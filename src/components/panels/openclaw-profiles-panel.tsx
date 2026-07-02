@@ -46,12 +46,39 @@ interface ProfileConfigBackup {
   createdAt: string
 }
 
+type ProfileConfigFileId =
+  | 'openclaw-json'
+  | 'workspace-rules'
+  | 'workspace-memory'
+  | 'workspace-today-memory'
+  | 'profile-wiki-rules'
+
+type ProfileConfigKind = 'json' | 'markdown'
+
+interface ProfileConfigFile {
+  id: ProfileConfigFileId
+  label: string
+  description: string
+  path: string
+  kind: ProfileConfigKind
+  canCreate: boolean
+  backupKeep: number
+}
+
 interface ProfileConfigState {
   profile: string
+  fileId: ProfileConfigFileId
+  label: string
+  description: string
+  kind: ProfileConfigKind
   path: string
   raw: string
   hash: string
   rawSize: number
+  exists: boolean
+  canCreate: boolean
+  backupKeep: number
+  files: ProfileConfigFile[]
   backups: ProfileConfigBackup[]
   validation: {
     ok: boolean
@@ -146,12 +173,16 @@ export function OpenClawProfilesPanel() {
     }
   }
 
-  const openConfig = async (profile: OpenClawProfile) => {
+  const openConfig = async (profile: Pick<OpenClawProfile, 'id'>, fileId?: ProfileConfigFileId) => {
+    const requestedFileId = fileId || (configPanel?.profile === profile.id ? configPanel.fileId : 'openclaw-json')
     setConfigLoading(profile.id)
     setConfigMessage(null)
     setError(null)
     try {
-      const res = await fetch(`/api/openclaw/profiles/config?profile=${encodeURIComponent(profile.id)}`, { cache: 'no-store' })
+      const res = await fetch(
+        `/api/openclaw/profiles/config?profile=${encodeURIComponent(profile.id)}&fileId=${encodeURIComponent(requestedFileId)}`,
+        { cache: 'no-store' },
+      )
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data?.error || '无法读取配置')
       const config = data.config as ProfileConfigState
@@ -174,6 +205,7 @@ export function OpenClawProfilesPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           profile: configPanel.profile,
+          fileId: configPanel.fileId,
           raw: configDraft,
           hash: configPanel.hash,
         }),
@@ -184,7 +216,7 @@ export function OpenClawProfilesPanel() {
         const issues = Array.isArray(result?.validation?.issues) ? `：${result.validation.issues.join('；')}` : ''
         throw new Error(result?.error || data?.error || `保存失败${issues}`)
       }
-      showConfigMessage(true, `已保存，备份 ${result.backup?.name || '已创建'}`)
+      showConfigMessage(true, result.backup?.name ? `已保存，备份 ${result.backup.name}` : '已保存，新文件已创建')
       await openConfig({ id: configPanel.profile } as OpenClawProfile)
     } catch (err) {
       showConfigMessage(false, err instanceof Error ? err.message : '保存失败')
@@ -206,6 +238,7 @@ export function OpenClawProfilesPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           profile: configPanel.profile,
+          fileId: configPanel.fileId,
           backupName: backup.name,
           hash: configPanel.hash,
         }),
@@ -249,6 +282,11 @@ export function OpenClawProfilesPanel() {
 
   const localDraftValidation = useMemo(() => {
     if (!configPanel) return null
+    if (configPanel.kind === 'markdown') {
+      const size = new Blob([configDraft]).size
+      if (size > 2_000_000) return { ok: false, text: '文件过大，最多允许 2MB' }
+      return { ok: true, text: '文本格式正常' }
+    }
     try {
       const parsed = JSON.parse(configDraft)
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -361,14 +399,44 @@ export function OpenClawProfilesPanel() {
 
       {configPanel && (
         <section className="rounded-lg border border-border bg-card overflow-hidden">
+          <div className="border-b border-border p-4">
+            <div className="flex flex-wrap gap-2">
+              {configPanel.files.map(file => {
+                const active = file.id === configPanel.fileId
+                return (
+                  <button
+                    key={file.id}
+                    type="button"
+                    onClick={() => openConfig({ id: configPanel.profile }, file.id)}
+                    disabled={configSaving || configLoading === configPanel.profile}
+                    className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
+                      active
+                        ? 'border-primary/50 bg-primary/15 text-primary'
+                        : 'border-border bg-background/50 text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {file.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
           <div className="flex flex-col gap-3 border-b border-border p-4 md:flex-row md:items-start md:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-foreground">{configPanel.profile} 配置</h3>
+                <h3 className="text-sm font-semibold text-foreground">{configPanel.profile} · {configPanel.label}</h3>
                 <span className={`rounded border px-2 py-0.5 text-2xs ${configPanel.validation.ok ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-300'}`}>
-                  {configPanel.validation.ok ? 'Zod 校验通过' : '校验失败'}
+                  {configPanel.validation.ok ? (configPanel.kind === 'json' ? 'JSON 校验通过' : '文本可保存') : '校验失败'}
+                </span>
+                <span className="rounded border border-border px-2 py-0.5 text-2xs text-muted-foreground">
+                  {configPanel.kind === 'json' ? 'JSON' : 'Markdown'}
+                </span>
+                <span className={`rounded border px-2 py-0.5 text-2xs ${configPanel.exists ? 'border-green-500/30 text-green-400' : 'border-amber-500/30 text-amber-300'}`}>
+                  {configPanel.exists ? '已存在' : configPanel.canCreate ? '保存时创建' : '未找到'}
                 </span>
               </div>
+              <p className="mt-2 text-xs text-muted-foreground">{configPanel.description}</p>
               <div className="mt-1 truncate font-mono text-2xs text-muted-foreground" title={configPanel.path}>
                 {configPanel.path}
               </div>
@@ -378,7 +446,7 @@ export function OpenClawProfilesPanel() {
                 重新读取
               </Button>
               <Button size="xs" variant="default" onClick={saveConfig} disabled={configSaving || !localDraftValidation?.ok || configDraft === configPanel.raw}>
-                {configSaving ? '保存中' : '保存配置'}
+                {configSaving ? '保存中' : '保存文件'}
               </Button>
               <Button size="xs" variant="ghost" onClick={() => setConfigPanel(null)} disabled={configSaving}>
                 关闭
@@ -392,11 +460,16 @@ export function OpenClawProfilesPanel() {
                 <span className={localDraftValidation?.ok ? 'text-green-400' : 'text-red-300'}>
                   {localDraftValidation?.text}
                 </span>
-                <span className="font-mono text-muted-foreground">{Math.round(configDraft.length / 1024)} KB</span>
+                <span className="font-mono text-muted-foreground">{Math.max(0, Math.round(configDraft.length / 1024))} KB</span>
               </div>
               {!configPanel.validation.ok && (
                 <div className="rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">
                   {configPanel.validation.issues.join('；')}
+                </div>
+              )}
+              {configPanel.kind === 'json' && (
+                <div className="rounded border border-amber-500/20 bg-amber-500/10 p-2 text-xs text-amber-200">
+                  敏感字段会以 <span className="font-mono">--------</span> 显示；保持该占位符保存时会自动保留远端原值。
                 </div>
               )}
               <textarea
@@ -410,7 +483,7 @@ export function OpenClawProfilesPanel() {
             <aside className="space-y-3">
               <div className="rounded-lg border border-border bg-background/40 p-3">
                 <div className="text-xs font-semibold text-foreground">轻量备份</div>
-                <div className="mt-1 text-2xs text-muted-foreground">保留最新 2 版</div>
+                <div className="mt-1 text-2xs text-muted-foreground">保留最新 {configPanel.backupKeep} 版</div>
                 <div className="mt-3 space-y-2">
                   {configPanel.backups.length === 0 && (
                     <div className="text-xs text-muted-foreground">暂无备份</div>
@@ -512,7 +585,7 @@ function ProfileCard({ profile, running, onRun, onOpenConfig, configLoading }: {
         onClick={() => onOpenConfig(profile)}
         disabled={Boolean(running) || configLoading === profile.id}
       >
-        {configLoading === profile.id ? '读取中' : '配置'}
+        {configLoading === profile.id ? '读取中' : '核心配置'}
       </Button>
     </section>
   )

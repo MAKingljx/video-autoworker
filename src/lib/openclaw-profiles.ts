@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto'
+import path from 'node:path'
 import { z } from 'zod'
 import { runCommand, runOpenClaw } from './command'
 
 export type OpenClawProfileId = 'gpt-main' | 'qwen-current' | 'qwen-weixin-new'
 export type OpenClawProfileAction = 'restart' | 'model-test' | 'agent-test'
+export type OpenClawProfileConfigFileId =
+  | 'openclaw-json'
+  | 'workspace-rules'
+  | 'workspace-memory'
+  | 'workspace-today-memory'
+  | 'profile-wiki-rules'
+export type OpenClawProfileConfigFileKind = 'json' | 'markdown'
 
 export interface OpenClawProfileDefinition {
   id: OpenClawProfileId
@@ -49,6 +57,16 @@ export interface OpenClawProfileConfigBackup {
   createdAt: string
 }
 
+export interface OpenClawProfileConfigFileDefinition {
+  id: OpenClawProfileConfigFileId
+  label: string
+  description: string
+  path: string
+  kind: OpenClawProfileConfigFileKind
+  canCreate: boolean
+  backupKeep: number
+}
+
 export interface OpenClawProfileConfigValidation {
   ok: boolean
   issues: string[]
@@ -56,17 +74,26 @@ export interface OpenClawProfileConfigValidation {
 
 export interface OpenClawProfileConfigReadResult {
   profile: OpenClawProfileId
+  fileId: OpenClawProfileConfigFileId
+  label: string
+  description: string
+  kind: OpenClawProfileConfigFileKind
   path: string
   raw: string
   rawSize: number
   hash: string
   mtimeMs: number
+  exists: boolean
+  canCreate: boolean
+  backupKeep: number
+  files: OpenClawProfileConfigFileDefinition[]
   backups: OpenClawProfileConfigBackup[]
   validation: OpenClawProfileConfigValidation
 }
 
 export interface OpenClawProfileConfigWriteResult {
   profile: OpenClawProfileId
+  fileId?: OpenClawProfileConfigFileId
   path: string
   ok: boolean
   hash?: string
@@ -137,6 +164,7 @@ const PROFILE_IDS = new Set(DEFAULT_OPENCLAW_PROFILES.map(profile => profile.id)
 const ACTIONS = new Set<OpenClawProfileAction>(['restart', 'model-test', 'agent-test'])
 const DEFAULT_PROMPT = '只输出一个字：好'
 const CONFIG_BACKUP_KEEP = 2
+const TEXT_FILE_BACKUP_KEEP = 5
 const REDACTED_SECRET_VALUE = '--------'
 
 const openClawProfileConfigSchema = z.object({
@@ -171,6 +199,81 @@ export function getOpenClawProfile(id: string): OpenClawProfileDefinition | null
 export function getProfileConfigPath(profile: OpenClawProfileDefinition): string {
   if (profile.configPath) return profile.configPath
   return `/Users/heisenbergs-1/.openclaw-${profile.id}/openclaw.json`
+}
+
+export function getProfileConfigFiles(profile: OpenClawProfileDefinition): OpenClawProfileConfigFileDefinition[] {
+  const configPath = getProfileConfigPath(profile)
+  const stateDir = path.posix.dirname(configPath)
+  const today = todayInShanghai()
+
+  return [
+    {
+      id: 'openclaw-json',
+      label: '主配置',
+      description: 'OpenClaw profile 的核心 openclaw.json，包含模型、通道、插件、网关和工具配置。',
+      path: configPath,
+      kind: 'json',
+      canCreate: false,
+      backupKeep: CONFIG_BACKUP_KEEP,
+    },
+    {
+      id: 'workspace-rules',
+      label: '工作区规则',
+      description: '该 profile 对应 workspace 的 AGENTS.md，控制模型执行规则、写作规则和工具使用约束。',
+      path: path.posix.join(profile.workspace, 'AGENTS.md'),
+      kind: 'markdown',
+      canCreate: false,
+      backupKeep: TEXT_FILE_BACKUP_KEEP,
+    },
+    {
+      id: 'workspace-memory',
+      label: '长期记忆',
+      description: '该 profile 对应 workspace 的 MEMORY.md，作为长期记忆和项目事实来源。',
+      path: path.posix.join(profile.workspace, 'MEMORY.md'),
+      kind: 'markdown',
+      canCreate: true,
+      backupKeep: TEXT_FILE_BACKUP_KEEP,
+    },
+    {
+      id: 'workspace-today-memory',
+      label: '今日记忆',
+      description: `该 profile 对应 workspace 的当天记忆文件 memory/${today}.md，可记录当天规则、排障和临时决策。`,
+      path: path.posix.join(profile.workspace, 'memory', `${today}.md`),
+      kind: 'markdown',
+      canCreate: true,
+      backupKeep: TEXT_FILE_BACKUP_KEEP,
+    },
+    {
+      id: 'profile-wiki-rules',
+      label: '记忆规则',
+      description: 'OpenClaw profile 内 wiki/main/AGENTS.md，影响 Active Memory / wiki 相关规则。',
+      path: path.posix.join(stateDir, 'wiki', 'main', 'AGENTS.md'),
+      kind: 'markdown',
+      canCreate: true,
+      backupKeep: TEXT_FILE_BACKUP_KEEP,
+    },
+  ]
+}
+
+export function getProfileConfigFile(
+  profile: OpenClawProfileDefinition,
+  fileId = 'openclaw-json',
+): OpenClawProfileConfigFileDefinition {
+  const file = getProfileConfigFiles(profile).find(item => item.id === fileId)
+  if (!file) throw new Error('不支持的核心配置文件')
+  return file
+}
+
+function todayInShanghai(): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date())
+
+  const get = (type: string) => parts.find(part => part.type === type)?.value || ''
+  return `${get('year')}-${get('month')}-${get('day')}`
 }
 
 export function assertProfileId(id: string): asserts id is OpenClawProfileId {
@@ -296,31 +399,74 @@ export function validateOpenClawProfileConfig(configValue: unknown): OpenClawPro
 }
 
 export async function readProfileConfig(profile: OpenClawProfileDefinition): Promise<OpenClawProfileConfigReadResult> {
-  const configPath = getProfileConfigPath(profile)
-  const result = await runProfileNodeScript(READ_PROFILE_CONFIG_SCRIPT, [configPath], 15000)
-  const payload = parseRemotePayload(result.stdout)
-  const raw = String(payload.raw || '')
-  let validation: OpenClawProfileConfigValidation
-  let displayRaw = raw
+  return readProfileConfigFile(profile, 'openclaw-json')
+}
 
-  try {
-    const parsed = JSON.parse(raw)
-    validation = validateOpenClawProfileConfig(parsed)
-    displayRaw = JSON.stringify(redactProfileConfigSecrets(parsed), null, 2) + '\n'
-  } catch (error) {
-    validation = { ok: false, issues: [`json: ${(error as Error).message}`] }
+export async function readProfileConfigFile(
+  profile: OpenClawProfileDefinition,
+  fileId: OpenClawProfileConfigFileId = 'openclaw-json',
+): Promise<OpenClawProfileConfigReadResult> {
+  const file = getProfileConfigFile(profile, fileId)
+  const result = await runProfileNodeScript(READ_PROFILE_CONFIG_SCRIPT, [file.path], 15000, JSON.stringify({
+    canCreate: file.canCreate,
+  }))
+  const payload = parseRemotePayload(result.stdout)
+  if (payload.ok === false) {
+    throw new Error(localizeProfileError(String(payload.error || '读取文件失败')))
   }
+  const raw = String(payload.raw || '')
+  const display = displayProfileConfigFileRaw(file, raw)
 
   return {
     profile: profile.id,
-    path: String(payload.path || configPath),
-    raw: displayRaw,
+    fileId: file.id,
+    label: file.label,
+    description: file.description,
+    kind: file.kind,
+    path: String(payload.path || file.path),
+    raw: display.raw,
     rawSize: Number(payload.rawSize || raw.length),
     hash: computeConfigHash(raw),
     mtimeMs: Number(payload.mtimeMs || 0),
+    exists: payload.exists === true,
+    canCreate: file.canCreate,
+    backupKeep: file.backupKeep,
+    files: getProfileConfigFiles(profile),
     backups: normalizeBackups(payload.backups),
-    validation,
+    validation: display.validation,
   }
+}
+
+function displayProfileConfigFileRaw(
+  file: OpenClawProfileConfigFileDefinition,
+  raw: string,
+): { raw: string; validation: OpenClawProfileConfigValidation } {
+  if (file.kind === 'json') {
+    try {
+      const parsed = JSON.parse(raw)
+      return {
+        raw: JSON.stringify(redactProfileConfigSecrets(parsed), null, 2) + '\n',
+        validation: validateOpenClawProfileConfig(parsed),
+      }
+    } catch (error) {
+      return {
+        raw,
+        validation: { ok: false, issues: [`json: ${(error as Error).message}`] },
+      }
+    }
+  }
+
+  return {
+    raw,
+    validation: validateProfileTextFile(raw),
+  }
+}
+
+function validateProfileTextFile(raw: string): OpenClawProfileConfigValidation {
+  if (Buffer.byteLength(raw, 'utf8') > 2_000_000) {
+    return { ok: false, issues: ['文件过大：最多允许 2MB'] }
+  }
+  return { ok: true, issues: [] }
 }
 
 function redactProfileConfigSecrets(value: unknown, parentKey = ''): unknown {
@@ -348,52 +494,126 @@ export async function saveProfileConfig(
   raw: string,
   expectedHash?: string,
 ): Promise<OpenClawProfileConfigWriteResult> {
+  return saveProfileConfigFile(profile, 'openclaw-json', raw, expectedHash)
+}
+
+export async function saveProfileConfigFile(
+  profile: OpenClawProfileDefinition,
+  fileId: OpenClawProfileConfigFileId,
+  raw: string,
+  expectedHash?: string,
+): Promise<OpenClawProfileConfigWriteResult> {
+  const file = getProfileConfigFile(profile, fileId)
+  const prepared = prepareProfileConfigFileForSave(file, raw, profile.id)
+  if (!prepared.ok) return prepared.result
+
+  const input = JSON.stringify({
+    raw: prepared.raw,
+    hash: expectedHash || '',
+    keep: file.backupKeep,
+    kind: file.kind,
+    canCreate: file.canCreate,
+  })
+  const result = await runProfileNodeScript(SAVE_PROFILE_CONFIG_SCRIPT, [file.path], 20000, input)
+  const payload = parseRemotePayload(result.stdout)
+
+  return {
+    profile: profile.id,
+    fileId: file.id,
+    path: String(payload.path || file.path),
+    ok: payload.ok === true,
+    hash: typeof payload.hash === 'string' ? payload.hash : undefined,
+    backup: normalizeBackups(payload.backup ? [payload.backup] : [])[0],
+    backups: normalizeBackups(payload.backups),
+    removed: Array.isArray(payload.removed) ? payload.removed.map(String) : [],
+    validation: prepared.validation,
+    error: typeof payload.error === 'string' ? payload.error : undefined,
+    code: typeof payload.code === 'string' ? payload.code : undefined,
+  }
+}
+
+function prepareProfileConfigFileForSave(
+  file: OpenClawProfileConfigFileDefinition,
+  raw: string,
+  profileId: OpenClawProfileId,
+): { ok: true; raw: string; validation: OpenClawProfileConfigValidation } | { ok: false; result: OpenClawProfileConfigWriteResult } {
+  if (Buffer.byteLength(raw, 'utf8') > 2_000_000) {
+    return {
+      ok: false,
+      result: {
+        profile: profileId,
+        fileId: file.id,
+        path: file.path,
+        ok: false,
+        validation: { ok: false, issues: ['文件过大：最多允许 2MB'] },
+        error: '文件过大',
+        code: 'FILE_TOO_LARGE',
+      },
+    }
+  }
+
+  if (file.kind === 'markdown') {
+    const validation = validateProfileTextFile(raw)
+    if (!validation.ok) {
+      return {
+        ok: false,
+        result: {
+          profile: profileId,
+          fileId: file.id,
+          path: file.path,
+          ok: false,
+          validation,
+          error: '文件校验失败',
+          code: 'VALIDATION_FAILED',
+        },
+      }
+    }
+
+    return {
+      ok: true,
+      raw: raw.endsWith('\n') || raw.length === 0 ? raw : `${raw}\n`,
+      validation,
+    }
+  }
+
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch (error) {
     return {
-      profile: profile.id,
-      path: getProfileConfigPath(profile),
       ok: false,
-      validation: { ok: false, issues: [`json: ${(error as Error).message}`] },
-      error: 'JSON 格式无效',
-      code: 'INVALID_JSON',
+      result: {
+        profile: profileId,
+        fileId: file.id,
+        path: file.path,
+        ok: false,
+        validation: { ok: false, issues: [`json: ${(error as Error).message}`] },
+        error: 'JSON 格式无效',
+        code: 'INVALID_JSON',
+      },
     }
   }
 
   const validation = validateOpenClawProfileConfig(parsed)
   if (!validation.ok) {
     return {
-      profile: profile.id,
-      path: getProfileConfigPath(profile),
       ok: false,
-      validation,
-      error: '配置校验失败',
-      code: 'VALIDATION_FAILED',
+      result: {
+        profile: profileId,
+        fileId: file.id,
+        path: file.path,
+        ok: false,
+        validation,
+        error: '配置校验失败',
+        code: 'VALIDATION_FAILED',
+      },
     }
   }
 
-  const configPath = getProfileConfigPath(profile)
-  const input = JSON.stringify({
-    raw: JSON.stringify(parsed, null, 2) + '\n',
-    hash: expectedHash || '',
-    keep: CONFIG_BACKUP_KEEP,
-  })
-  const result = await runProfileNodeScript(SAVE_PROFILE_CONFIG_SCRIPT, [configPath], 20000, input)
-  const payload = parseRemotePayload(result.stdout)
-
   return {
-    profile: profile.id,
-    path: String(payload.path || configPath),
-    ok: payload.ok === true,
-    hash: typeof payload.hash === 'string' ? payload.hash : undefined,
-    backup: normalizeBackups(payload.backup ? [payload.backup] : [])[0],
-    backups: normalizeBackups(payload.backups),
-    removed: Array.isArray(payload.removed) ? payload.removed.map(String) : [],
+    ok: true,
+    raw: JSON.stringify(parsed, null, 2) + '\n',
     validation,
-    error: typeof payload.error === 'string' ? payload.error : undefined,
-    code: typeof payload.code === 'string' ? payload.code : undefined,
   }
 }
 
@@ -402,27 +622,34 @@ export async function restoreProfileConfigBackup(
   backupName: string,
   expectedHash?: string,
 ): Promise<OpenClawProfileConfigWriteResult> {
-  const configPath = getProfileConfigPath(profile)
+  return restoreProfileConfigFileBackup(profile, 'openclaw-json', backupName, expectedHash)
+}
+
+export async function restoreProfileConfigFileBackup(
+  profile: OpenClawProfileDefinition,
+  fileId: OpenClawProfileConfigFileId,
+  backupName: string,
+  expectedHash?: string,
+): Promise<OpenClawProfileConfigWriteResult> {
+  const file = getProfileConfigFile(profile, fileId)
   const input = JSON.stringify({
     backupName,
     hash: expectedHash || '',
-    keep: CONFIG_BACKUP_KEEP,
+    keep: file.backupKeep,
+    canCreate: file.canCreate,
   })
-  const result = await runProfileNodeScript(RESTORE_PROFILE_CONFIG_SCRIPT, [configPath], 20000, input)
+  const result = await runProfileNodeScript(RESTORE_PROFILE_CONFIG_SCRIPT, [file.path], 20000, input)
   const payload = parseRemotePayload(result.stdout)
 
   let validation: OpenClawProfileConfigValidation | undefined
   if (payload.rawAfter) {
-    try {
-      validation = validateOpenClawProfileConfig(JSON.parse(String(payload.rawAfter)))
-    } catch (error) {
-      validation = { ok: false, issues: [`json: ${(error as Error).message}`] }
-    }
+    validation = displayProfileConfigFileRaw(file, String(payload.rawAfter)).validation
   }
 
   return {
     profile: profile.id,
-    path: String(payload.path || configPath),
+    fileId: file.id,
+    path: String(payload.path || file.path),
     ok: payload.ok === true,
     hash: typeof payload.hash === 'string' ? payload.hash : undefined,
     backup: normalizeBackups(payload.backup ? [payload.backup] : [])[0],
@@ -607,6 +834,7 @@ function stamp() {
 function listBackups(configPath) {
   const dir = path.dirname(configPath);
   const base = path.basename(configPath);
+  if (!fs.existsSync(dir)) return [];
   return fs.readdirSync(dir)
     .filter((name) => name.startsWith(base + '.bak-'))
     .map((name) => {
@@ -638,6 +866,7 @@ function emit(payload) {
   process.stdout.write(JSON.stringify(payload));
 }
 function backupCurrent(configPath, suffix) {
+  if (!fs.existsSync(configPath)) return null;
   const st = fs.statSync(configPath);
   const backupPath = configPath + '.bak-' + suffix + '-' + stamp();
   fs.copyFileSync(configPath, backupPath);
@@ -677,10 +906,18 @@ function mergeRedactedSecrets(proposed, current, parentKey) {
 const READ_PROFILE_CONFIG_SCRIPT = `
 ${SHARED_REMOTE_CONFIG_HELPERS}
 const configPath = process.argv[1];
-const raw = fs.readFileSync(configPath, 'utf8');
-const st = fs.statSync(configPath);
+const payload = JSON.parse(readStdin() || '{}');
+const exists = fs.existsSync(configPath);
+if (!exists && !payload.canCreate) {
+  emit({ ok: false, path: configPath, code: 'FILE_NOT_FOUND', error: 'File not found', backups: listBackups(configPath) });
+  process.exit(0);
+}
+const raw = exists ? fs.readFileSync(configPath, 'utf8') : '';
+const st = exists ? fs.statSync(configPath) : { mtimeMs: 0 };
 emit({
+  ok: true,
   path: configPath,
+  exists,
   raw,
   rawSize: Buffer.byteLength(raw, 'utf8'),
   mtimeMs: st.mtimeMs,
@@ -694,24 +931,37 @@ const configPath = process.argv[1];
 const payload = JSON.parse(readStdin() || '{}');
 const raw = String(payload.raw || '');
 const keep = Number.isFinite(Number(payload.keep)) ? Number(payload.keep) : 2;
-try {
-  JSON.parse(raw);
-} catch (error) {
-  emit({ ok: false, path: configPath, code: 'INVALID_JSON', error: error.message, backups: listBackups(configPath) });
+const kind = String(payload.kind || 'json');
+const exists = fs.existsSync(configPath);
+if (!exists && !payload.canCreate) {
+  emit({ ok: false, path: configPath, code: 'FILE_NOT_FOUND', error: 'File not found', backups: listBackups(configPath) });
   process.exit(0);
 }
-const currentRaw = fs.readFileSync(configPath, 'utf8');
+if (kind === 'json') {
+  try {
+    JSON.parse(raw);
+  } catch (error) {
+    emit({ ok: false, path: configPath, code: 'INVALID_JSON', error: error.message, backups: listBackups(configPath) });
+    process.exit(0);
+  }
+}
+const currentRaw = exists ? fs.readFileSync(configPath, 'utf8') : '';
 const currentHash = hash(currentRaw);
 if (payload.hash && payload.hash !== currentHash) {
-  emit({ ok: false, path: configPath, code: 'CONFLICT', error: 'Config changed on disk', hash: currentHash, backups: listBackups(configPath) });
+  emit({ ok: false, path: configPath, code: 'CONFLICT', error: 'File changed on disk', hash: currentHash, backups: listBackups(configPath) });
   process.exit(0);
 }
-const proposedConfig = JSON.parse(raw);
-const currentConfig = JSON.parse(currentRaw);
-const mergedRaw = JSON.stringify(mergeRedactedSecrets(proposedConfig, currentConfig, ''), null, 2) + '\\n';
+let mergedRaw = raw;
+if (kind === 'json') {
+  const proposedConfig = JSON.parse(raw);
+  const currentConfig = exists ? JSON.parse(currentRaw) : {};
+  mergedRaw = JSON.stringify(mergeRedactedSecrets(proposedConfig, currentConfig, ''), null, 2) + '\\n';
+}
 const backup = backupCurrent(configPath, 'mc');
+fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
 const tmpPath = configPath + '.tmp-mc-' + process.pid;
-fs.writeFileSync(tmpPath, mergedRaw, { mode: fs.statSync(configPath).mode & 0o777 });
+const mode = exists ? (fs.statSync(configPath).mode & 0o777) : 0o600;
+fs.writeFileSync(tmpPath, mergedRaw, { mode });
 fs.renameSync(tmpPath, configPath);
 const removed = pruneBackups(configPath, keep);
 const savedRaw = fs.readFileSync(configPath, 'utf8');
@@ -742,13 +992,19 @@ if (!fs.existsSync(backupPath)) {
   emit({ ok: false, path: configPath, code: 'BACKUP_NOT_FOUND', error: 'Backup not found', backups: listBackups(configPath) });
   process.exit(0);
 }
-const currentRaw = fs.readFileSync(configPath, 'utf8');
+const exists = fs.existsSync(configPath);
+if (!exists && !payload.canCreate) {
+  emit({ ok: false, path: configPath, code: 'FILE_NOT_FOUND', error: 'File not found', backups: listBackups(configPath) });
+  process.exit(0);
+}
+const currentRaw = exists ? fs.readFileSync(configPath, 'utf8') : '';
 const currentHash = hash(currentRaw);
 if (payload.hash && payload.hash !== currentHash) {
-  emit({ ok: false, path: configPath, code: 'CONFLICT', error: 'Config changed on disk', hash: currentHash, backups: listBackups(configPath) });
+  emit({ ok: false, path: configPath, code: 'CONFLICT', error: 'File changed on disk', hash: currentHash, backups: listBackups(configPath) });
   process.exit(0);
 }
 const backup = backupCurrent(configPath, 'before-restore');
+fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
 fs.copyFileSync(backupPath, configPath);
 const removed = pruneBackups(configPath, keep);
 const rawAfter = fs.readFileSync(configPath, 'utf8');
@@ -897,8 +1153,10 @@ function localizeProfileError(message: string): string {
     [/Invalid JSON/gi, 'JSON 格式无效'],
     [/Config validation failed/gi, '配置校验失败'],
     [/Config changed on disk/gi, '配置文件已被远端更新，请重新读取后再保存'],
+    [/File changed on disk/gi, '文件已被远端更新，请重新读取后再保存'],
     [/Invalid backup name/gi, '备份名称无效'],
     [/Backup not found/gi, '未找到备份'],
+    [/File not found/gi, '未找到文件'],
     [/Remote command returned no JSON payload/gi, '远端命令没有返回 JSON 数据'],
     [/Remote command returned invalid JSON/gi, '远端命令返回的 JSON 无效'],
     [/No such file or directory/gi, '没有这个文件或目录'],

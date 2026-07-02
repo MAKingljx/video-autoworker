@@ -4,19 +4,29 @@ import { requireRole } from '@/lib/auth'
 import {
   assertProfileId,
   getOpenClawProfile,
-  readProfileConfig,
-  restoreProfileConfigBackup,
-  saveProfileConfig,
+  readProfileConfigFile,
+  restoreProfileConfigFileBackup,
+  saveProfileConfigFile,
 } from '@/lib/openclaw-profiles'
+
+const fileIdSchema = z.enum([
+  'openclaw-json',
+  'workspace-rules',
+  'workspace-memory',
+  'workspace-today-memory',
+  'profile-wiki-rules',
+]).optional()
 
 const saveSchema = z.object({
   profile: z.string().min(1),
-  raw: z.string().min(2).max(2_000_000),
+  fileId: fileIdSchema,
+  raw: z.string().max(2_000_000),
   hash: z.string().optional(),
 })
 
 const restoreSchema = z.object({
   profile: z.string().min(1),
+  fileId: fileIdSchema,
   backupName: z.string().min(1).max(255),
   hash: z.string().optional(),
 })
@@ -26,6 +36,10 @@ export async function GET(request: NextRequest) {
   if ('response' in auth) return auth.response
 
   const profileId = String(request.nextUrl.searchParams.get('profile') || '')
+  const parsedFileId = fileIdSchema.safeParse(request.nextUrl.searchParams.get('fileId') || undefined)
+  if (!parsedFileId.success) {
+    return NextResponse.json({ error: '不支持的核心配置文件' }, { status: 400 })
+  }
 
   try {
     assertProfileId(profileId)
@@ -37,7 +51,7 @@ export async function GET(request: NextRequest) {
   if (!profile) return NextResponse.json({ error: '未找到配置档' }, { status: 404 })
 
   try {
-    const config = await readProfileConfig(profile)
+    const config = await readProfileConfigFile(profile, parsedFileId.data || 'openclaw-json')
     return NextResponse.json({ config }, { headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
     return NextResponse.json(
@@ -69,7 +83,12 @@ export async function PUT(request: NextRequest) {
   if (!profile) return NextResponse.json({ error: '未找到配置档' }, { status: 404 })
 
   try {
-    const result = await saveProfileConfig(profile, parsed.data.raw, parsed.data.hash)
+    const result = await saveProfileConfigFile(
+      profile,
+      parsed.data.fileId || 'openclaw-json',
+      parsed.data.raw,
+      parsed.data.hash,
+    )
     return NextResponse.json(
       { result },
       { status: result.ok ? 200 : result.code === 'CONFLICT' ? 409 : 400 },
@@ -104,7 +123,12 @@ export async function POST(request: NextRequest) {
   if (!profile) return NextResponse.json({ error: '未找到配置档' }, { status: 404 })
 
   try {
-    const result = await restoreProfileConfigBackup(profile, parsed.data.backupName, parsed.data.hash)
+    const result = await restoreProfileConfigFileBackup(
+      profile,
+      parsed.data.fileId || 'openclaw-json',
+      parsed.data.backupName,
+      parsed.data.hash,
+    )
     return NextResponse.json(
       { result },
       { status: result.ok ? 200 : result.code === 'CONFLICT' ? 409 : 400 },
