@@ -202,8 +202,8 @@
     "connected": "已连接",
     "disconnected": "已断开",
     "interface": "界面",
-    "essential": "精简",
-    "full": "完整",
+    "essential": "当前系统",
+    "full": "扩展页面",
     "organizations": "组织",
     "all": "全部",
     "noTools": "无工具",
@@ -313,18 +313,18 @@
       "getStarted": "开始使用"
     },
     "interfaceMode": {
-      "title": "选择您的站点布局",
-      "description": "精简模式显示操作员最常用的核心面板。完整模式解锁站点上的所有系统 — 记忆、自动化、安全审计等。您可以随时切换。",
-      "essential": "精简",
-      "full": "完整",
-      "essentialDescription": "精简操作 — 您日常使用的面板：舰队概览、智能体、任务、聊天、活动流、日志和设置。",
+      "title": "当前系统范围",
+      "description": "当前系统展示已经接入并验收的核心页面；后续页面会随功能接入逐步开放。",
+      "essential": "当前系统",
+      "full": "扩展页面",
+      "essentialDescription": "当前可用页面 — 概览、智能体、任务、项目、素材、活动、日志、设置和 OpenClaw 配置。",
       "essentialPanels1": "舰队概览、智能体、任务、聊天",
       "essentialPanels2": "活动流、日志、设置",
-      "essentialTotal": "共 7 个面板",
-      "fullDescription": "完整站点访问 — 新增记忆浏览器、Cron 调度、Webhooks、告警、安全审计、费用追踪和网关配置。",
-      "fullIncludes": "包含精简模式的所有内容，另加",
+      "essentialTotal": "当前页面已开放",
+      "fullDescription": "扩展页面用于后续接入更多网关、自动化、审计和协作能力。",
+      "fullIncludes": "后续扩展能力",
       "fullPanels": "记忆、Cron、Webhooks、审计",
-      "fullTotal": "所有站点系统已解锁"
+      "fullTotal": "待接入后开放"
     },
     "gatewayLink": {
       "title": "网关链接",

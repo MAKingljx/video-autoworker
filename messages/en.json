@@ -201,8 +201,8 @@
     "connected": "Connected",
     "disconnected": "Disconnected",
     "interface": "Interface",
-    "essential": "Essential",
-    "full": "Full",
+    "essential": "Current system",
+    "full": "Extended pages",
     "organizations": "ORGANIZATIONS",
     "all": "All",
     "noTools": "no tools",
@@ -312,18 +312,18 @@
       "getStarted": "Get started"
     },
     "interfaceMode": {
-      "title": "Choose Your Station Layout",
-      "description": "Essential shows the core panels operators need most. Full unlocks every system on the station — memory, automation, security auditing, and more. You can switch anytime.",
-      "essential": "Essential",
-      "full": "Full",
-      "essentialDescription": "Streamlined ops — the panels you'll use daily: fleet overview, agents, tasks, chat, activity feed, logs, and settings.",
+      "title": "Current System Scope",
+      "description": "The current system shows the core pages that are connected and verified. Additional pages will open as those capabilities are integrated.",
+      "essential": "Current system",
+      "full": "Extended pages",
+      "essentialDescription": "Current pages — overview, agents, tasks, projects, materials, activity, logs, settings, and OpenClaw profiles.",
       "essentialPanels1": "Fleet overview, Agents, Tasks, Chat",
       "essentialPanels2": "Activity feed, Logs, Settings",
-      "essentialTotal": "7 panels total",
-      "fullDescription": "Full station access — adds memory browser, cron scheduling, webhooks, alerts, security audit, cost tracking, and gateway config.",
-      "fullIncludes": "Everything in Essential plus",
+      "essentialTotal": "Current pages are available",
+      "fullDescription": "Extended pages are reserved for future gateway, automation, audit, and collaboration capabilities.",
+      "fullIncludes": "Future extension capabilities",
       "fullPanels": "Memory, Cron, Webhooks, Audit",
-      "fullTotal": "All station systems unlocked"
+      "fullTotal": "Available after integration"
     },
     "gatewayLink": {
       "title": "Gateway Link",

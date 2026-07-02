@@ -78,6 +78,23 @@ const bootLabelKeys: Record<string, string> = {
   skills: 'indexingSkillCatalog',
 }
 
+const CURRENT_PANEL_IDS = new Set([
+  'overview', 'agents', 'tasks', 'projects', 'materials', 'activity', 'logs', 'settings', 'profiles',
+])
+
+function normalizePanelId(panel: string): string {
+  return panel === 'sessions' || panel === 'chat' ? 'profiles' : panel
+}
+
+function panelIdFromPathname(pathname: string): string {
+  if (pathname === '/') return 'overview'
+  return normalizePanelId(pathname.replace(/^\/+/, '').split('/')[0] || 'overview')
+}
+
+function isCurrentPanelPath(pathname: string): boolean {
+  return CURRENT_PANEL_IDS.has(panelIdFromPathname(pathname))
+}
+
 function renderPluginPanel(panelId: string) {
   const pluginPanel = getPluginPanel(panelId)
   return pluginPanel ? createElement(pluginPanel) : <Dashboard />
@@ -94,9 +111,9 @@ export default function Home() {
   // Sync URL → Zustand activeTab
   const pathname = usePathname()
   const panelFromUrl = pathname === '/' ? 'overview' : pathname.slice(1)
-  const normalizedPanel = panelFromUrl === 'sessions' || panelFromUrl === 'chat' ? 'profiles' : panelFromUrl
+  const normalizedPanel = normalizePanelId(panelFromUrl)
   const isProfilesPanel = normalizedPanel === 'profiles'
-  const isLocalDesktopPanel = normalizedPanel === 'profiles' || normalizedPanel === 'materials'
+  const isLocalDesktopPanel = CURRENT_PANEL_IDS.has(normalizedPanel)
 
   useEffect(() => {
     completeNavigationTiming(pathname)
@@ -221,7 +238,7 @@ export default function Home() {
     fetch('/api/auth/me')
       .then(async (res) => {
         if (res.ok) return res.json()
-        const isLocalDesktopLocation = typeof window !== 'undefined' && ['/profiles', '/materials'].includes(window.location.pathname)
+        const isLocalDesktopLocation = typeof window !== 'undefined' && isCurrentPanelPath(window.location.pathname)
         if (res.status === 401 && isLocalDesktopLocation) {
           return {
             user: {
@@ -330,7 +347,7 @@ export default function Home() {
     fetch('/api/onboarding')
       .then(res => res.ok ? res.json() : null)
       .then(data => {
-        if (isLocalDesktopPanel || (typeof window !== 'undefined' && ['/profiles', '/materials'].includes(window.location.pathname))) {
+        if (isLocalDesktopPanel || (typeof window !== 'undefined' && isCurrentPanelPath(window.location.pathname))) {
           setShowOnboarding(false)
           markStep('config')
           return
@@ -472,21 +489,17 @@ export default function Home() {
   )
 }
 
-const ESSENTIAL_PANELS = new Set([
-  'overview', 'agents', 'tasks', 'projects', 'materials', 'activity', 'logs', 'settings', 'profiles',
-])
-
 function ContentRouter({ tab }: { tab: string }) {
   const { dashboardMode } = useMissionControl()
   const navigateToPanel = useNavigateToPanel()
   const isLocal = dashboardMode === 'local'
   const panelName = tab.replace(/-/g, ' ')
 
-  if (!ESSENTIAL_PANELS.has(tab)) {
+  if (!CURRENT_PANEL_IDS.has(tab)) {
     return (
       <div className="flex flex-col items-center justify-center py-24 text-center gap-4">
         <p className="text-sm text-muted-foreground">
-          当前网页控制台只开放精简版，{panelName} 暂不显示。
+          当前系统暂未接入 {panelName} 页面。
         </p>
         <div className="flex items-center gap-2">
           <Button

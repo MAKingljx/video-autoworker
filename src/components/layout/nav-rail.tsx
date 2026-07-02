@@ -14,7 +14,7 @@ interface NavItem {
   label: string
   icon: React.ReactNode
   priority: boolean // Show in mobile bottom bar
-  essential?: boolean // Visible in Essential interface mode (default false)
+  essential?: boolean // Visible in the current focused navigation set (default false)
   children?: NavItem[] // Nested sub-items (expandable parent)
 }
 
@@ -176,8 +176,8 @@ export function NavRail() {
   }, [activeTenant?.id])
 
   // In local mode, hide gateway-only panels. Non-admin users don't see admin-only panels.
-  // In essential mode, hide non-essential panels.
-  const isEssential = true
+  // Keep the sidebar focused on the pages that are part of the current system surface.
+  const showCurrentNavOnly = true
   function filterItems(items: NavItem[]): NavItem[] {
     return items
       .map(i => {
@@ -188,7 +188,7 @@ export function NavRail() {
         }
         if (isLocal && gatewayOnlyPanels.has(i.id)) return null
         if (!isAdmin && adminOnlyPanels.has(i.id)) return null
-        if (isEssential && !i.essential) return null
+        if (showCurrentNavOnly && !i.essential) return null
         return i
       })
       .filter((i): i is NavItem => i !== null)
