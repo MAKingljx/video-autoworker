@@ -1,0 +1,113 @@
+import type { Metadata, Viewport } from 'next'
+import { headers } from 'next/headers'
+import { ThemeProvider } from 'next-themes'
+import { NextIntlClientProvider } from 'next-intl'
+import { getLocale, getMessages } from 'next-intl/server'
+import { THEME_IDS } from '@/lib/themes'
+import { ThemeBackground } from '@/components/ui/theme-background'
+import './globals.css'
+
+function resolveMetadataBase(): URL {
+  const candidates = [
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.MC_PUBLIC_BASE_URL,
+    process.env.APP_URL,
+    process.env.MISSION_CONTROL_PUBLIC_URL,
+  ]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+
+  for (const candidate of candidates) {
+    try {
+      return new URL(candidate)
+    } catch {
+      // Ignore invalid URL values and continue fallback chain.
+    }
+  }
+
+  // Prevent localhost fallback in production metadata when env is unset.
+  return new URL('https://mission-control.local')
+}
+
+const metadataBase = resolveMetadataBase()
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+  viewportFit: 'cover',
+}
+
+export const metadata: Metadata = {
+  title: 'Mission Control — OpenClaw 控制台',
+  description: '用于 OpenClaw 配置档、远端节点、任务和日志管理的本地控制台。',
+  metadataBase,
+  icons: {
+    icon: [
+      { url: '/icon.png', type: 'image/png', sizes: '256x256' },
+      { url: '/brand/mc-logo-128.png', type: 'image/png', sizes: '128x128' },
+    ],
+    apple: [{ url: '/apple-icon.png', sizes: '180x180', type: 'image/png' }],
+    shortcut: ['/icon.png'],
+  },
+  openGraph: {
+    title: 'Mission Control — OpenClaw 控制台',
+    description: '用于 OpenClaw 配置档、远端节点、任务和日志管理的本地控制台。',
+    images: [{ url: '/brand/mc-logo-512.png', width: 512, height: 512, alt: 'Mission Control OpenClaw 控制台' }],
+    type: 'website',
+    siteName: 'Mission Control',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'Mission Control — OpenClaw 控制台',
+    description: '用于 OpenClaw 配置档、远端节点、任务和日志管理的本地控制台。',
+    images: ['/brand/mc-logo-512.png'],
+  },
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: 'black-translucent',
+    title: 'Mission Control',
+  },
+}
+
+export default async function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  const nonce = (await headers()).get('x-nonce') || undefined
+  const locale = await getLocale()
+  const messages = await getMessages()
+
+  return (
+    <html lang={locale} dir={locale === 'ar' ? 'rtl' : 'ltr'} className="dark" suppressHydrationWarning>
+      <head>
+        {/* Blocking script to set the GitHub theme before first paint, preventing FOUC.
+            Content is a static string literal — no user input, no XSS vector. */}
+        <script
+          nonce={nonce}
+          suppressHydrationWarning
+          dangerouslySetInnerHTML={{
+            __html: `(function(){try{var allowed=['github-dark','github-light'];var t=localStorage.getItem('theme');if(allowed.indexOf(t)===-1)t='github-dark';localStorage.setItem('theme',t);document.documentElement.classList.remove('github-dark','github-light','dark');document.documentElement.classList.add(t);if(t==='github-dark')document.documentElement.classList.add('dark')}catch(e){document.documentElement.classList.add('github-dark','dark')}})()`,
+          }}
+        />
+      </head>
+      <body className="font-sans antialiased" suppressHydrationWarning>
+        <NextIntlClientProvider messages={messages}>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="github-dark"
+            themes={THEME_IDS}
+            enableSystem={false}
+            disableTransitionOnChange
+          >
+            <ThemeBackground />
+            <div className="h-screen overflow-hidden bg-background text-foreground">
+              {children}
+            </div>
+          </ThemeProvider>
+        </NextIntlClientProvider>
+      </body>
+    </html>
+  )
+}
