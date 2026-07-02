@@ -107,6 +107,7 @@ const statusLabels: Record<ProfileStatus, string> = {
 
 export function OpenClawProfilesPanel() {
   const [profiles, setProfiles] = useState<OpenClawProfile[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [running, setRunning] = useState<string | null>(null)
@@ -146,6 +147,26 @@ export function OpenClawProfilesPanel() {
     return { online, failed, total: profiles.length }
   }, [profiles])
 
+  const selectedProfile = useMemo(
+    () => profiles.find(profile => profile.id === selectedProfileId) || profiles[0] || null,
+    [profiles, selectedProfileId],
+  )
+
+  const activeConfigPanel = selectedProfile && configPanel?.profile === selectedProfile.id ? configPanel : null
+  const hasUnsavedConfig = Boolean(configPanel && configDraft !== configPanel.raw)
+
+  useEffect(() => {
+    if (profiles.length === 0) {
+      setSelectedProfileId(null)
+      return
+    }
+
+    setSelectedProfileId(current => {
+      if (current && profiles.some(profile => profile.id === current)) return current
+      return profiles[0]?.id || null
+    })
+  }, [profiles])
+
   const showConfigMessage = useCallback((ok: boolean, text: string) => {
     setConfigMessage({ ok, text })
     setTimeout(() => setConfigMessage(null), 4500)
@@ -173,8 +194,15 @@ export function OpenClawProfilesPanel() {
     }
   }
 
-  const openConfig = async (profile: Pick<OpenClawProfile, 'id'>, fileId?: ProfileConfigFileId) => {
+  const openConfig = useCallback(async (
+    profile: Pick<OpenClawProfile, 'id'>,
+    fileId?: ProfileConfigFileId,
+    options: { force?: boolean } = {},
+  ) => {
     const requestedFileId = fileId || (configPanel?.profile === profile.id ? configPanel.fileId : 'openclaw-json')
+    if (!options.force && hasUnsavedConfig && window.confirm && !window.confirm('当前配置有未保存内容，切换会丢失这些修改，确定继续？')) {
+      return false
+    }
     setConfigLoading(profile.id)
     setConfigMessage(null)
     setError(null)
@@ -188,11 +216,32 @@ export function OpenClawProfilesPanel() {
       const config = data.config as ProfileConfigState
       setConfigPanel(config)
       setConfigDraft(config.raw)
+      return true
     } catch (err) {
       setError(err instanceof Error ? err.message : '无法读取配置')
+      return false
     } finally {
       setConfigLoading(null)
     }
+  }, [configDraft, configPanel, hasUnsavedConfig])
+
+  useEffect(() => {
+    if (!selectedProfileId) return
+    if (configPanel?.profile === selectedProfileId) return
+    void openConfig({ id: selectedProfileId }, undefined, { force: true })
+  }, [configPanel?.profile, openConfig, selectedProfileId])
+
+  const selectProfile = (profile: OpenClawProfile) => {
+    if (profile.id === selectedProfileId) {
+      if (!configPanel || configPanel.profile !== profile.id) {
+        void openConfig(profile)
+      }
+      return
+    }
+    if (hasUnsavedConfig && !window.confirm('当前配置有未保存内容，切换配置档会丢失这些修改，确定继续？')) {
+      return
+    }
+    setSelectedProfileId(profile.id)
   }
 
   const saveConfig = async () => {
@@ -217,7 +266,7 @@ export function OpenClawProfilesPanel() {
         throw new Error(result?.error || data?.error || `保存失败${issues}`)
       }
       showConfigMessage(true, result.backup?.name ? `已保存，备份 ${result.backup.name}` : '已保存，新文件已创建')
-      await openConfig({ id: configPanel.profile } as OpenClawProfile)
+      await openConfig({ id: configPanel.profile } as OpenClawProfile, undefined, { force: true })
     } catch (err) {
       showConfigMessage(false, err instanceof Error ? err.message : '保存失败')
     } finally {
@@ -247,7 +296,7 @@ export function OpenClawProfilesPanel() {
       const result = data.result
       if (!res.ok || !result?.ok) throw new Error(result?.error || data?.error || '恢复失败')
       showConfigMessage(true, `已恢复 ${backup.name}`)
-      await openConfig({ id: configPanel.profile } as OpenClawProfile)
+      await openConfig({ id: configPanel.profile } as OpenClawProfile, undefined, { force: true })
     } catch (err) {
       showConfigMessage(false, err instanceof Error ? err.message : '恢复失败')
     } finally {
@@ -299,7 +348,7 @@ export function OpenClawProfilesPanel() {
   }, [configDraft, configPanel])
 
   return (
-    <div className="p-4 md:p-6 max-w-6xl mx-auto space-y-5">
+    <div className="w-full max-w-none space-y-4 p-3 md:p-4 lg:p-5">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-foreground">OpenClaw 配置档</h2>
@@ -383,150 +432,180 @@ export function OpenClawProfilesPanel() {
       {loading ? (
         <div className="text-center text-xs text-muted-foreground py-10">正在加载配置档...</div>
       ) : (
-        <div className="grid grid-cols-1 xl:grid-cols-3 gap-3">
-          {profiles.map(profile => (
-            <ProfileCard
-              key={profile.id}
-              profile={profile}
-              running={running}
-              onRun={runAction}
-              onOpenConfig={openConfig}
-              configLoading={configLoading}
-            />
-          ))}
-        </div>
-      )}
-
-      {configPanel && (
-        <section className="rounded-lg border border-border bg-card overflow-hidden">
-          <div className="border-b border-border p-4">
-            <div className="flex flex-wrap gap-2">
-              {configPanel.files.map(file => {
-                const active = file.id === configPanel.fileId
-                return (
-                  <button
-                    key={file.id}
-                    type="button"
-                    onClick={() => openConfig({ id: configPanel.profile }, file.id)}
-                    disabled={configSaving || configLoading === configPanel.profile}
-                    className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
-                      active
-                        ? 'border-primary/50 bg-primary/15 text-primary'
-                        : 'border-border bg-background/50 text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    {file.label}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-3 border-b border-border p-4 md:flex-row md:items-start md:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold text-foreground">{configPanel.profile} · {configPanel.label}</h3>
-                <span className={`rounded border px-2 py-0.5 text-2xs ${configPanel.validation.ok ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-300'}`}>
-                  {configPanel.validation.ok ? (configPanel.kind === 'json' ? 'JSON 校验通过' : '文本可保存') : '校验失败'}
-                </span>
-                <span className="rounded border border-border px-2 py-0.5 text-2xs text-muted-foreground">
-                  {configPanel.kind === 'json' ? 'JSON' : 'Markdown'}
-                </span>
-                <span className={`rounded border px-2 py-0.5 text-2xs ${configPanel.exists ? 'border-green-500/30 text-green-400' : 'border-amber-500/30 text-amber-300'}`}>
-                  {configPanel.exists ? '已存在' : configPanel.canCreate ? '保存时创建' : '未找到'}
-                </span>
-              </div>
-              <p className="mt-2 text-xs text-muted-foreground">{configPanel.description}</p>
-              <div className="mt-1 truncate font-mono text-2xs text-muted-foreground" title={configPanel.path}>
-                {configPanel.path}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
+          <aside className="overflow-hidden rounded-lg border border-border bg-card lg:sticky lg:top-4 lg:self-start">
+            <div className="border-b border-border px-3 py-3">
+              <div className="text-sm font-semibold text-foreground">配置档</div>
+              <div className="mt-1 text-2xs text-muted-foreground">
+                选择左侧配置档，右侧编辑核心文件
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button size="xs" variant="outline" onClick={() => openConfig({ id: configPanel.profile } as OpenClawProfile)} disabled={Boolean(configLoading) || configSaving}>
-                重新读取
-              </Button>
-              <Button size="xs" variant="default" onClick={saveConfig} disabled={configSaving || !localDraftValidation?.ok || configDraft === configPanel.raw}>
-                {configSaving ? '保存中' : '保存文件'}
-              </Button>
-              <Button size="xs" variant="ghost" onClick={() => setConfigPanel(null)} disabled={configSaving}>
-                关闭
-              </Button>
+            <div className="divide-y divide-border">
+              {profiles.map(profile => (
+                <ProfileRailItem
+                  key={profile.id}
+                  profile={profile}
+                  active={selectedProfile?.id === profile.id}
+                  loading={configLoading === profile.id}
+                  onSelect={selectProfile}
+                />
+              ))}
             </div>
-          </div>
+          </aside>
 
-          <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_280px]">
-            <div className="min-w-0 space-y-2">
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span className={localDraftValidation?.ok ? 'text-green-400' : 'text-red-300'}>
-                  {localDraftValidation?.text}
-                </span>
-                <span className="font-mono text-muted-foreground">{Math.max(0, Math.round(configDraft.length / 1024))} KB</span>
-              </div>
-              {!configPanel.validation.ok && (
-                <div className="rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">
-                  {configPanel.validation.issues.join('；')}
-                </div>
-              )}
-              {configPanel.kind === 'json' && (
-                <div className="rounded border border-amber-500/20 bg-amber-500/10 p-2 text-xs text-amber-200">
-                  敏感字段会以 <span className="font-mono">--------</span> 显示；保持该占位符保存时会自动保留远端原值。
-                </div>
-              )}
-              <textarea
-                value={configDraft}
-                onChange={event => setConfigDraft(event.target.value)}
-                className="h-[520px] w-full resize-y rounded-lg border border-border bg-background p-3 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
-                spellCheck={false}
-              />
-            </div>
+          <div className="min-w-0 space-y-4">
+            {selectedProfile ? (
+              <>
+                <ProfileOverview
+                  profile={selectedProfile}
+                  running={running}
+                  onRun={runAction}
+                />
 
-            <aside className="space-y-3">
-              <div className="rounded-lg border border-border bg-background/40 p-3">
-                <div className="text-xs font-semibold text-foreground">轻量备份</div>
-                <div className="mt-1 text-2xs text-muted-foreground">保留最新 {configPanel.backupKeep} 版</div>
-                <div className="mt-3 space-y-2">
-                  {configPanel.backups.length === 0 && (
-                    <div className="text-xs text-muted-foreground">暂无备份</div>
-                  )}
-                  {configPanel.backups.map(backup => (
-                    <div key={backup.name} className="rounded border border-border/80 p-2">
-                      <div className="truncate font-mono text-2xs text-foreground" title={backup.name}>{backup.name}</div>
-                      <div className="mt-1 text-2xs text-muted-foreground">
-                        {new Date(backup.createdAt).toLocaleString()} · {Math.max(1, Math.round(backup.size / 1024))} KB
+                {activeConfigPanel ? (
+                  <section className="overflow-hidden rounded-lg border border-border bg-card">
+                    <div className="border-b border-border p-4">
+                      <div className="flex flex-wrap gap-2">
+                        {activeConfigPanel.files.map(file => {
+                          const active = file.id === activeConfigPanel.fileId
+                          return (
+                            <button
+                              key={file.id}
+                              type="button"
+                              onClick={() => openConfig({ id: activeConfigPanel.profile }, file.id)}
+                              disabled={configSaving || configLoading === activeConfigPanel.profile}
+                              className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
+                                active
+                                  ? 'border-primary/50 bg-primary/15 text-primary'
+                                  : 'border-border bg-background/50 text-muted-foreground hover:text-foreground'
+                              }`}
+                            >
+                              {file.label}
+                            </button>
+                          )
+                        })}
                       </div>
-                      <Button
-                        className="mt-2 w-full"
-                        size="xs"
-                        variant="outline"
-                        onClick={() => restoreConfig(backup)}
-                        disabled={configSaving}
-                      >
-                        恢复
-                      </Button>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </aside>
+
+                    <div className="flex flex-col gap-3 border-b border-border p-4 md:flex-row md:items-start md:justify-between">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-sm font-semibold text-foreground">{activeConfigPanel.profile} · {activeConfigPanel.label}</h3>
+                          <span className={`rounded border px-2 py-0.5 text-2xs ${activeConfigPanel.validation.ok ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-300'}`}>
+                            {activeConfigPanel.validation.ok ? (activeConfigPanel.kind === 'json' ? 'JSON 校验通过' : '文本可保存') : '校验失败'}
+                          </span>
+                          <span className="rounded border border-border px-2 py-0.5 text-2xs text-muted-foreground">
+                            {activeConfigPanel.kind === 'json' ? 'JSON' : 'Markdown'}
+                          </span>
+                          <span className={`rounded border px-2 py-0.5 text-2xs ${activeConfigPanel.exists ? 'border-green-500/30 text-green-400' : 'border-amber-500/30 text-amber-300'}`}>
+                            {activeConfigPanel.exists ? '已存在' : activeConfigPanel.canCreate ? '保存时创建' : '未找到'}
+                          </span>
+                        </div>
+                        <p className="mt-2 text-xs text-muted-foreground">{activeConfigPanel.description}</p>
+                        <div className="mt-1 truncate font-mono text-2xs text-muted-foreground" title={activeConfigPanel.path}>
+                          {activeConfigPanel.path}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Button size="xs" variant="outline" onClick={() => openConfig({ id: activeConfigPanel.profile } as OpenClawProfile)} disabled={Boolean(configLoading) || configSaving}>
+                          重新读取
+                        </Button>
+                        <Button size="xs" variant="default" onClick={saveConfig} disabled={configSaving || !localDraftValidation?.ok || configDraft === activeConfigPanel.raw}>
+                          {configSaving ? '保存中' : '保存文件'}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_280px]">
+                      <div className="min-w-0 space-y-2">
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className={localDraftValidation?.ok ? 'text-green-400' : 'text-red-300'}>
+                            {localDraftValidation?.text}
+                          </span>
+                          <span className="font-mono text-muted-foreground">{Math.max(0, Math.round(configDraft.length / 1024))} KB</span>
+                        </div>
+                        {!activeConfigPanel.validation.ok && (
+                          <div className="rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300">
+                            {activeConfigPanel.validation.issues.join('；')}
+                          </div>
+                        )}
+                        {activeConfigPanel.kind === 'json' && (
+                          <div className="rounded border border-amber-500/20 bg-amber-500/10 p-2 text-xs text-amber-200">
+                            敏感字段会以 <span className="font-mono">--------</span> 显示；保持该占位符保存时会自动保留远端原值。
+                          </div>
+                        )}
+                        <textarea
+                          value={configDraft}
+                          onChange={event => setConfigDraft(event.target.value)}
+                          className="h-[560px] w-full resize-y rounded-lg border border-border bg-background p-3 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
+                          spellCheck={false}
+                        />
+                      </div>
+
+                      <aside className="space-y-3">
+                        <div className="rounded-lg border border-border bg-background/40 p-3">
+                          <div className="text-xs font-semibold text-foreground">轻量备份</div>
+                          <div className="mt-1 text-2xs text-muted-foreground">保留最新 {activeConfigPanel.backupKeep} 版</div>
+                          <div className="mt-3 space-y-2">
+                            {activeConfigPanel.backups.length === 0 && (
+                              <div className="text-xs text-muted-foreground">暂无备份</div>
+                            )}
+                            {activeConfigPanel.backups.map(backup => (
+                              <div key={backup.name} className="rounded border border-border/80 p-2">
+                                <div className="truncate font-mono text-2xs text-foreground" title={backup.name}>{backup.name}</div>
+                                <div className="mt-1 text-2xs text-muted-foreground">
+                                  {new Date(backup.createdAt).toLocaleString()} · {Math.max(1, Math.round(backup.size / 1024))} KB
+                                </div>
+                                <Button
+                                  className="mt-2 w-full"
+                                  size="xs"
+                                  variant="outline"
+                                  onClick={() => restoreConfig(backup)}
+                                  disabled={configSaving}
+                                >
+                                  恢复
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </aside>
+                    </div>
+                  </section>
+                ) : (
+                  <section className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+                    {configLoading === selectedProfile.id ? '正在读取核心配置...' : '选择左侧配置档后，将在这里展开核心配置。'}
+                  </section>
+                )}
+              </>
+            ) : (
+              <section className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">
+                暂无可用 OpenClaw 配置档。
+              </section>
+            )}
           </div>
-        </section>
+        </div>
       )}
     </div>
   )
 }
 
-function ProfileCard({ profile, running, onRun, onOpenConfig, configLoading }: {
+function ProfileRailItem({ profile, active, loading, onSelect }: {
   profile: OpenClawProfile
-  running: string | null
-  onRun: (profile: OpenClawProfile, action: ProfileAction) => void
-  onOpenConfig: (profile: OpenClawProfile) => void
-  configLoading: string | null
+  active: boolean
+  loading: boolean
+  onSelect: (profile: OpenClawProfile) => void
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
-  const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleString() : '从未'
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4 space-y-4">
+    <button
+      type="button"
+      onClick={() => onSelect(profile)}
+      className={`w-full px-3 py-3 text-left transition-colors ${
+        active ? 'bg-primary/10' : 'hover:bg-secondary/50'
+      }`}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -539,7 +618,56 @@ function ProfileCard({ profile, running, onRun, onOpenConfig, configLoading }: {
           {statusLabels[profile.status]}
         </span>
       </div>
+      <div className="mt-2 truncate font-mono text-2xs text-muted-foreground">{profile.model}</div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-2xs text-muted-foreground">
+        <span className="font-mono">:{profile.gatewayPort}</span>
+        <span>{loading ? '读取中' : profile.connectivity === 'ok' ? '连接正常' : '待检查'}</span>
+      </div>
+    </button>
+  )
+}
 
+function ProfileOverview({ profile, running, onRun }: {
+  profile: OpenClawProfile
+  running: string | null
+  onRun: (profile: OpenClawProfile, action: ProfileAction) => void
+}) {
+  const statusClass = statusColor(profile.status, profile.connectivity)
+  const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleString() : '从未'
+
+  return (
+    <section className="rounded-lg border border-border bg-card p-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`h-2.5 w-2.5 rounded-full ${statusClass.dot}`} />
+            <h3 className="text-base font-semibold text-foreground">{profile.label}</h3>
+            <span className={`rounded border px-2 py-0.5 text-2xs font-semibold uppercase ${statusClass.badge}`}>
+              {statusLabels[profile.status]}
+            </span>
+          </div>
+          <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{profile.id}</div>
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          {(['restart', 'model-test', 'agent-test'] as ProfileAction[]).map(action => {
+            const key = `${profile.id}:${action}`
+            const isRunning = running === key
+            const disabled = Boolean(running)
+            return (
+              <Button
+                key={action}
+                size="xs"
+                variant={action === 'restart' ? 'outline' : 'secondary'}
+                disabled={disabled}
+                onClick={() => onRun(profile, action)}
+                title={actionLabels[action]}
+              >
+                {isRunning ? '执行中' : actionLabels[action]}
+              </Button>
+            )
+          })}
+        </div>
+      </div>
       <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
         <Field label="端口" value={String(profile.gatewayPort)} mono />
         <Field label="PID" value={profile.pid ? String(profile.pid) : '-'} mono />
@@ -558,35 +686,6 @@ function ProfileCard({ profile, running, onRun, onOpenConfig, configLoading }: {
           {profile.error}
         </div>
       )}
-
-      <div className="grid grid-cols-3 gap-2">
-        {(['restart', 'model-test', 'agent-test'] as ProfileAction[]).map(action => {
-          const key = `${profile.id}:${action}`
-          const isRunning = running === key
-          const disabled = Boolean(running)
-          return (
-            <Button
-              key={action}
-              size="xs"
-              variant={action === 'restart' ? 'outline' : 'secondary'}
-              disabled={disabled}
-              onClick={() => onRun(profile, action)}
-              title={actionLabels[action]}
-            >
-              {isRunning ? '执行中' : actionLabels[action]}
-            </Button>
-          )
-        })}
-      </div>
-      <Button
-        size="xs"
-        variant="outline"
-        className="w-full"
-        onClick={() => onOpenConfig(profile)}
-        disabled={Boolean(running) || configLoading === profile.id}
-      >
-        {configLoading === profile.id ? '读取中' : '核心配置'}
-      </Button>
     </section>
   )
 }
