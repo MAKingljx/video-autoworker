@@ -71,6 +71,23 @@ find_node() {
 
 NODE_BIN="$(find_node)"
 
+configure_profile_command_target() {
+  if [[ -z "${MC_OPENCLAW_PROFILE_TARGET:-}" ]]; then
+    if [[ "$(id -un 2>/dev/null || true)" == "heisenbergs-1" && -x "$HOME/ai-worker/bin/openclaw" ]]; then
+      export MC_OPENCLAW_PROFILE_TARGET="local"
+    else
+      export MC_OPENCLAW_PROFILE_TARGET="ssh"
+    fi
+  fi
+
+  if [[ "${MC_OPENCLAW_PROFILE_TARGET:-}" == "local" ]]; then
+    export OPENCLAW_BIN="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
+    export MC_OPENCLAW_REMOTE_NODE="${MC_OPENCLAW_REMOTE_NODE:-${NODE_BIN:-node}}"
+  fi
+}
+
+configure_profile_command_target
+
 run_pnpm() {
   if [[ -n "$PNPM_BIN" ]]; then
     "$PNPM_BIN" "$@"
