@@ -82,15 +82,7 @@ function isLoopbackHost(raw: string): boolean {
 
 function isOpenClawProfilesNoAuthRequest(request: NextRequest, pathname: string): boolean {
   if (!isLocalDesktopRequest(request)) return false
-  if (
-    pathname !== '/profiles' &&
-    pathname !== '/materials' &&
-    pathname !== '/api/events' &&
-    !pathname.startsWith('/api/openclaw/profiles') &&
-    !pathname.startsWith('/api/materials')
-  ) return false
-
-  return true
+  return pathname !== '/login' && pathname !== '/setup'
 }
 
 function isLocalDesktopRequest(request: NextRequest): boolean {

@@ -108,4 +108,71 @@ describe('proxy host matching', () => {
     const response = proxy(request)
     expect(response.status).toBe(401)
   })
+
+  it('allows all loopback desktop-mode routes without redirecting to profiles', async () => {
+    vi.resetModules()
+    vi.doMock('node:os', () => ({
+      default: { hostname: () => 'hetzner-jarv' },
+      hostname: () => 'hetzner-jarv',
+    }))
+
+    const { proxy } = await import('./proxy')
+    setNodeEnv('production')
+    process.env.MC_DESKTOP_MODE = '1'
+    process.env.MC_ALLOWED_HOSTS = 'localhost,127.0.0.1'
+    delete process.env.MC_ALLOW_ANY_HOST
+
+    const pageRequest = {
+      headers: new Headers({ host: '127.0.0.1:3017' }),
+      nextUrl: {
+        host: '127.0.0.1:3017',
+        hostname: '127.0.0.1',
+        pathname: '/tasks',
+        searchParams: new URLSearchParams(),
+        clone: () => ({ pathname: '/tasks' }),
+      },
+      method: 'GET',
+      cookies: { get: () => undefined },
+    } as any
+    const apiRequest = {
+      ...pageRequest,
+      nextUrl: {
+        ...pageRequest.nextUrl,
+        pathname: '/api/tasks',
+        clone: () => ({ pathname: '/api/tasks' }),
+      },
+    } as any
+
+    expect(proxy(pageRequest).status).not.toBe(307)
+    expect(proxy(apiRequest).status).not.toBe(401)
+  })
+
+  it('does not apply desktop-mode no-auth to non-loopback hosts', async () => {
+    vi.resetModules()
+    vi.doMock('node:os', () => ({
+      default: { hostname: () => 'hetzner-jarv' },
+      hostname: () => 'hetzner-jarv',
+    }))
+
+    const { proxy } = await import('./proxy')
+    setNodeEnv('production')
+    process.env.MC_DESKTOP_MODE = '1'
+    process.env.MC_ALLOWED_HOSTS = 'localhost,127.0.0.1,app.example.com'
+    delete process.env.MC_ALLOW_ANY_HOST
+
+    const request = {
+      headers: new Headers({ host: 'app.example.com' }),
+      nextUrl: {
+        host: 'app.example.com',
+        hostname: 'app.example.com',
+        pathname: '/api/tasks',
+        searchParams: new URLSearchParams(),
+        clone: () => ({ pathname: '/api/tasks' }),
+      },
+      method: 'GET',
+      cookies: { get: () => undefined },
+    } as any
+
+    expect(proxy(request).status).toBe(401)
+  })
 })
