@@ -479,7 +479,7 @@ export function OpenClawProfilesPanel() {
       {loading ? (
         <div className="text-center text-xs text-muted-foreground py-10">正在加载配置档...</div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[288px_minmax(0,1fr)] 2xl:grid-cols-[304px_minmax(0,1fr)]">
           <aside className="overflow-hidden rounded-lg border border-border bg-card lg:sticky lg:top-4 lg:self-start">
             <div className="border-b border-border px-3 py-3">
               <div className="flex items-center justify-between gap-2">
@@ -695,40 +695,49 @@ function ProfileRailItem({ profile, active, loading, onSelect }: {
   onSelect: (profile: OpenClawProfile) => void
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
-  const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleTimeString() : '未检查'
+  const checkedAt = profile.checkedAt
+    ? new Date(profile.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : '未检查'
+  const compactMeta = [profile.channel, profile.agent, `:${profile.gatewayPort}`].join(' · ')
+  const runtimeLabel = loading
+    ? '探活读取中'
+    : profile.connectivity === 'ok'
+      ? profile.latencyMs != null
+        ? `探活 ${profile.latencyMs}ms`
+        : '探活正常'
+      : runtimeSummary(profile)
 
   return (
     <button
       type="button"
       onClick={() => onSelect(profile)}
-      className={`w-full px-3 py-3 text-left transition-colors ${
+      className={`w-full px-3 py-2.5 text-left transition-colors ${
         active ? 'bg-primary/10' : 'hover:bg-secondary/50'
       }`}
     >
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <span className={`h-2.5 w-2.5 rounded-full ${statusClass.dot}`} />
             <h3 className="text-sm font-semibold text-foreground truncate">{profile.label}</h3>
           </div>
-          <div className="mt-1 text-xs text-muted-foreground font-mono truncate">{profile.id}</div>
+          <div className="mt-0.5 font-mono text-2xs text-muted-foreground truncate">{profile.id}</div>
         </div>
-        <span className={`shrink-0 rounded border px-2 py-0.5 text-2xs font-semibold uppercase ${statusClass.badge}`}>
+        <span className={`shrink-0 rounded border px-1.5 py-0.5 text-2xs font-semibold uppercase ${statusClass.badge}`}>
           {statusLabels[profile.status]}
         </span>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-2">
-        <SidebarRow label="频道" value={profile.channel} />
-        <SidebarRow label="智能体" value={profile.agent} mono />
-        <SidebarRow label="端口" value={`:${profile.gatewayPort}`} mono />
-        <SidebarRow
-          label="探活"
-          value={loading ? '读取中' : profile.connectivity === 'ok' ? `${profile.latencyMs}ms` : runtimeSummary(profile)}
-        />
-        <SidebarRow label="工作区" value={pathTail(profile.workspace, 2)} mono wide />
-        <SidebarRow label="模型" value={profile.model} mono wide />
-        <SidebarRow label="最近检查" value={checkedAt} wide />
+      <div className="mt-2 space-y-1.5">
+        <div className="truncate text-2xs text-muted-foreground" title={compactMeta}>
+          {compactMeta}
+        </div>
+        <div className="flex items-center justify-between gap-2 text-2xs">
+          <span className="truncate text-foreground" title={runtimeLabel}>
+            {runtimeLabel}
+          </span>
+          <span className="shrink-0 text-muted-foreground">{checkedAt}</span>
+        </div>
       </div>
     </button>
   )
