@@ -695,6 +695,12 @@ function ProfileRailItem({ profile, active, loading, onSelect }: {
   onSelect: (profile: OpenClawProfile) => void
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
+  const railStatusClass = active
+    ? statusClass
+    : {
+        dot: 'bg-muted-foreground/30',
+        badge: 'border-border bg-background/40 text-muted-foreground',
+      }
   const checkedAt = profile.checkedAt
     ? new Date(profile.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '未检查'
@@ -718,12 +724,12 @@ function ProfileRailItem({ profile, active, loading, onSelect }: {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${statusClass.dot}`} />
+            <span className={`h-2.5 w-2.5 rounded-full ${railStatusClass.dot}`} />
             <h3 className="text-sm font-semibold text-foreground truncate">{profile.label}</h3>
           </div>
           <div className="mt-0.5 font-mono text-2xs text-muted-foreground truncate">{profile.id}</div>
         </div>
-        <span className={`shrink-0 rounded border px-1.5 py-0.5 text-2xs font-semibold uppercase ${statusClass.badge}`}>
+        <span className={`shrink-0 rounded border px-1.5 py-0.5 text-2xs font-semibold uppercase ${railStatusClass.badge}`}>
           {statusLabels[profile.status]}
         </span>
       </div>
