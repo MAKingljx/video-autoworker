@@ -356,7 +356,7 @@ export function OpenClawProfilesPanel() {
           <div>
             <h2 className="text-lg font-semibold text-foreground">OpenClaw 配置档</h2>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              按运行状态、配置文件与备份顺序集中处理 gpt-main、qwen-current、qwen-weixin-new。
+              先选配置档，再处理状态、规则、记忆和备份。
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -369,31 +369,27 @@ export function OpenClawProfilesPanel() {
           </div>
         </div>
 
-        <div className="mt-4 grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
-          <SummaryStat
-            label="在线配置档"
-            value={`${totals.online}/${totals.total}`}
-            hint={totals.failed ? `${totals.failed} 个需要排查` : '当前无异常告警'}
-            tone={totals.failed ? 'warn' : 'success'}
-          />
-          <SummaryStat
-            label="当前配置档"
-            value={selectedProfile?.label || '未选择'}
-            hint={selectedProfile ? `${selectedProfile.channel} · :${selectedProfile.gatewayPort}` : '等待载入'}
-            tone={selectedProfile ? 'info' : 'muted'}
-          />
-          <SummaryStat
-            label="当前文件"
-            value={activeConfigPanel?.label || '未载入'}
-            hint={activeConfigPanel ? pathTail(activeConfigPanel.path, 3) : '选择后自动读取'}
-            tone={activeConfigPanel ? 'info' : 'muted'}
-          />
-          <SummaryStat
-            label="编辑状态"
-            value={editorState}
-            hint={localDraftValidation?.text || '等待配置读取'}
-            tone={!activeConfigPanel ? 'muted' : hasUnsavedConfig || !localDraftValidation?.ok ? 'warn' : 'success'}
-          />
+        <div className="mt-4 rounded-lg border border-border bg-background/20 px-3 py-2.5">
+          <div className="grid gap-3 md:grid-cols-3">
+            <HeaderSummaryItem
+              label="在线配置档"
+              value={`${totals.online}/${totals.total}`}
+              hint={totals.failed ? `${totals.failed} 个需要排查` : '当前无异常告警'}
+              tone={totals.failed ? 'warn' : 'muted'}
+            />
+            <HeaderSummaryItem
+              label="当前配置档"
+              value={selectedProfile?.label || '未选择'}
+              hint={selectedProfile ? `${selectedProfile.channel} · :${selectedProfile.gatewayPort}` : '等待载入'}
+              tone="muted"
+            />
+            <HeaderSummaryItem
+              label="编辑状态"
+              value={editorState}
+              hint={localDraftValidation?.text || '等待配置读取'}
+              tone={!activeConfigPanel ? 'muted' : hasUnsavedConfig || !localDraftValidation?.ok ? 'warn' : 'muted'}
+            />
+          </div>
         </div>
       </section>
 
@@ -755,10 +751,17 @@ function ProfileOverview({ profile, running, onRun }: {
   onRun: (profile: OpenClawProfile, action: ProfileAction) => void
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
+  const overviewStatusClass =
+    profile.status === 'online' && profile.connectivity === 'ok'
+      ? {
+          dot: 'bg-muted-foreground/35',
+          badge: 'border-border bg-background/40 text-muted-foreground',
+        }
+      : statusClass
   const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleString() : '从未'
   const runtimeTone =
     profile.status === 'online' && profile.connectivity === 'ok'
-      ? 'success'
+      ? 'muted'
       : profile.status === 'error' || profile.connectivity === 'failed'
         ? 'danger'
         : profile.status === 'offline'
@@ -770,9 +773,9 @@ function ProfileOverview({ profile, running, onRun }: {
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={`h-2.5 w-2.5 rounded-full ${statusClass.dot}`} />
+            <span className={`h-2.5 w-2.5 rounded-full ${overviewStatusClass.dot}`} />
             <h3 className="text-base font-semibold text-foreground">{profile.label}</h3>
-            <span className={`rounded border px-2 py-0.5 text-2xs font-semibold uppercase ${statusClass.badge}`}>
+            <span className={`rounded border px-2 py-0.5 text-2xs font-semibold uppercase ${overviewStatusClass.badge}`}>
               {statusLabels[profile.status]}
             </span>
           </div>
@@ -810,14 +813,14 @@ function ProfileOverview({ profile, running, onRun }: {
           label="端口 / PID"
           value={`:${profile.gatewayPort} / ${profile.pid ? String(profile.pid) : '-'}`}
           hint={profile.listening.join(', ') || '暂无监听地址'}
-          tone="info"
+          tone="muted"
           mono
         />
         <RuntimeMetric
           label="业务入口"
           value={profile.channel}
           hint={`智能体 ${profile.agent}`}
-          tone="info"
+          tone="muted"
         />
         <RuntimeMetric
           label="版本"
@@ -856,7 +859,7 @@ function Field({ label, value, wide, mono }: { label: string; value: string; wid
   )
 }
 
-function SummaryStat({
+function HeaderSummaryItem({
   label,
   value,
   hint,
@@ -868,14 +871,15 @@ function SummaryStat({
   tone?: Tone
 }) {
   const colors = toneColor(tone)
+  const emphasized = tone === 'warn' || tone === 'danger'
 
   return (
-    <div className={`rounded-lg border p-3 ${colors.card}`}>
+    <div className="min-w-0">
       <div className="text-2xs text-muted-foreground">{label}</div>
-      <div className={`mt-1 truncate text-sm font-semibold ${colors.value}`} title={value}>
+      <div className={`mt-1 truncate text-sm font-semibold ${emphasized ? colors.value : 'text-foreground'}`} title={value}>
         {value}
       </div>
-      <div className={`mt-1 truncate text-2xs ${colors.hint}`} title={hint}>
+      <div className={`mt-1 truncate text-2xs ${emphasized ? colors.hint : 'text-muted-foreground'}`} title={hint}>
         {hint}
       </div>
     </div>
@@ -983,10 +987,10 @@ function toneColor(tone: Tone) {
   switch (tone) {
     case 'success':
       return {
-        card: 'border-green-500/30 bg-green-500/10',
-        value: 'text-green-300',
-        hint: 'text-green-200/80',
-        badge: 'border-green-500/30 bg-green-500/10 text-green-400',
+        card: 'border-border bg-background/30',
+        value: 'text-foreground',
+        hint: 'text-muted-foreground',
+        badge: 'border-border bg-background/40 text-muted-foreground',
       }
     case 'warn':
       return {
@@ -1004,10 +1008,10 @@ function toneColor(tone: Tone) {
       }
     case 'info':
       return {
-        card: 'border-primary/30 bg-primary/10',
-        value: 'text-primary',
-        hint: 'text-primary/80',
-        badge: 'border-primary/30 bg-primary/10 text-primary',
+        card: 'border-border bg-background/30',
+        value: 'text-foreground',
+        hint: 'text-muted-foreground',
+        badge: 'border-border bg-background/40 text-muted-foreground',
       }
     default:
       return {
