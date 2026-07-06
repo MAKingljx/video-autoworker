@@ -510,7 +510,7 @@ export function MaterialsPanel() {
   }, [])
 
   return (
-    <div className="space-y-5 p-4 md:p-6">
+    <div className="space-y-4 p-4 md:p-5">
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {error}
@@ -527,66 +527,21 @@ export function MaterialsPanel() {
         </div>
       ) : (
         <>
-          <section className="rounded-lg border border-border bg-card p-4 md:p-5">
-            <div className="flex flex-col gap-4">
-              <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
-                <div className="min-w-0 flex-1">
+          <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <Badge subtle>通义视频识别</Badge>
-                    <Badge subtle>通义识别搜索</Badge>
-                    <Badge subtle>{overview.vector.exists ? `${overview.vector.chunks} 个片段已入库` : '向量库待建立'}</Badge>
+                    <h1 className="text-lg font-semibold text-foreground">素材工作台</h1>
+                    {activeProject && <Badge subtle>{activeProject.name}</Badge>}
                     {searchData && <Badge subtle>{searchData.results.length} 个命中</Badge>}
                   </div>
-
-                  <div className="mt-3">
-                    <h1 className="text-2xl font-semibold text-foreground">素材工作台</h1>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      像视频站一样先找素材，再切视频，再回看镜头。
-                    </p>
-                  </div>
-
-                  <div className="mt-4 flex flex-col gap-3 xl:flex-row xl:items-center">
-                    <div className="min-w-0 flex-1">
-                      <input
-                        id="material-search"
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') void runSearch()
-                        }}
-                        placeholder="搜索地点、人物、动作、字幕、画面氛围"
-                        className="h-11 w-full rounded-lg border border-border bg-background px-4 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/40"
-                      />
-                    </div>
-                    <Button className="h-11 px-5" onClick={() => void runSearch()} disabled={searching || !query.trim()}>
-                      {searching ? '搜索中...' : '搜索素材'}
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <Badge subtle>{searchScope === 'selected' && activeProject ? `当前项目：${activeProject.name}` : '全库检索'}</Badge>
-                  <Badge subtle>{overview.vector.model || 'nomic-embed-text'}</Badge>
-                  <Badge subtle>{formatDate(overview.vector.indexedAt)}</Badge>
-                </div>
-              </div>
-
-              <div className="flex flex-col gap-3 border-t border-border pt-4 xl:flex-row xl:items-center xl:justify-between">
-                <div className="flex flex-wrap items-end gap-4">
-                  <div className="space-y-1">
-                    <div className="text-[11px] text-muted-foreground">范围</div>
-                    <div className="flex gap-2">
-                      <ModeButton active={searchScope === 'selected'} onClick={() => setSearchScope('selected')}>当前项目</ModeButton>
-                      <ModeButton active={searchScope === 'all'} onClick={() => setSearchScope('all')}>全部项目</ModeButton>
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-[11px] text-muted-foreground">方式</div>
-                    <div className="flex gap-2">
-                      <ModeButton active={mode === 'keyword'} onClick={() => setMode('keyword')}>关键词</ModeButton>
-                      <ModeButton active={mode === 'vector'} onClick={() => setMode('vector')}>通义语义</ModeButton>
-                      <ModeButton active={mode === 'hybrid'} onClick={() => setMode('hybrid')}>混合</ModeButton>
-                    </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <Badge subtle>{searchScope === 'selected' && activeProject ? '当前项目搜索' : '全库搜索'}</Badge>
+                    <Badge subtle>{mode === 'keyword' ? '关键词' : mode === 'vector' ? '通义语义' : '混合检索'}</Badge>
+                    <Badge subtle>{overview.vector.exists ? `${overview.vector.chunks} 个片段已入库` : '向量库待建立'}</Badge>
+                    <Badge subtle>{overview.vector.model || 'nomic-embed-text'}</Badge>
+                    <Badge subtle>{formatDate(overview.vector.indexedAt)}</Badge>
                   </div>
                 </div>
 
@@ -594,22 +549,41 @@ export function MaterialsPanel() {
                   <Button variant="outline" size="sm" onClick={() => void loadOverview()} disabled={loading || indexing}>
                     刷新素材
                   </Button>
-                  <Button size="sm" onClick={() => void runVectorIndex()} disabled={loading || indexing || !activeProject}>
+                  <Button variant="outline" size="sm" onClick={() => void runVectorIndex()} disabled={loading || indexing || !activeProject}>
                     {indexing ? '索引中...' : '更新向量索引'}
                   </Button>
                 </div>
               </div>
 
-              <div className="border-t border-border pt-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-[11px] tracking-wide text-muted-foreground">项目切换</p>
-                    <h2 className="mt-1 text-sm font-semibold text-foreground">素材片单</h2>
-                  </div>
-                  <span className="text-xs text-muted-foreground">{orderedProjects.length} 个项目</span>
+              <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="min-w-0">
+                  <input
+                    id="material-search"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') void runSearch()
+                    }}
+                    placeholder="搜索地点、人物、动作、字幕、画面氛围"
+                    className="h-11 w-full rounded-lg border border-border bg-background px-4 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/40"
+                  />
+                </div>
+                <Button className="h-11 px-5" onClick={() => void runSearch()} disabled={searching || !query.trim()}>
+                  {searching ? '搜索中...' : '搜索素材'}
+                </Button>
+              </div>
+
+              <div className="flex flex-col gap-2.5 border-t border-border pt-2.5 xl:flex-row xl:items-center xl:justify-between">
+                <div className="flex flex-wrap items-center gap-2">
+                  <ModeButton active={searchScope === 'selected'} onClick={() => setSearchScope('selected')}>当前项目</ModeButton>
+                  <ModeButton active={searchScope === 'all'} onClick={() => setSearchScope('all')}>全部项目</ModeButton>
+                  <div className="mx-1 hidden h-4 w-px bg-border xl:block" />
+                  <ModeButton active={mode === 'keyword'} onClick={() => setMode('keyword')}>关键词</ModeButton>
+                  <ModeButton active={mode === 'vector'} onClick={() => setMode('vector')}>通义语义</ModeButton>
+                  <ModeButton active={mode === 'hybrid'} onClick={() => setMode('hybrid')}>混合</ModeButton>
                 </div>
 
-                <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                <div className="flex min-w-0 gap-1.5 overflow-x-auto pb-1 xl:justify-end">
                   {orderedProjects.map(project => (
                     <ProjectTabButton
                       key={project.id}
@@ -638,14 +612,11 @@ export function MaterialsPanel() {
             <EmptyState title="暂无项目" description="当前素材库里还没有可用项目。" />
           )}
 
-          <section className="rounded-lg border border-border bg-card p-4 md:p-5">
-            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
               <div>
-                <p className="text-[11px] tracking-wide text-muted-foreground">搜索命中</p>
-                <h2 className="mt-1 text-lg font-semibold text-foreground">通义识别结果</h2>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  搜索入口放在上面，识别结果跟在播放器后面，不再抢第一屏操作位。
-                </p>
+                <h2 className="text-base font-semibold text-foreground">通义识别结果</h2>
+                <p className="mt-1 text-xs text-muted-foreground">命中镜头继续往下挑，焦点细节放右侧。</p>
               </div>
               {searchData && (
                 <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -655,7 +626,7 @@ export function MaterialsPanel() {
               )}
             </div>
 
-            <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1.12fr)_320px]">
+            <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.12fr)_312px]">
               <div className="space-y-3">
                 {!searchData && (
                   <EmptyState
@@ -736,7 +707,7 @@ function ProjectTabButton({
     <button
       type="button"
       onClick={onSelect}
-      className={`min-w-[220px] flex-none rounded-lg border px-3 py-3 text-left transition-colors ${
+      className={`min-w-[160px] max-w-[188px] flex-none rounded-md border px-2.5 py-2 text-left transition-colors ${
         active
           ? 'border-primary/40 bg-primary/10'
           : 'border-border bg-background/20 hover:border-primary/20 hover:bg-background/40'
@@ -744,17 +715,14 @@ function ProjectTabButton({
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">{project.name}</p>
-          <p className="mt-1 text-[11px] text-muted-foreground">
-            {project.totals.videos} 视频 · {project.totals.scenes} 场景 · {project.totals.visualDone} 已完成
+          <p className="truncate text-sm font-medium text-foreground">{project.name}</p>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            {project.totals.videos} 视频 · {project.totals.scenes} 场景
           </p>
         </div>
         <span className="rounded border border-border bg-background/50 px-1.5 py-0.5 text-[10px] text-muted-foreground">
           {ratio}%
         </span>
-      </div>
-      <div className="mt-3 h-1 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-primary" style={{ width: `${ratio}%` }} />
       </div>
     </button>
   )
@@ -782,18 +750,15 @@ function ProjectWorkbench({
   const focusedVideoMatch = focusedResult ? matchResultVideo(project, focusedResult) : null
 
   return (
-    <section className="rounded-lg border border-border bg-card p-4 md:p-5">
-      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+    <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
+      <div className="flex flex-col gap-2 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Badge subtle>{project.totals.videos} 条视频</Badge>
             <Badge subtle>{project.totals.scenes} 场景</Badge>
             <Badge subtle>{project.totals.visualDone} 通义完成</Badge>
           </div>
-          <h2 className="mt-1 truncate text-xl font-semibold text-foreground">{project.name}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            左边看片，右边切片单；搜索结果放到下方继续挑镜头。
-          </p>
+          <h2 className="mt-1 truncate text-lg font-semibold text-foreground">{project.name}</h2>
         </div>
         {focusedVideoMatch && focusedResult && (
           <Badge subtle>
@@ -802,10 +767,10 @@ function ProjectWorkbench({
         )}
       </div>
 
-      <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <div className="space-y-4">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_304px]">
+        <div className="space-y-3">
           <div className="overflow-hidden rounded-lg border border-border bg-background/25">
-            <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+            <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-semibold text-foreground">
                   {selectedVideo ? videoDisplayTitle(selectedVideo.name) : '视频播放器'}
@@ -830,9 +795,9 @@ function ProjectWorkbench({
                     src={assetUrl(selectedVideo.path)}
                   />
                 </div>
-                <div className="space-y-2 px-4 py-3">
+                <div className="space-y-2 px-3 py-2.5">
                   {focusedResult && (
-                    <div className="rounded-md border border-border bg-card px-3 py-2.5">
+                    <div className="rounded-md border border-border bg-card px-3 py-2">
                       <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                         <div className="min-w-0">
                           <p className="text-[11px] tracking-wide text-muted-foreground">当前搜索焦点</p>
@@ -865,17 +830,14 @@ function ProjectWorkbench({
         </div>
 
         <div className="rounded-lg border border-border bg-background/25">
-          <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="flex items-center justify-between gap-3 border-b border-border px-3 py-2.5">
             <div>
               <h3 className="text-sm font-semibold text-foreground">视频列表</h3>
-              <p className="mt-1 text-xs text-muted-foreground">
-                像桌面视频站一样从右侧快速切片源。
-              </p>
             </div>
             <span className="text-xs text-muted-foreground">{project.videos.length}</span>
           </div>
 
-          <div className="max-h-[760px] space-y-2 overflow-auto p-3">
+          <div className="max-h-[720px] space-y-1.5 overflow-auto p-2.5">
             {project.videos.map(video => {
               const isSelected = selectedVideoPath === video.path
               const isFocusMatch = focusedVideoMatch?.path === video.path
@@ -899,7 +861,7 @@ function ProjectWorkbench({
         </div>
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <div className="mt-3.5 grid gap-3.5 xl:grid-cols-2">
         <details className="rounded-lg border border-border bg-background/25 p-4">
           <summary className="cursor-pointer list-none">
             <div className="flex items-center justify-between gap-3">
@@ -991,14 +953,14 @@ function VideoListItem({
 
   return (
     <div
-      className={`rounded-lg border p-3 transition-colors ${
+      className={`rounded-md border p-2 transition-colors ${
         selected
           ? 'border-primary/40 bg-primary/10'
           : 'border-border bg-card hover:border-primary/20 hover:bg-background/40'
       }`}
     >
-      <div className="flex gap-3">
-        <div className="relative w-[168px] flex-none overflow-hidden rounded-md border border-border bg-zinc-950">
+      <div className="flex gap-2">
+        <div className="relative w-[124px] flex-none overflow-hidden rounded-md border border-border bg-zinc-950">
           {previewFrame ? (
             <img
               src={assetUrl(previewFrame.path)}
@@ -1012,31 +974,32 @@ function VideoListItem({
             </div>
           )}
 
-          <div className="absolute left-2 top-2 rounded-md border border-white/15 bg-black/55 px-2 py-0.5 text-[10px] font-medium text-white">
+          <div className="absolute left-1.5 top-1.5 rounded-md border border-white/15 bg-black/55 px-1.5 py-0.5 text-[10px] font-medium text-white">
             {videoEpisodeBadge(video.name)}
           </div>
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex flex-col gap-1.5">
             <div className="min-w-0">
               <div className="text-sm font-semibold text-foreground">{videoDisplayTitle(video.name)}</div>
-              <div className="mt-1 text-[11px] text-muted-foreground">
+              <div className="mt-0.5 text-[11px] text-muted-foreground">
                 {formatBytes(video.size)} · {formatDate(video.modifiedAt)}
               </div>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-1.5">
               {selected && <Badge>当前播放</Badge>}
               {focusResult && <Badge subtle>搜索焦点</Badge>}
+              {focusResult?.start !== null && focusResult && (
+                <Badge subtle>{formatTimeRange(focusResult.start, focusResult.end)}</Badge>
+              )}
             </div>
           </div>
 
-          <div className="mt-2 rounded-md border border-border bg-background/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
-            {focusText}
-          </div>
+          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">{focusText}</p>
 
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button size="xs" variant={selected ? 'secondary' : 'default'} onClick={onSelect}>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Button size="xs" variant={selected ? 'secondary' : 'outline'} onClick={onSelect}>
               {selected ? '当前视频' : '切到这个视频'}
             </Button>
             {onCueFocus && (
@@ -1074,7 +1037,7 @@ function SearchResultCard({
 
   return (
     <article
-      className={`rounded-lg border p-4 transition-colors ${
+      className={`rounded-md border p-3.5 transition-colors ${
         active
           ? 'border-primary/35 bg-background/45'
           : 'border-border bg-background/20 hover:border-primary/20 hover:bg-background/30'
@@ -1088,10 +1051,10 @@ function SearchResultCard({
           <span>{result.pipeline}</span>
         </div>
 
-        <div className="mt-3 flex flex-col gap-3 lg:flex-row">
+        <div className="mt-2.5 flex flex-col gap-3 lg:flex-row">
           {result.previewFrames.length > 0 && (
-            <div className="grid grid-cols-2 gap-2 lg:w-[176px] lg:flex-none">
-              {result.previewFrames.slice(0, 2).map(frame => (
+            <div className="lg:w-[124px] lg:flex-none">
+              {result.previewFrames.slice(0, 1).map(frame => (
                 <div key={`${result.id}:${frame.path}:${frame.timeLabel || ''}`} className="overflow-hidden rounded-md border border-border bg-card">
                   <img
                     src={assetUrl(frame.path)}
@@ -1106,8 +1069,8 @@ function SearchResultCard({
 
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-semibold text-foreground">{resultTitle(result)}</h3>
-            <p className="mt-2 text-xs leading-6 text-muted-foreground">{result.snippet || result.transcript || result.label}</p>
-            <div className="mt-3 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{result.snippet || result.transcript || result.label}</p>
+            <div className="mt-1.5 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
               <MetaLine label="地点" value={location || '未提取'} />
               <MetaLine label="人物" value={people.slice(0, 3).join(' / ') || '未提取'} />
               <MetaLine label="动作" value={actions.slice(0, 3).join(' / ') || '未提取'} />
@@ -1117,22 +1080,22 @@ function SearchResultCard({
         </div>
       </button>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        {result.tags.slice(0, 5).map(tag => (
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        {result.tags.slice(0, 3).map(tag => (
           <Badge key={`${result.id}:${tag}`} subtle>{tag}</Badge>
         ))}
       </div>
 
-      <div className="mt-4 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button size="xs" variant="outline" onClick={onFocus}>
           查看识别
         </Button>
         {activeProjectId === result.project && selectedVideo && result.start !== null ? (
-          <Button size="xs" onClick={onCueCurrent}>
+          <Button size="xs" variant={active ? 'secondary' : 'outline'} onClick={onCueCurrent}>
             在当前视频试播
           </Button>
         ) : (
-          <Button size="xs" variant="secondary" onClick={onSwitchProject}>
+          <Button size="xs" variant={active ? 'secondary' : 'outline'} onClick={onSwitchProject}>
             切到该项目
           </Button>
         )}

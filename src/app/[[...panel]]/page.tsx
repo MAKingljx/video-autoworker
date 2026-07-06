@@ -82,6 +82,8 @@ const CURRENT_PANEL_IDS = new Set([
   'overview', 'agents', 'tasks', 'projects', 'materials', 'activity', 'logs', 'settings', 'profiles',
 ])
 
+const IMMERSIVE_PANEL_IDS = new Set(['materials', 'profiles'])
+
 function normalizePanelId(panel: string): string {
   return panel === 'sessions' || panel === 'chat' ? 'profiles' : panel
 }
@@ -114,6 +116,7 @@ export default function Home() {
   const normalizedPanel = normalizePanelId(panelFromUrl)
   const isProfilesPanel = normalizedPanel === 'profiles'
   const isLocalDesktopPanel = CURRENT_PANEL_IDS.has(normalizedPanel)
+  const shouldShowSystemBanners = !showOnboarding && !IMMERSIVE_PANEL_IDS.has(normalizedPanel)
 
   useEffect(() => {
     completeNavigationTiming(pathname)
@@ -428,10 +431,14 @@ export default function Home() {
         {!showOnboarding && (
           <>
             <HeaderBar />
-            <LocalModeBanner />
-            <UpdateBanner />
-            <OpenClawUpdateBanner />
-            <OpenClawDoctorBanner />
+            {shouldShowSystemBanners && (
+              <>
+                <LocalModeBanner />
+                <UpdateBanner />
+                <OpenClawUpdateBanner />
+                <OpenClawDoctorBanner />
+              </>
+            )}
           </>
         )}
         <main
