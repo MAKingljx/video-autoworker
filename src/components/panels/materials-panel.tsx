@@ -947,9 +947,7 @@ function VideoListItem({
   const previewFrame = focusResult?.previewFrames[0] || null
   const focusText = focusResult
     ? `${resultTitle(focusResult)} · ${formatTimeRange(focusResult.start, focusResult.end)}`
-    : selected
-      ? '当前视频已经装入播放器，可以继续配合上方搜索结果试播。'
-      : '切到这条视频后，可以把通义识别的时间码直接送进播放器。'
+    : null
 
   return (
     <div
@@ -996,7 +994,9 @@ function VideoListItem({
             </div>
           </div>
 
-          <p className="mt-2 text-[11px] leading-5 text-muted-foreground">{focusText}</p>
+          {focusText && (
+            <p className="mt-2 text-[11px] leading-5 text-muted-foreground">{focusText}</p>
+          )}
 
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Button size="xs" variant={selected ? 'secondary' : 'outline'} onClick={onSelect}>
