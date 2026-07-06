@@ -30,6 +30,14 @@ export interface MaterialPipeline {
   visualPending: number
 }
 
+export interface MaterialPreviewFrame {
+  path: string
+  time: number | null
+  timeLabel: string | null
+  width?: number | null
+  height?: number | null
+}
+
 export interface MaterialVectorStatus {
   exists: boolean
   path: string
@@ -89,6 +97,7 @@ export interface MaterialSearchResult {
   transcript: string
   visualSummary: string
   tags: string[]
+  previewFrames: MaterialPreviewFrame[]
   metadata: Record<string, unknown>
 }
 
@@ -119,7 +128,7 @@ const DEFAULT_REMOTE_PYTHON = 'python3'
 const DEFAULT_EMBED_MODEL = 'nomic-embed-text'
 
 export async function getMaterialsOverview(): Promise<MaterialsOverview> {
-  return runMaterialsPython<MaterialsOverview>(LIST_MATERIALS_SCRIPT, [workspaceRoot()], 60000)
+  return runMaterialsPython<MaterialsOverview>(LIST_MATERIALS_SCRIPT, [getMaterialsWorkspaceRoot()], 60000)
 }
 
 export async function searchMaterials(options: {
@@ -132,7 +141,7 @@ export async function searchMaterials(options: {
   const mode = normalizeSearchMode(options.mode)
   const limit = Math.min(Math.max(Number(options.limit || 20), 1), 80)
   return runMaterialsPython<MaterialsSearchResponse>(SEARCH_MATERIALS_SCRIPT, [
-    workspaceRoot(),
+    getMaterialsWorkspaceRoot(),
     query,
     options.project || '',
     mode,
@@ -147,15 +156,19 @@ export async function indexMaterialVectors(options: {
 } = {}): Promise<MaterialsVectorIndexResult> {
   const maxChunks = Number.isFinite(Number(options.maxChunks)) ? Math.max(0, Number(options.maxChunks)) : 0
   return runMaterialsPython<MaterialsVectorIndexResult>(INDEX_MATERIALS_SCRIPT, [
-    workspaceRoot(),
+    getMaterialsWorkspaceRoot(),
     options.project || '',
     String(maxChunks),
     embedModel(),
   ], 15 * 60 * 1000)
 }
 
-function workspaceRoot(): string {
+export function getMaterialsWorkspaceRoot(): string {
   return String(process.env.MC_MATERIALS_WORKSPACE_ROOT || DEFAULT_WORKSPACE_ROOT).trim() || DEFAULT_WORKSPACE_ROOT
+}
+
+export function getMaterialsBotLearningRoot(): string {
+  return `${getMaterialsWorkspaceRoot()}/bot-learning`
 }
 
 function embedModel(): string {
@@ -396,22 +409,38 @@ def scene_rows(project_filter=None):
             try:
                 with connect_readonly(db_path) as conn:
                     sql = """
-                    select s.id, s.label, s.start, s.end, s.transcript, s.material_tags_json,
+                    select s.id, s.label, s.start, s.end, s.keyframes_json, s.transcript, s.material_tags_json,
                            coalesce(v.status,''), coalesce(v.result_json,''), coalesce(v.raw_response,'')
                     from scene_segments s
                     left join visual_labels v on v.scene_id = s.id
                     order by s.id
                     """
                     for row in conn.execute(sql):
-                        result = safe_json_loads(row[7], {})
-                        tags = safe_json_loads(row[5], [])
+                        preview_frames = []
+                        for frame in safe_json_loads(row[4], []):
+                            if not isinstance(frame, dict):
+                                continue
+                            frame_path = str(frame.get("path", "")).strip()
+                            if not frame_path:
+                                continue
+                            preview_frames.append({
+                                "path": frame_path,
+                                "time": frame.get("time"),
+                                "timeLabel": frame.get("time_label"),
+                                "width": frame.get("width"),
+                                "height": frame.get("height"),
+                            })
+                            if len(preview_frames) >= 3:
+                                break
+                        result = safe_json_loads(row[8], {})
+                        tags = safe_json_loads(row[6], [])
                         result_tags = result.get("searchable_tags") if isinstance(result, dict) else []
                         all_tags = []
                         for tag in (tags if isinstance(tags, list) else []) + (result_tags if isinstance(result_tags, list) else []):
                             tag_text = str(tag).strip()
                             if tag_text and tag_text not in all_tags:
                                 all_tags.append(tag_text)
-                        text_parts = [str(row[1] or ""), str(row[4] or "")]
+                        text_parts = [str(row[1] or ""), str(row[5] or "")]
                         text_parts.extend(flatten_json_text(result))
                         text = "\n".join(part for part in text_parts if part)
                         yield {
@@ -422,9 +451,10 @@ def scene_rows(project_filter=None):
                             "label": str(row[1] or f"scene-{int(row[0]):03d}"),
                             "start": row[2],
                             "end": row[3],
-                            "transcript": str(row[4] or ""),
+                            "transcript": str(row[5] or ""),
                             "visualSummary": str(result.get("visual_summary", "") if isinstance(result, dict) else ""),
                             "tags": all_tags[:24],
+                            "previewFrames": preview_frames,
                             "text": text,
                             "metadata": result if isinstance(result, dict) else {},
                         }
@@ -569,6 +599,7 @@ def vector_results(query, project_filter, limit, model):
                 "transcript": str(metadata.get("transcript", "") if isinstance(metadata, dict) else ""),
                 "visualSummary": str(metadata.get("visual_summary", "") if isinstance(metadata, dict) else ""),
                 "tags": tags if isinstance(tags, list) else [],
+                "previewFrames": metadata.get("preview_frames", []) if isinstance(metadata, dict) and isinstance(metadata.get("preview_frames", []), list) else [],
                 "metadata": metadata if isinstance(metadata, dict) else {},
             })
     return sorted(rows, key=lambda item: item["score"], reverse=True)[:limit]
@@ -593,6 +624,7 @@ def keyword_results(query, project_filter, limit):
             "transcript": scene["transcript"],
             "visualSummary": scene["visualSummary"],
             "tags": scene["tags"],
+            "previewFrames": scene["previewFrames"],
             "metadata": scene["metadata"],
         })
     return sorted(rows, key=lambda item: item["score"], reverse=True)[:limit]
@@ -608,6 +640,8 @@ def merge_hybrid(vector_rows, keyword_rows, limit):
             existing["score"] = float(existing["score"]) + float(row["score"]) * 10
             if not existing.get("visualSummary"):
                 existing["visualSummary"] = row.get("visualSummary", "")
+            if not existing.get("previewFrames"):
+                existing["previewFrames"] = row.get("previewFrames", [])
         else:
             merged[row["id"]] = {**row, "source": "hybrid"}
     return sorted(merged.values(), key=lambda item: item["score"], reverse=True)[:limit]
@@ -702,6 +736,7 @@ def main():
                 metadata["transcript"] = scene["transcript"]
                 metadata["visual_summary"] = scene["visualSummary"]
                 metadata["searchable_tags"] = scene["tags"]
+                metadata["preview_frames"] = scene["previewFrames"]
                 conn.execute(
                     """insert or replace into material_vectors
                     (id, project, pipeline, scene_id, label, start, end, text, metadata_json, content_hash, embedding_json, model, dims, indexed_at, source_mtime)
