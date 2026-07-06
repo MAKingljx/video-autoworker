@@ -347,27 +347,55 @@ export function OpenClawProfilesPanel() {
     }
   }, [configDraft, configPanel])
 
+  const editorState = !activeConfigPanel ? '待载入' : hasUnsavedConfig ? '有未保存修改' : '已同步'
+
   return (
     <div className="w-full max-w-none space-y-4 p-3 md:p-4 lg:p-5">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-foreground">OpenClaw 配置档</h2>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            gpt-main、qwen-current 与 qwen-weixin-new 控制面板
-          </p>
+      <section className="rounded-lg border border-border bg-card p-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">OpenClaw 配置档</h2>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              按运行状态、配置文件与备份顺序集中处理 gpt-main、qwen-current、qwen-weixin-new。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={generateReport} variant="outline" size="sm" disabled={reportLoading}>
+              {reportLoading ? '生成中' : '生成验收报告'}
+            </Button>
+            <Button onClick={fetchProfiles} variant="secondary" size="sm" disabled={refreshing}>
+              {refreshing ? '刷新中' : '刷新状态'}
+            </Button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">
-            {totals.online}/{totals.total} 在线{totals.failed ? ` · ${totals.failed} 个需要关注` : ''}
-          </span>
-          <Button onClick={generateReport} variant="outline" size="sm" disabled={reportLoading}>
-            {reportLoading ? '生成中' : '验收报告'}
-          </Button>
-          <Button onClick={fetchProfiles} variant="secondary" size="sm" disabled={refreshing}>
-            {refreshing ? '刷新中' : '刷新'}
-          </Button>
+
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
+          <SummaryStat
+            label="在线配置档"
+            value={`${totals.online}/${totals.total}`}
+            hint={totals.failed ? `${totals.failed} 个需要排查` : '当前无异常告警'}
+            tone={totals.failed ? 'warn' : 'success'}
+          />
+          <SummaryStat
+            label="当前配置档"
+            value={selectedProfile?.label || '未选择'}
+            hint={selectedProfile ? `${selectedProfile.channel} · :${selectedProfile.gatewayPort}` : '等待载入'}
+            tone={selectedProfile ? 'info' : 'muted'}
+          />
+          <SummaryStat
+            label="当前文件"
+            value={activeConfigPanel?.label || '未载入'}
+            hint={activeConfigPanel ? pathTail(activeConfigPanel.path, 3) : '选择后自动读取'}
+            tone={activeConfigPanel ? 'info' : 'muted'}
+          />
+          <SummaryStat
+            label="编辑状态"
+            value={editorState}
+            hint={localDraftValidation?.text || '等待配置读取'}
+            tone={!activeConfigPanel ? 'muted' : hasUnsavedConfig || !localDraftValidation?.ok ? 'warn' : 'success'}
+          />
         </div>
-      </div>
+      </section>
 
       {error && (
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
@@ -376,20 +404,27 @@ export function OpenClawProfilesPanel() {
       )}
 
       {lastResult && (
-        <div className={`rounded-lg border px-4 py-3 ${lastResult.ok ? 'border-green-500/30 bg-green-500/10' : 'border-red-500/30 bg-red-500/10'}`}>
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium text-foreground">
-                {lastResult.profile} · {actionLabels[lastResult.action]}
+        <details
+          open={!lastResult.ok}
+          className={`rounded-lg border px-4 py-3 ${
+            lastResult.ok ? 'border-green-500/30 bg-green-500/10' : 'border-red-500/30 bg-red-500/10'
+          }`}
+        >
+          <summary className="cursor-pointer list-none">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-foreground">
+                  最近操作 · {lastResult.profile} · {actionLabels[lastResult.action]}
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {Math.round(lastResult.durationMs / 1000)} 秒 · {lastResult.ok ? '执行完成' : '执行失败'}
+                </div>
               </div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                {Math.round(lastResult.durationMs / 1000)} 秒 · {lastResult.ok ? '已完成' : '失败'}
-              </div>
+              <span className={`text-xs font-medium ${lastResult.ok ? 'text-green-400' : 'text-red-300'}`}>
+                {lastResult.ok ? '展开查看结果' : '优先检查'}
+              </span>
             </div>
-            <span className={`text-xs font-medium ${lastResult.ok ? 'text-green-400' : 'text-red-300'}`}>
-              {lastResult.ok ? '正常' : '失败'}
-            </span>
-          </div>
+          </summary>
           <div className="mt-3 whitespace-pre-wrap rounded border border-border/70 bg-background/60 p-3 text-sm text-foreground">
             {lastResult.summary || '操作已完成，但没有返回摘要。'}
           </div>
@@ -403,24 +438,36 @@ export function OpenClawProfilesPanel() {
               </pre>
             </details>
           )}
-        </div>
+        </details>
       )}
 
       {report && (
-        <section className={`rounded-lg border px-4 py-3 ${report.issues.length ? 'border-amber-500/30 bg-amber-500/10' : 'border-green-500/30 bg-green-500/10'}`}>
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <div className="text-sm font-medium text-foreground">首版验收报告</div>
-              <div className="text-xs text-muted-foreground mt-0.5">
-                {new Date(report.generatedAt).toLocaleString()} · {report.issues.length ? `${report.issues.length} 个问题` : '无阻塞问题'}
+        <details
+          open={report.issues.length > 0}
+          className={`rounded-lg border px-4 py-3 ${
+            report.issues.length ? 'border-amber-500/30 bg-amber-500/10' : 'border-green-500/30 bg-green-500/10'
+          }`}
+        >
+          <summary className="cursor-pointer list-none">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-foreground">验收报告</div>
+                <div className="mt-0.5 text-xs text-muted-foreground">
+                  {new Date(report.generatedAt).toLocaleString()} · {report.issues.length ? `${report.issues.length} 个待处理项` : '无阻塞问题'}
+                </div>
               </div>
+              <span className={`text-xs font-medium ${report.issues.length ? 'text-amber-300' : 'text-green-400'}`}>
+                {report.issues.length ? '展开排查' : '展开查看'}
+              </span>
             </div>
+          </summary>
+          <div className="mt-3 flex justify-end">
             <Button size="xs" variant="outline" onClick={copyReport}>复制 Markdown</Button>
           </div>
           <pre className="mt-3 max-h-56 overflow-auto whitespace-pre-wrap rounded border border-border/70 bg-background/60 p-3 text-xs text-muted-foreground">
             {report.markdown}
           </pre>
-        </section>
+        </details>
       )}
 
       {configMessage && (
@@ -432,12 +479,15 @@ export function OpenClawProfilesPanel() {
       {loading ? (
         <div className="text-center text-xs text-muted-foreground py-10">正在加载配置档...</div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[300px_minmax(0,1fr)]">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[340px_minmax(0,1fr)]">
           <aside className="overflow-hidden rounded-lg border border-border bg-card lg:sticky lg:top-4 lg:self-start">
             <div className="border-b border-border px-3 py-3">
-              <div className="text-sm font-semibold text-foreground">配置档</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-sm font-semibold text-foreground">配置档列表</div>
+                <span className="text-2xs text-muted-foreground">{profiles.length} 项</span>
+              </div>
               <div className="mt-1 text-2xs text-muted-foreground">
-                选择左侧配置档，右侧编辑核心文件
+                先看运行态，再进入主配置、规则、记忆与备份处理。
               </div>
             </div>
             <div className="divide-y divide-border">
@@ -465,59 +515,78 @@ export function OpenClawProfilesPanel() {
                 {activeConfigPanel ? (
                   <section className="overflow-hidden rounded-lg border border-border bg-card">
                     <div className="border-b border-border p-4">
-                      <div className="flex flex-wrap gap-2">
-                        {activeConfigPanel.files.map(file => {
-                          const active = file.id === activeConfigPanel.fileId
-                          return (
-                            <button
-                              key={file.id}
-                              type="button"
-                              onClick={() => openConfig({ id: activeConfigPanel.profile }, file.id)}
-                              disabled={configSaving || configLoading === activeConfigPanel.profile}
-                              className={`rounded-md border px-3 py-1.5 text-xs transition-colors ${
-                                active
-                                  ? 'border-primary/50 bg-primary/15 text-primary'
-                                  : 'border-border bg-background/50 text-muted-foreground hover:text-foreground'
-                              }`}
-                            >
-                              {file.label}
-                            </button>
-                          )
-                        })}
+                      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-sm font-semibold text-foreground">
+                              {activeConfigPanel.profile} · {activeConfigPanel.label}
+                            </h3>
+                            <FileStateBadge
+                              text={activeConfigPanel.validation.ok ? (activeConfigPanel.kind === 'json' ? 'JSON 校验通过' : '文本可保存') : '校验失败'}
+                              tone={activeConfigPanel.validation.ok ? 'success' : 'danger'}
+                            />
+                            <FileStateBadge
+                              text={activeConfigPanel.kind === 'json' ? 'JSON' : 'Markdown'}
+                              tone="muted"
+                            />
+                            <FileStateBadge
+                              text={activeConfigPanel.exists ? '文件已存在' : activeConfigPanel.canCreate ? '保存时创建' : '文件缺失'}
+                              tone={activeConfigPanel.exists ? 'success' : 'warn'}
+                            />
+                          </div>
+                          <p className="mt-2 text-xs text-muted-foreground">{activeConfigPanel.description}</p>
+                          <div className="mt-3 grid gap-2 md:grid-cols-2">
+                            <SidebarRow label="完整路径" value={activeConfigPanel.path} mono wide />
+                            <SidebarRow label="备份保留" value={`最近 ${activeConfigPanel.backupKeep} 版`} />
+                          </div>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="flex flex-col gap-3 border-b border-border p-4 md:flex-row md:items-start md:justify-between">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-sm font-semibold text-foreground">{activeConfigPanel.profile} · {activeConfigPanel.label}</h3>
-                          <span className={`rounded border px-2 py-0.5 text-2xs ${activeConfigPanel.validation.ok ? 'border-green-500/30 text-green-400' : 'border-red-500/30 text-red-300'}`}>
-                            {activeConfigPanel.validation.ok ? (activeConfigPanel.kind === 'json' ? 'JSON 校验通过' : '文本可保存') : '校验失败'}
-                          </span>
-                          <span className="rounded border border-border px-2 py-0.5 text-2xs text-muted-foreground">
-                            {activeConfigPanel.kind === 'json' ? 'JSON' : 'Markdown'}
-                          </span>
-                          <span className={`rounded border px-2 py-0.5 text-2xs ${activeConfigPanel.exists ? 'border-green-500/30 text-green-400' : 'border-amber-500/30 text-amber-300'}`}>
-                            {activeConfigPanel.exists ? '已存在' : activeConfigPanel.canCreate ? '保存时创建' : '未找到'}
-                          </span>
+                    <div className="grid grid-cols-1 xl:grid-cols-[220px_minmax(0,1fr)_300px] 2xl:grid-cols-[240px_minmax(0,1fr)_320px]">
+                      <aside className="border-b border-border bg-background/20 p-3 xl:border-b-0 xl:border-r">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-semibold text-foreground">核心文件</div>
+                          <span className="text-2xs text-muted-foreground">{activeConfigPanel.files.length} 项</span>
                         </div>
-                        <p className="mt-2 text-xs text-muted-foreground">{activeConfigPanel.description}</p>
-                        <div className="mt-1 truncate font-mono text-2xs text-muted-foreground" title={activeConfigPanel.path}>
-                          {activeConfigPanel.path}
+                        <div className="mt-3 space-y-2">
+                          {activeConfigPanel.files.map(file => {
+                            const active = file.id === activeConfigPanel.fileId
+                            return (
+                              <button
+                                key={file.id}
+                                type="button"
+                                onClick={() => openConfig({ id: activeConfigPanel.profile }, file.id)}
+                                disabled={configSaving || configLoading === activeConfigPanel.profile}
+                                className={`w-full rounded-lg border p-3 text-left transition-colors ${
+                                  active
+                                    ? 'border-primary/50 bg-primary/10'
+                                    : 'border-border bg-background/50 hover:border-primary/20 hover:bg-background'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className={`text-xs font-medium ${active ? 'text-primary' : 'text-foreground'}`}>
+                                    {file.label}
+                                  </div>
+                                  {active && (
+                                    <span className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">
+                                      当前
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="mt-1 line-clamp-2 text-2xs text-muted-foreground">
+                                  {file.description}
+                                </div>
+                                <div className="mt-2 truncate font-mono text-2xs text-muted-foreground" title={file.path}>
+                                  {pathTail(file.path, 3)}
+                                </div>
+                              </button>
+                            )
+                          })}
                         </div>
-                      </div>
-                      <div className="flex shrink-0 items-center gap-2">
-                        <Button size="xs" variant="outline" onClick={() => openConfig({ id: activeConfigPanel.profile } as OpenClawProfile)} disabled={Boolean(configLoading) || configSaving}>
-                          重新读取
-                        </Button>
-                        <Button size="xs" variant="default" onClick={saveConfig} disabled={configSaving || !localDraftValidation?.ok || configDraft === activeConfigPanel.raw}>
-                          {configSaving ? '保存中' : '保存文件'}
-                        </Button>
-                      </div>
-                    </div>
+                      </aside>
 
-                    <div className="grid grid-cols-1 gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_280px]">
-                      <div className="min-w-0 space-y-2">
+                      <div className="min-w-0 border-b border-border p-4 xl:border-b-0 xl:border-r">
                         <div className="flex items-center justify-between gap-2 text-xs">
                           <span className={localDraftValidation?.ok ? 'text-green-400' : 'text-red-300'}>
                             {localDraftValidation?.text}
@@ -537,15 +606,44 @@ export function OpenClawProfilesPanel() {
                         <textarea
                           value={configDraft}
                           onChange={event => setConfigDraft(event.target.value)}
-                          className="h-[560px] w-full resize-y rounded-lg border border-border bg-background p-3 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
+                          className="h-[620px] w-full resize-y rounded-lg border border-border bg-background p-3 font-mono text-xs text-foreground outline-none focus:ring-1 focus:ring-primary/50"
                           spellCheck={false}
                         />
                       </div>
 
-                      <aside className="space-y-3">
+                      <aside className="space-y-3 p-4">
+                        <div className="rounded-lg border border-border bg-background/40 p-3">
+                          <div className="text-xs font-semibold text-foreground">当前文件操作</div>
+                          <div className="mt-1 text-2xs text-muted-foreground">从这里重新读取、校验并保存当前文件。</div>
+                          <div className="mt-3 space-y-2">
+                            <SidebarRow label="文件状态" value={editorState} />
+                            <SidebarRow label="文件格式" value={activeConfigPanel.kind === 'json' ? 'JSON' : 'Markdown'} />
+                            <SidebarRow label="远端状态" value={activeConfigPanel.exists ? '文件已存在' : activeConfigPanel.canCreate ? '允许创建' : '未找到'} />
+                            <SidebarRow label="备份策略" value={`保留 ${activeConfigPanel.backupKeep} 版`} />
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() => openConfig({ id: activeConfigPanel.profile } as OpenClawProfile)}
+                              disabled={Boolean(configLoading) || configSaving}
+                            >
+                              重新读取
+                            </Button>
+                            <Button
+                              size="xs"
+                              variant="default"
+                              onClick={saveConfig}
+                              disabled={configSaving || !localDraftValidation?.ok || configDraft === activeConfigPanel.raw}
+                            >
+                              {configSaving ? '保存中' : '保存文件'}
+                            </Button>
+                          </div>
+                        </div>
+
                         <div className="rounded-lg border border-border bg-background/40 p-3">
                           <div className="text-xs font-semibold text-foreground">轻量备份</div>
-                          <div className="mt-1 text-2xs text-muted-foreground">保留最新 {activeConfigPanel.backupKeep} 版</div>
+                          <div className="mt-1 text-2xs text-muted-foreground">每次保存自动留档，便于回滚。</div>
                           <div className="mt-3 space-y-2">
                             {activeConfigPanel.backups.length === 0 && (
                               <div className="text-xs text-muted-foreground">暂无备份</div>
@@ -597,6 +695,7 @@ function ProfileRailItem({ profile, active, loading, onSelect }: {
   onSelect: (profile: OpenClawProfile) => void
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
+  const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleTimeString() : '未检查'
 
   return (
     <button
@@ -618,10 +717,18 @@ function ProfileRailItem({ profile, active, loading, onSelect }: {
           {statusLabels[profile.status]}
         </span>
       </div>
-      <div className="mt-2 truncate font-mono text-2xs text-muted-foreground">{profile.model}</div>
-      <div className="mt-2 flex items-center justify-between gap-2 text-2xs text-muted-foreground">
-        <span className="font-mono">:{profile.gatewayPort}</span>
-        <span>{loading ? '读取中' : profile.connectivity === 'ok' ? '连接正常' : '待检查'}</span>
+
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <SidebarRow label="频道" value={profile.channel} />
+        <SidebarRow label="智能体" value={profile.agent} mono />
+        <SidebarRow label="端口" value={`:${profile.gatewayPort}`} mono />
+        <SidebarRow
+          label="探活"
+          value={loading ? '读取中' : profile.connectivity === 'ok' ? `${profile.latencyMs}ms` : runtimeSummary(profile)}
+        />
+        <SidebarRow label="工作区" value={pathTail(profile.workspace, 2)} mono wide />
+        <SidebarRow label="模型" value={profile.model} mono wide />
+        <SidebarRow label="最近检查" value={checkedAt} wide />
       </div>
     </button>
   )
@@ -634,10 +741,18 @@ function ProfileOverview({ profile, running, onRun }: {
 }) {
   const statusClass = statusColor(profile.status, profile.connectivity)
   const checkedAt = profile.checkedAt ? new Date(profile.checkedAt).toLocaleString() : '从未'
+  const runtimeTone =
+    profile.status === 'online' && profile.connectivity === 'ok'
+      ? 'success'
+      : profile.status === 'error' || profile.connectivity === 'failed'
+        ? 'danger'
+        : profile.status === 'offline'
+          ? 'warn'
+          : 'muted'
 
   return (
     <section className="rounded-lg border border-border bg-card p-4">
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className={`h-2.5 w-2.5 rounded-full ${statusClass.dot}`} />
@@ -668,21 +783,46 @@ function ProfileOverview({ profile, running, onRun }: {
           })}
         </div>
       </div>
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
-        <Field label="端口" value={String(profile.gatewayPort)} mono />
-        <Field label="PID" value={profile.pid ? String(profile.pid) : '-'} mono />
-        <Field label="智能体" value={profile.agent} mono />
-        <Field label="频道" value={profile.channel} />
-        <Field label="模型" value={profile.model} mono wide />
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-2 2xl:grid-cols-4">
+        <RuntimeMetric
+          label="运行状态"
+          value={runtimeSummary(profile)}
+          hint={`${statusLabels[profile.status]} · ${profile.connectivity === 'ok' ? `${profile.latencyMs}ms` : '待排查'}`}
+          tone={runtimeTone}
+        />
+        <RuntimeMetric
+          label="端口 / PID"
+          value={`:${profile.gatewayPort} / ${profile.pid ? String(profile.pid) : '-'}`}
+          hint={profile.listening.join(', ') || '暂无监听地址'}
+          tone="info"
+          mono
+        />
+        <RuntimeMetric
+          label="业务入口"
+          value={profile.channel}
+          hint={`智能体 ${profile.agent}`}
+          tone="info"
+        />
+        <RuntimeMetric
+          label="版本"
+          value={profile.gatewayVersion || '-'}
+          hint={`CLI ${profile.cliVersion || '-'} · ${checkedAt}`}
+          tone="muted"
+        />
+      </div>
+
+      <dl className="mt-4 grid gap-3 text-xs md:grid-cols-2">
         <Field label="工作区" value={profile.workspace} mono wide />
-        <Field label="CLI" value={profile.cliVersion || '-'} wide />
-        <Field label="网关" value={profile.gatewayVersion || '-'} wide />
-        <Field label="监听" value={profile.listening.join(', ') || '-'} mono wide />
-        <Field label="检查时间" value={`${checkedAt} · ${profile.latencyMs}ms`} wide />
+        <Field label="主配置路径" value={profile.configPath || '-'} mono wide />
+        <Field label="LaunchAgent" value={profile.launchAgent} mono />
+        <Field label="监听地址" value={profile.listening.join(', ') || '-'} mono />
+        <Field label="模型" value={profile.model} mono wide />
+        <Field label="最近检查" value={`${checkedAt} · ${profile.latencyMs}ms`} wide />
       </dl>
 
       {profile.error && (
-        <div className="rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300 whitespace-pre-wrap">
+        <div className="mt-4 rounded border border-red-500/20 bg-red-500/10 p-2 text-xs text-red-300 whitespace-pre-wrap">
           {profile.error}
         </div>
       )}
@@ -693,10 +833,93 @@ function ProfileOverview({ profile, running, onRun }: {
 function Field({ label, value, wide, mono }: { label: string; value: string; wide?: boolean; mono?: boolean }) {
   return (
     <div className={wide ? 'col-span-2 min-w-0' : 'min-w-0'}>
-      <dt className="text-2xs uppercase tracking-wide text-muted-foreground/70">{label}</dt>
+      <dt className="text-2xs text-muted-foreground/70">{label}</dt>
       <dd className={`mt-0.5 truncate text-foreground ${mono ? 'font-mono' : ''}`} title={value}>
         {value}
       </dd>
+    </div>
+  )
+}
+
+function SummaryStat({
+  label,
+  value,
+  hint,
+  tone = 'muted',
+}: {
+  label: string
+  value: string
+  hint: string
+  tone?: Tone
+}) {
+  const colors = toneColor(tone)
+
+  return (
+    <div className={`rounded-lg border p-3 ${colors.card}`}>
+      <div className="text-2xs text-muted-foreground">{label}</div>
+      <div className={`mt-1 truncate text-sm font-semibold ${colors.value}`} title={value}>
+        {value}
+      </div>
+      <div className={`mt-1 truncate text-2xs ${colors.hint}`} title={hint}>
+        {hint}
+      </div>
+    </div>
+  )
+}
+
+function RuntimeMetric({
+  label,
+  value,
+  hint,
+  tone = 'muted',
+  mono = false,
+}: {
+  label: string
+  value: string
+  hint: string
+  tone?: Tone
+  mono?: boolean
+}) {
+  const colors = toneColor(tone)
+
+  return (
+    <div className={`rounded-lg border p-3 ${colors.card}`}>
+      <div className="text-2xs text-muted-foreground">{label}</div>
+      <div className={`mt-1 truncate text-sm font-semibold ${colors.value} ${mono ? 'font-mono' : ''}`} title={value}>
+        {value}
+      </div>
+      <div className={`mt-1 truncate text-2xs ${colors.hint}`} title={hint}>
+        {hint}
+      </div>
+    </div>
+  )
+}
+
+function FileStateBadge({ text, tone = 'muted' }: { text: string; tone?: Tone }) {
+  return (
+    <span className={`rounded border px-2 py-0.5 text-2xs ${toneColor(tone).badge}`}>
+      {text}
+    </span>
+  )
+}
+
+function SidebarRow({
+  label,
+  value,
+  mono = false,
+  wide = false,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  wide?: boolean
+}) {
+  return (
+    <div className={wide ? 'col-span-2 min-w-0' : 'min-w-0'}>
+      <div className="text-2xs text-muted-foreground/70">{label}</div>
+      <div className={`mt-0.5 truncate text-xs text-foreground ${mono ? 'font-mono' : ''}`} title={value}>
+        {value}
+      </div>
     </div>
   )
 }
@@ -723,5 +946,60 @@ function statusColor(status: ProfileStatus, connectivity: OpenClawProfile['conne
   return {
     dot: 'bg-muted-foreground/40',
     badge: 'border-border bg-secondary text-muted-foreground',
+  }
+}
+
+function runtimeSummary(profile: OpenClawProfile) {
+  if (profile.status === 'online' && profile.connectivity === 'ok') return '运行正常'
+  if (profile.status === 'error' || profile.connectivity === 'failed') return '探活失败'
+  if (profile.status === 'offline') return '服务离线'
+  return '状态待确认'
+}
+
+function pathTail(value: string, depth = 2) {
+  const parts = value.split('/').filter(Boolean)
+  if (parts.length <= depth) return value
+  return `.../${parts.slice(-depth).join('/')}`
+}
+
+type Tone = 'success' | 'warn' | 'danger' | 'muted' | 'info'
+
+function toneColor(tone: Tone) {
+  switch (tone) {
+    case 'success':
+      return {
+        card: 'border-green-500/30 bg-green-500/10',
+        value: 'text-green-300',
+        hint: 'text-green-200/80',
+        badge: 'border-green-500/30 bg-green-500/10 text-green-400',
+      }
+    case 'warn':
+      return {
+        card: 'border-amber-500/30 bg-amber-500/10',
+        value: 'text-amber-200',
+        hint: 'text-amber-200/80',
+        badge: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+      }
+    case 'danger':
+      return {
+        card: 'border-red-500/30 bg-red-500/10',
+        value: 'text-red-200',
+        hint: 'text-red-200/80',
+        badge: 'border-red-500/30 bg-red-500/10 text-red-300',
+      }
+    case 'info':
+      return {
+        card: 'border-primary/30 bg-primary/10',
+        value: 'text-primary',
+        hint: 'text-primary/80',
+        badge: 'border-primary/30 bg-primary/10 text-primary',
+      }
+    default:
+      return {
+        card: 'border-border bg-background/40',
+        value: 'text-foreground',
+        hint: 'text-muted-foreground',
+        badge: 'border-border bg-background/50 text-muted-foreground',
+      }
   }
 }
