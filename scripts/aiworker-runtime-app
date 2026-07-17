@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -u
+
+CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUNTIME_SCRIPT="$CONTENTS_DIR/Resources/start-aiworker-runtime.sh"
+SMOKE_REPORT="/tmp/aiworker-runtime-launcher-smoke.log"
+
+if [[ -f "$RUNTIME_SCRIPT" ]]; then
+  RESULT="$(/bin/bash "$RUNTIME_SCRIPT" 2>&1)"
+  STATUS=$?
+else
+  RESULT="启动器内置脚本不可用：$RUNTIME_SCRIPT"
+  STATUS=1
+fi
+
+if [[ "${AIWORKER_LAUNCHER_SMOKE:-}" == "1" ]]; then
+  {
+    printf 'status=%s\n' "$STATUS"
+    printf 'runtime=%s\n' "$RUNTIME_SCRIPT"
+    printf '%s\n' "$RESULT"
+  } > "$SMOKE_REPORT"
+  exit "$STATUS"
+fi
+
+export AIWORKER_LAUNCHER_RESULT="$RESULT"
+export AIWORKER_LAUNCHER_STATUS="$STATUS"
+
+if [[ "$STATUS" -eq 0 ]]; then
+  /usr/bin/osascript <<'APPLESCRIPT'
+set resultText to system attribute "AIWORKER_LAUNCHER_RESULT"
+if resultText is "" then set resultText to "全部服务已就绪。"
+set selectedButton to button returned of (display dialog resultText buttons {"完成", "打开控制台"} default button "打开控制台" with title "AI-worker 一键启动" with icon note)
+if selectedButton is "打开控制台" then
+  do shell script "/usr/bin/open http://127.0.0.1:3017/profiles"
+end if
+APPLESCRIPT
+else
+  /usr/bin/osascript <<'APPLESCRIPT'
+set resultText to system attribute "AIWORKER_LAUNCHER_RESULT"
+if resultText is "" then set resultText to "启动未完成，请检查服务状态。"
+display dialog resultText buttons {"好"} default button "好" with title "AI-worker 一键启动" with icon caution
+APPLESCRIPT
+fi
+
+exit "$STATUS"
