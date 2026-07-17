@@ -4,6 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FALLBACK_APP_DIR="$HOME/Documents/Phoenix/video-autoworker"
+AIWORKER_NODE_BIN="$HOME/ai-worker/node/current/bin"
+AIWORKER_BIN_DIR="$HOME/ai-worker/bin"
+
+# Finder launches apps with a system-only PATH. The OpenClaw entrypoint uses
+# `/usr/bin/env node`, so make the managed Node.js runtime available first.
+export PATH="$AIWORKER_NODE_BIN:$AIWORKER_BIN_DIR:$PATH"
+
 if [[ -f "$SOURCE_APP_DIR/package.json" ]]; then
   APP_DIR="$SOURCE_APP_DIR"
 elif [[ -f "$FALLBACK_APP_DIR/package.json" ]]; then
