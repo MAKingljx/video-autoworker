@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -u
 
+export LANG=zh_CN.UTF-8
+export LC_ALL=zh_CN.UTF-8
+
 CONTENTS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNTIME_SCRIPT="$CONTENTS_DIR/Resources/start-aiworker-runtime.sh"
 SMOKE_REPORT="/tmp/aiworker-runtime-launcher-smoke.log"
@@ -22,12 +25,19 @@ if [[ "${AIWORKER_LAUNCHER_SMOKE:-}" == "1" ]]; then
   exit "$STATUS"
 fi
 
-export AIWORKER_LAUNCHER_RESULT="$RESULT"
+RESULT_FILE="$(mktemp /tmp/aiworker-runtime-result.XXXXXX)"
+printf '%s' "$RESULT" > "$RESULT_FILE"
+export AIWORKER_LAUNCHER_RESULT_FILE="$RESULT_FILE"
 export AIWORKER_LAUNCHER_STATUS="$STATUS"
 
 if [[ "$STATUS" -eq 0 ]]; then
   /usr/bin/osascript <<'APPLESCRIPT'
-set resultText to system attribute "AIWORKER_LAUNCHER_RESULT"
+try
+  set resultFile to POSIX file (system attribute "AIWORKER_LAUNCHER_RESULT_FILE")
+  set resultText to read resultFile as «class utf8»
+on error
+  set resultText to "服务已启动，但无法读取启动汇总。"
+end try
 if resultText is "" then set resultText to "全部服务已就绪。"
 set selectedButton to button returned of (display dialog resultText buttons {"完成", "打开控制台"} default button "打开控制台" with title "AI-worker 一键启动" with icon note)
 if selectedButton is "打开控制台" then
@@ -36,10 +46,16 @@ end if
 APPLESCRIPT
 else
   /usr/bin/osascript <<'APPLESCRIPT'
-set resultText to system attribute "AIWORKER_LAUNCHER_RESULT"
+try
+  set resultFile to POSIX file (system attribute "AIWORKER_LAUNCHER_RESULT_FILE")
+  set resultText to read resultFile as «class utf8»
+on error
+  set resultText to "启动未完成，请检查服务状态。"
+end try
 if resultText is "" then set resultText to "启动未完成，请检查服务状态。"
 display dialog resultText buttons {"好"} default button "好" with title "AI-worker 一键启动" with icon caution
 APPLESCRIPT
 fi
 
+rm -f "$RESULT_FILE"
 exit "$STATUS"
