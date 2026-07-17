@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOURCE_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+FALLBACK_APP_DIR="$HOME/Documents/Phoenix/video-autoworker"
+if [[ -f "$SOURCE_APP_DIR/package.json" ]]; then
+  APP_DIR="$SOURCE_APP_DIR"
+elif [[ -f "$FALLBACK_APP_DIR/package.json" ]]; then
+  APP_DIR="$FALLBACK_APP_DIR"
+else
+  APP_DIR=""
+fi
 OPENCLAW_BIN="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
 PORT=3017
 QWEN_PORT=18091
@@ -129,6 +138,11 @@ ensure_platform() {
 
   if [[ -z "$PNPM_BIN" || ! -x "$PNPM_BIN" ]]; then
     mark_failed '可视化平台：未找到 pnpm，无法启动'
+    return
+  fi
+
+  if [[ -z "$APP_DIR" ]]; then
+    mark_failed '可视化平台：未找到 video-autoworker 部署目录'
     return
   fi
 

@@ -1,5 +1,5 @@
 on run
-  set launcherPath to (POSIX path of (path to home folder)) & "Documents/Phoenix/video-autoworker/scripts/start-aiworker-runtime.sh"
+  set launcherPath to (POSIX path of (path to me)) & "Contents/Resources/start-aiworker-runtime.sh"
 
   try
     do shell script "/usr/bin/test -x " & quoted form of launcherPath
