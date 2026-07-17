@@ -1,5 +1,10 @@
 on run
-  set launcherPath to (POSIX path of (path to me)) & "Contents/Resources/start-aiworker-runtime.sh"
+  try
+    set launcherPath to POSIX path of (path to resource "start-aiworker-runtime.sh")
+  on error
+    display dialog "启动器内置脚本不可用，请重新生成桌面 App。" buttons {"好"} default button "好" with icon stop
+    return
+  end try
 
   try
     do shell script "/usr/bin/test -x " & quoted form of launcherPath

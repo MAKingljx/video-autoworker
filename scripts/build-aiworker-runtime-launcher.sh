@@ -28,6 +28,7 @@ mkdir -p "$(dirname "$TARGET")"
 /usr/bin/osacompile -o "$TEMP_APP" "$SOURCE"
 /bin/cp "$RUNTIME_SCRIPT" "$TEMP_APP/Contents/Resources/start-aiworker-runtime.sh"
 /bin/chmod +x "$TEMP_APP/Contents/Resources/start-aiworker-runtime.sh"
+/usr/bin/codesign --force --deep --sign - "$TEMP_APP" >/dev/null
 
 if [[ -e "$TARGET" ]]; then
   if [[ "$TARGET" != "$DEFAULT_TARGET" ]]; then
