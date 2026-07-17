@@ -4,7 +4,8 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$APP_DIR/scripts/aiworker-runtime-launcher.applescript"
 RUNTIME_SCRIPT="$APP_DIR/scripts/start-aiworker-runtime.sh"
-TARGET="${1:-$HOME/Desktop/AI-worker 一键启动.app}"
+DEFAULT_TARGET="$HOME/Desktop/AI-worker 一键启动.app"
+TARGET="${1:-$DEFAULT_TARGET}"
 TEMP_DIR="$(mktemp -d)"
 TEMP_APP="$TEMP_DIR/AI-worker 一键启动.app"
 
@@ -29,9 +30,11 @@ mkdir -p "$(dirname "$TARGET")"
 /bin/chmod +x "$TEMP_APP/Contents/Resources/start-aiworker-runtime.sh"
 
 if [[ -e "$TARGET" ]]; then
-  backup="${TARGET}.backup-$(date +%Y%m%d-%H%M%S)"
-  mv "$TARGET" "$backup"
-  printf 'Existing launcher backed up to: %s\n' "$backup"
+  if [[ "$TARGET" != "$DEFAULT_TARGET" ]]; then
+    printf 'Refusing to replace a custom target: %s\n' "$TARGET" >&2
+    exit 1
+  fi
+  rm -rf "$TARGET"
 fi
 
 mv "$TEMP_APP" "$TARGET"
