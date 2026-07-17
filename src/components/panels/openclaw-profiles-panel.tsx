@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 
 type ProfileStatus = 'online' | 'offline' | 'error' | 'unknown'
 type ProfileAction = 'restart' | 'model-test' | 'agent-test'
+type StartupServiceState = 'skipped' | 'started' | 'starting' | 'failed'
 
 interface OpenClawProfile {
   id: string
@@ -36,6 +37,20 @@ interface ActionResult {
   durationMs: number
   summary: string
   output: string
+}
+
+interface StartupResult {
+  ok: boolean
+  startedAt: string
+  finishedAt: string
+  durationMs: number
+  services: Array<{
+    id: string
+    label: string
+    state: StartupServiceState
+    summary: string
+    detail?: string
+  }>
 }
 
 interface ProfileConfigBackup {
@@ -112,6 +127,8 @@ export function OpenClawProfilesPanel() {
   const [refreshing, setRefreshing] = useState(false)
   const [running, setRunning] = useState<string | null>(null)
   const [lastResult, setLastResult] = useState<ActionResult | null>(null)
+  const [startupRunning, setStartupRunning] = useState(false)
+  const [startupResult, setStartupResult] = useState<StartupResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [configPanel, setConfigPanel] = useState<ProfileConfigState | null>(null)
   const [configDraft, setConfigDraft] = useState('')
@@ -191,6 +208,23 @@ export function OpenClawProfilesPanel() {
       setError(err instanceof Error ? err.message : '配置档操作失败')
     } finally {
       setRunning(null)
+    }
+  }
+
+  const startRuntime = async () => {
+    setStartupRunning(true)
+    setStartupResult(null)
+    setError(null)
+    try {
+      const res = await fetch('/api/openclaw/startup', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok && !data?.result) throw new Error(data?.error || '一键启动失败')
+      setStartupResult(data.result as StartupResult)
+      await fetchProfiles()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '一键启动失败')
+    } finally {
+      setStartupRunning(false)
     }
   }
 
@@ -360,6 +394,9 @@ export function OpenClawProfilesPanel() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={startRuntime} size="sm" disabled={startupRunning || Boolean(running)}>
+              {startupRunning ? '启动检查中' : '一键启动服务'}
+            </Button>
             <Button onClick={generateReport} variant="outline" size="sm" disabled={reportLoading}>
               {reportLoading ? '生成中' : '生成验收报告'}
             </Button>
@@ -397,6 +434,36 @@ export function OpenClawProfilesPanel() {
         <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {error}
         </div>
+      )}
+
+      {startupResult && (
+        <section className={`rounded-lg border px-4 py-3 ${
+          startupResult.ok ? 'border-border bg-card' : 'border-red-500/30 bg-red-500/10'
+        }`}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-sm font-medium text-foreground">一键启动结果</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {Math.max(1, Math.round(startupResult.durationMs / 1000))} 秒 · 已按需检查全部服务
+              </div>
+            </div>
+            <span className={`text-xs font-medium ${startupResult.ok ? 'text-muted-foreground' : 'text-red-300'}`}>
+              {startupResult.ok ? '执行完成' : '存在启动失败项'}
+            </span>
+          </div>
+          <div className="mt-3 divide-y divide-border rounded border border-border bg-background/20">
+            {startupResult.services.map(service => (
+              <div key={service.id} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-3 py-2 text-xs">
+                <div className="min-w-0">
+                  <span className="font-medium text-foreground">{service.label}</span>
+                  <span className="ml-2 text-muted-foreground">{service.summary}</span>
+                  {service.detail && <span className="ml-2 text-red-300">{service.detail}</span>}
+                </div>
+                <StartupStateBadge state={service.state} />
+              </div>
+            ))}
+          </div>
+        </section>
       )}
 
       {lastResult && (
@@ -912,6 +979,22 @@ function RuntimeMetric({
       </div>
     </div>
   )
+}
+
+function StartupStateBadge({ state }: { state: StartupServiceState }) {
+  const labels: Record<StartupServiceState, string> = {
+    skipped: '已运行',
+    started: '已启动',
+    starting: '启动中',
+    failed: '失败',
+  }
+  const classes: Record<StartupServiceState, string> = {
+    skipped: 'border-border bg-background/40 text-muted-foreground',
+    started: 'border-border bg-background/40 text-foreground',
+    starting: 'border-amber-500/30 bg-amber-500/10 text-amber-300',
+    failed: 'border-red-500/30 bg-red-500/10 text-red-300',
+  }
+  return <span className={`shrink-0 rounded border px-2 py-0.5 text-2xs ${classes[state]}`}>{labels[state]}</span>
 }
 
 function FileStateBadge({ text, tone = 'muted' }: { text: string; tone?: Tone }) {
