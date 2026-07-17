@@ -4,10 +4,11 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$APP_DIR/scripts/aiworker-runtime-launcher.applescript"
 RUNTIME_SCRIPT="$APP_DIR/scripts/start-aiworker-runtime.sh"
-DEFAULT_TARGET="$HOME/Desktop/AI-worker 一键启动.app"
-TARGET="${1:-$DEFAULT_TARGET}"
+APP_NAME="AI-worker 一键启动.app"
+INSTALL_TARGET="$HOME/Applications/$APP_NAME"
+DESKTOP_LINK="$HOME/Desktop/$APP_NAME"
 TEMP_DIR="$(mktemp -d)"
-TEMP_APP="$TEMP_DIR/AI-worker 一键启动.app"
+TEMP_APP="$TEMP_DIR/$APP_NAME"
 
 if [[ ! -x /usr/bin/osacompile ]]; then
   printf 'osacompile is required to build the macOS launcher.\n' >&2
@@ -24,21 +25,24 @@ if [[ ! -x "$RUNTIME_SCRIPT" ]]; then
   exit 1
 fi
 
-mkdir -p "$(dirname "$TARGET")"
+mkdir -p "$(dirname "$INSTALL_TARGET")" "$(dirname "$DESKTOP_LINK")"
 /usr/bin/osacompile -o "$TEMP_APP" "$SOURCE"
 /bin/cp "$RUNTIME_SCRIPT" "$TEMP_APP/Contents/Resources/start-aiworker-runtime.sh"
 /bin/chmod +x "$TEMP_APP/Contents/Resources/start-aiworker-runtime.sh"
 
-if [[ -e "$TARGET" ]]; then
-  if [[ "$TARGET" != "$DEFAULT_TARGET" ]]; then
-    printf 'Refusing to replace a custom target: %s\n' "$TARGET" >&2
-    exit 1
-  fi
-  rm -rf "$TARGET"
+if [[ -e "$INSTALL_TARGET" ]]; then
+  rm -rf "$INSTALL_TARGET"
 fi
 
-mv "$TEMP_APP" "$TARGET"
+mv "$TEMP_APP" "$INSTALL_TARGET"
 rmdir "$TEMP_DIR"
-/usr/bin/xattr -cr "$TARGET"
-/usr/bin/codesign --force --deep --sign - "$TARGET" >/dev/null
-printf 'Launcher created: %s\n' "$TARGET"
+/usr/bin/xattr -cr "$INSTALL_TARGET"
+/usr/bin/codesign --force --deep --sign - "$INSTALL_TARGET" >/dev/null
+/usr/bin/codesign --verify --deep --strict "$INSTALL_TARGET"
+
+if [[ -e "$DESKTOP_LINK" || -L "$DESKTOP_LINK" ]]; then
+  rm -rf "$DESKTOP_LINK"
+fi
+ln -s "$INSTALL_TARGET" "$DESKTOP_LINK"
+printf 'Launcher installed: %s\n' "$INSTALL_TARGET"
+printf 'Desktop launcher: %s\n' "$DESKTOP_LINK"
