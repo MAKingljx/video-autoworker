@@ -6,13 +6,6 @@ on run
     return
   end try
 
-  try
-    do shell script "/usr/bin/test -x " & quoted form of launcherPath
-  on error
-    display dialog "未找到 AI-worker 启动脚本：" & launcherPath buttons {"好"} default button "好" with icon stop
-    return
-  end try
-
   display notification "正在检查并按需启动千问、OpenClaw 与可视化平台。" with title "AI-worker 一键启动"
 
   try
