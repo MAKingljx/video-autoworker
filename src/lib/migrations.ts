@@ -1410,6 +1410,38 @@ const migrations: Migration[] = [
         )
       `)
     }
+  },
+  {
+    id: '049_n8n_workflow_bindings',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_workflow_bindings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          description TEXT,
+          workflow_id TEXT,
+          webhook_path TEXT NOT NULL,
+          task_type TEXT NOT NULL DEFAULT 'general',
+          agent_role TEXT NOT NULL DEFAULT 'executor',
+          model TEXT NOT NULL DEFAULT 'qwen36-tools-local/default_model',
+          timeout_seconds INTEGER NOT NULL DEFAULT 30,
+          retry_count INTEGER NOT NULL DEFAULT 1,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          config TEXT NOT NULL DEFAULT '{}',
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          tenant_id INTEGER NOT NULL DEFAULT 1,
+          created_by TEXT NOT NULL DEFAULT 'system',
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          last_run_at INTEGER,
+          last_status TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_n8n_workflow_bindings_scope_name
+          ON n8n_workflow_bindings(tenant_id, workspace_id, name);
+        CREATE INDEX IF NOT EXISTS idx_n8n_workflow_bindings_enabled
+          ON n8n_workflow_bindings(tenant_id, workspace_id, enabled, updated_at);
+      `)
+    }
   }
 ]
 

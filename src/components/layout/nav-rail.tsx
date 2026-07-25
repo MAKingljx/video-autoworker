@@ -33,6 +33,7 @@ const navGroups: NavGroup[] = [
       { id: 'profiles', label: 'OpenClaw 配置', icon: <ProfilesIcon />, priority: false, essential: true },
       { id: 'materials', label: '素材', icon: <MaterialsIcon />, priority: false, essential: true },
       { id: 'tasks', label: '任务', icon: <TasksIcon />, priority: true, essential: true },
+      { id: 'automation', label: '任务链', icon: <AutomationIcon />, priority: false, essential: true },
       { id: 'projects', label: '项目', icon: <ProjectsIcon />, priority: false, essential: true },
       { id: 'channels', label: '频道', icon: <ChannelsIcon />, priority: false },
       { id: 'skills', label: '技能', icon: <SkillsIcon />, priority: false },
@@ -90,6 +91,7 @@ const navItemTranslationKeys: Record<string, string> = {
   profiles: 'profiles',
   materials: 'materials',
   tasks: 'tasks',
+  automation: 'automation',
   projects: 'projects',
   channels: 'channels',
   skills: 'skills',
@@ -1161,6 +1163,18 @@ function TasksIcon() {
     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="1" width="12" height="14" rx="1.5" />
       <path d="M5 5h6M5 8h6M5 11h3" />
+    </svg>
+  )
+}
+
+function AutomationIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="3" cy="3" r="1.5" />
+      <circle cx="13" cy="8" r="1.5" />
+      <circle cx="3" cy="13" r="1.5" />
+      <path d="M4.5 3h2A2.5 2.5 0 019 5.5v0A2.5 2.5 0 0011.5 8H11" />
+      <path d="M4.5 13h2A2.5 2.5 0 009 10.5v0A2.5 2.5 0 0111.5 8H11" />
     </svg>
   )
 }

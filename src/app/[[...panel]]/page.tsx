@@ -27,6 +27,7 @@ import { AlertRulesPanel } from '@/components/panels/alert-rules-panel'
 import { MultiGatewayPanel } from '@/components/panels/multi-gateway-panel'
 import { OpenClawProfilesPanel } from '@/components/panels/openclaw-profiles-panel'
 import { MaterialsPanel } from '@/components/panels/materials-panel'
+import { N8nWorkflowsPanel } from '@/components/panels/n8n-workflows-panel'
 import { SuperAdminPanel } from '@/components/panels/super-admin-panel'
 import { OfficePanel } from '@/components/panels/office-panel'
 import { GitHubSyncPanel } from '@/components/panels/github-sync-panel'
@@ -79,7 +80,7 @@ const bootLabelKeys: Record<string, string> = {
 }
 
 const CURRENT_PANEL_IDS = new Set([
-  'overview', 'agents', 'tasks', 'projects', 'materials', 'activity', 'logs', 'settings', 'profiles',
+  'overview', 'agents', 'tasks', 'projects', 'materials', 'automation', 'activity', 'logs', 'settings', 'profiles',
 ])
 
 const IMMERSIVE_PANEL_IDS = new Set(['materials', 'profiles'])
@@ -579,6 +580,8 @@ function ContentRouter({ tab }: { tab: string }) {
       return <OpenClawProfilesPanel />
     case 'materials':
       return <MaterialsPanel />
+    case 'automation':
+      return <N8nWorkflowsPanel />
     case 'gateway-config':
       if (isLocal) return <LocalModeUnavailable panel={tab} />
       return <GatewayConfigPanel />

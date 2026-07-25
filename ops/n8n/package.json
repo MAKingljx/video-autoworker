@@ -1,0 +1,12 @@
+{
+  "name": "video-autoworker-n8n-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned n8n runtime for Video AutoWorker production deployments",
+  "engines": {
+    "node": ">=22.22"
+  },
+  "dependencies": {
+    "n8n": "2.31.6"
+  }
+}

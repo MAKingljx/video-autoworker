@@ -1,0 +1,158 @@
+{
+  "id": "aiworker-task-intake-v1",
+  "name": "AI-worker Task Intake v1",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aiworker-task",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf001",
+      "name": "AI-worker Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -460,
+        0
+      ],
+      "webhookId": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf002"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf003",
+              "name": "accepted",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf004",
+              "name": "taskId",
+              "value": "={{ $json.body.taskId }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf005",
+              "name": "idempotencyKey",
+              "value": "={{ $json.body.idempotencyKey || $json.headers['x-aiworker-idempotency-key'] }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf006",
+              "name": "source",
+              "value": "={{ $json.body.source }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf007",
+              "name": "workflow",
+              "value": "AI-worker Task Intake v1",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf008",
+              "name": "taskType",
+              "value": "={{ $json.body.routing.taskType }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf009",
+              "name": "agentRole",
+              "value": "={{ $json.body.routing.agentRole }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00a",
+              "name": "model",
+              "value": "={{ $json.body.routing.model }}",
+              "type": "string"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00b",
+              "name": "input",
+              "value": "={{ $json.body.input }}",
+              "type": "object"
+            },
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00c",
+              "name": "receivedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00d",
+      "name": "Build Observable Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-AIWorker-Workflow",
+                "value": "task-intake-v1"
+              }
+            ]
+          }
+        }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00e",
+      "name": "Return Accepted Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        60,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "AI-worker Webhook": {
+      "main": [
+        [
+          {
+            "node": "Build Observable Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Observable Result": {
+      "main": [
+        [
+          {
+            "node": "Return Accepted Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00f",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

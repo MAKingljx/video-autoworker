@@ -14,8 +14,8 @@ dist/
 *.pem
 .env*.local
 
-# npm (project uses pnpm)
-package-lock.json
+# npm (root project uses pnpm; ops/n8n intentionally tracks its npm lockfile)
+/package-lock.json
 
 # Debug
 npm-debug.log*
@@ -41,9 +41,23 @@ playwright-report/
 
 # Local runtime/export artifacts
 output/
-report/
+/report/
 src-tauri/target/
 *.log
+.runtime/
+*.pid
+*.bak-*
+
+# n8n runtime state is external and must never enter Git. Deployment assets,
+# workflow JSON, the lockfile, and the env template under ops/n8n stay tracked.
+ops/n8n/node_modules/
+ops/n8n/.env
+ops/n8n/.n8n/
+ops/n8n/data/
+ops/n8n/logs/
+ops/n8n/run/
+ops/n8n/credentials/
+ops/n8n/backups/
 
 # Local QA screenshots
 /e2e-debug-*.png

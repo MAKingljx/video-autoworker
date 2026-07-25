@@ -95,6 +95,22 @@
     {
       "name": "Docs",
       "description": "API documentation"
+    },
+    {
+      "name": "Local Workspace",
+      "description": "Read-only local workspace discovery"
+    },
+    {
+      "name": "Materials",
+      "description": "OpenClaw learning materials, assets, search, and indexing"
+    },
+    {
+      "name": "OpenClaw Profiles",
+      "description": "Production OpenClaw profile control and acceptance reporting"
+    },
+    {
+      "name": "n8n",
+      "description": "n8n runtime status, workflow bindings, executions, and triggers"
     }
   ],
   "paths": {
@@ -11184,6 +11200,289 @@
           "409": { "description": "Working tree has uncommitted changes" }
         }
       }
+    },
+    "/api/local/workspace-projects": {
+      "get": {
+        "tags": ["Local Workspace"],
+        "summary": "Discover dated projects in the local workspace",
+        "operationId": "listLocalWorkspaceProjects",
+        "responses": {
+          "200": {
+            "description": "Workspace root and month/project inventory",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "required": ["workspaceRoot", "workspaceName", "months"],
+              "properties": {
+                "workspaceRoot": { "type": "string" },
+                "workspaceName": { "type": "string" },
+                "months": { "type": "array", "items": { "type": "object" } }
+              }
+            } } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "500": { "description": "Workspace discovery failed" }
+        }
+      }
+    },
+    "/api/materials": {
+      "get": {
+        "tags": ["Materials"],
+        "summary": "Get the local OpenClaw materials overview",
+        "operationId": "getMaterialsOverview",
+        "responses": {
+          "200": { "description": "Materials projects and index status", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "Materials backend unavailable" }
+        }
+      }
+    },
+    "/api/materials/asset": {
+      "get": {
+        "tags": ["Materials"],
+        "summary": "Stream an allowed materials asset",
+        "operationId": "getMaterialsAsset",
+        "parameters": [
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "Range", "in": "header", "required": false, "schema": { "type": "string", "example": "bytes=0-1023" } }
+        ],
+        "responses": {
+          "200": { "description": "Complete asset", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "206": { "description": "Requested byte range", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "416": { "description": "Requested range is not satisfiable" }
+        }
+      }
+    },
+    "/api/materials/search": {
+      "get": {
+        "tags": ["Materials"],
+        "summary": "Search indexed OpenClaw materials",
+        "operationId": "searchMaterials",
+        "parameters": [
+          { "name": "q", "in": "query", "schema": { "type": "string" } },
+          { "name": "project", "in": "query", "schema": { "type": "string" } },
+          { "name": "mode", "in": "query", "schema": { "type": "string", "enum": ["keyword", "vector", "hybrid"], "default": "keyword" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20 } }
+        ],
+        "responses": {
+          "200": { "description": "Material search results", "content": { "application/json": { "schema": { "type": "object" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "Material search backend unavailable" }
+        }
+      }
+    },
+    "/api/materials/vector-index": {
+      "post": {
+        "tags": ["Materials"],
+        "summary": "Build or update the materials vector index",
+        "operationId": "indexMaterialVectors",
+        "requestBody": { "content": { "application/json": { "schema": {
+          "type": "object",
+          "properties": { "project": { "type": "string" }, "maxChunks": { "type": "integer", "minimum": 0 } }
+        } } } },
+        "responses": {
+          "200": { "description": "Index completed", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object" } } } } } },
+          "207": { "description": "Index completed with partial failures" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "Vector index backend unavailable" }
+        }
+      }
+    },
+    "/api/openclaw/profiles": {
+      "get": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "List production OpenClaw profiles and live status",
+        "operationId": "listOpenClawProfiles",
+        "responses": {
+          "200": { "description": "Profile status snapshot", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["profiles", "checkedAt"],
+            "properties": { "profiles": { "type": "array", "items": { "type": "object" } }, "checkedAt": { "type": "string", "format": "date-time" } }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Run a controlled action for one OpenClaw profile",
+        "operationId": "runOpenClawProfileAction",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["profile", "action"],
+          "properties": { "profile": { "type": "string" }, "action": { "type": "string" } }
+        } } } },
+        "responses": {
+          "200": { "description": "Profile action completed", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The same profile action is already in progress" },
+          "502": { "description": "Profile action failed" }
+        }
+      }
+    },
+    "/api/openclaw/profiles/config": {
+      "get": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Read a controlled OpenClaw profile configuration file",
+        "operationId": "getOpenClawProfileConfig",
+        "parameters": [
+          { "name": "profile", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "fileId", "in": "query", "schema": { "$ref": "#/components/schemas/OpenClawProfileFileId" } }
+        ],
+        "responses": {
+          "200": { "description": "Profile file content and metadata", "content": { "application/json": { "schema": { "type": "object", "properties": { "config": { "type": "object" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "502": { "description": "Profile configuration could not be read" }
+        }
+      },
+      "put": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Validate and save a controlled OpenClaw profile configuration file",
+        "operationId": "saveOpenClawProfileConfig",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OpenClawProfileConfigSave" } } } },
+        "responses": {
+          "200": { "description": "Configuration saved with a backup" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Configuration hash conflict" }, "502": { "description": "Configuration save failed" }
+        }
+      },
+      "post": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Restore a controlled OpenClaw profile configuration backup",
+        "operationId": "restoreOpenClawProfileConfig",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OpenClawProfileConfigRestore" } } } },
+        "responses": {
+          "200": { "description": "Backup restored" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Configuration hash conflict" }, "502": { "description": "Backup restore failed" }
+        }
+      }
+    },
+    "/api/openclaw/profiles/report": {
+      "get": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Generate an acceptance report for all production OpenClaw profiles",
+        "operationId": "generateOpenClawProfilesAcceptanceReport",
+        "responses": {
+          "200": { "description": "Fresh profile acceptance report", "headers": { "Cache-Control": { "schema": { "type": "string", "const": "no-store" } } }, "content": { "application/json": { "schema": {
+            "type": "object", "required": ["report"], "properties": { "report": { "type": "object" } }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "Acceptance command failed" }
+        }
+      }
+    },
+    "/api/openclaw/startup": {
+      "post": {
+        "tags": ["OpenClaw Profiles"],
+        "summary": "Start the local AI-worker runtime in dependency order",
+        "operationId": "startOpenClawRuntime",
+        "responses": {
+          "200": { "description": "Runtime startup completed", "content": { "application/json": { "schema": { "type": "object", "properties": { "result": { "type": "object" } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "A startup operation is already running" }, "502": { "description": "One or more runtime services failed to start" }
+        }
+      }
+    },
+    "/api/n8n/status": {
+      "get": {
+        "tags": ["n8n"],
+        "summary": "Read n8n health, safe runtime configuration, and remote workflows",
+        "operationId": "getN8nStatus",
+        "responses": {
+          "200": { "description": "n8n integration status", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["health", "config", "remoteWorkflows", "managementError"],
+            "properties": {
+              "health": { "type": "object" }, "config": { "type": "object" },
+              "remoteWorkflows": { "type": "array", "items": { "type": "object" } },
+              "managementError": { "type": ["string", "null"] }
+            }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/n8n/workflows": {
+      "get": {
+        "tags": ["n8n"], "summary": "List n8n workflow bindings", "operationId": "listN8nWorkflowBindings",
+        "responses": {
+          "200": { "description": "Configured workflow bindings", "content": { "application/json": { "schema": { "type": "object", "properties": { "bindings": { "type": "array", "items": { "$ref": "#/components/schemas/N8nWorkflowBinding" } } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["n8n"], "summary": "Create an n8n workflow binding", "operationId": "createN8nWorkflowBinding",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/N8nWorkflowBindingInput" } } } },
+        "responses": {
+          "201": { "description": "Workflow binding created", "content": { "application/json": { "schema": { "type": "object", "properties": { "binding": { "$ref": "#/components/schemas/N8nWorkflowBinding" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "put": {
+        "tags": ["n8n"], "summary": "Replace an n8n workflow binding", "operationId": "updateN8nWorkflowBinding",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "allOf": [
+          { "$ref": "#/components/schemas/N8nWorkflowBindingInput" },
+          { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer", "minimum": 1 } } }
+        ] } } } },
+        "responses": {
+          "200": { "description": "Workflow binding updated" }, "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }, "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "delete": {
+        "tags": ["n8n"], "summary": "Delete an n8n workflow binding", "operationId": "deleteN8nWorkflowBinding",
+        "parameters": [{ "name": "id", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1 } }],
+        "responses": {
+          "200": { "description": "Workflow binding deleted", "content": { "application/json": { "schema": { "type": "object", "properties": { "deleted": { "type": "integer" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/n8n/executions": {
+      "get": {
+        "tags": ["n8n"], "summary": "List recent n8n executions", "operationId": "listN8nExecutions",
+        "parameters": [{ "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 } }],
+        "responses": {
+          "200": { "description": "Recent execution summaries", "content": { "application/json": { "schema": { "type": "object", "properties": { "executions": { "type": "array", "items": { "type": "object" } } } } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "n8n management API unavailable" }
+        }
+      }
+    },
+    "/api/n8n/trigger": {
+      "post": {
+        "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["bindingId", "input"],
+          "properties": {
+            "bindingId": { "type": "integer", "minimum": 1 }, "taskId": { "type": "string" },
+            "idempotencyKey": { "type": "string" }, "input": { "type": "object" }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "Video AutoWorker submitted the webhook request; result.statusCode reports n8n's response (normally 202 for the bundled workflow)", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "result": { "type": "object" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Workflow binding is disabled" }, "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "description": "n8n webhook failed or timed out" }
+        }
+      }
     }
   },
   "components": {
@@ -11200,6 +11499,71 @@
       }
     },
     "schemas": {
+      "OpenClawProfileFileId": {
+        "type": "string",
+        "enum": [
+          "openclaw-json",
+          "workspace-rules",
+          "workspace-memory",
+          "workspace-today-memory",
+          "profile-wiki-rules"
+        ],
+        "default": "openclaw-json"
+      },
+      "OpenClawProfileConfigSave": {
+        "type": "object",
+        "required": ["profile", "raw"],
+        "properties": {
+          "profile": { "type": "string", "minLength": 1 },
+          "fileId": { "$ref": "#/components/schemas/OpenClawProfileFileId" },
+          "raw": { "type": "string", "maxLength": 2000000 },
+          "hash": { "type": "string" }
+        }
+      },
+      "OpenClawProfileConfigRestore": {
+        "type": "object",
+        "required": ["profile", "backupName"],
+        "properties": {
+          "profile": { "type": "string", "minLength": 1 },
+          "fileId": { "$ref": "#/components/schemas/OpenClawProfileFileId" },
+          "backupName": { "type": "string", "minLength": 1, "maxLength": 255 },
+          "hash": { "type": "string" }
+        }
+      },
+      "N8nWorkflowBindingInput": {
+        "type": "object",
+        "required": ["name", "webhookPath"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 1000, "default": "" },
+          "workflowId": { "type": "string", "maxLength": 120, "default": "" },
+          "webhookPath": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^(webhook|webhook-test)/" },
+          "taskType": { "type": "string", "minLength": 1, "maxLength": 80, "default": "general" },
+          "agentRole": { "type": "string", "minLength": 1, "maxLength": 80, "default": "executor" },
+          "model": { "type": "string", "minLength": 1, "maxLength": 180, "default": "qwen36-tools-local/default_model" },
+          "timeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 120, "default": 30 },
+          "retryCount": { "type": "integer", "minimum": 0, "maximum": 10, "default": 1 },
+          "enabled": { "type": "boolean", "default": true },
+          "config": { "type": "object", "default": {}, "description": "Non-secret workflow settings only; credentials must be stored outside this binding." }
+        }
+      },
+      "N8nWorkflowBinding": {
+        "allOf": [
+          { "$ref": "#/components/schemas/N8nWorkflowBindingInput" },
+          {
+            "type": "object",
+            "required": ["id", "createdBy", "createdAt", "updatedAt", "lastRunAt", "lastStatus"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 1 },
+              "createdBy": { "type": "string" },
+              "createdAt": { "type": "integer" },
+              "updatedAt": { "type": "integer" },
+              "lastRunAt": { "type": ["integer", "null"] },
+              "lastStatus": { "type": ["string", "null"] }
+            }
+          }
+        ]
+      },
       "Error": {
         "type": "object",
         "required": [
