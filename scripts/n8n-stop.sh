@@ -17,6 +17,10 @@ fi
 
 if ! n8n_pid_is_running; then
   rm -f "$AIWORKER_N8N_PID_FILE"
+  if n8n_health_is_available; then
+    printf 'n8n health endpoint still responds but no owned PID is available; refusing to claim it stopped.\n' >&2
+    exit 1
+  fi
   printf 'n8n is not running.\n'
   exit 0
 fi

@@ -46,7 +46,7 @@ if n8n_pid_is_running || n8n_launch_job_loaded || n8n_health_is_available; then
 fi
 
 if [[ "${#workflow_files[@]}" -eq 0 ]]; then
-  workflow_files=("$AIWORKER_N8N_PROJECT_DIR/workflows/aiworker-task-intake.json")
+  workflow_files=("$AIWORKER_N8N_RUNTIME_DIR/workflows/aiworker-task-intake.json")
 fi
 
 if [[ -d "$N8N_USER_FOLDER" ]] && [[ -n "$(find "$N8N_USER_FOLDER" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
@@ -82,15 +82,15 @@ for workflow_file in "${workflow_files[@]}"; do
 
   # n8n 2.31.6 imports workflows inactive in regular deployment mode. An
   # existing published workflow must be unpublished before a fixed-ID update.
-  if "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fqx "$workflow_id"; then
+  if "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fqx "$workflow_id"; then
     printf 'Unpublishing existing workflow before fixed-ID update: %s\n' "$workflow_id"
-    "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" unpublish:workflow --id="$workflow_id"
+    "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" unpublish:workflow --id="$workflow_id"
   fi
 
   printf 'Importing workflow: %s\n' "$workflow_file"
-  "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" import:workflow --input="$workflow_file"
+  "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" import:workflow --input="$workflow_file"
 
-  workflow_count="$("$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fxc "$workflow_id" || true)"
+  workflow_count="$("$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fxc "$workflow_id" || true)"
   if [[ "$workflow_count" != "1" ]]; then
     printf 'Expected exactly one workflow with ID %s; found %s.\n' "$workflow_id" "$workflow_count" >&2
     exit 1
@@ -98,8 +98,8 @@ for workflow_file in "${workflow_files[@]}"; do
 
   if [[ "$activate_workflows" == true ]]; then
     printf 'Publishing workflow for production webhooks: %s\n' "$workflow_id"
-    "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" publish:workflow --id="$workflow_id"
-    if ! "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" list:workflow --active=true --onlyId | grep -Fqx "$workflow_id"; then
+    "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" publish:workflow --id="$workflow_id"
+    if ! "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --active=true --onlyId | grep -Fqx "$workflow_id"; then
       printf 'Workflow did not become active: %s\n' "$workflow_id" >&2
       exit 1
     fi

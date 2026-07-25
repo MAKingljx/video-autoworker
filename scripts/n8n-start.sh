@@ -13,6 +13,19 @@ n8n_require_encryption_key
 n8n_require_installation
 n8n_prepare_runtime_directories
 
+if n8n_health_is_available; then
+  if n8n_pid_is_running; then
+    if n8n_launch_job_loaded; then
+      printf 'n8n is already healthy under the LaunchAgent: %s\n' "$(n8n_health_url)"
+    else
+      printf 'n8n is already healthy under the managed background process: %s\n' "$(n8n_health_url)"
+    fi
+    exit 0
+  fi
+  printf 'n8n health responds without an owned process; refusing to treat it as managed.\n' >&2
+  exit 1
+fi
+
 run_foreground() {
   local lock_dir="$AIWORKER_N8N_RUN_DIR/start.lock"
   if ! mkdir "$lock_dir" 2>/dev/null; then
@@ -37,7 +50,7 @@ run_foreground() {
   fi
   rm -f "$AIWORKER_N8N_PID_FILE"
 
-  "$N8N_NODE_BIN" "$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n" start &
+  "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" start &
   local child_pid=$!
   local pid_tmp="$AIWORKER_N8N_PID_FILE.tmp.$$"
   printf '%s\n' "$child_pid" > "$pid_tmp"

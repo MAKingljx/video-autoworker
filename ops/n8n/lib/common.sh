@@ -3,8 +3,8 @@
 set -euo pipefail
 
 AIWORKER_N8N_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AIWORKER_N8N_PROJECT_DIR="$(cd "$AIWORKER_N8N_LIB_DIR/.." && pwd)"
-AIWORKER_REPOSITORY_ROOT="$(cd "$AIWORKER_N8N_PROJECT_DIR/../.." && pwd)"
+AIWORKER_N8N_SOURCE_DIR="$(cd "$AIWORKER_N8N_LIB_DIR/.." && pwd)"
+AIWORKER_REPOSITORY_ROOT="$(cd "$AIWORKER_N8N_SOURCE_DIR/../.." && pwd)"
 AIWORKER_N8N_LAUNCH_LABEL="com.video-autoworker.n8n"
 
 n8n_env_file() {
@@ -12,7 +12,7 @@ n8n_env_file() {
 }
 
 n8n_load_environment() {
-  local env_file override_node override_npm override_user_folder override_log_dir override_run_dir
+  local env_file override_node override_npm override_runtime_root override_user_folder override_log_dir override_run_dir
   local override_backup_dir override_pid_file override_log_file override_listen_address
   local override_host override_port override_protocol override_encryption_key
   env_file="$(n8n_env_file)"
@@ -26,6 +26,7 @@ n8n_load_environment() {
   # one-off alternate Node 22 path or isolated validation without editing it.
   override_node="${N8N_NODE_BIN:-}"
   override_npm="${N8N_NPM_BIN:-}"
+  override_runtime_root="${AIWORKER_N8N_RUNTIME_ROOT:-}"
   override_user_folder="${N8N_USER_FOLDER:-}"
   override_log_dir="${AIWORKER_N8N_LOG_DIR:-}"
   override_run_dir="${AIWORKER_N8N_RUN_DIR:-}"
@@ -46,6 +47,7 @@ n8n_load_environment() {
 
   [[ -n "$override_node" ]] && N8N_NODE_BIN="$override_node"
   [[ -n "$override_npm" ]] && N8N_NPM_BIN="$override_npm"
+  [[ -n "$override_runtime_root" ]] && AIWORKER_N8N_RUNTIME_ROOT="$override_runtime_root"
   [[ -n "$override_user_folder" ]] && N8N_USER_FOLDER="$override_user_folder"
   [[ -n "$override_log_dir" ]] && AIWORKER_N8N_LOG_DIR="$override_log_dir"
   [[ -n "$override_run_dir" ]] && AIWORKER_N8N_RUN_DIR="$override_run_dir"
@@ -73,6 +75,9 @@ n8n_load_environment() {
     fi
   fi
 
+  AIWORKER_N8N_RUNTIME_ROOT="${AIWORKER_N8N_RUNTIME_ROOT:-$HOME/ai-worker/services/video-autoworker-n8n}"
+  AIWORKER_N8N_RUNTIME_CURRENT="$AIWORKER_N8N_RUNTIME_ROOT/current"
+  AIWORKER_N8N_RUNTIME_DIR="$AIWORKER_N8N_RUNTIME_CURRENT/ops/n8n"
   N8N_USER_FOLDER="${N8N_USER_FOLDER:-$HOME/ai-worker/state/n8n}"
   AIWORKER_N8N_LOG_DIR="${AIWORKER_N8N_LOG_DIR:-$HOME/ai-worker/logs/n8n}"
   AIWORKER_N8N_RUN_DIR="${AIWORKER_N8N_RUN_DIR:-$HOME/ai-worker/run/n8n}"
@@ -85,6 +90,7 @@ n8n_load_environment() {
   N8N_PROTOCOL="${N8N_PROTOCOL:-http}"
 
   export N8N_NODE_BIN N8N_NPM_BIN N8N_USER_FOLDER
+  export AIWORKER_N8N_RUNTIME_ROOT AIWORKER_N8N_RUNTIME_CURRENT AIWORKER_N8N_RUNTIME_DIR
   export AIWORKER_N8N_LOG_DIR AIWORKER_N8N_RUN_DIR AIWORKER_N8N_BACKUP_DIR
   export AIWORKER_N8N_PID_FILE AIWORKER_N8N_LOG_FILE
   export N8N_LISTEN_ADDRESS N8N_HOST N8N_PORT N8N_PROTOCOL
@@ -121,12 +127,45 @@ n8n_require_encryption_key() {
 }
 
 n8n_require_installation() {
-  local cli="$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/bin/n8n"
+  local cli="$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n"
   if [[ ! -f "$cli" ]]; then
-    printf 'n8n is not installed under %s\n' "$AIWORKER_N8N_PROJECT_DIR" >&2
+    printf 'n8n is not installed under %s\n' "$AIWORKER_N8N_RUNTIME_DIR" >&2
     printf 'Run scripts/n8n-install.sh first.\n' >&2
     return 1
   fi
+}
+
+n8n_runtime_source_manifest() {
+  local source_root="${1:-$AIWORKER_REPOSITORY_ROOT}"
+  (
+    cd "$source_root"
+    shasum -a 256 \
+      scripts/n8n-start.sh \
+      scripts/n8n-stop.sh \
+      scripts/n8n-status.sh \
+      scripts/n8n-import-workflows.sh \
+      ops/n8n/.env.example \
+      ops/n8n/lib/common.sh \
+      ops/n8n/package.json \
+      ops/n8n/package-lock.json \
+      ops/n8n/workflows/aiworker-task-intake.json
+  )
+}
+
+n8n_runtime_source_manifest_sha256() {
+  n8n_runtime_source_manifest "${1:-$AIWORKER_REPOSITORY_ROOT}" \
+    | shasum -a 256 \
+    | awk '{print $1}'
+}
+
+n8n_release_matches_repository_source() {
+  local release_dir="$1" expected_manifest_sha actual_manifest_sha
+  [[ -f "$release_dir/SOURCE_MANIFEST" && -f "$release_dir/RUNTIME_SOURCE_SHA256SUMS" ]] || return 1
+  expected_manifest_sha="$(n8n_runtime_source_manifest_sha256 "$AIWORKER_REPOSITORY_ROOT")"
+  actual_manifest_sha="$(shasum -a 256 "$release_dir/RUNTIME_SOURCE_SHA256SUMS" | awk '{print $1}')"
+  [[ "$actual_manifest_sha" == "$expected_manifest_sha" ]] || return 1
+  grep -Fqx "runtime_source_manifest_sha256=$expected_manifest_sha" "$release_dir/SOURCE_MANIFEST" || return 1
+  (cd "$release_dir" && shasum -a 256 -c RUNTIME_SOURCE_SHA256SUMS >/dev/null 2>&1)
 }
 
 n8n_health_url() {
@@ -142,13 +181,17 @@ n8n_pid_is_running() {
   local pid
   pid="$(tr -d '[:space:]' < "$AIWORKER_N8N_PID_FILE")"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null
+  kill -0 "$pid" 2>/dev/null && n8n_process_is_owned "$pid"
 }
 
 n8n_process_is_owned() {
-  local pid="$1" command_line
+  local pid="$1" command_line current_target
   command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  [[ "$command_line" == *"$AIWORKER_N8N_PROJECT_DIR/node_modules/n8n/"* ]]
+  if [[ "$command_line" == *"$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/"* ]]; then
+    return 0
+  fi
+  current_target="$(readlink "$AIWORKER_N8N_RUNTIME_CURRENT" 2>/dev/null || true)"
+  [[ -n "$current_target" && "$command_line" == *"$current_target/ops/n8n/node_modules/n8n/"* ]]
 }
 
 n8n_launch_domain() {

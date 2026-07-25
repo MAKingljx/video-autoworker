@@ -7,11 +7,11 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>__REPOSITORY_ROOT__/scripts/n8n-start.sh</string>
+    <string>__RUNTIME_ROOT__/current/scripts/n8n-start.sh</string>
     <string>--foreground</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>__REPOSITORY_ROOT__/ops/n8n</string>
+  <string>__RUNTIME_ROOT__/current/ops/n8n</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>AIWORKER_N8N_ENV_FILE</key>
