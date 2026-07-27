@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { resolveN8nEditorTarget, type N8nEditorTarget } from '@/lib/n8n-editor-url'
 
 interface N8nHealth {
   ok: boolean
@@ -83,6 +84,14 @@ interface ApiErrorBody {
 const inputClass = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-primary/60 focus:ring-1 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60'
 const labelClass = 'mb-1.5 block text-xs font-medium text-muted-foreground'
 
+const UNAVAILABLE_EDITOR_TARGET: N8nEditorTarget = {
+  href: null,
+  canOpen: false,
+  canEmbed: false,
+  openReason: '正在读取 n8n 编辑器地址。',
+  embedReason: '正在读取 n8n 编辑器地址。',
+}
+
 const EMPTY_FORM: BindingForm = {
   name: '',
   description: '',
@@ -158,11 +167,49 @@ export function N8nWorkflowsPanel() {
   const [testResult, setTestResult] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [pageUrl, setPageUrl] = useState<string | null>(null)
+  const [editorExpanded, setEditorExpanded] = useState(false)
+  const [editorFrameLoaded, setEditorFrameLoaded] = useState(false)
+  const [editorFrameSlow, setEditorFrameSlow] = useState(false)
+  const editorFrameTimerRef = useRef<number | null>(null)
 
   const selectedBinding = useMemo(
     () => bindings.find(binding => binding.id === selectedId) || null,
     [bindings, selectedId],
   )
+
+  const editorTarget = useMemo(() => {
+    if (!pageUrl || !status?.config.baseUrl) return UNAVAILABLE_EDITOR_TARGET
+    return resolveN8nEditorTarget(status.config.baseUrl, pageUrl)
+  }, [pageUrl, status?.config.baseUrl])
+
+  useEffect(() => {
+    setPageUrl(window.location.href)
+  }, [])
+
+  useEffect(() => {
+    if (!editorTarget.canEmbed) setEditorExpanded(false)
+  }, [editorTarget.canEmbed])
+
+  useEffect(() => {
+    if (editorFrameTimerRef.current !== null) {
+      window.clearTimeout(editorFrameTimerRef.current)
+      editorFrameTimerRef.current = null
+    }
+    setEditorFrameLoaded(false)
+    setEditorFrameSlow(false)
+    if (!editorExpanded) return
+    editorFrameTimerRef.current = window.setTimeout(() => {
+      editorFrameTimerRef.current = null
+      setEditorFrameSlow(true)
+    }, 8_000)
+    return () => {
+      if (editorFrameTimerRef.current !== null) {
+        window.clearTimeout(editorFrameTimerRef.current)
+        editorFrameTimerRef.current = null
+      }
+    }
+  }, [editorExpanded, editorTarget.href])
 
   const loadData = useCallback(async (quiet = false) => {
     if (quiet) setRefreshing(true)
@@ -392,6 +439,22 @@ export function N8nWorkflowsPanel() {
             <p className="mt-1 text-xs text-muted-foreground">统一配置模型、Agent 角色与 Webhook 路由，并从控制台测试任务执行。</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            {editorTarget.canOpen && editorTarget.href ? (
+              <Button asChild variant="outline" size="sm">
+                <a href={editorTarget.href} target="_blank" rel="noopener noreferrer">打开 n8n 编辑器</a>
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" disabled title={editorTarget.openReason || undefined}>打开 n8n 编辑器</Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!editorTarget.canEmbed}
+              title={editorTarget.embedReason || undefined}
+              onClick={() => setEditorExpanded(current => !current)}
+            >
+              {editorExpanded ? '收起 n8n 编辑器' : '嵌入 n8n 编辑器'}
+            </Button>
             <Button variant="outline" size="sm" onClick={() => void loadData(true)} disabled={refreshing}>
               {refreshing ? '刷新中…' : '刷新状态'}
             </Button>
@@ -408,7 +471,40 @@ export function N8nWorkflowsPanel() {
         {status?.managementError && (
           <p className="mt-3 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">{status.managementError}</p>
         )}
+        <p className={`mt-3 text-xs ${editorTarget.openReason || editorTarget.embedReason ? 'text-amber-300' : 'text-muted-foreground'}`}>
+          {editorTarget.openReason || editorTarget.embedReason || '远程使用时请同时转发 3017 和 5678 端口；内嵌失败时可随时改用新窗口。'}
+        </p>
       </section>
+
+      {editorExpanded && editorTarget.canEmbed && editorTarget.href && (
+        <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+          <div className="flex flex-col gap-2 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">n8n 原生编辑器</h2>
+              <p className="mt-0.5 text-2xs text-muted-foreground">工作流编辑、凭据和激活操作仍由 n8n 原生界面负责。</p>
+            </div>
+            <span className={`text-2xs ${editorFrameSlow ? 'text-amber-300' : editorFrameLoaded ? 'text-emerald-400' : 'text-muted-foreground'}`}>
+              {editorFrameSlow ? '加载时间较长，请尝试新窗口打开' : editorFrameLoaded ? '编辑器页面已响应' : '正在加载编辑器…'}
+            </span>
+          </div>
+          <iframe
+            key={editorTarget.href}
+            src={editorTarget.href}
+            title="n8n 原生工作流编辑器"
+            className="h-[760px] w-full bg-white"
+            allow="clipboard-read; clipboard-write"
+            referrerPolicy="no-referrer"
+            onLoad={() => {
+              if (editorFrameTimerRef.current !== null) {
+                window.clearTimeout(editorFrameTimerRef.current)
+                editorFrameTimerRef.current = null
+              }
+              setEditorFrameLoaded(true)
+              setEditorFrameSlow(false)
+            }}
+          />
+        </section>
+      )}
 
       {(error || notice) && (
         <div className={`rounded-lg border px-4 py-3 text-sm ${error ? 'border-red-500/25 bg-red-500/10 text-red-300' : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300'}`} role="status">

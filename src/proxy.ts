@@ -126,6 +126,7 @@ function nextResponseWithNonce(request: NextRequest): { response: NextResponse; 
     headers: request.headers,
     nonce,
     googleEnabled,
+    n8nBaseUrl: process.env.N8N_BASE_URL || 'http://127.0.0.1:5678',
   })
   const response = NextResponse.next({
     request: {
@@ -144,7 +145,11 @@ function addSecurityHeaders(response: NextResponse, _request: NextRequest, nonce
 
   const googleEnabled = !!(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID)
   const effectiveNonce = nonce || crypto.randomBytes(16).toString('base64')
-  response.headers.set('Content-Security-Policy', buildMissionControlCsp({ nonce: effectiveNonce, googleEnabled }))
+  response.headers.set('Content-Security-Policy', buildMissionControlCsp({
+    nonce: effectiveNonce,
+    googleEnabled,
+    n8nBaseUrl: process.env.N8N_BASE_URL || 'http://127.0.0.1:5678',
+  }))
 
   return response
 }
