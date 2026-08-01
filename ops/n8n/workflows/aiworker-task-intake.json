@@ -121,6 +121,43 @@
         60,
         0
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3017/api/n8n/execute",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf010",
+      "name": "Execute Local Model Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
     }
   ],
   "connections": {
@@ -140,6 +177,17 @@
         [
           {
             "node": "Return Accepted Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Accepted Result": {
+      "main": [
+        [
+          {
+            "node": "Execute Local Model Task",
             "type": "main",
             "index": 0
           }

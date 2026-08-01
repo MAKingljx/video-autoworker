@@ -1442,6 +1442,42 @@ const migrations: Migration[] = [
           ON n8n_workflow_bindings(tenant_id, workspace_id, enabled, updated_at);
       `)
     }
+  },
+  {
+    id: '050_n8n_task_runs',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_task_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL UNIQUE,
+          idempotency_key TEXT NOT NULL,
+          binding_id INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          source TEXT NOT NULL DEFAULT 'video-autoworker',
+          requested_by TEXT NOT NULL DEFAULT 'system',
+          routing TEXT NOT NULL DEFAULT '{}',
+          input TEXT NOT NULL DEFAULT '{}',
+          delivery TEXT NOT NULL DEFAULT '{"mode":"none"}',
+          output TEXT,
+          error TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 1,
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          tenant_id INTEGER NOT NULL DEFAULT 1,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          accepted_at INTEGER,
+          started_at INTEGER,
+          completed_at INTEGER,
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_n8n_task_runs_scope_idempotency
+          ON n8n_task_runs(tenant_id, workspace_id, idempotency_key);
+        CREATE INDEX IF NOT EXISTS idx_n8n_task_runs_scope_status
+          ON n8n_task_runs(tenant_id, workspace_id, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_n8n_task_runs_binding
+          ON n8n_task_runs(binding_id, updated_at DESC);
+      `)
+    }
   }
 ]
 

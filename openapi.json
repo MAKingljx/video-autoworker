@@ -11472,15 +11472,53 @@
           "type": "object", "required": ["bindingId", "input"],
           "properties": {
             "bindingId": { "type": "integer", "minimum": 1 }, "taskId": { "type": "string" },
-            "idempotencyKey": { "type": "string" }, "input": { "type": "object" }
+            "idempotencyKey": { "type": "string" },
+            "source": { "type": "string", "enum": ["video-autoworker", "openclaw"], "default": "video-autoworker" },
+            "input": { "type": "object" },
+            "delivery": { "$ref": "#/components/schemas/N8nTaskDelivery" }
           }
         } } } },
         "responses": {
-          "200": { "description": "Video AutoWorker submitted the webhook request; result.statusCode reports n8n's response (normally 202 for the bundled workflow)", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "result": { "type": "object" } } } } } },
+          "200": { "description": "The idempotency key already completed; returns the cached task output", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "duplicate": { "type": "boolean" }, "status": { "type": "string" }, "output": { "type": ["object", "null"] } } } } } },
+          "202": { "description": "The task was accepted by n8n, or an existing in-progress run was returned", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "duplicate": { "type": "boolean" }, "result": { "type": "object" } } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "description": "Workflow binding is disabled" }, "429": { "$ref": "#/components/responses/RateLimited" },
           "502": { "description": "n8n webhook failed or timed out" }
+        }
+      }
+    },
+    "/api/n8n/execute": {
+      "post": {
+        "tags": ["n8n"], "summary": "Execute a persisted n8n task through local OpenClaw", "operationId": "executeN8nTaskRun",
+        "description": "Internal loopback callback used by the bundled n8n workflow. It requires the external shared webhook secret and is idempotent per persisted task run.",
+        "security": [{ "n8nWebhookSecret": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["taskId", "idempotencyKey"],
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120 }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "Local OpenClaw execution succeeded or a completed result was returned", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "output": { "type": ["object", "null"] }, "cached": { "type": "boolean" } } } } } },
+          "202": { "description": "The same task is already running" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }, "409": { "description": "Idempotency mismatch, exhausted retries, or invalid run state" },
+          "502": { "description": "OpenClaw execution failed; response reports whether another retry remains" }
+        }
+      }
+    },
+    "/api/n8n/runs": {
+      "get": {
+        "tags": ["n8n"], "summary": "List persisted n8n task runs", "operationId": "listN8nTaskRuns",
+        "parameters": [
+          { "name": "taskId", "in": "query", "schema": { "type": "string", "minLength": 1, "maxLength": 120 }, "description": "When provided, returns only the matching workspace-scoped task run." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 } }
+        ],
+        "responses": {
+          "200": { "description": "Workspace-scoped task runs", "content": { "application/json": { "schema": { "type": "object", "properties": { "runs": { "type": "array", "items": { "$ref": "#/components/schemas/N8nTaskRun" } } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }
         }
       }
     }
@@ -11496,6 +11534,11 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-api-key"
+      },
+      "n8nWebhookSecret": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-AIWorker-Webhook-Secret"
       }
     },
     "schemas": {
@@ -11563,6 +11606,45 @@
             }
           }
         ]
+      },
+      "N8nTaskDelivery": {
+        "type": "object",
+        "required": ["mode"],
+        "properties": {
+          "mode": { "type": "string", "enum": ["none", "reply"], "default": "none" },
+          "sessionKey": { "type": "string", "maxLength": 240 },
+          "channel": { "type": "string", "maxLength": 80 },
+          "target": { "type": "string", "maxLength": 240 },
+          "accountId": { "type": "string", "maxLength": 240 }
+        },
+        "description": "reply requires either sessionKey or both channel and target; none keeps the result in the task-run store only."
+      },
+      "N8nTaskRun": {
+        "type": "object",
+        "required": ["id", "taskId", "idempotencyKey", "bindingId", "status", "source", "requestedBy", "routing", "input", "delivery", "attemptCount", "maxAttempts", "workspaceId", "tenantId", "createdAt", "updatedAt"],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "taskId": { "type": "string" },
+          "idempotencyKey": { "type": "string" },
+          "bindingId": { "type": "integer", "minimum": 1 },
+          "status": { "type": "string", "enum": ["queued", "accepted", "running", "succeeded", "failed"] },
+          "source": { "type": "string", "enum": ["video-autoworker", "openclaw"] },
+          "requestedBy": { "type": "string" },
+          "routing": { "type": "object" },
+          "input": { "type": "object" },
+          "delivery": { "$ref": "#/components/schemas/N8nTaskDelivery" },
+          "output": { "type": ["object", "null"] },
+          "error": { "type": ["string", "null"] },
+          "attemptCount": { "type": "integer", "minimum": 0 },
+          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "workspaceId": { "type": "integer" },
+          "tenantId": { "type": "integer" },
+          "createdAt": { "type": "integer" },
+          "acceptedAt": { "type": ["integer", "null"] },
+          "startedAt": { "type": ["integer", "null"] },
+          "completedAt": { "type": ["integer", "null"] },
+          "updatedAt": { "type": "integer" }
+        }
       },
       "Error": {
         "type": "object",

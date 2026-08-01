@@ -7,7 +7,20 @@ import {
   normalizeN8nBaseUrl,
   normalizeN8nWebhookPath,
   triggerN8nWebhook,
+  verifyN8nWebhookSecret,
 } from '@/lib/n8n'
+import {
+  claimN8nTaskRun,
+  completeN8nTaskRun,
+  createN8nTaskRun,
+  failN8nTaskRun,
+  getN8nTaskRunByIdempotencyKey,
+  getN8nTaskRunByTaskId,
+  getScopedN8nTaskRunByTaskId,
+  listN8nTaskRuns,
+  markN8nTaskAccepted,
+  n8nTaskDeliverySchema,
+} from '@/lib/n8n-task-runs'
 import {
   createN8nWorkflowBinding,
   deleteN8nWorkflowBinding,
@@ -24,6 +37,7 @@ const ENV_KEYS = [
   'N8N_API_KEY',
   'N8N_WEBHOOK_SECRET',
   'N8N_ALLOW_PRIVATE_REMOTE',
+  'N8N_DEFAULT_WEBHOOK_PATH',
 ] as const
 
 const originalEnv = Object.fromEntries(ENV_KEYS.map(key => [key, process.env[key]]))
@@ -68,6 +82,13 @@ describe('n8n endpoint validation', () => {
     expect(() => normalizeN8nWebhookPath('api/v1/workflows')).toThrow(/webhook/)
     expect(() => normalizeN8nWebhookPath('webhook/../admin')).toThrow(/无效/)
     expect(() => normalizeN8nWebhookPath('https://example.test/webhook/a')).toThrow(/无效/)
+  })
+
+  it('validates the execution callback secret without accepting an empty configuration', () => {
+    expect(verifyN8nWebhookSecret('anything')).toBe(false)
+    process.env.N8N_WEBHOOK_SECRET = 'shared-secret'
+    expect(verifyN8nWebhookSecret('shared-secret')).toBe(true)
+    expect(verifyN8nWebhookSecret('wrong-secret')).toBe(false)
   })
 })
 
@@ -208,6 +229,80 @@ describe('n8n workflow binding persistence', () => {
     expect(result.success).toBe(false)
     if (!result.success) {
       expect(result.error.issues[0]?.message).toMatch(/不能保存密码、密钥、令牌或凭据/)
+    }
+  })
+})
+
+describe('n8n task run persistence', () => {
+  it('enforces scoped idempotency and tracks accepted, running, and completed states', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      const scope = { workspaceId: 1, tenantId: 1 }
+      const input = {
+        taskId: 'task-1',
+        idempotencyKey: 'idem-1',
+        bindingId: 7,
+        source: 'video-autoworker',
+        requestedBy: 'tester',
+        routing: { model: 'qwen36-tools-local/default_model', timeoutSeconds: 120 },
+        taskInput: { prompt: '测试闭环' },
+        delivery: n8nTaskDeliverySchema.parse({ mode: 'none' }),
+        maxAttempts: 2,
+      }
+
+      const created = createN8nTaskRun(db, input, scope)
+      expect(created.created).toBe(true)
+      expect(created.run).toMatchObject({ taskId: 'task-1', status: 'queued', attemptCount: 0 })
+
+      const duplicate = createN8nTaskRun(db, { ...input, taskId: 'task-2' }, scope)
+      expect(duplicate.created).toBe(false)
+      expect(duplicate.run.taskId).toBe('task-1')
+
+      expect(markN8nTaskAccepted(db, 'task-1')).toMatchObject({ status: 'accepted' })
+      const claimed = claimN8nTaskRun(db, 'task-1')
+      expect(claimed).toMatchObject({ claimed: true, run: { status: 'running', attemptCount: 1 } })
+      expect(completeN8nTaskRun(db, 'task-1', { text: '完成' })).toMatchObject({
+        status: 'succeeded',
+        output: { text: '完成' },
+      })
+
+      expect(getN8nTaskRunByTaskId(db, 'task-1')).toMatchObject({ status: 'succeeded' })
+      expect(getN8nTaskRunByIdempotencyKey(db, 'idem-1', scope)?.taskId).toBe('task-1')
+      expect(getScopedN8nTaskRunByTaskId(db, 'task-1', scope)?.taskId).toBe('task-1')
+      expect(getScopedN8nTaskRunByTaskId(db, 'task-1', { workspaceId: 9, tenantId: 9 })).toBeNull()
+      expect(listN8nTaskRuns(db, scope, 10)).toHaveLength(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('allows a failed run to be claimed only until max attempts is reached', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      createN8nTaskRun(db, {
+        taskId: 'task-retry',
+        idempotencyKey: 'idem-retry',
+        bindingId: 1,
+        source: 'video-autoworker',
+        requestedBy: 'tester',
+        routing: {},
+        taskInput: { prompt: 'retry' },
+        delivery: { mode: 'none' },
+        maxAttempts: 1,
+      }, { workspaceId: 1, tenantId: 1 })
+
+      expect(claimN8nTaskRun(db, 'task-retry').claimed).toBe(true)
+      failN8nTaskRun(db, 'task-retry', 'failed once')
+      expect(claimN8nTaskRun(db, 'task-retry').claimed).toBe(false)
+      expect(getN8nTaskRunByTaskId(db, 'task-retry')).toMatchObject({
+        status: 'failed',
+        attemptCount: 1,
+        maxAttempts: 1,
+      })
+    } finally {
+      db.close()
     }
   })
 })

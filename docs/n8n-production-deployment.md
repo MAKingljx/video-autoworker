@@ -30,7 +30,9 @@ GitHub 仓库是唯一源码；安装脚本会在 `~/ai-worker/services/video-au
 | `scripts/n8n-status.sh` | 显示版本、路径、LaunchAgent、PID 和健康状态 |
 | `scripts/n8n-import-workflows.sh` | 在 n8n 停止时备份状态，以固定 ID 导入并默认发布工作流 |
 | `scripts/n8n-install-launch-agent.sh` | 渲染、备份旧配置、安装并启动当前用户的 LaunchAgent |
-| `ops/n8n/workflows/aiworker-task-intake.json` | `Webhook -> 字段整理 -> 202 JSON 响应` 的最小闭环 |
+| `ops/n8n/workflows/aiworker-task-intake.json` | `Webhook -> 字段整理 -> 202 响应 -> 本地 OpenClaw 执行` 的任务闭环 |
+| `scripts/install-platform-env.sh` | 在仓库外初始化并保留 Video AutoWorker 与 n8n 共享密钥 |
+| `scripts/install-aiworker-task-flow-skill.sh` | 备份后安装 OpenClaw 任务提交技能 |
 
 ## 首次安装
 
@@ -97,7 +99,8 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 {
   "taskId": "task-001",
   "idempotencyKey": "task-001",
-  "source": "video-autoworker",
+  "source": "openclaw",
+  "requestedBy": "local-desktop",
   "routing": {
     "taskType": "summarize",
     "agentRole": "editor",
@@ -105,13 +108,16 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
   },
   "input": {
     "text": "测试任务"
+  },
+  "delivery": {
+    "mode": "none"
   }
 }
 ```
 
-成功响应 HTTP `202`，包含 `accepted`、`taskId`、`idempotencyKey`、模型路由、原始 `input` 和 `receivedAt`，便于控制台和执行日志核对同一任务。
+工作流先响应 HTTP `202`，再把同一 `taskId` 和幂等键回调到回环地址 `/api/n8n/execute`。该接口从 SQLite 读取已持久化的路由、输入和回投目标，调用指定 OpenClaw profile/agent/model，并把成功输出或失败原因写回 `n8n_task_runs`。相同幂等键不会重复创建任务；已经成功的任务直接返回缓存结果，失败任务只会在绑定配置的最大尝试次数内重试。
 
-当前样例只使用 Webhook、Edit Fields 和 Respond to Webhook 三个内置 JavaScript 节点，不依赖 Python Task Runner。原生 macOS 启动时若提示缺少内部 Python runner，对这条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner，不能把该提示当作已具备 Python 执行能力。
+当前样例只使用 Webhook、Edit Fields、Respond to Webhook 和 HTTP Request 四个内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
 
 ## 安装 macOS LaunchAgent
 
@@ -136,16 +142,44 @@ bash "$runtime/scripts/n8n-stop.sh"
 
 ## Video AutoWorker 配置
 
+先在真实生产仓库根目录初始化外部平台环境，再重启 3017 服务。脚本为现有文件补齐空的共享密钥，但保留已有非空值；密钥不会打印到终端：
+
+```bash
+bash scripts/install-platform-env.sh
+chmod 600 "$HOME/.config/video-autoworker/platform.env"
+```
+
 以下变量属于 Video AutoWorker 服务环境，不写入代码仓库：
 
 ```bash
 N8N_BASE_URL="http://127.0.0.1:5678"
 N8N_DEFAULT_WEBHOOK_PATH="webhook/aiworker-task"
-N8N_API_KEY="<在 n8n UI 中创建的 API key>"
-N8N_WEBHOOK_SECRET="<可选的共享秘密>"
+N8N_API_KEY="<完成所有者初始化后在 n8n UI 创建的 API key>"
+N8N_WEBHOOK_SECRET="<安装脚本生成的随机共享密钥>"
 ```
 
-`N8N_API_KEY` 用于控制台读取 n8n 工作流与执行记录。样例工作流部署在仅回环监听的可信边界内，未绑定凭据；如果以后将 Webhook 暴露到其他主机，必须先给 Webhook 配置 Header Auth 或在入口反向代理验证 `X-AIWorker-Webhook-Secret`，不能原样公网开放。样例会携带并回显幂等键作为关联证据，但不会持久化去重；任何产生外部副作用的正式工作流都必须在执行副作用前增加持久化幂等检查。
+`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调 `/api/n8n/execute` 的必需认证信息，不能留空。任务及幂等状态由 Video AutoWorker 的 SQLite 持久化；数据库、外部环境文件和 n8n 状态必须作为同一生产备份链管理。如果以后将 Webhook 暴露到其他主机，还必须在入口反向代理或 n8n Webhook 层增加独立认证，不能仅依赖回环部署假设。
+
+## OpenClaw 任务入口
+
+把版本化技能安装到 `qwen-current` 的第二原始 Agent 工作区：
+
+```bash
+bash scripts/install-aiworker-task-flow-skill.sh
+openclaw --profile qwen-current skills info aiworker-task-flow --agent second-original
+```
+
+技能脚本只允许访问本机回环地址。OpenClaw 可以提交任务并查询持久化状态：
+
+```bash
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
+  --prompt '只输出：闭环成功'
+
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
+  --status '<上一步返回的 taskId>'
+```
+
+默认 `delivery.mode=none`，结果仅保存在任务运行记录中。要把结果回投到已有手机会话，必须显式传入 `--delivery reply --session-key '<已验证会话键>'`，或同时给出 `--channel` 与 `--target`；不得把测试消息投递到未经确认的会话。
 
 `/automation` 页面提供“打开 n8n 编辑器”和按需“嵌入 n8n 编辑器”两个入口。n8n 继续只监听回环地址，不直接暴露公网；从远端电脑访问时，应在同一条 SSH 连接中同时转发控制台和 n8n 端口：
 
@@ -190,7 +224,10 @@ curl --fail-with-body \
 1. `/api/n8n/status` 显示健康且可读取工作流。
 2. `/api/n8n/trigger` 返回同一个 `taskId` 和 n8n 的 `202` 响应。
 3. n8n 执行记录中存在对应执行且没有凭据或输入敏感信息泄漏。
-4. `git status --short` 不出现数据库、日志、PID、环境文件或备份。
+4. `/api/n8n/runs` 中同一任务依次进入 `accepted/running/succeeded`，输出包含实际 provider/model 证据。
+5. 使用同一幂等键再次提交时不产生第二次模型调用，并返回已有任务或缓存结果。
+6. 经确认的手机会话收到一次真实回投，且输出与任务运行记录一致。
+7. `git status --short` 不出现数据库、日志、PID、环境文件或备份。
 
 ## 升级与回退
 

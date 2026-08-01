@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   logAuditEvent: vi.fn(),
   getN8nWorkflowBinding: vi.fn(),
   updateN8nWorkflowRunStatus: vi.fn(),
+  createN8nTaskRun: vi.fn(),
+  markN8nTaskAccepted: vi.fn(),
+  failN8nTaskRun: vi.fn(),
   mutationLimiter: vi.fn(),
 }))
 
@@ -25,6 +28,16 @@ vi.mock('@/lib/n8n-workflows', () => ({
   getN8nWorkflowBinding: mocks.getN8nWorkflowBinding,
   updateN8nWorkflowRunStatus: mocks.updateN8nWorkflowRunStatus,
 }))
+
+vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
+  return {
+    ...actual,
+    createN8nTaskRun: mocks.createN8nTaskRun,
+    markN8nTaskAccepted: mocks.markN8nTaskAccepted,
+    failN8nTaskRun: mocks.failN8nTaskRun,
+  }
+})
 
 vi.mock('@/lib/rate-limit', () => ({
   mutationLimiter: mocks.mutationLimiter,
@@ -68,6 +81,10 @@ describe('n8n trigger route', () => {
       data: { accepted: true },
       latencyMs: 12,
     })
+    mocks.createN8nTaskRun.mockReturnValue({
+      created: true,
+      run: { taskId: 'task-7', status: 'queued', output: null },
+    })
   })
 
   it('sends a stable routing envelope to n8n without the reserved binding property', async () => {
@@ -78,7 +95,7 @@ describe('n8n trigger route', () => {
       input: { prompt: '分析视频' },
     }))
 
-    expect(response.status).toBe(200)
+    expect(response.status).toBe(202)
     expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
       'webhook/aiworker-task',
       {
@@ -97,6 +114,7 @@ describe('n8n trigger route', () => {
           config: { queue: 'heavy-model' },
         },
         input: { prompt: '分析视频' },
+        delivery: { mode: 'none' },
       },
       { timeoutMs: 120_000, idempotencyKey: 'idem-7' },
     )
@@ -104,7 +122,55 @@ describe('n8n trigger route', () => {
     expect(mocks.updateN8nWorkflowRunStatus).toHaveBeenCalledWith(
       {}, 7, 'accepted', { workspaceId: 2, tenantId: 3 },
     )
+    expect(mocks.createN8nTaskRun).toHaveBeenCalledWith({}, expect.objectContaining({
+      taskId: 'task-7',
+      idempotencyKey: 'idem-7',
+      delivery: { mode: 'none' },
+      maxAttempts: 3,
+    }), { workspaceId: 2, tenantId: 3 })
+    expect(mocks.markN8nTaskAccepted).toHaveBeenCalledWith({}, 'task-7')
     expect(await response.json()).toMatchObject({ taskId: 'task-7', result: { ok: true } })
+  })
+
+  it('preserves the OpenClaw source marker for agent-submitted tasks', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-openclaw',
+      source: 'openclaw',
+      input: { prompt: '执行任务' },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(mocks.createN8nTaskRun).toHaveBeenCalledWith({}, expect.objectContaining({
+      source: 'openclaw',
+    }), { workspaceId: 2, tenantId: 3 })
+    expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
+      'webhook/aiworker-task',
+      expect.objectContaining({ source: 'openclaw' }),
+      expect.any(Object),
+    )
+  })
+
+  it('returns the existing task without triggering n8n for a duplicate idempotency key', async () => {
+    mocks.createN8nTaskRun.mockReturnValue({
+      created: false,
+      run: { taskId: 'original-task', status: 'running', output: null },
+    })
+
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'duplicate-task',
+      idempotencyKey: 'same-key',
+      input: { prompt: 'test' },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(await response.json()).toMatchObject({
+      taskId: 'original-task',
+      duplicate: true,
+      status: 'running',
+    })
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
   })
 
   it('refuses disabled bindings before calling n8n', async () => {
@@ -126,5 +192,6 @@ describe('n8n trigger route', () => {
     expect(mocks.updateN8nWorkflowRunStatus).toHaveBeenCalledWith(
       {}, 7, 'failed: n8n unavailable', { workspaceId: 2, tenantId: 3 },
     )
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledWith({}, 'task-failed', 'n8n unavailable')
   })
 })

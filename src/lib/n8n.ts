@@ -1,5 +1,6 @@
 import { getLocalDesktopUserFromRequest, requireRole } from '@/lib/auth'
 import { normalizeN8nBaseUrl } from '@/lib/n8n-base-url'
+import { timingSafeEqual } from 'node:crypto'
 
 const DEFAULT_TIMEOUT_MS = 8_000
 
@@ -66,6 +67,16 @@ export function getN8nRuntimeConfig(): N8nRuntimeConfig {
       process.env.N8N_DEFAULT_WEBHOOK_PATH || 'webhook/aiworker-task',
     ),
   }
+}
+
+export function verifyN8nWebhookSecret(provided: string | null): boolean {
+  const expected = String(process.env.N8N_WEBHOOK_SECRET || '').trim()
+  const actual = String(provided || '').trim()
+  if (!expected || !actual) return false
+  const expectedBuffer = Buffer.from(expected)
+  const actualBuffer = Buffer.from(actual)
+  return expectedBuffer.length === actualBuffer.length
+    && timingSafeEqual(expectedBuffer, actualBuffer)
 }
 
 async function parseResponseBody(response: Response): Promise<unknown> {

@@ -4,6 +4,32 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$APP_DIR"
 
+PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
+
+load_platform_environment() {
+  if [[ ! -e "$PLATFORM_ENV_FILE" ]]; then
+    return
+  fi
+  if [[ -L "$PLATFORM_ENV_FILE" || ! -f "$PLATFORM_ENV_FILE" || ! -O "$PLATFORM_ENV_FILE" ]]; then
+    printf '拒绝加载不安全的平台环境文件：%s\n' "$PLATFORM_ENV_FILE" >&2
+    exit 1
+  fi
+  local mode group_digit other_digit
+  mode="$(stat -f '%Lp' "$PLATFORM_ENV_FILE" 2>/dev/null || stat -c '%a' "$PLATFORM_ENV_FILE")"
+  group_digit="${mode: -2:1}"
+  other_digit="${mode: -1}"
+  if (( (10#$group_digit & 2) != 0 || (10#$other_digit & 2) != 0 )); then
+    printf '平台环境文件不能允许组或其他用户写入：%s（mode=%s）\n' "$PLATFORM_ENV_FILE" "$mode" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$PLATFORM_ENV_FILE"
+  set +a
+}
+
+load_platform_environment
+
 PORT="${PORT:-3017}"
 URL="http://127.0.0.1:${PORT}/profiles"
 AUTH_URL="http://127.0.0.1:${PORT}/api/auth/me"
