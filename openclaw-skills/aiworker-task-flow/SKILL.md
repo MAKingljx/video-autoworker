@@ -1,12 +1,12 @@
 ---
 name: aiworker-task-flow
-description: Submit a durable background task through the local Video AutoWorker and n8n pipeline, optionally returning the final local-model result to the current OpenClaw conversation.
+description: Submit a durable background task through the local Video AutoWorker and n8n pipeline, choose registered local or cloud model routes per node, and optionally return the final result to the current OpenClaw conversation.
 ---
 
 # AI-worker Task Flow
 
 Use this skill when a user asks to hand a task to the AI-worker workflow,
-background queue, n8n task chain, or local Qwen execution pipeline.
+background queue, n8n task chain, or routed local/cloud model pipeline.
 
 ## Boundary
 
@@ -18,6 +18,11 @@ background queue, n8n task chain, or local Qwen execution pipeline.
 - Use `delivery=none` for dry runs or when the user did not ask for a channel
   reply. Use `delivery=reply` only when the current session key is known, or when
   both the current channel and target are known.
+- The n8n workflow may bind different registered routes to `planner`,
+  `executor`, and `reviewer`; do not assume every node uses the same model.
+- Use `--planner-route`, `--executor-route`, or `--reviewer-route` only for a
+  user-requested per-task override. The route IDs must already exist in the
+  platform registry and never contain credentials.
 - The workflow returns a task ID immediately. Do not claim the model task has
   finished until its run status is `succeeded`.
 
@@ -31,6 +36,15 @@ node skills/aiworker-task-flow/scripts/submit-task.mjs \
   --prompt-file <task-file> \
   --idempotency-key <stable-key> \
   --delivery none
+```
+
+Optional per-task model choices can be added without changing the saved n8n
+workflow:
+
+```bash
+  --planner-route <route-id> \
+  --executor-route <route-id> \
+  --reviewer-route <route-id>
 ```
 
 To return the completed result to an existing OpenClaw session:

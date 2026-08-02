@@ -9,6 +9,11 @@ import {
   n8nTaskDeliverySchema,
   n8nTaskIdentitySchema,
 } from '@/lib/n8n-task-runs'
+import {
+  loadN8nModelRegistry,
+  n8nTaskRoutingOverrideSchema,
+  validateTaskRouteIds,
+} from '@/lib/n8n-model-routing'
 import { getN8nWorkflowBinding, updateN8nWorkflowRunStatus } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
 
@@ -50,6 +55,20 @@ export async function POST(request: NextRequest) {
   if (!['video-autoworker', 'openclaw'].includes(source)) {
     return NextResponse.json({ error: 'source 只能是 video-autoworker 或 openclaw' }, { status: 400 })
   }
+  const taskRoutingResult = n8nTaskRoutingOverrideSchema.safeParse(body?.routing || { nodes: {} })
+  if (!taskRoutingResult.success) {
+    return NextResponse.json({ error: '模型路由覆盖无效', issues: taskRoutingResult.error.issues }, { status: 400 })
+  }
+  if (body?.routing !== undefined) {
+    const registry = loadN8nModelRegistry()
+    if (registry.errors.length) {
+      return NextResponse.json({ error: `模型注册表无效：${registry.errors.join('；')}` }, { status: 503 })
+    }
+    const missingRoutes = validateTaskRouteIds(taskRoutingResult.data, registry)
+    if (missingRoutes.length) {
+      return NextResponse.json({ error: `模型路由未登记：${missingRoutes.join('、')}` }, { status: 400 })
+    }
+  }
 
   const taskId = taskIdResult.data
   const idempotencyKey = idempotencyResult.data
@@ -62,6 +81,7 @@ export async function POST(request: NextRequest) {
     timeoutSeconds: binding.timeoutSeconds,
     retryCount: binding.retryCount,
     config: binding.config,
+    ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
   }
   const created = createN8nTaskRun(db, {
     taskId,

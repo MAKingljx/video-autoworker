@@ -90,6 +90,14 @@ async function main() {
 
   const taskId = option('--task-id') || randomUUID()
   const idempotencyKey = option('--idempotency-key') || taskId
+  const routingNodes = Object.fromEntries([
+    ['planner', option('--planner-route')],
+    ['executor', option('--executor-route')],
+    ['reviewer', option('--reviewer-route')],
+  ].filter(([, routeId]) => Boolean(routeId)).map(([nodeKey, routeId]) => [
+    nodeKey,
+    { routeId, fallbackRouteIds: [] },
+  ]))
   const response = await request('/api/n8n/trigger', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -99,6 +107,7 @@ async function main() {
       idempotencyKey,
       source: 'openclaw',
       input: { prompt: prompt.trim() },
+      ...(Object.keys(routingNodes).length ? { routing: { nodes: routingNodes } } : {}),
       delivery: {
         mode: deliveryMode,
         ...(sessionKey ? { sessionKey } : {}),
@@ -112,6 +121,7 @@ async function main() {
     taskId: response.taskId,
     status: response.status || response.result?.data?.status || 'accepted',
     duplicate: Boolean(response.duplicate),
+    ...(Object.keys(routingNodes).length ? { routes: routingNodes } : {}),
   })}\n`)
 }
 

@@ -69,6 +69,19 @@ function request(body: unknown) {
 describe('n8n trigger route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      routes: [{
+        id: 'cloud-planner',
+        label: '云端规划模型',
+        location: 'cloud',
+        transport: 'openclaw',
+        model: 'openai/gpt-5.5',
+        profile: 'gpt-main',
+        agentId: 'main',
+        enabled: true,
+      }],
+    })
     mocks.requireN8nRole.mockReturnValue({
       user: { id: 1, username: 'local-desktop', workspace_id: 2, tenant_id: 3 },
     })
@@ -147,6 +160,36 @@ describe('n8n trigger route', () => {
     expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
       'webhook/aiworker-task',
       expect.objectContaining({ source: 'openclaw' }),
+      expect.any(Object),
+    )
+  })
+
+  it('accepts an OpenClaw per-task route override from the registered model list', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-routed',
+      idempotencyKey: 'idem-routed',
+      input: { prompt: '规划任务' },
+      routing: {
+        nodes: { planner: { routeId: 'cloud-planner', fallbackRouteIds: [] } },
+      },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(mocks.createN8nTaskRun).toHaveBeenCalledWith({}, expect.objectContaining({
+      routing: expect.objectContaining({
+        taskRouting: {
+          nodes: { planner: { routeId: 'cloud-planner', fallbackRouteIds: [] } },
+        },
+      }),
+    }), { workspaceId: 2, tenantId: 3 })
+    expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
+      'webhook/aiworker-task',
+      expect.objectContaining({
+        routing: expect.objectContaining({
+          taskRouting: expect.objectContaining({ nodes: expect.any(Object) }),
+        }),
+      }),
       expect.any(Object),
     )
   })

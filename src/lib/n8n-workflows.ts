@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
 import { normalizeN8nWebhookPath } from '@/lib/n8n'
+import { validateN8nModelRoutingConfig } from '@/lib/n8n-model-routing'
 
 export interface N8nWorkflowBinding {
   id: number
@@ -92,6 +93,13 @@ export const n8nWorkflowBindingInputSchema = z.object({
       code: 'custom',
       path: ['config', ...sensitivePath.split('.')],
       message: '高级配置不能保存密码、密钥、令牌或凭据；请只保存外部密钥引用',
+    })
+  }
+  for (const issue of validateN8nModelRoutingConfig(value.config)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['config', 'modelRouting', ...issue.path],
+      message: issue.message,
     })
   }
 })

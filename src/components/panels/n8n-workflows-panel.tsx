@@ -63,6 +63,17 @@ interface ExecutionSummary {
   finished?: boolean
 }
 
+interface ModelRoute {
+  id: string
+  label: string
+  location: 'local' | 'cloud'
+  transport: 'openclaw' | 'openai-compatible'
+  model: string
+  enabled: boolean
+  available: boolean
+  unavailableReason: string | null
+}
+
 interface BindingForm {
   name: string
   description: string
@@ -75,6 +86,10 @@ interface BindingForm {
   retryCount: string
   enabled: boolean
   configText: string
+  plannerRouteId: string
+  executorRouteId: string
+  reviewerRouteId: string
+  allowTaskOverride: boolean
 }
 
 interface ApiErrorBody {
@@ -104,6 +119,10 @@ const EMPTY_FORM: BindingForm = {
   retryCount: '1',
   enabled: true,
   configText: '{}',
+  plannerRouteId: '',
+  executorRouteId: '',
+  reviewerRouteId: '',
+  allowTaskOverride: true,
 }
 
 async function readJson<T>(response: Response): Promise<T> {
@@ -136,6 +155,18 @@ function statusTone(status: string | null | undefined): string {
   return 'border-border bg-secondary/60 text-muted-foreground'
 }
 
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function routeIdFromConfig(config: Record<string, unknown>, nodeKey: string): string {
+  const modelRouting = objectValue(config.modelRouting)
+  const nodes = objectValue(modelRouting.nodes)
+  return String(objectValue(nodes[nodeKey]).routeId || '')
+}
+
 function formFromBinding(binding: WorkflowBinding): BindingForm {
   return {
     name: binding.name,
@@ -149,6 +180,10 @@ function formFromBinding(binding: WorkflowBinding): BindingForm {
     retryCount: String(binding.retryCount),
     enabled: binding.enabled,
     configText: JSON.stringify(binding.config, null, 2),
+    plannerRouteId: routeIdFromConfig(binding.config, 'planner'),
+    executorRouteId: routeIdFromConfig(binding.config, 'executor'),
+    reviewerRouteId: routeIdFromConfig(binding.config, 'reviewer'),
+    allowTaskOverride: objectValue(binding.config.modelRouting).allowTaskOverride !== false,
   }
 }
 
@@ -156,6 +191,8 @@ export function N8nWorkflowsPanel() {
   const [status, setStatus] = useState<N8nStatusResponse | null>(null)
   const [bindings, setBindings] = useState<WorkflowBinding[]>([])
   const [executions, setExecutions] = useState<ExecutionSummary[]>([])
+  const [modelRoutes, setModelRoutes] = useState<ModelRoute[]>([])
+  const [modelRegistryError, setModelRegistryError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [form, setForm] = useState<BindingForm>(EMPTY_FORM)
   const [loading, setLoading] = useState(true)
@@ -217,9 +254,10 @@ export function N8nWorkflowsPanel() {
     setError(null)
 
     try {
-      const [statusResponse, bindingsResponse] = await Promise.all([
+      const [statusResponse, bindingsResponse, modelsResponse] = await Promise.all([
         fetch('/api/n8n/status', { cache: 'no-store' }),
         fetch('/api/n8n/workflows', { cache: 'no-store' }),
+        fetch('/api/n8n/models', { cache: 'no-store' }),
       ])
       if (!statusResponse.ok) {
         const body = await readJson<ApiErrorBody>(statusResponse).catch((): ApiErrorBody => ({}))
@@ -237,6 +275,14 @@ export function N8nWorkflowsPanel() {
       const nextBindings = Array.isArray(bindingsBody.bindings) ? bindingsBody.bindings : []
       setStatus(nextStatus)
       setBindings(nextBindings)
+      if (modelsResponse.ok) {
+        const modelBody = await readJson<{ routes?: ModelRoute[]; errors?: string[] }>(modelsResponse)
+        setModelRoutes(Array.isArray(modelBody.routes) ? modelBody.routes : [])
+        setModelRegistryError(Array.isArray(modelBody.errors) && modelBody.errors.length ? modelBody.errors.join('；') : null)
+      } else {
+        setModelRoutes([])
+        setModelRegistryError('模型路由暂时不可用')
+      }
 
       if (nextStatus.config.apiKeyConfigured) {
         const executionsResponse = await fetch('/api/n8n/executions?limit=20', { cache: 'no-store' })
@@ -302,6 +348,25 @@ export function N8nWorkflowsPanel() {
     } catch (configError) {
       setError(messageFrom(configError, '高级配置不是有效 JSON'))
       return
+    }
+
+    const existingModelRouting = objectValue(config.modelRouting)
+    const existingNodeRoutes = objectValue(existingModelRouting.nodes)
+    const nodeRoutes = Object.fromEntries([
+      ['planner', form.plannerRouteId],
+      ['executor', form.executorRouteId],
+      ['reviewer', form.reviewerRouteId],
+    ].filter((entry): entry is [string, string] => Boolean(entry[1])).map(([nodeKey, routeId]) => [
+      nodeKey,
+      { ...objectValue(existingNodeRoutes[nodeKey]), routeId },
+    ]))
+    if (Object.keys(nodeRoutes).length) {
+      config.modelRouting = {
+        allowTaskOverride: form.allowTaskOverride,
+        nodes: nodeRoutes,
+      }
+    } else {
+      delete config.modelRouting
     }
 
     const timeoutSeconds = Number(form.timeoutSeconds)
@@ -626,12 +691,45 @@ export function N8nWorkflowsPanel() {
                   <option value="coordinator" /><option value="executor" /><option value="reviewer" /><option value="researcher" /><option value="video-specialist" />
                 </datalist>
               </Field>
-              <Field label="模型路由">
+              <Field label="兼容默认模型" hint="没有单独选择节点模型时使用">
                 <input className={`${inputClass} font-mono`} value={form.model} maxLength={180} list="n8n-models" placeholder="qwen36-tools-local/default_model" onChange={event => updateForm('model', event.target.value)} />
                 <datalist id="n8n-models">
-                  <option value="qwen36-tools-local/default_model" /><option value="qwen-vl-local/default_model" /><option value="whisper-local/default_model" />
+                  {modelRoutes.map(route => <option key={route.id} value={route.model} />)}
                 </datalist>
               </Field>
+            </div>
+
+            <div className="rounded-lg border border-border bg-background/35 p-4">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-medium text-foreground">节点模型</h3>
+                  <p className="mt-1 text-xs text-muted-foreground">每个节点可独立选择本地模型或云端模型。</p>
+                </div>
+                <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={form.allowTaskOverride} onChange={event => updateForm('allowTaskOverride', event.target.checked)} />
+                  允许 OpenClaw 临时指定
+                </label>
+              </div>
+              {modelRegistryError && <p className="mb-3 text-xs text-red-400">{modelRegistryError}</p>}
+              {!modelRegistryError && modelRoutes.length === 0 && <p className="mb-3 text-xs text-muted-foreground">尚未安装模型路由，当前沿用兼容默认模型。</p>}
+              <div className="grid gap-4 md:grid-cols-3">
+                {([
+                  ['plannerRouteId', '规划节点'],
+                  ['executorRouteId', '执行节点'],
+                  ['reviewerRouteId', '审核节点'],
+                ] as const).map(([field, label]) => (
+                  <Field key={field} label={label}>
+                    <select className={inputClass} value={form[field]} onChange={event => updateForm(field, event.target.value)}>
+                      <option value="">兼容默认模型</option>
+                      {modelRoutes.map(route => (
+                        <option key={route.id} value={route.id} disabled={!route.available}>
+                          {route.label} · {route.location === 'local' ? '本地' : '云端'}{route.available ? '' : '（不可用）'}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                ))}
+              </div>
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">

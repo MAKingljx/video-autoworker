@@ -11465,6 +11465,22 @@
         }
       }
     },
+    "/api/n8n/models": {
+      "get": {
+        "tags": ["n8n"], "summary": "List registered local and cloud model routes", "operationId": "listN8nModelRoutes",
+        "description": "Returns only public route metadata and external credential references; credential values are never returned.",
+        "responses": {
+          "200": { "description": "Registered model routes and current availability", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["routes", "source", "errors"], "properties": {
+              "routes": { "type": "array", "items": { "$ref": "#/components/schemas/N8nModelRoute" } },
+              "source": { "type": "string" },
+              "errors": { "type": "array", "items": { "type": "string" } }
+            }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
     "/api/n8n/trigger": {
       "post": {
         "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",
@@ -11475,6 +11491,7 @@
             "idempotencyKey": { "type": "string" },
             "source": { "type": "string", "enum": ["video-autoworker", "openclaw"], "default": "video-autoworker" },
             "input": { "type": "object" },
+            "routing": { "$ref": "#/components/schemas/N8nTaskRoutingOverride" },
             "delivery": { "$ref": "#/components/schemas/N8nTaskDelivery" }
           }
         } } } },
@@ -11485,6 +11502,30 @@
           "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "description": "Workflow binding is disabled" }, "429": { "$ref": "#/components/responses/RateLimited" },
           "502": { "description": "n8n webhook failed or timed out" }
+        }
+      }
+    },
+    "/api/n8n/node-execute": {
+      "post": {
+        "tags": ["n8n"], "summary": "Execute one persisted n8n model node", "operationId": "executeN8nModelNode",
+        "description": "Internal loopback callback used by the bundled multi-model workflow. The selected route is resolved from the external registry and persisted task routing.",
+        "security": [{ "n8nWebhookSecret": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["taskId", "idempotencyKey", "nodeKey", "input"], "additionalProperties": false,
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "nodeKey": { "type": "string", "minLength": 1, "maxLength": 60, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "input": { "type": "object" },
+            "finalizeParent": { "type": "boolean", "default": false }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "The node succeeded or a persisted node/parent result was returned" },
+          "202": { "description": "The same node is already running" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }, "409": { "description": "Invalid parent state, idempotency mismatch, or unavailable route" },
+          "502": { "description": "Model execution failed and will not be replayed automatically" }
         }
       }
     },
@@ -11573,6 +11614,40 @@
           "hash": { "type": "string" }
         }
       },
+      "N8nModelRoute": {
+        "type": "object",
+        "required": ["id", "label", "description", "location", "transport", "model", "enabled", "available", "unavailableReason", "capabilities"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "label": { "type": "string" },
+          "description": { "type": "string" },
+          "location": { "type": "string", "enum": ["local", "cloud"] },
+          "transport": { "type": "string", "enum": ["openclaw", "openai-compatible"] },
+          "model": { "type": "string" },
+          "enabled": { "type": "boolean" },
+          "available": { "type": "boolean" },
+          "unavailableReason": { "type": ["string", "null"] },
+          "capabilities": { "type": "array", "items": { "type": "string" } },
+          "profile": { "type": "string" },
+          "agentId": { "type": "string" },
+          "baseUrl": { "type": "string", "format": "uri" },
+          "credentialReference": { "type": "string", "description": "External environment variable name only; never the credential value." }
+        }
+      },
+      "N8nTaskRoutingOverride": {
+        "type": "object", "additionalProperties": false,
+        "properties": {
+          "nodes": {
+            "type": "object", "additionalProperties": {
+              "type": "object", "required": ["routeId"], "additionalProperties": false,
+              "properties": {
+                "routeId": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9._:-]+$" },
+                "fallbackRouteIds": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 80 } }
+              }
+            }
+          }
+        }
+      },
       "N8nWorkflowBindingInput": {
         "type": "object",
         "required": ["name", "webhookPath"],
@@ -11628,7 +11703,7 @@
           "idempotencyKey": { "type": "string" },
           "bindingId": { "type": "integer", "minimum": 1 },
           "status": { "type": "string", "enum": ["queued", "accepted", "running", "succeeded", "failed"] },
-          "source": { "type": "string", "enum": ["video-autoworker", "openclaw"] },
+          "source": { "type": "string", "enum": ["video-autoworker", "openclaw", "n8n-node"] },
           "requestedBy": { "type": "string" },
           "routing": { "type": "object" },
           "input": { "type": "object" },

@@ -1,6 +1,6 @@
 {
   "id": "aiworker-task-intake-v1",
-  "name": "AI-worker Task Intake v1",
+  "name": "AI-worker Model Pipeline v2",
   "active": false,
   "nodes": [
     {
@@ -51,7 +51,7 @@
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf007",
               "name": "workflow",
-              "value": "AI-worker Task Intake v1",
+              "value": "AI-worker Model Pipeline v2",
               "type": "string"
             },
             {
@@ -125,7 +125,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://127.0.0.1:3017/api/n8n/execute",
+        "url": "http://127.0.0.1:3017/api/n8n/node-execute",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -142,17 +142,91 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'planner', input: { task: $('AI-worker Webhook').item.json.body.input, requirement: '拆解目标、约束、执行步骤和验收标准。' }, finalizeParent: false }) }}",
         "options": {
           "timeout": 600000
         }
       },
       "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf010",
-      "name": "Execute Local Model Task",
+      "name": "Planner Model Node",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
         320,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3017/api/n8n/node-execute",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'executor', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $json.output, requirement: '按照规划完成任务，产出可审核的完整结果。' }, finalizeParent: false }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf011",
+      "name": "Executor Model Node",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3017/api/n8n/node-execute",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'reviewer', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $('Planner Model Node').item.json.output, execution: $json.output, requirement: '检查准确性、完整性和安全边界；修正问题后只输出最终交付结果。' }, finalizeParent: true }) }}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf012",
+      "name": "Reviewer Model Node",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
         0
       ],
       "retryOnFail": true,
@@ -187,7 +261,29 @@
       "main": [
         [
           {
-            "node": "Execute Local Model Task",
+            "node": "Planner Model Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Planner Model Node": {
+      "main": [
+        [
+          {
+            "node": "Executor Model Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Executor Model Node": {
+      "main": [
+        [
+          {
+            "node": "Reviewer Model Node",
             "type": "main",
             "index": 0
           }
@@ -198,7 +294,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00f",
+  "versionId": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf013",
   "meta": {
     "templateCredsSetupCompleted": true
   },

@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-本方案在同一台 Mac Studio 上把 n8n 作为 Video AutoWorker 的确定性工作流调度层，固定使用 `n8n 2.31.6` 和 `Node.js >= 22.22`。n8n 仅监听 `127.0.0.1:5678`，Video AutoWorker 通过本机回环地址调用，默认不把编辑器或 Webhook 暴露到公网。
+本方案在同一台 Mac Studio 上把 n8n 作为 Video AutoWorker 的确定性工作流调度层，固定使用 `n8n 2.31.6` 和 `Node.js >= 22.22`。OpenClaw 负责提交任务，n8n 依次编排 `planner`、`executor`、`reviewer` 三个模型节点；每个节点都从外部注册表选择本地模型或云端模型 API，不在工作流 JSON 中固定供应商或密钥。n8n 仅监听 `127.0.0.1:5678`，Video AutoWorker 通过本机回环地址调用，默认不把编辑器或 Webhook 暴露到公网。
 
 进入 GitHub 的内容：
 
@@ -30,7 +30,9 @@ GitHub 仓库是唯一源码；安装脚本会在 `~/ai-worker/services/video-au
 | `scripts/n8n-status.sh` | 显示版本、路径、LaunchAgent、PID 和健康状态 |
 | `scripts/n8n-import-workflows.sh` | 在 n8n 停止时备份状态，以固定 ID 导入并默认发布工作流 |
 | `scripts/n8n-install-launch-agent.sh` | 渲染、备份旧配置、安装并启动当前用户的 LaunchAgent |
-| `ops/n8n/workflows/aiworker-task-intake.json` | `Webhook -> 字段整理 -> 202 响应 -> 本地 OpenClaw 执行` 的任务闭环 |
+| `ops/n8n/workflows/aiworker-task-intake.json` | `Webhook -> 202 响应 -> 规划 -> 执行 -> 审核/回投` 的三模型节点闭环 |
+| `ops/model-routing/model-routes.example.json` | 无密钥的本地/云端模型注册表示例 |
+| `scripts/install-model-routes.sh` | 在仓库外初始化并保留模型注册表 |
 | `scripts/install-platform-env.sh` | 在仓库外初始化并保留 Video AutoWorker 与 n8n 共享密钥 |
 | `scripts/install-aiworker-task-flow-skill.sh` | 备份后安装 OpenClaw 任务提交技能 |
 
@@ -104,7 +106,14 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
   "routing": {
     "taskType": "summarize",
     "agentRole": "editor",
-    "model": "qwen-local"
+    "model": "qwen-local",
+    "taskRouting": {
+      "nodes": {
+        "planner": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36"] },
+        "executor": { "routeId": "local-qwen36", "fallbackRouteIds": [] },
+        "reviewer": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36"] }
+      }
+    }
   },
   "input": {
     "text": "测试任务"
@@ -115,9 +124,11 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 }
 ```
 
-工作流先响应 HTTP `202`，再把同一 `taskId` 和幂等键回调到回环地址 `/api/n8n/execute`。该接口从 SQLite 读取已持久化的路由、输入和回投目标，调用指定 OpenClaw profile/agent/model，并把成功输出或失败原因写回 `n8n_task_runs`。相同幂等键不会重复创建任务；已经成功的任务直接返回缓存结果，失败任务只会在绑定配置的最大尝试次数内重试。
+工作流先响应 HTTP `202`，再让三个 HTTP Request 节点依次回调回环地址 `/api/n8n/node-execute`。接口从 SQLite 读取父任务、节点配置和回投目标，按“本次任务覆盖 → 任务链节点配置 → 旧版兼容模型”的顺序解析路由。规划结果传给执行节点，规划和执行结果再交给审核节点；仅最终审核节点完成父任务并按需回投手机会话。
 
-当前样例只使用 Webhook、Edit Fields、Respond to Webhook 和 HTTP Request 四个内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
+每个节点会建立独立、可幂等查询的子任务记录，记录实际 `routeId`、本地/云端位置、传输方式和模型名。模型执行一旦产生错误不会自动重放，以免工具或外部 API 产生重复副作用；n8n 重复同一个节点 HTTP 请求只会读取已经持久化的结果。旧版 `/api/n8n/execute` 继续保留，供历史单模型工作流回退使用。
+
+当前样例只使用 Webhook、Edit Fields、Respond to Webhook 和 HTTP Request 内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
 
 ## 安装 macOS LaunchAgent
 
@@ -146,7 +157,9 @@ bash "$runtime/scripts/n8n-stop.sh"
 
 ```bash
 bash scripts/install-platform-env.sh
+bash scripts/install-model-routes.sh
 chmod 600 "$HOME/.config/video-autoworker/platform.env"
+chmod 600 "$HOME/.config/video-autoworker/model-routes.json"
 ```
 
 以下变量属于 Video AutoWorker 服务环境，不写入代码仓库：
@@ -156,9 +169,12 @@ N8N_BASE_URL="http://127.0.0.1:5678"
 N8N_DEFAULT_WEBHOOK_PATH="webhook/aiworker-task"
 N8N_API_KEY="<完成所有者初始化后在 n8n UI 创建的 API key>"
 N8N_WEBHOOK_SECRET="<安装脚本生成的随机共享密钥>"
+AIWORKER_MODEL_ROUTES_FILE="$HOME/.config/video-autoworker/model-routes.json"
 ```
 
-`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调 `/api/n8n/execute` 的必需认证信息，不能留空。任务及幂等状态由 Video AutoWorker 的 SQLite 持久化；数据库、外部环境文件和 n8n 状态必须作为同一生产备份链管理。如果以后将 Webhook 暴露到其他主机，还必须在入口反向代理或 n8n Webhook 层增加独立认证，不能仅依赖回环部署假设。
+`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存 `apiKeyEnv` 变量名。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
+
+修改注册表后重启 Video AutoWorker 即可刷新可选模型，不需要重新导入 n8n 工作流。`/api/n8n/models` 只向已登录用户返回脱敏路由、可用状态和缺失的凭据引用，不返回任何凭据值。任务及幂等状态由 Video AutoWorker 的 SQLite 持久化；数据库、外部环境文件、模型注册表和 n8n 状态必须作为同一生产备份链管理。
 
 ## OpenClaw 任务入口
 
@@ -174,6 +190,12 @@ openclaw --profile qwen-current skills info aiworker-task-flow --agent second-or
 ```bash
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
   --prompt '只输出：闭环成功'
+
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
+  --prompt '规划、执行并审核这个任务' \
+  --planner-route cloud-gpt-main \
+  --executor-route local-qwen36 \
+  --reviewer-route cloud-gpt-main
 
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
   --status '<上一步返回的 taskId>'
@@ -196,7 +218,9 @@ ssh -N \
 
 - 工作流 ID：从 n8n UI 或管理 API 读取。
 - Webhook 路径：`webhook/aiworker-task`。
-- 任务类型、Agent 角色和模型：按实际任务路由填写。
+- 规划、执行、审核模型：分别从注册表选择本地或云端路由；页面保存的是路由 ID，不保存凭据。
+- 兼容默认模型：仅在某个节点尚未选择注册路由时使用。
+- 允许 OpenClaw 单次改选：开启后，技能脚本可以只覆盖本次任务的节点模型，不改保存的工作流。
 - 超时和重试：n8n 负责确定性流程重试；不要与后续 LangGraph 的节点级重试重复叠加。
 
 ## 验收
@@ -224,10 +248,11 @@ curl --fail-with-body \
 1. `/api/n8n/status` 显示健康且可读取工作流。
 2. `/api/n8n/trigger` 返回同一个 `taskId` 和 n8n 的 `202` 响应。
 3. n8n 执行记录中存在对应执行且没有凭据或输入敏感信息泄漏。
-4. `/api/n8n/runs` 中同一任务依次进入 `accepted/running/succeeded`，输出包含实际 provider/model 证据。
-5. 使用同一幂等键再次提交时不产生第二次模型调用，并返回已有任务或缓存结果。
-6. 经确认的手机会话收到一次真实回投，且输出与任务运行记录一致。
-7. `git status --short` 不出现数据库、日志、PID、环境文件或备份。
+4. `/api/n8n/runs` 中父任务最终进入 `succeeded`，并存在 `planner`、`executor`、`reviewer` 三个子任务；各自输出包含实际 route/provider/model 证据。
+5. 本地与云端路由至少各做一次不回投验证；不可用路由会使用配置的后备路由或明确失败，不会静默改用未知模型。
+6. 使用同一幂等键再次提交时不产生第二次模型调用，并返回已有任务或缓存结果。
+7. 经确认的手机会话只收到最终审核节点的一次真实回投，且输出与父任务运行记录一致。
+8. `git status --short` 不出现数据库、日志、PID、环境文件、模型注册表或备份。
 
 ## 升级与回退
 
