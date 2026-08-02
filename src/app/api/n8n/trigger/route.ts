@@ -17,6 +17,31 @@ import {
 import { getN8nWorkflowBinding, updateN8nWorkflowRunStatus } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
 
+export function resolveN8nNodeCallbackUrl(): string {
+  const configured = String(process.env.AIWORKER_N8N_NODE_CALLBACK_URL || '').trim()
+  const port = Number(process.env.PORT || 3017)
+  if (!configured && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
+    throw new Error('Video AutoWorker 服务端口无效')
+  }
+  const candidate = configured || `http://127.0.0.1:${port}/api/n8n/node-execute`
+  let url: URL
+  try {
+    url = new URL(candidate)
+  } catch {
+    throw new Error('n8n 模型节点回调地址无效')
+  }
+  const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
+  if (
+    url.protocol !== 'http:'
+    || !loopback
+    || Boolean(url.username || url.password || url.search || url.hash)
+    || url.pathname !== '/api/n8n/node-execute'
+  ) {
+    throw new Error('n8n 模型节点回调地址必须是本机回环 HTTP 接口 /api/n8n/node-execute')
+  }
+  return url.toString()
+}
+
 export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -72,6 +97,14 @@ export async function POST(request: NextRequest) {
 
   const taskId = taskIdResult.data
   const idempotencyKey = idempotencyResult.data
+  let nodeCallbackUrl: string
+  try {
+    nodeCallbackUrl = resolveN8nNodeCallbackUrl()
+  } catch (error) {
+    return NextResponse.json({
+      error: error instanceof Error ? error.message : 'n8n 模型节点回调地址无效',
+    }, { status: 503 })
+  }
   const routing = {
     id: binding.id,
     name: binding.name,
@@ -80,6 +113,7 @@ export async function POST(request: NextRequest) {
     model: binding.model,
     timeoutSeconds: binding.timeoutSeconds,
     retryCount: binding.retryCount,
+    nodeCallbackUrl,
     config: binding.config,
     ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
   }

@@ -69,6 +69,7 @@ function request(body: unknown) {
 describe('n8n trigger route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    delete process.env.AIWORKER_N8N_NODE_CALLBACK_URL
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       version: 1,
       routes: [{
@@ -124,6 +125,7 @@ describe('n8n trigger route', () => {
           model: 'qwen36-tools-local/default_model',
           timeoutSeconds: 120,
           retryCount: 2,
+          nodeCallbackUrl: 'http://127.0.0.1:3017/api/n8n/node-execute',
           config: { queue: 'heavy-model' },
         },
         input: { prompt: '分析视频' },
@@ -192,6 +194,20 @@ describe('n8n trigger route', () => {
       }),
       expect.any(Object),
     )
+  })
+
+  it('rejects a model-node callback URL outside the loopback interface', async () => {
+    process.env.AIWORKER_N8N_NODE_CALLBACK_URL = 'https://example.test/api/n8n/node-execute'
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-unsafe-callback',
+      input: { prompt: 'test' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/本机回环/) })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
   })
 
   it('returns the existing task without triggering n8n for a duplicate idempotency key', async () => {

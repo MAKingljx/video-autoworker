@@ -22,12 +22,16 @@ describe('bundled n8n model pipeline', () => {
     expect(workflow.name).toBe('AI-worker Model Pipeline v2')
     const modelNodes = workflow.nodes.filter(node =>
       node.type === 'n8n-nodes-base.httpRequest'
-      && JSON.stringify(node.parameters).includes('/api/n8n/node-execute'))
+      && JSON.stringify(node.parameters).includes('body.routing.nodeCallbackUrl'))
     expect(modelNodes.map(node => node.name)).toEqual([
       'Planner Model Node',
       'Executor Model Node',
       'Reviewer Model Node',
     ])
+    for (const node of modelNodes) {
+      expect(JSON.stringify(node.parameters)).toContain('body.routing.nodeCallbackUrl')
+      expect(JSON.stringify(node.parameters)).not.toContain('127.0.0.1:3017')
+    }
     expect(JSON.stringify(modelNodes[2].parameters)).toContain('finalizeParent: true')
   })
 
