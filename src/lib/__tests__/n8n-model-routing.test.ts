@@ -10,6 +10,15 @@ const registry = {
   version: 1,
   routes: [
     {
+      id: 'local-qwen-direct',
+      label: '本地千问直连',
+      location: 'local',
+      transport: 'openai-compatible',
+      model: 'default_model',
+      baseUrl: 'http://127.0.0.1:18091/v1',
+      enabled: true,
+    },
+    {
       id: 'local-qwen',
       label: '本地千问',
       location: 'local',
@@ -43,14 +52,20 @@ describe('n8n model routing', () => {
     const loaded = loadN8nModelRegistry()
 
     expect(loaded.errors).toEqual([])
-    expect(loaded.routes.map(route => route.id)).toEqual(['local-qwen', 'cloud-qwen'])
-    expect(publicN8nModelRoute(loaded.routes[1])).toMatchObject({
+    expect(loaded.routes.map(route => route.id)).toEqual(['local-qwen-direct', 'local-qwen', 'cloud-qwen'])
+    expect(publicN8nModelRoute(loaded.routes[2])).toMatchObject({
       available: false,
       credentialReference: 'TEST_DASHSCOPE_API_KEY',
     })
     process.env.TEST_DASHSCOPE_API_KEY = 'not-returned-to-client'
-    expect(publicN8nModelRoute(loaded.routes[1])).toMatchObject({ available: true })
-    expect(JSON.stringify(publicN8nModelRoute(loaded.routes[1]))).not.toContain('not-returned-to-client')
+    expect(publicN8nModelRoute(loaded.routes[2])).toMatchObject({ available: true })
+    expect(JSON.stringify(publicN8nModelRoute(loaded.routes[2]))).not.toContain('not-returned-to-client')
+    expect(publicN8nModelRoute(loaded.routes[0])).toMatchObject({
+      id: 'local-qwen-direct',
+      location: 'local',
+      transport: 'openai-compatible',
+      available: true,
+    })
   })
 
   it('uses a task route override before the saved node route', () => {

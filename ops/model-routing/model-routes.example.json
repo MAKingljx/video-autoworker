@@ -2,9 +2,23 @@
   "version": 1,
   "routes": [
     {
+      "id": "local-qwen36-direct",
+      "label": "本地千问 3.6 直连",
+      "description": "由 n8n 模型节点直连本机 Qwen API，适合规划、执行和审核等无需 OpenClaw 工具的高速任务。",
+      "location": "local",
+      "transport": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:18091/v1",
+      "model": "default_model",
+      "timeoutSeconds": 180,
+      "temperature": 0,
+      "maxTokens": 32768,
+      "capabilities": ["text", "reasoning", "structured-output"],
+      "enabled": true
+    },
+    {
       "id": "local-qwen36",
-      "label": "本地千问 3.6",
-      "description": "通过 qwen-current OpenClaw 配置档调用本机千问，适合私密资料和工具执行。",
+      "label": "本地千问 3.6 Agent",
+      "description": "通过 qwen-current OpenClaw 配置档调用本机千问，仅用于需要 OpenClaw 工具或最终会话回投的节点。",
       "location": "local",
       "transport": "openclaw",
       "model": "qwen36-tools-local/default_model",

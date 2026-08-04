@@ -109,9 +109,9 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
     "model": "qwen-local",
     "taskRouting": {
       "nodes": {
-        "planner": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36"] },
-        "executor": { "routeId": "local-qwen36", "fallbackRouteIds": [] },
-        "reviewer": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36"] }
+        "planner": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36-direct"] },
+        "executor": { "routeId": "local-qwen36-direct", "fallbackRouteIds": [] },
+        "reviewer": { "routeId": "cloud-gpt-main", "fallbackRouteIds": ["local-qwen36-direct"] }
       }
     }
   },
@@ -172,7 +172,7 @@ N8N_WEBHOOK_SECRET="<安装脚本生成的随机共享密钥>"
 AIWORKER_MODEL_ROUTES_FILE="$HOME/.config/video-autoworker/model-routes.json"
 ```
 
-`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存 `apiKeyEnv` 变量名。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
+`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存本地回环地址或云端 `apiKeyEnv` 变量名。默认优先让无需工具的规划、执行和审核节点使用 `local-qwen36-direct`，避免每个节点重复加载完整 OpenClaw Agent、工具和会话上下文；只有确实需要 OpenClaw 工具或最终会话回投时才选 `local-qwen36`。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
 
 修改注册表后重启 Video AutoWorker 即可刷新可选模型，不需要重新导入 n8n 工作流。`/api/n8n/models` 只向已登录用户返回脱敏路由、可用状态和缺失的凭据引用，不返回任何凭据值。任务及幂等状态由 Video AutoWorker 的 SQLite 持久化；数据库、外部环境文件、模型注册表和 n8n 状态必须作为同一生产备份链管理。
 
@@ -194,7 +194,7 @@ node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/script
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
   --prompt '规划、执行并审核这个任务' \
   --planner-route cloud-gpt-main \
-  --executor-route local-qwen36 \
+  --executor-route local-qwen36-direct \
   --reviewer-route cloud-gpt-main
 
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
@@ -221,6 +221,7 @@ ssh -N \
 - 规划、执行、审核模型：分别从注册表选择本地或云端路由；页面保存的是路由 ID，不保存凭据。
 - 兼容默认模型：仅在某个节点尚未选择注册路由时使用。
 - 允许 OpenClaw 单次改选：开启后，技能脚本可以只覆盖本次任务的节点模型，不改保存的工作流。
+- 纯本地三节点：规划、执行和审核都选择 `local-qwen36-direct`；只有需要工具或手机回投时再把对应节点切到 `local-qwen36` Agent 路由。
 - 超时和重试：n8n 负责确定性流程重试；不要与后续 LangGraph 的节点级重试重复叠加。
 
 ## 验收
