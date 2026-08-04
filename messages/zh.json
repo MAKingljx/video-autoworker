@@ -718,7 +718,7 @@
     "tabCommand": "命令",
     "tabWorkflows": "工作流",
     "tabPipelines": "管道",
-    "tabFleet": "集群",
+    "tabFleet": "模型集群",
     "selectAgent": "选择代理...",
     "commandPlaceholder": "向代理发送命令或消息...",
     "send": "发送",

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
+import { reorderPipelineSteps } from '@/lib/pipeline-editor'
 
 interface WorkflowTemplate {
   id: number
@@ -67,6 +68,8 @@ export function PipelineTab() {
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [spawning, setSpawning] = useState<number | null>(null)
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null)
+  const [draggedStepIndex, setDraggedStepIndex] = useState<number | null>(null)
+  const [dragOverStepIndex, setDragOverStepIndex] = useState<number | null>(null)
 
   const fetchData = useCallback(async () => {
     const [tRes, pRes, rRes] = await Promise.all([
@@ -107,13 +110,12 @@ export function PipelineTab() {
   }
 
   const moveStep = (index: number, dir: -1 | 1) => {
-    setFormSteps(s => {
-      const arr = [...s]
-      const target = index + dir
-      if (target < 0 || target >= arr.length) return arr
-      ;[arr[index], arr[target]] = [arr[target], arr[index]]
-      return arr
-    })
+    setFormSteps(steps => reorderPipelineSteps(steps, index, index + dir))
+  }
+
+  const finishStepDrag = () => {
+    setDraggedStepIndex(null)
+    setDragOverStepIndex(null)
   }
 
   const savePipeline = async () => {
@@ -236,54 +238,116 @@ export function PipelineTab() {
 
       {/* Create/Edit form */}
       {formMode !== 'hidden' && (
-        <div className="p-3 rounded-lg bg-secondary/50 border border-border space-y-2">
-          <span className="text-xs font-medium">{formMode === 'edit' ? t('editPipeline') : t('newPipeline')}</span>
-          <input
-            value={formName}
-            onChange={e => setFormName(e.target.value)}
-            placeholder={t('pipelineNamePlaceholder')}
-            className="w-full h-8 px-2 rounded-md bg-secondary border border-border text-sm text-foreground"
-          />
-          <input
-            value={formDesc}
-            onChange={e => setFormDesc(e.target.value)}
-            placeholder={t('descriptionPlaceholder')}
-            className="w-full h-8 px-2 rounded-md bg-secondary border border-border text-sm text-foreground"
-          />
+        <div className="space-y-4 rounded-xl border border-border bg-card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="text-sm font-medium text-foreground">{formMode === 'edit' ? t('editPipeline') : t('newPipeline')}</span>
+              <p className="mt-0.5 text-2xs text-muted-foreground">从模板添加节点，拖动卡片调整任务执行顺序。</p>
+            </div>
+            <span className="rounded-full bg-secondary px-2 py-1 text-2xs text-muted-foreground">{formSteps.length} 个节点</span>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <input
+              value={formName}
+              onChange={e => setFormName(e.target.value)}
+              placeholder={t('pipelineNamePlaceholder')}
+              className="h-9 w-full rounded-md border border-border bg-secondary px-3 text-sm text-foreground"
+            />
+            <input
+              value={formDesc}
+              onChange={e => setFormDesc(e.target.value)}
+              placeholder={t('descriptionPlaceholder')}
+              className="h-9 w-full rounded-md border border-border bg-secondary px-3 text-sm text-foreground"
+            />
+          </div>
 
           {/* Step builder */}
-          <div className="space-y-1">
-            <span className="text-2xs text-muted-foreground">Steps ({formSteps.length})</span>
-            {formSteps.map((step, i) => (
-              <div key={i} className="flex items-center gap-1.5 p-1.5 rounded bg-secondary/80 text-xs">
-                <span className="w-5 h-5 rounded-full bg-primary/20 text-primary text-2xs font-bold flex items-center justify-center shrink-0">
-                  {i + 1}
-                </span>
-                <span className="flex-1 truncate text-foreground">{step.template_name || `Template #${step.template_id}`}</span>
-                <select
-                  value={step.on_failure}
-                  onChange={e => setFormSteps(s => s.map((st, idx) => idx === i ? { ...st, on_failure: e.target.value as 'stop' | 'continue' } : st))}
-                  className="h-5 px-1 text-2xs rounded bg-secondary border border-border text-foreground"
-                >
-                  <option value="stop">{t('stopOnFail')}</option>
-                  <option value="continue">{t('continueOnFail')}</option>
-                </select>
-                <Button onClick={() => moveStep(i, -1)} variant="ghost" size="icon-xs" className="w-5 h-5" title="Move up">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M8 3v10M4 7l4-4 4 4" /></svg>
-                </Button>
-                <Button onClick={() => moveStep(i, 1)} variant="ghost" size="icon-xs" className="w-5 h-5" title="Move down">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="w-3 h-3"><path d="M8 13V3M4 9l4 4 4-4" /></svg>
-                </Button>
-                <Button onClick={() => removeStep(i)} variant="ghost" size="icon-xs" className="w-5 h-5 text-red-400 hover:text-red-300">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-3 h-3"><path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" /></svg>
-                </Button>
+          <div className="space-y-3 rounded-xl border border-border/70 bg-background/45 p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-foreground">执行画布</span>
+              <span className="text-2xs text-muted-foreground">拖动节点可排序；箭头按钮用于键盘操作</span>
+            </div>
+            {formSteps.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-xs text-muted-foreground">
+                从下方选择工作流模板，添加第一个节点。
               </div>
-            ))}
+            ) : (
+              <div className="flex items-stretch gap-2 overflow-x-auto pb-2">
+                {formSteps.map((step, i) => (
+                  <div key={`${step.template_id}-${i}`} className="flex items-center gap-2 shrink-0">
+                    <div
+                      draggable
+                      onDragStart={event => {
+                        setDraggedStepIndex(i)
+                        setDragOverStepIndex(i)
+                        event.dataTransfer.effectAllowed = 'move'
+                      }}
+                      onDragOver={event => {
+                        event.preventDefault()
+                        event.dataTransfer.dropEffect = 'move'
+                        setDragOverStepIndex(i)
+                      }}
+                      onDrop={event => {
+                        event.preventDefault()
+                        if (draggedStepIndex !== null) {
+                          setFormSteps(steps => reorderPipelineSteps(steps, draggedStepIndex, i))
+                        }
+                        finishStepDrag()
+                      }}
+                      onDragEnd={finishStepDrag}
+                      className={`w-60 cursor-grab rounded-xl border bg-card p-3 shadow-sm transition-all active:cursor-grabbing ${
+                        dragOverStepIndex === i && draggedStepIndex !== i
+                          ? 'border-primary ring-2 ring-primary/20'
+                          : 'border-border'
+                      } ${draggedStepIndex === i ? 'opacity-60' : ''}`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/15 font-mono text-xs font-bold text-primary">{i + 1}</span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-xs font-medium text-foreground">{step.template_name || `Template #${step.template_id}`}</p>
+                          <p className="mt-0.5 text-[10px] text-muted-foreground">模板 #{step.template_id}</p>
+                        </div>
+                        <span className="select-none text-sm tracking-[-2px] text-muted-foreground" title="拖动节点">⋮⋮</span>
+                      </div>
+                      <label className="mt-3 block text-2xs text-muted-foreground">
+                        失败策略
+                        <select
+                          value={step.on_failure}
+                          onChange={event => setFormSteps(steps => steps.map((item, index) => index === i
+                            ? { ...item, on_failure: event.target.value as 'stop' | 'continue' }
+                            : item))}
+                          className="mt-1 h-7 w-full rounded border border-border bg-secondary px-2 text-xs text-foreground"
+                        >
+                          <option value="stop">{t('stopOnFail')}</option>
+                          <option value="continue">{t('continueOnFail')}</option>
+                        </select>
+                      </label>
+                      <div className="mt-3 flex items-center justify-between border-t border-border/60 pt-2">
+                        <div className="flex gap-1">
+                          <Button onClick={() => moveStep(i, -1)} disabled={i === 0} variant="ghost" size="icon-xs" title="向前移动">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3"><path d="M13 8H3M7 4L3 8l4 4" /></svg>
+                          </Button>
+                          <Button onClick={() => moveStep(i, 1)} disabled={i === formSteps.length - 1} variant="ghost" size="icon-xs" title="向后移动">
+                            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3"><path d="M3 8h10M9 4l4 4-4 4" /></svg>
+                          </Button>
+                        </div>
+                        <Button onClick={() => removeStep(i)} variant="ghost" size="xs" className="text-red-400 hover:text-red-300">删除</Button>
+                      </div>
+                    </div>
+                    {i < formSteps.length - 1 && (
+                      <svg viewBox="0 0 24 14" fill="none" className="h-4 w-7 shrink-0 text-primary/60">
+                        <path d="M1 7h19M16 2l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
 
             {/* Add step dropdown */}
             <select
               onChange={e => { if (e.target.value) { addStep(parseInt(e.target.value)); e.target.value = '' } }}
-              className="w-full h-7 px-2 rounded-md bg-secondary border border-border text-xs text-muted-foreground"
+              className="h-9 w-full rounded-md border border-border bg-secondary px-3 text-xs text-muted-foreground"
               defaultValue=""
             >
               <option value="" disabled>{t('addStepPlaceholder')}</option>
@@ -293,7 +357,7 @@ export function PipelineTab() {
             </select>
           </div>
 
-          <div className="flex justify-end">
+          <div className="flex justify-end border-t border-border pt-3">
             <Button
               onClick={savePipeline}
               disabled={!formName || formSteps.length < 2}

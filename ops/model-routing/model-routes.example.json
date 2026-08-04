@@ -3,6 +3,8 @@
   "routes": [
     {
       "id": "local-qwen36-direct",
+      "resourceId": "qwen36-local",
+      "resourceLabel": "本地千问 3.6",
       "label": "本地千问 3.6 直连",
       "description": "由 n8n 模型节点直连本机 Qwen API，适合规划、执行和审核等无需 OpenClaw 工具的高速任务。",
       "location": "local",
@@ -17,6 +19,8 @@
     },
     {
       "id": "local-qwen36",
+      "resourceId": "qwen36-local",
+      "resourceLabel": "本地千问 3.6",
       "label": "本地千问 3.6 Agent",
       "description": "通过 qwen-current OpenClaw 配置档调用本机千问，仅用于需要 OpenClaw 工具或最终会话回投的节点。",
       "location": "local",
@@ -31,6 +35,8 @@
     },
     {
       "id": "cloud-gpt-main",
+      "resourceId": "gpt-main-cloud",
+      "resourceLabel": "云端 GPT 主模型",
       "label": "云端 GPT 主模型",
       "description": "通过 gpt-main OpenClaw 配置档调用云端模型，适合规划和审核。",
       "location": "cloud",
@@ -45,6 +51,8 @@
     },
     {
       "id": "cloud-qwen37-plus",
+      "resourceId": "qwen37-plus-cloud",
+      "resourceLabel": "通义千问 3.7 Plus",
       "label": "通义千问 3.7 Plus API",
       "description": "百炼 OpenAI 兼容 API 示例；启用前把 DASHSCOPE_API_KEY 放入外部环境。",
       "location": "cloud",
@@ -59,6 +67,8 @@
     },
     {
       "id": "cloud-qwen37-max",
+      "resourceId": "qwen37-max-cloud",
+      "resourceLabel": "通义千问 3.7 Max",
       "label": "通义千问 3.7 Max API",
       "description": "百炼旗舰模型示例；启用前把 DASHSCOPE_API_KEY 放入外部环境。",
       "location": "cloud",

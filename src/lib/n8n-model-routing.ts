@@ -9,6 +9,8 @@ const envReferenceSchema = z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/)
 
 const commonRouteSchema = z.object({
   id: routeIdSchema,
+  resourceId: routeIdSchema.optional(),
+  resourceLabel: z.string().trim().min(1).max(120).optional(),
   label: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).default(''),
   location: z.enum(['local', 'cloud']),
@@ -78,6 +80,8 @@ export interface N8nModelRegistry {
 
 export interface PublicN8nModelRoute {
   id: string
+  resourceId: string
+  resourceLabel: string
   label: string
   description: string
   location: 'local' | 'cloud'
@@ -163,6 +167,8 @@ export function publicN8nModelRoute(route: N8nModelRoute): PublicN8nModelRoute {
   const available = route.enabled && credentialReady
   return {
     id: route.id,
+    resourceId: route.resourceId || route.id,
+    resourceLabel: route.resourceLabel || route.label,
     label: route.label,
     description: route.description,
     location: route.location,

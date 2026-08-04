@@ -1,9 +1,12 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import type { ReactNode } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { PipelineTab } from './pipeline-tab'
+import { AgentSquadPanelPhase3 } from './agent-squad-panel-phase3'
+import { ModelClusterPanel } from './model-cluster-panel'
 
 interface Agent {
   id: number
@@ -47,7 +50,7 @@ const emptyForm: TemplateFormData = {
   timeout_seconds: 300, agent_role: '', tags: []
 }
 
-export function OrchestrationBar() {
+export function OrchestrationBar({ agentDocs }: { agentDocs?: ReactNode }) {
   const t = useTranslations('orchestration')
   const [agents, setAgents] = useState<Agent[]>([])
   const [templates, setTemplates] = useState<WorkflowTemplate[]>([])
@@ -296,15 +299,10 @@ export function OrchestrationBar() {
     setTemplateForm(f => ({ ...f, tags: f.tags.filter(t => t !== tag) }))
   }
 
-  // Fleet metrics
-  const onlineCount = agents.filter(a => a.status === 'idle' || a.status === 'busy').length
-  const busyCount = agents.filter(a => a.status === 'busy').length
-  const errorCount = agents.filter(a => a.status === 'error').length
-
   return (
-    <div className="border-b border-border bg-card/50">
+    <div className="min-h-full bg-background">
       {/* Tab bar */}
-      <div className="flex items-center gap-1 px-4 pt-2">
+      <div className="sticky top-0 z-20 flex items-center gap-1 border-b border-border bg-card/95 px-4 pt-2 backdrop-blur">
         {(['command', 'templates', 'pipelines', 'fleet'] as const).map(tab => (
           <Button
             key={tab}
@@ -318,11 +316,6 @@ export function OrchestrationBar() {
             }`}
           >
             {tab === 'command' ? t('tabCommand') : tab === 'templates' ? t('tabWorkflows') : tab === 'pipelines' ? t('tabPipelines') : t('tabFleet')}
-            {tab === 'fleet' && (
-              <span className={`ml-1.5 text-2xs ${errorCount > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                {onlineCount}/{agents.length}
-              </span>
-            )}
           </Button>
         ))}
 
@@ -336,8 +329,13 @@ export function OrchestrationBar() {
 
       {/* Command Tab */}
       {activeTab === 'command' && (
-        <div className="p-4 pt-3 space-y-2">
-          <div className="flex items-center gap-2">
+        <div className="min-h-[calc(100vh-10rem)]">
+          <section className="border-b border-border bg-card/35 p-4">
+            <div className="mb-3">
+              <h2 className="text-base font-semibold text-foreground">智能体命令中心</h2>
+              <p className="mt-1 text-xs text-muted-foreground">向已绑定会话的智能体发送消息、创建任务，或触发后台调度。</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
             <select
               value={commandMode}
               onChange={(e) => setCommandMode(e.target.value as any)}
@@ -386,9 +384,9 @@ export function OrchestrationBar() {
               <option value="aegis_review">aegis_review</option>
               <option value="stale_task_requeue">stale_task_requeue</option>
             </select>
-          </div>
+            </div>
 
-          <div className="flex gap-2">
+            <div className="mt-2 flex gap-2">
             <input
               value={message}
               onChange={(e) => setMessage(e.target.value)}
@@ -402,15 +400,22 @@ export function OrchestrationBar() {
             >
               {sending ? '...' : t('send')}
             </Button>
-          </div>
+            </div>
+          </section>
+          {agentDocs}
+          <AgentSquadPanelPhase3 />
         </div>
       )}
 
       {/* Workflows Tab */}
       {activeTab === 'templates' && (
-        <div className="p-4 pt-3">
+        <div className="min-h-[calc(100vh-10rem)] p-5">
+          <div className="mb-5 border-b border-border pb-4">
+            <h2 className="text-base font-semibold text-foreground">工作流模板</h2>
+            <p className="mt-1 text-xs text-muted-foreground">保存可复用的任务提示、模型别名和执行限制；多步骤组合请前往“管道”。</p>
+          </div>
           {templates.length === 0 && formMode === 'hidden' ? (
-            <div className="text-center py-4">
+            <div className="rounded-xl border border-dashed border-border bg-card/30 py-16 text-center">
               <p className="text-sm text-muted-foreground mb-2">{t('noTemplates')}</p>
               <Button
                 onClick={() => { setFormMode('create'); setEditingId(null); setTemplateForm({ ...emptyForm }) }}
@@ -551,7 +556,7 @@ export function OrchestrationBar() {
               )}
 
               {/* Template list */}
-              <div className="space-y-1.5 max-h-64 overflow-y-auto">
+              <div className="space-y-2">
                 {filteredTemplates.map(tmpl => (
                   <div key={tmpl.id} className="rounded-md bg-secondary/30 hover:bg-secondary/50 transition-smooth group">
                     <div className="flex items-center gap-2 p-2">
@@ -640,54 +645,19 @@ export function OrchestrationBar() {
 
       {/* Pipelines Tab */}
       {activeTab === 'pipelines' && (
-        <div className="p-4 pt-3">
+        <div className="min-h-[calc(100vh-10rem)] p-5">
+          <div className="mb-5 border-b border-border pb-4">
+            <h2 className="text-base font-semibold text-foreground">可视化管道</h2>
+            <p className="mt-1 text-xs text-muted-foreground">将工作流模板组合成多步骤流程，可拖动节点调整执行顺序并查看运行状态。</p>
+          </div>
           <PipelineTab />
         </div>
       )}
 
       {/* Fleet Tab */}
       {activeTab === 'fleet' && (
-        <div className="p-4 pt-3">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <FleetCard label={t('totalAgents')} value={agents.length} />
-            <FleetCard label={t('online')} value={onlineCount} color="green" />
-            <FleetCard label={t('busy')} value={busyCount} color="amber" />
-            <FleetCard label={t('errors')} value={errorCount} color={errorCount > 0 ? 'red' : undefined} />
-          </div>
-          {agents.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {agents.map(a => (
-                <div
-                  key={a.id}
-                  className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-secondary/50 text-xs"
-                  title={`${a.name} - ${a.role} - ${a.status}`}
-                >
-                  <span className={`w-1.5 h-1.5 rounded-full ${
-                    a.status === 'busy' ? 'bg-amber-500' :
-                    a.status === 'idle' ? 'bg-green-500' :
-                    a.status === 'error' ? 'bg-red-500' : 'bg-gray-500'
-                  }`} />
-                  <span className="text-foreground font-medium">{a.name}</span>
-                  <span className="text-muted-foreground">{a.role}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <ModelClusterPanel />
       )}
-    </div>
-  )
-}
-
-function FleetCard({ label, value, color }: { label: string; value: number; color?: string }) {
-  const colorClass = color === 'green' ? 'text-green-400' :
-    color === 'amber' ? 'text-amber-400' :
-    color === 'red' ? 'text-red-400' : 'text-foreground'
-
-  return (
-    <div className="p-2.5 rounded-lg bg-secondary/50 border border-border">
-      <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={`text-lg font-semibold font-mono-tight ${colorClass}`}>{value}</div>
     </div>
   )
 }

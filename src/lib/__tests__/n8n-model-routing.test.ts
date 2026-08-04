@@ -11,6 +11,8 @@ const registry = {
   routes: [
     {
       id: 'local-qwen-direct',
+      resourceId: 'qwen-local',
+      resourceLabel: '本地千问',
       label: '本地千问直连',
       location: 'local',
       transport: 'openai-compatible',
@@ -20,6 +22,8 @@ const registry = {
     },
     {
       id: 'local-qwen',
+      resourceId: 'qwen-local',
+      resourceLabel: '本地千问',
       label: '本地千问',
       location: 'local',
       transport: 'openclaw',
@@ -62,6 +66,8 @@ describe('n8n model routing', () => {
     expect(JSON.stringify(publicN8nModelRoute(loaded.routes[2]))).not.toContain('not-returned-to-client')
     expect(publicN8nModelRoute(loaded.routes[0])).toMatchObject({
       id: 'local-qwen-direct',
+      resourceId: 'qwen-local',
+      resourceLabel: '本地千问',
       location: 'local',
       transport: 'openai-compatible',
       available: true,

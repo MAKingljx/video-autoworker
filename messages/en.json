@@ -1998,7 +1998,7 @@
     "tabCommand": "Command",
     "tabWorkflows": "Workflows",
     "tabPipelines": "Pipelines",
-    "tabFleet": "Fleet",
+    "tabFleet": "Model Cluster",
     "selectAgent": "Select agent...",
     "noAgentsRegistered": "No agents registered",
     "noSessionSuffix": "no session",

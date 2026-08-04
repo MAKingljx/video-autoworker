@@ -174,6 +174,8 @@ AIWORKER_MODEL_ROUTES_FILE="$HOME/.config/video-autoworker/model-routes.json"
 
 `N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存本地回环地址或云端 `apiKeyEnv` 变量名。默认优先让无需工具的规划、执行和审核节点使用 `local-qwen36-direct`，避免每个节点重复加载完整 OpenClaw Agent、工具和会话上下文；只有确实需要 OpenClaw 工具或最终会话回投时才选 `local-qwen36`。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
 
+模型注册表中的 `resourceId` 与 `resourceLabel` 描述物理模型资源，`id` 仍表示任务链实际调用的访问路由。同一台本地 Qwen 可以把直连路由和 OpenClaw Agent 路由登记到同一个 `resourceId`；模型集群页面会聚合显示为一个模型，并展开各条路由。n8n 任务链只保存路由 `id`，不会保存物理地址之外的凭据，也不会把供应商实现写死在流程节点中。
+
 修改注册表后重启 Video AutoWorker 即可刷新可选模型，不需要重新导入 n8n 工作流。`/api/n8n/models` 只向已登录用户返回脱敏路由、可用状态和缺失的凭据引用，不返回任何凭据值。任务及幂等状态由 Video AutoWorker 的 SQLite 持久化；数据库、外部环境文件、模型注册表和 n8n 状态必须作为同一生产备份链管理。
 
 ## OpenClaw 任务入口
@@ -223,6 +225,8 @@ ssh -N \
 - 允许 OpenClaw 单次改选：开启后，技能脚本可以只覆盖本次任务的节点模型，不改保存的工作流。
 - 纯本地三节点：规划、执行和审核都选择 `local-qwen36-direct`；只有需要工具或手机回投时再把对应节点切到 `local-qwen36` Agent 路由。
 - 超时和重试：n8n 负责确定性流程重试；不要与后续 LangGraph 的节点级重试重复叠加。
+
+`/agents` 页的“模型集群”标签读取 `/api/n8n/models` 与 `/api/n8n/workflows`，按物理模型聚合路由，并反向展示每个模型负责的任务链节点、主路由和备用路由。这里的“可调度”只代表配置与外部凭据引用完整，不代替真实推理健康检查；实时能力仍以任务链执行记录和节点输出为准。智能体卡片属于 OpenClaw 管理能力，只显示在“命令”标签中，不再作为模型集群内容。
 
 ## 验收
 

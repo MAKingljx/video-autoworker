@@ -12,7 +12,6 @@ import { MemoryBrowserPanel } from '@/components/panels/memory-browser-panel'
 import { CostTrackerPanel } from '@/components/panels/cost-tracker-panel'
 import { TaskBoardPanel } from '@/components/panels/task-board-panel'
 import { ActivityFeedPanel } from '@/components/panels/activity-feed-panel'
-import { AgentSquadPanelPhase3 } from '@/components/panels/agent-squad-panel-phase3'
 import { AgentCommsPanel } from '@/components/panels/agent-comms-panel'
 import { StandupPanel } from '@/components/panels/standup-panel'
 import { OrchestrationBar } from '@/components/panels/orchestration-bar'
@@ -539,13 +538,7 @@ function ContentRouter({ tab }: { tab: string }) {
     case 'projects':
       return <WorkspaceProjectsPanel />
     case 'agents':
-      return (
-        <>
-          <OrchestrationBar />
-          {isLocal && <LocalAgentsDocPanel />}
-          <AgentSquadPanelPhase3 />
-        </>
-      )
+      return <OrchestrationBar agentDocs={isLocal ? <LocalAgentsDocPanel /> : null} />
     case 'notifications':
       return <NotificationsPanel />
     case 'standup':
