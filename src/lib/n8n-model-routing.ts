@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { z } from 'zod'
@@ -6,6 +6,10 @@ import { z } from 'zod'
 const routeIdSchema = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._:-]+$/)
 const safeComponentSchema = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9._:-]+$/)
 const envReferenceSchema = z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/)
+const modelCapabilitySchema = z.enum([
+  'text', 'vision', 'audio', 'tools', 'reasoning', 'structured-output',
+  'transcription', 'embedding', 'reranking', 'multilingual',
+])
 
 const commonRouteSchema = z.object({
   id: routeIdSchema,
@@ -18,7 +22,7 @@ const commonRouteSchema = z.object({
   enabled: z.boolean().default(true),
   timeoutSeconds: z.coerce.number().int().min(5).max(600).default(120),
   thinking: z.string().trim().max(40).default('off'),
-  capabilities: z.array(z.enum(['text', 'vision', 'tools', 'reasoning', 'structured-output']))
+  capabilities: z.array(modelCapabilitySchema)
     .max(10)
     .default(['text']),
   systemPrompt: z.string().trim().max(4_000).default(''),
@@ -57,9 +61,52 @@ export const n8nModelRouteSchema = z.discriminatedUnion('transport', [
   compatibleApiRouteSchema,
 ])
 
+const localPathSchema = z.string().trim().min(1).max(500).refine(
+  value => value.startsWith('/') || value.startsWith('~/'),
+  '本地模型路径必须是绝对路径或 ~/ 路径',
+)
+
+const cliResourceRuntimeSchema = z.object({
+  type: z.literal('cli'),
+  command: localPathSchema,
+  requiredFiles: z.array(localPathSchema).max(20).default([]),
+}).strict()
+
+const ollamaResourceRuntimeSchema = z.object({
+  type: z.literal('ollama'),
+  baseUrl: z.string().trim().url().max(500),
+}).strict()
+
+export const auxiliaryModelResourceSchema = z.object({
+  id: routeIdSchema,
+  label: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(500).default(''),
+  location: z.literal('local').default('local'),
+  kind: z.enum(['speech-recognition', 'embedding', 'reranker', 'other']),
+  model: z.string().trim().min(1).max(180),
+  production: z.boolean().default(true),
+  enabled: z.boolean().default(true),
+  capabilities: z.array(modelCapabilitySchema).max(10).default([]),
+  usedBy: z.array(z.string().trim().min(1).max(160)).max(20).default([]),
+  runtime: z.discriminatedUnion('type', [cliResourceRuntimeSchema, ollamaResourceRuntimeSchema]),
+}).strict().superRefine((resource, ctx) => {
+  if (resource.runtime.type !== 'ollama') return
+  let url: URL
+  try {
+    url = new URL(resource.runtime.baseUrl)
+  } catch {
+    return
+  }
+  const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
+  if (!loopback || url.protocol !== 'http:') {
+    ctx.addIssue({ code: 'custom', path: ['runtime', 'baseUrl'], message: '本地 Ollama 地址必须使用回环 HTTP' })
+  }
+})
+
 const registrySchema = z.object({
   version: z.literal(1),
   routes: z.array(n8nModelRouteSchema).max(100),
+  resources: z.array(auxiliaryModelResourceSchema).max(100).default([]),
 }).superRefine((registry, ctx) => {
   const seen = new Set<string>()
   registry.routes.forEach((route, index) => {
@@ -68,12 +115,21 @@ const registrySchema = z.object({
     }
     seen.add(route.id)
   })
+  const resourceIds = new Set<string>()
+  registry.resources.forEach((resource, index) => {
+    if (resourceIds.has(resource.id)) {
+      ctx.addIssue({ code: 'custom', path: ['resources', index, 'id'], message: '辅助模型资源 ID 不能重复' })
+    }
+    resourceIds.add(resource.id)
+  })
 })
 
 export type N8nModelRoute = z.infer<typeof n8nModelRouteSchema>
+export type AuxiliaryModelResource = z.infer<typeof auxiliaryModelResourceSchema>
 
 export interface N8nModelRegistry {
   routes: N8nModelRoute[]
+  resources: AuxiliaryModelResource[]
   source: string
   errors: string[]
 }
@@ -95,6 +151,23 @@ export interface PublicN8nModelRoute {
   agentId?: string
   baseUrl?: string
   credentialReference?: string
+}
+
+export interface PublicAuxiliaryModelResource {
+  id: string
+  label: string
+  description: string
+  location: 'local'
+  kind: AuxiliaryModelResource['kind']
+  model: string
+  production: boolean
+  enabled: boolean
+  available: boolean
+  unavailableReason: string | null
+  capabilities: string[]
+  usedBy: string[]
+  runtime: AuxiliaryModelResource['runtime']['type']
+  endpoint: string
 }
 
 const nodeSelectionSchema = z.object({
@@ -131,17 +204,18 @@ function parseRegistry(raw: string, source: string): N8nModelRegistry {
   try {
     decoded = JSON.parse(raw)
   } catch {
-    return { routes: [], source, errors: ['模型注册表不是有效 JSON'] }
+    return { routes: [], resources: [], source, errors: ['模型注册表不是有效 JSON'] }
   }
   const parsed = registrySchema.safeParse(decoded)
   if (!parsed.success) {
     return {
       routes: [],
+      resources: [],
       source,
       errors: parsed.error.issues.map(issue => `${issue.path.join('.') || 'registry'}: ${issue.message}`),
     }
   }
-  return { routes: parsed.data.routes, source, errors: [] }
+  return { routes: parsed.data.routes, resources: parsed.data.resources, source, errors: [] }
 }
 
 export function loadN8nModelRegistry(): N8nModelRegistry {
@@ -149,15 +223,93 @@ export function loadN8nModelRegistry(): N8nModelRegistry {
   if (inline) return parseRegistry(inline, 'AIWORKER_MODEL_ROUTES_JSON')
 
   const filePath = registryPath()
-  if (!existsSync(filePath)) return { routes: [], source: filePath, errors: [] }
+  if (!existsSync(filePath)) return { routes: [], resources: [], source: filePath, errors: [] }
   try {
     return parseRegistry(readFileSync(filePath, 'utf8'), filePath)
   } catch (error) {
     return {
       routes: [],
+      resources: [],
       source: filePath,
       errors: [error instanceof Error ? error.message : '无法读取模型注册表'],
     }
+  }
+}
+
+function expandHomePath(value: string): string {
+  return resolve(value.replace(/^~(?=\/)/, homedir()))
+}
+
+function normalizedOllamaName(value: string): string {
+  const name = value.trim()
+  return name.includes(':') ? name : `${name}:latest`
+}
+
+export async function publicAuxiliaryModelResource(
+  resource: AuxiliaryModelResource,
+): Promise<PublicAuxiliaryModelResource> {
+  let available = resource.enabled
+  let unavailableReason: string | null = resource.enabled ? null : '已停用'
+  let endpoint: string
+
+  if (resource.runtime.type === 'cli') {
+    const command = expandHomePath(resource.runtime.command)
+    const requiredFiles = resource.runtime.requiredFiles.map(expandHomePath)
+    if (resource.enabled) {
+      const missing = [command, ...requiredFiles].filter(path => !existsSync(path))
+      if (missing.length) {
+        available = false
+        unavailableReason = `缺少运行文件：${missing.map(path => path.split('/').pop() || path).join('、')}`
+      } else {
+        try {
+          accessSync(command, constants.X_OK)
+          requiredFiles.forEach(path => accessSync(path, constants.R_OK))
+        } catch {
+          available = false
+          unavailableReason = '运行文件权限不满足要求'
+        }
+      }
+    }
+    endpoint = `CLI · ${command.split('/').pop() || command}`
+  } else {
+    const baseUrl = resource.runtime.baseUrl.replace(/\/+$/, '')
+    endpoint = `Ollama · ${new URL(baseUrl).host}`
+    if (resource.enabled) {
+      try {
+        const response = await fetch(`${baseUrl}/api/tags`, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(1_500),
+        })
+        const payload = response.ok ? await response.json() as { models?: Array<{ name?: string; model?: string }> } : null
+        const names = new Set((payload?.models || []).flatMap(item => [item.name, item.model])
+          .filter((value): value is string => typeof value === 'string')
+          .map(normalizedOllamaName))
+        if (!response.ok || !names.has(normalizedOllamaName(resource.model))) {
+          available = false
+          unavailableReason = response.ok ? 'Ollama 中未安装该模型' : `Ollama HTTP ${response.status}`
+        }
+      } catch {
+        available = false
+        unavailableReason = 'Ollama 当前不可访问'
+      }
+    }
+  }
+
+  return {
+    id: resource.id,
+    label: resource.label,
+    description: resource.description,
+    location: resource.location,
+    kind: resource.kind,
+    model: resource.model,
+    production: resource.production,
+    enabled: resource.enabled,
+    available,
+    unavailableReason,
+    capabilities: resource.capabilities,
+    usedBy: resource.usedBy,
+    runtime: resource.runtime.type,
+    endpoint,
   }
 }
 

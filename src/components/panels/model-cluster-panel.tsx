@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { buildModelCluster, type ModelClusterBinding } from '@/lib/model-cluster'
-import type { PublicN8nModelRoute } from '@/lib/n8n-model-routing'
+import type { PublicAuxiliaryModelResource, PublicN8nModelRoute } from '@/lib/n8n-model-routing'
 
 type ClusterFilter = 'local' | 'cloud' | 'all'
 
 interface ModelRoutesResponse {
   routes?: PublicN8nModelRoute[]
+  resources?: PublicAuxiliaryModelResource[]
   errors?: string[]
 }
 
@@ -32,8 +33,17 @@ function transportLabel(transport: PublicN8nModelRoute['transport']): string {
   return transport === 'openclaw' ? 'OpenClaw Agent' : 'API 直连'
 }
 
+function kindLabel(kind: 'generative' | PublicAuxiliaryModelResource['kind']): string {
+  if (kind === 'speech-recognition') return '语音识别'
+  if (kind === 'embedding') return '向量模型'
+  if (kind === 'reranker') return '重排模型'
+  if (kind === 'other') return '专用模型'
+  return '生成模型'
+}
+
 export function ModelClusterPanel() {
   const [routes, setRoutes] = useState<PublicN8nModelRoute[]>([])
+  const [auxiliaryResources, setAuxiliaryResources] = useState<PublicAuxiliaryModelResource[]>([])
   const [bindings, setBindings] = useState<ModelClusterBinding[]>([])
   const [filter, setFilter] = useState<ClusterFilter>('local')
   const [loading, setLoading] = useState(true)
@@ -58,6 +68,7 @@ export function ModelClusterPanel() {
         workflowsResponse.json() as Promise<WorkflowBindingsResponse>,
       ])
       setRoutes(Array.isArray(modelsBody.routes) ? modelsBody.routes : [])
+      setAuxiliaryResources(Array.isArray(modelsBody.resources) ? modelsBody.resources : [])
       setBindings(Array.isArray(workflowsBody.bindings) ? workflowsBody.bindings : [])
       setRegistryWarnings(Array.isArray(modelsBody.errors) ? modelsBody.errors : [])
     } catch (loadError) {
@@ -72,7 +83,10 @@ export function ModelClusterPanel() {
     void loadData()
   }, [loadData])
 
-  const resources = useMemo(() => buildModelCluster(routes, bindings), [routes, bindings])
+  const resources = useMemo(
+    () => buildModelCluster(routes, bindings, auxiliaryResources),
+    [routes, bindings, auxiliaryResources],
+  )
   const visibleResources = filter === 'all'
     ? resources
     : resources.filter(resource => resource.location === filter)
@@ -94,10 +108,10 @@ export function ModelClusterPanel() {
               </span>
             </div>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              查看本地和云端模型资源、访问路由及当前负责的任务链节点。同一物理模型可以同时提供 API 直连和 OpenClaw Agent 路由。
+              查看本地和云端模型资源、访问路由及当前负责的任务。同一物理模型可以提供多条访问路由，语音和向量模型则由专用生产链路按需调用。
             </p>
             <p className="mt-1 text-2xs text-muted-foreground/70">
-              “可调度”仅表示配置与凭据引用完整，不等同于本次实时推理健康；真实结果以任务链执行记录为准。
+              生成模型的“可调度”表示配置与凭据引用完整；专用模型的“生产可用”会检查本机运行文件或 Ollama 模型清单。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -112,7 +126,7 @@ export function ModelClusterPanel() {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="模型资源" value={visibleResources.length} detail={`本地 ${localCount} · 云端 ${cloudCount}`} />
-          <MetricCard label="配置可调度" value={availableCount} detail={`当前筛选共 ${visibleResources.length} 个`} tone="green" />
+          <MetricCard label="当前可用" value={availableCount} detail={`当前筛选共 ${visibleResources.length} 个`} tone="green" />
           <MetricCard label="访问路由" value={routeCount} detail="任务链保存路由 ID" tone="cyan" />
           <MetricCard label="节点职责" value={assignmentCount} detail="包含主路由和备用路由" tone="amber" />
         </div>
@@ -175,6 +189,9 @@ export function ModelClusterPanel() {
                         }`}>
                           {locationLabel(resource.location)}
                         </span>
+                        <span className="rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs text-muted-foreground">
+                          {kindLabel(resource.kind)}
+                        </span>
                       </div>
                       <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={resource.models.join(' · ')}>
                         {resource.models.join(' · ')}
@@ -185,7 +202,9 @@ export function ModelClusterPanel() {
                         ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
                         : 'border-slate-500/30 bg-slate-500/10 text-slate-400'
                     }`}>
-                      {resource.available ? '配置可调度' : '当前不可调度'}
+                      {resource.available
+                        ? resource.routes.length > 0 ? '配置可调度' : '生产可用'
+                        : resource.routes.length > 0 ? '当前不可调度' : '当前不可用'}
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap gap-1.5">
@@ -201,30 +220,51 @@ export function ModelClusterPanel() {
                       <h4 className="text-xs font-medium text-foreground">调用路由</h4>
                       <span className="text-2xs text-muted-foreground">{resource.routes.length} 条</span>
                     </div>
-                    <div className="space-y-2">
-                      {resource.routes.map(route => {
-                        const routeAssignments = resource.assignments.filter(assignment => assignment.routeId === route.id)
-                        return (
-                          <div key={route.id} className="rounded-lg border border-border/70 bg-background/50 px-3 py-2.5">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="min-w-0">
-                                <p className="truncate text-xs font-medium text-foreground">{route.label}</p>
-                                <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground" title={routeEndpoint(route)}>
-                                  {route.id} · {routeEndpoint(route)}
-                                </p>
-                              </div>
-                              <div className="shrink-0 text-right">
-                                <p className="text-2xs text-muted-foreground">{transportLabel(route.transport)}</p>
-                                <p className={`mt-0.5 text-[10px] ${route.available ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                  {route.available ? `${routeAssignments.length} 项职责` : route.unavailableReason || '不可用'}
-                                </p>
+                    {resource.routes.length === 0 ? (
+                      <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                        <p>由专用生产链路调用，不作为通用文本任务节点。</p>
+                        {resource.endpoint && <p className="mt-1 font-mono text-[10px] text-muted-foreground/70">{resource.endpoint}</p>}
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {resource.routes.map(route => {
+                          const routeAssignments = resource.assignments.filter(assignment => assignment.routeId === route.id)
+                          return (
+                            <div key={route.id} className="rounded-lg border border-border/70 bg-background/50 px-3 py-2.5">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="truncate text-xs font-medium text-foreground">{route.label}</p>
+                                  <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground" title={routeEndpoint(route)}>
+                                    {route.id} · {routeEndpoint(route)}
+                                  </p>
+                                </div>
+                                <div className="shrink-0 text-right">
+                                  <p className="text-2xs text-muted-foreground">{transportLabel(route.transport)}</p>
+                                  <p className={`mt-0.5 text-[10px] ${route.available ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    {route.available ? `${routeAssignments.length} 项职责` : route.unavailableReason || '不可用'}
+                                  </p>
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        )
-                      })}
-                    </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </section>
+
+                  {resource.usedBy.length > 0 && (
+                    <section>
+                      <div className="mb-2 flex items-center justify-between">
+                        <h4 className="text-xs font-medium text-foreground">生产用途</h4>
+                        <span className="text-2xs text-muted-foreground">{resource.usedBy.length} 项</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {resource.usedBy.map(usage => (
+                          <div key={usage} className="rounded-lg bg-secondary/35 px-3 py-2 text-xs text-foreground">{usage}</div>
+                        ))}
+                      </div>
+                    </section>
+                  )}
 
                   <section>
                     <div className="mb-2 flex items-center justify-between">
@@ -233,7 +273,7 @@ export function ModelClusterPanel() {
                     </div>
                     {resource.assignments.length === 0 ? (
                       <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                        未分配任务链节点
+                        {resource.routes.length > 0 ? '未分配任务链节点' : '此类模型由专用流程调用'}
                       </div>
                     ) : (
                       <div className="space-y-1.5">

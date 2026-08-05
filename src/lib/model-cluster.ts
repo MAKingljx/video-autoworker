@@ -1,4 +1,4 @@
-import type { PublicN8nModelRoute } from '@/lib/n8n-model-routing'
+import type { PublicAuxiliaryModelResource, PublicN8nModelRoute } from '@/lib/n8n-model-routing'
 
 export interface ModelClusterBinding {
   id: number
@@ -22,8 +22,12 @@ export interface ModelClusterResource {
   location: 'local' | 'cloud'
   available: boolean
   enabled: boolean
+  kind: 'generative' | PublicAuxiliaryModelResource['kind']
+  production: boolean
   models: string[]
   capabilities: string[]
+  usedBy: string[]
+  endpoint: string | null
   routes: PublicN8nModelRoute[]
   assignments: ModelClusterAssignment[]
 }
@@ -81,6 +85,7 @@ function routeAssignments(bindings: ModelClusterBinding[]): Map<string, ModelClu
 export function buildModelCluster(
   routes: PublicN8nModelRoute[],
   bindings: ModelClusterBinding[],
+  auxiliaryResources: PublicAuxiliaryModelResource[] = [],
 ): ModelClusterResource[] {
   const assignmentsByRoute = routeAssignments(bindings)
   const grouped = new Map<string, PublicN8nModelRoute[]>()
@@ -89,7 +94,7 @@ export function buildModelCluster(
     grouped.set(route.resourceId, [...(grouped.get(route.resourceId) || []), route])
   }
 
-  return [...grouped.entries()].map(([resourceId, resourceRoutes]) => {
+  const routedResources = [...grouped.entries()].map(([resourceId, resourceRoutes]) => {
     const assignments = resourceRoutes.flatMap(route => assignmentsByRoute.get(route.id) || [])
     return {
       id: resourceId,
@@ -97,12 +102,37 @@ export function buildModelCluster(
       location: resourceRoutes[0]?.location || 'local',
       available: resourceRoutes.some(route => route.available),
       enabled: resourceRoutes.some(route => route.enabled),
+      kind: 'generative' as const,
+      production: true,
       models: [...new Set(resourceRoutes.map(route => route.model))],
       capabilities: [...new Set(resourceRoutes.flatMap(route => route.capabilities))].sort(),
+      usedBy: [],
+      endpoint: null,
       routes: [...resourceRoutes].sort((a, b) => Number(b.available) - Number(a.available) || a.label.localeCompare(b.label)),
       assignments: assignments.sort((a, b) =>
         a.bindingName.localeCompare(b.bindingName) || a.nodeLabel.localeCompare(b.nodeLabel) || Number(a.fallback) - Number(b.fallback)),
     }
-  }).sort((a, b) =>
+  })
+
+  const routedIds = new Set(routedResources.map(resource => resource.id))
+  const standaloneResources: ModelClusterResource[] = auxiliaryResources
+    .filter(resource => !routedIds.has(resource.id))
+    .map(resource => ({
+      id: resource.id,
+      label: resource.label,
+      location: resource.location,
+      available: resource.available,
+      enabled: resource.enabled,
+      kind: resource.kind,
+      production: resource.production,
+      models: [resource.model],
+      capabilities: [...new Set(resource.capabilities)].sort(),
+      usedBy: [...resource.usedBy],
+      endpoint: resource.endpoint,
+      routes: [],
+      assignments: [],
+    }))
+
+  return [...routedResources, ...standaloneResources].sort((a, b) =>
     Number(a.location === 'cloud') - Number(b.location === 'cloud') || a.label.localeCompare(b.label))
 }

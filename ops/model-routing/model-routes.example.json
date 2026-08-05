@@ -1,5 +1,47 @@
 {
   "version": 1,
+  "resources": [
+    {
+      "id": "whisper-large-v3-turbo",
+      "label": "Whisper large-v3-turbo",
+      "description": "供 qwen-current 和 qwen-weixin-new 的语音消息按需转写。",
+      "location": "local",
+      "kind": "speech-recognition",
+      "model": "large-v3-turbo",
+      "production": true,
+      "enabled": true,
+      "capabilities": ["audio", "transcription", "multilingual"],
+      "usedBy": [
+        "qwen-current 语音消息转写",
+        "qwen-weixin-new 语音消息转写"
+      ],
+      "runtime": {
+        "type": "cli",
+        "command": "~/ai-worker/bin/aiworker-whisper-transcribe",
+        "requiredFiles": ["~/.cache/whisper/large-v3-turbo.pt"]
+      }
+    },
+    {
+      "id": "nomic-embed-text",
+      "label": "nomic-embed-text",
+      "description": "供 OpenClaw 长期记忆检索按需生成文本向量。",
+      "location": "local",
+      "kind": "embedding",
+      "model": "nomic-embed-text",
+      "production": true,
+      "enabled": true,
+      "capabilities": ["text", "embedding"],
+      "usedBy": [
+        "gpt-main 长期记忆检索",
+        "qwen-current 长期记忆检索",
+        "qwen-weixin-new 长期记忆检索"
+      ],
+      "runtime": {
+        "type": "ollama",
+        "baseUrl": "http://127.0.0.1:11434"
+      }
+    }
+  ],
   "routes": [
     {
       "id": "local-qwen36-direct",

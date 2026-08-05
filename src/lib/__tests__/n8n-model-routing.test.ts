@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   loadN8nModelRegistry,
+  publicAuxiliaryModelResource,
   publicN8nModelRoute,
   resolveN8nNodeRoute,
   validateTaskRouteIds,
@@ -8,6 +9,35 @@ import {
 
 const registry = {
   version: 1,
+  resources: [
+    {
+      id: 'whisper-large-v3-turbo',
+      label: 'Whisper large-v3-turbo',
+      location: 'local',
+      kind: 'speech-recognition',
+      model: 'large-v3-turbo',
+      capabilities: ['audio', 'transcription'],
+      usedBy: ['qwen-current 语音消息转写'],
+      runtime: {
+        type: 'cli',
+        command: '/bin/sh',
+        requiredFiles: ['/bin/sh'],
+      },
+    },
+    {
+      id: 'nomic-embed-text',
+      label: 'nomic-embed-text',
+      location: 'local',
+      kind: 'embedding',
+      model: 'nomic-embed-text',
+      capabilities: ['text', 'embedding'],
+      usedBy: ['gpt-main 长期记忆检索'],
+      runtime: {
+        type: 'ollama',
+        baseUrl: 'http://127.0.0.1:11434',
+      },
+    },
+  ],
   routes: [
     {
       id: 'local-qwen-direct',
@@ -46,6 +76,7 @@ const registry = {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
   delete process.env.AIWORKER_MODEL_ROUTES_JSON
   delete process.env.TEST_DASHSCOPE_API_KEY
 })
@@ -57,6 +88,7 @@ describe('n8n model routing', () => {
 
     expect(loaded.errors).toEqual([])
     expect(loaded.routes.map(route => route.id)).toEqual(['local-qwen-direct', 'local-qwen', 'cloud-qwen'])
+    expect(loaded.resources.map(resource => resource.id)).toEqual(['whisper-large-v3-turbo', 'nomic-embed-text'])
     expect(publicN8nModelRoute(loaded.routes[2])).toMatchObject({
       available: false,
       credentialReference: 'TEST_DASHSCOPE_API_KEY',
@@ -72,6 +104,39 @@ describe('n8n model routing', () => {
       transport: 'openai-compatible',
       available: true,
     })
+  })
+
+  it('checks CLI files and Ollama tags without exposing local paths', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify(registry)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      models: [{ name: 'nomic-embed-text:latest' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const loaded = loadN8nModelRegistry()
+
+    await expect(publicAuxiliaryModelResource(loaded.resources[0])).resolves.toMatchObject({
+      available: true,
+      endpoint: 'CLI · sh',
+    })
+    await expect(publicAuxiliaryModelResource(loaded.resources[1])).resolves.toMatchObject({
+      available: true,
+      endpoint: 'Ollama · 127.0.0.1:11434',
+    })
+    expect(JSON.stringify(await publicAuxiliaryModelResource(loaded.resources[0]))).not.toContain('/bin/sh')
+  })
+
+  it('rejects an auxiliary Ollama endpoint outside the local machine', () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      ...registry,
+      resources: [{
+        ...registry.resources[1],
+        runtime: { type: 'ollama', baseUrl: 'https://example.com' },
+      }],
+    })
+    const loaded = loadN8nModelRegistry()
+
+    expect(loaded.routes).toEqual([])
+    expect(loaded.resources).toEqual([])
+    expect(loaded.errors.join(' ')).toContain('本地 Ollama 地址必须使用回环 HTTP')
   })
 
   it('uses a task route override before the saved node route', () => {
