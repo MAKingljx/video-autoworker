@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync } from 'node:fs'
+import { accessSync, constants, existsSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import { z } from 'zod'
@@ -66,6 +66,13 @@ const localPathSchema = z.string().trim().min(1).max(500).refine(
   '本地模型路径必须是绝对路径或 ~/ 路径',
 )
 
+const relativeModelFileSchema = z.string().trim().min(1).max(300).refine(
+  value => !value.startsWith('/')
+    && !value.startsWith('~')
+    && value.split('/').every(component => component !== '' && component !== '.' && component !== '..'),
+  '模型文件必须是模型目录内的相对路径',
+)
+
 const cliResourceRuntimeSchema = z.object({
   type: z.literal('cli'),
   command: localPathSchema,
@@ -75,6 +82,12 @@ const cliResourceRuntimeSchema = z.object({
 const ollamaResourceRuntimeSchema = z.object({
   type: z.literal('ollama'),
   baseUrl: z.string().trim().url().max(500),
+}).strict()
+
+const localFilesResourceRuntimeSchema = z.object({
+  type: z.literal('local-files'),
+  directory: localPathSchema,
+  requiredFiles: z.array(relativeModelFileSchema).min(1).max(30),
 }).strict()
 
 export const auxiliaryModelResourceSchema = z.object({
@@ -88,7 +101,11 @@ export const auxiliaryModelResourceSchema = z.object({
   enabled: z.boolean().default(true),
   capabilities: z.array(modelCapabilitySchema).max(10).default([]),
   usedBy: z.array(z.string().trim().min(1).max(160)).max(20).default([]),
-  runtime: z.discriminatedUnion('type', [cliResourceRuntimeSchema, ollamaResourceRuntimeSchema]),
+  runtime: z.discriminatedUnion('type', [
+    cliResourceRuntimeSchema,
+    ollamaResourceRuntimeSchema,
+    localFilesResourceRuntimeSchema,
+  ]),
 }).strict().superRefine((resource, ctx) => {
   if (resource.runtime.type !== 'ollama') return
   let url: URL
@@ -245,6 +262,23 @@ function normalizedOllamaName(value: string): string {
   return name.includes(':') ? name : `${name}:latest`
 }
 
+function isReadableModelDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isReadableModelFile(path: string): boolean {
+  try {
+    const stat = statSync(path)
+    return stat.isFile() && stat.size > 0
+  } catch {
+    return false
+  }
+}
+
 export async function publicAuxiliaryModelResource(
   resource: AuxiliaryModelResource,
 ): Promise<PublicAuxiliaryModelResource> {
@@ -271,7 +305,7 @@ export async function publicAuxiliaryModelResource(
       }
     }
     endpoint = `CLI · ${command.split('/').pop() || command}`
-  } else {
+  } else if (resource.runtime.type === 'ollama') {
     const baseUrl = resource.runtime.baseUrl.replace(/\/+$/, '')
     endpoint = `Ollama · ${new URL(baseUrl).host}`
     if (resource.enabled) {
@@ -293,6 +327,30 @@ export async function publicAuxiliaryModelResource(
         unavailableReason = 'Ollama 当前不可访问'
       }
     }
+  } else {
+    const directory = expandHomePath(resource.runtime.directory)
+    const requiredFiles = resource.runtime.requiredFiles.map(file => resolve(directory, file))
+    if (resource.enabled) {
+      const missing = [
+        ...(!isReadableModelDirectory(directory) ? ['模型目录'] : []),
+        ...requiredFiles
+          .filter(path => !isReadableModelFile(path))
+          .map(path => path.split('/').pop() || '模型文件'),
+      ]
+      if (missing.length) {
+        available = false
+        unavailableReason = `缺少模型文件：${missing.join('、')}`
+      } else {
+        try {
+          accessSync(directory, constants.R_OK)
+          requiredFiles.forEach(path => accessSync(path, constants.R_OK))
+        } catch {
+          available = false
+          unavailableReason = '模型文件权限不满足要求'
+        }
+      }
+    }
+    endpoint = `本地模型文件 · ${resource.model}`
   }
 
   return {

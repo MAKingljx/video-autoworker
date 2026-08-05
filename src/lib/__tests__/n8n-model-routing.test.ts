@@ -37,6 +37,21 @@ const registry = {
         baseUrl: 'http://127.0.0.1:11434',
       },
     },
+    {
+      id: 'sensevoice-small',
+      label: 'SenseVoiceSmall',
+      location: 'local',
+      kind: 'speech-recognition',
+      model: 'iic/SenseVoiceSmall',
+      production: false,
+      capabilities: ['audio', 'transcription', 'multilingual'],
+      usedBy: [],
+      runtime: {
+        type: 'local-files',
+        directory: '/bin',
+        requiredFiles: ['sh'],
+      },
+    },
   ],
   routes: [
     {
@@ -88,7 +103,11 @@ describe('n8n model routing', () => {
 
     expect(loaded.errors).toEqual([])
     expect(loaded.routes.map(route => route.id)).toEqual(['local-qwen-direct', 'local-qwen', 'cloud-qwen'])
-    expect(loaded.resources.map(resource => resource.id)).toEqual(['whisper-large-v3-turbo', 'nomic-embed-text'])
+    expect(loaded.resources.map(resource => resource.id)).toEqual([
+      'whisper-large-v3-turbo',
+      'nomic-embed-text',
+      'sensevoice-small',
+    ])
     expect(publicN8nModelRoute(loaded.routes[2])).toMatchObject({
       available: false,
       credentialReference: 'TEST_DASHSCOPE_API_KEY',
@@ -106,7 +125,7 @@ describe('n8n model routing', () => {
     })
   })
 
-  it('checks CLI files and Ollama tags without exposing local paths', async () => {
+  it('checks CLI, Ollama, and local model files without exposing local paths', async () => {
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify(registry)
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
       models: [{ name: 'nomic-embed-text:latest' }],
@@ -121,7 +140,51 @@ describe('n8n model routing', () => {
       available: true,
       endpoint: 'Ollama · 127.0.0.1:11434',
     })
+    await expect(publicAuxiliaryModelResource(loaded.resources[2])).resolves.toMatchObject({
+      available: true,
+      production: false,
+      runtime: 'local-files',
+      endpoint: '本地模型文件 · iic/SenseVoiceSmall',
+    })
     expect(JSON.stringify(await publicAuxiliaryModelResource(loaded.resources[0]))).not.toContain('/bin/sh')
+    expect(JSON.stringify(await publicAuxiliaryModelResource(loaded.resources[2]))).not.toContain('/bin')
+  })
+
+  it('rejects model files that escape the registered local directory', () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      ...registry,
+      resources: [{
+        ...registry.resources[2],
+        runtime: { type: 'local-files', directory: '/bin', requiredFiles: ['../etc/passwd'] },
+      }],
+    })
+    const loaded = loadN8nModelRegistry()
+
+    expect(loaded.routes).toEqual([])
+    expect(loaded.resources).toEqual([])
+    expect(loaded.errors.join(' ')).toContain('模型文件必须是模型目录内的相对路径')
+  })
+
+  it('reports a missing local model file without exposing its directory', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      ...registry,
+      resources: [{
+        ...registry.resources[2],
+        runtime: {
+          type: 'local-files',
+          directory: '/bin',
+          requiredFiles: ['definitely-not-an-installed-model.bin'],
+        },
+      }],
+    })
+    const loaded = loadN8nModelRegistry()
+    const result = await publicAuxiliaryModelResource(loaded.resources[0])
+
+    expect(result).toMatchObject({
+      available: false,
+      unavailableReason: '缺少模型文件：definitely-not-an-installed-model.bin',
+    })
+    expect(JSON.stringify(result)).not.toContain('/bin')
   })
 
   it('rejects an auxiliary Ollama endpoint outside the local machine', () => {

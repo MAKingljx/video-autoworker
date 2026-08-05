@@ -56,4 +56,4 @@ try {
   rmSync(temporaryPath, { force: true })
 }
 
-console.log(`已同步 ${templateResources.length} 个生产辅助模型资源；备份：${backupPath}`)
+console.log(`已同步 ${templateResources.length} 个辅助模型资源；备份：${backupPath}`)

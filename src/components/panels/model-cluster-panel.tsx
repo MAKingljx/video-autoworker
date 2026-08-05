@@ -3,7 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
-import { buildModelCluster, type ModelClusterBinding } from '@/lib/model-cluster'
+import {
+  buildModelCluster,
+  type ModelClusterBinding,
+  type ModelClusterResource,
+} from '@/lib/model-cluster'
 import type { PublicAuxiliaryModelResource, PublicN8nModelRoute } from '@/lib/n8n-model-routing'
 
 type ClusterFilter = 'local' | 'cloud' | 'all'
@@ -39,6 +43,25 @@ function kindLabel(kind: 'generative' | PublicAuxiliaryModelResource['kind']): s
   if (kind === 'reranker') return '重排模型'
   if (kind === 'other') return '专用模型'
   return '生成模型'
+}
+
+function resourceStatus(resource: ModelClusterResource): { label: string; className: string } {
+  if (!resource.enabled) {
+    return { label: '已停用', className: 'border-border bg-secondary/60 text-muted-foreground' }
+  }
+  if (!resource.available) {
+    return {
+      label: resource.routes.length > 0 ? '当前不可调度' : '当前不可识别',
+      className: 'border-destructive/20 bg-destructive/[0.06] text-destructive',
+    }
+  }
+  if (!resource.production) {
+    return { label: '已安装', className: 'border-border bg-secondary/60 text-foreground' }
+  }
+  return {
+    label: resource.routes.length > 0 ? '配置可调度' : '生产可用',
+    className: 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-400',
+  }
 }
 
 export function ModelClusterPanel() {
@@ -93,8 +116,23 @@ export function ModelClusterPanel() {
   const localCount = resources.filter(resource => resource.location === 'local').length
   const cloudCount = resources.filter(resource => resource.location === 'cloud').length
   const availableCount = visibleResources.filter(resource => resource.available).length
+  const productionCount = visibleResources.filter(resource => resource.production).length
+  const unassignedCount = visibleResources.filter(resource => !resource.production).length
   const assignmentCount = visibleResources.reduce((total, resource) => total + resource.assignments.length, 0)
-  const routeCount = visibleResources.reduce((total, resource) => total + resource.routes.length, 0)
+  const resourceGroups = [
+    {
+      id: 'production',
+      label: '生产已用',
+      description: '已有任务链路或专用生产流程正在调用',
+      resources: visibleResources.filter(resource => resource.production),
+    },
+    {
+      id: 'unassigned',
+      label: '已安装待分配',
+      description: '本机文件已识别，但尚未接入生产任务',
+      resources: visibleResources.filter(resource => !resource.production),
+    },
+  ].filter(group => group.resources.length > 0)
 
   return (
     <div className="min-h-[calc(100vh-13rem)] bg-background">
@@ -103,15 +141,15 @@ export function ModelClusterPanel() {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-lg font-semibold text-foreground">模型集群</h2>
-              <span className="rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2 py-0.5 text-2xs text-cyan-300">
+              <span className="rounded-full border border-border bg-secondary/70 px-2 py-0.5 text-2xs text-muted-foreground">
                 任务链按路由 ID 调用
               </span>
             </div>
             <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-              查看本地和云端模型资源、访问路由及当前负责的任务。同一物理模型可以提供多条访问路由，语音和向量模型则由专用生产链路按需调用。
+              查看本地和云端模型资源、访问路由及当前负责的任务。生产模型与仅安装在本机、尚未分配任务的模型会分开展示。
             </p>
             <p className="mt-1 text-2xs text-muted-foreground/70">
-              生成模型的“可调度”表示配置与凭据引用完整；专用模型的“生产可用”会检查本机运行文件或 Ollama 模型清单。
+              “可调度”与“生产可用”表示生产链路检测通过；“已安装”只表示所需模型文件完整，不代表已经运行或接入任务链。
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -126,9 +164,9 @@ export function ModelClusterPanel() {
 
         <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="模型资源" value={visibleResources.length} detail={`本地 ${localCount} · 云端 ${cloudCount}`} />
-          <MetricCard label="当前可用" value={availableCount} detail={`当前筛选共 ${visibleResources.length} 个`} tone="green" />
-          <MetricCard label="访问路由" value={routeCount} detail="任务链保存路由 ID" tone="cyan" />
-          <MetricCard label="节点职责" value={assignmentCount} detail="包含主路由和备用路由" tone="amber" />
+          <MetricCard label="检测通过" value={availableCount} detail={`当前筛选共 ${visibleResources.length} 个`} />
+          <MetricCard label="生产已用" value={productionCount} detail={`另有 ${unassignedCount} 个待分配`} />
+          <MetricCard label="节点职责" value={assignmentCount} detail="包含主路由和备用路由" />
         </div>
       </div>
 
@@ -174,129 +212,157 @@ export function ModelClusterPanel() {
             <p className="mt-1 text-xs text-muted-foreground">先在仓库外的模型注册表中登记路由，再刷新集群。</p>
           </div>
         ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {visibleResources.map(resource => (
-              <article key={resource.id} className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-                <div className="border-b border-border bg-secondary/20 px-4 py-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="font-semibold text-foreground">{resource.label}</h3>
-                        <span className={`rounded-full border px-2 py-0.5 text-2xs ${
-                          resource.location === 'local'
-                            ? 'border-violet-500/30 bg-violet-500/10 text-violet-300'
-                            : 'border-blue-500/30 bg-blue-500/10 text-blue-300'
-                        }`}>
-                          {locationLabel(resource.location)}
-                        </span>
-                        <span className="rounded-full border border-border bg-secondary px-2 py-0.5 text-2xs text-muted-foreground">
-                          {kindLabel(resource.kind)}
-                        </span>
-                      </div>
-                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={resource.models.join(' · ')}>
-                        {resource.models.join(' · ')}
-                      </p>
-                    </div>
-                    <span className={`shrink-0 rounded-full border px-2 py-1 text-2xs ${
-                      resource.available
-                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                        : 'border-slate-500/30 bg-slate-500/10 text-slate-400'
-                    }`}>
-                      {resource.available
-                        ? resource.routes.length > 0 ? '配置可调度' : '生产可用'
-                        : resource.routes.length > 0 ? '当前不可调度' : '当前不可用'}
-                    </span>
+          <div className="space-y-6">
+            {resourceGroups.map(group => (
+              <section key={group.id}>
+                <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground">{group.label}</h3>
+                    <p className="mt-0.5 text-xs text-muted-foreground">{group.description}</p>
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {resource.capabilities.map(capability => (
-                      <span key={capability} className="rounded bg-secondary px-2 py-0.5 text-2xs text-muted-foreground">{capability}</span>
-                    ))}
-                  </div>
+                  <span className="rounded-full border border-border bg-secondary/60 px-2 py-0.5 text-2xs text-muted-foreground">
+                    {group.resources.length} 个模型
+                  </span>
                 </div>
-
-                <div className="space-y-4 p-4">
-                  <section>
-                    <div className="mb-2 flex items-center justify-between">
-                      <h4 className="text-xs font-medium text-foreground">调用路由</h4>
-                      <span className="text-2xs text-muted-foreground">{resource.routes.length} 条</span>
-                    </div>
-                    {resource.routes.length === 0 ? (
-                      <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                        <p>由专用生产链路调用，不作为通用文本任务节点。</p>
-                        {resource.endpoint && <p className="mt-1 font-mono text-[10px] text-muted-foreground/70">{resource.endpoint}</p>}
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {resource.routes.map(route => {
-                          const routeAssignments = resource.assignments.filter(assignment => assignment.routeId === route.id)
-                          return (
-                            <div key={route.id} className="rounded-lg border border-border/70 bg-background/50 px-3 py-2.5">
-                              <div className="flex items-center justify-between gap-3">
-                                <div className="min-w-0">
-                                  <p className="truncate text-xs font-medium text-foreground">{route.label}</p>
-                                  <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground" title={routeEndpoint(route)}>
-                                    {route.id} · {routeEndpoint(route)}
-                                  </p>
-                                </div>
-                                <div className="shrink-0 text-right">
-                                  <p className="text-2xs text-muted-foreground">{transportLabel(route.transport)}</p>
-                                  <p className={`mt-0.5 text-[10px] ${route.available ? 'text-emerald-400' : 'text-rose-400'}`}>
-                                    {route.available ? `${routeAssignments.length} 项职责` : route.unavailableReason || '不可用'}
-                                  </p>
-                                </div>
+                <div className="grid gap-4 xl:grid-cols-2">
+                  {group.resources.map(resource => {
+                    const status = resourceStatus(resource)
+                    return (
+                      <article key={resource.id} className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+                        <div className="border-b border-border bg-secondary/20 px-4 py-3">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="font-semibold text-foreground">{resource.label}</h3>
+                                <span className="rounded-full border border-border bg-background/60 px-2 py-0.5 text-2xs text-muted-foreground">
+                                  {locationLabel(resource.location)}
+                                </span>
+                                <span className="rounded-full border border-border bg-secondary/70 px-2 py-0.5 text-2xs text-muted-foreground">
+                                  {kindLabel(resource.kind)}
+                                </span>
+                                <span className="rounded-full border border-border bg-secondary/70 px-2 py-0.5 text-2xs text-muted-foreground">
+                                  {resource.production ? '生产使用' : '待分配'}
+                                </span>
                               </div>
+                              <p className="mt-1 truncate font-mono text-xs text-muted-foreground" title={resource.models.join(' · ')}>
+                                {resource.models.join(' · ')}
+                              </p>
                             </div>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </section>
-
-                  {resource.usedBy.length > 0 && (
-                    <section>
-                      <div className="mb-2 flex items-center justify-between">
-                        <h4 className="text-xs font-medium text-foreground">生产用途</h4>
-                        <span className="text-2xs text-muted-foreground">{resource.usedBy.length} 项</span>
-                      </div>
-                      <div className="space-y-1.5">
-                        {resource.usedBy.map(usage => (
-                          <div key={usage} className="rounded-lg bg-secondary/35 px-3 py-2 text-xs text-foreground">{usage}</div>
-                        ))}
-                      </div>
-                    </section>
-                  )}
-
-                  <section>
-                    <div className="mb-2 flex items-center justify-between">
-                      <h4 className="text-xs font-medium text-foreground">负责的任务链节点</h4>
-                      <Link href="/automation" className="text-2xs text-primary hover:underline">前往配置</Link>
-                    </div>
-                    {resource.assignments.length === 0 ? (
-                      <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
-                        {resource.routes.length > 0 ? '未分配任务链节点' : '此类模型由专用流程调用'}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        {resource.assignments.map((assignment, index) => (
-                          <div
-                            key={`${assignment.bindingId}-${assignment.nodeKey}-${assignment.routeId}-${index}`}
-                            className="flex flex-wrap items-center gap-2 rounded-lg bg-secondary/35 px-3 py-2 text-xs"
-                          >
-                            <span className={assignment.bindingEnabled ? 'text-foreground' : 'text-muted-foreground line-through'}>{assignment.bindingName}</span>
-                            <span className="text-muted-foreground">/</span>
-                            <span className="text-cyan-300">{assignment.nodeLabel}</span>
-                            <span className={`ml-auto rounded px-1.5 py-0.5 text-[10px] ${
-                              assignment.fallback ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'
-                            }`}>
-                              {assignment.fallback ? '备用' : '主路由'} · {assignment.routeId}
+                            <span className={`shrink-0 rounded-full border px-2 py-1 text-2xs ${status.className}`}>
+                              {status.label}
                             </span>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </section>
+                          {resource.description && (
+                            <p className="mt-2 text-xs leading-5 text-muted-foreground">{resource.description}</p>
+                          )}
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            {resource.capabilities.map(capability => (
+                              <span key={capability} className="rounded bg-secondary px-2 py-0.5 text-2xs text-muted-foreground">{capability}</span>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-4 p-4">
+                          <section>
+                            <div className="mb-2 flex items-center justify-between">
+                              <h4 className="text-xs font-medium text-foreground">
+                                {resource.routes.length > 0 ? '调用路由' : '接入状态'}
+                              </h4>
+                              <span className="text-2xs text-muted-foreground">
+                                {resource.routes.length > 0 ? `${resource.routes.length} 条` : resource.production ? '专用链路' : '待分配'}
+                              </span>
+                            </div>
+                            {resource.routes.length === 0 ? (
+                              <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                                <p>
+                                  {resource.production
+                                    ? '由专用生产链路调用，不作为通用文本任务节点。'
+                                    : '本机模型文件已登记，尚未启动服务或分配生产任务。'}
+                                </p>
+                                {resource.endpoint && <p className="mt-1 font-mono text-[10px] text-muted-foreground/70">{resource.endpoint}</p>}
+                              </div>
+                            ) : (
+                              <div className="space-y-2">
+                                {resource.routes.map(route => {
+                                  const routeAssignments = resource.assignments.filter(assignment => assignment.routeId === route.id)
+                                  return (
+                                    <div key={route.id} className="rounded-lg border border-border/70 bg-background/50 px-3 py-2.5">
+                                      <div className="flex items-center justify-between gap-3">
+                                        <div className="min-w-0">
+                                          <p className="truncate text-xs font-medium text-foreground">{route.label}</p>
+                                          <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground" title={routeEndpoint(route)}>
+                                            {route.id} · {routeEndpoint(route)}
+                                          </p>
+                                        </div>
+                                        <div className="shrink-0 text-right">
+                                          <p className="text-2xs text-muted-foreground">{transportLabel(route.transport)}</p>
+                                          <p className={`mt-0.5 text-[10px] ${route.available ? 'text-emerald-400' : 'text-destructive'}`}>
+                                            {route.available ? `${routeAssignments.length} 项职责` : route.unavailableReason || '不可用'}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </section>
+
+                          {resource.usedBy.length > 0 && (
+                            <section>
+                              <div className="mb-2 flex items-center justify-between">
+                                <h4 className="text-xs font-medium text-foreground">生产用途</h4>
+                                <span className="text-2xs text-muted-foreground">{resource.usedBy.length} 项</span>
+                              </div>
+                              <div className="space-y-1.5">
+                                {resource.usedBy.map(usage => (
+                                  <div key={usage} className="rounded-lg bg-secondary/35 px-3 py-2 text-xs text-foreground">{usage}</div>
+                                ))}
+                              </div>
+                            </section>
+                          )}
+
+                          <section>
+                            <div className="mb-2 flex items-center justify-between">
+                              <h4 className="text-xs font-medium text-foreground">负责的任务链节点</h4>
+                              <Link href="/automation" className="text-2xs text-primary hover:underline">前往配置</Link>
+                            </div>
+                            {resource.assignments.length === 0 ? (
+                              <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+                                {resource.routes.length > 0
+                                  ? '未分配任务链节点'
+                                  : resource.production
+                                    ? '此类模型由专用流程调用'
+                                    : '尚未分配生产任务，可在后续专用 n8n 节点中接入'}
+                              </div>
+                            ) : (
+                              <div className="space-y-1.5">
+                                {resource.assignments.map((assignment, index) => (
+                                  <div
+                                    key={`${assignment.bindingId}-${assignment.nodeKey}-${assignment.routeId}-${index}`}
+                                    className="flex flex-wrap items-center gap-2 rounded-lg bg-secondary/35 px-3 py-2 text-xs"
+                                  >
+                                    <span className={assignment.bindingEnabled ? 'text-foreground' : 'text-muted-foreground line-through'}>{assignment.bindingName}</span>
+                                    <span className="text-muted-foreground">/</span>
+                                    <span className="font-medium text-foreground">{assignment.nodeLabel}</span>
+                                    <span className={`ml-auto rounded border px-1.5 py-0.5 text-[10px] ${
+                                      assignment.fallback
+                                        ? 'border-border bg-background/60 text-muted-foreground'
+                                        : 'border-border bg-secondary/70 text-foreground'
+                                    }`}>
+                                      {assignment.fallback ? '备用' : '主路由'} · {assignment.routeId}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </section>
+                        </div>
+                      </article>
+                    )
+                  })}
                 </div>
-              </article>
+              </section>
             ))}
           </div>
         )}
@@ -309,24 +375,15 @@ function MetricCard({
   label,
   value,
   detail,
-  tone,
 }: {
   label: string
   value: number
   detail: string
-  tone?: 'green' | 'cyan' | 'amber'
 }) {
-  const valueClass = tone === 'green'
-    ? 'text-emerald-400'
-    : tone === 'cyan'
-      ? 'text-cyan-400'
-      : tone === 'amber'
-        ? 'text-amber-400'
-        : 'text-foreground'
   return (
     <div className="rounded-xl border border-border bg-background/60 px-4 py-3">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`mt-1 text-2xl font-semibold font-mono-tight ${valueClass}`}>{value}</p>
+      <p className="mt-1 text-2xl font-semibold text-foreground font-mono-tight">{value}</p>
       <p className="mt-0.5 text-2xs text-muted-foreground/70">{detail}</p>
     </div>
   )

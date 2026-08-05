@@ -40,6 +40,76 @@
         "type": "ollama",
         "baseUrl": "http://127.0.0.1:11434"
       }
+    },
+    {
+      "id": "sensevoice-small",
+      "label": "SenseVoiceSmall",
+      "description": "已安装的多语种语音识别资源，可作为语音转写备选；尚未分配生产任务。",
+      "location": "local",
+      "kind": "speech-recognition",
+      "model": "iic/SenseVoiceSmall",
+      "production": false,
+      "enabled": true,
+      "capabilities": ["audio", "transcription", "multilingual"],
+      "usedBy": [],
+      "runtime": {
+        "type": "local-files",
+        "directory": "~/.cache/modelscope/iic/SenseVoiceSmall",
+        "requiredFiles": [
+          "config.yaml",
+          "configuration.json",
+          "model.pt",
+          "chn_jpn_yue_eng_ko_spectok.bpe.model"
+        ]
+      }
+    },
+    {
+      "id": "bge-m3",
+      "label": "bge-m3",
+      "description": "已安装的多语种向量模型，适合长文本和混合检索；尚未接入生产记忆链路。",
+      "location": "local",
+      "kind": "embedding",
+      "model": "BAAI/bge-m3",
+      "production": false,
+      "enabled": true,
+      "capabilities": ["text", "embedding", "multilingual"],
+      "usedBy": [],
+      "runtime": {
+        "type": "local-files",
+        "directory": "~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots/5617a9f61b028005a4858fdac845db406aefb181",
+        "requiredFiles": [
+          "config.json",
+          "modules.json",
+          "pytorch_model.bin",
+          "tokenizer.json"
+        ]
+      }
+    },
+    {
+      "id": "qwen3-reranker-8b",
+      "label": "Qwen3-Reranker-8B",
+      "description": "已安装的 8B 检索重排模型，适合对候选结果精排；尚未接入生产检索链路。",
+      "location": "local",
+      "kind": "reranker",
+      "model": "Qwen/Qwen3-Reranker-8B",
+      "production": false,
+      "enabled": true,
+      "capabilities": ["text", "reranking", "multilingual"],
+      "usedBy": [],
+      "runtime": {
+        "type": "local-files",
+        "directory": "~/.cache/huggingface/hub/models--Qwen--Qwen3-Reranker-8B/snapshots/77d193c791ed757ca307ee72715aa132723da912",
+        "requiredFiles": [
+          "config.json",
+          "model.safetensors.index.json",
+          "model-00001-of-00005.safetensors",
+          "model-00002-of-00005.safetensors",
+          "model-00003-of-00005.safetensors",
+          "model-00004-of-00005.safetensors",
+          "model-00005-of-00005.safetensors",
+          "tokenizer.json"
+        ]
+      }
     }
   ],
   "routes": [

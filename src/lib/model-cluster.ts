@@ -19,6 +19,7 @@ export interface ModelClusterAssignment {
 export interface ModelClusterResource {
   id: string
   label: string
+  description: string
   location: 'local' | 'cloud'
   available: boolean
   enabled: boolean
@@ -99,6 +100,7 @@ export function buildModelCluster(
     return {
       id: resourceId,
       label: resourceRoutes[0]?.resourceLabel || resourceId,
+      description: resourceRoutes[0]?.description || '',
       location: resourceRoutes[0]?.location || 'local',
       available: resourceRoutes.some(route => route.available),
       enabled: resourceRoutes.some(route => route.enabled),
@@ -120,6 +122,7 @@ export function buildModelCluster(
     .map(resource => ({
       id: resource.id,
       label: resource.label,
+      description: resource.description,
       location: resource.location,
       available: resource.available,
       enabled: resource.enabled,
@@ -134,5 +137,7 @@ export function buildModelCluster(
     }))
 
   return [...routedResources, ...standaloneResources].sort((a, b) =>
-    Number(a.location === 'cloud') - Number(b.location === 'cloud') || a.label.localeCompare(b.label))
+    Number(b.production) - Number(a.production)
+      || Number(a.location === 'cloud') - Number(b.location === 'cloud')
+      || a.label.localeCompare(b.label))
 }

@@ -36,22 +36,40 @@ const routes: PublicN8nModelRoute[] = [
   },
 ]
 
-const auxiliaryResources: PublicAuxiliaryModelResource[] = [{
-  id: 'whisper-large-v3-turbo',
-  label: 'Whisper large-v3-turbo',
-  description: '语音转写',
-  location: 'local',
-  kind: 'speech-recognition',
-  model: 'large-v3-turbo',
-  production: true,
-  enabled: true,
-  available: true,
-  unavailableReason: null,
-  capabilities: ['audio', 'transcription'],
-  usedBy: ['qwen-current 语音消息转写'],
-  runtime: 'cli',
-  endpoint: 'CLI · aiworker-whisper-transcribe',
-}]
+const auxiliaryResources: PublicAuxiliaryModelResource[] = [
+  {
+    id: 'whisper-large-v3-turbo',
+    label: 'Whisper large-v3-turbo',
+    description: '语音转写',
+    location: 'local',
+    kind: 'speech-recognition',
+    model: 'large-v3-turbo',
+    production: true,
+    enabled: true,
+    available: true,
+    unavailableReason: null,
+    capabilities: ['audio', 'transcription'],
+    usedBy: ['qwen-current 语音消息转写'],
+    runtime: 'cli',
+    endpoint: 'CLI · aiworker-whisper-transcribe',
+  },
+  {
+    id: 'bge-m3',
+    label: 'bge-m3',
+    description: '已安装待分配',
+    location: 'local',
+    kind: 'embedding',
+    model: 'BAAI/bge-m3',
+    production: false,
+    enabled: true,
+    available: true,
+    unavailableReason: null,
+    capabilities: ['text', 'embedding', 'multilingual'],
+    usedBy: [],
+    runtime: 'local-files',
+    endpoint: '本地模型文件 · BAAI/bge-m3',
+  },
+]
 
 describe('model cluster projection', () => {
   it('groups access routes under one physical model and derives node responsibilities', () => {
@@ -69,9 +87,10 @@ describe('model cluster projection', () => {
       },
     }], auxiliaryResources)
 
-    expect(cluster).toHaveLength(2)
+    expect(cluster).toHaveLength(3)
     const qwen = cluster.find(resource => resource.id === 'qwen-local')
     const whisper = cluster.find(resource => resource.id === 'whisper-large-v3-turbo')
+    const bge = cluster.find(resource => resource.id === 'bge-m3')
     expect(qwen).toMatchObject({
       id: 'qwen-local',
       label: '本地千问',
@@ -88,9 +107,20 @@ describe('model cluster projection', () => {
     ])
     expect(whisper).toMatchObject({
       kind: 'speech-recognition',
+      production: true,
       routes: [],
       usedBy: ['qwen-current 语音消息转写'],
       endpoint: 'CLI · aiworker-whisper-transcribe',
     })
+    expect(bge).toMatchObject({
+      description: '已安装待分配',
+      kind: 'embedding',
+      production: false,
+      available: true,
+      routes: [],
+      usedBy: [],
+      endpoint: '本地模型文件 · BAAI/bge-m3',
+    })
+    expect(cluster.indexOf(bge!)).toBeGreaterThan(cluster.indexOf(whisper!))
   })
 })
