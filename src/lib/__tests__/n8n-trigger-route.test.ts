@@ -70,6 +70,7 @@ describe('n8n trigger route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     delete process.env.AIWORKER_N8N_NODE_CALLBACK_URL
+    delete process.env.AIWORKER_N8N_MEDIA_CALLBACK_URL
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       version: 1,
       routes: [{
@@ -126,7 +127,9 @@ describe('n8n trigger route', () => {
           timeoutSeconds: 120,
           retryCount: 2,
           nodeCallbackUrl: 'http://127.0.0.1:3017/api/n8n/node-execute',
+          mediaCallbackUrl: 'http://127.0.0.1:3017/api/n8n/media-execute',
           config: { queue: 'heavy-model' },
+          memoryMode: 'none',
         },
         input: { prompt: '分析视频' },
         delivery: { mode: 'none' },
@@ -166,6 +169,20 @@ describe('n8n trigger route', () => {
     )
   })
 
+  it('rejects direct session delivery for stateless video workers', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-video-reply',
+      input: { prompt: '分析视频' },
+      delivery: { mode: 'reply', sessionKey: 'agent:main:video-test' },
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/不进入 OpenClaw 会话/) })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
   it('accepts an OpenClaw per-task route override from the registered model list', async () => {
     const response = await POST(request({
       bindingId: 7,
@@ -201,6 +218,20 @@ describe('n8n trigger route', () => {
     const response = await POST(request({
       bindingId: 7,
       taskId: 'task-unsafe-callback',
+      input: { prompt: 'test' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/本机回环/) })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects a media-node callback URL outside the loopback interface', async () => {
+    process.env.AIWORKER_N8N_MEDIA_CALLBACK_URL = 'https://example.test/api/n8n/media-execute'
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-unsafe-media-callback',
       input: { prompt: 'test' },
     }))
 

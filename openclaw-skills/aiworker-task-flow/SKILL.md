@@ -25,6 +25,9 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
   platform registry and never contain credentials.
 - The workflow returns a task ID immediately. Do not claim the model task has
   finished until its run status is `succeeded`.
+- For video analysis, OpenClaw only submits and reads the finished task. Audio
+  and frame workers use stateless local executors and never receive an OpenClaw
+  session key or memory directory.
 
 ## Submit
 
@@ -60,6 +63,28 @@ node skills/aiworker-task-flow/scripts/submit-task.mjs \
 If a session key is unavailable, provide both `--channel` and `--target` instead.
 Delete the temporary task file after a successful submission. Report the
 returned `taskId`, `status`, and whether the request was a duplicate.
+
+## Stateless Video Analysis
+
+When the user asks to analyze one local video, submit it through the dedicated
+`video-analysis` binding. The script copies the source into a mode-0700 managed
+inbox and sends only a random media key; never put an arbitrary filesystem path
+in the task payload.
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs \
+  --video-file <local-video> \
+  --prompt "分别分析语音和画面，再合并结果" \
+  --idempotency-key <stable-key> \
+  --delivery none \
+  --wait-seconds 600
+```
+
+Use `--vision-route <route-id>` only when the chosen route is a registered
+OpenAI-compatible route with the `vision` capability. Do not select an OpenClaw
+Agent route for the audio or frame worker. Video analysis intentionally rejects
+`delivery=reply`; after `--wait-seconds` returns `succeeded`, summarize its
+`output` in the current conversation.
 
 ## Status
 

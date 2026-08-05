@@ -148,7 +148,8 @@ n8n_runtime_source_manifest() {
       ops/n8n/lib/common.sh \
       ops/n8n/package.json \
       ops/n8n/package-lock.json \
-      ops/n8n/workflows/aiworker-task-intake.json
+      ops/n8n/workflows/aiworker-task-intake.json \
+      ops/n8n/workflows/aiworker-video-analysis.json
   )
 }
 

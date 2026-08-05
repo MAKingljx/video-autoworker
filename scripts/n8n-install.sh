@@ -107,6 +107,7 @@ source_origin="$(printf '%s' "$source_origin" | sed -E \
   -e 's#([?&])(access_token|token|auth|password|key)=[^&]*#\1redacted=1#g')"
 lock_sha="$(shasum -a 256 "$AIWORKER_N8N_SOURCE_DIR/package-lock.json" | awk '{print $1}')"
 workflow_sha="$(shasum -a 256 "$AIWORKER_N8N_SOURCE_DIR/workflows/aiworker-task-intake.json" | awk '{print $1}')"
+video_workflow_sha="$(shasum -a 256 "$AIWORKER_N8N_SOURCE_DIR/workflows/aiworker-video-analysis.json" | awk '{print $1}')"
 expected_runtime_source_manifest_sha="$(n8n_runtime_source_manifest_sha256 "$AIWORKER_REPOSITORY_ROOT")"
 release_root="$AIWORKER_N8N_RUNTIME_ROOT/releases"
 release_dir="$release_root/$source_commit"
@@ -141,6 +142,9 @@ if [[ ! -d "$release_dir" ]]; then
   install -m 600 \
     "$AIWORKER_N8N_SOURCE_DIR/workflows/aiworker-task-intake.json" \
     "$staging_dir/ops/n8n/workflows/aiworker-task-intake.json"
+  install -m 600 \
+    "$AIWORKER_N8N_SOURCE_DIR/workflows/aiworker-video-analysis.json" \
+    "$staging_dir/ops/n8n/workflows/aiworker-video-analysis.json"
 
   printf 'Installing pinned n8n runtime in staged release %s...\n' "$source_commit"
   (
@@ -166,6 +170,7 @@ if [[ ! -d "$release_dir" ]]; then
     printf 'source_commit=%s\n' "$source_commit"
     printf 'package_lock_sha256=%s\n' "$lock_sha"
     printf 'workflow_sha256=%s\n' "$workflow_sha"
+    printf 'video_workflow_sha256=%s\n' "$video_workflow_sha"
     printf 'runtime_source_manifest_sha256=%s\n' "$runtime_source_manifest_sha"
     printf 'n8n_version=%s\n' "$staged_version"
     printf 'built_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -181,6 +186,7 @@ else
     || ! -f "$release_dir/RUNTIME_SOURCE_SHA256SUMS" ]] \
     || ! grep -Fqx "package_lock_sha256=$lock_sha" "$release_dir/SOURCE_MANIFEST" \
     || ! grep -Fqx "workflow_sha256=$workflow_sha" "$release_dir/SOURCE_MANIFEST" \
+    || ! grep -Fqx "video_workflow_sha256=$video_workflow_sha" "$release_dir/SOURCE_MANIFEST" \
     || ! n8n_release_matches_repository_source "$release_dir"; then
     printf 'Existing runtime release failed validation: %s\n' "$release_dir" >&2
     exit 1

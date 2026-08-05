@@ -2,7 +2,7 @@
 
 ## 目标与边界
 
-本方案在同一台 Mac Studio 上把 n8n 作为 Video AutoWorker 的确定性工作流调度层，固定使用 `n8n 2.31.6` 和 `Node.js >= 22.22`。OpenClaw 负责提交任务，n8n 依次编排 `planner`、`executor`、`reviewer` 三个模型节点；每个节点都从外部注册表选择本地模型或云端模型 API，不在工作流 JSON 中固定供应商或密钥。n8n 仅监听 `127.0.0.1:5678`，Video AutoWorker 通过本机回环地址调用，默认不把编辑器或 Webhook 暴露到公网。
+本方案在同一台 Mac Studio 上把 n8n 作为 Video AutoWorker 的确定性工作流调度层，固定使用 `n8n 2.31.6` 和 `Node.js >= 22.22`。OpenClaw 负责提交任务；通用链依次编排 `planner`、`executor`、`reviewer`，视频链则执行“受控收件箱 → ffmpeg 预处理 → 音频/画面无状态分支执行 → 确定性合并”。每个生成模型节点都从外部注册表选择本地模型或云端模型 API，不在工作流 JSON 中固定供应商或密钥。n8n 仅监听 `127.0.0.1:5678`，Video AutoWorker 通过本机回环地址调用，默认不把编辑器或 Webhook 暴露到公网。
 
 进入 GitHub 的内容：
 
@@ -31,6 +31,7 @@ GitHub 仓库是唯一源码；安装脚本会在 `~/ai-worker/services/video-au
 | `scripts/n8n-import-workflows.sh` | 在 n8n 停止时备份状态，以固定 ID 导入并默认发布工作流 |
 | `scripts/n8n-install-launch-agent.sh` | 渲染、备份旧配置、安装并启动当前用户的 LaunchAgent |
 | `ops/n8n/workflows/aiworker-task-intake.json` | `Webhook -> 202 响应 -> 规划 -> 执行 -> 审核/回投` 的三模型节点闭环 |
+| `ops/n8n/workflows/aiworker-video-analysis.json` | `Webhook -> 视频预处理 -> 音频/画面独立无状态分支 -> 合并` 的视频分析闭环 |
 | `ops/model-routing/model-routes.example.json` | 无密钥的本地/云端模型注册表示例 |
 | `scripts/install-model-routes.sh` | 在仓库外初始化并保留模型注册表 |
 | `scripts/install-platform-env.sh` | 在仓库外初始化并保留 Video AutoWorker 与 n8n 共享密钥 |
@@ -128,7 +129,37 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 
 每个节点会建立独立、可幂等查询的子任务记录，记录实际 `routeId`、本地/云端位置、传输方式和模型名。模型执行一旦产生错误不会自动重放，以免工具或外部 API 产生重复副作用；n8n 重复同一个节点 HTTP 请求只会读取已经持久化的结果。旧版 `/api/n8n/execute` 继续保留，供历史单模型工作流回退使用。
 
-当前样例只使用 Webhook、Edit Fields、Respond to Webhook 和 HTTP Request 内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
+两条样例只使用 Webhook、Edit Fields、Respond to Webhook、HTTP Request 和 Merge 内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这两条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
+
+### 视频分析任务链
+
+第二个固定工作流 ID 为 `aiworker-video-analysis-v1`，生产 Webhook 路径为 `/webhook/aiworker-video-analysis`。OpenClaw 技能收到 `--video-file` 后不会把任意本机路径写进任务，而是以 0600 权限复制到 0700 的受控收件箱，只把随机 `videoKey` 交给平台。`prepare` 阶段验证容器、大小、时长和视频流，使用参数数组调用 ffmpeg，提取 16 kHz 单声道音轨和有限数量的 JPEG 抽帧；不拼接 shell 命令，也不接受远程 URL。
+
+准备完成后，n8n 分出两个独立分支：音频分支从模型注册表解析 `Whisper large-v3-turbo` CLI 资源，画面分支从任务链 `vision` 节点解析具备 `vision` 能力的 `openai-compatible` 直连路由。两个分支都固定 `memoryMode=none`，不接收 OpenClaw profile、agent、session key 或记忆目录。n8n v1 在同一次执行中按节点顺序调度分支，Merge 节点等待两侧都完成；这里保证的是模型职责隔离，不把顺序分支误报为计算并发。最终接口从 SQLite 中读取两个已成功的子任务结果并做确定性合并，不再调用第三个带会话模型。SQLite 只保存任务状态和本次输出，属于运维审计记录，不属于智能体长期记忆；抽帧、音轨和工作目录在成功合并后删除，下一次 `prepare` 会清理已超过 24 小时的异常残留与未消费收件箱文件。
+
+建议绑定配置如下；路由 ID 仍可替换成其他本地或云端直连视觉模型，不能换成 OpenClaw Agent 路由：
+
+```json
+{
+  "media": {
+    "audioResourceId": "whisper-large-v3-turbo",
+    "language": "zh",
+    "maxDurationSeconds": 1800,
+    "maxFrames": 4,
+    "frameWidth": 960
+  },
+  "modelRouting": {
+    "allowTaskOverride": true,
+    "nodes": {
+      "vision": {
+        "routeId": "local-qwen36-direct",
+        "fallbackRouteIds": [],
+        "instruction": "按时间顺序分析人物、场景、动作、文字和事件。"
+      }
+    }
+  }
+}
+```
 
 ## 安装 macOS LaunchAgent
 
@@ -157,12 +188,12 @@ bash "$runtime/scripts/n8n-stop.sh"
 
 ```bash
 bash scripts/install-platform-env.sh
-bash scripts/install-model-routes.sh
+bash scripts/install-model-routes.sh --sync-resources --enable-video-analysis
 chmod 600 "$HOME/.config/video-autoworker/platform.env"
 chmod 600 "$HOME/.config/video-autoworker/model-routes.json"
 ```
 
-已有注册表需要合并仓库模板中的辅助模型资源时，使用 `bash scripts/install-model-routes.sh --sync-resources`。脚本只替换同 ID 的辅助资源，保留现有访问路由和其他自定义辅助资源，并先在目标文件旁生成 0600 权限的时间戳备份。资源的 `production` 字段用于区分“生产已用”和“已安装待分配”；同步未分配资源只登记可核验的本机模型文件，不会启动模型服务或把它接入生产任务。
+已有注册表需要合并仓库模板中的辅助模型资源时，使用 `bash scripts/install-model-routes.sh --sync-resources`。部署视频链时再加 `--enable-video-analysis`：脚本仍保留现有路由地址、模型名和其他自定义字段，只为 `local-qwen36-direct` 合并 `vision` 能力，并同步 Whisper 的视频音频节点用途。任何实际写入前都会在目标旁生成 0600 权限的时间戳备份。资源的 `production` 字段用于区分“生产已用”和“已安装待分配”；同步未分配资源只登记可核验的本机模型文件，不会启动模型服务或把它接入生产任务。
 
 以下变量属于 Video AutoWorker 服务环境，不写入代码仓库：
 
@@ -172,6 +203,9 @@ N8N_DEFAULT_WEBHOOK_PATH="webhook/aiworker-task"
 N8N_API_KEY="<完成所有者初始化后在 n8n UI 创建的 API key>"
 N8N_WEBHOOK_SECRET="<安装脚本生成的随机共享密钥>"
 AIWORKER_MODEL_ROUTES_FILE="$HOME/.config/video-autoworker/model-routes.json"
+AIWORKER_FFMPEG_BIN="$HOME/ai-worker/bin/ffmpeg"
+AIWORKER_MEDIA_INGEST_DIR="$HOME/ai-worker/state/video-autoworker/media-inbox"
+AIWORKER_MEDIA_WORK_DIR="$HOME/ai-worker/state/video-autoworker/media-tasks"
 ```
 
 `N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存本地回环地址或云端 `apiKeyEnv` 变量名。默认优先让无需工具的规划、执行和审核节点使用 `local-qwen36-direct`，避免每个节点重复加载完整 OpenClaw Agent、工具和会话上下文；只有确实需要 OpenClaw 工具或最终会话回投时才选 `local-qwen36`。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
@@ -203,6 +237,12 @@ node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/script
 
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
   --status '<上一步返回的 taskId>'
+
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
+  --video-file '<本机视频路径>' \
+  --prompt '分别分析语音和画面，再合并结果' \
+  --delivery none \
+  --wait-seconds 600
 ```
 
 默认 `delivery.mode=none`，结果仅保存在任务运行记录中。要把结果回投到已有手机会话，必须显式传入 `--delivery reply --session-key '<已验证会话键>'`，或同时给出 `--channel` 与 `--target`；不得把测试消息投递到未经确认的会话。
@@ -226,6 +266,7 @@ ssh -N \
 - 兼容默认模型：仅在某个节点尚未选择注册路由时使用。
 - 允许 OpenClaw 单次改选：开启后，技能脚本可以只覆盖本次任务的节点模型，不改保存的工作流。
 - 纯本地三节点：规划、执行和审核都选择 `local-qwen36-direct`；只有需要工具或手机回投时再把对应节点切到 `local-qwen36` Agent 路由。
+- 视频分析链：Webhook 使用 `webhook/aiworker-video-analysis`，任务类型使用 `video-analysis`；`vision` 选择具备 `vision` 能力的直连路由，音频资源在高级配置的 `media.audioResourceId` 中选择。
 - 超时和重试：n8n 负责确定性流程重试；不要与后续 LangGraph 的节点级重试重复叠加。
 
 `/agents` 页的“模型集群”标签读取 `/api/n8n/models` 与 `/api/n8n/workflows`，按物理模型聚合路由，并把“生产已用”和“已安装待分配”分组展示，反向列出每个模型负责的任务链节点、主路由、备用路由和专用生产用途。生成模型的“可调度”代表配置与外部凭据引用完整；CLI 辅助模型会检查命令和权重权限，Ollama 辅助模型会实时检查本机模型清单，`local-files` 资源只检查已登记的模型目录和关键文件。真实推理结果仍以生产验收和任务链执行记录为准，文件检测通过不等于模型正在运行。智能体卡片属于 OpenClaw 管理能力，只显示在“命令”标签中，不再作为模型集群内容。
@@ -260,6 +301,8 @@ curl --fail-with-body \
 6. 使用同一幂等键再次提交时不产生第二次模型调用，并返回已有任务或缓存结果。
 7. 经确认的手机会话只收到最终审核节点的一次真实回投，且输出与父任务运行记录一致。
 8. `git status --short` 不出现数据库、日志、PID、环境文件、模型注册表或备份。
+9. 视频链存在 `prepare`、`audio`、`vision`、`finalize` 四个子任务；音频与画面输出均显示 `memoryMode=none`，父任务合并结果一致，媒体临时目录已经清理。
+10. 从 OpenClaw 当前会话执行技能的 `--video-file ... --wait-seconds ...`，确认是 OpenClaw 发起、n8n 编排、本地模型实际完成，而不是直接调用测试接口冒充完整链路。
 
 ## 升级与回退
 

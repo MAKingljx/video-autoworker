@@ -17,29 +17,45 @@ import {
 import { getN8nWorkflowBinding, updateN8nWorkflowRunStatus } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
 
-export function resolveN8nNodeCallbackUrl(): string {
-  const configured = String(process.env.AIWORKER_N8N_NODE_CALLBACK_URL || '').trim()
+function resolveN8nLoopbackCallbackUrl(configuredValue: string, pathname: string, label: string): string {
+  const configured = String(configuredValue || '').trim()
   const port = Number(process.env.PORT || 3017)
   if (!configured && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
     throw new Error('Video AutoWorker 服务端口无效')
   }
-  const candidate = configured || `http://127.0.0.1:${port}/api/n8n/node-execute`
+  const candidate = configured || `http://127.0.0.1:${port}${pathname}`
   let url: URL
   try {
     url = new URL(candidate)
   } catch {
-    throw new Error('n8n 模型节点回调地址无效')
+    throw new Error(`n8n ${label}回调地址无效`)
   }
   const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
   if (
     url.protocol !== 'http:'
     || !loopback
     || Boolean(url.username || url.password || url.search || url.hash)
-    || url.pathname !== '/api/n8n/node-execute'
+    || url.pathname !== pathname
   ) {
-    throw new Error('n8n 模型节点回调地址必须是本机回环 HTTP 接口 /api/n8n/node-execute')
+    throw new Error(`n8n ${label}回调地址必须是本机回环 HTTP 接口 ${pathname}`)
   }
   return url.toString()
+}
+
+export function resolveN8nNodeCallbackUrl(): string {
+  return resolveN8nLoopbackCallbackUrl(
+    String(process.env.AIWORKER_N8N_NODE_CALLBACK_URL || ''),
+    '/api/n8n/node-execute',
+    '模型节点',
+  )
+}
+
+export function resolveN8nMediaCallbackUrl(): string {
+  return resolveN8nLoopbackCallbackUrl(
+    String(process.env.AIWORKER_N8N_MEDIA_CALLBACK_URL || ''),
+    '/api/n8n/media-execute',
+    '媒体节点',
+  )
 }
 
 export async function POST(request: NextRequest) {
@@ -76,6 +92,11 @@ export async function POST(request: NextRequest) {
   if (!deliveryResult.success) {
     return NextResponse.json({ error: 'delivery 无效', issues: deliveryResult.error.issues }, { status: 400 })
   }
+  if (binding.taskType === 'video-analysis' && deliveryResult.data.mode !== 'none') {
+    return NextResponse.json({
+      error: '视频分析工作节点不进入 OpenClaw 会话；请由 OpenClaw 等待任务结果后在当前会话回复',
+    }, { status: 400 })
+  }
   const source = body?.source === undefined ? 'video-autoworker' : String(body.source).trim()
   if (!['video-autoworker', 'openclaw'].includes(source)) {
     return NextResponse.json({ error: 'source 只能是 video-autoworker 或 openclaw' }, { status: 400 })
@@ -98,11 +119,13 @@ export async function POST(request: NextRequest) {
   const taskId = taskIdResult.data
   const idempotencyKey = idempotencyResult.data
   let nodeCallbackUrl: string
+  let mediaCallbackUrl: string
   try {
     nodeCallbackUrl = resolveN8nNodeCallbackUrl()
+    mediaCallbackUrl = resolveN8nMediaCallbackUrl()
   } catch (error) {
     return NextResponse.json({
-      error: error instanceof Error ? error.message : 'n8n 模型节点回调地址无效',
+      error: error instanceof Error ? error.message : 'n8n 节点回调地址无效',
     }, { status: 503 })
   }
   const routing = {
@@ -114,7 +137,9 @@ export async function POST(request: NextRequest) {
     timeoutSeconds: binding.timeoutSeconds,
     retryCount: binding.retryCount,
     nodeCallbackUrl,
+    mediaCallbackUrl,
     config: binding.config,
+    ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
     ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
   }
   const created = createN8nTaskRun(db, {

@@ -1,0 +1,251 @@
+{
+  "id": "aiworker-video-analysis-v1",
+  "name": "AI-worker Stateless Video Analysis v1",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "aiworker-video-analysis",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000001",
+      "name": "AI-worker Video Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-620, 0],
+      "webhookId": "019fb12d-8000-7a10-9000-000000000002"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000003",
+              "name": "accepted",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000004",
+              "name": "taskId",
+              "value": "={{ $json.body.taskId }}",
+              "type": "string"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000005",
+              "name": "workflow",
+              "value": "AI-worker Stateless Video Analysis v1",
+              "type": "string"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000006",
+              "name": "memoryMode",
+              "value": "none",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000007",
+      "name": "Build Video Accepted Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-380, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-AIWorker-Workflow",
+                "value": "video-analysis-v1"
+              }
+            ]
+          }
+        }
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000008",
+      "name": "Return Video Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Video Webhook').item.json.body.routing.mediaCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'prepare', input: $('AI-worker Video Webhook').item.json.body.input }) }}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000009",
+      "name": "Prepare Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [100, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Video Webhook').item.json.body.routing.mediaCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'audio', input: { prepared: $json.output } }) }}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "019fb12d-8000-7a10-9000-00000000000a",
+      "name": "Analyze Audio Stateless",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [360, -140],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Video Webhook').item.json.body.routing.mediaCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'vision', input: { prepared: $json.output } }) }}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "019fb12d-8000-7a10-9000-00000000000b",
+      "name": "Analyze Frames Stateless",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [360, 140],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "019fb12d-8000-7a10-9000-00000000000c",
+      "name": "Wait For Both Workers",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [620, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Video Webhook').item.json.body.routing.mediaCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'finalize', input: {} }) }}",
+        "options": { "timeout": 600000 }
+      },
+      "id": "019fb12d-8000-7a10-9000-00000000000d",
+      "name": "Merge Video Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "AI-worker Video Webhook": {
+      "main": [[{ "node": "Build Video Accepted Result", "type": "main", "index": 0 }]]
+    },
+    "Build Video Accepted Result": {
+      "main": [[{ "node": "Return Video Accepted", "type": "main", "index": 0 }]]
+    },
+    "Return Video Accepted": {
+      "main": [[{ "node": "Prepare Video", "type": "main", "index": 0 }]]
+    },
+    "Prepare Video": {
+      "main": [[
+        { "node": "Analyze Audio Stateless", "type": "main", "index": 0 },
+        { "node": "Analyze Frames Stateless", "type": "main", "index": 0 }
+      ]]
+    },
+    "Analyze Audio Stateless": {
+      "main": [[{ "node": "Wait For Both Workers", "type": "main", "index": 0 }]]
+    },
+    "Analyze Frames Stateless": {
+      "main": [[{ "node": "Wait For Both Workers", "type": "main", "index": 1 }]]
+    },
+    "Wait For Both Workers": {
+      "main": [[{ "node": "Merge Video Result", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "versionId": "019fb12d-8000-7a10-9000-00000000000e",
+  "meta": { "templateCredsSetupCompleted": true },
+  "tags": []
+}

@@ -11,10 +11,11 @@ import {
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 
-const [templatePath, targetPath] = process.argv.slice(2)
+const [templatePath, targetPath, ...options] = process.argv.slice(2)
+const enableVideoAnalysis = options.includes('--enable-video-analysis')
 
-if (!templatePath || !targetPath) {
-  console.error('用法：sync-model-resources.mjs <template> <target>')
+if (!templatePath || !targetPath || options.some(option => option !== '--enable-video-analysis')) {
+  console.error('用法：sync-model-resources.mjs <template> <target> [--enable-video-analysis]')
   process.exit(2)
 }
 
@@ -39,10 +40,29 @@ const target = loadRegistry(targetPath, '目标文件')
 const templateResources = template.resources || []
 const templateIds = new Set(templateResources.map(resource => resource.id))
 const retainedResources = (target.resources || []).filter(resource => !templateIds.has(resource.id))
-const merged = { ...target, resources: [...retainedResources, ...templateResources] }
+let mergedRoutes = target.routes
+if (enableVideoAnalysis) {
+  const routeId = 'local-qwen36-direct'
+  const templateRoute = template.routes.find(route => route.id === routeId)
+  const targetRoute = target.routes.find(route => route.id === routeId)
+  if (!templateRoute || templateRoute.transport !== 'openai-compatible' || !templateRoute.capabilities?.includes('vision')) {
+    throw new Error(`模板缺少可用于视频分析的 ${routeId} vision 直连路由`)
+  }
+  if (!targetRoute || targetRoute.transport !== 'openai-compatible') {
+    throw new Error(`目标注册表缺少可安全升级的 ${routeId} 直连路由`)
+  }
+  mergedRoutes = target.routes.map(route => route.id === routeId
+    ? { ...route, capabilities: [...new Set([...(route.capabilities || []), 'vision'])] }
+    : route)
+}
+const merged = {
+  ...target,
+  routes: mergedRoutes,
+  resources: [...retainedResources, ...templateResources],
+}
 
 const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-')
-const backupPath = `${targetPath}.backup-${timestamp}`
+const backupPath = `${targetPath}.backup-${timestamp}-${process.pid}`
 const temporaryPath = join(dirname(targetPath), `.${basename(targetPath)}.tmp-${process.pid}`)
 
 copyFileSync(targetPath, backupPath)
@@ -56,4 +76,4 @@ try {
   rmSync(temporaryPath, { force: true })
 }
 
-console.log(`已同步 ${templateResources.length} 个辅助模型资源；备份：${backupPath}`)
+console.log(`已同步 ${templateResources.length} 个辅助模型资源${enableVideoAnalysis ? '，并启用视频分析视觉直连能力' : ''}；备份：${backupPath}`)

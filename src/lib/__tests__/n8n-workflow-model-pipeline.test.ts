@@ -42,3 +42,44 @@ describe('bundled n8n model pipeline', () => {
     expect(serialized).not.toContain('DASHSCOPE_API_KEY')
   })
 })
+
+describe('bundled stateless video pipeline', () => {
+  const workflowPath = resolve(process.cwd(), 'ops/n8n/workflows/aiworker-video-analysis.json')
+  const workflow = JSON.parse(readFileSync(workflowPath, 'utf8')) as {
+    id: string
+    name: string
+    nodes: WorkflowNode[]
+    connections: Record<string, any>
+  }
+
+  it('prepares once, runs independent audio and vision branches, then merges', () => {
+    expect(workflow.id).toBe('aiworker-video-analysis-v1')
+    expect(workflow.name).toBe('AI-worker Stateless Video Analysis v1')
+    const names = workflow.nodes.map(node => node.name)
+    expect(names).toEqual(expect.arrayContaining([
+      'Prepare Video',
+      'Analyze Audio Stateless',
+      'Analyze Frames Stateless',
+      'Wait For Both Workers',
+      'Merge Video Result',
+    ]))
+    expect(workflow.connections['Prepare Video'].main[0]).toEqual([
+      { node: 'Analyze Audio Stateless', type: 'main', index: 0 },
+      { node: 'Analyze Frames Stateless', type: 'main', index: 0 },
+    ])
+    expect(workflow.connections['Analyze Audio Stateless'].main[0][0].index).toBe(0)
+    expect(workflow.connections['Analyze Frames Stateless'].main[0][0].index).toBe(1)
+  })
+
+  it('uses only the authenticated media callback and declares stateless stages', () => {
+    const serialized = JSON.stringify(workflow)
+    expect(serialized).toContain('body.routing.mediaCallbackUrl')
+    expect(serialized).toContain("stage: 'audio'")
+    expect(serialized).toContain("stage: 'vision'")
+    expect(serialized).toContain("stage: 'finalize'")
+    expect(serialized).toContain("headers['x-aiworker-webhook-secret']")
+    expect(serialized).not.toContain('/api/n8n/node-execute')
+    expect(serialized).not.toContain('127.0.0.1:3017')
+    expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{12,}/)
+  })
+})

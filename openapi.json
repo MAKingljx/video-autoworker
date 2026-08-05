@@ -11529,6 +11529,29 @@
         }
       }
     },
+    "/api/n8n/media-execute": {
+      "post": {
+        "tags": ["n8n"], "summary": "Execute one stateless video-analysis stage", "operationId": "executeN8nMediaStage",
+        "description": "Internal loopback callback used by the bundled video workflow. Prepare, audio, vision, and finalize stages persist operational task results but never receive an OpenClaw session or memory context.",
+        "security": [{ "n8nWebhookSecret": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "required": ["taskId", "idempotencyKey", "stage"], "additionalProperties": false,
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "stage": { "type": "string", "enum": ["prepare", "audio", "vision", "finalize"] },
+            "input": { "type": "object", "default": {} }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "The stage succeeded, a cached stage was returned, or the parent was finalized" },
+          "202": { "description": "The same stage is already running" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }, "409": { "description": "Invalid parent state, idempotency mismatch, or unavailable worker" },
+          "502": { "description": "Media preparation or stateless model execution failed" }
+        }
+      }
+    },
     "/api/n8n/execute": {
       "post": {
         "tags": ["n8n"], "summary": "Execute a persisted n8n task through local OpenClaw", "operationId": "executeN8nTaskRun",

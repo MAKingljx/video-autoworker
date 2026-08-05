@@ -25,7 +25,7 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     -h|--help)
       printf 'Usage: %s [--activate|--no-activate] [workflow.json ...]\n' "$0"
-      printf 'Default: import the bundled workflow and publish it for production webhooks.\n'
+      printf 'Default: import all bundled workflows and publish them for production webhooks.\n'
       exit 0
       ;;
     --*)
@@ -46,7 +46,10 @@ if n8n_pid_is_running || n8n_launch_job_loaded || n8n_health_is_available; then
 fi
 
 if [[ "${#workflow_files[@]}" -eq 0 ]]; then
-  workflow_files=("$AIWORKER_N8N_RUNTIME_DIR/workflows/aiworker-task-intake.json")
+  workflow_files=(
+    "$AIWORKER_N8N_RUNTIME_DIR/workflows/aiworker-task-intake.json"
+    "$AIWORKER_N8N_RUNTIME_DIR/workflows/aiworker-video-analysis.json"
+  )
 fi
 
 if [[ -d "$N8N_USER_FOLDER" ]] && [[ -n "$(find "$N8N_USER_FOLDER" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then

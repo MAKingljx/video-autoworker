@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { chmod, copyFile, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { extname, join, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
 
@@ -64,10 +67,12 @@ async function main() {
     return
   }
 
+  const videoFile = option('--video-file')
   const promptFile = option('--prompt-file')
   const promptArg = option('--prompt')
-  const prompt = promptFile ? await readFile(promptFile, 'utf8') : promptArg
-  if (!prompt?.trim()) throw new Error('必须通过 --prompt-file 或 --prompt 提供任务内容')
+  const prompt = (promptFile ? await readFile(promptFile, 'utf8') : promptArg)
+    || (videoFile ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
+  if (!prompt?.trim()) throw new Error('必须通过 --prompt-file、--prompt 或 --video-file 提供任务内容')
   if (prompt.length > 120_000) throw new Error('任务内容超过 120000 字符上限')
 
   const bindingsBody = await request('/api/n8n/workflows')
@@ -75,7 +80,10 @@ async function main() {
   const requestedBinding = option('--binding-id')
   const binding = requestedBinding
     ? bindings.find(item => String(item.id) === requestedBinding && item.enabled)
-    : bindings.find(item => item.enabled)
+    : videoFile
+      ? bindings.find(item => item.enabled && item.taskType === 'video-analysis')
+      : bindings.find(item => item.enabled && item.taskType !== 'video-analysis')
+        || bindings.find(item => item.enabled)
   if (!binding) throw new Error('没有找到可用的 AI-worker n8n 任务链')
 
   const deliveryMode = option('--delivery') || 'none'
@@ -87,6 +95,9 @@ async function main() {
   if (deliveryMode === 'reply' && !sessionKey && !(channel && target)) {
     throw new Error('回投任务必须提供 --session-key，或同时提供 --channel 和 --target')
   }
+  if (videoFile && deliveryMode !== 'none') {
+    throw new Error('视频分析工作节点不进入 OpenClaw 会话；请使用 --delivery none 和 --wait-seconds 获取结果')
+  }
 
   const taskId = option('--task-id') || randomUUID()
   const idempotencyKey = option('--idempotency-key') || taskId
@@ -94,35 +105,94 @@ async function main() {
     ['planner', option('--planner-route')],
     ['executor', option('--executor-route')],
     ['reviewer', option('--reviewer-route')],
+    ['vision', option('--vision-route')],
   ].filter(([, routeId]) => Boolean(routeId)).map(([nodeKey, routeId]) => [
     nodeKey,
     { routeId, fallbackRouteIds: [] },
   ]))
-  const response = await request('/api/n8n/trigger', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  let stagedVideo = null
+  try {
+    if (videoFile) {
+      const sourcePath = await realpath(resolve(videoFile))
+      const sourceStat = await stat(sourcePath)
+      if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
+      const maxBytes = Number(process.env.AIWORKER_MEDIA_MAX_FILE_BYTES || 2 * 1024 ** 3)
+      if (!Number.isFinite(maxBytes) || sourceStat.size > maxBytes) throw new Error('视频文件超过允许大小')
+      const extension = extname(sourcePath).toLowerCase()
+      if (!['.mp4', '.mov', '.mkv', '.webm', '.m4v'].includes(extension)) {
+        throw new Error('视频格式只支持 mp4、mov、mkv、webm 或 m4v')
+      }
+      const inbox = resolve(process.env.AIWORKER_MEDIA_INGEST_DIR
+        || join(homedir(), 'ai-worker/state/video-autoworker/media-inbox'))
+      await mkdir(inbox, { recursive: true, mode: 0o700 })
+      await chmod(inbox, 0o700)
+      const videoKey = `${randomUUID()}${extension}`
+      stagedVideo = join(inbox, videoKey)
+      await copyFile(sourcePath, stagedVideo, constants.COPYFILE_EXCL)
+      await chmod(stagedVideo, 0o600)
+    }
+
+    const response = await request('/api/n8n/trigger', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bindingId: binding.id,
+        taskId,
+        idempotencyKey,
+        source: 'openclaw',
+        input: {
+          prompt: prompt.trim(),
+          ...(stagedVideo ? { videoKey: stagedVideo.split('/').pop() } : {}),
+        },
+        ...(Object.keys(routingNodes).length ? { routing: { nodes: routingNodes } } : {}),
+        delivery: {
+          mode: deliveryMode,
+          ...(sessionKey ? { sessionKey } : {}),
+          ...(channel ? { channel } : {}),
+          ...(target ? { target } : {}),
+          ...(accountId ? { accountId } : {}),
+        },
+      }),
+    })
+    if (response.duplicate && stagedVideo) {
+      await rm(stagedVideo, { force: true })
+      stagedVideo = null
+    } else if (stagedVideo) {
+      // n8n now owns the managed inbox copy. A later client-side wait timeout
+      // must not delete media that an accepted workflow may still consume.
+      stagedVideo = null
+    }
+
+    const waitSecondsRaw = option('--wait-seconds') || '0'
+    const waitSeconds = Number(waitSecondsRaw)
+    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 1_800) {
+      throw new Error('--wait-seconds 必须是 0 到 1800 的整数')
+    }
+    let finalRun = null
+    const deadline = Date.now() + waitSeconds * 1_000
+    while (waitSeconds > 0 && Date.now() <= deadline) {
+      const statusBody = await request(`/api/n8n/runs?taskId=${encodeURIComponent(response.taskId)}`)
+      finalRun = Array.isArray(statusBody?.runs)
+        ? statusBody.runs.find(item => item?.taskId === response.taskId) || null
+        : null
+      if (finalRun && ['succeeded', 'failed'].includes(finalRun.status)) break
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 2_000))
+    }
+    if (waitSeconds > 0 && (!finalRun || !['succeeded', 'failed'].includes(finalRun.status))) {
+      throw new Error(`等待任务 ${response.taskId} 超时，可使用 --status 继续查询`)
+    }
+    process.stdout.write(`${JSON.stringify({
+      taskId: response.taskId,
+      status: finalRun?.status || response.status || response.result?.data?.status || 'accepted',
+      duplicate: Boolean(response.duplicate),
       bindingId: binding.id,
-      taskId,
-      idempotencyKey,
-      source: 'openclaw',
-      input: { prompt: prompt.trim() },
-      ...(Object.keys(routingNodes).length ? { routing: { nodes: routingNodes } } : {}),
-      delivery: {
-        mode: deliveryMode,
-        ...(sessionKey ? { sessionKey } : {}),
-        ...(channel ? { channel } : {}),
-        ...(target ? { target } : {}),
-        ...(accountId ? { accountId } : {}),
-      },
-    }),
-  })
-  process.stdout.write(`${JSON.stringify({
-    taskId: response.taskId,
-    status: response.status || response.result?.data?.status || 'accepted',
-    duplicate: Boolean(response.duplicate),
-    ...(Object.keys(routingNodes).length ? { routes: routingNodes } : {}),
-  })}\n`)
+      ...(finalRun ? { output: finalRun.output, error: finalRun.error } : {}),
+      ...(Object.keys(routingNodes).length ? { routes: routingNodes } : {}),
+    })}\n`)
+  } catch (error) {
+    if (stagedVideo) await rm(stagedVideo, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 main().catch(error => fail(error instanceof Error ? error.message : String(error)))
