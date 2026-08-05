@@ -8,5 +8,6 @@ describe('standalone deployment script', () => {
 
     expect(script).not.toContain('declare -A')
     expect(script).toContain('case " $seen_pids " in')
+    expect(script).toContain('curl -fsSL "http://$VERIFY_HOST:$PORT/login"')
   })
 })

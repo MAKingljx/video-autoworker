@@ -214,13 +214,13 @@ echo "$new_pid" > "$PID_FILE"
 
 echo "==> verifying process and static assets"
 for _ in $(seq 1 20); do
-  if curl -fsS "http://$VERIFY_HOST:$PORT/login" >/dev/null 2>&1; then
+  if curl -fsSL "http://$VERIFY_HOST:$PORT/login" >/dev/null 2>&1; then
     break
   fi
   sleep 1
 done
 
-login_html="$(curl -fsS "http://$VERIFY_HOST:$PORT/login")"
+login_html="$(curl -fsSL "http://$VERIFY_HOST:$PORT/login")"
 css_path="$(printf '%s\n' "$login_html" | sed -n 's|.*\(/_next/static/chunks/[^"]*\.css\).*|\1|p' | sed -n '1p')"
 if [[ -z "${css_path:-}" ]]; then
   echo "error: no css asset found in rendered login HTML" >&2
