@@ -107,11 +107,13 @@ stop_existing_server() {
     return
   fi
 
-  declare -A seen=()
+  local seen_pids=""
   for pid in "${candidate_pids[@]}"; do
     [[ -z "$pid" ]] && continue
-    [[ -n "${seen[$pid]:-}" ]] && continue
-    seen[$pid]=1
+    case " $seen_pids " in
+      *" $pid "*) continue ;;
+    esac
+    seen_pids="$seen_pids $pid"
     stop_pid "$pid" "standalone server"
   done
 
