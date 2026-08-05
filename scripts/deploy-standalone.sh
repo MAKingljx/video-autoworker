@@ -243,7 +243,7 @@ if [[ ! -f "$css_disk_path" ]]; then
   exit 1
 fi
 
-content_type="$(curl -fsSI "http://$VERIFY_HOST:$PORT$css_path" | awk 'BEGIN{IGNORECASE=1} /^content-type:/ {print $2}' | tr -d '\r')"
+content_type="$(curl -fsSI "http://$VERIFY_HOST:$PORT$css_path" | awk 'tolower($1) == "content-type:" {print $2}' | tr -d '\r')"
 if [[ "${content_type:-}" != text/css* ]]; then
   echo "error: css asset served with unexpected content-type: ${content_type:-missing}" >&2
   exit 1

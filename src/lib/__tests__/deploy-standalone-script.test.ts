@@ -7,7 +7,9 @@ describe('standalone deployment script', () => {
     const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-standalone.sh'), 'utf8')
 
     expect(script).not.toContain('declare -A')
+    expect(script).not.toContain('IGNORECASE=1')
     expect(script).toContain('case " $seen_pids " in')
     expect(script).toContain('curl -fsSL "http://$VERIFY_HOST:$PORT/login"')
+    expect(script).toContain('tolower($1) == "content-type:"')
   })
 })
