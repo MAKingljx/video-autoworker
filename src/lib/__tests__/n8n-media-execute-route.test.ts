@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   transcribeN8nMedia: vi.fn(),
   analyzeN8nVideoFrames: vi.fn(),
   mergeN8nMediaResults: vi.fn(),
+  synthesizeN8nMediaResults: vi.fn(),
   cleanupN8nMediaTask: vi.fn(),
   cleanupExpiredN8nMediaTasks: vi.fn(),
 }))
@@ -28,6 +29,7 @@ vi.mock('@/lib/n8n-media-execution', async (importOriginal) => {
     transcribeN8nMedia: mocks.transcribeN8nMedia,
     analyzeN8nVideoFrames: mocks.analyzeN8nVideoFrames,
     mergeN8nMediaResults: mocks.mergeN8nMediaResults,
+    synthesizeN8nMediaResults: mocks.synthesizeN8nMediaResults,
     cleanupN8nMediaTask: mocks.cleanupN8nMediaTask,
     cleanupExpiredN8nMediaTasks: mocks.cleanupExpiredN8nMediaTasks,
   }
@@ -104,9 +106,10 @@ describe('n8n media node execution route', () => {
       run: { ...parent, taskId, status: 'running', attemptCount: 1 },
     }))
     mocks.prepareN8nMedia.mockResolvedValue({
-      kind: 'prepared-video', durationSeconds: 4, sourceBytes: 100, audioAvailable: true, frameCount: 4, memoryMode: 'none',
+      kind: 'prepared-video', durationSeconds: 4, sourceBytes: 100, audioAvailable: true, frameCount: 4, segmentCount: 1, segmentSeconds: 60, memoryMode: 'none',
     })
     mocks.mergeN8nMediaResults.mockReturnValue({ combinedText: '合并结果', memoryMode: 'none' })
+    mocks.synthesizeN8nMediaResults.mockResolvedValue({ combinedText: '最终汇总', memoryMode: 'none' })
     mocks.cleanupExpiredN8nMediaTasks.mockResolvedValue(0)
     mocks.cleanupN8nMediaTask.mockResolvedValue(undefined)
   })
@@ -125,7 +128,7 @@ describe('n8n media node execution route', () => {
     expect(mocks.createN8nTaskRun).toHaveBeenCalledWith({}, expect.objectContaining({
       source: 'n8n-media-node',
       delivery: { mode: 'none' },
-      maxAttempts: 1,
+      maxAttempts: 2,
       routing: expect.objectContaining({ mediaStage: 'prepare', memoryMode: 'none' }),
     }), { workspaceId: 2, tenantId: 3 })
     expect(mocks.prepareN8nMedia).toHaveBeenCalledWith(parent.taskId, parent.routing, parent.input)
@@ -137,11 +140,17 @@ describe('n8n media node execution route', () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({
       stage: 'finalize',
-      output: { combinedText: '合并结果', memoryMode: 'none' },
+      output: { combinedText: '最终汇总', memoryMode: 'none' },
     })
     expect(mocks.mergeN8nMediaResults).toHaveBeenCalledWith(
       expect.objectContaining({ transcript: '音频结果' }),
       expect.objectContaining({ analysis: '画面结果' }),
+    )
+    expect(mocks.synthesizeN8nMediaResults).toHaveBeenCalledWith(
+      parent.taskId,
+      parent.routing,
+      parent.input,
+      expect.objectContaining({ combinedText: '合并结果' }),
     )
     expect(mocks.completeN8nTaskRun).toHaveBeenCalledTimes(2)
     expect(mocks.cleanupN8nMediaTask).toHaveBeenCalledWith(parent.taskId)
@@ -151,7 +160,7 @@ describe('n8n media node execution route', () => {
     mocks.prepareN8nMedia.mockRejectedValue(new Error('视频容器探测失败'))
     const response = await POST(request('prepare'))
     expect(response.status).toBe(502)
-    expect(await response.json()).toMatchObject({ stage: 'prepare', status: 'failed', retryable: false })
+    expect(await response.json()).toMatchObject({ stage: 'prepare', status: 'failed', retryable: true })
     expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(2)
   })
 

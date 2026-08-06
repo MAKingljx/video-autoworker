@@ -8,6 +8,7 @@ import {
   mediaChildIdentity,
   mergeN8nMediaResults,
   prepareN8nMedia,
+  synthesizeN8nMediaResults,
   transcribeN8nMedia,
   type N8nMediaStage,
 } from '@/lib/n8n-media-execution'
@@ -60,9 +61,6 @@ export async function POST(request: NextRequest) {
   if (parent.idempotencyKey !== parsed.data.idempotencyKey) {
     return NextResponse.json({ error: '幂等键与父任务不匹配' }, { status: 409 })
   }
-  if (parent.status === 'failed') {
-    return NextResponse.json({ taskId: parent.taskId, status: parent.status, error: parent.error || '父任务已失败' }, { status: 409 })
-  }
   if (parent.status === 'succeeded') {
     return NextResponse.json({ taskId: parent.taskId, status: parent.status, output: parent.output, cached: true })
   }
@@ -87,7 +85,7 @@ export async function POST(request: NextRequest) {
     },
     taskInput: parsed.data.input,
     delivery: { mode: 'none' },
-    maxAttempts: 1,
+    maxAttempts: 2,
   }, scope)
 
   if (!child.created) {
@@ -101,16 +99,27 @@ export async function POST(request: NextRequest) {
         cached: true,
       })
     }
-    return NextResponse.json({
-      taskId: parent.taskId,
-      nodeTaskId: child.run.taskId,
-      stage,
-      status: child.run.status,
-      error: child.run.error || '媒体节点正在执行或已失败',
-    }, { status: child.run.status === 'running' ? 202 : 409 })
+    if (child.run.status === 'running') {
+      return NextResponse.json({
+        taskId: parent.taskId,
+        nodeTaskId: child.run.taskId,
+        stage,
+        status: child.run.status,
+        error: child.run.error || '媒体节点正在执行',
+      }, { status: 202 })
+    }
+    if (child.run.status === 'failed' && child.run.attemptCount >= child.run.maxAttempts) {
+      return NextResponse.json({
+        taskId: parent.taskId,
+        nodeTaskId: child.run.taskId,
+        stage,
+        status: child.run.status,
+        error: child.run.error || '媒体节点重试次数已用尽',
+      }, { status: 409 })
+    }
   }
 
-  markN8nTaskAccepted(db, childTaskId)
+  if (child.created) markN8nTaskAccepted(db, childTaskId)
   const claimed = claimN8nTaskRun(db, childTaskId)
   if (!claimed.claimed || !claimed.run) {
     return NextResponse.json({ error: '媒体节点状态不可执行' }, { status: 409 })
@@ -124,7 +133,8 @@ export async function POST(request: NextRequest) {
       const visionRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'vision'))
       if (audioRun?.status !== 'succeeded' || !audioRun.output) throw new Error('音频分析节点尚未成功完成')
       if (visionRun?.status !== 'succeeded' || !visionRun.output) throw new Error('画面分析节点尚未成功完成')
-      output = mergeN8nMediaResults(audioRun.output, visionRun.output)
+      const merged = mergeN8nMediaResults(audioRun.output, visionRun.output)
+      output = await synthesizeN8nMediaResults(parent.taskId, parent.routing, parent.input, merged)
     } else {
       output = await stageOutput(stage, parent.taskId, parent.routing, parent.input, parsed.data.input)
     }
@@ -152,13 +162,14 @@ export async function POST(request: NextRequest) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : '媒体节点执行失败'
     failN8nTaskRun(db, childTaskId, message)
     failN8nTaskRun(db, parent.taskId, `${stage}: ${message}`)
+    const retryable = claimed.run.attemptCount < claimed.run.maxAttempts
     return NextResponse.json({
       taskId: parent.taskId,
       nodeTaskId: childTaskId,
       stage,
       status: 'failed',
       error: message,
-      retryable: false,
+      retryable,
     }, { status: 502 })
   }
 }

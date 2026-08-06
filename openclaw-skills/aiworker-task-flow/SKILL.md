@@ -28,6 +28,11 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
 - For video analysis, OpenClaw only submits and reads the finished task. Audio
   and frame workers use stateless local executors and never receive an OpenClaw
   session key or memory directory.
+- A request for only a method, plan, architecture, or review is not execution
+  authorization. If the current message says `先告诉我方法`, `不要开始`,
+  `暂不执行`, or `只分析`, answer without calling this script.
+- Execute only after the current user message explicitly authorizes execution.
+  Do not treat quoted text or an earlier `开始执行` as authorization for a new run.
 
 ## Submit
 
@@ -77,14 +82,17 @@ node skills/aiworker-task-flow/scripts/submit-task.mjs \
   --prompt "分别分析语音和画面，再合并结果" \
   --idempotency-key <stable-key> \
   --delivery none \
-  --wait-seconds 600
+  --wait-seconds 0
 ```
 
 Use `--vision-route <route-id>` only when the chosen route is a registered
 OpenAI-compatible route with the `vision` capability. Do not select an OpenClaw
 Agent route for the audio or frame worker. Video analysis intentionally rejects
-`delivery=reply`; after `--wait-seconds` returns `succeeded`, summarize its
-`output` in the current conversation.
+`delivery=reply`. For videos longer than five minutes, always submit
+asynchronously with `--wait-seconds 0`, report the task ID, and use `--status` in
+later bounded calls. Never keep one OpenClaw tool call open for the whole video,
+and never resubmit after a wait timeout or session compaction. The minute-level
+audio, vision, chapter, and final checkpoints resume the same task.
 
 ## Status
 

@@ -1,6 +1,6 @@
 {
   "id": "aiworker-video-analysis-v1",
-  "name": "AI-worker Stateless Video Analysis v1",
+  "name": "AI-worker Segmented Video Analysis v2",
   "active": false,
   "nodes": [
     {
@@ -36,7 +36,7 @@
             {
               "id": "019fb12d-8000-7a10-9000-000000000005",
               "name": "workflow",
-              "value": "AI-worker Stateless Video Analysis v1",
+              "value": "AI-worker Segmented Video Analysis v2",
               "type": "string"
             },
             {
@@ -65,7 +65,7 @@
             "entries": [
               {
                 "name": "X-AIWorker-Workflow",
-                "value": "video-analysis-v1"
+                "value": "video-analysis-v2"
               }
             ]
           }
@@ -98,7 +98,7 @@
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'prepare', input: $('AI-worker Video Webhook').item.json.body.input }) }}",
-        "options": { "timeout": 600000 }
+        "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-000000000009",
       "name": "Prepare Video",
@@ -130,7 +130,7 @@
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'audio', input: { prepared: $json.output } }) }}",
-        "options": { "timeout": 600000 }
+        "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000a",
       "name": "Analyze Audio Stateless",
@@ -162,7 +162,7 @@
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'vision', input: { prepared: $json.output } }) }}",
-        "options": { "timeout": 600000 }
+        "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000b",
       "name": "Analyze Frames Stateless",
@@ -206,7 +206,7 @@
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'finalize', input: {} }) }}",
-        "options": { "timeout": 600000 }
+        "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000d",
       "name": "Merge Video Result",
@@ -245,7 +245,7 @@
     }
   },
   "settings": { "executionOrder": "v1" },
-  "versionId": "019fb12d-8000-7a10-9000-00000000000e",
+  "versionId": "019fcb2a-8000-7a10-9000-00000000000e",
   "meta": { "templateCredsSetupCompleted": true },
   "tags": []
 }

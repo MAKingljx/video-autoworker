@@ -116,7 +116,7 @@ async function main() {
       const sourcePath = await realpath(resolve(videoFile))
       const sourceStat = await stat(sourcePath)
       if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
-      const maxBytes = Number(process.env.AIWORKER_MEDIA_MAX_FILE_BYTES || 2 * 1024 ** 3)
+      const maxBytes = Number(process.env.AIWORKER_MEDIA_MAX_FILE_BYTES || 10 * 1024 ** 3)
       if (!Number.isFinite(maxBytes) || sourceStat.size > maxBytes) throw new Error('视频文件超过允许大小')
       const extension = extname(sourcePath).toLowerCase()
       if (!['.mp4', '.mov', '.mkv', '.webm', '.m4v'].includes(extension)) {
@@ -128,7 +128,15 @@ async function main() {
       await chmod(inbox, 0o700)
       const videoKey = `${randomUUID()}${extension}`
       stagedVideo = join(inbox, videoKey)
-      await copyFile(sourcePath, stagedVideo, constants.COPYFILE_EXCL)
+      const copyMode = process.platform === 'darwin'
+        ? constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE_FORCE
+        : constants.COPYFILE_EXCL
+      try {
+        await copyFile(sourcePath, stagedVideo, copyMode)
+      } catch (error) {
+        if (process.platform !== 'darwin') throw error
+        throw new Error('视频与受控收件箱必须位于支持 APFS 克隆的同一文件系统，未执行 7GB 级完整复制')
+      }
       await chmod(stagedVideo, 0o600)
     }
 
@@ -165,8 +173,8 @@ async function main() {
 
     const waitSecondsRaw = option('--wait-seconds') || '0'
     const waitSeconds = Number(waitSecondsRaw)
-    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 1_800) {
-      throw new Error('--wait-seconds 必须是 0 到 1800 的整数')
+    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 14_400) {
+      throw new Error('--wait-seconds 必须是 0 到 14400 的整数')
     }
     let finalRun = null
     const deadline = Date.now() + waitSeconds * 1_000

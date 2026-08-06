@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { access, chmod, mkdir, readFile, readdir, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -21,12 +21,20 @@ const videoKeySchema = z.string().trim().regex(
 const mediaConfigSchema = z.object({
   audioResourceId: z.string().trim().min(1).max(80).default('whisper-large-v3-turbo'),
   language: z.string().trim().min(2).max(20).default('zh'),
-  maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(1_800),
-  maxFileBytes: z.coerce.number().int().min(1_024).max(10 * 1024 ** 3).default(2 * 1024 ** 3),
+  maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(7_200),
+  maxFileBytes: z.coerce.number().int().min(1_024).max(10 * 1024 ** 3).default(10 * 1024 ** 3),
+  segmentSeconds: z.coerce.number().int().min(30).max(300).default(60),
+  segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(1),
+  maxKeyframesPerSegment: z.coerce.number().int().min(1).max(6).default(3),
   maxFrames: z.coerce.number().int().min(1).max(12).default(4),
   frameWidth: z.coerce.number().int().min(320).max(2_048).default(960),
-  maxTranscriptChars: z.coerce.number().int().min(500).max(100_000).default(12_000),
-}).strict()
+  maxTranscriptCharsPerSegment: z.coerce.number().int().min(500).max(12_000).default(6_000),
+  maxTranscriptChars: z.coerce.number().int().min(500).max(100_000).default(100_000),
+}).strict().superRefine((settings, ctx) => {
+  if (settings.segmentOverlapSeconds >= settings.segmentSeconds) {
+    ctx.addIssue({ code: 'custom', path: ['segmentOverlapSeconds'], message: '分段重叠必须小于分段时长' })
+  }
+})
 
 export type N8nMediaStage = 'prepare' | 'audio' | 'vision' | 'finalize'
 
@@ -36,7 +44,23 @@ export interface PreparedMedia extends Record<string, unknown> {
   sourceBytes: number
   audioAvailable: boolean
   frameCount: number
+  segmentCount: number
+  segmentSeconds: number
   memoryMode: 'none'
+}
+
+interface MediaSegment {
+  index: number
+  startSeconds: number
+  durationSeconds: number
+  audioFile: string | null
+  frameFiles: string[]
+}
+
+export interface MediaSegmentWindow {
+  index: number
+  startSeconds: number
+  durationSeconds: number
 }
 
 interface CommandResult {
@@ -47,6 +71,7 @@ interface CommandResult {
 interface MediaMetadata extends PreparedMedia {
   taskId: string
   preparedAt: string
+  segments: MediaSegment[]
 }
 
 type CliAudioResource = Omit<AuxiliaryModelResource, 'runtime'> & {
@@ -170,7 +195,9 @@ async function assertControlledSource(videoKey: string, maxFileBytes: number) {
 
 async function writeMetadata(workspace: string, metadata: MediaMetadata) {
   const path = join(workspace, 'metadata.json')
-  await writeFile(path, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 })
+  const temporaryPath = `${path}.tmp-${process.pid}`
+  await writeFile(temporaryPath, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(temporaryPath, path)
   await chmod(path, 0o600)
 }
 
@@ -183,6 +210,76 @@ async function readMetadata(taskId: string): Promise<MediaMetadata> {
   return parsed
 }
 
+function preparedOutput(metadata: MediaMetadata): PreparedMedia {
+  return {
+    kind: metadata.kind,
+    durationSeconds: metadata.durationSeconds,
+    sourceBytes: metadata.sourceBytes,
+    audioAvailable: metadata.audioAvailable,
+    frameCount: metadata.frameCount,
+    segmentCount: metadata.segmentCount,
+    segmentSeconds: metadata.segmentSeconds,
+    memoryMode: 'none',
+  }
+}
+
+async function readExistingMetadata(taskId: string): Promise<MediaMetadata | null> {
+  try {
+    const metadata = await readMetadata(taskId)
+    if (!Array.isArray(metadata.segments) || !metadata.segments.length) return null
+    return metadata
+  } catch {
+    return null
+  }
+}
+
+function segmentTimeLabel(segment: MediaSegment): string {
+  const format = (seconds: number) => {
+    const value = Math.max(0, Math.floor(seconds))
+    const hours = Math.floor(value / 3_600)
+    const minutes = Math.floor((value % 3_600) / 60)
+    const remaining = value % 60
+    return [hours, minutes, remaining].map(item => String(item).padStart(2, '0')).join(':')
+  }
+  return `${format(segment.startSeconds)}-${format(segment.startSeconds + segment.durationSeconds)}`
+}
+
+export function buildMediaSegmentWindows(durationSeconds: number, segmentSeconds: number): MediaSegmentWindow[] {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('视频时长无效')
+  if (!Number.isInteger(segmentSeconds) || segmentSeconds <= 0) throw new Error('分段时长无效')
+  const segmentCount = Math.max(1, Math.ceil(durationSeconds / segmentSeconds))
+  return Array.from({ length: segmentCount }, (_, index) => ({
+    index: index + 1,
+    startSeconds: index * segmentSeconds,
+    durationSeconds: Math.min(segmentSeconds, durationSeconds - index * segmentSeconds),
+  }))
+}
+
+async function writeCheckpoint(workspace: string, name: string, value: Record<string, unknown>) {
+  const checkpointDir = join(workspace, 'checkpoints')
+  await mkdir(checkpointDir, { recursive: true, mode: 0o700 })
+  const path = join(checkpointDir, name)
+  const temporaryPath = `${path}.tmp-${process.pid}`
+  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(temporaryPath, path)
+  await chmod(path, 0o600)
+}
+
+async function readCheckpoint(
+  workspace: string,
+  name: string,
+  validate: (value: Record<string, unknown>) => boolean,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const value = JSON.parse(await readFile(join(workspace, 'checkpoints', name), 'utf8'))
+    return value && typeof value === 'object' && !Array.isArray(value) && validate(value)
+      ? value as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
 export async function prepareN8nMedia(
   taskId: string,
   routing: Record<string, unknown>,
@@ -190,6 +287,13 @@ export async function prepareN8nMedia(
 ): Promise<PreparedMedia> {
   const settings = mediaConfig(routing)
   const videoKey = videoKeySchema.parse(input.videoKey)
+  const cached = await readExistingMetadata(taskId)
+  if (cached) {
+    const orphanedSource = await assertControlledSource(videoKey, settings.maxFileBytes).catch(() => null)
+    if (orphanedSource) await unlink(orphanedSource.sourcePath).catch(() => undefined)
+    return preparedOutput(cached)
+  }
+
   const { sourcePath, sourceBytes } = await assertControlledSource(videoKey, settings.maxFileBytes)
   const ffmpeg = ffmpegCommand()
   await access(ffmpeg, constants.X_OK)
@@ -199,59 +303,114 @@ export async function prepareN8nMedia(
   await rm(workspace, { recursive: true, force: true })
   await mkdir(workspace, { recursive: false, mode: 0o700 })
 
-  try {
-    const probe = await probeMedia(ffmpeg, sourcePath)
-    if (!probe.hasVideo) throw new Error('输入文件没有可分析的视频流')
-    if (probe.durationSeconds > settings.maxDurationSeconds) {
-      throw new Error(`视频时长超过 ${settings.maxDurationSeconds} 秒上限`)
-    }
-    const timeoutMs = Math.min(30 * 60_000, Math.max(60_000, Math.ceil(probe.durationSeconds * 4_000)))
-    if (probe.hasAudio) {
-      try {
-        await runCommand(ffmpeg, [
-          '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', sourcePath,
-          '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', join(workspace, 'audio.wav'),
-        ], { timeoutMs })
-      } catch (error) {
-        throw commandFailure(error, '视频音轨提取失败')
-      }
-    }
-
-    const frameRate = Math.max(0.001, settings.maxFrames / probe.durationSeconds)
+  const probe = await probeMedia(ffmpeg, sourcePath)
+  if (!probe.hasVideo) throw new Error('输入文件没有可分析的视频流')
+  if (probe.durationSeconds > settings.maxDurationSeconds) {
+    throw new Error(`视频时长超过 ${settings.maxDurationSeconds} 秒上限`)
+  }
+  const timeoutMs = Math.min(60 * 60_000, Math.max(60_000, Math.ceil(probe.durationSeconds * 4_000)))
+  const audioSourcePath = join(workspace, 'audio.wav')
+  if (probe.hasAudio) {
     try {
       await runCommand(ffmpeg, [
         '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', sourcePath,
-        '-an', '-vf', `fps=${frameRate},scale=${settings.frameWidth}:-2:force_original_aspect_ratio=decrease`,
-        '-frames:v', String(settings.maxFrames), '-q:v', '3', join(workspace, 'frame-%03d.jpg'),
+        '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audioSourcePath,
       ], { timeoutMs })
     } catch (error) {
-      throw commandFailure(error, '视频画面抽帧失败')
+      throw commandFailure(error, '视频音轨提取失败')
     }
-    const frames = (await readdir(workspace)).filter(name => /^frame-\d{3}\.jpg$/.test(name)).sort()
-    if (!frames.length) throw new Error('视频画面抽帧结果为空')
-
-    const metadata: MediaMetadata = {
-      taskId,
-      kind: 'prepared-video',
-      durationSeconds: Math.round(probe.durationSeconds * 1000) / 1000,
-      sourceBytes,
-      audioAvailable: probe.hasAudio,
-      frameCount: frames.length,
-      memoryMode: 'none',
-      preparedAt: new Date().toISOString(),
-    }
-    await writeMetadata(workspace, metadata)
-    return {
-      kind: metadata.kind,
-      durationSeconds: metadata.durationSeconds,
-      sourceBytes: metadata.sourceBytes,
-      audioAvailable: metadata.audioAvailable,
-      frameCount: metadata.frameCount,
-      memoryMode: 'none',
-    }
-  } finally {
-    await unlink(sourcePath).catch(() => undefined)
   }
+
+  const segmentWindows = buildMediaSegmentWindows(probe.durationSeconds, settings.segmentSeconds)
+  const segmentCount = segmentWindows.length
+  const segments: MediaSegment[] = []
+  let frameCount = 0
+  for (const window of segmentWindows) {
+    const index = window.index - 1
+    const { startSeconds, durationSeconds } = window
+    const prefix = `segment-${String(index + 1).padStart(3, '0')}`
+    const segmentDir = join(workspace, prefix)
+    await mkdir(segmentDir, { recursive: true, mode: 0o700 })
+    let audioFile: string | null = null
+    if (probe.hasAudio) {
+      audioFile = join(prefix, 'audio.wav')
+      const extendedDuration = Math.min(
+        durationSeconds + settings.segmentOverlapSeconds,
+        probe.durationSeconds - startSeconds,
+      )
+      try {
+        await runCommand(ffmpeg, [
+          '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+          '-ss', String(startSeconds), '-t', String(extendedDuration), '-i', audioSourcePath,
+          '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', join(workspace, audioFile),
+        ], { timeoutMs: Math.max(60_000, Math.ceil(extendedDuration * 2_000)) })
+      } catch (error) {
+        throw commandFailure(error, `第 ${index + 1} 段音频切分失败`)
+      }
+    }
+
+    const frameFiles: string[] = []
+    const scenePattern = join(segmentDir, 'scene-%02d.jpg')
+    try {
+      await runCommand(ffmpeg, [
+        '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+        '-ss', String(startSeconds), '-t', String(durationSeconds), '-i', sourcePath, '-an',
+        '-vf', `select=gt(scene\\,0.20),scale=${settings.frameWidth}:-2:force_original_aspect_ratio=decrease`,
+        '-fps_mode', 'vfr', '-frames:v', String(settings.maxKeyframesPerSegment), '-q:v', '3', scenePattern,
+      ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
+    } catch {
+      // Some videos have no scene boundary in a minute; uniform fallback below is authoritative.
+    }
+    const sceneFrames = (await readdir(segmentDir))
+      .filter(name => /^scene-\d{2}\.jpg$/.test(name)).sort()
+      .map(name => join(prefix, name))
+    frameFiles.push(...sceneFrames.slice(0, settings.maxKeyframesPerSegment))
+
+    if (frameFiles.length < settings.maxKeyframesPerSegment) {
+      const needed = settings.maxKeyframesPerSegment - frameFiles.length
+      try {
+        await runCommand(ffmpeg, [
+          '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+          '-ss', String(startSeconds), '-t', String(durationSeconds), '-i', sourcePath, '-an',
+          '-vf', `fps=${Math.max(0.001, needed / durationSeconds)},scale=${settings.frameWidth}:-2:force_original_aspect_ratio=decrease`,
+          '-frames:v', String(needed), '-q:v', '3', join(segmentDir, 'uniform-%02d.jpg'),
+        ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
+      } catch (error) {
+        if (!frameFiles.length) throw commandFailure(error, `第 ${index + 1} 段画面抽帧失败`)
+      }
+      const uniformFrames = (await readdir(segmentDir))
+        .filter(name => /^uniform-\d{2}\.jpg$/.test(name)).sort()
+        .map(name => join(prefix, name))
+      frameFiles.push(...uniformFrames.slice(0, needed))
+    }
+    if (!frameFiles.length) throw new Error(`第 ${index + 1} 段画面抽帧结果为空`)
+    frameCount += frameFiles.length
+    segments.push({
+      index: index + 1,
+      startSeconds: Math.round(startSeconds * 1000) / 1000,
+      durationSeconds: Math.round(durationSeconds * 1000) / 1000,
+      audioFile,
+      frameFiles,
+    })
+  }
+
+  await unlink(audioSourcePath).catch(() => undefined)
+  const metadata: MediaMetadata = {
+    taskId,
+    kind: 'prepared-video',
+    durationSeconds: Math.round(probe.durationSeconds * 1000) / 1000,
+    sourceBytes,
+    audioAvailable: probe.hasAudio,
+    frameCount,
+    segmentCount,
+    segmentSeconds: settings.segmentSeconds,
+    segments,
+    memoryMode: 'none',
+    preparedAt: new Date().toISOString(),
+  }
+  await writeMetadata(workspace, metadata)
+  await unlink(sourcePath).catch(() => undefined)
+  return preparedOutput(metadata)
 }
 
 function resolveAudioResource(routing: Record<string, unknown>): CliAudioResource {
@@ -288,26 +447,52 @@ export async function transcribeN8nMedia(
   }
   const command = expandHome(resource.runtime.command)
   await access(command, constants.X_OK)
-  const audioPath = join(mediaTaskWorkspace(taskId), 'audio.wav')
-  await access(audioPath, constants.R_OK)
-  let result: CommandResult
-  try {
-    result = await runCommand(command, [
-      '--model', resource.model,
-      '--language', settings.language,
-      '--max-chars', String(settings.maxTranscriptChars),
-      audioPath,
-    ], {
-      timeoutMs: Math.min(30 * 60_000, Math.max(60_000, Math.ceil(metadata.durationSeconds * 4_000))),
-      maxBuffer: 2 * 1024 * 1024,
-    })
-  } catch (error) {
-    throw commandFailure(error, '音频模型转写失败')
+  const workspace = mediaTaskWorkspace(taskId)
+  const segments: Record<string, unknown>[] = []
+  for (const segment of metadata.segments) {
+    if (!segment.audioFile) continue
+    const checkpointName = `audio-${String(segment.index).padStart(3, '0')}.json`
+    let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
+      value.index === segment.index && typeof value.transcript === 'string'
+    ))
+    if (!segmentResult) {
+      const audioPath = join(workspace, segment.audioFile)
+      await access(audioPath, constants.R_OK)
+      let result: CommandResult
+      try {
+        result = await runCommand(command, [
+          '--model', resource.model,
+          '--language', settings.language,
+          '--max-chars', String(settings.maxTranscriptCharsPerSegment),
+          audioPath,
+        ], {
+          timeoutMs: Math.min(15 * 60_000, Math.max(60_000, Math.ceil(segment.durationSeconds * 8_000))),
+          maxBuffer: 2 * 1024 * 1024,
+        })
+      } catch (error) {
+        throw commandFailure(error, `第 ${segment.index} 段音频模型转写失败`)
+      }
+      const transcript = result.stdout.trim().slice(0, settings.maxTranscriptCharsPerSegment)
+      if (!transcript) throw new Error(`第 ${segment.index} 段音频模型返回空转写`)
+      segmentResult = {
+        index: segment.index,
+        startSeconds: segment.startSeconds,
+        durationSeconds: segment.durationSeconds,
+        timeRange: segmentTimeLabel(segment),
+        transcript,
+      }
+      await writeCheckpoint(workspace, checkpointName, segmentResult)
+    }
+    segments.push(segmentResult)
   }
-  const transcript = result.stdout.trim().slice(0, settings.maxTranscriptChars)
+  const transcript = segments.map(segment => (
+    `[${segment.timeRange}]\n${String(segment.transcript || '').trim()}`
+  )).join('\n\n').slice(0, settings.maxTranscriptChars)
   if (!transcript) throw new Error('音频模型返回空转写')
   return {
     transcript,
+    segments,
+    segmentCount: segments.length,
     skipped: false,
     resourceId: resource.id,
     model: resource.model,
@@ -326,38 +511,12 @@ function assertVisionRoute(route: N8nModelRoute): Extract<N8nModelRoute, { trans
   return route
 }
 
-export async function analyzeN8nVideoFrames(
-  taskId: string,
-  routing: Record<string, unknown>,
-  taskInput: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  const metadata = await readMetadata(taskId)
-  const resolved = resolveN8nNodeRoute(routing, 'vision')
-  const route = assertVisionRoute(resolved.route)
-  const workspace = mediaTaskWorkspace(taskId)
-  const frameNames = (await readdir(workspace)).filter(name => /^frame-\d{3}\.jpg$/.test(name)).sort()
-  if (!frameNames.length) throw new Error('没有可供画面模型分析的抽帧')
-  const images = await Promise.all(frameNames.map(async name => {
-    const buffer = await readFile(join(workspace, name))
-    if (buffer.byteLength > 4 * 1024 * 1024) throw new Error(`抽帧文件过大：${name}`)
-    return `data:image/jpeg;base64,${buffer.toString('base64')}`
-  }))
-  const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
-  const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
-  if (route.apiKeyEnv && !apiKey) throw new Error(`视频画面路由缺少外部凭据引用 ${route.apiKeyEnv}`)
-  const content = [
-    {
-      type: 'text',
-      text: [
-        resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
-        `视频时长约 ${metadata.durationSeconds} 秒，共提供 ${images.length} 张按时间排序的抽帧。`,
-        `业务要求：${prompt.slice(0, 4_000)}`,
-        '只输出画面可见信息，不分析或评论音频；音频与合并由其他节点负责。',
-        '不要引用历史会话或长期记忆；无法从画面确认的内容要明确说明。',
-      ].join('\n'),
-    },
-    ...images.map(url => ({ type: 'image_url', image_url: { url } })),
-  ]
+async function callCompatibleModel(
+  route: Extract<N8nModelRoute, { transport: 'openai-compatible' }>,
+  apiKey: string,
+  content: unknown,
+  failurePrefix: string,
+): Promise<any> {
   const response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -367,7 +526,7 @@ export async function analyzeN8nVideoFrames(
     body: JSON.stringify({
       model: route.model,
       messages: [
-        { role: 'system', content: '你是无状态画面节点，只处理当前请求中的视频抽帧；不分析音频，不读取或写入任何会话记忆。' },
+        { role: 'system', content: '你是无状态视频分析工作节点，只处理当前请求，不读取或写入任何会话记忆。' },
         { role: 'user', content },
       ],
       ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
@@ -380,23 +539,83 @@ export async function analyzeN8nVideoFrames(
   try {
     parsed = raw ? JSON.parse(raw) : null
   } catch {
-    // The error below intentionally reports a bounded response fragment.
+    // The bounded raw fragment below is enough to diagnose a malformed response.
   }
   if (!response.ok) {
     const detail = String(parsed?.error?.message || raw || `HTTP ${response.status}`).slice(0, 2_000)
-    throw new Error(`视频画面模型调用失败：${detail}`)
+    throw new Error(`${failurePrefix}：${detail}`)
   }
-  const analysis = parsed?.choices?.[0]?.message?.content
-  if (typeof analysis !== 'string' || !analysis.trim()) throw new Error('视频画面模型返回空结果')
+  return parsed
+}
+
+export async function analyzeN8nVideoFrames(
+  taskId: string,
+  routing: Record<string, unknown>,
+  taskInput: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const metadata = await readMetadata(taskId)
+  const resolved = resolveN8nNodeRoute(routing, 'vision')
+  const route = assertVisionRoute(resolved.route)
+  const workspace = mediaTaskWorkspace(taskId)
+  const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
+  const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
+  if (route.apiKeyEnv && !apiKey) throw new Error(`视频画面路由缺少外部凭据引用 ${route.apiKeyEnv}`)
+  const segments: Record<string, unknown>[] = []
+  let totalFrames = 0
+  for (const segment of metadata.segments) {
+    const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
+    let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
+      value.index === segment.index && typeof value.analysis === 'string'
+    ))
+    if (!segmentResult) {
+      const images = await Promise.all(segment.frameFiles.map(async name => {
+        const buffer = await readFile(join(workspace, name))
+        if (buffer.byteLength > 4 * 1024 * 1024) throw new Error(`抽帧文件过大：${name}`)
+        return `data:image/jpeg;base64,${buffer.toString('base64')}`
+      }))
+      if (!images.length) throw new Error(`第 ${segment.index} 段没有可供画面模型分析的抽帧`)
+      const content = [
+        {
+          type: 'text',
+          text: [
+            resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
+            `当前片段时间为 ${segmentTimeLabel(segment)}，提供 ${images.length} 张按时间排序的关键帧。`,
+            `业务要求：${prompt.slice(0, 4_000)}`,
+            '只输出画面可见的人物、场景、动作、文字和事件；不要分析音频。',
+            '不要引用历史会话或长期记忆；无法从画面确认的内容要明确说明。',
+          ].join('\n'),
+        },
+        ...images.map(url => ({ type: 'image_url', image_url: { url } })),
+      ]
+      const parsed = await callCompatibleModel(route, apiKey, content, '视频画面模型调用失败')
+      const analysis = parsed?.choices?.[0]?.message?.content
+      if (typeof analysis !== 'string' || !analysis.trim()) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
+      segmentResult = {
+        index: segment.index,
+        startSeconds: segment.startSeconds,
+        durationSeconds: segment.durationSeconds,
+        timeRange: segmentTimeLabel(segment),
+        analysis: analysis.trim().slice(0, 12_000),
+        frameCount: images.length,
+      }
+      await writeCheckpoint(workspace, checkpointName, segmentResult)
+    }
+    totalFrames += Number(segmentResult.frameCount || segment.frameFiles.length)
+    segments.push(segmentResult)
+  }
+  const analysis = segments.map(segment => (
+    `[${segment.timeRange}]\n${String(segment.analysis || '').trim()}`
+  )).join('\n\n').slice(0, 100_000)
   return {
-    analysis: analysis.trim().slice(0, 100_000),
-    frameCount: images.length,
+    analysis,
+    segments,
+    segmentCount: segments.length,
+    frameCount: totalFrames,
     routeId: route.id,
     model: route.model,
     location: route.location,
     transport: route.transport,
     memoryMode: 'none',
-    ...(parsed?.usage && typeof parsed.usage === 'object' ? { usage: parsed.usage } : {}),
   }
 }
 
@@ -406,16 +625,41 @@ export function mergeN8nMediaResults(
 ): Record<string, unknown> {
   const transcript = String(audio.transcript || '').trim()
   const visualAnalysis = String(vision.analysis || '').trim()
+  const audioSegments = Array.isArray(audio.segments) ? audio.segments : []
+  const visionSegments = Array.isArray(vision.segments) ? vision.segments : []
+  const segmentIndexes = new Set<number>()
+  for (const segment of [...audioSegments, ...visionSegments]) {
+    const index = Number(objectValue(segment).index)
+    if (Number.isInteger(index) && index > 0) segmentIndexes.add(index)
+  }
+  const timeline = [...segmentIndexes].sort((a, b) => a - b).map(index => {
+    const audioSegment = objectValue(audioSegments.find(item => Number(objectValue(item).index) === index))
+    const visionSegment = objectValue(visionSegments.find(item => Number(objectValue(item).index) === index))
+    return {
+      index,
+      timeRange: String(audioSegment.timeRange || visionSegment.timeRange || ''),
+      transcript: String(audioSegment.transcript || ''),
+      visualAnalysis: String(visionSegment.analysis || ''),
+    }
+  })
+  const timelineText = timeline.map(segment => [
+    `【${segment.timeRange || `片段 ${segment.index}`}】`,
+    `语音：${segment.transcript || '无可用转写'}`,
+    `画面：${segment.visualAnalysis || '无可用画面分析'}`,
+  ].join('\n')).join('\n\n')
   return {
     taskType: 'video-analysis',
     audio,
     vision,
+    timeline,
     combinedText: [
-      '【音频分析】',
-      transcript || '未检测到可转写音轨。',
-      '',
-      '【画面分析】',
-      visualAnalysis || '画面分析结果为空。',
+      timelineText || [
+        '【音频分析】',
+        transcript || '未检测到可转写音轨。',
+        '',
+        '【画面分析】',
+        visualAnalysis || '画面分析结果为空。',
+      ].join('\n'),
     ].join('\n'),
     workers: {
       audio: { model: audio.model || null, memoryMode: 'none' },
@@ -423,6 +667,75 @@ export function mergeN8nMediaResults(
     },
     memoryMode: 'none',
     persistence: 'operational-task-record-only',
+  }
+}
+
+export async function synthesizeN8nMediaResults(
+  taskId: string,
+  routing: Record<string, unknown>,
+  taskInput: Record<string, unknown>,
+  merged: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
+  if (!timeline.length) return merged
+  const resolved = resolveN8nNodeRoute(routing, 'vision')
+  const route = assertVisionRoute(resolved.route)
+  const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
+  if (route.apiKeyEnv && !apiKey) throw new Error(`视频汇总路由缺少外部凭据引用 ${route.apiKeyEnv}`)
+  const workspace = mediaTaskWorkspace(taskId)
+  const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim().slice(0, 4_000)
+  const chapterSize = 5
+  const chapters: Record<string, unknown>[] = []
+  for (let offset = 0; offset < timeline.length; offset += chapterSize) {
+    const group = timeline.slice(offset, offset + chapterSize)
+    const chapterIndex = Math.floor(offset / chapterSize) + 1
+    const checkpointName = `chapter-${String(chapterIndex).padStart(3, '0')}.json`
+    let chapter = await readCheckpoint(workspace, checkpointName, value => (
+      value.index === chapterIndex && typeof value.summary === 'string'
+    ))
+    if (!chapter) {
+      const source = group.map(segment => [
+        `[${String(segment.timeRange || '')}]`,
+        `语音：${String(segment.transcript || '').slice(0, 6_000) || '无'}`,
+        `画面：${String(segment.visualAnalysis || '').slice(0, 6_000) || '无'}`,
+      ].join('\n')).join('\n\n')
+      const parsed = await callCompatibleModel(route, apiKey, [
+        '请把以下约 5 分钟的分段结果汇总为一个章节。',
+        `业务要求：${businessPrompt}`,
+        '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。',
+        source,
+      ].join('\n\n'), `第 ${chapterIndex} 章汇总失败`)
+      const summary = parsed?.choices?.[0]?.message?.content
+      if (typeof summary !== 'string' || !summary.trim()) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
+      chapter = {
+        index: chapterIndex,
+        startTime: String(group[0]?.timeRange || '').split('-')[0],
+        endTime: String(group.at(-1)?.timeRange || '').split('-')[1],
+        summary: summary.trim().slice(0, 16_000),
+      }
+      await writeCheckpoint(workspace, checkpointName, chapter)
+    }
+    chapters.push(chapter)
+  }
+
+  let finalSummary = await readCheckpoint(workspace, 'final-summary.json', value => typeof value.summary === 'string')
+  if (!finalSummary) {
+    const parsed = await callCompatibleModel(route, apiKey, [
+      '根据下面的章节汇总，生成整部视频的最终分析报告。',
+      `业务要求：${businessPrompt}`,
+      '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。',
+      chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${chapter.summary}`).join('\n\n'),
+    ].join('\n\n'), '全片汇总失败')
+    const summary = parsed?.choices?.[0]?.message?.content
+    if (typeof summary !== 'string' || !summary.trim()) throw new Error('全片汇总返回空结果')
+    finalSummary = { summary: summary.trim().slice(0, 32_000) }
+    await writeCheckpoint(workspace, 'final-summary.json', finalSummary)
+  }
+  return {
+    ...merged,
+    chapters,
+    summary: finalSummary.summary,
+    combinedText: `${String(finalSummary.summary)}\n\n【逐分钟证据】\n${String(merged.combinedText || '')}`,
   }
 }
 

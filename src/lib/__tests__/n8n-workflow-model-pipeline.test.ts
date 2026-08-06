@@ -54,7 +54,7 @@ describe('bundled stateless video pipeline', () => {
 
   it('prepares once, runs independent audio and vision branches, then merges', () => {
     expect(workflow.id).toBe('aiworker-video-analysis-v1')
-    expect(workflow.name).toBe('AI-worker Stateless Video Analysis v1')
+    expect(workflow.name).toBe('AI-worker Segmented Video Analysis v2')
     const names = workflow.nodes.map(node => node.name)
     expect(names).toEqual(expect.arrayContaining([
       'Prepare Video',
@@ -69,6 +69,9 @@ describe('bundled stateless video pipeline', () => {
     ])
     expect(workflow.connections['Analyze Audio Stateless'].main[0][0].index).toBe(0)
     expect(workflow.connections['Analyze Frames Stateless'].main[0][0].index).toBe(1)
+    for (const node of workflow.nodes.filter(node => node.type === 'n8n-nodes-base.httpRequest')) {
+      expect(JSON.stringify(node.parameters)).toContain('14400000')
+    }
   })
 
   it('uses only the authenticated media callback and declares stateless stages', () => {

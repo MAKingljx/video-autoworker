@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  buildMediaSegmentWindows,
   cleanupExpiredN8nMediaTasks,
   mediaChildIdentity,
   mergeN8nMediaResults,
@@ -31,10 +32,24 @@ describe('n8n stateless media helpers', () => {
     expect(first).toMatch(/^media-task:/)
   })
 
+  it('splits long media into one-minute windows with a bounded final remainder', () => {
+    expect(buildMediaSegmentWindows(125, 60)).toEqual([
+      { index: 1, startSeconds: 0, durationSeconds: 60 },
+      { index: 2, startSeconds: 60, durationSeconds: 60 },
+      { index: 3, startSeconds: 120, durationSeconds: 5 },
+    ])
+  })
+
   it('merges worker output without creating a memory-bearing synthesis node', () => {
     const merged = mergeN8nMediaResults(
-      { transcript: '这是一段语音。', model: 'large-v3-turbo', memoryMode: 'none' },
-      { analysis: '画面中有人走进房间。', model: 'default_model', memoryMode: 'none' },
+      {
+        transcript: '这是一段语音。', model: 'large-v3-turbo', memoryMode: 'none',
+        segments: [{ index: 1, timeRange: '00:00:00-00:01:00', transcript: '这是一段语音。' }],
+      },
+      {
+        analysis: '画面中有人走进房间。', model: 'default_model', memoryMode: 'none',
+        segments: [{ index: 1, timeRange: '00:00:00-00:01:00', analysis: '画面中有人走进房间。' }],
+      },
     )
     expect(merged).toMatchObject({
       taskType: 'video-analysis',
@@ -47,6 +62,12 @@ describe('n8n stateless media helpers', () => {
     })
     expect(merged.combinedText).toContain('这是一段语音。')
     expect(merged.combinedText).toContain('画面中有人走进房间。')
+    expect(merged.timeline).toEqual([{
+      index: 1,
+      timeRange: '00:00:00-00:01:00',
+      transcript: '这是一段语音。',
+      visualAnalysis: '画面中有人走进房间。',
+    }])
   })
 
   it('removes only expired managed workspaces and inbox media', async () => {
