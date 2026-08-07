@@ -59,6 +59,8 @@ describe('OpenClaw task-flow submit script', () => {
 
     expect(skill).toContain('both `--task-id` and `--idempotency-key`')
     expect(skill.match(/--task-id <stable-key>/g)).toHaveLength(3)
+    expect(skill).toContain('never tell the user to pass a batch ID to')
+    expect(skill).toContain('`--batch-status <stable-batch-key>`')
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {

@@ -17,7 +17,8 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   once with `--video-dir` and an explicit stable `--batch-id`. The durable batch
   controller processes one video at a time; do not launch parallel per-video
   tool calls. Query with `--batch-status`, and use `--resume-batch` after a
-  controller or machine restart.
+  controller or machine restart. Never pass a batch ID to plain `--status`;
+  that option is only for an individual task ID returned by the batch summary.
 - Reuse one idempotency key for one user request. Never resubmit the same video
   after a timeout or compaction; query the existing task instead.
 - Audio is handled by the registered Whisper worker and frames by the registered
