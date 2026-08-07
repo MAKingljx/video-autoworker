@@ -125,6 +125,11 @@ Query the durable batch without reading unrelated task payloads:
 node skills/aiworker-task-flow/scripts/submit-task.mjs --batch-status <stable-batch-key>
 ```
 
+A batch ID is not a task ID. Always describe batch progress with
+`--batch-status <stable-batch-key>`; never tell the user to pass a batch ID to
+`--status`. The plain `--status` option is only for one individual task ID
+returned inside the batch summary.
+
 If the controller or machine restarts, resume pending work without resubmitting
 completed items:
 
