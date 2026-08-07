@@ -7,6 +7,8 @@ describe('OpenClaw task-flow submit script', () => {
   it('uses APFS clone ingestion and accepts bounded asynchronous waits', () => {
     const script = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs'), 'utf8')
     expect(script).toContain('COPYFILE_FICLONE_FORCE')
+    expect(script).toContain("execFileAsync('/bin/cp', ['-c', '-n', sourcePath, stagedVideo])")
+    expect(script).toContain("['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)")
     expect(script).toContain('10 * 1024 ** 3')
     expect(script).toContain('waitSeconds > 14_400')
   })

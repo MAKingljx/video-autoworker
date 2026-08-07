@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import { chmod, copyFile, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 const args = process.argv.slice(2)
+const execFileAsync = promisify(execFile)
 
 function option(name) {
   const index = args.indexOf(name)
@@ -135,7 +138,19 @@ async function main() {
         await copyFile(sourcePath, stagedVideo, copyMode)
       } catch (error) {
         if (process.platform !== 'darwin') throw error
-        throw new Error('视频与受控收件箱必须位于支持 APFS 克隆的同一文件系统，未执行 7GB 级完整复制')
+        const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
+        if (!['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)) {
+          throw new Error('视频与受控收件箱必须位于支持 APFS 克隆的同一文件系统，未执行 7GB 级完整复制')
+        }
+        // Some macOS Node distributions return ENOSYS for the clonefile flag
+        // even when APFS cloning is available. Apple's `cp -c` requests the
+        // same CoW clone and fails instead of silently performing a full copy.
+        await rm(stagedVideo, { force: true })
+        await execFileAsync('/bin/cp', ['-c', '-n', sourcePath, stagedVideo])
+        const stagedStat = await stat(stagedVideo)
+        if (!stagedStat.isFile() || stagedStat.size !== sourceStat.size) {
+          throw new Error('APFS 克隆结果校验失败，未保留视频副本')
+        }
       }
       await chmod(stagedVideo, 0o600)
     }
