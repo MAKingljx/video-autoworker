@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { constants } from 'node:fs'
-import { chmod, copyFile, mkdir, readFile, realpath, rm, stat, utimes } from 'node:fs/promises'
-import { homedir } from 'node:os'
-import { extname, join, resolve } from 'node:path'
-import { promisify } from 'node:util'
+import { spawn } from 'node:child_process'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import { createPlatformClient } from '../lib/platform-client.mjs'
+import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
+import { submitVideoTask } from '../lib/video-task.mjs'
+import {
+  batchStatePath,
+  createBatchState,
+  readBatchState,
+  summarizeBatchState,
+  validateBatchId,
+} from '../lib/video-batch-state.mjs'
 
 const args = process.argv.slice(2)
-const execFileAsync = promisify(execFile)
 
 function option(name) {
   const index = args.indexOf(name)
@@ -24,41 +30,108 @@ function fail(message, code = 1) {
   process.exit(code)
 }
 
-const baseUrl = String(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
-  .replace(/\/+$/, '')
-if (!/^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(baseUrl)) {
-  fail('AI-worker 提交地址必须是本机回环 HTTP 地址')
+function output(value) {
+  process.stdout.write(`${JSON.stringify(value)}\n`)
 }
 
-async function readJson(response) {
-  const text = await response.text()
-  try {
-    return text ? JSON.parse(text) : null
-  } catch {
-    return { error: text || `HTTP ${response.status}` }
-  }
+function chooseBinding(bindings, requestedBinding, video) {
+  const binding = requestedBinding
+    ? bindings.find(item => String(item.id) === requestedBinding && item.enabled)
+    : video
+      ? bindings.find(item => item.enabled && item.taskType === 'video-analysis')
+      : bindings.find(item => item.enabled && item.taskType !== 'video-analysis')
+        || bindings.find(item => item.enabled)
+  if (!binding) throw new Error('没有找到可用的 AI-worker n8n 任务链')
+  return binding
 }
 
-async function request(path, init = {}) {
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...init,
-    headers: { Accept: 'application/json', ...(init.headers || {}) },
-    signal: AbortSignal.timeout(15_000),
+function spawnBatchWorker(statePath) {
+  const worker = fileURLToPath(new URL('./run-video-batch.mjs', import.meta.url))
+  const child = spawn(process.execPath, [worker, '--state-file', statePath], {
+    detached: true,
+    stdio: 'ignore',
+    env: process.env,
   })
-  const body = await readJson(response)
-  if (!response.ok) {
-    throw new Error(body?.error || `AI-worker 请求失败：HTTP ${response.status}`)
+  child.unref()
+}
+
+async function resolvePrompt({ video = false } = {}) {
+  const promptFile = option('--prompt-file')
+  const promptArg = option('--prompt')
+  const prompt = (promptFile ? await readFile(promptFile, 'utf8') : promptArg)
+    || (video ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
+  if (!prompt?.trim()) throw new Error('必须通过 --prompt-file、--prompt 或视频参数提供任务内容')
+  if (prompt.length > 120_000) throw new Error('任务内容超过 120000 字符上限')
+  return prompt.trim()
+}
+
+async function handleBatchStatus(batchId) {
+  const state = await readBatchState(batchStatePath(validateBatchId(batchId)))
+  output(summarizeBatchState(state))
+}
+
+async function handleBatchResume(batchId) {
+  const statePath = batchStatePath(validateBatchId(batchId))
+  const state = await readBatchState(statePath)
+  if (!['succeeded', 'completed_with_errors'].includes(state.status)) spawnBatchWorker(statePath)
+  output({ ...summarizeBatchState(state), resumed: !['succeeded', 'completed_with_errors'].includes(state.status) })
+}
+
+async function handleBatchCreate(client, videoDir) {
+  const batchId = validateBatchId(option('--batch-id'))
+  const prompt = await resolvePrompt({ video: true })
+  const deliveryMode = option('--delivery') || 'none'
+  if (deliveryMode !== 'none') throw new Error('批量视频工作节点不进入 OpenClaw 会话；请用批次状态查询结果')
+  const bindings = await client.listBindings()
+  const binding = chooseBinding(bindings, option('--binding-id'), true)
+  const created = await createBatchState({
+    batchId,
+    baseUrl: client.baseUrl,
+    bindingId: binding.id,
+    prompt,
+    visionRoute: option('--vision-route'),
+    videoDir,
+    inboxRoot: defaultMediaInboxRoot(),
+  })
+  if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
+    spawnBatchWorker(created.statePath)
   }
-  return body
+  output({
+    ...summarizeBatchState(created.state),
+    duplicate: created.duplicate,
+    bindingId: binding.id,
+  })
+}
+
+async function waitForTask(client, taskId, waitSeconds) {
+  if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 14_400) {
+    throw new Error('--wait-seconds 必须是 0 到 14400 的整数')
+  }
+  let run = null
+  const deadline = Date.now() + waitSeconds * 1_000
+  while (waitSeconds > 0 && Date.now() <= deadline) {
+    run = await client.getRun(taskId)
+    if (run && ['succeeded', 'failed'].includes(run.status)) break
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 2_000))
+  }
+  if (waitSeconds > 0 && (!run || !['succeeded', 'failed'].includes(run.status))) {
+    throw new Error(`等待任务 ${taskId} 超时，可使用 --status 继续查询`)
+  }
+  return run
 }
 
 async function main() {
+  const batchStatus = option('--batch-status')
+  if (batchStatus) return handleBatchStatus(batchStatus)
+  const resumeBatch = option('--resume-batch')
+  if (resumeBatch) return handleBatchResume(resumeBatch)
+
+  const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
   const statusTaskId = option('--status')
   if (statusTaskId) {
-    const body = await request(`/api/n8n/runs?taskId=${encodeURIComponent(statusTaskId)}`)
-    const run = Array.isArray(body?.runs) ? body.runs.find(item => item?.taskId === statusTaskId) : null
+    const run = await client.getRun(statusTaskId)
     if (!run) throw new Error(`未找到任务：${statusTaskId}`)
-    process.stdout.write(`${JSON.stringify({
+    output({
       taskId: run.taskId,
       status: run.status,
       attemptCount: run.attemptCount,
@@ -66,29 +139,17 @@ async function main() {
       output: run.output,
       error: run.error,
       updatedAt: run.updatedAt,
-    })}\n`)
+    })
     return
   }
 
+  const videoDir = option('--video-dir')
+  if (videoDir) return handleBatchCreate(client, videoDir)
+
   const videoFile = option('--video-file')
-  const promptFile = option('--prompt-file')
-  const promptArg = option('--prompt')
-  const prompt = (promptFile ? await readFile(promptFile, 'utf8') : promptArg)
-    || (videoFile ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
-  if (!prompt?.trim()) throw new Error('必须通过 --prompt-file、--prompt 或 --video-file 提供任务内容')
-  if (prompt.length > 120_000) throw new Error('任务内容超过 120000 字符上限')
-
-  const bindingsBody = await request('/api/n8n/workflows')
-  const bindings = Array.isArray(bindingsBody?.bindings) ? bindingsBody.bindings : []
-  const requestedBinding = option('--binding-id')
-  const binding = requestedBinding
-    ? bindings.find(item => String(item.id) === requestedBinding && item.enabled)
-    : videoFile
-      ? bindings.find(item => item.enabled && item.taskType === 'video-analysis')
-      : bindings.find(item => item.enabled && item.taskType !== 'video-analysis')
-        || bindings.find(item => item.enabled)
-  if (!binding) throw new Error('没有找到可用的 AI-worker n8n 任务链')
-
+  const prompt = await resolvePrompt({ video: Boolean(videoFile) })
+  const bindings = await client.listBindings()
+  const binding = chooseBinding(bindings, option('--binding-id'), Boolean(videoFile))
   const deliveryMode = option('--delivery') || 'none'
   if (!['none', 'reply'].includes(deliveryMode)) throw new Error('--delivery 只能是 none 或 reply')
   const sessionKey = option('--session-key')
@@ -113,114 +174,45 @@ async function main() {
     nodeKey,
     { routeId, fallbackRouteIds: [] },
   ]))
-  let stagedVideo = null
-  try {
-    if (videoFile) {
-      const sourcePath = await realpath(resolve(videoFile))
-      const sourceStat = await stat(sourcePath)
-      if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
-      const maxBytes = Number(process.env.AIWORKER_MEDIA_MAX_FILE_BYTES || 10 * 1024 ** 3)
-      if (!Number.isFinite(maxBytes) || sourceStat.size > maxBytes) throw new Error('视频文件超过允许大小')
-      const extension = extname(sourcePath).toLowerCase()
-      if (!['.mp4', '.mov', '.mkv', '.webm', '.m4v'].includes(extension)) {
-        throw new Error('视频格式只支持 mp4、mov、mkv、webm 或 m4v')
-      }
-      const inbox = resolve(process.env.AIWORKER_MEDIA_INGEST_DIR
-        || join(homedir(), 'ai-worker/state/video-autoworker/media-inbox'))
-      await mkdir(inbox, { recursive: true, mode: 0o700 })
-      await chmod(inbox, 0o700)
-      const videoKey = `${randomUUID()}${extension}`
-      stagedVideo = join(inbox, videoKey)
-      const copyMode = process.platform === 'darwin'
-        ? constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE_FORCE
-        : constants.COPYFILE_EXCL
-      try {
-        await copyFile(sourcePath, stagedVideo, copyMode)
-      } catch (error) {
-        if (process.platform !== 'darwin') throw error
-        const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
-        if (!['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)) {
-          throw new Error('视频与受控收件箱必须位于支持 APFS 克隆的同一文件系统，未执行 7GB 级完整复制')
-        }
-        // Some macOS Node distributions return ENOSYS for the clonefile flag
-        // even when APFS cloning is available. Apple's `cp -c` requests the
-        // same CoW clone and fails instead of silently performing a full copy.
-        await rm(stagedVideo, { force: true })
-        await execFileAsync('/bin/cp', ['-c', '-n', sourcePath, stagedVideo])
-        const stagedStat = await stat(stagedVideo)
-        if (!stagedStat.isFile() || stagedStat.size !== sourceStat.size) {
-          throw new Error('APFS 克隆结果校验失败，未保留视频副本')
-        }
-      }
-      // APFS clones can preserve an old source mtime. The managed-inbox
-      // sweeper treats mtime as ingestion age, so stamp the newly accepted
-      // clone now before n8n performs its pre-prepare expiration pass.
-      const ingestedAt = new Date()
-      await utimes(stagedVideo, ingestedAt, ingestedAt)
-      await chmod(stagedVideo, 0o600)
-    }
 
-    const response = await request('/api/n8n/trigger', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        bindingId: binding.id,
-        taskId,
-        idempotencyKey,
-        source: 'openclaw',
-        input: {
-          prompt: prompt.trim(),
-          ...(stagedVideo ? { videoKey: stagedVideo.split('/').pop() } : {}),
-        },
-        ...(Object.keys(routingNodes).length ? { routing: { nodes: routingNodes } } : {}),
-        delivery: {
-          mode: deliveryMode,
-          ...(sessionKey ? { sessionKey } : {}),
-          ...(channel ? { channel } : {}),
-          ...(target ? { target } : {}),
-          ...(accountId ? { accountId } : {}),
-        },
-      }),
-    })
-    if (response.duplicate && stagedVideo) {
-      await rm(stagedVideo, { force: true })
-      stagedVideo = null
-    } else if (stagedVideo) {
-      // n8n now owns the managed inbox copy. A later client-side wait timeout
-      // must not delete media that an accepted workflow may still consume.
-      stagedVideo = null
-    }
-
-    const waitSecondsRaw = option('--wait-seconds') || '0'
-    const waitSeconds = Number(waitSecondsRaw)
-    if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 14_400) {
-      throw new Error('--wait-seconds 必须是 0 到 14400 的整数')
-    }
-    let finalRun = null
-    const deadline = Date.now() + waitSeconds * 1_000
-    while (waitSeconds > 0 && Date.now() <= deadline) {
-      const statusBody = await request(`/api/n8n/runs?taskId=${encodeURIComponent(response.taskId)}`)
-      finalRun = Array.isArray(statusBody?.runs)
-        ? statusBody.runs.find(item => item?.taskId === response.taskId) || null
-        : null
-      if (finalRun && ['succeeded', 'failed'].includes(finalRun.status)) break
-      await new Promise(resolvePromise => setTimeout(resolvePromise, 2_000))
-    }
-    if (waitSeconds > 0 && (!finalRun || !['succeeded', 'failed'].includes(finalRun.status))) {
-      throw new Error(`等待任务 ${response.taskId} 超时，可使用 --status 继续查询`)
-    }
-    process.stdout.write(`${JSON.stringify({
-      taskId: response.taskId,
-      status: finalRun?.status || response.status || response.result?.data?.status || 'accepted',
-      duplicate: Boolean(response.duplicate),
+  const response = videoFile
+    ? await submitVideoTask({
+      client,
       bindingId: binding.id,
-      ...(finalRun ? { output: finalRun.output, error: finalRun.error } : {}),
-      ...(Object.keys(routingNodes).length ? { routes: routingNodes } : {}),
-    })}\n`)
-  } catch (error) {
-    if (stagedVideo) await rm(stagedVideo, { force: true }).catch(() => undefined)
-    throw error
-  }
+      taskId,
+      idempotencyKey,
+      prompt,
+      videoFile,
+      visionRoute: option('--vision-route'),
+      inboxRoot: defaultMediaInboxRoot(),
+    })
+    : await client.trigger({
+      bindingId: binding.id,
+      taskId,
+      idempotencyKey,
+      source: 'openclaw',
+      input: { prompt },
+      ...(Object.keys(routingNodes).length ? { routing: { nodes: routingNodes } } : {}),
+      delivery: {
+        mode: deliveryMode,
+        ...(sessionKey ? { sessionKey } : {}),
+        ...(channel ? { channel } : {}),
+        ...(target ? { target } : {}),
+        ...(accountId ? { accountId } : {}),
+      },
+    })
+
+  const waitSeconds = Number(option('--wait-seconds') || '0')
+  const finalRun = await waitForTask(client, response.taskId, waitSeconds)
+  output({
+    taskId: response.taskId,
+    status: finalRun?.status || response.status || response.result?.data?.status || 'accepted',
+    duplicate: Boolean(response.duplicate),
+    bindingId: binding.id,
+    ...(response.recoveredAfterTriggerError ? { recoveredAfterTriggerError: true } : {}),
+    ...(finalRun ? { output: finalRun.output, error: finalRun.error } : {}),
+    ...(Object.keys(routingNodes).length ? { routes: routingNodes } : {}),
+  })
 }
 
 main().catch(error => fail(error instanceof Error ? error.message : String(error)))

@@ -99,6 +99,43 @@ later bounded calls. Never keep one OpenClaw tool call open for the whole video,
 and never resubmit after a wait timeout or session compaction. The minute-level
 audio, vision, chapter, and final checkpoints resume the same task.
 
+## Multiple Videos
+
+When one user request contains several local videos in the same directory, use
+one durable batch instead of launching several `--video-file` commands. The
+batch controller runs outside the conversation, submits only one video at a
+time, waits for its terminal status, then starts the next video. This protects
+the single local Qwen slot and avoids overlapping Whisper/ffmpeg workloads.
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs \
+  --video-dir <directory> \
+  --batch-id <stable-batch-key> \
+  --prompt "分别分析每个视频的语音和画面，不要混合不同视频" \
+  --delivery none
+```
+
+The directory scan is non-recursive, sorted, and limited to 100 supported video
+files. Reuse the same `--batch-id` for the same user request. The command returns
+immediately with the batch summary; it must not wait for all videos.
+
+Query the durable batch without reading unrelated task payloads:
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs --batch-status <stable-batch-key>
+```
+
+If the controller or machine restarts, resume pending work without resubmitting
+completed items:
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs --resume-batch <stable-batch-key>
+```
+
+Report the batch ID, counts, current video, and failed item names. Query an
+individual returned task ID with `--status` when its full analysis is needed.
+Do not paste all video outputs into one OpenClaw context.
+
 ## Status
 
 Query a submitted task without reading unrelated task payloads:

@@ -7,7 +7,23 @@ WORKSPACE_ROOT="${AIWORKER_QWEN_WORKSPACE:-$HOME/AI-worker-second-original-works
 TARGET_DIR="$WORKSPACE_ROOT/skills/aiworker-task-flow"
 BACKUP_ROOT="${AIWORKER_SKILL_BACKUP_ROOT:-$HOME/ai-worker/backups/aiworker-task-flow-skill}"
 
-if [[ ! -f "$SOURCE_DIR/SKILL.md" || ! -f "$SOURCE_DIR/WORKSPACE_VIDEO_RULES.md" || ! -f "$SOURCE_DIR/scripts/submit-task.mjs" ]]; then
+required_skill_files=(
+  "$SOURCE_DIR/SKILL.md"
+  "$SOURCE_DIR/WORKSPACE_VIDEO_RULES.md"
+  "$SOURCE_DIR/scripts/submit-task.mjs"
+  "$SOURCE_DIR/scripts/run-video-batch.mjs"
+  "$SOURCE_DIR/lib/platform-client.mjs"
+  "$SOURCE_DIR/lib/media-ingest.mjs"
+  "$SOURCE_DIR/lib/video-task.mjs"
+  "$SOURCE_DIR/lib/video-batch-state.mjs"
+)
+for required_skill_file in "${required_skill_files[@]}"; do
+  if [[ ! -f "$required_skill_file" ]]; then
+    printf 'Task-flow skill source is incomplete: %s\n' "$required_skill_file" >&2
+    exit 1
+  fi
+done
+if [[ ! -d "$SOURCE_DIR/scripts" || ! -d "$SOURCE_DIR/lib" ]]; then
   printf 'Task-flow skill source is incomplete: %s\n' "$SOURCE_DIR" >&2
   exit 1
 fi
@@ -36,9 +52,14 @@ if [[ -f "$workspace_agents" ]]; then
 fi
 
 staging_dir="$WORKSPACE_ROOT/skills/.aiworker-task-flow.staging.$$"
-mkdir -p "$staging_dir/scripts"
+mkdir -p "$staging_dir/scripts" "$staging_dir/lib"
 install -m 600 "$SOURCE_DIR/SKILL.md" "$staging_dir/SKILL.md"
-install -m 700 "$SOURCE_DIR/scripts/submit-task.mjs" "$staging_dir/scripts/submit-task.mjs"
+for skill_script in "$SOURCE_DIR"/scripts/*.mjs; do
+  install -m 700 "$skill_script" "$staging_dir/scripts/$(basename "$skill_script")"
+done
+for skill_module in "$SOURCE_DIR"/lib/*.mjs; do
+  install -m 600 "$skill_module" "$staging_dir/lib/$(basename "$skill_module")"
+done
 
 if ! mv "$staging_dir" "$TARGET_DIR"; then
   if [[ -n "$backup_dir" && -d "$backup_dir/aiworker-task-flow" && ! -e "$TARGET_DIR" ]]; then
