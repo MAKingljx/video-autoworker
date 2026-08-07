@@ -12,4 +12,12 @@ describe('n8n operations runtime', () => {
     expect(common).toContain('export N8N_NODE_BIN N8N_NPM_BIN NODE_OPTIONS N8N_USER_FOLDER')
     expect(environmentTemplate).toContain('NODE_OPTIONS="--max-old-space-size=8192"')
   })
+
+  it('consumes workflow listings before exact matching to avoid n8n EPIPE failures', () => {
+    const importer = readFileSync(resolve(process.cwd(), 'scripts/n8n-import-workflows.sh'), 'utf8')
+
+    expect(importer).toContain('listed_workflow_ids="$("$N8N_NODE_BIN"')
+    expect(importer).toContain('active_workflow_ids="$("$N8N_NODE_BIN"')
+    expect(importer).not.toMatch(/list:workflow[^\n]*\|\s*grep\s+-Fq/)
+  })
 })

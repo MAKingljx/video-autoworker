@@ -85,7 +85,11 @@ for workflow_file in "${workflow_files[@]}"; do
 
   # n8n 2.31.6 imports workflows inactive in regular deployment mode. An
   # existing published workflow must be unpublished before a fixed-ID update.
-  if "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fqx "$workflow_id"; then
+  # Consume the n8n CLI output completely before matching. Piping directly to
+  # `grep -q` lets grep close stdout after the first match; when more workflow
+  # IDs follow, n8n receives EPIPE and its stack formatter can exhaust memory.
+  listed_workflow_ids="$("$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId)"
+  if grep -Fqx "$workflow_id" <<< "$listed_workflow_ids"; then
     printf 'Unpublishing existing workflow before fixed-ID update: %s\n' "$workflow_id"
     "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" unpublish:workflow --id="$workflow_id"
   fi
@@ -93,7 +97,8 @@ for workflow_file in "${workflow_files[@]}"; do
   printf 'Importing workflow: %s\n' "$workflow_file"
   "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" import:workflow --input="$workflow_file"
 
-  workflow_count="$("$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId | grep -Fxc "$workflow_id" || true)"
+  listed_workflow_ids="$("$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --onlyId)"
+  workflow_count="$(grep -Fxc "$workflow_id" <<< "$listed_workflow_ids" || true)"
   if [[ "$workflow_count" != "1" ]]; then
     printf 'Expected exactly one workflow with ID %s; found %s.\n' "$workflow_id" "$workflow_count" >&2
     exit 1
@@ -102,7 +107,8 @@ for workflow_file in "${workflow_files[@]}"; do
   if [[ "$activate_workflows" == true ]]; then
     printf 'Publishing workflow for production webhooks: %s\n' "$workflow_id"
     "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" publish:workflow --id="$workflow_id"
-    if ! "$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --active=true --onlyId | grep -Fqx "$workflow_id"; then
+    active_workflow_ids="$("$N8N_NODE_BIN" "$AIWORKER_N8N_RUNTIME_DIR/node_modules/n8n/bin/n8n" list:workflow --active=true --onlyId)"
+    if ! grep -Fqx "$workflow_id" <<< "$active_workflow_ids"; then
       printf 'Workflow did not become active: %s\n' "$workflow_id" >&2
       exit 1
     fi
