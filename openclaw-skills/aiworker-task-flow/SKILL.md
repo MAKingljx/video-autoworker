@@ -15,6 +15,8 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
   the task input.
 - Use one stable idempotency key for one user request. Reusing it returns the
   existing task and must not create a duplicate side effect.
+- Pass the same stable identifier to both `--task-id` and `--idempotency-key`;
+  do not let the submission script generate a random task ID for a durable run.
 - Use `delivery=none` for dry runs or when the user did not ask for a channel
   reply. Use `delivery=reply` only when the current session key is known, or when
   both the current channel and target are known.
@@ -42,6 +44,7 @@ then run:
 ```bash
 node skills/aiworker-task-flow/scripts/submit-task.mjs \
   --prompt-file <task-file> \
+  --task-id <stable-key> \
   --idempotency-key <stable-key> \
   --delivery none
 ```
@@ -60,6 +63,7 @@ To return the completed result to an existing OpenClaw session:
 ```bash
 node skills/aiworker-task-flow/scripts/submit-task.mjs \
   --prompt-file <task-file> \
+  --task-id <stable-key> \
   --idempotency-key <stable-key> \
   --delivery reply \
   --session-key <current-session-key>
@@ -80,6 +84,7 @@ in the task payload.
 node skills/aiworker-task-flow/scripts/submit-task.mjs \
   --video-file <local-video> \
   --prompt "分别分析语音和画面，再合并结果" \
+  --task-id <stable-key> \
   --idempotency-key <stable-key> \
   --delivery none \
   --wait-seconds 0

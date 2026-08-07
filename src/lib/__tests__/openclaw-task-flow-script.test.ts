@@ -9,6 +9,7 @@ describe('OpenClaw task-flow submit script', () => {
     expect(script).toContain('COPYFILE_FICLONE_FORCE')
     expect(script).toContain("execFileAsync('/bin/cp', ['-c', '-n', sourcePath, stagedVideo])")
     expect(script).toContain("['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)")
+    expect(script).toContain('await utimes(stagedVideo, ingestedAt, ingestedAt)')
     expect(script).toContain('10 * 1024 ** 3')
     expect(script).toContain('waitSeconds > 14_400')
   })
@@ -32,5 +33,12 @@ describe('OpenClaw task-flow submit script', () => {
     expect(result.stdout).toBe('')
     expect(result.stderr).not.toContain('SyntaxError')
     expect(result.stderr).not.toContain('does not provide an export named')
+  })
+
+  it('requires one explicit stable identity for durable task submissions', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+
+    expect(skill).toContain('both `--task-id` and `--idempotency-key`')
+    expect(skill.match(/--task-id <stable-key>/g)).toHaveLength(3)
   })
 })

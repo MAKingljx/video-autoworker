@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
-import { chmod, copyFile, mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, readFile, realpath, rm, stat, utimes } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -152,6 +152,11 @@ async function main() {
           throw new Error('APFS 克隆结果校验失败，未保留视频副本')
         }
       }
+      // APFS clones can preserve an old source mtime. The managed-inbox
+      // sweeper treats mtime as ingestion age, so stamp the newly accepted
+      // clone now before n8n performs its pre-prepare expiration pass.
+      const ingestedAt = new Date()
+      await utimes(stagedVideo, ingestedAt, ingestedAt)
       await chmod(stagedVideo, 0o600)
     }
 
