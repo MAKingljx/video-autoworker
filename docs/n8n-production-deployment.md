@@ -223,6 +223,18 @@ bash scripts/install-aiworker-task-flow-skill.sh
 openclaw --profile qwen-current skills info aiworker-task-flow --agent second-original
 ```
 
+安装后，单视频的标准用户入口只有一行：
+
+```text
+分析视频 /完整路径/video.mp4
+```
+
+该句本身表示确认执行。OpenClaw 自动选择 `aiworker-task-flow` 和现有
+`video-analysis` 绑定，生成稳定任务 ID，以 `delivery=none`、
+`wait-seconds=0` 异步提交；Whisper、视觉模型、分钟分段与
+`memoryMode=none` 由已登记的任务链配置提供，不要求用户重复描述。若同一
+消息含有“不要执行”“只给方案”等否定语义，则不提交。
+
 技能脚本只允许访问本机回环地址。OpenClaw 可以提交任务并查询持久化状态：
 
 ```bash
@@ -239,11 +251,16 @@ node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/script
   --status '<上一步返回的 taskId>'
 
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
-  --video-file '<本机视频路径>' \
-  --prompt '分别分析语音和画面，再合并结果' \
+  --video-file '<绝对本机视频路径>' \
+  --task-id '<本次请求稳定 ID>' \
+  --idempotency-key '<同一本次请求稳定 ID>' \
   --delivery none \
-  --wait-seconds 600
+  --wait-seconds 0
 ```
+
+上面的参数是技能内部映射，不是用户输入格式。路径作为一个完整参数处理；中文、
+空格和括号不得被拆分或进行 shell 展开。首次回复只报告任务 ID、当前状态和是否
+命中重复请求，完成结果以后续 `--status '<taskId>'` 为准。
 
 默认 `delivery.mode=none`，结果仅保存在任务运行记录中。要把结果回投到已有手机会话，必须显式传入 `--delivery reply --session-key '<已验证会话键>'`，或同时给出 `--channel` 与 `--target`；不得把测试消息投递到未经确认的会话。
 
