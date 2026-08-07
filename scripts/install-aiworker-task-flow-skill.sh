@@ -76,12 +76,19 @@ if [[ -f "$workspace_agents" ]]; then
       close(rules_file)
     }
     /^## Video Learning Pipeline Rule$/ || /^## Video Analysis Task Flow Rule$/ {
+      found = 1
       emit_rules()
       replacing = 1
       next
     }
     replacing && /^## / { replacing = 0 }
     !replacing { print }
+    END {
+      if (!found) {
+        print ""
+        emit_rules()
+      }
+    }
   ' "$workspace_agents" > "$agents_tmp"
   mv "$agents_tmp" "$workspace_agents"
   chmod 600 "$workspace_agents"

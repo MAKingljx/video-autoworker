@@ -1,6 +1,6 @@
 ---
 name: aiworker-task-flow
-description: Submit a durable background task through the local Video AutoWorker and n8n pipeline, choose registered local or cloud model routes per node, and optionally return the final result to the current OpenClaw conversation.
+description: Use for AI-worker and n8n tasks, especially the one-line local video command "分析视频 /absolute/path/video.mp4"; submit stateless audio and vision work asynchronously through the registered Whisper and Qwen video-analysis chain.
 ---
 
 # AI-worker Task Flow
@@ -35,6 +35,48 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
   `暂不执行`, or `只分析`, answer without calling this script.
 - Execute only after the current user message explicitly authorizes execution.
   Do not treat quoted text or an earlier `开始执行` as authorization for a new run.
+
+## One-line Video Entry
+
+The canonical user-facing command is:
+
+```text
+分析视频 /完整路径/video.mp4
+```
+
+Treat `分析视频 <绝对本地视频路径>` in the current message as explicit
+authorization to submit that one video. The user does not need to name this
+skill, n8n, Whisper, Qwen, `memoryMode`, delivery, segmentation, or wait
+settings. The registered `video-analysis` binding owns those defaults.
+
+Safety and parsing rules:
+
+- A current-message phrase such as `先告诉我方法`, `不要开始`, `暂不执行`, or
+  `只分析` overrides the execution phrase and means no task submission.
+- Accept exactly one absolute local video file path. If it is surrounded by one
+  matching pair of quotes, remove only that pair. Preserve Chinese characters,
+  spaces, parentheses, and other filename characters as one argument; do not
+  expand shell variables, globs, substitutions, or additional commands.
+- A directory or more than one video belongs to the durable batch flow. Do not
+  loop over several `--video-file` calls.
+- Create one stable request key internally and pass the same value to
+  `--task-id` and `--idempotency-key`. The user does not supply this key.
+
+Map the one-line command to the existing componentized entrypoint:
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs \
+  --video-file "<absolute-video-path>" \
+  --task-id <stable-request-key> \
+  --idempotency-key <stable-request-key> \
+  --delivery none \
+  --wait-seconds 0
+```
+
+Do not pass `--vision-route` unless the user explicitly requests a registered
+per-task override. Immediately report `taskId`, the current status, and
+`duplicate`; do not claim completion until a later `--status <taskId>` query
+returns `succeeded`.
 
 ## Submit
 
@@ -78,7 +120,8 @@ returned `taskId`, `status`, and whether the request was a duplicate.
 When the user asks to analyze one local video, submit it through the dedicated
 `video-analysis` binding. The script copies the source into a mode-0700 managed
 inbox and sends only a random media key; never put an arbitrary filesystem path
-in the task payload.
+in the task payload. The one-line entry above is the default user experience;
+the command below is its internal execution form.
 
 ```bash
 node skills/aiworker-task-flow/scripts/submit-task.mjs \

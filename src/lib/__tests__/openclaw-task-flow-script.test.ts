@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -63,12 +63,82 @@ describe('OpenClaw task-flow submit script', () => {
     expect(skill).toContain('`--batch-status <stable-batch-key>`')
   })
 
+  it('defines the one-line video command as an asynchronous stateless skill entry', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+
+    expect(skill).toContain('分析视频 /完整路径/video.mp4')
+    expect(skill).toContain('`分析视频 <绝对本地视频路径>`')
+    expect(skill).toContain('--video-file "<absolute-video-path>"')
+    expect(skill).toContain('--task-id <stable-request-key>')
+    expect(skill).toContain('--idempotency-key <stable-request-key>')
+    expect(skill).toContain('--delivery none')
+    expect(skill).toContain('--wait-seconds 0')
+    expect(skill).toContain('overrides the execution phrase and means no task submission')
+    expect(workspaceRules).toContain('`分析视频 <绝对本地视频路径>`')
+    expect(workspaceRules).toContain('user does not need to name the skill')
+  })
+
   it('installs the componentized client, media, batch state, and worker modules', () => {
     const installer = readFileSync(resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh'), 'utf8')
     expect(installer).toContain('run-video-batch.mjs')
     expect(installer).toContain('video-batch-state.mjs')
     expect(installer).toContain('"$SOURCE_DIR"/lib/*.mjs')
     expect(installer).toContain('"$SOURCE_DIR"/scripts/*.mjs')
+  })
+
+  it('appends the video command rule to a workspace that has no previous section', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-install-test-'))
+    const workspace = resolve(root, 'workspace')
+    const installer = resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh')
+    const runInstaller = (backupRoot: string) => new Promise<void>((resolvePromise, rejectPromise) => {
+      execFile('bash', [installer], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          AIWORKER_QWEN_WORKSPACE: workspace,
+          AIWORKER_SKILL_BACKUP_ROOT: backupRoot,
+        },
+        encoding: 'utf8',
+      }, error => error ? rejectPromise(error) : resolvePromise())
+    })
+
+    try {
+      await mkdir(workspace, { recursive: true })
+      await writeFile(resolve(workspace, 'AGENTS.md'), '# Workspace Rules\n\nKeep this rule.\n')
+      await runInstaller(resolve(root, 'backups-1'))
+      await runInstaller(resolve(root, 'backups-2'))
+
+      const agents = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
+      expect(agents).toContain('Keep this rule.')
+      expect(agents).toContain('`分析视频 <绝对本地视频路径>`')
+      expect(agents.match(/^## Video Analysis Task Flow Rule$/gm)).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts absolute video paths containing Chinese, spaces, parentheses, and quotes', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-path-test-'))
+    try {
+      const video = resolve(root, "地球之极 第一集 (成片)'v1'.mp4")
+      await writeFile(video, 'video')
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/media-ingest.mjs',
+      )).href
+      const media = await import(/* @vite-ignore */ moduleUrl) as {
+        inspectVideoFile: (path: string) => Promise<{ sourcePath: string; sourceBytes: number }>
+      }
+      const inspected = await media.inspectVideoFile(video)
+      expect(inspected.sourcePath).toBe(await realpath(video))
+      expect(inspected.sourceBytes).toBe(5)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('discovers a deterministic sorted video batch and derives stable task ids', async () => {
