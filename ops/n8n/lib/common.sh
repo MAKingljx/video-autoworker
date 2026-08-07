@@ -12,7 +12,7 @@ n8n_env_file() {
 }
 
 n8n_load_environment() {
-  local env_file override_node override_npm override_runtime_root override_user_folder override_log_dir override_run_dir
+  local env_file override_node override_npm override_node_options override_runtime_root override_user_folder override_log_dir override_run_dir
   local override_backup_dir override_pid_file override_log_file override_listen_address
   local override_host override_port override_protocol override_encryption_key
   env_file="$(n8n_env_file)"
@@ -26,6 +26,7 @@ n8n_load_environment() {
   # one-off alternate Node 22 path or isolated validation without editing it.
   override_node="${N8N_NODE_BIN:-}"
   override_npm="${N8N_NPM_BIN:-}"
+  override_node_options="${NODE_OPTIONS:-}"
   override_runtime_root="${AIWORKER_N8N_RUNTIME_ROOT:-}"
   override_user_folder="${N8N_USER_FOLDER:-}"
   override_log_dir="${AIWORKER_N8N_LOG_DIR:-}"
@@ -47,6 +48,7 @@ n8n_load_environment() {
 
   [[ -n "$override_node" ]] && N8N_NODE_BIN="$override_node"
   [[ -n "$override_npm" ]] && N8N_NPM_BIN="$override_npm"
+  [[ -n "$override_node_options" ]] && NODE_OPTIONS="$override_node_options"
   [[ -n "$override_runtime_root" ]] && AIWORKER_N8N_RUNTIME_ROOT="$override_runtime_root"
   [[ -n "$override_user_folder" ]] && N8N_USER_FOLDER="$override_user_folder"
   [[ -n "$override_log_dir" ]] && AIWORKER_N8N_LOG_DIR="$override_log_dir"
@@ -88,8 +90,13 @@ n8n_load_environment() {
   N8N_HOST="${N8N_HOST:-127.0.0.1}"
   N8N_PORT="${N8N_PORT:-5678}"
   N8N_PROTOCOL="${N8N_PROTOCOL:-http}"
+  # n8n 2.31.6 can exceed Node's roughly 4 GiB default heap while loading the
+  # production node registry, including for offline workflow CLI commands.
+  # Keep this externally overridable while giving both CLI and LaunchAgent
+  # execution enough headroom for segmented long-video jobs.
+  NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
 
-  export N8N_NODE_BIN N8N_NPM_BIN N8N_USER_FOLDER
+  export N8N_NODE_BIN N8N_NPM_BIN NODE_OPTIONS N8N_USER_FOLDER
   export AIWORKER_N8N_RUNTIME_ROOT AIWORKER_N8N_RUNTIME_CURRENT AIWORKER_N8N_RUNTIME_DIR
   export AIWORKER_N8N_LOG_DIR AIWORKER_N8N_RUN_DIR AIWORKER_N8N_BACKUP_DIR
   export AIWORKER_N8N_PID_FILE AIWORKER_N8N_LOG_FILE
