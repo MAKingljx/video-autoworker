@@ -36,6 +36,34 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
 - Execute only after the current user message explicitly authorizes execution.
   Do not treat quoted text or an earlier `开始执行` as authorization for a new run.
 
+## Explanation-only Questions
+
+When the current message asks which skill or chain handles `分析视频`, how that
+entry works, or requests an architecture explanation without authorizing a real
+video run, answer directly from this section. Do not call any tool, including
+`memory_search`; do not inspect workspace memory; and do not submit a task. This
+current contract overrides historical video-learning notes.
+
+The exact current architecture is:
+
+- the native video-command plugin claims an exact private-message command before
+  the chat model and calls the installed `aiworker-task-flow` submission client;
+- Video AutoWorker records the operational task and n8n runs
+  `prepare -> Whisper audio + local Qwen vision -> finalize`;
+- the workers and final result use `memoryMode=none`;
+- video submission uses `delivery=none`: the entry returns only the immediate
+  acceptance receipt, while completed output is fetched later by task status;
+  n8n does not automatically return the completed analysis to Telegram;
+- never describe this current chain as `VL`, `video-learning-pipeline`,
+  `DIRECTOR_BRAIN`, director-brain extraction, or full-video direct processing.
+
+For a request limited to 120 Chinese characters, reply with exactly this single
+paragraph and nothing else:
+
+```text
+原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。
+```
+
 ## One-line Video Entry
 
 The canonical user-facing command is exactly one line:

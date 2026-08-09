@@ -411,6 +411,24 @@ globalThis.fetch = async (input, init = {}) => {
     expect(workspaceRules).toContain('`memoryMode=none`')
   })
 
+  it('answers video-chain explanation questions without tools or retired routes', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+    const fixedReply = '原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。'
+
+    expect([...fixedReply]).toHaveLength(114)
+    for (const contract of [skill, workspaceRules]) {
+      expect(contract).toContain(fixedReply)
+      expect(contract).toMatch(/including\s+`memory_search`/)
+      expect(contract).toMatch(/n8n does not automatically return the completed/)
+      expect(contract).toMatch(/local Qwen vision/)
+      expect(contract).toMatch(/current\s+contract overrides historical/)
+    }
+  })
+
   it('installs the componentized client, media, batch state, and worker modules', () => {
     const installer = readFileSync(resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh'), 'utf8')
     expect(installer).toContain('run-video-batch.mjs')

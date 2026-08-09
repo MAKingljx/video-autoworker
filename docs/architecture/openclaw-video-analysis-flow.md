@@ -26,6 +26,12 @@
 - `aiworker-task-flow` skill 和 `submit-task` parser 继续保留，分别作为模型可见的后备说明层和显式 CLI / 运维入口；它们不再承担精确 Telegram 单行命令的首要路由判断。
 - 插件只负责解析、单次提交和短回执，不直接处理媒体，不读取模型结果，也不改变 n8n 工作节点的 `memoryMode=none` 边界。
 
+## 说明型问答边界
+
+用户询问“使用什么技能”“链路怎么走”或明确要求只说明、不执行时，`second-original` 不调用工具、不查询历史记忆，也不提交任务；它直接依据当前 workspace 规则说明正式链路。当前固定口径为：原生命令插件先接管精确入口，`aiworker-task-flow` 将任务交给 Video AutoWorker / Mission Control 和 n8n，随后执行 `prepare -> Whisper audio + local Qwen vision -> finalize`。全部模型工作节点使用 `memoryMode=none`，视频提交使用 `delivery=none`；入口只返回受理信息，完成结果由后续状态查询读取，不由 n8n 自动回投 Telegram。
+
+旧 `VL`、导演脑、`video-learning-pipeline` 或直接全视频处理属于历史学习流程，不得用于描述当前生产视频分析链。说明型问答的业务任务数、n8n execution、媒体 inbox 和工作目录必须保持零增量。
+
 ## 单次提交与异步回执
 
 - 一条执行消息最多触发一次正式提交；消息键、任务 ID 与幂等键必须稳定且一致。

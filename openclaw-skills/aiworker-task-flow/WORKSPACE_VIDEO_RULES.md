@@ -10,6 +10,20 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   `暂不执行`, or `只分析`, return the plan and do not submit a task.
 - Submission requires an explicit execution instruction in the current message.
   A quoted or earlier `开始执行` does not authorize a new run.
+- If the user asks which skill or chain handles `分析视频`, how this entry works,
+  or otherwise asks only for an explanation, answer from this rule without any
+  tool call, including `memory_search`, and do not submit a task. The current
+  contract overrides historical video-learning notes: the native video-command
+  plugin claims the exact private-message command before the chat model, calls
+  the installed `aiworker-task-flow` client, and submits Video AutoWorker/n8n as
+  `prepare -> Whisper audio + local Qwen vision -> finalize`. All stages use
+  `memoryMode=none`; video submission uses `delivery=none`, so only the immediate
+  acceptance receipt is returned and completed output is fetched later by task
+  status. n8n does not automatically return the completed result to Telegram.
+  Never describe this current chain as `VL`, `video-learning-pipeline`,
+  `DIRECTOR_BRAIN`, director-brain extraction, or full-video direct processing.
+  When the user limits the answer to 120 Chinese characters, reply with exactly:
+  `原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。`
 - The canonical single-video execution command is exactly one line:
   `分析视频 <绝对路径>`. It authorizes one and only one n8n submission for that
   video; the user does not need to name the skill, models, workflow,
