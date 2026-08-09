@@ -71,9 +71,14 @@ bash scripts/install-aiworker-video-command-plugin.sh --apply
 The script refuses any user/host/profile other than the production
 `heisenbergs-1` `qwen-current` target. Its dry run checks the clean canonical
 Git checkout, manifest/package contract, strict config schema, and JavaScript
-syntax, then uses a mode-0700 temporary OpenClaw state for an official install,
-runtime inspection, and plugin doctor pass. The exact temporary state is
-removed afterward; `qwen-current` is never selected or changed. The installer
+syntax, then performs a real official install inside mode-0700 temporary
+`OPENCLAW_HOME` and state roots, followed by runtime inspection and a plugin
+doctor pass. The exact temporary root is removed afterward; `qwen-current` is
+inspected under before/after fingerprints but is not intentionally changed. Real approvals, default config, and default extension
+paths, plus the target plugin index in the default and `qwen-current` state, are
+fingerprinted before and after to detect the known high-risk isolation escapes. The installer
+also clears inherited OpenClaw home/state/config overrides for every production-profile
+CLI call, so `--profile qwen-current` cannot be redirected by the caller environment. It
 intentionally does not call `plugins validate`, because
 OpenClaw `2026.7.1-2` defines that command only for generated
 `defineToolPlugin` metadata, not hook-only native plugins. Apply mode creates a
