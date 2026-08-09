@@ -104,6 +104,26 @@ After installation, the rollout must verify or explicitly refresh only
 `ai.openclaw.qwen-current`, then run an isolated Telegram acceptance test before
 production use.
 
+The installed package includes a deterministic isolated harness:
+
+```bash
+node ~/.openclaw-qwen-current/extensions/aiworker-video-command/scripts/run-isolated-video-command-qa.mjs \
+  --video-file /absolute/controlled-qa.mp4 \
+  --timestamp-ms 1786238400000 \
+  --qa-id release-qa-1
+```
+
+It invokes the installed `before_dispatch` handler once with a synthetic,
+private Telegram-shaped event and the real task runner, then emits one redacted
+JSON receipt. Although ingress is synthetic, a successful run creates one real
+AI-worker task in the active production control plane with `delivery=none` and
+no harness-side status query. This proves the installed native handler, parser,
+stable key, runner, and AI-worker submission boundary without invoking the
+OpenClaw agent/model path. Downstream Whisper, Qwen, and workflow stages run
+asynchronously as normal and must be verified separately by task ID. It is not
+proof that a real Telegram inbound message reached the hook; that final ingress
+check still requires one real allowlisted private message from the user.
+
 ## Exact rollback boundary
 
 The installer prints the exact backup directory. To roll back, set

@@ -162,6 +162,7 @@ required_files=(
   "$PLUGIN_DIR/lib/runner.js"
   "$PLUGIN_DIR/lib/stable-message-key.js"
   "$RUNTIME_VALIDATOR"
+  "$PLUGIN_DIR/scripts/run-isolated-video-command-qa.mjs"
 )
 for required_file in "${required_files[@]}"; do
   if [[ ! -f "$required_file" ]]; then
