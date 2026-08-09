@@ -9,6 +9,7 @@
     "mc": "node scripts/mc-cli.cjs",
     "mc:mcp": "node scripts/mc-mcp-server.cjs",
     "mc:tui": "node scripts/mc-tui.cjs",
+    "media:retention:audit": "node scripts/aiworker-media-retention.mjs --dry-run",
     "dev": "pnpm run verify:node && next dev --hostname 127.0.0.1 --port ${PORT:-3000}",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",

@@ -135,7 +135,7 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 
 第二个固定工作流 ID 为 `aiworker-video-analysis-v1`，生产 Webhook 路径为 `/webhook/aiworker-video-analysis`。OpenClaw 技能收到 `--video-file` 后不会把任意本机路径写进任务，而是以 0600 权限复制到 0700 的受控收件箱，只把随机 `videoKey` 交给平台。`prepare` 阶段验证容器、大小、时长和视频流，使用参数数组调用 ffmpeg，提取 16 kHz 单声道音轨和有限数量的 JPEG 抽帧；不拼接 shell 命令，也不接受远程 URL。
 
-准备完成后，n8n 分出两个独立分支：音频分支从模型注册表解析 `Whisper large-v3-turbo` CLI 资源，画面分支从任务链 `vision` 节点解析具备 `vision` 能力的 `openai-compatible` 直连路由。两个分支都固定 `memoryMode=none`，不接收 OpenClaw profile、agent、session key 或记忆目录。n8n v1 在同一次执行中按节点顺序调度分支，Merge 节点等待两侧都完成；这里保证的是模型职责隔离，不把顺序分支误报为计算并发。最终接口从 SQLite 中读取两个已成功的子任务结果并做确定性合并，不再调用第三个带会话模型。SQLite 只保存任务状态和本次输出，属于运维审计记录，不属于智能体长期记忆；抽帧、音轨和工作目录在成功合并后删除，下一次 `prepare` 会清理已超过 24 小时的异常残留与未消费收件箱文件。
+准备完成后，n8n 分出两个独立分支：音频分支从模型注册表解析 `Whisper large-v3-turbo` CLI 资源，画面分支从任务链 `vision` 节点解析具备 `vision` 能力的 `openai-compatible` 直连路由。两个分支都固定 `memoryMode=none`，不接收 OpenClaw profile、agent、session key 或记忆目录。n8n v1 在同一次执行中按节点顺序调度分支，Merge 节点等待两侧都完成；这里保证的是模型职责隔离，不把顺序分支误报为计算并发。最终接口从 SQLite 中读取两个已成功的子任务结果并做确定性合并，不再调用第三个带会话模型。SQLite 只保存任务状态和本次输出，属于运维审计记录，不属于智能体长期记忆；抽帧、音轨和当前任务工作目录在成功合并后按当前任务范围删除。正常 `prepare` 不再执行跨任务 TTL 扫描；异常残留与未消费收件箱文件只能通过下文的独立只读审计入口盘点，任何恢复、隔离或删除都需要另立任务并取得明确授权。
 
 建议绑定配置如下；路由 ID 仍可替换成其他本地或云端直连视觉模型，不能换成 OpenClaw Agent 路由：
 
@@ -263,6 +263,43 @@ node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/script
 命中重复请求，完成结果以后续 `--status '<taskId>'` 为准。
 
 默认 `delivery.mode=none`，结果仅保存在任务运行记录中。要把结果回投到已有手机会话，必须显式传入 `--delivery reply --session-key '<已验证会话键>'`，或同时给出 `--channel` 与 `--target`；不得把测试消息投递到未经确认的会话。
+
+### 原生视频命令与受控媒体审计边界
+
+`qwen-current` 可以安装版本化的原生视频命令插件，在消息进入模型前通过
+`before_dispatch` 识别精确的 Telegram 私聊单行入口，并以参数数组调用已安装的
+`submit-task`。插件只返回任务 ID、受理状态和幂等标记，视频任务固定使用
+`delivery=none`；命中后不再进入 Agent，也不在同一轮查询状态或重复提交。随插件
+提供的 synthetic DM harness 只验证同一处理器、解析器、稳定键和真实任务提交边界，
+不能替代由真实 allowlisted 用户发出的 Telegram 入口验收。
+
+生产隔离验收已经证明该确定性入口可只创建一次视频工作流执行，普通任务工作流
+不增加执行；父任务和 `prepare`、`audio`、`vision`、`finalize` 四个子任务均以首次
+尝试成功，所有实际出现的 `memoryMode` 均为 `none`，Whisper 与本地视觉模型分别
+命中受控音频口令和纯色画面。这个结论只覆盖原生处理器至视频任务链的功能闭环，
+不扩大为真实 Telegram 入站、历史媒体保留或全局运行数据完整性的证明。
+
+同一次验收暴露了既有媒体清理边界：执行前受控 inbox 记录了一个普通文件的数量
+基线，同时存在一条更早的 `accepted / attempt=0` 记录；执行后文件数量变为零。本轮
+QA 与历史记录使用不同的视频键，且当时 `prepare` 热路径会先扫描并删除超过 24 小时的全部
+受控 inbox 文件；目录时间也与本轮 prepare 时段吻合。因此现有证据高度怀疑历史
+文件被旧的全局 TTL 扫描删除，但部署前只保存了数量基线，没有保存该文件的路径、
+大小和哈希，运行时也没有逐文件删除审计，不能把该判断表述为完整法证结论，更不能
+据此推测或执行恢复。
+
+修复候选从 `prepare` 热路径移除全局过期清理，并要求 prepare 请求的视频键与父任务
+持久化的视频键完全一致；不匹配的请求在创建子任务或读取文件前拒绝。受控媒体检查改为独立审计入口
+`scripts/aiworker-media-retention.mjs`，核心逻辑位于
+`scripts/lib/aiworker-media-retention.mjs`。当前版本只提供审计模式，调用时必须显式
+使用 `--dry-run`；它不会通过 SQLite 打开生产数据库，而是先把文件状态稳定的主库和
+WAL 复制到权限受控的临时快照，在快照上执行 `query_only` 与完整性检查，结束后只清理
+该精确临时目录。生产数据库及其 sidecar 在前后必须保持不变，唯一保留的写入是调用者
+指定、位于源码仓库和媒体根之外的 0700 目录中的 0600 审计计划文件。`--apply` 与
+`--delete` 会被拒绝，没有媒体恢复或删除能力，也不把审计动作
+挂回任务执行路径。该候选只修改 Video AutoWorker 应用代码和测试，不涉及 n8n
+release、工作流、OpenClaw 插件、模型路由或数据库 schema；生产部署只允许重新构建
+并刷新 `3017` 应用，n8n 与 OpenClaw Gateway 不应随之重启。任何后续保留、恢复或
+删除动作都必须作为独立任务重新取证并获得明确授权，不能由审计 CLI 自动完成。
 
 `/automation` 页面提供“打开 n8n 编辑器”和按需“嵌入 n8n 编辑器”两个入口。n8n 继续只监听回环地址，不直接暴露公网；从远端电脑访问时，应在同一条 SSH 连接中同时转发控制台和 n8n 端口：
 

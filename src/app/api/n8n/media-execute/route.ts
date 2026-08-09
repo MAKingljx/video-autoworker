@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
 import {
   analyzeN8nVideoFrames,
-  cleanupExpiredN8nMediaTasks,
   cleanupN8nMediaTask,
   mediaChildIdentity,
   mergeN8nMediaResults,
@@ -37,9 +36,8 @@ function stageOutput(
   taskId: string,
   routing: Record<string, unknown>,
   taskInput: Record<string, unknown>,
-  stageInput: Record<string, unknown>,
 ) {
-  if (stage === 'prepare') return prepareN8nMedia(taskId, routing, stageInput)
+  if (stage === 'prepare') return prepareN8nMedia(taskId, routing, taskInput)
   if (stage === 'audio') return transcribeN8nMedia(taskId, routing)
   if (stage === 'vision') return analyzeN8nVideoFrames(taskId, routing, taskInput)
   throw new Error(`不支持直接执行阶段：${stage}`)
@@ -69,6 +67,13 @@ export async function POST(request: NextRequest) {
   }
 
   const stage = parsed.data.stage
+  if (stage === 'prepare') {
+    const parentVideoKey = typeof parent.input.videoKey === 'string' ? parent.input.videoKey : ''
+    const requestedVideoKey = typeof parsed.data.input.videoKey === 'string' ? parsed.data.input.videoKey : ''
+    if (!parentVideoKey || requestedVideoKey !== parentVideoKey) {
+      return NextResponse.json({ error: '视频标识与父任务不匹配' }, { status: 409 })
+    }
+  }
   const childTaskId = mediaChildIdentity('task', parent.taskId, stage)
   const childIdempotencyKey = mediaChildIdentity('idem', parent.idempotencyKey, stage)
   const scope = { workspaceId: parent.workspaceId, tenantId: parent.tenantId }
@@ -126,7 +131,6 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    if (stage === 'prepare') await cleanupExpiredN8nMediaTasks().catch(() => undefined)
     let output: Record<string, unknown>
     if (stage === 'finalize') {
       const audioRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'audio'))
@@ -136,7 +140,7 @@ export async function POST(request: NextRequest) {
       const merged = mergeN8nMediaResults(audioRun.output, visionRun.output)
       output = await synthesizeN8nMediaResults(parent.taskId, parent.routing, parent.input, merged)
     } else {
-      output = await stageOutput(stage, parent.taskId, parent.routing, parent.input, parsed.data.input)
+      output = await stageOutput(stage, parent.taskId, parent.routing, parent.input)
     }
     if (stage === 'finalize') await cleanupN8nMediaTask(parent.taskId)
     completeN8nTaskRun(db, childTaskId, output)

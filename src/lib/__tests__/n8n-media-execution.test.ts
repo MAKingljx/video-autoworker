@@ -1,11 +1,12 @@
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildMediaSegmentWindows,
-  cleanupExpiredN8nMediaTasks,
+  cleanupN8nMediaTask,
   mediaChildIdentity,
+  mediaTaskWorkspace,
   mergeN8nMediaResults,
 } from '@/lib/n8n-media-execution'
 
@@ -70,27 +71,17 @@ describe('n8n stateless media helpers', () => {
     }])
   })
 
-  it('removes only expired managed workspaces and inbox media', async () => {
-    const work = process.env.AIWORKER_MEDIA_WORK_DIR!
-    const inbox = process.env.AIWORKER_MEDIA_INGEST_DIR!
-    const managedDir = join(work, 'a'.repeat(64))
-    const ignoredDir = join(work, 'operator-notes')
-    const managedVideo = join(inbox, '123e4567-e89b-42d3-a456-426614174000.mp4')
-    const ignoredFile = join(inbox, 'keep.txt')
-    await mkdir(managedDir, { recursive: true })
-    await mkdir(ignoredDir, { recursive: true })
-    await mkdir(inbox, { recursive: true })
-    await writeFile(join(managedDir, 'metadata.json'), '{}')
-    await writeFile(managedVideo, 'video')
-    await writeFile(ignoredFile, 'keep')
-    const old = new Date(Date.now() - 25 * 60 * 60 * 1_000)
-    await utimes(managedDir, old, old)
-    await utimes(managedVideo, old, old)
+  it('cleans only the exact finalized task workspace', async () => {
+    const target = mediaTaskWorkspace('video-parent-target')
+    const neighbor = mediaTaskWorkspace('video-parent-neighbor')
+    await mkdir(target, { recursive: true })
+    await mkdir(neighbor, { recursive: true })
+    await writeFile(join(target, 'metadata.json'), 'target')
+    await writeFile(join(neighbor, 'metadata.json'), 'neighbor')
 
-    expect(await cleanupExpiredN8nMediaTasks()).toBe(2)
-    await expect(stat(managedDir)).rejects.toThrow()
-    await expect(stat(managedVideo)).rejects.toThrow()
-    expect((await readFile(ignoredFile, 'utf8'))).toBe('keep')
-    expect((await stat(ignoredDir)).isDirectory()).toBe(true)
+    await cleanupN8nMediaTask('video-parent-target')
+
+    await expect(stat(target)).rejects.toThrow()
+    await expect(readFile(join(neighbor, 'metadata.json'), 'utf8')).resolves.toBe('neighbor')
   })
 })

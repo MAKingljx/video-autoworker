@@ -1,3 +1,7 @@
+import { createHash } from 'node:crypto'
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
@@ -16,7 +20,6 @@ const mocks = vi.hoisted(() => ({
   mergeN8nMediaResults: vi.fn(),
   synthesizeN8nMediaResults: vi.fn(),
   cleanupN8nMediaTask: vi.fn(),
-  cleanupExpiredN8nMediaTasks: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
@@ -31,7 +34,6 @@ vi.mock('@/lib/n8n-media-execution', async (importOriginal) => {
     mergeN8nMediaResults: mocks.mergeN8nMediaResults,
     synthesizeN8nMediaResults: mocks.synthesizeN8nMediaResults,
     cleanupN8nMediaTask: mocks.cleanupN8nMediaTask,
-    cleanupExpiredN8nMediaTasks: mocks.cleanupExpiredN8nMediaTasks,
   }
 })
 vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
@@ -73,7 +75,11 @@ const parent = {
   updatedAt: 1,
 }
 
-function request(stage: 'prepare' | 'audio' | 'vision' | 'finalize', secret = 'shared-secret') {
+function request(
+  stage: 'prepare' | 'audio' | 'vision' | 'finalize',
+  secret = 'shared-secret',
+  input = stage === 'prepare' ? parent.input : {},
+) {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/media-execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-AIWorker-Webhook-Secret': secret },
@@ -81,7 +87,7 @@ function request(stage: 'prepare' | 'audio' | 'vision' | 'finalize', secret = 's
       taskId: parent.taskId,
       idempotencyKey: parent.idempotencyKey,
       stage,
-      input: stage === 'prepare' ? parent.input : {},
+      input,
     }),
   })
 }
@@ -110,7 +116,6 @@ describe('n8n media node execution route', () => {
     })
     mocks.mergeN8nMediaResults.mockReturnValue({ combinedText: '合并结果', memoryMode: 'none' })
     mocks.synthesizeN8nMediaResults.mockResolvedValue({ combinedText: '最终汇总', memoryMode: 'none' })
-    mocks.cleanupExpiredN8nMediaTasks.mockResolvedValue(0)
     mocks.cleanupN8nMediaTask.mockResolvedValue(undefined)
   })
 
@@ -133,6 +138,55 @@ describe('n8n media node execution route', () => {
     }), { workspaceId: 2, tenantId: 3 })
     expect(mocks.prepareN8nMedia).toHaveBeenCalledWith(parent.taskId, parent.routing, parent.input)
     expect(mocks.completeN8nTaskRun).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not sweep an unrelated expired controlled inbox file before prepare', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-route-test-'))
+    const inbox = join(root, 'inbox')
+    const work = join(root, 'work')
+    const historicalVideo = join(inbox, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4')
+    const previousInbox = process.env.AIWORKER_MEDIA_INGEST_DIR
+    const previousWork = process.env.AIWORKER_MEDIA_WORK_DIR
+    try {
+      await mkdir(inbox, { recursive: true })
+      await mkdir(work, { recursive: true })
+      await writeFile(historicalVideo, 'historical-video')
+      const expired = new Date(Date.now() - 25 * 60 * 60 * 1_000)
+      await utimes(historicalVideo, expired, expired)
+      const before = await stat(historicalVideo)
+      const beforeHash = createHash('sha256').update(await readFile(historicalVideo)).digest('hex')
+      process.env.AIWORKER_MEDIA_INGEST_DIR = inbox
+      process.env.AIWORKER_MEDIA_WORK_DIR = work
+
+      const response = await POST(request('prepare'))
+
+      expect(response.status).toBe(200)
+      const after = await stat(historicalVideo)
+      expect(await readFile(historicalVideo, 'utf8')).toBe('historical-video')
+      expect(createHash('sha256').update(await readFile(historicalVideo)).digest('hex')).toBe(beforeHash)
+      expect(after.ino).toBe(before.ino)
+      expect(after.size).toBe(before.size)
+      expect(after.mtimeMs).toBe(before.mtimeMs)
+    } finally {
+      if (previousInbox === undefined) delete process.env.AIWORKER_MEDIA_INGEST_DIR
+      else process.env.AIWORKER_MEDIA_INGEST_DIR = previousInbox
+      if (previousWork === undefined) delete process.env.AIWORKER_MEDIA_WORK_DIR
+      else process.env.AIWORKER_MEDIA_WORK_DIR = previousWork
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a prepare video key that is not owned by the parent task', async () => {
+    const otherVideoKey = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4'
+    const response = await POST(request('prepare', 'shared-secret', {
+      ...parent.input,
+      videoKey: otherVideoKey,
+    }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({ error: '视频标识与父任务不匹配' })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.prepareN8nMedia).not.toHaveBeenCalled()
   })
 
   it('merges persisted audio and vision outputs before completing the parent', async () => {

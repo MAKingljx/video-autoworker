@@ -742,30 +742,3 @@ export async function synthesizeN8nMediaResults(
 export async function cleanupN8nMediaTask(taskId: string): Promise<void> {
   await rm(mediaTaskWorkspace(taskId), { recursive: true, force: true })
 }
-
-export async function cleanupExpiredN8nMediaTasks(now = Date.now()): Promise<number> {
-  const root = mediaWorkRoot()
-  await mkdir(root, { recursive: true, mode: 0o700 })
-  const entries = await readdir(root, { withFileTypes: true })
-  let removed = 0
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^[0-9a-f]{64}$/.test(entry.name)) continue
-    const path = join(root, entry.name)
-    const info = await stat(path).catch(() => null)
-    if (!info || now - info.mtimeMs <= 24 * 60 * 60 * 1_000) continue
-    await rm(path, { recursive: true, force: true })
-    removed += 1
-  }
-  const inbox = mediaInboxRoot()
-  await mkdir(inbox, { recursive: true, mode: 0o700 })
-  const inboxEntries = await readdir(inbox, { withFileTypes: true })
-  for (const entry of inboxEntries) {
-    if (!entry.isFile() || !videoKeySchema.safeParse(entry.name).success) continue
-    const path = join(inbox, entry.name)
-    const info = await stat(path).catch(() => null)
-    if (!info || now - info.mtimeMs <= 24 * 60 * 60 * 1_000) continue
-    await rm(path, { force: true })
-    removed += 1
-  }
-  return removed
-}
