@@ -1,6 +1,6 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker and n8n tasks, especially the one-line local video command "分析视频 /absolute/path/video.mp4"; submit stateless audio and vision work asynchronously through the registered Whisper and Qwen video-analysis chain.
+description: Use for AI-worker and n8n tasks, especially the exact one-line local video command "分析视频 /absolute/path/video.mp4"; submit it once through the stateless registered video-analysis chain without preamble or same-turn polling.
 ---
 
 # AI-worker Task Flow
@@ -38,21 +38,25 @@ background queue, n8n task chain, or routed local/cloud model pipeline.
 
 ## One-line Video Entry
 
-The canonical user-facing command is:
+The canonical user-facing command is exactly one line:
 
 ```text
 分析视频 /完整路径/video.mp4
 ```
 
-Treat `分析视频 <绝对本地视频路径>` in the current message as explicit
-authorization to submit that one video. The user does not need to name this
-skill, n8n, Whisper, Qwen, `memoryMode`, delivery, segmentation, or wait
-settings. The registered `video-analysis` binding owns those defaults.
+Treat a current message consisting of exactly `分析视频 <绝对路径>` as explicit
+authorization for one and only one n8n submission of that video. The user does
+not need to name this skill, n8n, Whisper, Qwen, `memoryMode`, delivery,
+segmentation, or wait settings. The registered `video-analysis` binding owns
+those defaults.
 
 Safety and parsing rules:
 
 - A current-message phrase such as `先告诉我方法`, `不要开始`, `暂不执行`, or
   `只分析` overrides the execution phrase and means no task submission.
+- Do not send any preflight narration such as `马上开始`, `我先找`, `让我检查`,
+  or a paraphrase. The first action for an authorized one-line command is the
+  single `submit-task.mjs` invocation below.
 - Accept exactly one absolute local video file path. If it is surrounded by one
   matching pair of quotes, remove only that pair. Preserve Chinese characters,
   spaces, parentheses, and other filename characters as one argument; do not
@@ -61,6 +65,10 @@ Safety and parsing rules:
   loop over several `--video-file` calls.
 - Create one stable request key internally and pass the same value to
   `--task-id` and `--idempotency-key`. The user does not supply this key.
+- Do not inspect or process the video with direct `ffmpeg`, Whisper, Qwen, VL,
+  the retired `video-learning-pipeline`, or any ad-hoc shell command. Do not run
+  `ls`, `find`, `stat`, a media probe, or any alternate submission path; the
+  managed script owns validation, ingestion, and the one n8n submission.
 
 Map the one-line command to the existing componentized entrypoint:
 
@@ -74,9 +82,27 @@ node skills/aiworker-task-flow/scripts/submit-task.mjs \
 ```
 
 Do not pass `--vision-route` unless the user explicitly requests a registered
-per-task override. Immediately report `taskId`, the current status, and
-`duplicate`; do not claim completion until a later `--status <taskId>` query
-returns `succeeded`.
+per-task override. Invoke this command exactly once in the current turn. Do not
+poll `--status`, inspect n8n, wait, retry, resubmit, or run another tool in the
+same turn after it returns.
+
+On success, send exactly one short acknowledgement containing only `taskId`,
+`status`, and `duplicate`, for example:
+
+```text
+已提交：taskId=<taskId>，status=<status>，duplicate=<true|false>。
+```
+
+On failure, do not retry or inspect further. Send exactly one short error, for
+example:
+
+```text
+提交失败：<简短错误>。
+```
+
+Query `--status <taskId>` only in a later turn after a new explicit status or
+monitoring request. Do not claim completion until that later query returns
+`succeeded`.
 
 ## Submit
 

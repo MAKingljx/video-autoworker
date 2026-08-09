@@ -10,19 +10,32 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   `暂不执行`, or `只分析`, return the plan and do not submit a task.
 - Submission requires an explicit execution instruction in the current message.
   A quoted or earlier `开始执行` does not authorize a new run.
-- The canonical single-video execution command is
-  `分析视频 <绝对本地视频路径>`. It is sufficient authorization by itself; the
-  user does not need to name the skill, models, workflow, segmentation,
-  `memoryMode`, delivery, or wait settings. A negative phrase in the same
-  message still takes priority and prevents submission.
+- The canonical single-video execution command is exactly one line:
+  `分析视频 <绝对路径>`. It authorizes one and only one n8n submission for that
+  video; the user does not need to name the skill, models, workflow,
+  segmentation, `memoryMode`, delivery, or wait settings. A negative phrase in
+  the same message still takes priority and prevents submission.
+- Do not narrate before submitting. Phrases such as `马上开始`, `我先找`,
+  `让我检查`, or any paraphrased preflight update are forbidden. The first
+  action must be the single managed `submit-task.mjs` invocation.
 - Preserve one optionally quoted path as a single argument, including Chinese,
   spaces, and parentheses. Do not expand shell variables, globs, substitutions,
   or additional commands. Directories and multi-video requests must use the
   existing durable batch flow, never a loop of parallel single-video calls.
+- Never inspect or process this one-line request with direct `ffmpeg`, Whisper,
+  Qwen, VL, the retired `video-learning-pipeline`, or an ad-hoc shell command.
+  Do not run `ls`, `find`, `stat`, a media probe, or any alternate submission
+  path before the managed script; it owns validation, controlled ingestion, and
+  the only n8n submission.
 - For the one-line command, generate one stable request key internally, use it
   for both task identity fields, and submit with `delivery=none` and
-  `wait-seconds=0`. Immediately report the task ID and current status; only a
-  later status of `succeeded` proves completion.
+  `wait-seconds=0`; the registered video binding keeps `memoryMode=none`.
+- After the single invocation returns, do not poll status, inspect n8n, wait,
+  retry, resubmit, or run another tool in the same turn. On success, return one
+  short acknowledgement containing only `taskId`, `status`, and `duplicate`.
+  On failure, return one short error and do not investigate or retry in that
+  turn. Query status only in a later turn after a new explicit status or
+  monitoring request; only a returned status of `succeeded` proves completion.
 - Videos longer than five minutes must use the segmented pipeline. Submit with
   `--wait-seconds 0`, report the returned task ID, and query it later with
   `--status`. Never hold one OpenClaw tool call open for the whole video.

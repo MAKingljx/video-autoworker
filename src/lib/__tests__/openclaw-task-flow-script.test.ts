@@ -71,15 +71,43 @@ describe('OpenClaw task-flow submit script', () => {
     ), 'utf8')
 
     expect(skill).toContain('分析视频 /完整路径/video.mp4')
-    expect(skill).toContain('`分析视频 <绝对本地视频路径>`')
+    expect(skill).toContain('`分析视频 <绝对路径>`')
     expect(skill).toContain('--video-file "<absolute-video-path>"')
     expect(skill).toContain('--task-id <stable-request-key>')
     expect(skill).toContain('--idempotency-key <stable-request-key>')
     expect(skill).toContain('--delivery none')
     expect(skill).toContain('--wait-seconds 0')
     expect(skill).toContain('overrides the execution phrase and means no task submission')
-    expect(workspaceRules).toContain('`分析视频 <绝对本地视频路径>`')
+    expect(workspaceRules).toContain('`分析视频 <绝对路径>`')
     expect(workspaceRules).toContain('user does not need to name the skill')
+  })
+
+  it('contracts the exact one-line command to one silent submission and one receipt', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+
+    for (const contract of [skill, workspaceRules]) {
+      expect(contract).toContain('one and only one n8n submission')
+      expect(contract).toMatch(/马上开始.*我先找.*让我检查/s)
+      expect(contract).toMatch(/direct `ffmpeg`, Whisper,\s+Qwen, VL/)
+      expect(contract).toMatch(/Do not run\s+`ls`, `find`, `stat`/)
+      expect(contract).toMatch(/do not\s+poll/i)
+      expect(contract).toContain('same turn')
+      expect(contract).toMatch(/one\s+short acknowledgement/)
+      expect(contract).toMatch(/one\s+short error/)
+      expect(contract).toContain('new explicit status or')
+      expect(contract).toContain('monitoring request')
+    }
+    expect(skill).toContain('exactly once in the current turn')
+    expect(skill).toMatch(/containing only `taskId`,\s+`status`, and `duplicate`/)
+    expect(skill).toContain('已提交：taskId=<taskId>，status=<status>，duplicate=<true|false>。')
+    expect(skill).toContain('提交失败：<简短错误>。')
+    expect(workspaceRules).toContain('`delivery=none` and')
+    expect(workspaceRules).toContain('`wait-seconds=0`')
+    expect(workspaceRules).toContain('`memoryMode=none`')
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {
@@ -114,7 +142,7 @@ describe('OpenClaw task-flow submit script', () => {
 
       const agents = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
       expect(agents).toContain('Keep this rule.')
-      expect(agents).toContain('`分析视频 <绝对本地视频路径>`')
+      expect(agents).toContain('`分析视频 <绝对路径>`')
       expect(agents.match(/^## Video Analysis Task Flow Rule$/gm)).toHaveLength(1)
     } finally {
       await rm(root, { recursive: true, force: true })
