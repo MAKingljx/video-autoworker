@@ -14,9 +14,17 @@ describe('AI-worker video-command plugin installer contract', () => {
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('plugins install --force "$PLUGIN_DIR"')
-    expect(script).toContain('plugins validate --root "$PLUGIN_DIR" --entry index.js')
+    expect(script).not.toContain('plugins validate')
+    expect(script).toContain('plugins inspect "$PLUGIN_ID" --runtime --json')
+    expect(script).toContain('plugins doctor')
+    expect(script).toContain('validate-runtime-inspection.mjs')
+    expect(script).toContain('manifest?.id !== pluginId')
     expect(script).toContain('verify_explicit_allowlist pre-install')
     expect(script).toContain('verify_explicit_allowlist post-install')
+    expect(script).toContain('verify_first_install_state')
+    expect(script).toContain('assert_plugin_index_absent "$PROFILE_STATE_DB"')
+    expect(script).toContain('assert_plugin_index_present "$PROFILE_STATE_DB"')
+    expect(script).toContain("WHERE index_key = 'installed-plugin-index'")
     expect(script).toContain('!allow.includes(process.argv[3])')
     expect(script).toContain('[[ ! -d "$INSTALLED_PLUGIN_DIR" ]]')
     expect(script).toContain('"$PLUGIN_DIR/lib/before-dispatch.js"')
@@ -24,19 +32,40 @@ describe('AI-worker video-command plugin installer contract', () => {
     expect(script).not.toMatch(/gateway (?:restart|start|stop)|launchctl|npm\/dist/iu)
   })
 
-  it('defaults to dry-run and backs up config plus any installed extension', async () => {
+  it('proves runtime loading in an isolated state and removes only that exact state', async () => {
+    const script = await readFile(installerPath, 'utf8')
+    expect(script).toContain('mktemp -d "/tmp/aiworker-plugin-dry-run.XXXXXX"')
+    expect(script).toContain('OPENCLAW_STATE_DIR="$isolated_state_dir"')
+    expect(script).toContain('OPENCLAW_CONFIG_PATH="$isolated_config"')
+    expect(script).toContain('openclaw plugins install --force "$PLUGIN_DIR"')
+    expect(script).toContain('assert_plugin_index_present "$isolated_state_dir/state/openclaw.sqlite"')
+    expect(script).toContain("grep -Fqx 'No plugin issues detected.'")
+    expect(script).toContain('/tmp/aiworker-plugin-dry-run.*|/private/tmp/aiworker-plugin-dry-run.*')
+    expect(script).toContain('rm -rf -- "$isolated_state_dir"')
+  })
+
+  it('defaults to dry-run and backs up config for a rollback-safe first install', async () => {
     const script = await readFile(installerPath, 'utf8')
     expect(script).toContain('MODE="dry-run"')
-    expect(script).toContain('install -d -m 700 "$backup_dir"')
+    expect(script).toContain('install -d -m 700 "$BACKUP_ROOT"')
+    expect(script).toContain('mktemp -d "$BACKUP_ROOT/$stamp.XXXXXX"')
+    expect(script).toContain('mkdir "$INSTALL_LOCK_DIR"')
+    expect(script).toContain('pre-install-plugins-doctor.txt')
+    expect(script).toContain('verify_first_install_state')
     expect(script).toContain('install -m 600 "$PROFILE_CONFIG" "$backup_dir/openclaw.json"')
-    expect(script).toContain('cp -R -p "$INSTALLED_PLUGIN_DIR" "$backup_dir/extension"')
     expect(script).toContain('install -m 600 "$backup_dir/openclaw.json" "$PROFILE_CONFIG"')
-    expect(script).toContain('mv "$INSTALLED_PLUGIN_DIR" "$backup_dir/failed-installed-extension"')
-    expect(script.indexOf('trap restore_failed_install ERR')).toBeLessThan(
+    expect(script).toContain('plugins uninstall "$PLUGIN_ID" --force')
+    expect(script).toContain('cmp -s "$backup_dir/openclaw.json" "$PROFILE_CONFIG"')
+    expect(script).toContain('ROLLBACK FAILED')
+    expect(script.indexOf('trap restore_failed_install EXIT')).toBeLessThan(
       script.indexOf('verify_explicit_allowlist post-install'),
     )
+    expect(script).toContain("trap 'exit 143' TERM")
     expect(script.indexOf('verify_explicit_allowlist post-install')).toBeLessThan(
-      script.indexOf('trap - ERR'),
+      script.lastIndexOf('plugins inspect "$PLUGIN_ID" --runtime --json'),
+    )
+    expect(script.lastIndexOf('plugins inspect "$PLUGIN_ID" --runtime --json')).toBeLessThan(
+      script.lastIndexOf('trap - EXIT HUP INT TERM'),
     )
   })
 })

@@ -69,20 +69,39 @@ bash scripts/install-aiworker-video-command-plugin.sh --apply
 ```
 
 The script refuses any user/host/profile other than the production
-`heisenbergs-1` `qwen-current` target. It validates the clean canonical Git
-checkout and plugin package, creates a mode-0700 timestamped backup of the
-profile config and any prior plugin directory, requires a non-empty explicit
-plugin allowlist, then invokes only the official command:
+`heisenbergs-1` `qwen-current` target. Its dry run checks the clean canonical
+Git checkout, manifest/package contract, strict config schema, and JavaScript
+syntax, then uses a mode-0700 temporary OpenClaw state for an official install,
+runtime inspection, and plugin doctor pass. The exact temporary state is
+removed afterward; `qwen-current` is never selected or changed. The installer
+intentionally does not call `plugins validate`, because
+OpenClaw `2026.7.1-2` defines that command only for generated
+`defineToolPlugin` metadata, not hook-only native plugins. Apply mode creates a
+mode-0700 timestamped backup of the profile config. Apply also holds a
+profile-specific first-install lock, records a clean production plugin-doctor
+baseline, and repeats the first-install checks immediately before mutation. It
+is deliberately limited
+to a first install: the target ID must be absent from the allowlist, profile
+entries, runtime discovery, and extension directory. It also requires a
+non-empty explicit plugin allowlist, then invokes only the official command:
 
 ```bash
 openclaw --profile qwen-current plugins install --force <plugin-directory>
 ```
 
-It does not edit npm `dist`, install into another profile, or restart any
-service. It verifies after installation that the plugin ID was added to that
-allowlist and that the installed directory exists; failure restores the saved
-configuration and prior plugin. A separately authorized rollout must restart only
-`ai.openclaw.qwen-current` and run an isolated Telegram acceptance test before
+It does not edit npm `dist`, install into another profile, or explicitly invoke
+a service restart. The official OpenClaw install/uninstall configuration write
+may refresh `qwen-current`; no other profile, Mission Control, or n8n service is
+in scope. Before committing the install, it verifies that the plugin ID was
+added to that allowlist, the installed directory exists, and official runtime
+inspection reports the expected plugin ID as `loaded`, includes the registered
+`before_dispatch` typed hook, and has no error diagnostic; it then runs
+`plugins doctor`. Any failure first calls the official plugin uninstall command
+to remove its install-index record and files, restores the saved configuration,
+then proves the target is no longer discoverable. A failed uninstall or residual
+state is reported as a rollback failure and never as a successful recovery.
+After installation, the rollout must verify or explicitly refresh only
+`ai.openclaw.qwen-current`, then run an isolated Telegram acceptance test before
 production use.
 
 ## Exact rollback boundary
