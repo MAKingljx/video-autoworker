@@ -50,6 +50,10 @@ not need to name this skill, n8n, Whisper, Qwen, `memoryMode`, delivery,
 segmentation, or wait settings. The registered `video-analysis` binding owns
 those defaults.
 
+As a deterministic fallback, `submit-task.mjs` recognizes that exact command
+from `--prompt` or `--prompt-file` before binding selection; non-matches remain
+generic tasks.
+
 Safety and parsing rules:
 
 - A current-message phrase such as `先告诉我方法`, `不要开始`, `暂不执行`, or
@@ -73,7 +77,7 @@ Safety and parsing rules:
 Map the one-line command to the existing componentized entrypoint:
 
 ```bash
-node skills/aiworker-task-flow/scripts/submit-task.mjs \
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
   --video-file "<absolute-video-path>" \
   --task-id <stable-request-key> \
   --idempotency-key <stable-request-key> \

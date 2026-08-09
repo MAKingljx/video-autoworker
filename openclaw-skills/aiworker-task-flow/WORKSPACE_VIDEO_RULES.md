@@ -15,9 +15,15 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   video; the user does not need to name the skill, models, workflow,
   segmentation, `memoryMode`, delivery, or wait settings. A negative phrase in
   the same message still takes priority and prevents submission.
+- As a script-layer fallback, `submit-task.mjs` recognizes that exact command
+  from `--prompt` or `--prompt-file` before binding selection; non-matches remain
+  generic tasks.
 - Do not narrate before submitting. Phrases such as `马上开始`, `我先找`,
   `让我检查`, or any paraphrased preflight update are forbidden. The first
   action must be the single managed `submit-task.mjs` invocation.
+- Invoke the production-verified entry directly as
+  `node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs"`;
+  do not use `ls` or `find` to locate the script.
 - Preserve one optionally quoted path as a single argument, including Chinese,
   spaces, and parentheses. Do not expand shell variables, globs, substitutions,
   or additional commands. Directories and multi-video requests must use the

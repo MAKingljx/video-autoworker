@@ -14,6 +14,7 @@ import {
   summarizeBatchState,
   validateBatchId,
 } from '../lib/video-batch-state.mjs'
+import { deriveVideoCommandTaskKey, parseExactVideoCommand } from '../lib/video-command.mjs'
 
 const args = process.argv.slice(2)
 
@@ -42,6 +43,9 @@ function chooseBinding(bindings, requestedBinding, video) {
       : bindings.find(item => item.enabled && item.taskType !== 'video-analysis')
         || bindings.find(item => item.enabled)
   if (!binding) throw new Error('没有找到可用的 AI-worker n8n 任务链')
+  if (video && binding.taskType !== 'video-analysis') {
+    throw new Error('视频任务必须使用启用的 video-analysis binding')
+  }
   return binding
 }
 
@@ -55,11 +59,17 @@ function spawnBatchWorker(statePath) {
   child.unref()
 }
 
-async function resolvePrompt({ video = false } = {}) {
+async function readPromptInput() {
   const promptFile = option('--prompt-file')
   const promptArg = option('--prompt')
-  const prompt = (promptFile ? await readFile(promptFile, 'utf8') : promptArg)
-    || (video ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
+  return promptFile ? await readFile(promptFile, 'utf8') : promptArg
+}
+
+async function resolvePrompt({ video = false, promptInput, forceVideoDefault = false } = {}) {
+  const prompt = forceVideoDefault
+    ? '分析视频中的语音内容和画面信息，分别给出结果后合并。'
+    : (promptInput ?? await readPromptInput())
+      || (video ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
   if (!prompt?.trim()) throw new Error('必须通过 --prompt-file、--prompt 或视频参数提供任务内容')
   if (prompt.length > 120_000) throw new Error('任务内容超过 120000 字符上限')
   return prompt.trim()
@@ -146,10 +156,29 @@ async function main() {
   const videoDir = option('--video-dir')
   if (videoDir) return handleBatchCreate(client, videoDir)
 
-  const videoFile = option('--video-file')
-  const prompt = await resolvePrompt({ video: Boolean(videoFile) })
+  let videoFile = option('--video-file')
+  let promptInput
+  let inferredVideoCommand = false
+  if (!videoFile) {
+    promptInput = await readPromptInput()
+    const inferredVideoFile = parseExactVideoCommand(promptInput)
+    if (inferredVideoFile) {
+      videoFile = inferredVideoFile
+      inferredVideoCommand = true
+    }
+  }
+
+  const prompt = await resolvePrompt({
+    video: Boolean(videoFile),
+    promptInput,
+    forceVideoDefault: inferredVideoCommand,
+  })
   const bindings = await client.listBindings()
-  const binding = chooseBinding(bindings, option('--binding-id'), Boolean(videoFile))
+  const binding = chooseBinding(
+    bindings,
+    inferredVideoCommand ? null : option('--binding-id'),
+    Boolean(videoFile),
+  )
   const deliveryMode = option('--delivery') || 'none'
   if (!['none', 'reply'].includes(deliveryMode)) throw new Error('--delivery 只能是 none 或 reply')
   const sessionKey = option('--session-key')
@@ -163,8 +192,22 @@ async function main() {
     throw new Error('视频分析工作节点不进入 OpenClaw 会话；请使用 --delivery none 和 --wait-seconds 获取结果')
   }
 
-  const taskId = option('--task-id') || randomUUID()
-  const idempotencyKey = option('--idempotency-key') || taskId
+  const requestedTaskId = option('--task-id')
+  const requestedIdempotencyKey = option('--idempotency-key')
+  let taskId
+  let idempotencyKey
+  if (inferredVideoCommand) {
+    if (requestedTaskId && requestedIdempotencyKey && requestedTaskId !== requestedIdempotencyKey) {
+      throw new Error('视频命令的 --task-id 与 --idempotency-key 必须相同')
+    }
+    taskId = requestedTaskId
+      || requestedIdempotencyKey
+      || deriveVideoCommandTaskKey(videoFile)
+    idempotencyKey = taskId
+  } else {
+    taskId = requestedTaskId || randomUUID()
+    idempotencyKey = requestedIdempotencyKey || taskId
+  }
   const routingNodes = Object.fromEntries([
     ['planner', option('--planner-route')],
     ['executor', option('--executor-route')],
@@ -202,7 +245,9 @@ async function main() {
       },
     })
 
-  const waitSeconds = Number(option('--wait-seconds') || '0')
+  const waitSeconds = inferredVideoCommand
+    ? 0
+    : Number(option('--wait-seconds') || '0')
   const finalRun = await waitForTask(client, response.taskId, waitSeconds)
   output({
     taskId: response.taskId,

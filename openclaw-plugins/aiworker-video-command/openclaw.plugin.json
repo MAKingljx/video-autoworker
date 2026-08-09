@@ -1,0 +1,10 @@
+{
+  "id": "aiworker-video-command",
+  "name": "AI-worker Video Command",
+  "description": "Handles exact Telegram video-analysis commands before agent dispatch.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
