@@ -273,6 +273,55 @@ node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/script
 提供的 synthetic DM harness 只验证同一处理器、解析器、稳定键和真实任务提交边界，
 不能替代由真实 allowlisted 用户发出的 Telegram 入口验收。
 
+自然语言视频入口的 `0.2.0` 升级候选在同一原生插件内新增可选工具
+`aiworker_analyze_video`。它不是 generic prompt 自动分类：只有
+`second-original` 当前消息为肯定执行、恰好包含一个受支持的绝对视频路径时，模型
+才可选择这个工具；插件的 prompt/tool hooks 会再次核对可信 run、session、agent、
+tool call 和路径，阻止其他工具并保证同一 run 只调用 runner 一次。模型不接收任务
+ID 或幂等键，也不得直接执行 `submit-task.mjs`。精确单行命令继续由
+`before_dispatch` 优先接管，两种入口共用原 runner 和正式 video-analysis binding。
+
+工具必须只在 `qwen-current` 的唯一 `second-original` agent 上以精确名称放行：
+
+```json
+{
+  "tools": {
+    "alsoAllow": ["aiworker_analyze_video"]
+  }
+}
+```
+
+上面的对象表示 `agents.list` 中 `id="second-original"` 的 `tools` 子对象，不是全局
+`tools`。已有 `tools.allow` 必须原样保留；不能仅追加到 `allow`，因为生产
+`tools.profile="coding"` 会先过滤可选工具，也不能放行插件 ID、`group:plugins` 或
+全局工具组。插件 manifest 还必须声明同名 optional tool，runtime inspection 必须
+同时看到目标 hooks 与工具能力。
+
+生产现有插件安装来源为 canonical path，OpenClaw `plugins update` 会跳过；升级必须
+使用 Git 管理的受控 upgrade installer，内部通过官方
+`plugins install --force <canonical-plugin-dir>` 完成 staged replacement。升级前备份
+原配置、旧插件树和安装记录证据，失败时用旧插件备份目录再次执行官方 force install，
+再恢复原配置；不得直接编辑 OpenClaw SQLite。自动回滚成功后，安装索引会指向该次
+备份的 `previous-plugin`；安装器只有在旧 runtime/index/doctor 和载荷指纹一致后才写入
+0600 的 active-rollback marker。索引仍引用它期间，整份 0700 备份目录属于活动安装
+来源，不得删除、移动、重命名或归档；下一次升级只接受 canonical source 或这类精确
+标记且指纹匹配的来源，成功升级后索引必须回到 canonical `0.2.0`。
+
+apply 在 `.verified` 和关闭回滚门之前，必须由安装器调用官方 profile-scoped
+`gateway restart`，只刷新 `ai.openclaw.qwen-current`；随后要求
+`gateway status --deep --require-rpc` 成功，并向真实运行 Gateway 调用
+`tools.catalog(agentId="second-original", includePlugins=true)`。active registry 中必须
+精确出现 `pluginId="aiworker-video-command"` 的 optional
+`aiworker_analyze_video`；该工具只存在于 `0.2.0`，而配置门已经单独证明唯一
+`second-original.tools.alsoAllow` 授权。独立 CLI plugin inspect 不能替代此在线证据。
+
+若 restart、RPC 健康或 live catalog 任一失败，回滚仍保持 armed：安装器官方回装
+`0.1.0`、恢复原配置，再次只刷新 `qwen-current`，并要求 deep RPC 成功且 live catalog
+不再含 `aiworker_analyze_video`；该恢复门失败必须报 rollback failure，不得写 active
+marker 或成功口径。脚本不得重启 `3017`、n8n 或其他 profile，也不得提交任务。apply
+完整成功前不得运行唯一受控自然语言真实提交验收；真实提交验收通过前，该能力仍只能
+标记为候选。
+
 生产隔离验收已经证明该确定性入口可只创建一次视频工作流执行，普通任务工作流
 不增加执行；父任务和 `prepare`、`audio`、`vision`、`finalize` 四个子任务均以首次
 尝试成功，所有实际出现的 `memoryMode` 均为 `none`，Whisper 与本地视觉模型分别

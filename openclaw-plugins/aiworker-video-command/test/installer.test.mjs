@@ -11,6 +11,7 @@ describe('AI-worker video-command plugin installer contract', () => {
   it('is pinned to qwen-current and uses only the official plugin installer', async () => {
     const script = await readFile(installerPath, 'utf8')
     expect(script).toContain('PROFILE="qwen-current"')
+    expect(script).toContain('LEGACY_SOURCE_VERSION="0.1.0"')
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('run_qwen_openclaw plugins install --force "$PLUGIN_DIR"')
@@ -28,6 +29,9 @@ describe('AI-worker video-command plugin installer contract', () => {
     expect(script).toContain('plugins inspect --all --json > "$report_path"')
     expect(script).toContain('Unable to inspect the complete qwen-current plugin registry.')
     expect(script).toContain('manifest?.id !== pluginId')
+    expect(script).toContain('packageJson?.version !== legacySourceVersion')
+    expect(script).toContain('fresh 0.2.0 install is not delivered')
+    expect(script).toContain('"$PLUGIN_ID" "$LEGACY_SOURCE_VERSION"')
     expect(script).toContain('verify_explicit_allowlist pre-install')
     expect(script).toContain('verify_explicit_allowlist post-install')
     expect(script).toContain('verify_first_install_state')

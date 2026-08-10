@@ -1,7 +1,24 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "description": "Handles exact Telegram video-analysis commands before agent dispatch.",
+  "description": "Handles exact commands and guarded natural-language video submission.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "hook",
+      "tool"
+    ]
+  },
+  "contracts": {
+    "tools": [
+      "aiworker_analyze_video"
+    ]
+  },
+  "toolMetadata": {
+    "aiworker_analyze_video": {
+      "optional": true
+    }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

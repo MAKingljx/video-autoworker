@@ -1,6 +1,6 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker and n8n tasks, especially the exact one-line local video command "分析视频 /absolute/path/video.mp4"; submit it once through the stateless registered video-analysis chain without preamble or same-turn polling.
+description: Use for AI-worker/n8n tasks and one-video requests; exact commands use native dispatch, while affirmative natural language uses the guarded AI-worker tool.
 ---
 
 # AI-worker Task Flow
@@ -48,6 +48,10 @@ The exact current architecture is:
 
 - the native video-command plugin claims an exact private-message command before
   the chat model and calls the installed `aiworker-task-flow` submission client;
+- for other affirmative single-video wording, `second-original` may select the
+  optional `aiworker_analyze_video` tool; the same plugin validates the current
+  message, pins its only absolute path, derives the hidden stable identity, and
+  permits only one submission call in that run;
 - Video AutoWorker records the operational task and n8n runs
   `prepare -> Whisper audio + local Qwen vision -> finalize`;
 - the workers and final result use `memoryMode=none`;
@@ -61,7 +65,7 @@ For a request limited to 120 Chinese characters, reply with exactly this single
 paragraph and nothing else:
 
 ```text
-原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。
+精确命令由插件接管；普通说法由千问调用 aiworker_analyze_video，再交给 n8n：prepare→Whisper＋本地 Qwen→finalize。memoryMode=none、delivery=none，结果另查。
 ```
 
 ## One-line Video Entry
@@ -136,7 +140,61 @@ Query `--status <taskId>` only in a later turn after a new explicit status or
 monitoring request. Do not claim completion until that later query returns
 `succeeded`.
 
+## Natural-language Video Execution
+
+The exact `分析视频 <绝对路径>` command remains the deterministic Telegram entry
+and is normally claimed by the native plugin before the model. If another
+affirmative natural-language request reaches the model, treat it as execution
+authorization only when the current message both:
+
+1. explicitly asks to analyze or parse one video now, for example
+   `帮我分析一下这个视频 <绝对路径>`; and
+2. contains exactly one absolute path ending in `.mp4`, `.mov`, `.mkv`,
+   `.webm`, or `.m4v`.
+
+For that natural-language case, do not call `memory_search` or inspect old
+video-learning memory. Do not narrate, locate, probe, or process the file. The
+first and only tool call must be `aiworker_analyze_video` with exactly this
+shape:
+
+```json
+{"videoPath":"<absolute-video-path>"}
+```
+
+Do not call `exec`, `submit-task.mjs`, or the generic task entry directly for
+this branch. The native plugin re-validates the current message and trusted
+inbound and run context, pins the path, derives identical hidden
+task/idempotency keys, and calls
+the installed client once with `delivery=none` and `wait-seconds=0`. The model
+must not invent or receive those identity fields.
+
+The same one-submission, short-receipt, no-polling, no-retry, no-direct-media,
+and later-status-query rules from the exact entry apply. Never send this video
+through the generic prompt submission path.
+
+Fail closed instead of guessing:
+
+- method, architecture, review, or question-only wording is explanation, not
+  execution;
+- `先告诉我方法`, `先说方法`, `先给我方案`, `只给方案`, `不要开始`,
+  `不要执行`, `不要提交`, `不用执行`, `先别执行`, `暂不执行`, or `只分析`
+  means no submission even if a path appears;
+- with no absolute server path, including a Telegram attachment that has not
+  been ingested to a server path, ask only for the production Mac absolute path;
+- with more than one path, ask for one path or use the durable directory batch
+  flow; never issue several single-video calls;
+- relative paths, `~`, URLs, unsupported extensions, multiline requests, and
+  ambiguous references such as only `这个视频` are not executable inputs.
+
+On success or failure, use the same exact short response shapes defined by the
+one-line entry. Do not continue with another tool in that turn.
+
 ## Submit
+
+The generic submission form below is never a fallback for a video request. A
+natural-language video request must use the guarded `aiworker_analyze_video`
+tool defined above; if its video path is missing or ambiguous, ask for a valid
+path and do not submit.
 
 Write the requested task to a UTF-8 temporary file inside the current workspace,
 then run:

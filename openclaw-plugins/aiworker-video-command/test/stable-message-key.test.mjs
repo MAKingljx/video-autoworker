@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { deriveStableDispatchKey } from '../lib/stable-message-key.js'
+import {
+  deriveStableDispatchKey,
+  deriveStableNaturalDispatchKey,
+} from '../lib/stable-message-key.js'
 
 describe('deriveStableDispatchKey', () => {
   it('is stable, scoped, and contains no plaintext content or identity fields', () => {
@@ -26,5 +29,22 @@ describe('deriveStableDispatchKey', () => {
       .toThrow('finite timestamp is required')
     expect(() => deriveStableDispatchKey({ timestamp: 123 }))
       .toThrow('content is required')
+  })
+
+  it('derives a separate replay-stable identity for natural-language ingress', () => {
+    const fields = {
+      channel: 'telegram',
+      accountId: 'account-private',
+      conversationId: 'conversation-private',
+      sessionKey: 'agent:second-original:telegram:direct:private',
+      senderId: 'sender-private',
+      timestamp: 1_786_240_000_123,
+      content: '帮我分析一下这个视频 /tmp/demo.mp4',
+    }
+    const key = deriveStableNaturalDispatchKey(fields)
+    expect(key).toMatch(/^video-natural-[a-f0-9]{64}$/u)
+    expect(deriveStableNaturalDispatchKey(fields)).toBe(key)
+    expect(key).not.toBe(deriveStableDispatchKey(fields))
+    for (const value of Object.values(fields).map(String)) expect(key).not.toContain(value)
   })
 })

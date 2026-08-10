@@ -15,7 +15,9 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   tool call, including `memory_search`, and do not submit a task. The current
   contract overrides historical video-learning notes: the native video-command
   plugin claims the exact private-message command before the chat model, calls
-  the installed `aiworker-task-flow` client, and submits Video AutoWorker/n8n as
+  the installed `aiworker-task-flow` client, while other affirmative single-video
+  wording lets `second-original` choose the guarded `aiworker_analyze_video`
+  tool. Both entries submit Video AutoWorker/n8n, which executes
   `prepare -> Whisper audio + local Qwen vision -> finalize`. All stages use
   `memoryMode=none`; video submission uses `delivery=none`, so only the immediate
   acceptance receipt is returned and completed output is fetched later by task
@@ -23,7 +25,7 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   Never describe this current chain as `VL`, `video-learning-pipeline`,
   `DIRECTOR_BRAIN`, director-brain extraction, or full-video direct processing.
   When the user limits the answer to 120 Chinese characters, reply with exactly:
-  `原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。`
+  `精确命令由插件接管；普通说法由千问调用 aiworker_analyze_video，再交给 n8n：prepare→Whisper＋本地 Qwen→finalize。memoryMode=none、delivery=none，结果另查。`
 - The canonical single-video execution command is exactly one line:
   `分析视频 <绝对路径>`. It authorizes one and only one n8n submission for that
   video; the user does not need to name the skill, models, workflow,
@@ -67,6 +69,31 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   that option is only for an individual task ID returned by the batch summary.
 - Reuse one idempotency key for one user request. Never resubmit the same video
   after a timeout or compaction; query the existing task instead.
+- When another affirmative natural-language request reaches the model, such as
+  `帮我分析一下这个视频 <绝对路径>`, treat it as execution authorization only if
+  the current message explicitly asks to analyze one video now and contains
+  exactly one absolute path ending in `.mp4`, `.mov`, `.mkv`, `.webm`, or
+  `.m4v`. The exact command remains plugin-first; this rule is the model-routed
+  fallback for non-exact wording.
+- For that natural-language case, do not call `memory_search`, do not inspect
+  old video-learning memory, and do not use the generic prompt task path. The
+  first and only tool call must be `aiworker_analyze_video` with only the
+  current message's absolute path in `videoPath`. Never call `exec` or
+  `submit-task.mjs` directly for this branch. The native plugin validates the
+  trusted inbound and run context, pins the path, derives the hidden stable
+  identity, and invokes
+  the installed client once with `delivery=none` and `wait-seconds=0`. Then
+  return only the same short receipt and stop the turn.
+- The natural-language tool is active only when the native plugin is loaded and
+  the qwen-current configuration explicitly adds exactly
+  `aiworker_analyze_video` to `second-original.tools.alsoAllow`. Memory and this
+  rule guide model choice but are not the execution safety boundary.
+- Fail closed when the message is a question or method request, contains a
+  negative phrase, has no absolute server path, refers only to an un-ingested
+  Telegram attachment, contains multiple paths, uses a relative path or URL,
+  or has an unsupported extension. Ask briefly for one production Mac absolute
+  path; never guess, search the filesystem, download an attachment, or submit a
+  generic task.
 - Audio is handled by the registered Whisper worker and frames by the registered
   vision route. These workers are stateless and must not read or write OpenClaw
   memory.

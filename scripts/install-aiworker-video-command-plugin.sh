@@ -3,6 +3,7 @@ set -euo pipefail
 
 PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
+LEGACY_SOURCE_VERSION="0.1.0"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -264,8 +265,12 @@ node -e '
   const packageJson = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const pluginId = process.argv[3];
+  const legacySourceVersion = process.argv[4];
   const extensions = packageJson?.openclaw?.extensions;
   const schema = manifest?.configSchema;
+  if (packageJson?.version !== legacySourceVersion) {
+    throw new Error(`Legacy first install accepts only source version ${legacySourceVersion}; fresh 0.2.0 install is not delivered.`);
+  }
   if (manifest?.id !== pluginId) throw new Error("Plugin manifest id mismatch.");
   if (!Array.isArray(extensions) || extensions.length !== 1 || extensions[0] !== "./index.js") {
     throw new Error("Plugin package must declare only ./index.js.");
@@ -273,7 +278,7 @@ node -e '
   if (schema?.type !== "object" || schema?.additionalProperties !== false) {
     throw new Error("Plugin manifest must use a strict object config schema.");
   }
-' "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID"
+' "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$LEGACY_SOURCE_VERSION"
 while IFS= read -r javascript_file; do
   node --check "$javascript_file"
 done < <(find "$PLUGIN_DIR" -type f \( -name '*.js' -o -name '*.mjs' \) -print | LC_ALL=C sort)

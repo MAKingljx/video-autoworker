@@ -7,7 +7,9 @@ function encodePart(value) {
   return `${Buffer.byteLength(normalized, 'utf8')}:${normalized}`
 }
 
-export function deriveStableDispatchKey({
+function deriveStableMessageKey({
+  namespace,
+  taskPrefix,
   channel,
   accountId,
   conversationId,
@@ -20,7 +22,7 @@ export function deriveStableDispatchKey({
   if (typeof content !== 'string' || !content) throw new TypeError('content is required')
 
   const canonical = [
-    'aiworker-video-dispatch-v1',
+    namespace,
     channel,
     accountId,
     conversationId,
@@ -30,5 +32,21 @@ export function deriveStableDispatchKey({
     content,
   ].map(encodePart).join('|')
   const digest = createHash('sha256').update(canonical, 'utf8').digest('hex')
-  return `video-command-${digest}`
+  return `${taskPrefix}${digest}`
+}
+
+export function deriveStableDispatchKey(fields) {
+  return deriveStableMessageKey({
+    ...fields,
+    namespace: 'aiworker-video-dispatch-v1',
+    taskPrefix: 'video-command-',
+  })
+}
+
+export function deriveStableNaturalDispatchKey(fields) {
+  return deriveStableMessageKey({
+    ...fields,
+    namespace: 'aiworker-natural-video-dispatch-v1',
+    taskPrefix: 'video-natural-',
+  })
 }

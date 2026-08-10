@@ -417,9 +417,9 @@ globalThis.fetch = async (input, init = {}) => {
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
-    const fixedReply = '原生命令插件接管，aiworker-task-flow 提交 n8n：prepare→Whisper 音频＋本地 Qwen 画面→finalize。memoryMode=none、delivery=none；只回受理，结果另查。'
+    const fixedReply = '精确命令由插件接管；普通说法由千问调用 aiworker_analyze_video，再交给 n8n：prepare→Whisper＋本地 Qwen→finalize。memoryMode=none、delivery=none，结果另查。'
 
-    expect([...fixedReply]).toHaveLength(114)
+    expect([...fixedReply]).toHaveLength(119)
     for (const contract of [skill, workspaceRules]) {
       expect(contract).toContain(fixedReply)
       expect(contract).toMatch(/including\s+`memory_search`/)
@@ -427,6 +427,34 @@ globalThis.fetch = async (input, init = {}) => {
       expect(contract).toMatch(/local Qwen vision/)
       expect(contract).toMatch(/current\s+contract overrides historical/)
     }
+  })
+
+  it('routes affirmative natural-language video execution through the guarded optional tool', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+    const description = skill.match(/^description: (.+)$/m)?.[1]
+    const naturalSection = skill.match(
+      /## Natural-language Video Execution([\s\S]*?)## Submit/u,
+    )?.[1]
+
+    expect(description?.length).toBeLessThanOrEqual(160)
+    expect(naturalSection).toContain('`aiworker_analyze_video`')
+    expect(naturalSection).toContain('{"videoPath":"<absolute-video-path>"}')
+    expect(naturalSection).toContain('Do not call `exec`, `submit-task.mjs`')
+    expect(naturalSection).toContain('must not invent or receive those identity fields')
+    for (const contract of [workspaceRules, workspaceMemory]) {
+      expect(contract).toContain('`aiworker_analyze_video`')
+      expect(contract).toContain('`second-original.tools.alsoAllow`')
+    }
+    expect(workspaceRules).toContain('are not the execution safety boundary')
+    expect(workspaceMemory).toMatch(/not an authorization\s+or safety boundary/u)
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {
