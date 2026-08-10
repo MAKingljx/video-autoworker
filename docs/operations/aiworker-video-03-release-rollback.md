@@ -17,7 +17,7 @@ scripts/rollback-aiworker-video-release.sh --apply \
   --target-sha 0123456789abcdef0123456789abcdef01234567
 ```
 
-两个备份路径都必须明确给出，且必须分别是固定备份根目录的直接子目录；脚本不会选择 `latest`。`--target-sha` 必须同时等于当前 `HEAD`、本地 `origin/main` 和实时远端 `main`。插件备份必须带有有效的 `.verified`、0.2 配置、0.2 payload、旧索引记录、已审计 0.3 payload 指纹、创建备份时写入的 0.2 `previous-plugin` 完整规范化指纹，以及与 `--target-sha` 一致的来源提交。升级器在任何生产安装前写入该 0.2 指纹，并在创建 `.verified` 前重新计算；回滚入口也必须重新计算一致，任何普通文件增删改都会拒绝。任务流备份必须通过完整 `STATE` 与 `MANIFEST.sha256` 自校验；清单按安装器相同的全局 `LC_ALL=C` 字节序重算，覆盖根目录、`STATE`、对象类型、八进制 mode 与内容 SHA，并排除清单文件自身。除插件中唯一的 `node_modules/openclaw` 官方 peer 链接外，插件备份不允许其他符号链接；该链接的文本和真实目标必须与当前官方安装完全一致，任务流备份则完全不允许符号链接。
+两个备份路径都必须明确给出，且必须分别是固定备份根目录的直接子目录；脚本不会选择 `latest`。`--target-sha` 必须同时等于当前 `HEAD`、本地 `origin/main` 和实时远端 `main`。插件备份必须带有有效的 `.verified`、0.2 配置、0.2 payload、旧索引记录、已审计 0.3 payload 指纹，以及创建备份时写入的 0.2 `previous-plugin` 完整规范化指纹。备份来源提交只能是 `--target-sha` 本身或其祖先，且必须由 canonical repo 中实际存在的提交对象和 `git merge-base --is-ancestor` 证明；这样仅修复校验器的后续提交可继续使用原备份，但非祖先、提交缺失或当前 canonical 插件源码与备份指纹不一致都会拒绝。升级器在任何生产安装前写入该 0.2 指纹，并在创建 `.verified` 前重新计算；回滚入口也必须重新计算一致，任何普通文件增删改都会拒绝。任务流备份必须通过完整 `STATE` 与 `MANIFEST.sha256` 自校验；清单按安装器相同的全局 `LC_ALL=C` 字节序重算，覆盖根目录、`STATE`、对象类型、八进制 mode 与内容 SHA，并排除清单文件自身。除插件中唯一的 `node_modules/openclaw` 官方 peer 链接外，插件备份不允许其他符号链接；该链接的文本和真实目标必须与当前官方安装完全一致，任务流备份则完全不允许符号链接。
 
 应用阶段同时持有 qwen-current 插件锁和任务流工作区锁，并先建立权限为 0700 的临时 0.3 事务快照。插件通过官方 OpenClaw 安装命令从受控 `previous-plugin` 恢复，配置按备份逐字恢复。安装索引不会把已经是 0.3 内容的 canonical 路径伪装成 0.2，而是安全地指向已验证的 0.2 备份 payload，并写入 active rollback marker；旧索引记录用于语义校验，不做不安全的 SQLite 字节复制。active marker 验证成功后，该备份从 `.verified` 转换为 active source，避免后续重试的保留策略误删唯一兼容基线。
 

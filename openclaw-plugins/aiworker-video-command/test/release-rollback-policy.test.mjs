@@ -13,8 +13,8 @@ import {
   validateSafeEquivalentIndex,
   validateTaskFlowRollbackBackup,
 } from '../../../scripts/lib/aiworker-video-release-rollback-policy.mjs'
+import { fingerprintPluginPayload } from '../../../scripts/lib/aiworker-video-command-upgrade-policy.mjs'
 
-const approvedSha = '0123456789abcdef0123456789abcdef01234567'
 const execFileAsync = promisify(execFile)
 const taskFlowInstaller = resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh')
 const roots = []
@@ -27,6 +27,10 @@ async function file(pathname, value, mode = 0o600) {
   await writeFile(pathname, typeof value === 'string' ? value : `${JSON.stringify(value)}\n`, { mode })
 }
 
+async function git(repositoryRoot, ...args) {
+  return (await execFileAsync('git', ['-C', repositoryRoot, ...args])).stdout.trim()
+}
+
 async function fixture() {
   const temporary = await realpath(await mkdtemp(join(tmpdir(), 'video-release-rollback-policy.')))
   roots.push(temporary)
@@ -36,6 +40,8 @@ async function fixture() {
   const workspace = join(temporary, 'workspace')
   const installedPlugin = join(temporary, 'installed-plugin')
   const officialOpenClaw = join(temporary, 'official-openclaw')
+  const repositoryRoot = join(temporary, 'canonical-repo')
+  const pluginSource = join(repositoryRoot, 'openclaw-plugins', 'aiworker-video-command')
   await Promise.all([
     directory(pluginRoot),
     directory(taskRoot),
@@ -43,7 +49,25 @@ async function fixture() {
     directory(join(workspace, 'skills', 'aiworker-task-flow')),
     directory(installedPlugin),
     directory(officialOpenClaw),
+    directory(pluginSource),
   ])
+  await execFileAsync('git', ['init', '--quiet', repositoryRoot])
+  await git(repositoryRoot, 'config', 'user.name', 'Release rollback test')
+  await git(repositoryRoot, 'config', 'user.email', 'release-rollback@example.invalid')
+  await file(join(pluginSource, 'package.json'), { name: 'aiworker-video-command', version: '0.3.0' })
+  await file(join(pluginSource, 'openclaw.plugin.json'), {
+    id: 'aiworker-video-command',
+    activation: { onCapabilities: ['hook'] },
+  })
+  await file(join(pluginSource, 'index.js'), 'export default {}\n')
+  await git(repositoryRoot, 'add', '--', 'openclaw-plugins')
+  await git(repositoryRoot, 'commit', '--quiet', '-m', 'canonical plugin source')
+  const sourceCommit = await git(repositoryRoot, 'rev-parse', 'HEAD')
+  await directory(join(repositoryRoot, 'scripts'))
+  await file(join(repositoryRoot, 'scripts', 'validator-only.mjs'), 'export const policyVersion = 2\n')
+  await git(repositoryRoot, 'add', '--', 'scripts/validator-only.mjs')
+  await git(repositoryRoot, 'commit', '--quiet', '-m', 'validator-only release fix')
+  const targetSha = await git(repositoryRoot, 'rev-parse', 'HEAD')
   await file(join(officialOpenClaw, 'package.json'), { name: 'openclaw', version: '2026.7.1-2' })
   await file(join(workspace, 'skills', 'aiworker-task-flow', 'SKILL.md'), 'version 0.3\n')
   await file(join(workspace, 'AGENTS.md'), 'agents 0.3\n')
@@ -87,6 +111,7 @@ async function fixture() {
     activation: { onCapabilities: ['hook'] },
   })
   const previousPluginFingerprint = (await fingerprintAuditedPreviousPlugin(previousPlugin)).fingerprint
+  const sourcePluginFingerprint = await fingerprintPluginPayload(pluginSource)
   for (const [name, value] of [
     ['.verified', ''],
     ['openclaw-current.json', '{}\n'],
@@ -94,13 +119,13 @@ async function fixture() {
     ['pre-0.2-effective-tools.json', '{}\n'],
     ['current-0.2-effective-tools.json', '{}\n'],
     ['owner-sender-policy.json', '{}\n'],
-    ['source-commit.txt', `${approvedSha}\n`],
-    ['source-plugin-payload-sha256.txt', `${'a'.repeat(64)}\n`],
+    ['source-commit.txt', `${sourceCommit}\n`],
+    ['source-plugin-payload-sha256.txt', `${sourcePluginFingerprint}\n`],
     ['previous-plugin-payload-sha256.txt', `${previousPluginFingerprint}\n`],
   ]) await file(join(pluginBackup, name), value)
   await file(join(pluginBackup, 'install-index-old.json'), {
     source: 'path',
-    sourcePath: join(temporary, 'canonical-plugin'),
+    sourcePath: pluginSource,
     installPath: installedPlugin,
     version: '0.2.0',
     installedAt: '2026-08-10T01:02:03.000Z',
@@ -115,7 +140,23 @@ async function fixture() {
     workspace,
     installedPlugin,
     officialOpenClaw,
+    repositoryRoot,
+    pluginSource,
+    sourceCommit,
+    targetSha,
   }
+}
+
+function validateFixturePlugin(value, overrides = {}) {
+  return validatePluginRollbackBackup({
+    backupRoot: value.pluginRoot,
+    backupDir: value.pluginBackup,
+    approvedSha: value.targetSha,
+    installedPluginPath: value.installedPlugin,
+    repositoryRoot: value.repositoryRoot,
+    pluginSourcePath: value.pluginSource,
+    ...overrides,
+  })
 }
 
 afterEach(async () => {
@@ -156,18 +197,42 @@ describe('release rollback policy', () => {
 
   it('accepts only the explicit verified 0.2 plugin backup and exact task-flow manifest', async () => {
     const value = await fixture()
-    const plugin = await validatePluginRollbackBackup({
-      backupRoot: value.pluginRoot,
-      backupDir: value.pluginBackup,
-      approvedSha,
-      installedPluginPath: value.installedPlugin,
-    })
+    const plugin = await validateFixturePlugin(value)
     const task = await validateTaskFlowRollbackBackup({
       backupRoot: value.taskRoot,
       backupDir: value.taskBackup,
     })
     expect(plugin.previousPlugin).toBe(join(value.pluginBackup, 'previous-plugin'))
+    expect(plugin).toMatchObject({
+      sourceCommit: value.sourceCommit,
+      sourceCommitRelation: 'ancestor',
+      approvedSha: value.targetSha,
+    })
     expect(task.state).toEqual({ skill_present: true, agents_present: true, memory_present: true })
+  })
+
+  it('rejects an existing but unrelated backup source commit', async () => {
+    const value = await fixture()
+    const emptyTree = await git(value.repositoryRoot, 'hash-object', '-t', 'tree', '/dev/null')
+    const unrelatedCommit = await git(value.repositoryRoot, 'commit-tree', emptyTree, '-m', 'unrelated root')
+    await file(join(value.pluginBackup, 'source-commit.txt'), `${unrelatedCommit}\n`)
+    await expect(validateFixturePlugin(value)).rejects.toThrow(/not the approved target or its ancestor/u)
+  })
+
+  it('rejects missing source or target commit objects', async () => {
+    const value = await fixture()
+    await file(join(value.pluginBackup, 'source-commit.txt'), `${'f'.repeat(40)}\n`)
+    await expect(validateFixturePlugin(value)).rejects.toThrow(/Backup source commit object is missing/u)
+    await file(join(value.pluginBackup, 'source-commit.txt'), `${value.sourceCommit}\n`)
+    await expect(validateFixturePlugin(value, {
+      approvedSha: 'e'.repeat(40),
+    })).rejects.toThrow(/Approved target commit object is missing/u)
+  })
+
+  it('rejects canonical plugin source drift after a validator-only target commit', async () => {
+    const value = await fixture()
+    await file(join(value.pluginSource, 'index.js'), 'export default { drifted: true }\n')
+    await expect(validateFixturePlugin(value)).rejects.toThrow(/no longer matches the rollback backup payload fingerprint/u)
   })
 
   it('allows only the official peer symlink and rejects a changed peer target', async () => {
@@ -177,32 +242,19 @@ describe('release rollback policy', () => {
     await file(join(otherOpenClaw, 'package.json'), { name: 'openclaw', version: '2026.7.1-2' })
     await rm(join(value.pluginBackup, 'previous-plugin', 'node_modules', 'openclaw'))
     await symlink(otherOpenClaw, join(value.pluginBackup, 'previous-plugin', 'node_modules', 'openclaw'))
-    await expect(validatePluginRollbackBackup({
-      backupRoot: value.pluginRoot,
-      backupDir: value.pluginBackup,
-      approvedSha,
-      installedPluginPath: value.installedPlugin,
-    })).rejects.toThrow(/OpenClaw peer link (?:text|target) changed/u)
+    await expect(validateFixturePlugin(value)).rejects.toThrow(/OpenClaw peer link (?:text|target) changed/u)
   })
 
   it('rejects an ordinary previous-plugin file changed after the backup fingerprint', async () => {
     const value = await fixture()
     await file(join(value.pluginBackup, 'previous-plugin', 'index.js'), 'tampered after backup\n')
-    await expect(validatePluginRollbackBackup({
-      backupRoot: value.pluginRoot,
-      backupDir: value.pluginBackup,
-      approvedSha,
-      installedPluginPath: value.installedPlugin,
-    })).rejects.toThrow(/changed after its audited backup fingerprint/u)
+    await expect(validateFixturePlugin(value)).rejects.toThrow(/changed after its audited backup fingerprint/u)
   })
 
   it('rejects backup path escape and every task-flow symlink', async () => {
     const value = await fixture()
-    await expect(validatePluginRollbackBackup({
-      backupRoot: value.pluginRoot,
+    await expect(validateFixturePlugin(value, {
       backupDir: value.temporary,
-      approvedSha,
-      installedPluginPath: value.installedPlugin,
     })).rejects.toThrow(/direct child|mode 700/u)
     await symlink('/tmp', join(value.taskBackup, 'unsafe-link'))
     await expect(validateTaskFlowRollbackBackup({

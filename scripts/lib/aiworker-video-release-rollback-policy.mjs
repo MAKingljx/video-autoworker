@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import {
   chmod,
   cp,
@@ -13,8 +14,8 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { isDeepStrictEqual } from 'node:util'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { isDeepStrictEqual, promisify } from 'node:util'
 import {
   fingerprintPluginPayload,
   validateOfficialOpenClawPeerLink,
@@ -24,6 +25,7 @@ const PLUGIN_BACKUP_NAME = /^upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
 const TASK_FLOW_BACKUP_NAME = /^[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
 const RELEASE_TRANSACTION_NAME = /^rollback-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
 const GIT_SHA = /^[a-f0-9]{40}$/u
+const execFileAsync = promisify(execFile)
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -236,16 +238,68 @@ export function validateApprovedSha(value) {
   return value
 }
 
+async function runCanonicalGit(repositoryRoot, args, failureMessage) {
+  try {
+    return await execFileAsync('git', ['-C', repositoryRoot, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, GIT_NO_REPLACE_OBJECTS: '1' },
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+    })
+  } catch {
+    throw new Error(failureMessage)
+  }
+}
+
+async function validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha }) {
+  assert(typeof sourceCommit === 'string' && GIT_SHA.test(sourceCommit), 'Plugin rollback source commit is invalid.')
+  const topLevel = (await runCanonicalGit(
+    repositoryRoot,
+    ['rev-parse', '--show-toplevel'],
+    'Canonical rollback repository is not a readable Git worktree.',
+  )).stdout.trim()
+  assertNormalizedAbsolute(topLevel, 'Canonical Git top-level')
+  assert(
+    await realpath(topLevel) === repositoryRoot,
+    'Rollback repository path is not the canonical Git top-level.',
+  )
+  for (const [commit, label] of [[sourceCommit, 'Backup source'], [approvedSha, 'Approved target']]) {
+    await runCanonicalGit(
+      repositoryRoot,
+      ['cat-file', '-e', `${commit}^{commit}`],
+      `${label} commit object is missing from the canonical repository.`,
+    )
+  }
+  await runCanonicalGit(
+    repositoryRoot,
+    ['merge-base', '--is-ancestor', sourceCommit, approvedSha],
+    'Plugin rollback source commit is not the approved target or its ancestor.',
+  )
+  return sourceCommit === approvedSha ? 'target' : 'ancestor'
+}
+
 export async function validatePluginRollbackBackup({
   backupRoot,
   backupDir,
   approvedSha,
   installedPluginPath,
+  repositoryRoot,
+  pluginSourcePath,
   pluginId = 'aiworker-video-command',
   oldVersion = '0.2.0',
 }) {
   validateApprovedSha(approvedSha)
   assertNormalizedAbsolute(installedPluginPath, 'Installed plugin path')
+  await assertRealPath(repositoryRoot, 'directory', 'Canonical rollback repository')
+  await assertRealPath(pluginSourcePath, 'directory', 'Canonical plugin source')
+  const sourceRelativePath = relative(repositoryRoot, pluginSourcePath)
+  assert(
+    sourceRelativePath.length > 0
+      && sourceRelativePath !== '..'
+      && !sourceRelativePath.startsWith(`..${sep}`)
+      && !isAbsolute(sourceRelativePath),
+    'Canonical plugin source must be contained by the rollback repository.',
+  )
   await assertDirectChild(backupRoot, backupDir, PLUGIN_BACKUP_NAME, 'Plugin rollback backup')
   const previousPlugin = join(backupDir, 'previous-plugin')
   const installedPeer = await validateOfficialOpenClawPeerLink(installedPluginPath)
@@ -279,12 +333,16 @@ export async function validatePluginRollbackBackup({
   assert(!await optionalLstat(join(backupDir, '.active-rollback-source.json')), 'Plugin rollback backup is already an active rollback source.')
 
   const sourceCommit = (await readFile(join(backupDir, 'source-commit.txt'), 'utf8')).trim()
-  assert(sourceCommit === approvedSha, 'Plugin rollback backup was not created from the approved release SHA.')
+  const sourceCommitRelation = await validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha })
   const sourcePluginFingerprint = (await readFile(
     join(backupDir, 'source-plugin-payload-sha256.txt'),
     'utf8',
   )).trim()
   assert(/^[a-f0-9]{64}$/u.test(sourcePluginFingerprint), 'Approved source plugin payload fingerprint is invalid.')
+  assert(
+    await fingerprintPluginPayload(pluginSourcePath) === sourcePluginFingerprint,
+    'Canonical plugin source no longer matches the rollback backup payload fingerprint.',
+  )
   const previousPluginFingerprint = (await readFile(
     join(backupDir, 'previous-plugin-payload-sha256.txt'),
     'utf8',
@@ -324,6 +382,8 @@ export async function validatePluginRollbackBackup({
   return {
     schemaVersion: 1,
     approvedSha,
+    sourceCommit,
+    sourceCommitRelation,
     sourcePluginFingerprint,
     backupDir,
     previousPlugin,

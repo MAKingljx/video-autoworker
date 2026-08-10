@@ -239,6 +239,7 @@ validate_explicit_backups() {
   local report_dir="$1"
   node "$ROLLBACK_VALIDATOR" plugin-backup \
     "$PLUGIN_BACKUP_ROOT" "$PLUGIN_BACKUP" "$TARGET_SHA" "$INSTALLED_PLUGIN_DIR" \
+    "$REPOSITORY_ROOT" "$PLUGIN_SOURCE" \
     > "$report_dir/plugin-backup.json"
   node "$ROLLBACK_VALIDATOR" task-backup \
     "$TASK_BACKUP_ROOT" "$TASK_FLOW_BACKUP" \

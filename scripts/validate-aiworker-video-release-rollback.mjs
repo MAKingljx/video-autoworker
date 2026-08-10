@@ -41,13 +41,26 @@ async function main() {
       break
     }
     case 'plugin-backup': {
-      const [backupRoot, backupDir, approvedSha, installedPluginPath] = args
-      assert(backupRoot && backupDir && approvedSha && installedPluginPath, 'plugin-backup arguments are incomplete.')
+      const [
+        backupRoot,
+        backupDir,
+        approvedSha,
+        installedPluginPath,
+        repositoryRoot,
+        pluginSourcePath,
+      ] = args
+      assert(
+        backupRoot && backupDir && approvedSha && installedPluginPath
+          && repositoryRoot && pluginSourcePath,
+        'plugin-backup arguments are incomplete.',
+      )
       process.stdout.write(`${JSON.stringify(await validatePluginRollbackBackup({
         backupRoot,
         backupDir,
         approvedSha,
         installedPluginPath,
+        repositoryRoot,
+        pluginSourcePath,
       }), null, 2)}\n`)
       break
     }
