@@ -253,6 +253,8 @@ async function runCanonicalGit(repositoryRoot, args, failureMessage) {
 
 async function validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha }) {
   assert(typeof sourceCommit === 'string' && GIT_SHA.test(sourceCommit), 'Plugin rollback source commit is invalid.')
+  if (sourceCommit === approvedSha) return 'target'
+  await assertRealPath(repositoryRoot, 'directory', 'Canonical rollback repository')
   const topLevel = (await runCanonicalGit(
     repositoryRoot,
     ['rev-parse', '--show-toplevel'],
@@ -275,7 +277,38 @@ async function validateBackupSourceCommit({ repositoryRoot, sourceCommit, approv
     ['merge-base', '--is-ancestor', sourceCommit, approvedSha],
     'Plugin rollback source commit is not the approved target or its ancestor.',
   )
-  return sourceCommit === approvedSha ? 'target' : 'ancestor'
+  return 'ancestor'
+}
+
+async function validateCanonicalPluginSource({ repositoryRoot, pluginSourcePath, sourcePluginFingerprint }) {
+  await assertRealPath(repositoryRoot, 'directory', 'Canonical rollback repository')
+  await assertRealPath(pluginSourcePath, 'directory', 'Canonical plugin source')
+  const sourceRelativePath = relative(repositoryRoot, pluginSourcePath)
+  assert(
+    sourceRelativePath.length > 0
+      && sourceRelativePath !== '..'
+      && !sourceRelativePath.startsWith(`..${sep}`)
+      && !isAbsolute(sourceRelativePath),
+    'Canonical plugin source must be contained by the rollback repository.',
+  )
+  assert(
+    await fingerprintPluginPayload(pluginSourcePath) === sourcePluginFingerprint,
+    'Canonical plugin source no longer matches the rollback backup payload fingerprint.',
+  )
+}
+
+export async function validateRollbackBackupProvenance({
+  repositoryRoot,
+  pluginSourcePath,
+  sourceCommit,
+  approvedSha,
+  sourcePluginFingerprint,
+}) {
+  validateApprovedSha(approvedSha)
+  assert(/^[a-f0-9]{64}$/u.test(sourcePluginFingerprint), 'Approved source plugin payload fingerprint is invalid.')
+  const sourceCommitRelation = await validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha })
+  await validateCanonicalPluginSource({ repositoryRoot, pluginSourcePath, sourcePluginFingerprint })
+  return { schemaVersion: 1, sourceCommit, sourceCommitRelation, approvedSha, sourcePluginFingerprint }
 }
 
 export async function validatePluginRollbackBackup({
@@ -290,16 +323,6 @@ export async function validatePluginRollbackBackup({
 }) {
   validateApprovedSha(approvedSha)
   assertNormalizedAbsolute(installedPluginPath, 'Installed plugin path')
-  await assertRealPath(repositoryRoot, 'directory', 'Canonical rollback repository')
-  await assertRealPath(pluginSourcePath, 'directory', 'Canonical plugin source')
-  const sourceRelativePath = relative(repositoryRoot, pluginSourcePath)
-  assert(
-    sourceRelativePath.length > 0
-      && sourceRelativePath !== '..'
-      && !sourceRelativePath.startsWith(`..${sep}`)
-      && !isAbsolute(sourceRelativePath),
-    'Canonical plugin source must be contained by the rollback repository.',
-  )
   await assertDirectChild(backupRoot, backupDir, PLUGIN_BACKUP_NAME, 'Plugin rollback backup')
   const previousPlugin = join(backupDir, 'previous-plugin')
   const installedPeer = await validateOfficialOpenClawPeerLink(installedPluginPath)
@@ -333,16 +356,24 @@ export async function validatePluginRollbackBackup({
   assert(!await optionalLstat(join(backupDir, '.active-rollback-source.json')), 'Plugin rollback backup is already an active rollback source.')
 
   const sourceCommit = (await readFile(join(backupDir, 'source-commit.txt'), 'utf8')).trim()
-  const sourceCommitRelation = await validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha })
   const sourcePluginFingerprint = (await readFile(
     join(backupDir, 'source-plugin-payload-sha256.txt'),
     'utf8',
   )).trim()
   assert(/^[a-f0-9]{64}$/u.test(sourcePluginFingerprint), 'Approved source plugin payload fingerprint is invalid.')
-  assert(
-    await fingerprintPluginPayload(pluginSourcePath) === sourcePluginFingerprint,
-    'Canonical plugin source no longer matches the rollback backup payload fingerprint.',
-  )
+  let sourceCommitRelation
+  if (repositoryRoot !== undefined || pluginSourcePath !== undefined) {
+    const provenance = await validateRollbackBackupProvenance({
+      repositoryRoot,
+      pluginSourcePath,
+      sourceCommit,
+      approvedSha,
+      sourcePluginFingerprint,
+    })
+    sourceCommitRelation = provenance.sourceCommitRelation
+  } else {
+    sourceCommitRelation = await validateBackupSourceCommit({ repositoryRoot, sourceCommit, approvedSha })
+  }
   const previousPluginFingerprint = (await readFile(
     join(backupDir, 'previous-plugin-payload-sha256.txt'),
     'utf8',
