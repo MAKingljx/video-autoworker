@@ -200,6 +200,30 @@ write_index_record() {
   printf '%s\n' "$record" > "$output_path"
 }
 
+prepare_isolated_sqlite_read() {
+  local isolated_root="$1"
+  local database_path="$2"
+  local isolated_home="$isolated_root/home"
+  local isolated_state="$isolated_home/.openclaw"
+  local isolated_database_dir="$isolated_state/state"
+  local expected_database="$isolated_database_dir/openclaw.sqlite"
+  if [[ ! -d "$isolated_root" || -L "$isolated_root" \
+    || ! -d "$isolated_home" || -L "$isolated_home" \
+    || ! -d "$isolated_state" || -L "$isolated_state" \
+    || ! -d "$isolated_database_dir" || -L "$isolated_database_dir" \
+    || ! -f "$database_path" || -L "$database_path" \
+    || "$database_path" != "$expected_database" ]]; then
+    printf 'Isolated OpenClaw state database is missing or outside its disposable root.\n' >&2
+    return 1
+  fi
+  # OpenClaw creates this disposable database in WAL mode. A newly closed WAL
+  # database can lack the transient -shm sidecar that macOS sqlite3 -readonly
+  # needs. Prime only this exact temporary database with query_only; the formal
+  # index read below and every production/profile database read stay read-only.
+  sqlite3 "$database_path" \
+    'PRAGMA query_only = ON; SELECT 1 FROM sqlite_schema LIMIT 1;' >/dev/null
+}
+
 assert_index_absent() {
   local database_path="$1"
   local record
@@ -453,6 +477,7 @@ NODE
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins install --force "$INSTALLED_PLUGIN_DIR" \
     > "$isolated_root/install-old.txt"
+  prepare_isolated_sqlite_read "$isolated_root" "$isolated_state/state/openclaw.sqlite"
   write_index_record "$isolated_state/state/openclaw.sqlite" "$isolated_index"
   node "$VALIDATOR" index "$isolated_index" "$OLD_VERSION" "$INSTALLED_PLUGIN_DIR" "$isolated_install"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
@@ -467,6 +492,7 @@ NODE
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins install --force "$PLUGIN_DIR" \
     > "$isolated_root/install-new.txt"
+  prepare_isolated_sqlite_read "$isolated_root" "$isolated_state/state/openclaw.sqlite"
   write_index_record "$isolated_state/state/openclaw.sqlite" "$isolated_index"
   node "$VALIDATOR" index "$isolated_index" "$NEW_VERSION" "$PLUGIN_DIR" "$isolated_install"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \

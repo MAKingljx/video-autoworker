@@ -50,13 +50,33 @@ else if (joined.includes('rev-parse HEAD')) process.stdout.write('0123456789abcd
 else process.exit(2)
 `)
   await executable(join(binDir, 'sqlite3'), `#!/usr/bin/env node
-const { existsSync, readFileSync } = require('node:fs')
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require('node:fs')
 const args = process.argv.slice(2)
-if (args[0] !== '-readonly' || args.length < 3) {
-  process.stderr.write('fake sqlite3 permits only -readonly queries\\n')
+if (process.env.FAKE_SQLITE_LOG) {
+  appendFileSync(process.env.FAKE_SQLITE_LOG, JSON.stringify({ args }) + '\\n')
+}
+const readOnly = args[0] === '-readonly'
+const databasePath = readOnly ? args[1] : args[0]
+const query = readOnly ? args[2] : args[1]
+if (!databasePath || !query) {
+  process.stderr.write('fake sqlite3 received an incomplete invocation\\n')
   process.exit(73)
 }
-const recordPath = args[1] + '.record.json'
+const readinessPath = databasePath + '.readonly-ready'
+const isolatedDatabase = databasePath.includes('/aiworker-video-command-upgrade.')
+if (!readOnly) {
+  if (!isolatedDatabase || !query.includes('PRAGMA query_only') || !query.includes('sqlite_schema')) {
+    process.stderr.write('fake sqlite3 permits writable opens only for isolated query-only warmup\\n')
+    process.exit(74)
+  }
+  writeFileSync(readinessPath, '')
+  process.exit(0)
+}
+if (isolatedDatabase && !existsSync(readinessPath)) {
+  process.stderr.write('Error: in prepare, unable to open database file (14)\\n')
+  process.exit(14)
+}
+const recordPath = databasePath + '.record.json'
 if (!existsSync(recordPath)) process.exit(0)
 const records = JSON.parse(readFileSync(recordPath, 'utf8'))
 const record = records['${pluginId}']
@@ -116,6 +136,7 @@ function updateInstall(source) {
   rmSync(installDir, { recursive: true, force: true })
   cpSync(absoluteSource, installDir, { recursive: true })
   writeFileSync(databasePath, '')
+  rmSync(databasePath + '.readonly-ready', { force: true })
   writeFileSync(databasePath + '.record.json', JSON.stringify({
     '${pluginId}': {
       source: 'path',
@@ -331,6 +352,7 @@ async function setupFixture() {
   const qwenDatabase = join(qwenState, 'state', 'openclaw.sqlite')
   const installed = join(qwenState, 'extensions', pluginId)
   const log = join(root, 'openclaw.jsonl')
+  const sqliteLog = join(root, 'sqlite.jsonl')
   const isolatedRepo = join(root, 'repo')
   const installerPath = join(isolatedRepo, 'scripts', 'upgrade-aiworker-video-command-plugin.sh')
   const candidatePath = join(isolatedRepo, 'openclaw-plugins', pluginId)
@@ -377,6 +399,7 @@ async function setupFixture() {
     await writeJson(join(state, 'state', 'openclaw.sqlite.record.json'), {})
   }
   await writeFile(log, '')
+  await writeFile(sqliteLog, '')
 
   return {
     root,
@@ -388,12 +411,14 @@ async function setupFixture() {
     qwenDatabase,
     installed,
     log,
+    sqliteLog,
     backupRoot: join(home, 'ai-worker', 'backups', pluginId),
     env: {
       ...process.env,
       HOME: home,
       PATH: `${bin}:${process.env.PATH}`,
       FAKE_OPENCLAW_LOG: log,
+      FAKE_SQLITE_LOG: sqliteLog,
       OPENCLAW_PROFILE: 'redirected-profile',
       OPENCLAW_STATE_DIR: join(root, 'redirected-state'),
       OPENCLAW_CONFIG_PATH: join(root, 'redirected-config.json'),
@@ -453,6 +478,13 @@ describe('controlled video-command plugin upgrade installer', () => {
     const isolatedInstalls = calls.filter(call => call.profile === null
       && call.args[0] === 'plugins' && call.args[1] === 'install')
     expect(isolatedInstalls).toHaveLength(2)
+    const sqliteCalls = await readLog(fixture.sqliteLog)
+    const writableSqliteCalls = sqliteCalls.filter(call => call.args[0] !== '-readonly')
+    expect(writableSqliteCalls).toHaveLength(2)
+    expect(writableSqliteCalls.every(call => call.args[0].includes('/aiworker-video-command-upgrade.')
+      && call.args[1].includes('PRAGMA query_only')
+      && call.args[1].includes('sqlite_schema'))).toBe(true)
+    expect(sqliteCalls.filter(call => call.args[0] === '-readonly').length).toBeGreaterThan(2)
   }, 30_000)
 
   it('applies the full profile and effective baseline plus one tool with live proof', async () => {
