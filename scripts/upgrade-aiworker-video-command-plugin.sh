@@ -348,19 +348,43 @@ NODE
 
 build_config_plan() {
   local config_path="$1"
+  local effective_baseline_path="$2"
   local plan_line
   plan_line="$(node "$VALIDATOR" config-plan \
-    "$config_path" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME")" || return 1
+    "$config_path" "$effective_baseline_path" \
+    "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME")" || return 1
   if [[ "$plan_line" != *$'\t'* ]]; then
     printf 'Validator returned an invalid config plan.\n' >&2
     return 1
   fi
   AGENT_INDEX="${plan_line%%$'\t'*}"
-  NEXT_ALSO_ALLOW="${plan_line#*$'\t'}"
-  if [[ ! "$AGENT_INDEX" =~ ^[0-9]+$ || -z "$NEXT_ALSO_ALLOW" ]]; then
+  NEXT_AGENT_TOOLS="${plan_line#*$'\t'}"
+  if [[ ! "$AGENT_INDEX" =~ ^[0-9]+$ || -z "$NEXT_AGENT_TOOLS" ]]; then
     printf 'Validator returned an invalid config plan.\n' >&2
     return 1
   fi
+}
+
+capture_live_effective_baseline() {
+  local report_dir="$1"
+  local sessions_report
+  local baseline_report="$report_dir/live-tools-effective-baseline.json"
+  install -d -m 700 "$report_dir" || return 1
+  sessions_report="$(mktemp "$work_root/live-sessions.XXXXXX.json")" || return 1
+  chmod 600 "$sessions_report" || return 1
+  run_qwen_openclaw gateway status --deep --require-rpc --json \
+    > "$report_dir/live-gateway-status-baseline.json" || return 1
+  run_qwen_openclaw gateway call sessions.list \
+    --params "$(node -e 'process.stdout.write(JSON.stringify({agentId: process.argv[1], search: "telegram:direct:", configuredAgentsOnly: true, includeGlobal: false, limit: 200}))' "$AGENT_ID")" \
+    --timeout 20000 --json > "$sessions_report" || return 1
+  DIRECT_SESSION_KEY="$(node "$VALIDATOR" session-select "$sessions_report" "$AGENT_ID")" || return 1
+  rm -f -- "$sessions_report" || return 1
+  run_qwen_openclaw gateway call tools.effective \
+    --params "$(node -e 'process.stdout.write(JSON.stringify({agentId: process.argv[1], sessionKey: process.argv[2]}))' "$AGENT_ID" "$DIRECT_SESSION_KEY")" \
+    --timeout 20000 --json > "$baseline_report" || return 1
+  node "$VALIDATOR" effective-old "$baseline_report" "$baseline_report" \
+    "$AGENT_ID" "$TOOL_NAME" || return 1
+  EFFECTIVE_BASELINE_REPORT="$baseline_report"
 }
 
 validate_pre_upgrade_index() {
@@ -391,7 +415,6 @@ validate_current_state() {
     return 1
   fi
 
-  build_config_plan "$PROFILE_CONFIG"
   validate_old_install_files
   write_index_record "$PROFILE_STATE_DB" "$current_index"
   validate_pre_upgrade_index "$current_index" "$report_dir/current-source-kind.txt"
@@ -401,9 +424,12 @@ validate_current_state() {
   NO_COLOR=1 run_qwen_openclaw plugins doctor > "$doctor_report"
   node "$VALIDATOR" doctor-old "$doctor_report" "$PLUGIN_ID"
 
+  capture_live_effective_baseline "$report_dir"
+  build_config_plan "$PROFILE_CONFIG" "$EFFECTIVE_BASELINE_REPORT"
+
   run_qwen_openclaw config set \
-    "agents.list[$AGENT_INDEX].tools.alsoAllow" \
-    "$NEXT_ALSO_ALLOW" \
+    "agents.list[$AGENT_INDEX].tools" \
+    "$NEXT_AGENT_TOOLS" \
     --strict-json \
     --dry-run \
     > "$report_dir/config-set-dry-run.txt"
@@ -477,7 +503,9 @@ validate_final_state() {
 refresh_and_validate_live_gateway() {
   local report_dir="$1"
   local runtime_mode="$2"
+  local baseline_report="$3"
   local catalog_report="$report_dir/live-tools-catalog.json"
+  local effective_report="$report_dir/live-tools-effective.json"
 
   install -d -m 700 "$report_dir" || return 1
   run_qwen_openclaw gateway restart --wait 60s --json \
@@ -491,6 +519,16 @@ refresh_and_validate_live_gateway() {
     > "$catalog_report" || return 1
   node "$VALIDATOR" "$runtime_mode" "$catalog_report" \
     "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME" || return 1
+  run_qwen_openclaw gateway call tools.effective \
+    --params "$(node -e 'process.stdout.write(JSON.stringify({agentId: process.argv[1], sessionKey: process.argv[2]}))' "$AGENT_ID" "$DIRECT_SESSION_KEY")" \
+    --timeout 20000 --json > "$effective_report" || return 1
+  if [[ "$runtime_mode" == "live-new" ]]; then
+    node "$VALIDATOR" effective-new "$baseline_report" "$effective_report" \
+      "$AGENT_ID" "$TOOL_NAME" || return 1
+  else
+    node "$VALIDATOR" effective-old "$baseline_report" "$effective_report" \
+      "$AGENT_ID" "$TOOL_NAME" || return 1
+  fi
 }
 
 validate_source_and_host
@@ -608,7 +646,7 @@ fi
 validate_pre_upgrade_index \
   "$backup_dir/install-index-old.json" \
   "$backup_dir/pre-upgrade-source-kind.txt"
-build_config_plan "$backup_dir/openclaw.json"
+build_config_plan "$backup_dir/openclaw.json" "$EFFECTIVE_BASELINE_REPORT"
 
 rollback_required=0
 rollback_failed=0
@@ -643,6 +681,7 @@ rollback_upgrade() {
 
   if [[ "$rollback_failed" -eq 0 ]]; then
     refresh_and_validate_live_gateway "$backup_dir/rollback-live-gateway" live-old \
+      "$EFFECTIVE_BASELINE_REPORT" \
       > "$backup_dir/rollback-live-gateway-validation.txt" 2>&1
     if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
   fi
@@ -726,24 +765,25 @@ trap 'exit 143' TERM
 
 rollback_required=1
 run_qwen_openclaw config set \
-  "agents.list[$AGENT_INDEX].tools.alsoAllow" \
-  "$NEXT_ALSO_ALLOW" \
+  "agents.list[$AGENT_INDEX].tools" \
+  "$NEXT_AGENT_TOOLS" \
   --strict-json \
   > "$apply_reports/config-set.txt"
 node "$VALIDATOR" config-after "$backup_dir/openclaw.json" "$PROFILE_CONFIG" \
-  "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
+  "$EFFECTIVE_BASELINE_REPORT" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
 
 run_qwen_openclaw plugins install --force "$PLUGIN_DIR" \
   > "$apply_reports/install-new.txt"
 node "$VALIDATOR" config-after "$backup_dir/openclaw.json" "$PROFILE_CONFIG" \
-  "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
+  "$EFFECTIVE_BASELINE_REPORT" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
 validate_final_state "$apply_reports" "$PLUGIN_DIR" "$NEW_VERSION" runtime-new
 other_apply_after="$(other_profiles_snapshot "$work_root/other-apply-after")"
 if [[ "$other_apply_after" != "$other_apply_before" ]]; then
   printf 'Another OpenClaw profile changed during the upgrade.\n' >&2
   false
 fi
-refresh_and_validate_live_gateway "$apply_reports/live-gateway" live-new
+refresh_and_validate_live_gateway "$apply_reports/live-gateway" live-new \
+  "$EFFECTIVE_BASELINE_REPORT"
 
 install -m 600 /dev/null "$backup_dir/.verified"
 rollback_required=0
@@ -756,9 +796,11 @@ trap - EXIT HUP INT TERM
 
 printf 'Upgraded %s from %s to %s for %s/%s.\n' \
   "$PLUGIN_ID" "$OLD_VERSION" "$NEW_VERSION" "$PROFILE" "$AGENT_ID"
-printf 'Only %s was appended to the target agent tools.alsoAllow.\n' "$TOOL_NAME"
+printf 'The target agent now uses tools.profile=full and tools.allow equals the effective baseline plus only %s.\n' "$TOOL_NAME"
 printf 'Backup retained: %s\n' "$backup_dir"
 printf 'Only qwen-current was restarted through the official Gateway service command.\n'
 printf 'The live Gateway RPC proved the 0.2.0-only %s tool in the %s catalog.\n' \
   "$TOOL_NAME" "$AGENT_ID"
+printf 'The Telegram direct session effective tools equal the original baseline plus only %s.\n' \
+  "$TOOL_NAME"
 printf 'No production AI-worker task was submitted.\n'

@@ -451,9 +451,10 @@ globalThis.fetch = async (input, init = {}) => {
     expect(naturalSection).toContain('must not invent or receive those identity fields')
     for (const contract of [workspaceRules, workspaceMemory]) {
       expect(contract).toContain('`aiworker_analyze_video`')
-      expect(contract).toContain('`second-original.tools.alsoAllow`')
+      expect(contract).toContain('`tools.allow`')
+      expect(contract).toContain('`tools.alsoAllow` remains unset')
     }
-    expect(workspaceRules).toContain('are not the execution safety boundary')
+    expect(workspaceRules).toMatch(/are not the execution\s+safety boundary/u)
     expect(workspaceMemory).toMatch(/not an authorization\s+or safety boundary/u)
   })
 

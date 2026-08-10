@@ -5,12 +5,14 @@ import {
   createActiveRollbackMarker,
   validateConfigAfter,
   validateDoctorReport,
+  validateEffectiveTools,
   validateIndexRecord,
   validateLiveGatewayToolCatalog,
   validateOtherProfileConfig,
   validatePluginSource,
   validatePreUpgradeIndexRecord,
   validateRuntimeReport,
+  selectTelegramDirectSession,
 } from '../../../scripts/validate-aiworker-video-command-upgrade.mjs'
 
 const pluginId = 'aiworker-video-command'
@@ -34,27 +36,45 @@ function productionLikeConfig() {
   }
 }
 
+function effectiveReport(ids = ['read', 'exec']) {
+  return {
+    agentId,
+    profile: 'coding',
+    groups: [{ id: 'core', source: 'core', tools: ids.map(id => ({ id })) }],
+  }
+}
+
 describe('video-command upgrade validator', () => {
-  it('plans one per-agent alsoAllow append without changing the existing allow list', () => {
-    const plan = buildConfigPlan(productionLikeConfig(), { pluginId, agentId, toolName })
+  it('plans one per-agent full profile and allow append while preserving other tool fields', () => {
+    const config = productionLikeConfig()
+    config.agents.list[1].tools.allow.push('image')
+    config.agents.list[1].tools.loopDetection = { enabled: true }
+    const plan = buildConfigPlan(config, effectiveReport(), { pluginId, agentId, toolName })
     expect(plan).toEqual({
       agentIndex: 1,
-      originalAllow: ['read', 'exec'],
-      originalAlsoAllow: [],
-      nextAlsoAllow: [toolName],
+      originalAllow: ['read', 'exec', 'image'],
+      originalProfile: undefined,
+      effectiveAllow: ['read', 'exec'],
+      removedInactiveAllow: ['image'],
+      nextTools: {
+        profile: 'full',
+        allow: ['read', 'exec', toolName],
+        loopDetection: { enabled: true },
+      },
     })
   })
 
-  it('accepts only the approved append plus OpenClaw touch metadata', () => {
+  it('accepts only the approved target profile and allow update plus OpenClaw touch metadata', () => {
     const before = productionLikeConfig()
     const after = structuredClone(before)
     after.meta.lastTouchedAt = 'after'
     after.meta.lastTouchedVersion = '2026.7.1-2'
-    after.agents.list[1].tools.alsoAllow = [toolName]
+    after.agents.list[1].tools.profile = 'full'
+    after.agents.list[1].tools.allow.push(toolName)
 
-    expect(() => validateConfigAfter(before, after, { pluginId, agentId, toolName })).not.toThrow()
-    after.agents.list[1].tools.allow.push('process')
-    expect(() => validateConfigAfter(before, after, { pluginId, agentId, toolName }))
+    expect(() => validateConfigAfter(before, after, effectiveReport(), { pluginId, agentId, toolName })).not.toThrow()
+    after.agents.list[1].tools.loopDetection = { enabled: false }
+    expect(() => validateConfigAfter(before, after, effectiveReport(), { pluginId, agentId, toolName }))
       .toThrow(/outside the approved/u)
   })
 
@@ -66,7 +86,52 @@ describe('video-command upgrade validator', () => {
   ])('rejects %s', (_label, mutate) => {
     const config = productionLikeConfig()
     mutate(config)
-    expect(() => buildConfigPlan(config, { pluginId, agentId, toolName })).toThrow()
+    expect(() => buildConfigPlan(config, effectiveReport(), { pluginId, agentId, toolName })).toThrow()
+  })
+
+  it('fails closed when an effective baseline tool is absent from the restrictive allow list', () => {
+    expect(() => buildConfigPlan(
+      productionLikeConfig(),
+      effectiveReport(['read', 'exec', 'process']),
+      { pluginId, agentId, toolName },
+    )).toThrow(/must contain every effective baseline tool/u)
+  })
+
+  it('selects exactly one real second-original Telegram direct session', () => {
+    expect(selectTelegramDirectSession({
+      count: 1,
+      hasMore: false,
+      nextOffset: null,
+      totalCount: 1,
+      sessions: [{ key: 'agent:second-original:telegram:direct:owner' }],
+    }, { agentId })).toBe('agent:second-original:telegram:direct:owner')
+    expect(() => selectTelegramDirectSession({
+      count: 0, hasMore: false, nextOffset: null, totalCount: 0, sessions: [],
+    }, { agentId })).toThrow(/one returned/u)
+    expect(() => selectTelegramDirectSession({
+      count: 1,
+      hasMore: true,
+      nextOffset: 200,
+      totalCount: 201,
+      sessions: [{ key: 'agent:second-original:telegram:direct:owner' }],
+    }, { agentId })).toThrow(/must not be paginated/u)
+  })
+
+  it('requires effective tools to be exactly baseline plus the new tool and exact on rollback', () => {
+    const report = (profile, ids) => ({ ...effectiveReport(ids), profile })
+    const baseline = effectiveReport()
+    expect(() => validateEffectiveTools(baseline, report('full', ['read', 'exec', toolName]), {
+      agentId, toolName, expectTool: true,
+    })).not.toThrow()
+    expect(() => validateEffectiveTools(baseline, report('full', ['read', 'exec', toolName, 'image']), {
+      agentId, toolName, expectTool: true,
+    })).toThrow(/baseline plus only/u)
+    expect(() => validateEffectiveTools(baseline, report('coding', ['read', 'exec']), {
+      agentId, toolName, expectTool: false,
+    })).not.toThrow()
+    expect(() => validateEffectiveTools(baseline, report('coding', ['read']), {
+      agentId, toolName, expectTool: false,
+    })).toThrow(/baseline exactly/u)
   })
 
   it('requires the pinned 0.2.0 package and exact optional-tool declaration', () => {

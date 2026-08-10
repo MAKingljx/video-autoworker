@@ -141,13 +141,53 @@ if (args[0] === 'config' && args[1] === 'set') {
     process.stdout.write('Config dry run passed.\\n')
     process.exit(0)
   }
-  const match = /^agents\\.list\\[(\\d+)\\]\\.tools\\.alsoAllow$/u.exec(args[2])
+  const match = /^agents\\.list\\[(\\d+)\\]\\.tools$/u.exec(args[2])
   if (!match) process.exit(75)
   const config = JSON.parse(readFileSync(configPath, 'utf8'))
-  config.agents.list[Number(match[1])].tools.alsoAllow = JSON.parse(args[3])
+  config.agents.list[Number(match[1])].tools = JSON.parse(args[3])
   config.meta = { ...(config.meta ?? {}), lastTouchedAt: 'fake-config', lastTouchedVersion: '2026.7.1-2' }
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\\n', { mode: 0o600 })
   process.stdout.write('Config updated.\\n')
+  process.exit(0)
+}
+
+if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'sessions.list') {
+  const paramsIndex = args.indexOf('--params')
+  if (paramsIndex < 0) process.exit(82)
+  const params = JSON.parse(args[paramsIndex + 1])
+  if (params.agentId !== 'second-original'
+    || params.search !== 'telegram:direct:'
+    || params.configuredAgentsOnly !== true
+    || params.includeGlobal !== false
+    || params.limit !== 200) process.exit(83)
+  process.stdout.write(JSON.stringify({
+    count: 1,
+    hasMore: false,
+    nextOffset: null,
+    totalCount: 1,
+    sessions: [{ key: 'agent:second-original:telegram:direct:owner' }],
+  }) + '\\n')
+  process.exit(0)
+}
+
+if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'tools.effective') {
+  const paramsIndex = args.indexOf('--params')
+  if (paramsIndex < 0) process.exit(84)
+  const params = JSON.parse(args[paramsIndex + 1])
+  if (params.agentId !== 'second-original'
+    || params.sessionKey !== 'agent:second-original:telegram:direct:owner') process.exit(85)
+  const config = JSON.parse(readFileSync(configPath, 'utf8'))
+  const target = config.agents.list.find(agent => agent.id === 'second-original')
+  const baseIds = ['apply_patch', 'edit', 'exec', 'memory_get', 'memory_search', 'process', 'read', 'web_fetch', 'web_search', 'write']
+  const installed = installedVersion()
+  let ids = [...baseIds]
+  if (installed === '0.2.0' && target.tools.allow.includes('${toolName}')) ids.push('${toolName}')
+  if (installed === '0.2.0' && process.env.FAKE_EFFECTIVE_EXTRA_TOOL === '1') ids.push('image')
+  process.stdout.write(JSON.stringify({
+    agentId: 'second-original',
+    profile: target.tools.profile ?? config.tools.profile,
+    groups: [{ id: 'core', label: 'Core', source: 'core', tools: ids.map(id => ({ id })) }],
+  }) + '\\n')
   process.exit(0)
 }
 
@@ -268,7 +308,10 @@ function baseConfig() {
     agents: {
       list: [
         { id: 'main', tools: { allow: ['read'] } },
-        { id: 'second-original', tools: { allow: ['read', 'exec'] } },
+        { id: 'second-original', tools: {
+          allow: ['apply_patch', 'edit', 'exec', 'image', 'memory_get', 'memory_search', 'process', 'read', 'web_fetch', 'web_search', 'write'],
+          loopDetection: { enabled: true },
+        } },
       ],
     },
     plugins: {
@@ -312,6 +355,7 @@ async function setupFixture() {
     configSchema: { type: 'object', additionalProperties: false, properties: {} },
   })
   await writeFile(join(installed, 'index.js'), 'export default {}\n')
+  await writeJson(join(qwenState, 'fake-gateway-runtime.json'), { version: '0.1.0' })
   await writeJson(`${qwenDatabase}.record.json`, {
     [pluginId]: {
       source: 'path',
@@ -398,25 +442,36 @@ describe('controlled video-command plugin upgrade installer', () => {
     const qwenInstalls = calls.filter(call => call.profile === 'qwen-current'
       && call.args[0] === 'plugins' && call.args[1] === 'install')
     expect(qwenInstalls).toHaveLength(0)
-    expect(calls.some(call => call.args[0] === 'gateway')).toBe(false)
+    expect(calls.some(call => call.profile === 'qwen-current'
+      && call.args[0] === 'gateway' && call.args[1] === 'restart')).toBe(false)
+    expect(calls.some(call => call.profile === 'qwen-current'
+      && call.args[0] === 'gateway' && call.args[1] === 'call'
+      && call.args[2] === 'tools.catalog')).toBe(false)
+    expect(calls.some(call => call.profile === 'qwen-current'
+      && call.args[0] === 'gateway' && call.args[1] === 'call'
+      && call.args[2] === 'tools.effective')).toBe(true)
     const isolatedInstalls = calls.filter(call => call.profile === null
       && call.args[0] === 'plugins' && call.args[1] === 'install')
     expect(isolatedInstalls).toHaveLength(2)
   }, 30_000)
 
-  it('applies exactly one optional-tool grant and one official production force install', async () => {
+  it('applies the full profile and effective baseline plus one tool with live proof', async () => {
     const fixture = await setupFixture()
     const before = JSON.parse(await readFile(fixture.qwenConfig, 'utf8'))
 
     const { stdout } = await runInstaller(fixture, '--apply')
 
-    expect(stdout).toContain(`Only ${toolName} was appended`)
+    expect(stdout).toContain(`effective baseline plus only ${toolName}`)
     expect(stdout).toContain('Only qwen-current was restarted through the official Gateway service command.')
     expect(stdout).toContain(`The live Gateway RPC proved the 0.2.0-only ${toolName} tool`)
     expect(stdout).toContain('No production AI-worker task was submitted.')
     const after = JSON.parse(await readFile(fixture.qwenConfig, 'utf8'))
-    expect(after.agents.list[1].tools.allow).toEqual(before.agents.list[1].tools.allow)
-    expect(after.agents.list[1].tools.alsoAllow).toEqual([toolName])
+    expect(after.agents.list[1].tools.allow).toEqual(
+      [...before.agents.list[1].tools.allow.filter(id => id !== 'image'), toolName],
+    )
+    expect(after.agents.list[1].tools.profile).toBe('full')
+    expect(after.agents.list[1].tools.alsoAllow).toBeUndefined()
+    expect(after.agents.list[1].tools.loopDetection).toEqual(before.agents.list[1].tools.loopDetection)
     expect(after.agents.list[0]).toEqual(before.agents.list[0])
     expect(JSON.parse(await readFile(join(fixture.installed, 'package.json'), 'utf8')).version).toBe('0.2.0')
 
@@ -435,10 +490,20 @@ describe('controlled video-command plugin upgrade installer', () => {
     expect(qwenInstalls).toHaveLength(1)
     expect(qwenInstalls[0].args.slice(0, 3)).toEqual(['plugins', 'install', '--force'])
     expect(qwenCalls.filter(call => call.args[0] === 'gateway' && call.args[1] === 'restart')).toHaveLength(1)
-    expect(qwenCalls.filter(call => call.args[0] === 'gateway' && call.args[1] === 'status')).toHaveLength(1)
+    expect(qwenCalls.filter(call => call.args[0] === 'gateway' && call.args[1] === 'status')).toHaveLength(3)
     expect(qwenCalls.filter(call => call.args[0] === 'gateway'
       && call.args[1] === 'call' && call.args[2] === 'tools.catalog')).toHaveLength(1)
+    expect(qwenCalls.filter(call => call.args[0] === 'gateway'
+      && call.args[1] === 'call' && call.args[2] === 'tools.effective').length).toBeGreaterThanOrEqual(2)
     expect(calls.some(call => call.args[0] === 'plugins' && call.args[1] === 'update')).toBe(false)
+  }, 30_000)
+
+  it('rolls back when live effective tools contain an unapproved extra tool', async () => {
+    const fixture = await setupFixture()
+    const configBefore = await readFile(fixture.qwenConfig)
+    await expect(runInstaller(fixture, '--apply', { FAKE_EFFECTIVE_EXTRA_TOOL: '1' })).rejects.toMatchObject({ code: 1 })
+    expect(await readFile(fixture.qwenConfig)).toEqual(configBefore)
+    expect(JSON.parse(await readFile(join(fixture.installed, 'package.json'), 'utf8')).version).toBe('0.1.0')
   }, 30_000)
 
   it('rolls back and refreshes the old live Gateway when the new live catalog probe fails', async () => {

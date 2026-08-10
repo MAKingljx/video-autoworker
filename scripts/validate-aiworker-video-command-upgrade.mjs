@@ -125,7 +125,7 @@ function assertToolNotGrantedOutsideTarget(config, agentId, toolName) {
   }
 }
 
-export function buildConfigPlan(config, {
+export function buildConfigPlan(config, effectiveBaseline, {
   pluginId,
   agentId,
   toolName,
@@ -139,16 +139,29 @@ export function buildConfigPlan(config, {
   const allow = stringArray(agent?.tools?.allow, `${agentId}.tools.allow`, { required: true })
   assert(allow.length > 0, `${agentId}.tools.allow must be non-empty.`)
   assert(!allow.includes(toolName), `${toolName} must not be added to tools.allow.`)
-
-  const currentAlsoAllow = stringArray(agent?.tools?.alsoAllow, `${agentId}.tools.alsoAllow`)
-  assert(!currentAlsoAllow.includes(toolName), `${toolName} is already present in tools.alsoAllow.`)
+  assert(agent?.tools?.alsoAllow === undefined, `${agentId}.tools.alsoAllow must remain unset.`)
   assertToolNotGrantedOutsideTarget(config, agentId, toolName)
+
+  const baselineIds = effectiveToolIds(effectiveBaseline, { agentId })
+  assert(!baselineIds.includes(toolName), 'Effective baseline must not contain the candidate tool.')
+  const baselineSet = new Set(baselineIds)
+  const effectiveAllow = allow.filter(id => baselineSet.has(id))
+  assert(
+    effectiveAllow.length === baselineIds.length,
+    `${agentId}.tools.allow must contain every effective baseline tool.`,
+  )
 
   return {
     agentIndex: index,
     originalAllow: [...allow],
-    originalAlsoAllow: [...currentAlsoAllow],
-    nextAlsoAllow: [...currentAlsoAllow, toolName],
+    originalProfile: agent?.tools?.profile,
+    effectiveAllow,
+    removedInactiveAllow: allow.filter(id => !baselineSet.has(id)),
+    nextTools: {
+      ...clone(agent.tools),
+      profile: 'full',
+      allow: [...effectiveAllow, toolName],
+    },
   }
 }
 
@@ -160,34 +173,88 @@ function withoutAllowedMetaChanges(config) {
   return copy
 }
 
-export function validateConfigAfter(before, after, options) {
-  const plan = buildConfigPlan(before, options)
+export function validateConfigAfter(before, after, effectiveBaseline, options) {
+  const plan = buildConfigPlan(before, effectiveBaseline, options)
   const target = uniqueTargetAgent(after, options.agentId)
   assert(target.index === plan.agentIndex, 'The target agent index changed during upgrade.')
 
   const expected = clone(before)
   expected.agents.list[plan.agentIndex].tools = {
     ...expected.agents.list[plan.agentIndex].tools,
-    alsoAllow: plan.nextAlsoAllow,
+    profile: 'full',
+    allow: [...plan.effectiveAllow, options.toolName],
   }
 
   assert(
     isDeepStrictEqual(withoutAllowedMetaChanges(after), withoutAllowedMetaChanges(expected)),
-    'Config changed outside the approved tools.alsoAllow addition.',
+    'Config changed outside the approved target profile and tools.allow update.',
   )
   assert(
     isDeepStrictEqual(after.plugins?.allow, before.plugins?.allow),
     'plugins.allow changed during upgrade.',
   )
   assert(
-    isDeepStrictEqual(target.agent?.tools?.allow, plan.originalAllow),
-    'The existing agent tools.allow changed during upgrade.',
+    isDeepStrictEqual(target.agent?.tools?.allow, [...plan.effectiveAllow, options.toolName]),
+    'tools.allow must equal the effective baseline plus the approved tool.',
   )
   assert(
-    isDeepStrictEqual(target.agent?.tools?.alsoAllow, plan.nextAlsoAllow),
-    'The optional tool was not appended exactly once.',
+    target.agent?.tools?.profile === 'full' && target.agent?.tools?.alsoAllow === undefined,
+    'The target agent must use profile full without tools.alsoAllow.',
   )
   assertToolNotGrantedOutsideTarget(after, options.agentId, options.toolName)
+}
+
+function effectiveToolIds(report, { agentId }) {
+  assert(report && typeof report === 'object' && !Array.isArray(report), 'Effective tools report must be an object.')
+  assert(report.agentId === agentId, `Effective tools report must target ${agentId}.`)
+  assert(typeof report.profile === 'string' && report.profile.length > 0, 'Effective tools report profile is required.')
+  assert(Array.isArray(report.groups), 'Effective tools report groups must be an array.')
+  const ids = report.groups.flatMap(group => {
+    assert(Array.isArray(group?.tools), 'Effective tools group tools must be an array.')
+    return group.tools.map(tool => {
+      assert(typeof tool?.id === 'string' && tool.id.length > 0, 'Effective tool id is required.')
+      return tool.id
+    })
+  })
+  assert(new Set(ids).size === ids.length, 'Effective tools must not contain duplicate ids.')
+  return ids.toSorted()
+}
+
+export function selectTelegramDirectSession(report, { agentId }) {
+  assert(report && typeof report === 'object' && !Array.isArray(report), 'Sessions report must be an object.')
+  assert(Array.isArray(report.sessions), 'Sessions report must contain sessions.')
+  assert(report.count === 1 && report.sessions.length === 1, 'Expected one returned Telegram direct session.')
+  assert(report.hasMore === false, 'Telegram direct session query must not be paginated.')
+  assert(
+    report.totalCount === 1 && report.nextOffset === null,
+    'Expected exactly one Telegram direct session across all pages.',
+  )
+  const prefix = `agent:${agentId}:telegram:direct:`
+  const matches = report.sessions.filter(session => typeof session?.key === 'string' && session.key.startsWith(prefix))
+  assert(matches.length === 1, `Expected exactly one ${agentId} Telegram direct session.`)
+  return matches[0].key
+}
+
+export function validateEffectiveTools(baseline, current, {
+  agentId,
+  toolName,
+  expectTool,
+}) {
+  const baselineIds = effectiveToolIds(baseline, { agentId })
+  assert(!baselineIds.includes(toolName), 'Effective baseline must not contain the candidate tool.')
+  const currentIds = effectiveToolIds(current, { agentId })
+  const expectedIds = expectTool ? [...baselineIds, toolName].toSorted() : baselineIds
+  assert(
+    isDeepStrictEqual(currentIds, expectedIds),
+    expectTool
+      ? 'Effective tools must equal the baseline plus only the candidate tool.'
+      : 'Rolled-back effective tools must equal the original baseline exactly.',
+  )
+  if (expectTool) {
+    assert(current.profile === 'full', 'Upgraded effective tools must report profile full.')
+  } else {
+    assert(current.profile === baseline.profile, 'Rolled-back effective profile must equal the baseline.')
+  }
 }
 
 export function validatePluginSource(packageJson, manifest, {
@@ -463,16 +530,21 @@ async function main() {
       break
     }
     case 'config-plan': {
-      const [configPath, pluginId, agentId, toolName] = args
-      const plan = buildConfigPlan(await readJson(configPath, 'profile config'), { pluginId, agentId, toolName })
-      process.stdout.write(`${plan.agentIndex}\t${JSON.stringify(plan.nextAlsoAllow)}\n`)
+      const [configPath, effectiveBaselinePath, pluginId, agentId, toolName] = args
+      const plan = buildConfigPlan(
+        await readJson(configPath, 'profile config'),
+        await readJson(effectiveBaselinePath, 'effective tools baseline'),
+        { pluginId, agentId, toolName },
+      )
+      process.stdout.write(`${plan.agentIndex}\t${JSON.stringify(plan.nextTools)}\n`)
       break
     }
     case 'config-after': {
-      const [beforePath, afterPath, pluginId, agentId, toolName] = args
+      const [beforePath, afterPath, effectiveBaselinePath, pluginId, agentId, toolName] = args
       validateConfigAfter(
         await readJson(beforePath, 'pre-upgrade config'),
         await readJson(afterPath, 'post-upgrade config'),
+        await readJson(effectiveBaselinePath, 'effective tools baseline'),
         { pluginId, agentId, toolName },
       )
       break
@@ -498,6 +570,26 @@ async function main() {
         toolName,
         expectTool: command === 'live-new',
       })
+      break
+    }
+    case 'session-select': {
+      const [reportPath, agentId] = args
+      assert(reportPath && agentId, 'session-select arguments are incomplete.')
+      process.stdout.write(`${selectTelegramDirectSession(
+        await readJson(reportPath, 'sessions report'),
+        { agentId },
+      )}\n`)
+      break
+    }
+    case 'effective-old':
+    case 'effective-new': {
+      const [baselinePath, currentPath, agentId, toolName] = args
+      assert(baselinePath && currentPath && agentId && toolName, 'effective tools arguments are incomplete.')
+      validateEffectiveTools(
+        await readJson(baselinePath, 'effective tools baseline'),
+        await readJson(currentPath, 'current effective tools'),
+        { agentId, toolName, expectTool: command === 'effective-new' },
+      )
       break
     }
     case 'index': {

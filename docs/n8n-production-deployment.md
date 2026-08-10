@@ -286,16 +286,21 @@ ID 或幂等键，也不得直接执行 `submit-task.mjs`。精确单行命令�
 ```json
 {
   "tools": {
-    "alsoAllow": ["aiworker_analyze_video"]
+    "profile": "full",
+    "allow": ["<原有限制性工具清单>", "aiworker_analyze_video"]
   }
 }
 ```
 
 上面的对象表示 `agents.list` 中 `id="second-original"` 的 `tools` 子对象，不是全局
-`tools`。已有 `tools.allow` 必须原样保留；不能仅追加到 `allow`，因为生产
-`tools.profile="coding"` 会先过滤可选工具，也不能放行插件 ID、`group:plugins` 或
-全局工具组。插件 manifest 还必须声明同名 optional tool，runtime inspection 必须
-同时看到目标 hooks 与工具能力。
+`tools`。OpenClaw `2026.7.1-2` 不允许同一层同时存在 `allow` 与 `alsoAllow`；生产已有
+限制性 `tools.allow`，因此升级器把该 agent 的 profile 设为 `full`，保持原 allow 顺序
+并以升级前真实有效工具为基线；旧 allow 中被原 profile 挡住、实际未生效的条目不会随
+`full` 一起意外放开，最终只追加专用工具，同时保持 `alsoAllow` 缺失。`full` 只取消可选
+插件工具的前置 profile 过滤，后续 allow 仍锁定最终权限；不能放行插件 ID、
+`group:plugins` 或全局工具组。
+插件 manifest 还必须声明同名 optional tool，runtime inspection 必须同时看到目标 hooks
+与工具能力。
 
 生产现有插件安装来源为 canonical path，OpenClaw `plugins update` 会跳过；升级必须
 使用 Git 管理的受控 upgrade installer，内部通过官方
@@ -312,12 +317,16 @@ apply 在 `.verified` 和关闭回滚门之前，必须由安装器调用官方 
 `gateway status --deep --require-rpc` 成功，并向真实运行 Gateway 调用
 `tools.catalog(agentId="second-original", includePlugins=true)`。active registry 中必须
 精确出现 `pluginId="aiworker-video-command"` 的 optional
-`aiworker_analyze_video`；该工具只存在于 `0.2.0`，而配置门已经单独证明唯一
-`second-original.tools.alsoAllow` 授权。独立 CLI plugin inspect 不能替代此在线证据。
+`aiworker_analyze_video`。随后还要针对唯一既有 Telegram 私聊 session 调用
+`tools.effective`，并证明最终有效工具集合严格等于升级前基线加这一项；catalog 只证明
+在线注册，不能替代最终权限验证，独立 CLI plugin inspect 也不能替代这些在线证据。
+该版本的只读 effective 投影不携带 owner 身份；插件允许它列出 optional 工具，但
+owner 未知的 execute 闭包必定拒绝。唯一受信自然语言真实验收继续证明 owner 消息可以
+执行一次，二者不能互相替代。
 
 若 restart、RPC 健康或 live catalog 任一失败，回滚仍保持 armed：安装器官方回装
-`0.1.0`、恢复原配置，再次只刷新 `qwen-current`，并要求 deep RPC 成功且 live catalog
-不再含 `aiworker_analyze_video`；该恢复门失败必须报 rollback failure，不得写 active
+`0.1.0`、恢复原配置，再次只刷新 `qwen-current`，并要求 deep RPC 成功、live catalog
+不再含 `aiworker_analyze_video`，且 effective 集合精确恢复原基线；该恢复门失败必须报 rollback failure，不得写 active
 marker 或成功口径。脚本不得重启 `3017`、n8n 或其他 profile，也不得提交任务。apply
 完整成功前不得运行唯一受控自然语言真实提交验收；真实提交验收通过前，该能力仍只能
 标记为候选。

@@ -667,17 +667,24 @@ export function createNaturalVideoToolRuntime({
     const sessionKey = normalizedString(toolContext?.sessionKey)
     const trustedIngressOwner = toolContext?.senderIsOwner === true
     const explicitManualQa = toolContext?.oneShotCliRun === true
+    const explicitlyUntrustedIngress = toolContext?.senderIsOwner === false
     if (
       toolContext?.agentId !== TARGET_AGENT
       || !sessionKey
       || !isTelegramChannel(toolContext.messageChannel)
       || !isTelegramDirectSession(sessionKey)
       || isGroupSession(sessionKey)
-      || (!trustedIngressOwner && !explicitManualQa)
+      || (explicitlyUntrustedIngress && !explicitManualQa)
       || toolContext.sandboxed === true
     ) {
       return null
     }
+
+    // OpenClaw 2026.7.1-2 tools.effective intentionally omits senderIsOwner.
+    // Return the optional tool for that read-only inventory projection, but
+    // never let an owner-unknown runtime execute it. Real Telegram turns must
+    // carry senderIsOwner=true; the isolated CLI acceptance uses oneShotCliRun.
+    const executionAuthorized = trustedIngressOwner || explicitManualQa
 
     return {
       name: NATURAL_VIDEO_TOOL_NAME,
@@ -686,6 +693,7 @@ export function createNaturalVideoToolRuntime({
       parameters: TOOL_PARAMETERS,
       executionMode: 'sequential',
       async execute(toolCallId, params) {
+        if (!executionAuthorized) throw new Error('video_admission_missing')
         const normalizedToolCallId = normalizedString(toolCallId)
         if (!normalizedToolCallId) throw new Error('video_admission_missing')
         const key = admissionKey(sessionKey, normalizedToolCallId)

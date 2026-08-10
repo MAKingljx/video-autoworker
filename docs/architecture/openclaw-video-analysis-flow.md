@@ -24,7 +24,7 @@
 ## 模型前入口与后备层
 
 - `before_dispatch` 只在 `qwen-current` 的 Telegram 私聊上识别精确单行入口；群聊或缺少明确私聊分类的命令会短路拒绝。
-- 自然语言分支不是通用 prompt fallback。插件工具必须同时满足：只安装在 `qwen-current`、factory 只向 `second-original` 的受信上下文暴露、manifest 将工具声明为 optional，并在该 agent 的 `tools.alsoAllow` 中只增加 `aiworker_analyze_video`。不得放行插件组或全局工具组。
+- 自然语言分支不是通用 prompt fallback。插件工具必须同时满足：只安装在 `qwen-current`、factory 只允许 `second-original` 的 Telegram 私聊或受控单次 CLI 验收执行、manifest 将工具声明为 optional，并把该 agent 设为 `profile=full` 后用限制性 `tools.allow` 锁定为升级前真实有效工具集合加 `aiworker_analyze_video`。不得设置同层 `alsoAllow`，也不得放行插件组或全局工具组。`tools.effective` 的只读投影不携带 owner 位，因此 owner 未知时工具可以被列出但执行必定拒绝；生产 owner 授权由唯一真实自然语言验收继续证明。
 - 模型只负责在已准入的自然语言消息中选择专用工具；解析、可信身份、唯一提交、参数固定和幂等由插件运行时负责。skill、workspace 规则和 MEMORY 只指导模型，不构成执行安全边界。
 - 插件是 OpenClaw 原生加载对象，必须由上游插件 allowlist 明确允许；未进入 allowlist 时不得假定插件已经生效。
 - 实际 `2026.7.1-2` dispatch 代码确认：普通消息会全局调用 `before_dispatch`，不要求额外 binding；hook 返回 `handled` 后，OpenClaw 直接执行 `sendFinalPayload`，不再进入模型生成。

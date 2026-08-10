@@ -85,9 +85,13 @@ with ad-hoc full-video ffmpeg, Whisper, or Qwen shell commands.
   the installed client once with `delivery=none` and `wait-seconds=0`. Then
   return only the same short receipt and stop the turn.
 - The natural-language tool is active only when the native plugin is loaded and
-  the qwen-current configuration explicitly adds exactly
-  `aiworker_analyze_video` to `second-original.tools.alsoAllow`. Memory and this
-  rule guide model choice but are not the execution safety boundary.
+  the qwen-current configuration gives `second-original` a `full` profile plus
+  a restrictive `tools.allow` equal to the prior live effective baseline plus
+  exactly `aiworker_analyze_video`. Dormant configured entries must not become
+  newly effective. `tools.alsoAllow` remains unset, and the
+  live Telegram session effective set must equal its baseline plus only this
+  tool. Memory and this rule guide model choice but are not the execution
+  safety boundary.
 - Fail closed when the message is a question or method request, contains a
   negative phrase, has no absolute server path, refers only to an un-ingested
   Telegram attachment, contains multiple paths, uses a relative path or URL,

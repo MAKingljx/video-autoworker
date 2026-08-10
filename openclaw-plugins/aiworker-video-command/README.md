@@ -148,10 +148,14 @@ bash scripts/upgrade-aiworker-video-command-plugin.sh --apply
 ```
 
 The gate is pinned to OpenClaw `2026.7.1-2`, the production identity, a clean
-canonical checkout, and the unique `qwen-current` `second-original` agent. It
-preserves that agent's existing `tools.allow` and appends only
-`aiworker_analyze_video` to its `tools.alsoAllow`; every other agent and profile
-must remain free of the plugin and tool grant. Apply holds the shared profile
+canonical checkout, and the unique `qwen-current` `second-original` agent. The
+target already has a restrictive `tools.allow`, so the gate sets its profile to
+`full`, preserves every other tools field, removes any configured allow entry
+that was not actually effective under the old profile, and sets the allowlist
+to the live pre-upgrade effective baseline plus only
+`aiworker_analyze_video`. It never adds
+`tools.alsoAllow`; every other agent and profile must remain free of the plugin
+and tool grant. Apply holds the shared profile
 lock, creates a mode-0700 backup, and uses only official
 `plugins install --force` for replacement. On failure it officially reinstalls
 the backed-up `0.1.0` tree and restores the original config. The gate reads the
@@ -161,15 +165,21 @@ the official profile-scoped `gateway restart` for `qwen-current`, requires
 `gateway status --deep --require-rpc`, and calls the live Gateway
 `tools.catalog` RPC for `second-original`. Success requires the active plugin
 registry group for `aiworker-video-command` to expose the optional
-`aiworker_analyze_video` tool. That capability is exclusive to `0.2.0`, while
-the already-validated config proves the exact per-agent `tools.alsoAllow`
-grant. A failure in restart, RPC health, or catalog validation occurs while
+`aiworker_analyze_video` tool. It also queries `tools.effective` for the unique
+existing `second-original` Telegram direct session and requires its final tool
+set to equal the pre-upgrade baseline plus only that tool. A failure in restart,
+RPC health, catalog validation, or effective-policy validation occurs while
 rollback remains armed: the script officially reinstalls `0.1.0`, restores the
 original config, restarts only `qwen-current` again, and requires the live
-catalog to omit the `0.2.0` tool. Failure of that recovery is reported as a
+catalog to omit the `0.2.0` tool and the effective set to match the baseline
+exactly. Failure of that recovery is reported as a
 rollback failure. The script never restarts Mission Control, n8n, or another
 OpenClaw profile. The controlled acceptance request must not run until apply
-returns success.
+returns success. OpenClaw `2026.7.1-2` omits owner identity from the read-only
+`tools.effective` factory projection: owner-unknown inventory may list this
+optional tool, but its execute closure rejects. The one allowed real
+natural-language acceptance is the separate proof that the trusted owner turn
+can execute it exactly once.
 
 The installed package includes a deterministic isolated harness:
 

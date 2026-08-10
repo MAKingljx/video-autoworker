@@ -15,8 +15,9 @@
   retry, or resubmission.
 - This memory describes the current canonical route; it is not an authorization
   or safety boundary. The natural-language entry is operational only after the
-  plugin is loaded and qwen-current explicitly grants only
-  `aiworker_analyze_video` through `second-original.tools.alsoAllow`.
+  plugin is loaded and qwen-current sets `second-original.tools.profile=full`
+  while its restrictive `tools.allow` equals the previously effective tools
+  plus only `aiworker_analyze_video`; same-layer `tools.alsoAllow` remains unset.
 - Method/questions, negative wording, missing or multiple paths, relative paths,
   URLs, unsupported extensions, and Telegram attachments without a managed
   server path do not authorize execution. Ask briefly for one production Mac

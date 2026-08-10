@@ -452,13 +452,37 @@ describe('guarded natural-language video tool', () => {
       sessionKey: 'agent:second-original:telegram:group:123',
     })).toBeNull()
     expect(runtime.createTool({ ...toolContext, senderIsOwner: false })).toBeNull()
-    expect(runtime.createTool({ ...toolContext, senderIsOwner: undefined })).toBeNull()
+    expect(runtime.createTool({ ...toolContext, senderIsOwner: undefined })?.name)
+      .toBe(NATURAL_VIDEO_TOOL_NAME)
     expect(runtime.createTool({ ...toolContext, sandboxed: true })).toBeNull()
     expect(runtime.createTool({
       ...toolContext,
       senderIsOwner: undefined,
       oneShotCliRun: true,
     })?.name).toBe(NATURAL_VIDEO_TOOL_NAME)
+  })
+
+  it('projects the optional tool for owner-unknown inventory but refuses execution', async () => {
+    const runContext = createRunContext()
+    const runner = vi.fn()
+    const runtime = createNaturalVideoToolRuntime({ runContext, runner })
+    runtime.beforePromptBuild(
+      { prompt: '帮我分析 /tmp/demo.mp4', messages: [] },
+      promptContext,
+    )
+    const call = targetCall()
+    expect(runtime.beforeToolCall(call.event, call.context)).toEqual({
+      params: { videoPath: '/tmp/demo.mp4' },
+    })
+
+    const inventoryTool = runtime.createTool({ ...toolContext, senderIsOwner: undefined })
+    await expect(inventoryTool.execute('call-1', { videoPath: '/tmp/demo.mp4' }))
+      .rejects.toThrow('video_admission_missing')
+    expect(runner).not.toHaveBeenCalled()
+
+    const ownerTool = runtime.createTool(toolContext)
+    await ownerTool.execute('call-1', { videoPath: '/tmp/demo.mp4' })
+    expect(runner).toHaveBeenCalledTimes(1)
   })
 
   it('rejects session and tool-call admission collisions across runs without overwriting', async () => {
