@@ -106,7 +106,9 @@ async function collectEntries(root, { allowedSymlink = null } = {}) {
     if (entry.isDirectory()) {
       output.push({ relativePath, kind: 'directory', mode: modeOf(entry), digest: '-' })
       const names = await readdir(pathname)
-      names.sort((left, right) => left.localeCompare(right, 'en'))
+      // Keep traversal deterministic; manifestText performs the installer's
+      // required global byte-order sort after the safety walk is complete.
+      names.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
       for (const name of names) {
         await visit(join(pathname, name), relativePath === '.' ? `./${name}` : `${relativePath}/${name}`)
       }
@@ -122,8 +124,13 @@ async function collectEntries(root, { allowedSymlink = null } = {}) {
 }
 
 function manifestText(entries, excludedRelativePath = null) {
-  return `${entries
+  const globallyByteSorted = entries
     .filter(entry => entry.relativePath !== excludedRelativePath)
+    .sort((left, right) => Buffer.compare(
+      Buffer.from(left.relativePath),
+      Buffer.from(right.relativePath),
+    ))
+  return `${globallyByteSorted
     .map(entry => `${entry.relativePath}\t${entry.kind}\t${entry.mode.toString(8)}\t${entry.digest}`)
     .join('\n')}\n`
 }

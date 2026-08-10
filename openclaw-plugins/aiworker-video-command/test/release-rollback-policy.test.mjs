@@ -1,6 +1,8 @@
-import { mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   assertTaskFlowStateMatches,
@@ -13,6 +15,8 @@ import {
 } from '../../../scripts/lib/aiworker-video-release-rollback-policy.mjs'
 
 const approvedSha = '0123456789abcdef0123456789abcdef01234567'
+const execFileAsync = promisify(execFile)
+const taskFlowInstaller = resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh')
 const roots = []
 
 async function directory(pathname, mode = 0o700) {
@@ -119,6 +123,37 @@ afterEach(async () => {
 })
 
 describe('release rollback policy', () => {
+  it('accepts the byte-ordered manifest emitted by the real task-flow installer and rejects later tampering', async () => {
+    const temporary = await realpath(await mkdtemp(join(tmpdir(), 'video-release-real-task-backup.')))
+    roots.push(temporary)
+    const workspace = join(temporary, 'workspace')
+    const backupRoot = join(temporary, 'task-backups')
+    await directory(workspace)
+    await file(join(workspace, 'AGENTS.md'), 'existing agents\n')
+    await file(join(workspace, 'MEMORY.md'), 'existing memory\n')
+    await execFileAsync('/bin/bash', [taskFlowInstaller], {
+      env: {
+        ...process.env,
+        AIWORKER_NODE_BIN: process.execPath,
+        AIWORKER_QWEN_WORKSPACE: workspace,
+        AIWORKER_SKILL_BACKUP_ROOT: backupRoot,
+      },
+      maxBuffer: 4 * 1024 * 1024,
+    })
+    const backupNames = (await readdir(backupRoot))
+      .filter(name => /^[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(name))
+    expect(backupNames).toHaveLength(1)
+    const backupDir = join(backupRoot, backupNames[0])
+    await expect(validateTaskFlowRollbackBackup({ backupRoot, backupDir })).resolves.toMatchObject({
+      backupDir,
+      state: { skill_present: false, agents_present: true, memory_present: true },
+    })
+
+    await writeFile(join(backupDir, 'AGENTS.md'), 'tampered after installer verification\n')
+    await expect(validateTaskFlowRollbackBackup({ backupRoot, backupDir }))
+      .rejects.toThrow(/manifest does not match/u)
+  }, 30_000)
+
   it('accepts only the explicit verified 0.2 plugin backup and exact task-flow manifest', async () => {
     const value = await fixture()
     const plugin = await validatePluginRollbackBackup({
