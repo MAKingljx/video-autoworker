@@ -9,6 +9,7 @@ import {
   readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -34,6 +35,10 @@ async function writeJson(pathname, value, mode = 0o600) {
 }
 
 async function makeFakeCommands(binDir) {
+  // Keep the fake command environment independent from HOME. On production,
+  // `node` is reached through a HOME-aware launcher, while process.execPath is
+  // the already-resolved Node 22 executable running this test process.
+  await symlink(process.execPath, join(binDir, 'node'))
   await executable(join(binDir, 'id'), '#!/bin/sh\n[ "$1" = "-un" ] && printf "heisenbergs-1\\n"\n')
   await executable(join(binDir, 'hostname'), '#!/bin/sh\nprintf "HEISENBERGS-1deMac-Studio.local\\n"\n')
   await executable(join(binDir, 'git'), `#!/usr/bin/env node
@@ -451,6 +456,7 @@ describe('controlled video-command plugin upgrade installer', () => {
       injectedFailure = error
     }
     expect(injectedFailure).toMatchObject({ code: 1 })
+    expect(injectedFailure.stderr).toContain('injected live catalog failure')
 
     expect(await readFile(fixture.qwenConfig)).toEqual(configBefore)
     expect(JSON.parse(await readFile(join(fixture.installed, 'package.json'), 'utf8')).version).toBe('0.1.0')
