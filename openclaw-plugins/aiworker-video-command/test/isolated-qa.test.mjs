@@ -33,6 +33,7 @@ describe('isolated video-command QA harness', () => {
       videoFile,
       timestampMs: 1_786_238_400_000,
       qaId: 'release-qa-1',
+      mode: 'natural',
       runner: async input => {
         calls.push(input)
         return {
@@ -45,13 +46,14 @@ describe('isolated video-command QA harness', () => {
 
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ videoPath: videoFile })
-    expect(calls[0].taskId).toMatch(/^video-command-[a-f0-9]{64}$/u)
+    expect(calls[0].taskId).toMatch(/^video-natural-[a-f0-9]{64}$/u)
     expect(result).toMatchObject({
       schema: 'aiworker-installed-plugin-isolated-qa/v1',
       ok: true,
       ingress: 'synthetic-telegram-dm',
       realTelegramIngressProven: false,
       productionTaskSubmitted: true,
+      requestMode: 'natural',
       handled: true,
       submitCalls: 1,
       status: 'accepted',
@@ -67,6 +69,7 @@ describe('isolated video-command QA harness', () => {
       canonicalVideoFile: '/tmp/qa.mp4',
       timestampMs: 1_786_238_400_000,
       qaId: 'release-qa-1',
+      mode: 'exact',
     })).toEqual({
       event: {
         content: '分析视频 /tmp/qa.mp4',
@@ -86,17 +89,38 @@ describe('isolated video-command QA harness', () => {
     })
   })
 
-  it('parses only the three exact CLI arguments', () => {
+  it('parses only the four exact CLI arguments', () => {
     expect(parseQaArguments([
       '--video-file', '/tmp/qa.mp4',
       '--timestamp-ms', '1786238400000',
       '--qa-id', 'release-qa-1',
+      '--mode', 'exact',
     ])).toEqual({
       videoFile: '/tmp/qa.mp4',
       timestampMs: 1_786_238_400_000,
       qaId: 'release-qa-1',
+      mode: 'exact',
     })
     expect(() => parseQaArguments(['--video-file', '/tmp/qa.mp4'])).toThrow('invalid_arguments')
+  })
+
+  it('can verify the exact command entry independently', async () => {
+    const videoFile = await qaVideo()
+    const calls = []
+    const result = await runIsolatedVideoCommandQa({
+      videoFile,
+      timestampMs: 1_786_238_400_001,
+      qaId: 'release-qa-exact',
+      mode: 'exact',
+      runner: async input => {
+        calls.push(input)
+        return { taskId: input.taskId, status: 'accepted', duplicate: false }
+      },
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].taskId).toMatch(/^video-command-[a-f0-9]{64}$/u)
+    expect(result).toMatchObject({ requestMode: 'exact', submitCalls: 1 })
   })
 
   it('rejects a non-receipt without retrying the handler', async () => {
@@ -106,11 +130,24 @@ describe('isolated video-command QA harness', () => {
       videoFile,
       timestampMs: 1_786_238_400_000,
       qaId: 'release-qa-2',
+      mode: 'natural',
       runner: async () => {
         calls += 1
         throw new Error('submit_failed')
       },
     })).rejects.toThrow('invalid_dispatch_receipt')
     expect(calls).toBe(1)
+  })
+
+  it.each([
+    ['exact', '分析视频 /tmp/qa.mp4'],
+    ['natural', '帮我分析一下这个视频 /tmp/qa.mp4'],
+  ])('builds the requested %s ingress shape', (mode, content) => {
+    expect(createSyntheticPrivateEvent({
+      canonicalVideoFile: '/tmp/qa.mp4',
+      timestampMs: 1_786_238_400_000,
+      qaId: 'release-qa-mode',
+      mode,
+    }).event.content).toBe(content)
   })
 })

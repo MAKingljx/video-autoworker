@@ -1,5 +1,12 @@
 import { discardStagedVideo, stageVideoFile } from './media-ingest.mjs'
 
+export class VideoTriggerUnconfirmedError extends Error {
+  constructor(cause) {
+    super('video_trigger_unconfirmed', { cause })
+    this.name = 'VideoTriggerUnconfirmedError'
+  }
+}
+
 export function buildVideoTaskPayload({ bindingId, taskId, idempotencyKey, prompt, videoKey, visionRoute }) {
   return {
     bindingId,
@@ -24,6 +31,7 @@ export async function submitVideoTask({
   visionRoute = null,
   inboxRoot,
   maxBytes,
+  recoverAfterTriggerError = true,
 }) {
   const staged = await stageVideoFile(videoFile, { inboxRoot, maxBytes })
   let ownershipTransferred = false
@@ -39,6 +47,13 @@ export async function submitVideoTask({
         visionRoute,
       }))
     } catch (error) {
+      if (!recoverAfterTriggerError) {
+        // The trigger may have accepted the task before the connection failed.
+        // Preserve its staged media, return control to the caller, and let a
+        // later user-authorized status turn resolve the stable task ID.
+        ownershipTransferred = true
+        throw new VideoTriggerUnconfirmedError(error)
+      }
       // A timeout may happen after the platform durably accepted the run. Query
       // the exact task before deciding whether the managed clone is still ours.
       let recovered

@@ -1,62 +1,73 @@
-import { parseVideoCommand } from './parse-video-command.js'
+import {
+  deriveTelegramSenderHash,
+  normalizeAllowedSenderHash,
+  resolveConsistentString,
+  resolveDispatchIdentity,
+  TARGET_CHANNEL,
+} from './dispatch-identity.js'
 import { runVideoTask } from './runner.js'
-import { deriveStableDispatchKey } from './stable-message-key.js'
-
-const TARGET_CHANNEL = 'telegram'
+import { formatShortReceipt } from './short-receipt.js'
+import { routeVideoRequest } from './video-request-router.js'
 
 function handledError(text) {
   return { handled: true, text }
 }
 
-function resolveStableField(eventValue, contextValue) {
-  const normalizedEvent = typeof eventValue === 'string' ? eventValue : ''
-  const normalizedContext = typeof contextValue === 'string' ? contextValue : ''
-  if (normalizedEvent && normalizedContext && normalizedEvent !== normalizedContext) return null
-  return normalizedContext || normalizedEvent || undefined
-}
+export function createBeforeDispatchHandler({
+  runner = runVideoTask,
+  allowedSenderSha256,
+} = {}) {
+  const allowedSenderHash = normalizeAllowedSenderHash(allowedSenderSha256)
 
-export function createBeforeDispatchHandler({ runner = runVideoTask } = {}) {
   return async function handleBeforeDispatch(event, context) {
-    const parsed = parseVideoCommand(event?.content)
-    const channel = resolveStableField(event?.channel, context?.channelId)
+    const request = routeVideoRequest(event?.content)
+    if (request.kind === 'pass') return undefined
+
+    const channel = resolveConsistentString(event?.channel, context?.channelId)
     if (channel === null) {
-      return parsed.kind === 'unmatched'
-        ? undefined
-        : handledError('提交失败：消息上下文不一致。')
+      return handledError('提交失败：消息上下文不一致。')
     }
-    if (channel !== TARGET_CHANNEL || parsed.kind === 'unmatched') return undefined
+    if (channel !== TARGET_CHANNEL) return undefined
+    if (request.kind === 'respond') {
+      return event?.isGroup === false
+        ? handledError(request.text)
+        : undefined
+    }
     if (event?.isGroup !== false) {
       return handledError('未提交：仅支持 Telegram 私聊。')
     }
-    if (parsed.kind === 'invalid') return handledError('未提交：命令格式无效。')
+    if (request.kind === 'reject') return handledError(request.text)
 
-    if (!Number.isFinite(event.timestamp)) {
-      return handledError('提交失败：缺少有效消息时间。')
-    }
-
-    const sessionKey = resolveStableField(event.sessionKey, context.sessionKey)
-    const senderId = resolveStableField(event.senderId, context.senderId)
-    if (sessionKey === null || senderId === null) {
+    const identity = resolveDispatchIdentity(event, context, request.route)
+    if (!identity.ok) {
+      if (identity.reason === 'direct_message_required') {
+        return handledError('未提交：仅支持 Telegram 私聊。')
+      }
+      if (identity.reason === 'timestamp_missing') {
+        return handledError('提交失败：缺少有效消息时间。')
+      }
+      if (identity.reason === 'identity_missing') {
+        return handledError('提交失败：缺少可信消息身份。')
+      }
       return handledError('提交失败：消息上下文不一致。')
     }
-
-    const taskId = deriveStableDispatchKey({
-      channel,
-      accountId: context.accountId,
-      conversationId: context.conversationId,
-      sessionKey,
-      senderId,
-      timestamp: event.timestamp,
-      content: event.content,
-    })
+    if (
+      !allowedSenderHash
+      || deriveTelegramSenderHash(identity.senderId) !== allowedSenderHash
+    ) {
+      return handledError('未提交：当前发送者没有视频派发权限。')
+    }
 
     try {
-      const result = await runner({ videoPath: parsed.videoPath, taskId })
+      const result = await runner({ videoPath: request.videoPath, taskId: identity.taskId })
       return {
         handled: true,
-        text: `已提交：taskId=${result.taskId}，status=${result.status}，duplicate=${result.duplicate}。`,
+        text: formatShortReceipt(result, identity.taskId),
       }
-    } catch {
+    } catch (error) {
+      if (error?.message === 'submit_unconfirmed') {
+        return handledError(`提交状态暂未确认，任务编号：${identity.taskId}。请稍后查询。`)
+      }
       return handledError('提交失败：暂时无法确认任务状态。')
     }
   }

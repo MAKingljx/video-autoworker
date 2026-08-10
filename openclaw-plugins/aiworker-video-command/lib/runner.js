@@ -2,6 +2,8 @@ import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
+import { normalizeVideoTaskResult } from './video-task-result.js'
+
 export const INSTALLED_SUBMIT_SCRIPT = resolve(
   homedir(),
   'AI-worker-second-original-workspace',
@@ -12,8 +14,8 @@ export const INSTALLED_SUBMIT_SCRIPT = resolve(
 )
 
 const SUBMIT_TIMEOUT_MS = 25_000
-const STATUS_TIMEOUT_MS = 10_000
 const MAX_OUTPUT_BYTES = 64 * 1_024
+const VIDEO_TRIGGER_UNCONFIRMED_EXIT_CODE = 75
 
 function executeFile(file, args, options) {
   return new Promise((resolvePromise, rejectPromise) => {
@@ -51,15 +53,12 @@ function parseSingleLineJson(stdout) {
   return value
 }
 
-function validateIdentityAndStatus(value, taskId) {
-  if (value.taskId !== taskId) throw new Error('task_identity_mismatch')
-  if (typeof value.status !== 'string' || !/^[a-z][a-z0-9_-]{0,31}$/u.test(value.status)) {
-    throw new Error('invalid_status')
-  }
-}
-
 function isTimeoutError(error) {
   return error?.code === 'ETIMEDOUT' || error?.killed === true || error?.signal === 'SIGTERM'
+}
+
+function isUnconfirmedSubmitError(error) {
+  return isTimeoutError(error) || Number(error?.code) === VIDEO_TRIGGER_UNCONFIRMED_EXIT_CODE
 }
 
 export function createVideoTaskRunner({
@@ -79,29 +78,16 @@ export function createVideoTaskRunner({
       '--idempotency-key', taskId,
       '--delivery', 'none',
       '--wait-seconds', '0',
+      '--no-trigger-recovery',
     ]
 
     try {
       const result = await execute(nodePath, submitArgs, { timeout: SUBMIT_TIMEOUT_MS })
       const value = parseSingleLineJson(result.stdout)
-      validateIdentityAndStatus(value, taskId)
-      if (typeof value.duplicate !== 'boolean') throw new Error('invalid_duplicate')
-      return { taskId, status: value.status, duplicate: value.duplicate }
+      return normalizeVideoTaskResult(value, taskId)
     } catch (error) {
-      if (!isTimeoutError(error)) throw new Error('submit_failed')
-
-      try {
-        const statusResult = await execute(
-          nodePath,
-          [scriptPath, '--status', taskId],
-          { timeout: STATUS_TIMEOUT_MS },
-        )
-        const statusValue = parseSingleLineJson(statusResult.stdout)
-        validateIdentityAndStatus(statusValue, taskId)
-        return { taskId, status: statusValue.status, duplicate: true }
-      } catch {
-        throw new Error('status_unconfirmed')
-      }
+      if (isUnconfirmedSubmitError(error)) throw new Error('submit_unconfirmed')
+      throw new Error('submit_failed')
     }
   }
 }

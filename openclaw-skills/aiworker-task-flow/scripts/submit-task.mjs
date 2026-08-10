@@ -6,7 +6,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { createPlatformClient } from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
-import { submitVideoTask } from '../lib/video-task.mjs'
+import { submitVideoTask, VideoTriggerUnconfirmedError } from '../lib/video-task.mjs'
 import {
   batchStatePath,
   createBatchState,
@@ -14,9 +14,10 @@ import {
   summarizeBatchState,
   validateBatchId,
 } from '../lib/video-batch-state.mjs'
-import { deriveVideoCommandTaskKey, parseExactVideoCommand } from '../lib/video-command.mjs'
 
 const args = process.argv.slice(2)
+const VIDEO_ACTION = /(?:分析|解析|处理|识别|总结)/u
+const VIDEO_SUBJECT = /(?:视频|影片|录像|video|\/[^\r\n\0]*\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ts|webm|wmv))/iu
 
 function option(name) {
   const index = args.indexOf(name)
@@ -26,6 +27,10 @@ function option(name) {
   return value
 }
 
+function flag(name) {
+  return args.includes(name)
+}
+
 function fail(message, code = 1) {
   process.stderr.write(`${message}\n`)
   process.exit(code)
@@ -33,6 +38,12 @@ function fail(message, code = 1) {
 
 function output(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
+}
+
+function rejectGenericVideoPrompt(prompt) {
+  if (VIDEO_ACTION.test(prompt) && VIDEO_SUBJECT.test(prompt)) {
+    throw new Error('视频会话请求只能由已加载的原生视频插件提交')
+  }
 }
 
 function chooseBinding(bindings, requestedBinding, video) {
@@ -65,11 +76,9 @@ async function readPromptInput() {
   return promptFile ? await readFile(promptFile, 'utf8') : promptArg
 }
 
-async function resolvePrompt({ video = false, promptInput, forceVideoDefault = false } = {}) {
-  const prompt = forceVideoDefault
-    ? '分析视频中的语音内容和画面信息，分别给出结果后合并。'
-    : (promptInput ?? await readPromptInput())
-      || (video ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
+async function resolvePrompt({ video = false, promptInput } = {}) {
+  const prompt = (promptInput ?? await readPromptInput())
+    || (video ? '分析视频中的语音内容和画面信息，分别给出结果后合并。' : '')
   if (!prompt?.trim()) throw new Error('必须通过 --prompt-file、--prompt 或视频参数提供任务内容')
   if (prompt.length > 120_000) throw new Error('任务内容超过 120000 字符上限')
   return prompt.trim()
@@ -156,27 +165,17 @@ async function main() {
   const videoDir = option('--video-dir')
   if (videoDir) return handleBatchCreate(client, videoDir)
 
-  let videoFile = option('--video-file')
-  let promptInput
-  let inferredVideoCommand = false
-  if (!videoFile) {
-    promptInput = await readPromptInput()
-    const inferredVideoFile = parseExactVideoCommand(promptInput)
-    if (inferredVideoFile) {
-      videoFile = inferredVideoFile
-      inferredVideoCommand = true
-    }
-  }
-
+  const videoFile = option('--video-file')
+  const promptInput = await readPromptInput()
   const prompt = await resolvePrompt({
     video: Boolean(videoFile),
     promptInput,
-    forceVideoDefault: inferredVideoCommand,
   })
+  if (!videoFile) rejectGenericVideoPrompt(prompt)
   const bindings = await client.listBindings()
   const binding = chooseBinding(
     bindings,
-    inferredVideoCommand ? null : option('--binding-id'),
+    option('--binding-id'),
     Boolean(videoFile),
   )
   const deliveryMode = option('--delivery') || 'none'
@@ -194,16 +193,22 @@ async function main() {
 
   const requestedTaskId = option('--task-id')
   const requestedIdempotencyKey = option('--idempotency-key')
+  const noTriggerRecovery = flag('--no-trigger-recovery')
+  if (noTriggerRecovery && !videoFile) {
+    throw new Error('--no-trigger-recovery 仅用于视频单次派发')
+  }
+  const waitSeconds = Number(option('--wait-seconds') || '0')
+  if (noTriggerRecovery && waitSeconds !== 0) {
+    throw new Error('--no-trigger-recovery 必须与 --wait-seconds 0 一起使用')
+  }
   let taskId
   let idempotencyKey
-  if (inferredVideoCommand) {
-    if (requestedTaskId && requestedIdempotencyKey && requestedTaskId !== requestedIdempotencyKey) {
-      throw new Error('视频命令的 --task-id 与 --idempotency-key 必须相同')
+  if (videoFile) {
+    if (!requestedTaskId || !requestedIdempotencyKey || requestedTaskId !== requestedIdempotencyKey) {
+      throw new Error('视频任务必须提供相同的 --task-id 与 --idempotency-key')
     }
     taskId = requestedTaskId
-      || requestedIdempotencyKey
-      || deriveVideoCommandTaskKey(videoFile)
-    idempotencyKey = taskId
+    idempotencyKey = requestedIdempotencyKey
   } else {
     taskId = requestedTaskId || randomUUID()
     idempotencyKey = requestedIdempotencyKey || taskId
@@ -228,6 +233,7 @@ async function main() {
       videoFile,
       visionRoute: option('--vision-route'),
       inboxRoot: defaultMediaInboxRoot(),
+      recoverAfterTriggerError: !noTriggerRecovery,
     })
     : await client.trigger({
       bindingId: binding.id,
@@ -245,9 +251,6 @@ async function main() {
       },
     })
 
-  const waitSeconds = inferredVideoCommand
-    ? 0
-    : Number(option('--wait-seconds') || '0')
   const finalRun = await waitForTask(client, response.taskId, waitSeconds)
   output({
     taskId: response.taskId,
@@ -260,4 +263,9 @@ async function main() {
   })
 }
 
-main().catch(error => fail(error instanceof Error ? error.message : String(error)))
+main().catch(error => {
+  if (error instanceof VideoTriggerUnconfirmedError) {
+    fail('video_trigger_unconfirmed', 75)
+  }
+  fail(error instanceof Error ? error.message : String(error))
+})

@@ -1,32 +1,45 @@
 ## Current AI-worker Video Analysis Memory
 
-- The canonical video-analysis design has two controlled entries. The exact
-  Telegram private-message command `分析视频 <绝对路径>` is claimed by the native
-  plugin before the model. Other affirmative natural-language wording may be
-  handled by `second-original` only when the current message explicitly asks to
-  analyze one video now and contains exactly one absolute supported video path.
-- For the model-routed natural-language entry, the first and only tool call is
-  `aiworker_analyze_video` with only `videoPath`. The native plugin validates the
-  trusted inbound and run context, derives identical hidden task/idempotency
-  keys, and invokes the
-  installed `aiworker-task-flow` client once with `delivery=none` and
-  `wait-seconds=0`. Never use `memory_search`, `exec`, a generic prompt task,
-  filesystem discovery, direct ffmpeg/Whisper/Qwen, same-turn status polling,
-  retry, or resubmission.
-- This memory describes the current canonical route; it is not an authorization
-  or safety boundary. The natural-language entry is operational only after the
-  plugin is loaded and qwen-current sets `second-original.tools.profile=full`
-  while its restrictive `tools.allow` equals the previously effective tools
-  plus only `aiworker_analyze_video`; same-layer `tools.alsoAllow` remains unset.
-- Method/questions, negative wording, missing or multiple paths, relative paths,
-  URLs, unsupported extensions, and Telegram attachments without a managed
-  server path do not authorize execution. Ask briefly for one production Mac
-  absolute path instead of guessing.
-- The formal downstream chain is Video AutoWorker / Mission Control -> n8n ->
-  prepare -> Whisper audio + local Qwen vision -> finalize. All workers use
-  `memoryMode=none`; `delivery=none` returns only the immediate acceptance
-  receipt and never auto-returns completed output to Telegram. Results are read
-  later by task status.
-- Any older `VL`, `video-learning-pipeline`, `DIRECTOR_BRAIN`, director-brain
-  extraction, 1-fps direct processing, or automatic Telegram return note is
-  historical and must not guide the current `分析视频` execution path.
+- The local candidate has one conversation ingress component: the native
+  `aiworker-video-command` `before_dispatch` hook. It classifies both the exact
+  `分析视频 <绝对路径>` command and affirmative natural-language single-video
+  requests before `second-original` runs.
+- A valid execution request reaches one shared runner and one
+  `aiworker-task-flow` submission. OpenClaw returns only the short acceptance
+  receipt, does not monitor the background task in that turn, and checks status
+  only after a later explicit user request.
+- A new-task receipt says `已提交，任务编号：<taskId>。结果请稍后查询。`; an
+  idempotent duplicate says `任务已存在，任务编号：<taskId>。结果请稍后查询。`.
+  Runtime status and duplicate fields remain internal.
+- In the authorized Telegram private chat, method, architecture, capability,
+  example, conditional, and negative video-shaped messages are answered
+  directly by the loaded native hook with a managed short response. They use
+  zero tools: neither the model nor any tool starts, and they never submit.
+  Clearly affirmative but invalid private-chat inputs receive
+  one short rejection
+  instead of a guessed path. Only a later explicit status request may call the
+  bounded status client.
+- The managed explanation reply is
+  `视频会由原生插件一次派发到 AI-worker，后台依次执行 prepare、Whisper 音频、本地 Qwen 画面和 finalize；当前轮不等待，结果按任务编号另查。`.
+- The native plugin is the only single-video conversation entry. If it is absent
+  or unavailable, fail closed; never fall back to a generic task, `exec`, direct
+  media commands, or filesystem discovery.
+- For `查一下刚才的视频`, use only the full task ID in the current
+  conversation's most recent plugin receipt. If it is absent or ambiguous, ask
+  for the ID; never call `memory_search`, search memory, scan the database,
+  guess, or resubmit.
+- OpenClaw performs Telegram DM allowlist/pairing admission before the hook. The
+  plugin then validates private-chat and stable session/sender identity and
+  compares the sender with the domain-separated SHA-256 configured from the
+  unique Telegram command owner. Pairing another user does not grant video
+  dispatch; multi-user dispatch requires an explicit sender-policy change.
+- The downstream chain is Mission Control / SQLite -> n8n -> prepare -> Whisper
+  audio + local Qwen vision -> finalize -> SQLite. Every worker uses
+  `memoryMode=none`; video submission uses `delivery=none`, so completed output
+  is not automatically returned to Telegram.
+- Older `VL`, `video-learning-pipeline`, `DIRECTOR_BRAIN`, director-brain
+  extraction, direct full-video processing, and model-selected video-entry
+  designs are historical and must not guide this candidate.
+- This file records the local target contract, not proof of GitHub mainline or
+  production deployment. Promote it only with implementation, tests,
+  deployment, and production acceptance evidence.

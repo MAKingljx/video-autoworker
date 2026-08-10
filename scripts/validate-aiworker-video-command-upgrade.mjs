@@ -1,52 +1,50 @@
 #!/usr/bin/env node
 
-import { createHash } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
-import { lstat, readFile, readdir, readlink } from 'node:fs/promises'
+import { lstat, readFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import {
+  buildV02Transformation,
+  deriveTelegramOwnerSenderPolicy,
+  enforceVerifiedBackupRetention,
+  fingerprintPluginPayload,
+  selectCompatibleV02UpgradeBackup,
+  validateEffectiveTools,
+  validateKnownV02Tools,
+  validatePluginSenderHash,
+  validatePluginPayloadMatch,
+  validateOfficialOpenClawPeerLink,
+  validateRestoredConfig,
+  validateTelegramIngressPolicy,
+  validateVerifiedBackupRetentionBaseline,
+} from './lib/aiworker-video-command-upgrade-policy.mjs'
 
-const ALLOWED_META_CHANGES = new Set(['lastTouchedAt', 'lastTouchedVersion'])
-const REQUIRED_NEW_HOOKS = [
+const REQUIRED_V02_HOOKS = [
   'before_dispatch',
   'before_prompt_build',
   'before_tool_call',
 ]
 const ACTIVE_ROLLBACK_MARKER = '.active-rollback-source.json'
 
+export {
+  buildV02Transformation,
+  deriveTelegramOwnerSenderPolicy,
+  enforceVerifiedBackupRetention,
+  fingerprintPluginPayload,
+  selectCompatibleV02UpgradeBackup,
+  validateEffectiveTools,
+  validateKnownV02Tools,
+  validatePluginSenderHash,
+  validatePluginPayloadMatch,
+  validateOfficialOpenClawPeerLink,
+  validateRestoredConfig,
+  validateTelegramIngressPolicy,
+  validateVerifiedBackupRetentionBaseline,
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message)
-}
-
-function clone(value) {
-  return structuredClone(value)
-}
-
-async function fingerprintPluginPayload(root) {
-  const hash = createHash('sha256')
-
-  async function visit(pathname, relativePath) {
-    const stat = await lstat(pathname)
-    hash.update(`${relativePath}\0`)
-    if (stat.isSymbolicLink()) {
-      hash.update(`link\0${await readlink(pathname)}\0`)
-      return
-    }
-    if (stat.isFile()) {
-      hash.update('file\0')
-      hash.update(await readFile(pathname))
-      hash.update('\0')
-      return
-    }
-    assert(stat.isDirectory(), `Unsupported filesystem object: ${relativePath}`)
-    hash.update('dir\0')
-    for (const name of (await readdir(pathname)).sort()) {
-      await visit(join(pathname, name), relativePath === '.' ? name : `${relativePath}/${name}`)
-    }
-  }
-
-  await visit(root, '.')
-  return hash.digest('hex')
 }
 
 function assertSafeAbsolutePath(pathname, label) {
@@ -96,130 +94,6 @@ function agents(config) {
   return config.agents.list
 }
 
-function uniqueTargetAgent(config, agentId) {
-  const matches = agents(config).map((agent, index) => ({ agent, index }))
-    .filter(({ agent }) => agent?.id === agentId)
-  assert(matches.length === 1, `agents.list must contain exactly one ${agentId} agent.`)
-  return matches[0]
-}
-
-function assertToolNotGrantedOutsideTarget(config, agentId, toolName) {
-  for (const [label, value] of [
-    ['tools.allow', config?.tools?.allow],
-    ['tools.alsoAllow', config?.tools?.alsoAllow],
-  ]) {
-    if (value === undefined) continue
-    assert(!stringArray(value, label).includes(toolName), `${label} must not grant ${toolName}.`)
-  }
-
-  for (const agent of agents(config)) {
-    if (agent?.id === agentId) continue
-    for (const key of ['allow', 'alsoAllow']) {
-      const value = agent?.tools?.[key]
-      if (value === undefined) continue
-      assert(
-        !stringArray(value, `agents.${agent?.id ?? 'unknown'}.tools.${key}`).includes(toolName),
-        `Only ${agentId} may grant ${toolName}.`,
-      )
-    }
-  }
-}
-
-export function buildConfigPlan(config, effectiveBaseline, {
-  pluginId,
-  agentId,
-  toolName,
-}) {
-  const pluginAllow = stringArray(config?.plugins?.allow, 'plugins.allow', { required: true })
-  assert(pluginAllow.length > 0, 'plugins.allow must be non-empty.')
-  assert(pluginAllow.includes(pluginId), `plugins.allow must already contain ${pluginId}.`)
-  assert(config?.plugins?.entries?.[pluginId]?.enabled === true, `${pluginId} must already be enabled.`)
-
-  const { agent, index } = uniqueTargetAgent(config, agentId)
-  const allow = stringArray(agent?.tools?.allow, `${agentId}.tools.allow`, { required: true })
-  assert(allow.length > 0, `${agentId}.tools.allow must be non-empty.`)
-  assert(!allow.includes(toolName), `${toolName} must not be added to tools.allow.`)
-  assert(agent?.tools?.alsoAllow === undefined, `${agentId}.tools.alsoAllow must remain unset.`)
-  assertToolNotGrantedOutsideTarget(config, agentId, toolName)
-
-  const baselineIds = effectiveToolIds(effectiveBaseline, { agentId })
-  assert(!baselineIds.includes(toolName), 'Effective baseline must not contain the candidate tool.')
-  const baselineSet = new Set(baselineIds)
-  const effectiveAllow = allow.filter(id => baselineSet.has(id))
-  assert(
-    effectiveAllow.length === baselineIds.length,
-    `${agentId}.tools.allow must contain every effective baseline tool.`,
-  )
-
-  return {
-    agentIndex: index,
-    originalAllow: [...allow],
-    originalProfile: agent?.tools?.profile,
-    effectiveAllow,
-    removedInactiveAllow: allow.filter(id => !baselineSet.has(id)),
-    nextTools: {
-      ...clone(agent.tools),
-      profile: 'full',
-      allow: [...effectiveAllow, toolName],
-    },
-  }
-}
-
-function withoutAllowedMetaChanges(config) {
-  const copy = clone(config)
-  if (!copy.meta || typeof copy.meta !== 'object' || Array.isArray(copy.meta)) return copy
-  for (const key of ALLOWED_META_CHANGES) delete copy.meta[key]
-  if (Object.keys(copy.meta).length === 0) delete copy.meta
-  return copy
-}
-
-export function validateConfigAfter(before, after, effectiveBaseline, options) {
-  const plan = buildConfigPlan(before, effectiveBaseline, options)
-  const target = uniqueTargetAgent(after, options.agentId)
-  assert(target.index === plan.agentIndex, 'The target agent index changed during upgrade.')
-
-  const expected = clone(before)
-  expected.agents.list[plan.agentIndex].tools = {
-    ...expected.agents.list[plan.agentIndex].tools,
-    profile: 'full',
-    allow: [...plan.effectiveAllow, options.toolName],
-  }
-
-  assert(
-    isDeepStrictEqual(withoutAllowedMetaChanges(after), withoutAllowedMetaChanges(expected)),
-    'Config changed outside the approved target profile and tools.allow update.',
-  )
-  assert(
-    isDeepStrictEqual(after.plugins?.allow, before.plugins?.allow),
-    'plugins.allow changed during upgrade.',
-  )
-  assert(
-    isDeepStrictEqual(target.agent?.tools?.allow, [...plan.effectiveAllow, options.toolName]),
-    'tools.allow must equal the effective baseline plus the approved tool.',
-  )
-  assert(
-    target.agent?.tools?.profile === 'full' && target.agent?.tools?.alsoAllow === undefined,
-    'The target agent must use profile full without tools.alsoAllow.',
-  )
-  assertToolNotGrantedOutsideTarget(after, options.agentId, options.toolName)
-}
-
-function effectiveToolIds(report, { agentId }) {
-  assert(report && typeof report === 'object' && !Array.isArray(report), 'Effective tools report must be an object.')
-  assert(report.agentId === agentId, `Effective tools report must target ${agentId}.`)
-  assert(typeof report.profile === 'string' && report.profile.length > 0, 'Effective tools report profile is required.')
-  assert(Array.isArray(report.groups), 'Effective tools report groups must be an array.')
-  const ids = report.groups.flatMap(group => {
-    assert(Array.isArray(group?.tools), 'Effective tools group tools must be an array.')
-    return group.tools.map(tool => {
-      assert(typeof tool?.id === 'string' && tool.id.length > 0, 'Effective tool id is required.')
-      return tool.id
-    })
-  })
-  assert(new Set(ids).size === ids.length, 'Effective tools must not contain duplicate ids.')
-  return ids.toSorted()
-}
-
 export function selectTelegramDirectSession(report, { agentId }) {
   assert(report && typeof report === 'object' && !Array.isArray(report), 'Sessions report must be an object.')
   assert(Array.isArray(report.sessions), 'Sessions report must contain sessions.')
@@ -235,28 +109,6 @@ export function selectTelegramDirectSession(report, { agentId }) {
   return matches[0].key
 }
 
-export function validateEffectiveTools(baseline, current, {
-  agentId,
-  toolName,
-  expectTool,
-}) {
-  const baselineIds = effectiveToolIds(baseline, { agentId })
-  assert(!baselineIds.includes(toolName), 'Effective baseline must not contain the candidate tool.')
-  const currentIds = effectiveToolIds(current, { agentId })
-  const expectedIds = expectTool ? [...baselineIds, toolName].toSorted() : baselineIds
-  assert(
-    isDeepStrictEqual(currentIds, expectedIds),
-    expectTool
-      ? 'Effective tools must equal the baseline plus only the candidate tool.'
-      : 'Rolled-back effective tools must equal the original baseline exactly.',
-  )
-  if (expectTool) {
-    assert(current.profile === 'full', 'Upgraded effective tools must report profile full.')
-  } else {
-    assert(current.profile === baseline.profile, 'Rolled-back effective profile must equal the baseline.')
-  }
-}
-
 export function validatePluginSource(packageJson, manifest, {
   pluginId,
   expectedVersion,
@@ -267,19 +119,21 @@ export function validatePluginSource(packageJson, manifest, {
   assert(manifest?.id === pluginId, 'Plugin manifest id mismatch.')
   assert(manifest?.activation?.onStartup === true, 'Plugin manifest must activate on startup.')
   assert(
-    isDeepStrictEqual(manifest?.activation?.onCapabilities, ['hook', 'tool']),
-    'Plugin manifest must activate for exactly hook and tool capabilities.',
+    isDeepStrictEqual(manifest?.activation?.onCapabilities, ['hook']),
+    '0.3 plugin manifest must activate for exactly the hook capability.',
   )
-  assert(
-    isDeepStrictEqual(manifest?.contracts?.tools, [toolName]),
-    'Plugin manifest must declare exactly the approved optional tool.',
-  )
-  assert(
-    isDeepStrictEqual(manifest?.toolMetadata?.[toolName], { optional: true }),
-    'Plugin manifest must mark the approved tool optional.',
-  )
+  assert(manifest?.contracts === undefined, '0.3 plugin manifest must not declare capability contracts.')
+  assert(manifest?.toolMetadata === undefined, '0.3 plugin manifest must not declare tool metadata.')
+  assert(toolName && typeof toolName === 'string', 'Removed tool name must be explicit for validation.')
   assert(manifest?.configSchema?.type === 'object', 'Plugin config schema must be an object.')
   assert(manifest?.configSchema?.additionalProperties === false, 'Plugin config schema must reject additional properties.')
+  assert(
+    isDeepStrictEqual(manifest?.configSchema?.properties?.allowedSenderSha256, {
+      type: 'string',
+      pattern: '^[a-f0-9]{64}$',
+    }),
+    '0.3 plugin schema must declare the lowercase SHA-256 sender gate.',
+  )
 }
 
 function diagnosticIsError(item) {
@@ -296,13 +150,14 @@ export function validateRuntimeReport(report, {
   assert(report?.plugin?.status === 'loaded', 'Runtime inspection did not load the plugin.')
   assert(report?.plugin?.version === expectedVersion, `Runtime plugin version must be ${expectedVersion}.`)
   assert(Array.isArray(report.typedHooks), 'Runtime typedHooks must be an array.')
-  const hookNames = report.typedHooks.map(hook => hook?.name).filter(Boolean).sort()
-  assert(hookNames.includes('before_dispatch'), 'Runtime inspection is missing before_dispatch.')
-  if (expectTool) {
-    for (const hookName of REQUIRED_NEW_HOOKS) {
-      assert(hookNames.includes(hookName), `Runtime inspection is missing ${hookName}.`)
-    }
-  }
+  const hookNames = report.typedHooks.map(hook => hook?.name).filter(Boolean).toSorted()
+  const expectedHooks = (expectTool ? REQUIRED_V02_HOOKS : ['before_dispatch']).toSorted()
+  assert(
+    isDeepStrictEqual(hookNames, expectedHooks),
+    expectTool
+      ? '0.2 runtime must expose exactly its three known hooks.'
+      : '0.3 runtime must expose only before_dispatch.',
+  )
 
   assert(Array.isArray(report.tools), 'Runtime tools must be an array.')
   const matchingTools = report.tools.filter(tool => Array.isArray(tool?.names) && tool.names.includes(toolName))
@@ -310,7 +165,7 @@ export function validateRuntimeReport(report, {
     assert(matchingTools.length === 1, 'Runtime inspection must register the approved tool exactly once.')
     assert(matchingTools[0].optional === true, 'Runtime tool registration must remain optional.')
   } else {
-    assert(matchingTools.length === 0, 'The old runtime must not expose the new optional tool.')
+    assert(report.tools.length === 0, '0.3 runtime must not register any tool.')
   }
 
   assert(Array.isArray(report.diagnostics), 'Runtime diagnostics must be an array.')
@@ -341,7 +196,7 @@ export function validateLiveGatewayToolCatalog(report, {
     assert(matchingTools[0].pluginId === pluginId, 'Live Gateway target tool plugin id mismatch.')
     assert(matchingTools[0].optional === true, 'Live Gateway target tool must remain optional.')
   } else {
-    assert(matchingTools.length === 0, 'The rolled-back live Gateway must not expose the 0.2.0 tool.')
+    assert(matchingTools.length === 0, 'The 0.3 live Gateway must not expose the removed 0.2 tool.')
   }
 }
 
@@ -468,10 +323,10 @@ export async function validatePreUpgradeIndexRecord(record, {
   })
 }
 
-export function validateDoctorReport(raw, pluginId, { allowLegacyHookOnly = false } = {}) {
+export function validateDoctorReport(raw, pluginId, { allowHookOnly = false } = {}) {
   const lines = raw.split(/\r?\n/u).map(line => line.trim()).filter(Boolean)
   if (lines.length === 1 && lines[0] === 'No plugin issues detected.') return
-  if (allowLegacyHookOnly) {
+  if (allowHookOnly) {
     const expected = [
       'Compatibility:',
       `- ${pluginId} is hook-only. This remains a supported compatibility path, but it has not migrated to explicit capability registration yet. [info]`,
@@ -529,46 +384,167 @@ async function main() {
       )
       break
     }
-    case 'config-plan': {
-      const [configPath, effectiveBaselinePath, pluginId, agentId, toolName] = args
-      const plan = buildConfigPlan(
+    case 'baseline-select': {
+      const [backupRoot, currentConfigPath, installedPath, pluginId, agentId, toolName, baselineVersion, oldVersion] = args
+      assert(
+        backupRoot && currentConfigPath && installedPath && pluginId && agentId
+          && toolName && baselineVersion && oldVersion,
+        'baseline-select arguments are incomplete.',
+      )
+      const plan = await selectCompatibleV02UpgradeBackup(
+        backupRoot,
+        await readJson(currentConfigPath, 'current profile config'),
+        installedPath,
+        { pluginId, agentId, toolName, baselineVersion, oldVersion },
+      )
+      process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`)
+      break
+    }
+    case 'backup-retention-baseline': {
+      const [backupRoot, maxBackupsText = '2'] = args
+      assert(backupRoot, 'backup-retention-baseline arguments are incomplete.')
+      process.stdout.write(`${JSON.stringify(await validateVerifiedBackupRetentionBaseline(
+        backupRoot,
+        Number(maxBackupsText),
+      ), null, 2)}\n`)
+      break
+    }
+    case 'backup-retention-enforce': {
+      const [backupRoot, currentBackup, indexRecordPath, maxBackupsText = '2'] = args
+      assert(
+        backupRoot && currentBackup && indexRecordPath,
+        'backup-retention-enforce arguments are incomplete.',
+      )
+      const indexRecord = await readJson(indexRecordPath, 'final install index record')
+      process.stdout.write(`${JSON.stringify(await enforceVerifiedBackupRetention({
+        backupRoot,
+        currentBackup,
+        activeSourcePath: indexRecord.sourcePath,
+        maxBackups: Number(maxBackupsText),
+      }), null, 2)}\n`)
+      break
+    }
+    case 'payload-fingerprint': {
+      const [pluginRoot] = args
+      assert(pluginRoot, 'payload-fingerprint arguments are incomplete.')
+      process.stdout.write(`${await fingerprintPluginPayload(pluginRoot)}\n`)
+      break
+    }
+    case 'payload-match': {
+      const [
+        sourceRoot,
+        installedRoot,
+        expectedFingerprint,
+        expectedPeerLinkText,
+        expectedPeerRealPath,
+      ] = args
+      assert(
+        sourceRoot && installedRoot && expectedFingerprint
+          && expectedPeerLinkText && expectedPeerRealPath,
+        'payload-match arguments are incomplete.',
+      )
+      process.stdout.write(`${JSON.stringify(await validatePluginPayloadMatch({
+        sourceRoot,
+        installedRoot,
+        expectedFingerprint,
+        expectedPeerLinkText,
+        expectedPeerRealPath,
+      }), null, 2)}\n`)
+      break
+    }
+    case 'peer-link': {
+      const [installedRoot] = args
+      assert(installedRoot, 'peer-link arguments are incomplete.')
+      process.stdout.write(`${JSON.stringify(await validateOfficialOpenClawPeerLink(
+        installedRoot,
+      ), null, 2)}\n`)
+      break
+    }
+    case 'config-known-v02': {
+      const [baselineConfigPath, currentConfigPath, effectiveBaselinePath, pluginId, agentId, toolName] = args
+      assert(
+        baselineConfigPath && currentConfigPath && effectiveBaselinePath && pluginId && agentId && toolName,
+        'config-known-v02 arguments are incomplete.',
+      )
+      validateKnownV02Tools(
+        await readJson(baselineConfigPath, 'pre-0.2 profile config'),
+        await readJson(currentConfigPath, 'current profile config'),
+        await readJson(effectiveBaselinePath, 'effective tools baseline'),
+        { pluginId, agentId, toolName },
+      )
+      break
+    }
+    case 'config-restored': {
+      const [
+        currentBeforePath,
+        restoredPath,
+        baselineConfigPath,
+        effectiveBaselinePath,
+        pluginId,
+        agentId,
+        toolName,
+        allowedSenderSha256,
+      ] = args
+      assert(
+        currentBeforePath && restoredPath && baselineConfigPath && effectiveBaselinePath
+          && pluginId && agentId && toolName,
+        'config-restored arguments are incomplete.',
+      )
+      validateRestoredConfig(
+        await readJson(currentBeforePath, 'pre-0.3 current config'),
+        await readJson(restoredPath, 'restored 0.3 config'),
+        await readJson(baselineConfigPath, 'pre-0.2 profile config'),
+        await readJson(effectiveBaselinePath, 'pre-0.2 effective tools'),
+        { pluginId, agentId, toolName, allowedSenderSha256 },
+      )
+      break
+    }
+    case 'owner-sender-plan': {
+      const [configPath] = args
+      assert(configPath, 'owner-sender-plan arguments are incomplete.')
+      process.stdout.write(`${JSON.stringify(deriveTelegramOwnerSenderPolicy(
         await readJson(configPath, 'profile config'),
-        await readJson(effectiveBaselinePath, 'effective tools baseline'),
-        { pluginId, agentId, toolName },
-      )
-      process.stdout.write(`${plan.agentIndex}\t${JSON.stringify(plan.nextTools)}\n`)
+      ), null, 2)}\n`)
       break
     }
-    case 'config-after': {
-      const [beforePath, afterPath, effectiveBaselinePath, pluginId, agentId, toolName] = args
-      validateConfigAfter(
-        await readJson(beforePath, 'pre-upgrade config'),
-        await readJson(afterPath, 'post-upgrade config'),
-        await readJson(effectiveBaselinePath, 'effective tools baseline'),
-        { pluginId, agentId, toolName },
+    case 'sender-hash-config': {
+      const [configPath, pluginId, allowedSenderSha256] = args
+      assert(configPath && pluginId && allowedSenderSha256, 'sender-hash-config arguments are incomplete.')
+      validatePluginSenderHash(
+        await readJson(configPath, 'profile config'),
+        { pluginId, allowedSenderSha256 },
       )
       break
     }
-    case 'runtime-old':
-    case 'runtime-new': {
+    case 'telegram-policy': {
+      const [configPath, agentId] = args
+      assert(configPath && agentId, 'telegram-policy arguments are incomplete.')
+      validateTelegramIngressPolicy(
+        await readJson(configPath, 'profile config'),
+        { agentId },
+      )
+      break
+    }
+    case 'runtime-v02':
+    case 'runtime-v03': {
       const [reportPath, pluginId, expectedVersion, toolName] = args
       validateRuntimeReport(await readJson(reportPath, 'runtime report'), {
         pluginId,
         expectedVersion,
         toolName,
-        expectTool: command === 'runtime-new',
+        expectTool: command === 'runtime-v02',
       })
       break
     }
-    case 'live-old':
-    case 'live-new': {
+    case 'live-v02':
+    case 'live-v03': {
       const [reportPath, pluginId, agentId, toolName] = args
       assert(reportPath && pluginId && agentId && toolName, 'live Gateway arguments are incomplete.')
       validateLiveGatewayToolCatalog(await readJson(reportPath, 'live Gateway tool catalog'), {
         pluginId,
         agentId,
         toolName,
-        expectTool: command === 'live-new',
+        expectTool: command === 'live-v02',
       })
       break
     }
@@ -581,14 +557,14 @@ async function main() {
       )}\n`)
       break
     }
-    case 'effective-old':
-    case 'effective-new': {
+    case 'effective-v02':
+    case 'effective-v03': {
       const [baselinePath, currentPath, agentId, toolName] = args
       assert(baselinePath && currentPath && agentId && toolName, 'effective tools arguments are incomplete.')
       validateEffectiveTools(
         await readJson(baselinePath, 'effective tools baseline'),
         await readJson(currentPath, 'current effective tools'),
-        { agentId, toolName, expectTool: command === 'effective-new' },
+        { agentId, toolName, expectTool: command === 'effective-v02' },
       )
       break
     }
@@ -628,12 +604,12 @@ async function main() {
       }), null, 2)}\n`)
       break
     }
-    case 'doctor-old':
-    case 'doctor-new': {
+    case 'doctor-v02':
+    case 'doctor-v03': {
       const [reportPath, pluginId] = args
       assert(reportPath && pluginId, 'doctor arguments are incomplete.')
       validateDoctorReport(await readFile(reportPath, 'utf8'), pluginId, {
-        allowLegacyHookOnly: command === 'doctor-old',
+        allowHookOnly: command === 'doctor-v03',
       })
       break
     }

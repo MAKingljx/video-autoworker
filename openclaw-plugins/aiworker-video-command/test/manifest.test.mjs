@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const PLUGIN_ROOT = resolve(process.cwd(), 'openclaw-plugins/aiworker-video-command')
 
 describe('OpenClaw plugin package contract', () => {
-  it('declares one built JavaScript entry and a strict keyless config schema', async () => {
+  it('declares one built JavaScript entry and a strict sender-hash config schema', async () => {
     const rootPackageJson = JSON.parse(await readFile(resolve(process.cwd(), 'package.json'), 'utf8'))
     const packageJson = JSON.parse(await readFile(resolve(PLUGIN_ROOT, 'package.json'), 'utf8'))
     const manifest = JSON.parse(await readFile(resolve(PLUGIN_ROOT, 'openclaw.plugin.json'), 'utf8'))
@@ -15,32 +15,39 @@ describe('OpenClaw plugin package contract', () => {
       'openclaw-plugins/aiworker-video-command/vitest.config.mjs',
     )
     expect(packageJson.type).toBe('module')
+    expect(packageJson.version).toBe('0.3.0')
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(packageJson.openclaw.compat.pluginApi).toBe('>=2026.7.1')
     expect(manifest.id).toBe('aiworker-video-command')
     expect(manifest.activation).toEqual({
-      onStartup: true,
-      onCapabilities: ['hook', 'tool'],
+      onStartup: true, onCapabilities: ['hook'],
     })
     expect(manifest.configSchema).toEqual({
-      type: 'object', additionalProperties: false, properties: {},
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        allowedSenderSha256: {
+          type: 'string',
+          pattern: '^[a-f0-9]{64}$',
+        },
+      },
     })
-    expect(manifest.contracts).toEqual({ tools: ['aiworker_analyze_video'] })
-    expect(manifest.toolMetadata).toEqual({
-      aiworker_analyze_video: { optional: true },
-    })
+    expect(manifest).not.toHaveProperty('contracts')
+    expect(manifest).not.toHaveProperty('toolMetadata')
     expect(JSON.stringify(manifest)).not.toMatch(/secret|token|password|api.?key/iu)
   })
 
-  it('registers exact dispatch plus the guarded optional model tool', async () => {
+  it('registers only the native before-dispatch hook', async () => {
     const entry = await readFile(resolve(PLUGIN_ROOT, 'index.js'), 'utf8')
     expect(entry).toContain("from 'openclaw/plugin-sdk/plugin-entry'")
     expect(entry).toContain("api.on('before_dispatch'")
-    expect(entry).toContain("api.on('before_prompt_build'")
-    expect(entry).toContain("api.on('before_tool_call'")
-    expect(entry).toContain('api.registerTool')
-    expect(entry).toContain('optional: true')
+    expect(entry).not.toContain("api.on('before_prompt_build'")
+    expect(entry).not.toContain("api.on('before_tool_call'")
+    expect(entry).not.toContain('api.registerTool')
+    expect(entry).not.toContain('runContext')
+    expect(entry).not.toContain('aiworker_analyze_video')
     expect(entry).not.toContain('inbound_claim')
     expect(entry).not.toContain('message_received')
+    expect(entry).toContain('api.pluginConfig?.allowedSenderSha256')
   })
 })

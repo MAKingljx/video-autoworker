@@ -5,8 +5,9 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_NAME="aiworker_analyze_video"
-OLD_VERSION="0.1.0"
-NEW_VERSION="0.2.0"
+BASELINE_VERSION="0.1.0"
+OLD_VERSION="0.2.0"
+NEW_VERSION="0.3.0"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -14,6 +15,8 @@ EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 VALIDATOR="$REPOSITORY_ROOT/scripts/validate-aiworker-video-command-upgrade.mjs"
+POLICY_HELPER="$REPOSITORY_ROOT/scripts/lib/aiworker-video-command-upgrade-policy.mjs"
+RELEASE_ROLLBACK_VALIDATOR="$REPOSITORY_ROOT/scripts/validate-aiworker-video-release-rollback.mjs"
 PROFILE_STATE_DIR="$HOME/.openclaw-qwen-current"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
 PROFILE_STATE_DB="$PROFILE_STATE_DIR/state/openclaw.sqlite"
@@ -22,7 +25,14 @@ BACKUP_ROOT="$HOME/ai-worker/backups/$PLUGIN_ID"
 ACTIVE_ROLLBACK_MARKER=".active-rollback-source.json"
 # Share the existing qwen-current plugin-install lock with the first installer.
 INSTALL_LOCK_DIR="$BACKUP_ROOT/.qwen-current-first-install.lock"
-MODE="dry-run"
+MODE=""
+TARGET_SHA=""
+ALLOWED_SENDER_SHA256=""
+INITIAL_ALLOWED_SENDER_SHA256=""
+OPENCLAW_PEER_LINK_TEXT=""
+OPENCLAW_PEER_REAL_PATH=""
+INITIAL_OPENCLAW_PEER_LINK_TEXT=""
+INITIAL_OPENCLAW_PEER_REAL_PATH=""
 
 OTHER_PROFILE_NAMES=("default" "gpt-main" "qwen-weixin-new")
 OTHER_PROFILE_DIRS=(
@@ -62,16 +72,32 @@ run_isolated_openclaw() {
 }
 
 usage() {
-  printf 'Usage: %s [--dry-run|--apply]\n' "$0"
+  printf 'Usage: %s (--dry-run|--apply) --target-sha <40-lowercase-hex-sha>\n' "$0"
 }
 
-case "${1:---dry-run}" in
-  --dry-run) MODE="dry-run" ;;
-  --apply) MODE="apply" ;;
-  -h|--help) usage; exit 0 ;;
-  *) usage >&2; exit 2 ;;
-esac
-if [[ "$#" -gt 1 ]]; then
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --dry-run|--apply)
+      if [[ -n "$MODE" ]]; then usage >&2; exit 2; fi
+      MODE="${1#--}"
+      shift
+      ;;
+    --target-sha)
+      if [[ -n "$TARGET_SHA" || "$#" -lt 2 ]]; then usage >&2; exit 2; fi
+      TARGET_SHA="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -z "$MODE" || ! "$TARGET_SHA" =~ ^[a-f0-9]{40}$ ]]; then
   usage >&2
   exit 2
 fi
@@ -331,17 +357,16 @@ validate_source_and_host() {
     https://github.com/MAKingljx/video-autoworker|https://github.com/MAKingljx/video-autoworker.git|git@github.com:MAKingljx/video-autoworker.git) ;;
     *) printf 'Canonical Git remote mismatch.\n' >&2; return 1 ;;
   esac
-  if [[ -n "$(git -C "$REPOSITORY_ROOT" status --porcelain --untracked-files=normal)" ]]; then
-    printf 'Canonical Git checkout must be clean.\n' >&2
-    return 1
-  fi
+  validate_canonical_checkout remote
 
-  if [[ ! -f "$VALIDATOR" || ! -f "$PLUGIN_DIR/package.json" \
+  if [[ ! -f "$VALIDATOR" || ! -f "$POLICY_HELPER" \
+    || ! -f "$RELEASE_ROLLBACK_VALIDATOR" || ! -f "$PLUGIN_DIR/package.json" \
     || ! -f "$PLUGIN_DIR/openclaw.plugin.json" || ! -f "$PLUGIN_DIR/index.js" ]]; then
     printf 'Upgrade source is incomplete.\n' >&2
     return 1
   fi
   node --check "$VALIDATOR"
+  node --check "$RELEASE_ROLLBACK_VALIDATOR"
   node "$VALIDATOR" source \
     "$PLUGIN_DIR/package.json" \
     "$PLUGIN_DIR/openclaw.plugin.json" \
@@ -350,9 +375,57 @@ validate_source_and_host() {
     "$TOOL_NAME"
 }
 
+validate_canonical_checkout() {
+  local head_commit
+  local origin_main_commit
+  local remote_main_record
+  local remote_main_commit
+  local verify_remote="${1:-local}"
+
+  if [[ -n "$(git -C "$REPOSITORY_ROOT" status --porcelain --untracked-files=normal)" ]]; then
+    printf 'Canonical Git checkout must be clean.\n' >&2
+    return 1
+  fi
+  head_commit="$(git -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')" || return 1
+  origin_main_commit="$(git -C "$REPOSITORY_ROOT" rev-parse --verify \
+    'refs/remotes/origin/main^{commit}')" || return 1
+  if [[ ! "$head_commit" =~ ^[a-f0-9]{40}$ \
+    || ! "$origin_main_commit" =~ ^[a-f0-9]{40}$ ]]; then
+    printf 'Canonical Git commit evidence is malformed.\n' >&2
+    return 1
+  fi
+  if [[ "$head_commit" != "$TARGET_SHA" || "$origin_main_commit" != "$TARGET_SHA" ]]; then
+    printf 'Canonical checkout must satisfy HEAD=origin/main=approved target SHA.\n' >&2
+    return 1
+  fi
+  if [[ "$verify_remote" == "remote" ]]; then
+    remote_main_record="$(git -C "$REPOSITORY_ROOT" ls-remote --exit-code \
+      origin refs/heads/main)" || return 1
+    if [[ ! "$remote_main_record" =~ ^([a-f0-9]{40})[[:space:]]+refs/heads/main$ ]]; then
+      printf 'Canonical remote main evidence is malformed or ambiguous.\n' >&2
+      return 1
+    fi
+    remote_main_commit="${BASH_REMATCH[1]}"
+    if [[ "$remote_main_commit" != "$TARGET_SHA" ]]; then
+      printf 'GitHub origin main does not equal the approved target SHA.\n' >&2
+      return 1
+    fi
+  fi
+}
+
+assert_audited_source() {
+  local current_fingerprint
+  validate_canonical_checkout || return 1
+  current_fingerprint="$(node "$VALIDATOR" payload-fingerprint "$PLUGIN_DIR")" || return 1
+  if [[ "$current_fingerprint" != "$source_plugin_fingerprint" ]]; then
+    printf 'Canonical plugin payload changed after release audit.\n' >&2
+    return 1
+  fi
+}
+
 validate_old_install_files() {
   if [[ ! -d "$INSTALLED_PLUGIN_DIR" || -L "$INSTALLED_PLUGIN_DIR" ]]; then
-    printf 'The installed 0.1.0 plugin directory is missing or unsafe.\n' >&2
+    printf 'The installed 0.2.0 plugin directory is missing or unsafe.\n' >&2
     return 1
   fi
   node - "$INSTALLED_PLUGIN_DIR/package.json" "$INSTALLED_PLUGIN_DIR/openclaw.plugin.json" \
@@ -364,35 +437,73 @@ const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 if (packageJson.version !== oldVersion) throw new Error(`installed plugin must be ${oldVersion}`)
 if (manifest.id !== pluginId) throw new Error('installed plugin id mismatch')
 const declaredTools = manifest?.contracts?.tools ?? []
-if (declaredTools.includes('aiworker_analyze_video')) {
-  throw new Error('installed 0.1.0 unexpectedly declares the new optional tool')
+if (JSON.stringify(manifest?.activation?.onCapabilities) !== JSON.stringify(['hook', 'tool'])) {
+  throw new Error('installed 0.2.0 capability declaration mismatch')
+}
+if (JSON.stringify(declaredTools) !== JSON.stringify(['aiworker_analyze_video'])) {
+  throw new Error('installed 0.2.0 optional tool contract mismatch')
+}
+if (manifest?.toolMetadata?.aiworker_analyze_video?.optional !== true) {
+  throw new Error('installed 0.2.0 optional tool metadata mismatch')
 }
 NODE
 }
 
-build_config_plan() {
-  local config_path="$1"
-  local effective_baseline_path="$2"
-  local plan_line
-  plan_line="$(node "$VALIDATOR" config-plan \
-    "$config_path" "$effective_baseline_path" \
-    "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME")" || return 1
-  if [[ "$plan_line" != *$'\t'* ]]; then
-    printf 'Validator returned an invalid config plan.\n' >&2
+select_restore_plan() {
+  local report_dir="$1"
+  local plan_path="$report_dir/restore-plan.json"
+  node "$VALIDATOR" baseline-select \
+    "$BACKUP_ROOT" \
+    "$PROFILE_CONFIG" \
+    "$INSTALLED_PLUGIN_DIR" \
+    "$PLUGIN_ID" \
+    "$AGENT_ID" \
+    "$TOOL_NAME" \
+    "$BASELINE_VERSION" \
+    "$OLD_VERSION" \
+    > "$plan_path" || return 1
+  chmod 600 "$plan_path" || return 1
+  AGENT_INDEX="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.agentIndex))' "$plan_path")" || return 1
+  RESTORE_AGENT_TOOLS="$(node -e 'const p=require(process.argv[1]); process.stdout.write(JSON.stringify(p.restoreTools))' "$plan_path")" || return 1
+  BASELINE_CONFIG_PATH="$(node -e 'const p=require(process.argv[1]); process.stdout.write(p.baselineConfigPath)' "$plan_path")" || return 1
+  EFFECTIVE_BASELINE_REPORT="$(node -e 'const p=require(process.argv[1]); process.stdout.write(p.effectiveBaselinePath)' "$plan_path")" || return 1
+  RESTORE_PLAN_REPORT="$plan_path"
+  if [[ ! "$AGENT_INDEX" =~ ^[0-9]+$ || -z "$RESTORE_AGENT_TOOLS" \
+    || ! -f "$BASELINE_CONFIG_PATH" || ! -f "$EFFECTIVE_BASELINE_REPORT" ]]; then
+    printf 'Validator returned an invalid 0.3 restoration plan.\n' >&2
     return 1
   fi
-  AGENT_INDEX="${plan_line%%$'\t'*}"
-  NEXT_AGENT_TOOLS="${plan_line#*$'\t'}"
-  if [[ ! "$AGENT_INDEX" =~ ^[0-9]+$ || -z "$NEXT_AGENT_TOOLS" ]]; then
-    printf 'Validator returned an invalid config plan.\n' >&2
-    return 1
-  fi
+  node "$VALIDATOR" config-known-v02 \
+    "$BASELINE_CONFIG_PATH" "$PROFILE_CONFIG" "$EFFECTIVE_BASELINE_REPORT" \
+    "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
 }
 
-capture_live_effective_baseline() {
+load_owner_sender_policy() {
+  local plan
+  local owner_count
+  local sender_hash
+  plan="$(node "$VALIDATOR" owner-sender-plan "$PROFILE_CONFIG")" || return 1
+  owner_count="$(node -e 'const p=JSON.parse(process.argv[1]); process.stdout.write(String(p.ownerCount))' \
+    "$plan")" || return 1
+  sender_hash="$(node -e 'const p=JSON.parse(process.argv[1]); process.stdout.write(p.allowedSenderSha256 ?? "")' \
+    "$plan")" || return 1
+  if [[ "$owner_count" != "1" || ! "$sender_hash" =~ ^[a-f0-9]{64}$ ]]; then
+    printf 'Owner sender policy validator returned an invalid redacted plan.\n' >&2
+    return 1
+  fi
+  ALLOWED_SENDER_SHA256="$sender_hash"
+}
+
+verify_plugin_sender_hash() {
+  local config_path="$1"
+  node "$VALIDATOR" sender-hash-config \
+    "$config_path" "$PLUGIN_ID" "$ALLOWED_SENDER_SHA256"
+}
+
+capture_live_v02_effective() {
   local report_dir="$1"
   local sessions_report
-  local baseline_report="$report_dir/live-tools-effective-baseline.json"
+  local current_report="$report_dir/live-tools-effective-v02.json"
   install -d -m 700 "$report_dir" || return 1
   sessions_report="$(mktemp "$work_root/live-sessions.XXXXXX.json")" || return 1
   chmod 600 "$sessions_report" || return 1
@@ -405,10 +516,10 @@ capture_live_effective_baseline() {
   rm -f -- "$sessions_report" || return 1
   run_qwen_openclaw gateway call tools.effective \
     --params "$(node -e 'process.stdout.write(JSON.stringify({agentId: process.argv[1], sessionKey: process.argv[2]}))' "$AGENT_ID" "$DIRECT_SESSION_KEY")" \
-    --timeout 20000 --json > "$baseline_report" || return 1
-  node "$VALIDATOR" effective-old "$baseline_report" "$baseline_report" \
+    --timeout 20000 --json > "$current_report" || return 1
+  node "$VALIDATOR" effective-v02 "$EFFECTIVE_BASELINE_REPORT" "$current_report" \
     "$AGENT_ID" "$TOOL_NAME" || return 1
-  EFFECTIVE_BASELINE_REPORT="$baseline_report"
+  CURRENT_V02_EFFECTIVE_REPORT="$current_report"
 }
 
 validate_pre_upgrade_index() {
@@ -429,6 +540,7 @@ validate_current_state() {
   local current_index="$report_dir/current-index.json"
   local runtime_report="$report_dir/runtime-old.json"
   local doctor_report="$report_dir/doctor-old.txt"
+  local peer_report="$report_dir/openclaw-peer-link.json"
 
   if [[ ! -f "$PROFILE_CONFIG" || -L "$PROFILE_CONFIG" ]]; then
     printf 'Required qwen-current config is missing or unsafe.\n' >&2
@@ -440,20 +552,26 @@ validate_current_state() {
   fi
 
   validate_old_install_files
+  node "$VALIDATOR" peer-link "$INSTALLED_PLUGIN_DIR" > "$peer_report"
+  OPENCLAW_PEER_LINK_TEXT="$(node -e \
+    'const p=require(process.argv[1]); process.stdout.write(p.linkText)' "$peer_report")"
+  OPENCLAW_PEER_REAL_PATH="$(node -e \
+    'const p=require(process.argv[1]); process.stdout.write(p.realPath)' "$peer_report")"
   write_index_record "$PROFILE_STATE_DB" "$current_index"
   validate_pre_upgrade_index "$current_index" "$report_dir/current-source-kind.txt"
 
   run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$runtime_report"
-  node "$VALIDATOR" runtime-old "$runtime_report" "$PLUGIN_ID" "$OLD_VERSION" "$TOOL_NAME"
+  node "$VALIDATOR" runtime-v02 "$runtime_report" "$PLUGIN_ID" "$OLD_VERSION" "$TOOL_NAME"
   NO_COLOR=1 run_qwen_openclaw plugins doctor > "$doctor_report"
-  node "$VALIDATOR" doctor-old "$doctor_report" "$PLUGIN_ID"
+  node "$VALIDATOR" doctor-v02 "$doctor_report" "$PLUGIN_ID"
 
-  capture_live_effective_baseline "$report_dir"
-  build_config_plan "$PROFILE_CONFIG" "$EFFECTIVE_BASELINE_REPORT"
+  select_restore_plan "$report_dir"
+  load_owner_sender_policy
+  capture_live_v02_effective "$report_dir"
 
   run_qwen_openclaw config set \
     "agents.list[$AGENT_INDEX].tools" \
-    "$NEXT_AGENT_TOOLS" \
+    "$RESTORE_AGENT_TOOLS" \
     --strict-json \
     --dry-run \
     > "$report_dir/config-set-dry-run.txt"
@@ -483,26 +601,37 @@ NODE
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins inspect "$PLUGIN_ID" --runtime --json \
     > "$isolated_root/runtime-old.json"
-  node "$VALIDATOR" runtime-old "$isolated_root/runtime-old.json" \
+  node "$VALIDATOR" runtime-v02 "$isolated_root/runtime-old.json" \
     "$PLUGIN_ID" "$OLD_VERSION" "$TOOL_NAME"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins doctor > "$isolated_root/doctor-old.txt"
-  node "$VALIDATOR" doctor-old "$isolated_root/doctor-old.txt" "$PLUGIN_ID"
+  node "$VALIDATOR" doctor-v02 "$isolated_root/doctor-old.txt" "$PLUGIN_ID"
 
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins install --force "$PLUGIN_DIR" \
     > "$isolated_root/install-new.txt"
+  node "$VALIDATOR" payload-match \
+    "$PLUGIN_DIR" "$isolated_install" "$source_plugin_fingerprint" \
+    "$OPENCLAW_PEER_LINK_TEXT" "$OPENCLAW_PEER_REAL_PATH" \
+    > "$isolated_root/installed-payload.json"
+  run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
+    config set \
+      "plugins.entries.$PLUGIN_ID.config.allowedSenderSha256" \
+      "\"$ALLOWED_SENDER_SHA256\"" \
+      --strict-json \
+    > "$isolated_root/config-set-sender-hash.txt"
+  verify_plugin_sender_hash "$isolated_config"
   prepare_isolated_sqlite_read "$isolated_root" "$isolated_state/state/openclaw.sqlite"
   write_index_record "$isolated_state/state/openclaw.sqlite" "$isolated_index"
   node "$VALIDATOR" index "$isolated_index" "$NEW_VERSION" "$PLUGIN_DIR" "$isolated_install"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins inspect "$PLUGIN_ID" --runtime --json \
     > "$isolated_root/runtime-new.json"
-  node "$VALIDATOR" runtime-new "$isolated_root/runtime-new.json" \
+  node "$VALIDATOR" runtime-v03 "$isolated_root/runtime-new.json" \
     "$PLUGIN_ID" "$NEW_VERSION" "$TOOL_NAME"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins doctor > "$isolated_root/doctor-new.txt"
-  node "$VALIDATOR" doctor-new "$isolated_root/doctor-new.txt" "$PLUGIN_ID"
+  node "$VALIDATOR" doctor-v03 "$isolated_root/doctor-new.txt" "$PLUGIN_ID"
 }
 
 validate_final_state() {
@@ -519,10 +648,10 @@ validate_final_state() {
   node "$VALIDATOR" "$runtime_mode" "$report_dir/final-runtime.json" \
     "$PLUGIN_ID" "$expected_version" "$TOOL_NAME"
   NO_COLOR=1 run_qwen_openclaw plugins doctor > "$report_dir/final-doctor.txt"
-  if [[ "$runtime_mode" == "runtime-new" ]]; then
-    node "$VALIDATOR" doctor-new "$report_dir/final-doctor.txt" "$PLUGIN_ID"
+  if [[ "$runtime_mode" == "runtime-v03" ]]; then
+    node "$VALIDATOR" doctor-v03 "$report_dir/final-doctor.txt" "$PLUGIN_ID"
   else
-    node "$VALIDATOR" doctor-old "$report_dir/final-doctor.txt" "$PLUGIN_ID"
+    node "$VALIDATOR" doctor-v02 "$report_dir/final-doctor.txt" "$PLUGIN_ID"
   fi
 }
 
@@ -548,23 +677,26 @@ refresh_and_validate_live_gateway() {
   run_qwen_openclaw gateway call tools.effective \
     --params "$(node -e 'process.stdout.write(JSON.stringify({agentId: process.argv[1], sessionKey: process.argv[2]}))' "$AGENT_ID" "$DIRECT_SESSION_KEY")" \
     --timeout 20000 --json > "$effective_report" || return 1
-  if [[ "$runtime_mode" == "live-new" ]]; then
-    node "$VALIDATOR" effective-new "$baseline_report" "$effective_report" \
+  if [[ "$runtime_mode" == "live-v03" ]]; then
+    node "$VALIDATOR" effective-v03 "$baseline_report" "$effective_report" \
       "$AGENT_ID" "$TOOL_NAME" || return 1
   else
-    node "$VALIDATOR" effective-old "$baseline_report" "$effective_report" \
+    node "$VALIDATOR" effective-v02 "$baseline_report" "$effective_report" \
       "$AGENT_ID" "$TOOL_NAME" || return 1
   fi
 }
 
 validate_source_and_host
-source_commit_before="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
-source_plugin_fingerprint="$(fingerprint_path "$PLUGIN_DIR")"
+source_commit_before="$TARGET_SHA"
+source_plugin_fingerprint="$(node "$VALIDATOR" payload-fingerprint "$PLUGIN_DIR")"
 preflight_dir="$work_root/preflight"
 install -d -m 700 "$preflight_dir"
 qwen_snapshot_before="$(profile_snapshot)"
 other_snapshot_before="$(other_profiles_snapshot "$work_root/other-before")"
 validate_current_state "$preflight_dir"
+INITIAL_ALLOWED_SENDER_SHA256="$ALLOWED_SENDER_SHA256"
+INITIAL_OPENCLAW_PEER_LINK_TEXT="$OPENCLAW_PEER_LINK_TEXT"
+INITIAL_OPENCLAW_PEER_REAL_PATH="$OPENCLAW_PEER_REAL_PATH"
 run_isolated_upgrade
 qwen_snapshot_after="$(profile_snapshot)"
 other_snapshot_after="$(other_profiles_snapshot "$work_root/other-after")"
@@ -600,18 +732,8 @@ else
   install -d -m 700 "$BACKUP_ROOT"
 fi
 
-verified_backup_count=0
-shopt -s nullglob
-for verified_marker in "$BACKUP_ROOT"/upgrade-*/.verified; do
-  if [[ -f "$verified_marker" && ! -L "$verified_marker" ]]; then
-    verified_backup_count=$((verified_backup_count + 1))
-  fi
-done
-shopt -u nullglob
-if [[ "$verified_backup_count" -ge 2 ]]; then
-  printf 'Two verified upgrade backups already exist; archive one explicitly before applying.\n' >&2
-  exit 1
-fi
+node "$VALIDATOR" backup-retention-baseline "$BACKUP_ROOT" 2 \
+  > "$work_root/backup-retention-baseline.json"
 
 release_install_lock() {
   if [[ "${lock_acquired:-0}" -eq 0 ]]; then return; fi
@@ -648,19 +770,42 @@ install -d -m 700 "$apply_reports"
 
 # Re-check all mutable preconditions while holding the shared profile lock.
 validate_source_and_host
-if [[ "$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)" != "$source_commit_before" \
-  || "$(fingerprint_path "$PLUGIN_DIR")" != "$source_plugin_fingerprint" ]]; then
+if [[ "$TARGET_SHA" != "$source_commit_before" \
+  || "$(node "$VALIDATOR" payload-fingerprint "$PLUGIN_DIR")" != "$source_plugin_fingerprint" ]]; then
   printf 'Canonical upgrade source changed after dry-run validation.\n' >&2
   exit 1
 fi
 validate_current_state "$apply_reports"
+if [[ "$ALLOWED_SENDER_SHA256" != "$INITIAL_ALLOWED_SENDER_SHA256" ]]; then
+  printf 'The unique Telegram command owner changed after dry-run validation.\n' >&2
+  exit 1
+fi
+if [[ "$OPENCLAW_PEER_LINK_TEXT" != "$INITIAL_OPENCLAW_PEER_LINK_TEXT" \
+  || "$OPENCLAW_PEER_REAL_PATH" != "$INITIAL_OPENCLAW_PEER_REAL_PATH" ]]; then
+  printf 'The verified OpenClaw peer link changed after dry-run validation.\n' >&2
+  exit 1
+fi
 other_apply_before="$(other_profiles_snapshot "$work_root/other-apply-before")"
-install -m 600 "$PROFILE_CONFIG" "$backup_dir/openclaw.json"
+install -m 600 "$PROFILE_CONFIG" "$backup_dir/openclaw-current.json"
+install -m 600 "$BASELINE_CONFIG_PATH" "$backup_dir/pre-0.2-openclaw.json"
+install -m 600 "$EFFECTIVE_BASELINE_REPORT" "$backup_dir/pre-0.2-effective-tools.json"
+install -m 600 "$CURRENT_V02_EFFECTIVE_REPORT" "$backup_dir/current-0.2-effective-tools.json"
+node "$VALIDATOR" owner-sender-plan "$PROFILE_CONFIG" \
+  > "$backup_dir/owner-sender-policy.json"
+chmod 600 "$backup_dir/owner-sender-policy.json"
 cp -R -p "$INSTALLED_PLUGIN_DIR" "$backup_dir/previous-plugin"
 write_index_record "$PROFILE_STATE_DB" "$backup_dir/install-index-old.json"
-git -C "$REPOSITORY_ROOT" rev-parse HEAD > "$backup_dir/source-commit.txt"
+printf '%s\n' "$TARGET_SHA" > "$backup_dir/source-commit.txt"
+printf '%s\n' "$source_plugin_fingerprint" > "$backup_dir/source-plugin-payload-sha256.txt"
+previous_plugin_fingerprint="$(node "$RELEASE_ROLLBACK_VALIDATOR" previous-plugin-fingerprint \
+  "$backup_dir/previous-plugin" "$OPENCLAW_PEER_LINK_TEXT" "$OPENCLAW_PEER_REAL_PATH")"
+printf '%s\n' "$previous_plugin_fingerprint" > "$backup_dir/previous-plugin-payload-sha256.txt"
+chmod 600 \
+  "$backup_dir/source-commit.txt" \
+  "$backup_dir/source-plugin-payload-sha256.txt" \
+  "$backup_dir/previous-plugin-payload-sha256.txt"
 
-if ! cmp -s "$PROFILE_CONFIG" "$backup_dir/openclaw.json"; then
+if ! cmp -s "$PROFILE_CONFIG" "$backup_dir/openclaw-current.json"; then
   printf 'Profile config changed while the backup was created.\n' >&2
   exit 1
 fi
@@ -672,7 +817,11 @@ fi
 validate_pre_upgrade_index \
   "$backup_dir/install-index-old.json" \
   "$backup_dir/pre-upgrade-source-kind.txt"
-build_config_plan "$backup_dir/openclaw.json" "$EFFECTIVE_BASELINE_REPORT"
+node "$VALIDATOR" config-known-v02 \
+  "$backup_dir/pre-0.2-openclaw.json" \
+  "$backup_dir/openclaw-current.json" \
+  "$backup_dir/pre-0.2-effective-tools.json" \
+  "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
 
 rollback_required=0
 rollback_failed=0
@@ -692,22 +841,22 @@ rollback_upgrade() {
   run_qwen_openclaw plugins install --force "$backup_dir/previous-plugin" \
     > "$backup_dir/rollback-install-old.txt" 2>&1
   if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
-  install -m 600 "$backup_dir/openclaw.json" "$PROFILE_CONFIG"
+  install -m 600 "$backup_dir/openclaw-current.json" "$PROFILE_CONFIG"
   if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
-  if ! cmp -s "$backup_dir/openclaw.json" "$PROFILE_CONFIG"; then rollback_failed=1; fi
+  if ! cmp -s "$backup_dir/openclaw-current.json" "$PROFILE_CONFIG"; then rollback_failed=1; fi
 
   install -d -m 700 "$backup_dir/rollback-reports"
   if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
   validate_final_state "$backup_dir/rollback-reports" \
-    "$backup_dir/previous-plugin" "$OLD_VERSION" runtime-old \
+    "$backup_dir/previous-plugin" "$OLD_VERSION" runtime-v02 \
     > "$backup_dir/rollback-validation.txt" 2>&1
   if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
   other_apply_after="$(other_profiles_snapshot "$work_root/other-rollback-after")"
   if [[ "$?" -ne 0 || "$other_apply_after" != "$other_apply_before" ]]; then rollback_failed=1; fi
 
   if [[ "$rollback_failed" -eq 0 ]]; then
-    refresh_and_validate_live_gateway "$backup_dir/rollback-live-gateway" live-old \
-      "$EFFECTIVE_BASELINE_REPORT" \
+    refresh_and_validate_live_gateway "$backup_dir/rollback-live-gateway" live-v02 \
+      "$backup_dir/pre-0.2-effective-tools.json" \
       > "$backup_dir/rollback-live-gateway-validation.txt" 2>&1
     if [[ "$?" -ne 0 ]]; then rollback_failed=1; fi
   fi
@@ -768,7 +917,7 @@ rollback_upgrade() {
     exit 70
   fi
   cleanup_work_root || true
-  printf 'Upgrade failed; official 0.1.0 reinstall and exact config restoration succeeded.\n' >&2
+  printf 'Upgrade failed; official 0.2.0 reinstall and exact current-config restoration succeeded.\n' >&2
   printf 'Backup retained: %s\n' "$backup_dir" >&2
   exit "$failed_status"
 }
@@ -792,26 +941,58 @@ trap 'exit 143' TERM
 rollback_required=1
 run_qwen_openclaw config set \
   "agents.list[$AGENT_INDEX].tools" \
-  "$NEXT_AGENT_TOOLS" \
+  "$RESTORE_AGENT_TOOLS" \
   --strict-json \
   > "$apply_reports/config-set.txt"
-node "$VALIDATOR" config-after "$backup_dir/openclaw.json" "$PROFILE_CONFIG" \
-  "$EFFECTIVE_BASELINE_REPORT" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
+node "$VALIDATOR" config-restored \
+  "$backup_dir/openclaw-current.json" \
+  "$PROFILE_CONFIG" \
+  "$backup_dir/pre-0.2-openclaw.json" \
+  "$backup_dir/pre-0.2-effective-tools.json" \
+  "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
 
+assert_audited_source
 run_qwen_openclaw plugins install --force "$PLUGIN_DIR" \
   > "$apply_reports/install-new.txt"
-node "$VALIDATOR" config-after "$backup_dir/openclaw.json" "$PROFILE_CONFIG" \
-  "$EFFECTIVE_BASELINE_REPORT" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME"
-validate_final_state "$apply_reports" "$PLUGIN_DIR" "$NEW_VERSION" runtime-new
+assert_audited_source
+node "$VALIDATOR" payload-match \
+  "$PLUGIN_DIR" "$INSTALLED_PLUGIN_DIR" "$source_plugin_fingerprint" \
+  "$OPENCLAW_PEER_LINK_TEXT" "$OPENCLAW_PEER_REAL_PATH" \
+  > "$apply_reports/installed-payload.json"
+run_qwen_openclaw config set \
+  "plugins.entries.$PLUGIN_ID.config.allowedSenderSha256" \
+  "\"$ALLOWED_SENDER_SHA256\"" \
+  --strict-json \
+  > "$apply_reports/config-set-sender-hash.txt"
+verify_plugin_sender_hash "$PROFILE_CONFIG"
+node "$VALIDATOR" config-restored \
+  "$backup_dir/openclaw-current.json" \
+  "$PROFILE_CONFIG" \
+  "$backup_dir/pre-0.2-openclaw.json" \
+  "$backup_dir/pre-0.2-effective-tools.json" \
+  "$PLUGIN_ID" "$AGENT_ID" "$TOOL_NAME" "$ALLOWED_SENDER_SHA256"
+validate_final_state "$apply_reports" "$PLUGIN_DIR" "$NEW_VERSION" runtime-v03
 other_apply_after="$(other_profiles_snapshot "$work_root/other-apply-after")"
 if [[ "$other_apply_after" != "$other_apply_before" ]]; then
   printf 'Another OpenClaw profile changed during the upgrade.\n' >&2
   false
 fi
-refresh_and_validate_live_gateway "$apply_reports/live-gateway" live-new \
-  "$EFFECTIVE_BASELINE_REPORT"
+refresh_and_validate_live_gateway "$apply_reports/live-gateway" live-v03 \
+  "$backup_dir/pre-0.2-effective-tools.json"
 
+if [[ "$(node "$RELEASE_ROLLBACK_VALIDATOR" previous-plugin-fingerprint \
+  "$backup_dir/previous-plugin" "$OPENCLAW_PEER_LINK_TEXT" "$OPENCLAW_PEER_REAL_PATH")" \
+  != "$(awk 'NF { print; exit }' "$backup_dir/previous-plugin-payload-sha256.txt")" ]]; then
+  printf 'The previous-plugin rollback payload changed before backup verification.\n' >&2
+  false
+fi
 install -m 600 /dev/null "$backup_dir/.verified"
+node "$VALIDATOR" backup-retention-enforce \
+  "$BACKUP_ROOT" \
+  "$backup_dir" \
+  "$apply_reports/final-index.json" \
+  2 \
+  > "$apply_reports/backup-retention.json"
 rollback_required=0
 if ! release_install_lock; then
   printf 'Upgrade validation passed, but the profile lock could not be released.\n' >&2
@@ -822,11 +1003,12 @@ trap - EXIT HUP INT TERM
 
 printf 'Upgraded %s from %s to %s for %s/%s.\n' \
   "$PLUGIN_ID" "$OLD_VERSION" "$NEW_VERSION" "$PROFILE" "$AGENT_ID"
-printf 'The target agent now uses tools.profile=full and tools.allow equals the effective baseline plus only %s.\n' "$TOOL_NAME"
+printf 'The complete pre-0.2 second-original tools object was restored from the unique verified 0.2 upgrade backup.\n'
 printf 'Backup retained: %s\n' "$backup_dir"
 printf 'Only qwen-current was restarted through the official Gateway service command.\n'
-printf 'The live Gateway RPC proved the 0.2.0-only %s tool in the %s catalog.\n' \
-  "$TOOL_NAME" "$AGENT_ID"
-printf 'The Telegram direct session effective tools equal the original baseline plus only %s.\n' \
+printf 'Runtime inspection proved only before_dispatch and no plugin tool contract.\n'
+printf 'Installed plugin payload matches approved target %s and its audited canonical source.\n' "$TARGET_SHA"
+printf 'Plugin config contains only the SHA-256 gate for the unique canonical Telegram command owner.\n'
+printf 'The live Gateway catalog omits %s and the Telegram direct session effective tools equal the pre-0.2 baseline exactly.\n' \
   "$TOOL_NAME"
 printf 'No production AI-worker task was submitted.\n'

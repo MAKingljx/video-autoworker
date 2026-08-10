@@ -1,27 +1,21 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "description": "Handles exact commands and guarded natural-language video submission.",
+  "description": "Handles exact commands and affirmative natural-language video requests before model dispatch.",
   "activation": {
     "onStartup": true,
     "onCapabilities": [
-      "hook",
-      "tool"
+      "hook"
     ]
-  },
-  "contracts": {
-    "tools": [
-      "aiworker_analyze_video"
-    ]
-  },
-  "toolMetadata": {
-    "aiworker_analyze_video": {
-      "optional": true
-    }
   },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "allowedSenderSha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    }
   }
 }

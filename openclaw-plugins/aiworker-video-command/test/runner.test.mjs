@@ -26,25 +26,41 @@ describe('createVideoTaskRunner', () => {
       '--idempotency-key', 'task-1',
       '--delivery', 'none',
       '--wait-seconds', '0',
+      '--no-trigger-recovery',
     ])
   })
 
-  it('recovers a timed-out submission by status query without resubmitting', async () => {
+  it('stops after a timed-out submission and never queries or resubmits', async () => {
     const timeout = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT', killed: true })
-    const execute = vi.fn()
-      .mockRejectedValueOnce(timeout)
-      .mockResolvedValueOnce({
-        stdout: '{"taskId":"task-2","status":"running","attemptCount":1}\n',
-        stderr: '',
-      })
+    const execute = vi.fn().mockRejectedValueOnce(timeout)
     const runner = createVideoTaskRunner({ execute, scriptPath: SCRIPT_PATH, nodePath: NODE_PATH })
 
-    await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-2' })).resolves.toEqual({
-      taskId: 'task-2', status: 'running', duplicate: true,
-    })
-    expect(execute).toHaveBeenCalledTimes(2)
-    expect(execute.mock.calls[1][1]).toEqual([SCRIPT_PATH, '--status', 'task-2'])
-    expect(execute.mock.calls.filter(call => call[1].includes('--video-file'))).toHaveLength(1)
+    await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-2' }))
+      .rejects.toThrow('submit_unconfirmed')
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute.mock.calls[0][1]).toContain('--video-file')
+    expect(execute.mock.calls[0][1]).not.toContain('--status')
+  })
+
+  it('maps the dedicated trigger-ambiguity exit to an unconfirmed receipt without retrying', async () => {
+    const unconfirmed = Object.assign(new Error('video_trigger_unconfirmed'), { code: 75 })
+    const execute = vi.fn().mockRejectedValueOnce(unconfirmed)
+    const runner = createVideoTaskRunner({ execute, scriptPath: SCRIPT_PATH, nodePath: NODE_PATH })
+
+    await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-unconfirmed' }))
+      .rejects.toThrow('submit_unconfirmed')
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute.mock.calls[0][1]).not.toContain('--status')
+  })
+
+  it('keeps ordinary preflight failures distinct from an ambiguous trigger', async () => {
+    const failure = Object.assign(new Error('preflight failed'), { code: 2 })
+    const execute = vi.fn().mockRejectedValueOnce(failure)
+    const runner = createVideoTaskRunner({ execute, scriptPath: SCRIPT_PATH, nodePath: NODE_PATH })
+
+    await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-preflight' }))
+      .rejects.toThrow('submit_failed')
+    expect(execute).toHaveBeenCalledTimes(1)
   })
 
   it('rejects multiline, mismatched, or malformed command output', async () => {
@@ -59,4 +75,37 @@ describe('createVideoTaskRunner', () => {
         .rejects.toThrow('submit_failed')
     }
   })
+
+  it.each([
+    ['queued', false],
+    ['running', false],
+    ['succeeded', false],
+    ['failed', false],
+    ['banana', false],
+    ['failed', true],
+    ['banana', true],
+  ])('fails closed for status=%s duplicate=%s', async (status, duplicate) => {
+    const execute = vi.fn(async () => ({
+      stdout: `${JSON.stringify({ taskId: 'task-4', status, duplicate })}\n`,
+      stderr: '',
+    }))
+    const runner = createVideoTaskRunner({ execute, scriptPath: SCRIPT_PATH, nodePath: NODE_PATH })
+    await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-4' }))
+      .rejects.toThrow('submit_failed')
+    expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['queued', 'accepted', 'running', 'succeeded'])(
+    'accepts an existing task in %s state',
+    async status => {
+      const execute = vi.fn(async () => ({
+        stdout: `${JSON.stringify({ taskId: 'task-5', status, duplicate: true })}\n`,
+        stderr: '',
+      }))
+      const runner = createVideoTaskRunner({ execute, scriptPath: SCRIPT_PATH, nodePath: NODE_PATH })
+      await expect(runner({ videoPath: '/tmp/demo.mp4', taskId: 'task-5' })).resolves.toEqual({
+        taskId: 'task-5', status, duplicate: true,
+      })
+    },
+  )
 })

@@ -7,68 +7,7 @@ import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 describe('OpenClaw task-flow submit script', () => {
-  it('parses only the exact single-line video command', async () => {
-    const moduleUrl = pathToFileURL(resolve(
-      process.cwd(),
-      'openclaw-skills/aiworker-task-flow/lib/video-command.mjs',
-    )).href
-    const command = await import(/* @vite-ignore */ moduleUrl) as {
-      parseExactVideoCommand: (value: unknown) => string | null
-      deriveVideoCommandTaskKey: (videoFile: string) => string
-    }
-
-    const accepted = [
-      ['分析视频 /tmp/demo.mp4', '/tmp/demo.mp4'],
-      ['分析视频 /Users/Shared/中文目录/样片(终版).MOV', '/Users/Shared/中文目录/样片(终版).MOV'],
-      ['分析视频 /Users/Shared/中文 目录/样片 (终版).MOV', '/Users/Shared/中文 目录/样片 (终版).MOV'],
-      ['分析视频 "/Users/Shared/中文 目录/样片 (终版).mkv"', '/Users/Shared/中文 目录/样片 (终版).mkv'],
-      ["分析视频 '/Users/Shared/person\"s clip (v2).webm'", '/Users/Shared/person"s clip (v2).webm'],
-      ["分析视频 /Users/Shared/person's.mp4", "/Users/Shared/person's.mp4"],
-      ['分析视频 /Users/Shared/person"s.mp4', '/Users/Shared/person"s.mp4'],
-      ['分析视频 /tmp/demo.mp4 补充.mp4', '/tmp/demo.mp4 补充.mp4'],
-    ]
-    for (const [input, expected] of accepted) {
-      expect(command.parseExactVideoCommand(input), input).toBe(expected)
-    }
-
-    const rejected: unknown[] = [
-      undefined,
-      null,
-      '',
-      '分析视频 ',
-      '分析视频  /tmp/demo.mp4',
-      '分析视频 ./demo.mp4',
-      '分析视频 ~/demo.mp4',
-      '分析视频 /tmp/demo.mp4\n',
-      '分析视频 /tmp/demo.mp4\r\n马上开始',
-      '马上开始 分析视频 /tmp/demo.mp4',
-      '分析视频 "/tmp/demo.mp4',
-      "分析视频 '/tmp/demo.mp4\"",
-      '分析视频 "/tmp/demo.mp4" 现在开始',
-      '分析视频 /tmp/demo.mp4 现在开始',
-      '分析视频 /tmp/demo.txt',
-      '先告诉我方法，分析视频 /tmp/demo.mp4',
-      '分析视频 /tmp/不要开始.mp4',
-      '分析视频 /tmp/不要执行.mp4',
-      '分析视频 /tmp/不要提交.mp4',
-      '分析视频 /tmp/暂不执行.mp4',
-      '分析视频 /tmp/只分析.mp4',
-      `分析视频 /${'a'.repeat(4_090)}.mp4`,
-    ]
-    for (const input of rejected) {
-      expect(command.parseExactVideoCommand(input), String(input)).toBeNull()
-    }
-
-    const firstKey = command.deriveVideoCommandTaskKey('/Users/Shared/中文目录/demo.mp4')
-    expect(command.deriveVideoCommandTaskKey('/Users/Shared/中文目录/demo.mp4')).toBe(firstKey)
-    expect(command.deriveVideoCommandTaskKey('/Users/Shared/中文目录/../中文目录/demo.mp4')).toBe(firstKey)
-    expect(command.deriveVideoCommandTaskKey('/Users/Shared/中文目录/other.mp4')).not.toBe(firstKey)
-    expect(firstKey).toMatch(/^video-command-[a-f0-9]{64}$/)
-    expect(firstKey).not.toContain('/Users/Shared')
-    expect(firstKey).not.toContain('中文目录')
-  })
-
-  it('routes exact prompt inputs to video once and leaves a non-match generic', async () => {
+  it('routes explicit video arguments once and rejects video-shaped generic prompts', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'openclaw-video-command-test-'))
     const inboxRoot = resolve(root, 'inbox')
     const videoPath = resolve(root, '中文 样片 (终版).mp4')
@@ -92,7 +31,8 @@ globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : undefined
-  appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ method, url: url.pathname, body }) + '\\n')
+  const requestUrl = url.pathname + url.search
+  appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ method, url: requestUrl, body }) + '\\n')
   if (method === 'GET' && url.pathname === '/api/n8n/workflows') {
     return json({ bindings: [
       { id: 'generic-binding', taskType: 'general', enabled: true },
@@ -100,7 +40,13 @@ globalThis.fetch = async (input, init = {}) => {
     ] })
   }
   if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    if (process.env.FAKE_TRIGGER_ERROR === '1') {
+      return json({ error: 'injected trigger failure' }, 503)
+    }
     return json({ taskId: body.taskId, status: 'accepted' })
+  }
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    return json({ taskId: url.searchParams.get('taskId'), status: 'accepted' })
   }
   return json({ error: 'unexpected request' }, 404)
 }
@@ -119,10 +65,12 @@ globalThis.fetch = async (input, init = {}) => {
         execFile(process.execPath, [
           script,
           '--base-url', 'http://127.0.0.1:3017',
-          '--prompt', `分析视频 "${videoPath}"`,
-          '--binding-id', 'generic-binding',
+          '--video-file', videoPath,
+          '--task-id', 'explicit-video-task',
+          '--idempotency-key', 'explicit-video-task',
           '--delivery', 'none',
-          '--wait-seconds', '30',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
         ], {
           cwd: process.cwd(),
           env: childEnv,
@@ -134,7 +82,7 @@ globalThis.fetch = async (input, init = {}) => {
       })
       expect(videoRun.stderr).toBe('')
       expect(JSON.parse(videoRun.stdout)).toMatchObject({
-        taskId: expect.stringMatching(/^video-command-[a-f0-9]{64}$/),
+        taskId: 'explicit-video-task',
         status: 'accepted',
         bindingId: 'video-binding',
       })
@@ -160,28 +108,26 @@ globalThis.fetch = async (input, init = {}) => {
         bindingId: 'generic-binding',
       })
 
-      const singleIdentityRun = await new Promise<{
+      const videoPromptRun = await new Promise<{
+        failed: boolean
         stdout: string
         stderr: string
-      }>((resolvePromise, rejectPromise) => {
+      }>(resolvePromise => {
         execFile(process.execPath, [
           script,
           '--base-url', 'http://127.0.0.1:3017',
           '--prompt-file', promptFile,
           '--task-id', 'custom-video-task',
+          '--idempotency-key', 'custom-video-task',
           '--delivery', 'none',
           '--wait-seconds', '0',
         ], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' }, (error, stdout, stderr) => {
-          if (error) return rejectPromise(new Error(stderr || error.message))
-          resolvePromise({ stdout, stderr })
+          resolvePromise({ failed: Boolean(error), stdout, stderr })
         })
       })
-      expect(singleIdentityRun.stderr).toBe('')
-      expect(JSON.parse(singleIdentityRun.stdout)).toMatchObject({
-        taskId: 'custom-video-task',
-        status: 'accepted',
-        bindingId: 'video-binding',
-      })
+      expect(videoPromptRun.failed).toBe(true)
+      expect(videoPromptRun.stdout).toBe('')
+      expect(videoPromptRun.stderr).toContain('视频会话请求只能由已加载的原生视频插件提交')
 
       const mismatchedIdentityRun = await new Promise<{
         failed: boolean
@@ -191,7 +137,7 @@ globalThis.fetch = async (input, init = {}) => {
         execFile(process.execPath, [
           script,
           '--base-url', 'http://127.0.0.1:3017',
-          '--prompt-file', promptFile,
+          '--video-file', videoPath,
           '--task-id', 'video-task-a',
           '--idempotency-key', 'video-task-b',
           '--delivery', 'none',
@@ -202,7 +148,7 @@ globalThis.fetch = async (input, init = {}) => {
       })
       expect(mismatchedIdentityRun.failed).toBe(true)
       expect(mismatchedIdentityRun.stdout).toBe('')
-      expect(mismatchedIdentityRun.stderr).toContain('--task-id 与 --idempotency-key 必须相同')
+      expect(mismatchedIdentityRun.stderr).toContain('相同的 --task-id 与 --idempotency-key')
 
       const pathShapedExtraRun = await new Promise<{
         failed: boolean
@@ -223,11 +169,31 @@ globalThis.fetch = async (input, init = {}) => {
       expect(pathShapedExtraRun.stdout).toBe('')
       expect(pathShapedExtraRun.stderr).not.toBe('')
 
+      const unsupportedVideoPromptRun = await new Promise<{
+        failed: boolean
+        stdout: string
+        stderr: string
+      }>(resolvePromise => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--prompt', '分析 /tmp/demo.avi',
+          '--task-id', 'unsupported-video-prompt',
+          '--idempotency-key', 'unsupported-video-prompt',
+          '--delivery', 'none',
+        ], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' }, (error, stdout, stderr) => {
+          resolvePromise({ failed: Boolean(error), stdout, stderr })
+        })
+      })
+      expect(unsupportedVideoPromptRun.failed).toBe(true)
+      expect(unsupportedVideoPromptRun.stdout).toBe('')
+      expect(unsupportedVideoPromptRun.stderr).toContain('视频会话请求只能由已加载的原生视频插件提交')
+
       const replyRun = await new Promise<{ failed: boolean; stdout: string; stderr: string }>(resolvePromise => {
         execFile(process.execPath, [
           script,
           '--base-url', 'http://127.0.0.1:3017',
-          '--prompt-file', promptFile,
+          '--video-file', videoPath,
           '--task-id', 'reply-command-task',
           '--idempotency-key', 'reply-command-task',
           '--delivery', 'reply',
@@ -263,6 +229,39 @@ globalThis.fetch = async (input, init = {}) => {
       expect(wrongBindingRun.stdout).toBe('')
       expect(wrongBindingRun.stderr).toContain('视频任务必须使用启用的 video-analysis binding')
 
+      const noRecoveryRun = await new Promise<{
+        failed: boolean
+        exitCode: number | null
+        stdout: string
+        stderr: string
+      }>(resolvePromise => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--video-file', videoPath,
+          '--task-id', 'no-recovery-task',
+          '--idempotency-key', 'no-recovery-task',
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+        ], {
+          cwd: process.cwd(),
+          env: { ...childEnv, FAKE_TRIGGER_ERROR: '1' },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => {
+          resolvePromise({
+            failed: Boolean(error),
+            exitCode: typeof error?.code === 'number' ? error.code : null,
+            stdout,
+            stderr,
+          })
+        })
+      })
+      expect(noRecoveryRun.failed).toBe(true)
+      expect(noRecoveryRun.exitCode).toBe(75)
+      expect(noRecoveryRun.stdout).toBe('')
+      expect(noRecoveryRun.stderr).toBe('video_trigger_unconfirmed\n')
+
       const requests = (await readFile(requestLog, 'utf8'))
         .trim()
         .split('\n')
@@ -275,12 +274,10 @@ globalThis.fetch = async (input, init = {}) => {
         method === 'POST' && url === '/api/n8n/trigger'
       ))
       expect(triggerRequests).toHaveLength(3)
-      const derivedTaskId = triggerRequests[0]?.body?.taskId
-      expect(derivedTaskId).toEqual(expect.stringMatching(/^video-command-[a-f0-9]{64}$/))
       expect(triggerRequests[0]?.body).toMatchObject({
         bindingId: 'video-binding',
-        taskId: derivedTaskId,
-        idempotencyKey: derivedTaskId,
+        taskId: 'explicit-video-task',
+        idempotencyKey: 'explicit-video-task',
         delivery: { mode: 'none' },
         input: { prompt: '分析视频中的语音内容和画面信息，分别给出结果后合并。' },
       })
@@ -291,14 +288,17 @@ globalThis.fetch = async (input, init = {}) => {
         delivery: { mode: 'none' },
         input: { prompt: '请分析这个普通任务' },
       })
-      expect(triggerRequests[2]?.body).toMatchObject({
-        bindingId: 'video-binding',
-        taskId: 'custom-video-task',
-        idempotencyKey: 'custom-video-task',
-        delivery: { mode: 'none' },
-      })
-      expect(triggerRequests.filter(request => request.body?.taskId === derivedTaskId)).toHaveLength(1)
-      expect(requests.some(({ url }) => url?.startsWith('/api/n8n/runs'))).toBe(false)
+      expect(triggerRequests.filter(request => request.body?.taskId === 'explicit-video-task')).toHaveLength(1)
+      const noRecoveryRequests = requests.filter(request => (
+        request.body?.taskId === 'no-recovery-task'
+        || request.url.includes('taskId=no-recovery-task')
+      ))
+      expect(noRecoveryRequests.filter(({ method, url }) => (
+        method === 'POST' && url === '/api/n8n/trigger'
+      ))).toHaveLength(1)
+      expect(noRecoveryRequests.some(({ method, url }) => (
+        method === 'GET' && url.startsWith('/api/n8n/runs?')
+      ))).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -354,13 +354,16 @@ globalThis.fetch = async (input, init = {}) => {
   it('requires one explicit stable identity for durable task submissions', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
 
-    expect(skill).toContain('both `--task-id` and `--idempotency-key`')
-    expect(skill.match(/--task-id <stable-key>/g)).toHaveLength(3)
-    expect(skill).toContain('never tell the user to pass a batch ID to')
-    expect(skill).toContain('`--batch-status <stable-batch-key>`')
+    expect(skill).toContain('Reuse one stable task/idempotency key')
+    expect(skill).toContain('--task-id <stable-request-key>')
+    expect(skill).toContain('--idempotency-key <stable-request-key>')
+    expect(skill).toContain('--task-id <stable-key>')
+    expect(skill).toContain('--idempotency-key <stable-key>')
+    expect(skill).toContain('A batch ID is not a task ID')
+    expect(skill).toContain('--batch-status <stable-batch-key>')
   })
 
-  it('defines the one-line video command as an asynchronous stateless skill entry', () => {
+  it('defines both single-video conversation forms as native asynchronous entries', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -368,22 +371,25 @@ globalThis.fetch = async (input, init = {}) => {
     ), 'utf8')
 
     expect(skill).toContain('分析视频 /完整路径/video.mp4')
+    expect(skill).toContain('帮我分析一下这个视频 /完整路径/video.mp4')
     expect(skill).toContain('`分析视频 <绝对路径>`')
     expect(skill).toContain('--video-file "<absolute-video-path>"')
     expect(skill).toContain('--task-id <stable-request-key>')
     expect(skill).toContain('--idempotency-key <stable-request-key>')
     expect(skill).toContain('--delivery none')
     expect(skill).toContain('--wait-seconds 0')
-    expect(skill).toContain('overrides the execution phrase and means no task submission')
+    expect(skill).toContain('--no-trigger-recovery')
     expect(workspaceRules).toContain('`分析视频 <绝对路径>`')
-    expect(workspaceRules).toContain('user does not need to name the skill')
+    expect(workspaceRules).toContain('`帮我分析一下这个视频 <绝对路径>`')
+    expect(skill).toContain("plugin's `before_dispatch` hook")
+    expect(workspaceRules).toContain('in `before_dispatch`, before')
     const stableEntry = 'node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs"'
     expect(skill).toContain(stableEntry)
-    expect(workspaceRules).toContain(stableEntry)
-    expect(workspaceRules).toContain('do not use `ls` or `find` to locate the script')
+    expect(skill).toContain('implementation reference, not an')
+    expect(workspaceRules).toContain('Do not ask Qwen to choose a video tool')
   })
 
-  it('contracts the exact one-line command to one silent submission and one receipt', () => {
+  it('contracts native single-video dispatch to one silent submission and one receipt', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -391,24 +397,22 @@ globalThis.fetch = async (input, init = {}) => {
     ), 'utf8')
 
     for (const contract of [skill, workspaceRules]) {
-      expect(contract).toContain('one and only one n8n submission')
-      expect(contract).toMatch(/马上开始[\s\S]*我先找[\s\S]*让我检查/)
-      expect(contract).toMatch(/direct `ffmpeg`, Whisper,\s+Qwen, VL/)
-      expect(contract).toMatch(/Do not run\s+`ls`, `find`, `stat`/)
-      expect(contract).toMatch(/do not\s+poll/i)
-      expect(contract).toContain('same turn')
-      expect(contract).toMatch(/one\s+short acknowledgement/)
-      expect(contract).toMatch(/one\s+short error/)
-      expect(contract).toContain('new explicit status or')
-      expect(contract).toContain('monitoring request')
+      expect(contract).toContain('shared runner')
+      expect(contract).toMatch(/exactly\s+once/u)
+      expect(contract).toMatch(/Do not narrate|Do not\s+narrate/u)
+      expect(contract).toMatch(/generic prompt|generic task/u)
+      expect(contract).toMatch(/same turn/u)
+      expect(contract).toMatch(/later explicit user request/u)
+      expect(contract).toContain('`delivery=none`')
+      expect(contract).toContain('`memoryMode=none`')
     }
-    expect(skill).toContain('exactly once in the current turn')
-    expect(skill).toMatch(/containing only `taskId`,\s+`status`, and `duplicate`/)
-    expect(skill).toContain('已提交：taskId=<taskId>，status=<status>，duplicate=<true|false>。')
-    expect(skill).toContain('提交失败：<简短错误>。')
-    expect(workspaceRules).toContain('`delivery=none` and')
-    expect(workspaceRules).toContain('`wait-seconds=0`')
-    expect(workspaceRules).toContain('`memoryMode=none`')
+    expect(skill).toContain('After any receipt, rejection, or failure, stop the turn')
+    expect(skill).toContain('已提交，任务编号：<taskId>。结果请稍后查询。')
+    expect(skill).toContain('任务已存在，任务编号：<taskId>。结果请稍后查询。')
+    expect(skill).toContain('提交状态暂未确认，任务编号：<taskId>。请稍后查询。')
+    expect(workspaceRules).toContain('return only')
+    expect(workspaceRules).toContain('`--wait-seconds 0`')
+    expect(workspaceRules).toContain('`--no-trigger-recovery`')
   })
 
   it('answers video-chain explanation questions without tools or retired routes', () => {
@@ -417,19 +421,28 @@ globalThis.fetch = async (input, init = {}) => {
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
-    const fixedReply = '精确命令由插件接管；普通说法由千问调用 aiworker_analyze_video，再交给 n8n：prepare→Whisper＋本地 Qwen→finalize。memoryMode=none、delivery=none，结果另查。'
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+    const fixedReply = '视频会由原生插件一次派发到 AI-worker，后台依次执行 prepare、Whisper 音频、本地 Qwen 画面和 finalize；当前轮不等待，结果按任务编号另查。'
 
-    expect([...fixedReply]).toHaveLength(119)
+    expect([...fixedReply].length).toBeLessThanOrEqual(120)
     for (const contract of [skill, workspaceRules]) {
       expect(contract).toContain(fixedReply)
-      expect(contract).toMatch(/including\s+`memory_search`/)
-      expect(contract).toMatch(/n8n does not automatically return the completed/)
+      expect(contract).toMatch(/does not return the completed|never automatically returns the completed/u)
       expect(contract).toMatch(/local Qwen vision/)
-      expect(contract).toMatch(/current\s+contract overrides historical/)
+      expect(contract).toContain('`video-learning-pipeline`')
+    }
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
+      expect(contract).toMatch(/zero\s+tools/i)
+      expect(contract).toMatch(/memory_search|memory lookup/u)
+      expect(contract).toMatch(/generic task/u)
+      expect(contract).toMatch(/later explicit\s+status\s+request/u)
     }
   })
 
-  it('routes affirmative natural-language video execution through the guarded optional tool', () => {
+  it('routes affirmative natural-language video execution through native before_dispatch', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -440,22 +453,36 @@ globalThis.fetch = async (input, init = {}) => {
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
     const description = skill.match(/^description: (.+)$/m)?.[1]
-    const naturalSection = skill.match(
-      /## Natural-language Video Execution([\s\S]*?)## Submit/u,
-    )?.[1]
 
     expect(description?.length).toBeLessThanOrEqual(160)
-    expect(naturalSection).toContain('`aiworker_analyze_video`')
-    expect(naturalSection).toContain('{"videoPath":"<absolute-video-path>"}')
-    expect(naturalSection).toContain('Do not call `exec`, `submit-task.mjs`')
-    expect(naturalSection).toContain('must not invent or receive those identity fields')
     for (const contract of [workspaceRules, workspaceMemory]) {
-      expect(contract).toContain('`aiworker_analyze_video`')
-      expect(contract).toContain('`tools.allow`')
-      expect(contract).toContain('`tools.alsoAllow` remains unset')
+      expect(contract).toContain('`before_dispatch`')
+      expect(contract).toMatch(/exact|精确/u)
+      expect(contract).toMatch(/affirmative\s+natural-language|肯定自然语言/u)
+      expect(contract).toMatch(/generic prompt|generic task/u)
+      expect(contract).not.toContain('`aiworker_analyze_video`')
+      expect(contract).not.toContain('`tools.allow`')
+      expect(contract).not.toContain('`tools.profile`')
     }
-    expect(workspaceRules).toMatch(/are not the execution\s+safety boundary/u)
-    expect(workspaceMemory).toMatch(/not an authorization\s+or safety boundary/u)
+    expect(workspaceRules).toContain('fail closed')
+    expect(workspaceMemory).toContain('local target contract')
+  })
+
+  it('keeps later human status lookup separate and bounded to the latest receipt', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+
+    for (const contract of [skill, workspaceRules]) {
+      expect(contract).toContain('查一下刚才的视频')
+      expect(contract).toMatch(/most recent plugin\s+receipt/u)
+      expect(contract).toMatch(/ask[\s\S]{0,80}task ID/u)
+      expect(contract).toContain('`memory_search`')
+      expect(contract).toMatch(/scan.*database|scan Mission Control\/SQLite/u)
+      expect(contract).toMatch(/resubmit/u)
+    }
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {

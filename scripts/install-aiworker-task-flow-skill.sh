@@ -43,7 +43,6 @@ required_skill_files=(
   "$SOURCE_DIR/scripts/run-video-batch.mjs"
   "$SOURCE_DIR/lib/platform-client.mjs"
   "$SOURCE_DIR/lib/media-ingest.mjs"
-  "$SOURCE_DIR/lib/video-command.mjs"
   "$SOURCE_DIR/lib/video-task.mjs"
   "$SOURCE_DIR/lib/video-batch-state.mjs"
   "$RENDERER"
@@ -228,12 +227,47 @@ task_flow_backup_has_recoverable_shape() {
   fi
 }
 
-count_verified_task_flow_backups() {
-  local candidate candidate_name candidate_manifest candidate_symlinks
-  local actual_manifest scan_index=0 verified_count=0
+task_flow_backup_is_verified() {
+  local candidate="$1"
+  local scan_index="$2"
+  local candidate_name candidate_manifest candidate_symlinks actual_manifest
+
+  candidate_name="${candidate##*/}"
+  if ! is_task_flow_backup_family_name "$candidate_name"; then
+    return 1
+  fi
+  if [[ ! -d "$candidate" || -L "$candidate" ]]; then
+    return 1
+  fi
+  candidate_manifest="$candidate/MANIFEST.sha256"
+  if [[ ! -f "$candidate_manifest" || -L "$candidate_manifest" ]]; then
+    return 1
+  fi
+  if ! candidate_symlinks="$(find -P "$candidate" -type l -print 2>/dev/null)"; then
+    return 1
+  fi
+  if [[ -n "$candidate_symlinks" ]]; then
+    return 1
+  fi
+  if ! task_flow_backup_has_recoverable_shape "$candidate"; then
+    return 1
+  fi
+
+  actual_manifest="$TRANSACTION_DIR/verified-backup-manifest.$scan_index"
+  rm -f -- "$actual_manifest"
+  if ! write_tree_manifest "$candidate" "$actual_manifest" './MANIFEST.sha256' \
+    || ! cmp -s "$actual_manifest" "$candidate_manifest"; then
+    rm -f -- "$actual_manifest"
+    return 1
+  fi
+  rm -f -- "$actual_manifest"
+}
+
+list_verified_task_flow_backups() {
+  local candidate scan_index=0
+  local LC_ALL=C
 
   if [[ ! -d "$BACKUP_ROOT" ]]; then
-    printf '0\n'
     return
   fi
 
@@ -241,36 +275,66 @@ count_verified_task_flow_backups() {
     if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
       continue
     fi
-    candidate_name="${candidate##*/}"
-    if ! is_task_flow_backup_family_name "$candidate_name"; then
-      continue
-    fi
-    if [[ ! -d "$candidate" || -L "$candidate" ]]; then
-      continue
-    fi
-    candidate_manifest="$candidate/MANIFEST.sha256"
-    if [[ ! -f "$candidate_manifest" || -L "$candidate_manifest" ]]; then
-      continue
-    fi
-    if ! candidate_symlinks="$(find -P "$candidate" -type l -print 2>/dev/null)"; then
-      continue
-    fi
-    if [[ -n "$candidate_symlinks" ]]; then
-      continue
-    fi
-    if ! task_flow_backup_has_recoverable_shape "$candidate"; then
-      continue
-    fi
-
     scan_index=$((scan_index + 1))
-    actual_manifest="$TRANSACTION_DIR/verified-backup-manifest.$scan_index"
-    rm -f -- "$actual_manifest"
-    if write_tree_manifest "$candidate" "$actual_manifest" './MANIFEST.sha256' \
-      && cmp -s "$actual_manifest" "$candidate_manifest"; then
-      verified_count=$((verified_count + 1))
+    if task_flow_backup_is_verified "$candidate" "$scan_index"; then
+      printf '%s\n' "$candidate"
     fi
-    rm -f -- "$actual_manifest"
   done
+}
+
+prune_verified_task_flow_backups() {
+  local candidate candidate_name selected="" scan_index=100000
+  local -a verified_backups=()
+
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && verified_backups+=("$candidate")
+  done < <(list_verified_task_flow_backups)
+  if [[ "${#verified_backups[@]}" -le 2 ]]; then
+    return
+  fi
+  if [[ "${#verified_backups[@]}" -ne 3 ]]; then
+    printf 'Verified task-flow backup count must grow from at most two to at most three.\n' >&2
+    return 1
+  fi
+  if [[ ! " ${verified_backups[*]} " =~ " $BACKUP_DIR " ]]; then
+    printf 'The new task-flow backup is not part of the verified backup set.\n' >&2
+    return 1
+  fi
+
+  for candidate in "${verified_backups[@]}"; do
+    if [[ "$candidate" != "$BACKUP_DIR" ]]; then
+      selected="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$selected" || "${selected%/*}" != "$BACKUP_ROOT" ]]; then
+    printf 'Could not select a safe old task-flow backup for retention cleanup.\n' >&2
+    return 1
+  fi
+  candidate_name="${selected##*/}"
+  if ! is_task_flow_backup_family_name "$candidate_name" \
+    || ! task_flow_backup_is_verified "$selected" "$scan_index"; then
+    printf 'Old task-flow backup changed before retention cleanup.\n' >&2
+    return 1
+  fi
+  rm -rf -- "$selected"
+
+  verified_backups=()
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && verified_backups+=("$candidate")
+  done < <(list_verified_task_flow_backups)
+  if [[ "${#verified_backups[@]}" -ne 2 \
+    || ! " ${verified_backups[*]} " =~ " $BACKUP_DIR " ]]; then
+    printf 'Task-flow backup retention did not converge to two verified versions.\n' >&2
+    return 1
+  fi
+}
+
+count_verified_task_flow_backups() {
+  local candidate verified_count=0
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] && verified_count=$((verified_count + 1))
+  done < <(list_verified_task_flow_backups)
 
   printf '%s\n' "$verified_count"
 }
@@ -506,8 +570,8 @@ if [[ "$SKILL_MATCHES" == "1" && "$AGENTS_MATCHES" == "1" && "$MEMORY_MATCHES" =
 fi
 
 VERIFIED_BACKUP_COUNT="$(count_verified_task_flow_backups)"
-if [[ "$VERIFIED_BACKUP_COUNT" -ge 2 ]]; then
-  printf 'Two verified task-flow backups already exist; archive one explicitly before installing.\n' >&2
+if [[ "$VERIFIED_BACKUP_COUNT" -gt 2 ]]; then
+  printf 'More than two verified task-flow backups already exist; refusing to expand the inconsistent set.\n' >&2
   exit 1
 fi
 
@@ -624,6 +688,8 @@ if [[ "$(grep -Fxc '<!-- aiworker-task-flow:video-rules:start -->' "$WORKSPACE_A
   printf 'Task-flow managed-section verification failed.\n' >&2
   exit 1
 fi
+
+prune_verified_task_flow_backups
 
 TRANSACTION_COMPLETE=1
 printf 'Backed up task-flow installation state: %s\n' "$BACKUP_DIR"

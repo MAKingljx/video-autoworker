@@ -3,7 +3,8 @@ set -euo pipefail
 
 PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
-LEGACY_SOURCE_VERSION="0.1.0"
+AGENT_ID="second-original"
+SOURCE_VERSION="0.3.0"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +12,8 @@ PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 RUNTIME_VALIDATOR="$PLUGIN_DIR/scripts/validate-runtime-inspection.mjs"
 DOCTOR_VALIDATOR="$PLUGIN_DIR/scripts/validate-plugin-doctor.mjs"
 ABSENCE_VALIDATOR="$PLUGIN_DIR/scripts/validate-plugin-absence.mjs"
+UPGRADE_VALIDATOR="$REPOSITORY_ROOT/scripts/validate-aiworker-video-command-upgrade.mjs"
+UPGRADE_POLICY_HELPER="$REPOSITORY_ROOT/scripts/lib/aiworker-video-command-upgrade-policy.mjs"
 PROFILE_STATE_DIR="$HOME/.openclaw-qwen-current"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
 PROFILE_STATE_DB="$PROFILE_STATE_DIR/state/openclaw.sqlite"
@@ -18,6 +21,8 @@ INSTALLED_PLUGIN_DIR="$PROFILE_STATE_DIR/extensions/$PLUGIN_ID"
 BACKUP_ROOT="$HOME/ai-worker/backups/$PLUGIN_ID"
 INSTALL_LOCK_DIR="$BACKUP_ROOT/.qwen-current-first-install.lock"
 MODE="dry-run"
+ALLOWED_SENDER_SHA256=""
+INITIAL_ALLOWED_SENDER_SHA256=""
 
 run_qwen_openclaw() {
   env -u OPENCLAW_PROFILE \
@@ -197,7 +202,36 @@ verify_explicit_allowlist() {
   ' "$PROFILE_CONFIG" "$1" "$PLUGIN_ID"
 }
 
+verify_telegram_ingress_policy() {
+  node "$UPGRADE_VALIDATOR" telegram-policy "$PROFILE_CONFIG" "$AGENT_ID"
+}
+
+load_owner_sender_policy() {
+  local plan
+  local owner_count
+  local sender_hash
+  plan="$(node "$UPGRADE_VALIDATOR" owner-sender-plan "$PROFILE_CONFIG")" || return 1
+  owner_count="$(node -e 'const p=JSON.parse(process.argv[1]); process.stdout.write(String(p.ownerCount))' "$plan")" \
+    || return 1
+  sender_hash="$(node -e 'const p=JSON.parse(process.argv[1]); process.stdout.write(p.allowedSenderSha256 ?? "")' "$plan")" \
+    || return 1
+  if [[ "$owner_count" != "1" || ! "$sender_hash" =~ ^[a-f0-9]{64}$ ]]; then
+    printf 'Owner sender policy validator returned an invalid redacted plan.\n' >&2
+    return 1
+  fi
+  ALLOWED_SENDER_SHA256="$sender_hash"
+}
+
+verify_plugin_sender_hash() {
+  local config_path="$1"
+  node "$UPGRADE_VALIDATOR" sender-hash-config \
+    "$config_path" "$PLUGIN_ID" "$ALLOWED_SENDER_SHA256"
+}
+
 verify_explicit_allowlist pre-install
+verify_telegram_ingress_policy
+load_owner_sender_policy
+INITIAL_ALLOWED_SENDER_SHA256="$ALLOWED_SENDER_SHA256"
 
 verify_first_install_state() {
   node -e '
@@ -245,12 +279,20 @@ required_files=(
   "$PLUGIN_DIR/openclaw.plugin.json"
   "$PLUGIN_DIR/index.js"
   "$PLUGIN_DIR/lib/before-dispatch.js"
+  "$PLUGIN_DIR/lib/dispatch-identity.js"
+  "$PLUGIN_DIR/lib/natural-video-request.js"
   "$PLUGIN_DIR/lib/parse-video-command.js"
   "$PLUGIN_DIR/lib/runner.js"
+  "$PLUGIN_DIR/lib/short-receipt.js"
   "$PLUGIN_DIR/lib/stable-message-key.js"
+  "$PLUGIN_DIR/lib/video-path-policy.js"
+  "$PLUGIN_DIR/lib/video-request-router.js"
+  "$PLUGIN_DIR/lib/video-task-result.js"
   "$RUNTIME_VALIDATOR"
   "$DOCTOR_VALIDATOR"
   "$ABSENCE_VALIDATOR"
+  "$UPGRADE_VALIDATOR"
+  "$UPGRADE_POLICY_HELPER"
   "$PLUGIN_DIR/scripts/run-isolated-video-command-qa.mjs"
 )
 for required_file in "${required_files[@]}"; do
@@ -265,11 +307,11 @@ node -e '
   const packageJson = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
   const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const pluginId = process.argv[3];
-  const legacySourceVersion = process.argv[4];
+  const sourceVersion = process.argv[4];
   const extensions = packageJson?.openclaw?.extensions;
   const schema = manifest?.configSchema;
-  if (packageJson?.version !== legacySourceVersion) {
-    throw new Error(`Legacy first install accepts only source version ${legacySourceVersion}; fresh 0.2.0 install is not delivered.`);
+  if (packageJson?.version !== sourceVersion) {
+    throw new Error(`Fresh install accepts only hook-only source version ${sourceVersion}.`);
   }
   if (manifest?.id !== pluginId) throw new Error("Plugin manifest id mismatch.");
   if (!Array.isArray(extensions) || extensions.length !== 1 || extensions[0] !== "./index.js") {
@@ -278,7 +320,20 @@ node -e '
   if (schema?.type !== "object" || schema?.additionalProperties !== false) {
     throw new Error("Plugin manifest must use a strict object config schema.");
   }
-' "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$LEGACY_SOURCE_VERSION"
+  if (JSON.stringify(manifest?.activation?.onCapabilities) !== JSON.stringify(["hook"])) {
+    throw new Error("Fresh 0.3 install must declare only the hook capability.");
+  }
+  if (manifest?.contracts !== undefined || manifest?.toolMetadata !== undefined) {
+    throw new Error("Fresh 0.3 install must not declare any tool contract or tool metadata.");
+  }
+  const senderHashSchema = manifest?.configSchema?.properties?.allowedSenderSha256;
+  if (JSON.stringify(senderHashSchema) !== JSON.stringify({
+    type: "string",
+    pattern: "^[a-f0-9]{64}$",
+  })) {
+    throw new Error("Fresh 0.3 install must declare the lowercase SHA-256 sender gate.");
+  }
+' "$PLUGIN_DIR/package.json" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$SOURCE_VERSION"
 while IFS= read -r javascript_file; do
   node --check "$javascript_file"
 done < <(find "$PLUGIN_DIR" -type f \( -name '*.js' -o -name '*.mjs' \) -print | LC_ALL=C sort)
@@ -330,6 +385,22 @@ run_isolated_runtime_check() {
     isolated_status=1
   fi
   if [[ "$isolated_status" -eq 0 ]] \
+    && ! env -u OPENCLAW_PROFILE -u OPENCLAW_INCLUDE_ROOTS \
+      OPENCLAW_HOME="$isolated_home_dir" \
+      OPENCLAW_STATE_DIR="$isolated_state_dir" \
+      OPENCLAW_CONFIG_PATH="$isolated_config" \
+      NO_COLOR=1 \
+      openclaw config set \
+        "plugins.entries.$PLUGIN_ID.config.allowedSenderSha256" \
+        "\"$ALLOWED_SENDER_SHA256\"" \
+        --strict-json; then
+    isolated_status=1
+  fi
+  if [[ "$isolated_status" -eq 0 ]] \
+    && ! verify_plugin_sender_hash "$isolated_config"; then
+    isolated_status=1
+  fi
+  if [[ "$isolated_status" -eq 0 ]] \
     && ! prepare_isolated_sqlite_read "$isolated_state_dir/state/openclaw.sqlite"; then
     isolated_status=1
   fi
@@ -347,7 +418,7 @@ run_isolated_runtime_check() {
     isolated_status=1
   fi
   if [[ "$isolated_status" -eq 0 ]] \
-    && ! node "$RUNTIME_VALIDATOR" "$isolated_report" "$PLUGIN_ID"; then
+    && ! node "$RUNTIME_VALIDATOR" "$isolated_report" "$PLUGIN_ID" "$SOURCE_VERSION"; then
     isolated_status=1
   fi
   if [[ "$isolated_status" -eq 0 ]] \
@@ -390,7 +461,31 @@ fi
 
 umask 077
 stamp="$(date +%Y%m%d-%H%M%S)"
-install -d -m 700 "$BACKUP_ROOT"
+if [[ -L "$BACKUP_ROOT" ]]; then
+  printf 'Backup root must not be a symlink.\n' >&2
+  exit 1
+fi
+if [[ -e "$BACKUP_ROOT" ]]; then
+  backup_mode="$(stat -f '%Lp' "$BACKUP_ROOT")" || exit 1
+  if [[ ! -d "$BACKUP_ROOT" || "$backup_mode" != "700" ]]; then
+    printf 'Existing backup root must be a mode-0700 directory.\n' >&2
+    exit 1
+  fi
+else
+  install -d -m 700 "$BACKUP_ROOT"
+fi
+verified_backup_count=0
+shopt -s nullglob
+for verified_marker in "$BACKUP_ROOT"/*/.verified; do
+  if [[ -f "$verified_marker" && ! -L "$verified_marker" ]]; then
+    verified_backup_count=$((verified_backup_count + 1))
+  fi
+done
+shopt -u nullglob
+if [[ "$verified_backup_count" -ge 2 ]]; then
+  printf 'Two verified plugin backups already exist; archive one explicitly before applying.\n' >&2
+  exit 1
+fi
 if ! mkdir "$INSTALL_LOCK_DIR"; then
   printf 'Another qwen-current plugin installation holds the first-install lock.\n' >&2
   exit 1
@@ -434,6 +529,15 @@ if [[ "$preflight_status" -ne 0 ]]; then
   exit 1
 fi
 verify_first_install_state
+verify_telegram_ingress_policy
+load_owner_sender_policy
+if [[ "$ALLOWED_SENDER_SHA256" != "$INITIAL_ALLOWED_SENDER_SHA256" ]]; then
+  printf 'The unique Telegram command owner changed after dry-run validation.\n' >&2
+  exit 1
+fi
+node "$UPGRADE_VALIDATOR" owner-sender-plan "$PROFILE_CONFIG" \
+  > "$backup_dir/owner-sender-policy.json"
+chmod 600 "$backup_dir/owner-sender-policy.json"
 
 restore_failed_install() {
   install_status=$?
@@ -488,7 +592,18 @@ restore_failed_install() {
 trap restore_failed_install EXIT
 
 run_qwen_openclaw plugins install --force "$PLUGIN_DIR"
+run_qwen_openclaw config set \
+  "plugins.entries.$PLUGIN_ID.config.allowedSenderSha256" \
+  "\"$ALLOWED_SENDER_SHA256\"" \
+  --strict-json
+load_owner_sender_policy
+if [[ "$ALLOWED_SENDER_SHA256" != "$INITIAL_ALLOWED_SENDER_SHA256" ]]; then
+  printf 'The unique Telegram command owner changed during installation.\n' >&2
+  false
+fi
+verify_plugin_sender_hash "$PROFILE_CONFIG"
 verify_explicit_allowlist post-install
+verify_telegram_ingress_policy
 if [[ ! -d "$INSTALLED_PLUGIN_DIR" ]]; then
   printf 'Installed plugin directory is missing.\n' >&2
   false
@@ -497,10 +612,11 @@ assert_plugin_index_present "$PROFILE_STATE_DB"
 runtime_report="$backup_dir/runtime-inspect.json"
 doctor_report="$backup_dir/plugins-doctor.txt"
 run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$runtime_report"
-node "$RUNTIME_VALIDATOR" "$runtime_report" "$PLUGIN_ID"
+node "$RUNTIME_VALIDATOR" "$runtime_report" "$PLUGIN_ID" "$SOURCE_VERSION"
 NO_COLOR=1 run_qwen_openclaw plugins doctor > "$doctor_report"
 verify_doctor_report "$doctor_report"
 release_install_lock
+install -m 600 /dev/null "$backup_dir/.verified"
 trap - EXIT HUP INT TERM
 
 printf 'Installed plugin for profile %s; the official config write may have refreshed that profile.\n' "$PROFILE"

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export function validateRuntimeInspection(report, pluginId) {
+export function validateRuntimeInspection(report, pluginId, expectedVersion = '0.3.0') {
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
     throw new Error('Runtime inspection must be a JSON object.')
   }
@@ -12,11 +12,18 @@ export function validateRuntimeInspection(report, pluginId) {
   if (report.plugin?.status !== 'loaded') {
     throw new Error('Runtime inspection did not load the plugin.')
   }
-  if (
-    !Array.isArray(report.typedHooks)
-    || !report.typedHooks.some(hook => hook?.name === 'before_dispatch')
-  ) {
-    throw new Error('Runtime inspection is missing before_dispatch.')
+  if (report.plugin?.version !== expectedVersion) {
+    throw new Error(`Runtime inspection plugin version must be ${expectedVersion}.`)
+  }
+  if (!Array.isArray(report.typedHooks)) {
+    throw new Error('Runtime inspection hooks must be an array.')
+  }
+  const hookNames = report.typedHooks.map(hook => hook?.name).filter(Boolean).toSorted()
+  if (JSON.stringify(hookNames) !== JSON.stringify(['before_dispatch'])) {
+    throw new Error('Hook-only runtime must expose exactly before_dispatch.')
+  }
+  if (!Array.isArray(report.tools) || report.tools.length !== 0) {
+    throw new Error('Hook-only runtime must not register tools.')
   }
   if (!Array.isArray(report.diagnostics)) {
     throw new Error('Runtime inspection diagnostics must be an array.')
@@ -28,12 +35,12 @@ export function validateRuntimeInspection(report, pluginId) {
 }
 
 async function main() {
-  const [reportPath, pluginId] = process.argv.slice(2)
+  const [reportPath, pluginId, expectedVersion = '0.3.0'] = process.argv.slice(2)
   if (!reportPath || !pluginId) {
-    throw new Error('Usage: validate-runtime-inspection.mjs <report.json> <plugin-id>')
+    throw new Error('Usage: validate-runtime-inspection.mjs <report.json> <plugin-id> [expected-version]')
   }
   const report = JSON.parse(await readFile(reportPath, 'utf8'))
-  validateRuntimeInspection(report, pluginId)
+  validateRuntimeInspection(report, pluginId, expectedVersion)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

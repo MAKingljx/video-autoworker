@@ -193,7 +193,7 @@ describe('transactional AI-worker task-flow installer', () => {
       expect(memoryAfterFirst.match(/<!-- aiworker-task-flow:video-memory:start -->/gu)).toHaveLength(1)
       expect(await pathExists(resolve(
         workspace,
-        'skills/aiworker-task-flow/lib/video-command.mjs',
+        'skills/aiworker-task-flow/lib/video-task.mjs',
       ))).toBe(true)
       expect((await stat(resolve(workspace, 'AGENTS.md'))).mode & 0o777).toBe(0o600)
       expect((await stat(resolve(workspace, 'MEMORY.md'))).mode & 0o777).toBe(0o600)
@@ -228,7 +228,7 @@ describe('transactional AI-worker task-flow installer', () => {
     }
   })
 
-  it('fails closed before a third changed install when two verified backups already exist', async () => {
+  it('verifies a changed install before retaining only two recoverable backups', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-retention-test-'))
     const workspace = resolve(root, 'workspace')
     const backupRoot = resolve(root, 'backups')
@@ -259,23 +259,17 @@ describe('transactional AI-worker task-flow installer', () => {
       const installedSkill = resolve(workspace, 'skills/aiworker-task-flow/SKILL.md')
       await writeFile(installedSkill, 'second distinct installed skill state\n')
       await runInstaller(workspace, backupRoot)
-      expect(await generatedBackups()).toHaveLength(2)
+      const backupsBeforeThird = await generatedBackups()
+      expect(backupsBeforeThird).toHaveLength(2)
 
       await writeFile(installedSkill, 'third distinct installed skill state\n')
-      const skillBeforeThird = await readFile(installedSkill, 'utf8')
-      const agentsBeforeThird = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
-      const memoryBeforeThird = await readFile(resolve(workspace, 'MEMORY.md'), 'utf8')
-      const backupsBeforeThird = (await readdir(backupRoot)).sort()
+      const third = await runInstaller(workspace, backupRoot)
+      const backupsAfterThird = await generatedBackups()
 
-      await expect(runInstaller(workspace, backupRoot)).rejects.toMatchObject({
-        stderr: expect.stringContaining('archive one explicitly'),
-      })
-
-      expect(await readFile(installedSkill, 'utf8')).toBe(skillBeforeThird)
-      expect(await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')).toBe(agentsBeforeThird)
-      expect(await readFile(resolve(workspace, 'MEMORY.md'), 'utf8')).toBe(memoryBeforeThird)
-      expect(await generatedBackups()).toHaveLength(2)
-      expect((await readdir(backupRoot)).sort()).toEqual(backupsBeforeThird)
+      expect(third.stdout).toContain('Installed AI-worker task-flow skill and workspace sections')
+      expect(await readFile(installedSkill, 'utf8')).toContain('name: aiworker-task-flow')
+      expect(backupsAfterThird).toHaveLength(2)
+      expect(backupsAfterThird.filter(name => backupsBeforeThird.includes(name))).toHaveLength(1)
       expect(await readFile(resolve(legacyBackup, 'sentinel.txt'), 'utf8')).toBe('legacy backup\n')
       expect(await readFile(resolve(malformedBackup, 'MANIFEST.sha256'), 'utf8')).toBe(
         '.\tdirectory\t700\t-\n',
@@ -385,9 +379,10 @@ describe('transactional AI-worker task-flow installer', () => {
     }
   })
 
-  it('requires the installed parser module and rejects unguarded failure injection', async () => {
+  it('requires the installed video runtime and rejects unguarded failure injection', async () => {
     const script = await readFile(installer, 'utf8')
-    expect(script).toContain('"$SOURCE_DIR/lib/video-command.mjs"')
+    expect(script).toContain('"$SOURCE_DIR/lib/video-task.mjs"')
+    expect(script).not.toContain('"$SOURCE_DIR/lib/video-command.mjs"')
 
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-failpoint-guard-test-'))
     const workspace = resolve(root, 'workspace')
