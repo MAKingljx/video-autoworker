@@ -124,6 +124,12 @@ if (args[0] === 'plugins' && args[1] === 'install') {
     source: 'path', sourcePath: source, installPath: installed, version: sourceVersion,
     installedAt: '2026-08-11T01:02:03.000Z',
   }))
+  if (isProduction) {
+    const configPath = join(state, 'openclaw.json')
+    const config = JSON.parse(readFileSync(configPath, 'utf8'))
+    config.meta = { ...(config.meta || {}), lastTouchedAt: '2026-08-11T01:02:03.000Z' }
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\\n')
+  }
   process.stdout.write('installed\\n'); process.exit(0)
 }
 if (args[0] === 'plugins' && args[1] === 'inspect') {
@@ -308,6 +314,38 @@ describe('controlled 0.3.0 to 0.4.0 status upgrade entry', () => {
     expect(marker.pluginFingerprint).toBe(await payloadFingerprint(join(backup, 'previous-plugin')))
     expect(marker.pluginFingerprint).toBe(await payloadFingerprint(value.installed))
   }, 30_000)
+
+  it('retries from an active 0.3.0 recovery source without leaving a stale active marker', async () => {
+    const value = await fixture()
+    await seedVerifiedHistory(value)
+    await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
+      .rejects.toMatchObject({ code: 1 })
+    const retry = await run(value, '--apply')
+    expect(retry.stdout).toContain('from 0.3.0 to 0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.0')
+    const states = await Promise.all((await statusBackups(value))
+      .map(async backup => ({ backup, ...await markerState(backup) })))
+    expect(states.filter(state => state.active)).toEqual([])
+    expect(states.filter(state => state.verified)).toHaveLength(2)
+  }, 45_000)
+
+  it('keeps exactly one active 0.3.0 source when a retry also fails', async () => {
+    const value = await fixture()
+    await seedVerifiedHistory(value)
+    await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
+      .rejects.toMatchObject({ code: 1 })
+    await rm(join(value.root, 'live.fail'))
+    await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
+      .rejects.toMatchObject({ code: 1 })
+    expect(await packageVersion(value)).toBe('0.3.0')
+    const states = await Promise.all((await statusBackups(value))
+      .map(async backup => ({ backup, ...await markerState(backup) })))
+    const active = states.filter(state => state.active)
+    expect(active).toHaveLength(1)
+    expect(states.filter(state => state.verified)).toHaveLength(2)
+    const record = JSON.parse(await readFile(`${value.database}.record.json`, 'utf8'))
+    expect(record.sourcePath).toBe(join(active[0].backup, 'previous-plugin'))
+  }, 45_000)
 
   it('explicitly rolls a successful 0.4.0 release back to exact 0.3.0', async () => {
     const value = await fixture()

@@ -322,12 +322,38 @@ validate_installed_candidate() {
 
 install_and_validate_candidate() {
   run_qwen_openclaw plugins install --force "$PLUGIN_DIR" > "$BACKUP_DIR/install-candidate.txt" || return 1
+  # The official installer updates volatile config metadata such as
+  # meta.lastTouchedAt. Restore the audited profile bytes before loading the
+  # candidate so the release changes only the plugin payload and install index.
+  install -m 600 "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || return 1
   cmp -s "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || return 1
   assert_source_unchanged || return 1
   validate_installed_candidate "$BACKUP_DIR/candidate-validation" || return 1
   validate_live_candidate "$BACKUP_DIR/live-validation" || return 1
   [[ "$(node "$STATUS_VALIDATOR" config-fingerprint "$PROFILE_CONFIG")" == "$config_before" ]] || return 1
   [[ "$(service_snapshot)" == "$protected_before" ]] || return 1
+}
+
+retire_previous_active_marker() {
+  local marker backup_dir
+  marker="$(node -e '
+    const { readFileSync } = require("node:fs")
+    const { dirname, join } = require("node:path")
+    const record = JSON.parse(readFileSync(process.argv[1], "utf8"))
+    const backupRoot = process.argv[2]
+    const canonicalSource = process.argv[3]
+    if (record.sourcePath === canonicalSource) process.exit(0)
+    if (typeof record.sourcePath !== "string" || dirname(dirname(record.sourcePath)) !== backupRoot
+      || record.sourcePath !== join(dirname(record.sourcePath), "previous-plugin")) process.exit(1)
+    process.stdout.write(join(dirname(record.sourcePath), ".active-rollback-source.json"))
+  ' "$current_index" "$BACKUP_ROOT" "$PLUGIN_DIR")" || return 1
+  [[ -n "$marker" ]] || return 0
+  backup_dir="${marker%/.active-rollback-source.json}"
+  [[ -d "$backup_dir" && ! -L "$backup_dir" && "$(stat -f '%Lp' "$backup_dir")" == "700" ]] || return 1
+  [[ -f "$marker" && ! -L "$marker" && "$(stat -f '%Lp' "$marker")" == "600" ]] || return 1
+  [[ ! -e "$backup_dir/.verified" ]] || return 1
+  rm -f -- "$marker" || return 1
+  [[ ! -e "$marker" ]]
 }
 
 create_verified_backup() {
@@ -411,6 +437,9 @@ restore_v03() {
   fi
   if [[ "$failed" -eq 0 && -e "$backup_dir/.verified" ]]; then
     failed=1
+  fi
+  if [[ "$failed" -eq 0 ]]; then
+    retire_previous_active_marker || failed=1
   fi
   set -e
   return "$failed"
@@ -509,6 +538,7 @@ if [[ "$MODE" == "rollback" ]]; then
 else
   validate_current_hook "$work_root/locked-preflight" "$PREVIOUS_VERSION"
 fi
+current_index="$work_root/locked-preflight/index.json"
 
 if [[ "$MODE" == "rollback" ]]; then
   node "$STATUS_VALIDATOR" backup "$BACKUP_ROOT" "$ROLLBACK_BACKUP" "$TARGET_SHA" \
@@ -532,7 +562,6 @@ if [[ "$MODE" == "rollback" ]]; then
   exit 0
 fi
 
-current_index="$work_root/locked-preflight/index.json"
 create_verified_backup
 if ! install_and_validate_candidate; then
   if restore_v03 "$BACKUP_DIR" "$BACKUP_DIR/automatic-rollback" \
@@ -551,6 +580,10 @@ if ! node "$VALIDATOR" backup-retention-enforce "$BACKUP_ROOT" "$BACKUP_DIR" "$c
   exit 70
 fi
 chmod 600 "$BACKUP_DIR/retention.json"
+if ! retire_previous_active_marker; then
+  printf 'Upgrade passed, but the previous active rollback marker could not be retired safely.\n' >&2
+  exit 70
+fi
 
 printf 'Upgraded %s from %s to %s at approved target %s.\n' \
   "$PLUGIN_ID" "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
