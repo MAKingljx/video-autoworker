@@ -120,10 +120,10 @@ export function validatePluginSource(packageJson, manifest, {
   assert(manifest?.activation?.onStartup === true, 'Plugin manifest must activate on startup.')
   assert(
     isDeepStrictEqual(manifest?.activation?.onCapabilities, ['hook']),
-    '0.3 plugin manifest must activate for exactly the hook capability.',
+    'Hook-only plugin manifest must activate for exactly the hook capability.',
   )
-  assert(manifest?.contracts === undefined, '0.3 plugin manifest must not declare capability contracts.')
-  assert(manifest?.toolMetadata === undefined, '0.3 plugin manifest must not declare tool metadata.')
+  assert(manifest?.contracts === undefined, 'Hook-only plugin manifest must not declare capability contracts.')
+  assert(manifest?.toolMetadata === undefined, 'Hook-only plugin manifest must not declare tool metadata.')
   assert(toolName && typeof toolName === 'string', 'Removed tool name must be explicit for validation.')
   assert(manifest?.configSchema?.type === 'object', 'Plugin config schema must be an object.')
   assert(manifest?.configSchema?.additionalProperties === false, 'Plugin config schema must reject additional properties.')
@@ -132,7 +132,7 @@ export function validatePluginSource(packageJson, manifest, {
       type: 'string',
       pattern: '^[a-f0-9]{64}$',
     }),
-    '0.3 plugin schema must declare the lowercase SHA-256 sender gate.',
+    'Hook-only plugin schema must declare the lowercase SHA-256 sender gate.',
   )
 }
 
@@ -156,7 +156,7 @@ export function validateRuntimeReport(report, {
     isDeepStrictEqual(hookNames, expectedHooks),
     expectTool
       ? '0.2 runtime must expose exactly its three known hooks.'
-      : '0.3 runtime must expose only before_dispatch.',
+      : 'Hook-only runtime must expose only before_dispatch.',
   )
 
   assert(Array.isArray(report.tools), 'Runtime tools must be an array.')
@@ -165,7 +165,7 @@ export function validateRuntimeReport(report, {
     assert(matchingTools.length === 1, 'Runtime inspection must register the approved tool exactly once.')
     assert(matchingTools[0].optional === true, 'Runtime tool registration must remain optional.')
   } else {
-    assert(report.tools.length === 0, '0.3 runtime must not register any tool.')
+    assert(report.tools.length === 0, 'Hook-only runtime must not register any tool.')
   }
 
   assert(Array.isArray(report.diagnostics), 'Runtime diagnostics must be an array.')
@@ -196,7 +196,7 @@ export function validateLiveGatewayToolCatalog(report, {
     assert(matchingTools[0].pluginId === pluginId, 'Live Gateway target tool plugin id mismatch.')
     assert(matchingTools[0].optional === true, 'Live Gateway target tool must remain optional.')
   } else {
-    assert(matchingTools.length === 0, 'The 0.3 live Gateway must not expose the removed 0.2 tool.')
+    assert(matchingTools.length === 0, 'The hook-only live Gateway must not expose the removed tool.')
   }
 }
 
@@ -252,7 +252,7 @@ async function validateActiveRollbackSource({
   const parts = backupRelative.split(sep)
   assert(
     parts.length === 2
-      && /^upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(parts[0])
+      && /^(?:upgrade|status-upgrade)-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(parts[0])
       && parts[1] === 'previous-plugin',
     'Non-canonical install source is not an approved rollback backup path.',
   )
@@ -526,7 +526,8 @@ async function main() {
       break
     }
     case 'runtime-v02':
-    case 'runtime-v03': {
+    case 'runtime-v03':
+    case 'runtime-hook-only': {
       const [reportPath, pluginId, expectedVersion, toolName] = args
       validateRuntimeReport(await readJson(reportPath, 'runtime report'), {
         pluginId,
@@ -537,7 +538,8 @@ async function main() {
       break
     }
     case 'live-v02':
-    case 'live-v03': {
+    case 'live-v03':
+    case 'live-hook-only': {
       const [reportPath, pluginId, agentId, toolName] = args
       assert(reportPath && pluginId && agentId && toolName, 'live Gateway arguments are incomplete.')
       validateLiveGatewayToolCatalog(await readJson(reportPath, 'live Gateway tool catalog'), {
@@ -558,7 +560,8 @@ async function main() {
       break
     }
     case 'effective-v02':
-    case 'effective-v03': {
+    case 'effective-v03':
+    case 'effective-hook-only': {
       const [baselinePath, currentPath, agentId, toolName] = args
       assert(baselinePath && currentPath && agentId && toolName, 'effective tools arguments are incomplete.')
       validateEffectiveTools(
@@ -605,11 +608,12 @@ async function main() {
       break
     }
     case 'doctor-v02':
-    case 'doctor-v03': {
+    case 'doctor-v03':
+    case 'doctor-hook-only': {
       const [reportPath, pluginId] = args
       assert(reportPath && pluginId, 'doctor arguments are incomplete.')
       validateDoctorReport(await readFile(reportPath, 'utf8'), pluginId, {
-        allowHookOnly: command === 'doctor-v03',
+        allowHookOnly: command !== 'doctor-v02',
       })
       break
     }

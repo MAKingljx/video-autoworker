@@ -46,7 +46,14 @@ globalThis.fetch = async (input, init = {}) => {
     return json({ taskId: body.taskId, status: 'accepted' })
   }
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
-    return json({ taskId: url.searchParams.get('taskId'), status: 'accepted' })
+    return json({ runs: [{
+      taskId: url.searchParams.get('taskId'),
+      status: 'succeeded',
+      attemptCount: 1,
+      maxAttempts: 1,
+      output: { summary: '状态客户端测试摘要' },
+      updatedAt: '2026-08-11T12:00:00.000Z',
+    }] })
   }
   return json({ error: 'unexpected request' }, 404)
 }
@@ -106,6 +113,26 @@ globalThis.fetch = async (input, init = {}) => {
         taskId: 'generic-command-task',
         status: 'accepted',
         bindingId: 'generic-binding',
+      })
+
+      const statusRun = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--status', 'explicit-video-task',
+        ], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      expect(statusRun.stderr).toBe('')
+      expect(JSON.parse(statusRun.stdout)).toEqual({
+        taskId: 'explicit-video-task',
+        status: 'succeeded',
+        attemptCount: 1,
+        maxAttempts: 1,
+        output: { summary: '状态客户端测试摘要' },
+        updatedAt: '2026-08-11T12:00:00.000Z',
       })
 
       const videoPromptRun = await new Promise<{
@@ -289,6 +316,9 @@ globalThis.fetch = async (input, init = {}) => {
         input: { prompt: '请分析这个普通任务' },
       })
       expect(triggerRequests.filter(request => request.body?.taskId === 'explicit-video-task')).toHaveLength(1)
+      expect(requests.filter(({ method, url }) => (
+        method === 'GET' && url === '/api/n8n/runs?taskId=explicit-video-task'
+      ))).toHaveLength(1)
       const noRecoveryRequests = requests.filter(request => (
         request.body?.taskId === 'no-recovery-task'
         || request.url.includes('taskId=no-recovery-task')
@@ -474,15 +504,44 @@ globalThis.fetch = async (input, init = {}) => {
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+    const architecture = readFileSync(resolve(
+      process.cwd(),
+      'docs/architecture/openclaw-video-analysis-flow.md',
+    ), 'utf8')
 
-    for (const contract of [skill, workspaceRules]) {
-      expect(contract).toContain('查一下刚才的视频')
-      expect(contract).toMatch(/most recent plugin\s+receipt/u)
-      expect(contract).toMatch(/ask[\s\S]{0,80}task ID/u)
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
+      expect(contract).toContain('`before_dispatch`')
+      expect(contract).toMatch(/trusted[\s\S]{0,100}most-recent receipt|trusted unique most-recent receipt/u)
+      expect(contract).toMatch(/complete task ID/u)
+      expect(contract).toMatch(/exactly once/u)
+      expect(contract).toMatch(/read-only\s+status/u)
+      expect(contract).toMatch(/Qwen/u)
       expect(contract).toContain('`memory_search`')
-      expect(contract).toMatch(/scan.*database|scan Mission Control\/SQLite/u)
-      expect(contract).toMatch(/resubmit/u)
+      expect(contract).toMatch(/filesystem|file/u)
+      expect(contract).toMatch(/SQLite/u)
+      expect(contract).toMatch(/polling/u)
+      expect(contract).toMatch(/resubmission|resubmit/u)
     }
+    expect(skill).toContain('请提供完整任务编号。')
+    expect(workspaceRules).toContain('请提供完整任务编号。')
+    for (const reply of [
+      '任务已受理，正在等待处理。',
+      '任务正在处理中。',
+      '任务已完成。',
+      '任务处理失败。',
+      '暂时无法查询任务状态。',
+    ]) {
+      expect(skill).toContain(reply)
+      expect(workspaceRules).toContain(reply)
+    }
+    expect(architecture).toContain('before_dispatch 状态分类')
+    expect(architecture).toContain('只读状态 runner 查询一次')
+    expect(architecture).toContain('禁止启动 Qwen')
+    expect(architecture).toContain('不产生新提交')
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {

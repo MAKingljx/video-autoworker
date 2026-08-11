@@ -1,8 +1,8 @@
 # AI-worker Video Command plugin
 
-This directory contains the local `0.3.0` candidate for the native OpenClaw
-single-video ingress. It is not proof that GitHub main or production has been
-upgraded.
+This directory contains the hook-only `0.4.0` implementation of the native
+OpenClaw single-video ingress. The files describe the release contract; runtime
+and production acceptance still require their own evidence.
 
 ## Business contract
 
@@ -65,8 +65,8 @@ syntax, or processes media itself.
   respective message grammar and intent.
 - `video-path-policy.js` is the single extension, quoting, absolute-path, and
   canonical-path policy shared by both parsers.
-- `video-request-router.js` combines exact-command and natural-language
-  classification into `submit`, `respond`, `reject`, or `pass`.
+- `video-request-router.js` combines command, natural-language, and status
+  classification into `submit`, `status`, `respond`, `reject`, or `pass`.
 - `dispatch-identity.js` validates the Telegram private-chat and consistent
   session/sender identity, then derives the stable task key.
 - `before-dispatch.js` coordinates routing, identity, one runner call, and the
@@ -74,8 +74,19 @@ syntax, or processes media itself.
 - `runner.js` owns the fixed installed-client argument array and validates its
   structured response.
 - `video-task-result.js` is the single status/duplicate validation policy.
+- `video-task-id.js` validates and extracts canonical video task identifiers.
+- `recent-task-store.js` retains only the bounded, non-sensitive recent-task
+  pointer needed by an explicit status request.
+- `status-request.js` recognizes explicit progress/result queries and resolves
+  their task identifier without monitoring.
+- `status-runner.js` invokes the installed one-shot status client and validates
+  its structured response.
+- `video-status-result.js` renders one concise terminal or in-progress reply.
+- `json-command.js` provides the shared bounded JSON subprocess boundary.
 - `short-receipt.js` exposes only a
   human-readable task number and later-query hint.
+- `scripts/run-installed-video-status-qa.mjs` is the installed-runtime status
+  acceptance harness; it does not submit or poll a task.
 
 Keep parsing, identity, execution, and presentation separate. Do not add model
 tool selection, host run-state coordination, direct media analysis, or n8n
@@ -210,3 +221,49 @@ verified recovery points.
 After promotion, verify Mission Control / SQLite, one n8n video-analysis
 execution, `prepare/audio/vision/finalize`, `memoryMode=none`, `delivery=none`,
 service health, and temporary residue separately.
+
+### Controlled 0.3.0 to 0.4.0 status-query release
+
+The earlier upgrade entry is intentionally limited to its one-time
+`0.2.0 -> 0.3.0` tool-removal migration. Do not reuse that migration to deploy
+`0.4.0`. The hook-only status-query release has a separate, config-preserving
+entry:
+
+```bash
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --dry-run --target-sha <approved-0.4.0-sha>
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --apply --target-sha <same-approved-0.4.0-sha>
+```
+
+It accepts only installed `0.3.0` and source `0.4.0`. The gate requires a clean
+canonical `main` whose `HEAD`, local `origin/main`, and live GitHub `main` all
+equal the explicit target SHA. The installed recovery payload must also match
+the immutable `0.3.0` source commit `3c385f19308b4d36cf624d3c95a20cc65acaf903`,
+which must be an ancestor of the target. Dry-run performs an isolated official force
+install and fingerprints production state before and after. Apply makes and
+validates a complete `0.3.0` plugin/config recovery point, enforces the shared
+two-backup limit, installs only through the official OpenClaw command, and
+refreshes only `qwen-current`.
+
+Success requires the canonical and installed payload fingerprints to match,
+runtime and live Gateway inspection to expose only `before_dispatch`, the
+Telegram direct-session effective tools and qwen-current config to remain
+unchanged, and the protected `3017`, `5678`, `5679`, `18091`, `gpt-main`, and
+`qwen-weixin-new` listener identities to remain unchanged. It does not submit a
+task or restart Mission Control or n8n.
+
+The successful apply prints the exact verified backup path. Use that path and
+the same approved target SHA for an explicit rollback:
+
+```bash
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --rollback \
+  --target-sha <same-approved-0.4.0-sha> \
+  --backup /absolute/path/to/status-upgrade-YYYYMMDD-HHMMSS.suffix
+```
+
+Any failed apply automatically reinstalls the fingerprinted `0.3.0` payload,
+restores the exact saved qwen-current config, refreshes only qwen-current, and
+revalidates the live hook-only/runtime/tool boundary. A failed rollback attempts
+to restore the audited `0.4.0` candidate and accepts that compensation only
+after config, index, payload, runtime, live catalog, effective tools, and all
+protected listeners pass again. If compensation is incomplete, it exits for
+manual inspection rather than reporting success.

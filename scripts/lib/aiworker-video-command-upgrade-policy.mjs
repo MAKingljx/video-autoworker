@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 const VERIFIED_MARKER = '.verified'
 const UPGRADE_DIRECTORY = /^upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
-const VERIFIED_BACKUP_DIRECTORY = /^(?:upgrade-)?([0-9]{8}-[0-9]{6})\.[A-Za-z0-9]+$/u
+const VERIFIED_BACKUP_DIRECTORY = /^(?:(?:status-)?upgrade-)?([0-9]{8}-[0-9]{6})\.[A-Za-z0-9]+$/u
 const ACTIVE_ROLLBACK_MARKER = '.active-rollback-source.json'
 const TELEGRAM_OWNER = /^telegram:([1-9][0-9]*)$/u
 const EXPLICIT_CHANNEL_OWNER = /^[a-z][a-z0-9_-]*:.+$/u

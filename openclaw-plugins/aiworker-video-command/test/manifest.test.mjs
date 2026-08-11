@@ -15,7 +15,7 @@ describe('OpenClaw plugin package contract', () => {
       'openclaw-plugins/aiworker-video-command/vitest.config.mjs',
     )
     expect(packageJson.type).toBe('module')
-    expect(packageJson.version).toBe('0.3.0')
+    expect(packageJson.version).toBe('0.4.0')
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(packageJson.openclaw.compat.pluginApi).toBe('>=2026.7.1')
     expect(manifest.id).toBe('aiworker-video-command')
@@ -49,5 +49,6 @@ describe('OpenClaw plugin package contract', () => {
     expect(entry).not.toContain('inbound_claim')
     expect(entry).not.toContain('message_received')
     expect(entry).toContain('api.pluginConfig?.allowedSenderSha256')
+    expect(entry).toContain('bounded task status queries')
   })
 })

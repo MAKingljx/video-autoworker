@@ -25,6 +25,8 @@ const context = {
   senderId: 'sender-id',
 }
 
+const EXPLICIT_TASK_ID = `video-natural-${'d'.repeat(64)}`
+
 function acceptedRunner() {
   return vi.fn(async ({ taskId }) => ({ taskId, status: 'accepted', duplicate: false }))
 }
@@ -335,5 +337,214 @@ describe('before_dispatch handler', () => {
       ),
     })
     expect(runner).toHaveBeenCalledTimes(1)
+  })
+
+  it('retains the stable task hint after an unconfirmed receipt', async () => {
+    const runner = vi.fn(async () => {
+      throw new Error('submit_unconfirmed')
+    })
+    const statusRunner = vi.fn(async ({ taskId }) => ({ taskId, status: 'queued' }))
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await handler(event(), context)
+    await expect(handler(event({ content: '查进度' }), context)).resolves.toEqual({
+      handled: true,
+      text: '任务已受理，正在等待处理。',
+    })
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(statusRunner).toHaveBeenCalledTimes(1)
+  })
+
+  it('queries the latest task once in the same trusted conversation without invoking submission again', async () => {
+    const runner = acceptedRunner()
+    const statusRunner = vi.fn(async ({ taskId }) => ({ taskId, status: 'running' }))
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await handler(event({ content: '帮我分析一下这个视频 /tmp/demo.mp4' }), context)
+    const result = await handler(event({ content: '现在查询一下任务进度' }), context)
+
+    expect(result).toEqual({ handled: true, text: '任务正在处理中。' })
+    expect(result.text).not.toMatch(/video-(?:command|natural)-/u)
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(statusRunner).toHaveBeenCalledTimes(1)
+    expect(statusRunner).toHaveBeenCalledWith({
+      taskId: expect.stringMatching(/^video-natural-[a-f0-9]{64}$/u),
+    })
+  })
+
+  it('keeps common result and completion questions on the bounded status route', async () => {
+    const runner = acceptedRunner()
+    const statusRunner = vi.fn(async ({ taskId }) => ({ taskId, status: 'succeeded', summary: null }))
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await handler(event({ content: '帮我分析一下这个视频 /tmp/demo.mp4' }), context)
+    for (const content of [
+      '查一下结果',
+      '这个视频结果出来了吗',
+      '刚才的视频分析完了吗',
+      '上次的视频好了没',
+    ]) {
+      await expect(handler(event({ content }), context)).resolves.toEqual({
+        handled: true,
+        text: '任务已完成。',
+      })
+    }
+    expect(runner).toHaveBeenCalledTimes(1)
+    expect(statusRunner).toHaveBeenCalledTimes(4)
+  })
+
+  it('accepts one complete explicit task id without a recent-task hint', async () => {
+    const runner = vi.fn()
+    const statusRunner = vi.fn(async ({ taskId }) => ({
+      taskId,
+      status: 'succeeded',
+      summary: '纯蓝画面，无人物和文字。',
+    }))
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await expect(handler(event({
+      content: `查询任务${EXPLICIT_TASK_ID}状态`,
+    }), context)).resolves.toEqual({
+      handled: true,
+      text: '任务已完成。摘要：纯蓝画面，无人物和文字。',
+    })
+    expect(runner).not.toHaveBeenCalled()
+    expect(statusRunner).toHaveBeenCalledTimes(1)
+    expect(statusRunner).toHaveBeenCalledWith({ taskId: EXPLICIT_TASK_ID })
+  })
+
+  it('asks for a complete task id after restart, expiry, mismatch, or ambiguity', async () => {
+    const runner = vi.fn()
+    const statusRunner = vi.fn()
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    for (const content of [
+      '查进度',
+      '查询任务video-natural-short状态',
+      `查询 ${EXPLICIT_TASK_ID} 和 video-command-${'e'.repeat(64)} 的状态`,
+    ]) {
+      await expect(handler(event({ content }), context)).resolves.toEqual({
+        handled: true,
+        text: '请提供完整任务编号。',
+      })
+    }
+    expect(runner).not.toHaveBeenCalled()
+    expect(statusRunner).not.toHaveBeenCalled()
+  })
+
+  it('does not share a recent task across trusted session scopes', async () => {
+    const runner = acceptedRunner()
+    const statusRunner = vi.fn()
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await handler(event({ content: '帮我分析一下这个视频 /tmp/demo.mp4' }), context)
+    await expect(handler(event({
+      content: '查一下刚才的视频',
+      sessionKey: 'agent:second-original:telegram:direct:new-session',
+    }), {
+      ...context,
+      sessionKey: 'agent:second-original:telegram:direct:new-session',
+      conversationId: 'new-conversation',
+    })).resolves.toEqual({ handled: true, text: '请提供完整任务编号。' })
+    expect(statusRunner).not.toHaveBeenCalled()
+  })
+
+  it('keeps the same recent task when optional account or conversation fields drift', async () => {
+    const runner = acceptedRunner()
+    const statusRunner = vi.fn(async ({ taskId }) => ({ taskId, status: 'accepted' }))
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await handler(event({ content: '帮我分析一下这个视频 /tmp/demo.mp4' }), context)
+    await expect(handler(event({ content: '查进度' }), {
+      ...context,
+      accountId: undefined,
+      conversationId: undefined,
+    })).resolves.toEqual({ handled: true, text: '任务已受理，正在等待处理。' })
+    expect(statusRunner).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    '查\n进度',
+    `查询任务${EXPLICIT_TASK_ID}\0状态`,
+    `查询任务${EXPLICIT_TASK_ID}\u007f状态`,
+  ])('fails closed for control characters without querying: %s', async content => {
+    const statusRunner = vi.fn()
+    const handler = createBeforeDispatchHandler({
+      runner: vi.fn(),
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await expect(handler(event({ content }), context)).resolves.toEqual({
+      handled: true,
+      text: '暂时无法查询任务状态。',
+    })
+    expect(statusRunner).not.toHaveBeenCalled()
+  })
+
+  it('applies the sender hash gate to status and never falls through to the model', async () => {
+    const statusRunner = vi.fn()
+    const handler = createBeforeDispatchHandler({
+      runner: vi.fn(),
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash('another-sender'),
+    })
+
+    await expect(handler(event({
+      content: `查询任务${EXPLICIT_TASK_ID}状态`,
+    }), context)).resolves.toEqual({
+      handled: true,
+      text: '暂时无法查询任务状态。',
+    })
+    expect(statusRunner).not.toHaveBeenCalled()
+  })
+
+  it('returns one stable query error and never retries or resubmits', async () => {
+    const runner = vi.fn()
+    const statusRunner = vi.fn(async () => {
+      throw new Error('private status error with /tmp/path')
+    })
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    await expect(handler(event({
+      content: `查询任务${EXPLICIT_TASK_ID}状态`,
+    }), context)).resolves.toEqual({
+      handled: true,
+      text: '暂时无法查询任务状态。',
+    })
+    expect(statusRunner).toHaveBeenCalledTimes(1)
+    expect(runner).not.toHaveBeenCalled()
   })
 })

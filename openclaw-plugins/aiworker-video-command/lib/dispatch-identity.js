@@ -7,6 +7,7 @@ import {
 
 export const TARGET_CHANNEL = 'telegram'
 const SENDER_HASH_DOMAIN = 'aiworker-video-command:telegram-sender:v1\0'
+const CONVERSATION_SCOPE_DOMAIN = 'aiworker-video-command:conversation-scope:v1\0'
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 
 function normalizedString(value) {
@@ -32,18 +33,22 @@ export function normalizeAllowedSenderHash(value) {
   return typeof value === 'string' && SHA256_PATTERN.test(value) ? value : null
 }
 
-export function resolveDispatchIdentity(event, context, route) {
-  // Telegram pairing/allowlist owns sender authorization upstream. This hook
-  // receives stable identity fields, so it verifies their direct-message shape
-  // and consistency without inventing an unavailable senderIsOwner signal.
+function deriveConversationScopeKey(fields) {
+  return createHash('sha256')
+    .update(CONVERSATION_SCOPE_DOMAIN, 'utf8')
+    .update(JSON.stringify([
+      fields.channel,
+      fields.sessionKey,
+      fields.senderId,
+    ]), 'utf8')
+    .digest('hex')
+}
+
+export function resolveTelegramConversationIdentity(event, context) {
   const channel = resolveConsistentString(event?.channel, context?.channelId)
   if (channel === null) return { ok: false, reason: 'context_mismatch' }
   if (channel !== TARGET_CHANNEL) return { ok: false, reason: 'unsupported_channel' }
   if (event?.isGroup !== false) return { ok: false, reason: 'direct_message_required' }
-
-  if (!Number.isFinite(event?.timestamp)) {
-    return { ok: false, reason: 'timestamp_missing' }
-  }
 
   const sessionKey = resolveConsistentString(event?.sessionKey, context?.sessionKey)
   const senderId = resolveConsistentString(event?.senderId, context?.senderId)
@@ -54,6 +59,32 @@ export function resolveDispatchIdentity(event, context, route) {
 
   const fields = {
     channel,
+    sessionKey,
+    senderId,
+  }
+  return {
+    ok: true,
+    senderId,
+    scopeKey: deriveConversationScopeKey(fields),
+  }
+}
+
+export function resolveDispatchIdentity(event, context, route) {
+  // Telegram pairing/allowlist owns sender authorization upstream. This hook
+  // receives stable identity fields, so it verifies their direct-message shape
+  // and consistency without inventing an unavailable senderIsOwner signal.
+  const conversationIdentity = resolveTelegramConversationIdentity(event, context)
+  if (!conversationIdentity.ok) return conversationIdentity
+
+  if (!Number.isFinite(event?.timestamp)) {
+    return { ok: false, reason: 'timestamp_missing' }
+  }
+
+  const sessionKey = resolveConsistentString(event?.sessionKey, context?.sessionKey)
+  const senderId = conversationIdentity.senderId
+
+  const fields = {
+    channel: TARGET_CHANNEL,
     accountId: normalizedString(context?.accountId),
     conversationId: normalizedString(context?.conversationId),
     sessionKey,
@@ -64,5 +95,10 @@ export function resolveDispatchIdentity(event, context, route) {
   const taskId = route === 'natural'
     ? deriveStableNaturalDispatchKey(fields)
     : deriveStableDispatchKey(fields)
-  return { ok: true, taskId, senderId }
+  return {
+    ok: true,
+    taskId,
+    senderId,
+    scopeKey: conversationIdentity.scopeKey,
+  }
 }

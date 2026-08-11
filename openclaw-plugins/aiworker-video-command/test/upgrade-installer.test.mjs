@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
+import { materializeHistoricalPlugin } from './helpers/historical-plugin-fixture.mjs'
 
 const execFileAsync = promisify(execFile)
 const sourceInstallerPath = resolve(process.cwd(), 'scripts/upgrade-aiworker-video-command-plugin.sh')
@@ -25,7 +26,6 @@ const sourceValidatorPath = resolve(process.cwd(), 'scripts/validate-aiworker-vi
 const sourcePolicyPath = resolve(process.cwd(), 'scripts/lib/aiworker-video-command-upgrade-policy.mjs')
 const sourceReleaseRollbackValidatorPath = resolve(process.cwd(), 'scripts/validate-aiworker-video-release-rollback.mjs')
 const sourceReleaseRollbackPolicyPath = resolve(process.cwd(), 'scripts/lib/aiworker-video-release-rollback-policy.mjs')
-const sourceCandidatePath = resolve(process.cwd(), 'openclaw-plugins/aiworker-video-command')
 const pluginId = 'aiworker-video-command'
 const toolName = 'aiworker_analyze_video'
 const targetSha = '0123456789abcdef0123456789abcdef01234567'
@@ -433,7 +433,7 @@ async function setupFixture() {
   await cp(sourcePolicyPath, join(isolatedRepo, 'scripts', 'lib', 'aiworker-video-command-upgrade-policy.mjs'))
   await cp(sourceReleaseRollbackValidatorPath, join(isolatedRepo, 'scripts', 'validate-aiworker-video-release-rollback.mjs'))
   await cp(sourceReleaseRollbackPolicyPath, join(isolatedRepo, 'scripts', 'lib', 'aiworker-video-release-rollback-policy.mjs'))
-  await cp(sourceCandidatePath, candidatePath, { recursive: true })
+  await materializeHistoricalPlugin(candidatePath)
   const canonicalCandidatePath = await realpath(candidatePath)
   await mkdir(join(qwenState, 'state'), { recursive: true, mode: 0o700 })
   await mkdir(installed, { recursive: true, mode: 0o700 })

@@ -1,7 +1,7 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "description": "Handles exact commands and affirmative natural-language video requests before model dispatch.",
+  "description": "Handles video requests and bounded task status queries before model dispatch.",
   "activation": {
     "onStartup": true,
     "onCapabilities": [

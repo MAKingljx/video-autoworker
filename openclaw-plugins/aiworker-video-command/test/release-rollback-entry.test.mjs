@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
+import { materializeHistoricalPlugin } from './helpers/historical-plugin-fixture.mjs'
 import {
   fingerprintAuditedPreviousPlugin,
   snapshotTaskFlowState,
@@ -25,8 +26,10 @@ import {
 
 const execFileAsync = promisify(execFile)
 const rollbackEntry = resolve(process.cwd(), 'scripts/rollback-aiworker-video-release.sh')
-const pluginSource = resolve(process.cwd(), 'openclaw-plugins/aiworker-video-command')
 const upgradeValidator = resolve(process.cwd(), 'scripts/validate-aiworker-video-command-upgrade.mjs')
+const upgradePolicy = resolve(process.cwd(), 'scripts/lib/aiworker-video-command-upgrade-policy.mjs')
+const releaseValidator = resolve(process.cwd(), 'scripts/validate-aiworker-video-release-rollback.mjs')
+const releasePolicy = resolve(process.cwd(), 'scripts/lib/aiworker-video-release-rollback-policy.mjs')
 const targetSha = '0123456789abcdef0123456789abcdef01234567'
 const pluginId = 'aiworker-video-command'
 const toolName = 'aiworker_analyze_video'
@@ -183,13 +186,26 @@ async function fixture() {
   const pluginBackupRoot = join(home, 'ai-worker', 'backups', pluginId)
   const taskBackupRoot = join(home, 'ai-worker', 'backups', 'aiworker-task-flow-skill')
   const officialOpenClaw = join(root, 'official-openclaw')
+  const isolatedRepo = join(root, 'repo')
+  const isolatedRollbackEntry = join(isolatedRepo, 'scripts', 'rollback-aiworker-video-release.sh')
+  const pluginSource = join(isolatedRepo, 'openclaw-plugins', pluginId)
   await Promise.all([
     directory(home), directory(bin), directory(join(stateDir, 'extensions')),
     directory(join(stateDir, 'state')), directory(join(workspace, 'skills', 'aiworker-task-flow')),
     directory(pluginBackupRoot), directory(taskBackupRoot), directory(officialOpenClaw),
+    directory(join(isolatedRepo, 'scripts', 'lib')), directory(join(isolatedRepo, 'openclaw-plugins')),
   ])
+  await Promise.all([
+    cp(rollbackEntry, isolatedRollbackEntry),
+    cp(upgradeValidator, join(isolatedRepo, 'scripts', 'validate-aiworker-video-command-upgrade.mjs')),
+    cp(upgradePolicy, join(isolatedRepo, 'scripts', 'lib', 'aiworker-video-command-upgrade-policy.mjs')),
+    cp(releaseValidator, join(isolatedRepo, 'scripts', 'validate-aiworker-video-release-rollback.mjs')),
+    cp(releasePolicy, join(isolatedRepo, 'scripts', 'lib', 'aiworker-video-release-rollback-policy.mjs')),
+  ])
+  await chmod(isolatedRollbackEntry, 0o755)
   await createFakeCommands(bin)
   await file(join(officialOpenClaw, 'package.json'), { name: 'openclaw', version: '2026.7.1-2' })
+  await materializeHistoricalPlugin(pluginSource)
   await cp(pluginSource, installedPlugin, { recursive: true })
   await directory(join(installedPlugin, 'node_modules'))
   await symlink(officialOpenClaw, join(installedPlugin, 'node_modules', 'openclaw'))
@@ -251,7 +267,7 @@ async function fixture() {
   })
   return {
     root, home, bin, stateDir, installedPlugin, workspace,
-    pluginBackup, taskBackup,
+    pluginBackup, taskBackup, rollbackEntry: isolatedRollbackEntry,
     env: {
       ...process.env,
       HOME: home,
@@ -262,7 +278,7 @@ async function fixture() {
 }
 
 async function runRollback(value, mode, extraEnv = {}) {
-  return execFileAsync(rollbackEntry, [
+  return execFileAsync(value.rollbackEntry, [
     mode,
     '--plugin-backup', value.pluginBackup,
     '--task-flow-backup', value.taskBackup,

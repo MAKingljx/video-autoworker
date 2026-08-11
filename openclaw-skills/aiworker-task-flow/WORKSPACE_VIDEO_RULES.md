@@ -47,12 +47,25 @@ natural-language single-video requests in `before_dispatch`, before
 - End the conversation turn after the receipt, rejection, or failure. Do not
   query status, inspect Mission Control or n8n, wait, retry, resubmit, or report
   background progress in the same turn.
-- Query `--status <task-id>` only after a later explicit user request. A status
-  lookup never authorizes resubmission, and only `succeeded` proves completion.
-- For `查一下刚才的视频`, use the full task ID from the most recent plugin
-  receipt in the current conversation and query once. If no complete ID exists
-  or several receipts are ambiguous, ask for the task ID; do not use
-  `memory_search`, scan the database, guess, or resubmit.
+- A later explicit user request for progress/result is also handled by the same
+  native plugin in `before_dispatch`, before Qwen runs. This route calls the
+  read-only status client exactly once and then returns one human short reply;
+  it never starts Qwen or lets the model select a tool.
+- Resolve the task ID only from a complete task ID in the current message or the
+  plugin's trusted, unique most-recent receipt binding for that private
+  conversation. Do not scrape conversation prose. If neither source yields one
+  unambiguous complete ID, return `请提供完整任务编号。` and stop.
+- The status route must not call `memory_search`, `memory_get`, `exec`, process
+  supervision, filesystem search, direct Mission Control/SQLite access, n8n
+  inspection, polling, retry, resubmission, or a generic task. Query failure
+  produces one short status-unavailable reply for the same ID and stops.
+- Only a single formal status result of `succeeded` proves completion. Map
+  pending, success, failure, and unavailable states to concise human language;
+  never narrate lookup steps, expose internal reasoning, or recommend a new
+  submission. Use `任务已受理，正在等待处理。`, `任务正在处理中。`,
+  `任务已完成。`, `任务处理失败。`, or `暂时无法查询任务状态。`; a safe
+  bounded result/reason may follow completion/failure. Do not repeat a long
+  task ID in ordinary status replies.
 
 The only formal downstream chain is:
 

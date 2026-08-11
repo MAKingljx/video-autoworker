@@ -1,6 +1,6 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker/n8n tasks, native single-video dispatch, durable video batches, and later task-status queries.
+description: Use for AI-worker/n8n tasks, native single-video dispatch and status lookup, and durable video batches.
 ---
 
 # AI-worker Task Flow
@@ -248,17 +248,52 @@ A batch ID is not a task ID. Use `--batch-status` for the batch and plain
 
 ## Later status query
 
-Only after the user sends a new explicit progress or result request, query the
-existing task. For wording such as `查一下刚才的视频`, use exactly the full task
-ID from the most recent plugin receipt in the current conversation and perform
-one status query:
+A later explicit progress or result request is also owned by the native
+`aiworker-video-command` plugin in `before_dispatch`. It is not ordinary chat
+and must not start Qwen. The plugin first validates the same authorized
+Telegram private-message identity used for submission, then resolves exactly
+one task ID by either:
+
+1. accepting the complete task ID explicitly supplied in the current message;
+   or
+2. using the plugin's trusted, unambiguous most-recent receipt binding for this
+   private conversation.
+
+Do not recover an ID by asking the model, parsing free-form conversation text,
+searching memory, scanning files, or reading SQLite. If no trusted recent ID
+exists, if several receipts are ambiguous, or if an explicit ID is incomplete,
+return one short request for the complete task ID and stop:
+
+```text
+请提供完整任务编号。
+```
+
+With one resolved ID, the plugin calls its dedicated read-only status runner
+exactly once. The runner uses the installed client contract below; this is an
+implementation reference and is never constructed or executed by Qwen:
 
 ```bash
 node skills/aiworker-task-flow/scripts/submit-task.mjs --status <task-id>
 ```
 
-Never turn a failed status query into a new submission. Report completion only
-when this query returns `succeeded`. If the current conversation has no complete
-task ID or several receipts make the reference ambiguous, ask the user for the
-task ID. Do not call `memory_search`, scan Mission Control/SQLite, guess an ID,
-or resubmit.
+The status turn performs no model inference, OpenClaw tool selection,
+`memory_search`, `exec`, process supervision, filesystem discovery, direct
+Mission Control/SQLite access, n8n inspection, polling, retry, resubmission, or
+generic-task fallback. A query failure returns one short failure message and
+stops; it never authorizes a new video task.
+
+Translate the one returned state into a concise human response:
+
+- `accepted` or `queued`: `任务已受理，正在等待处理。`;
+- `running`: `任务正在处理中。`;
+- `succeeded`: `任务已完成。`, optionally followed by only a safe bounded
+  summary already returned by the formal status client;
+- `failed` or `cancelled`: `任务处理失败。`, optionally followed by only a
+  safe bounded reason already returned by the formal status client;
+- query error or an unsupported state: `暂时无法查询任务状态。`.
+
+Do not repeat a long task ID in an ordinary status reply. The complete ID is
+requested only when the plugin lacks a trusted unambiguous mapping.
+
+Only `succeeded` proves completion. After that one response, end the turn. Do
+not narrate lookup steps, expose internal reasoning or suggest resubmission.

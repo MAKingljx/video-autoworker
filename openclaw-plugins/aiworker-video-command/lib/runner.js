@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process'
 import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 
+import { executeFile, parseSingleLineJson } from './json-command.js'
 import { normalizeVideoTaskResult } from './video-task-result.js'
 
 export const INSTALLED_SUBMIT_SCRIPT = resolve(
@@ -14,44 +14,7 @@ export const INSTALLED_SUBMIT_SCRIPT = resolve(
 )
 
 const SUBMIT_TIMEOUT_MS = 25_000
-const MAX_OUTPUT_BYTES = 64 * 1_024
 const VIDEO_TRIGGER_UNCONFIRMED_EXIT_CODE = 75
-
-function executeFile(file, args, options) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    execFile(file, args, {
-      ...options,
-      encoding: 'utf8',
-      maxBuffer: MAX_OUTPUT_BYTES,
-      windowsHide: true,
-    }, (error, stdout, stderr) => {
-      if (error) {
-        error.stdout = stdout
-        error.stderr = stderr
-        rejectPromise(error)
-        return
-      }
-      resolvePromise({ stdout, stderr })
-    })
-  })
-}
-
-function parseSingleLineJson(stdout) {
-  if (typeof stdout !== 'string') throw new Error('invalid_output')
-  const trimmed = stdout.trim()
-  if (!trimmed || trimmed.split(/\r?\n/u).length !== 1) throw new Error('invalid_output')
-
-  let value
-  try {
-    value = JSON.parse(trimmed)
-  } catch {
-    throw new Error('invalid_output')
-  }
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('invalid_output')
-  }
-  return value
-}
 
 function isTimeoutError(error) {
   return error?.code === 'ETIMEDOUT' || error?.killed === true || error?.signal === 'SIGTERM'

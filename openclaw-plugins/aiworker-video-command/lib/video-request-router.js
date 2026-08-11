@@ -1,5 +1,6 @@
 import { parseNaturalVideoRequest } from './natural-video-request.js'
 import { parseVideoCommand } from './parse-video-command.js'
+import { parseStatusRequest } from './status-request.js'
 
 const REJECTION_TEXT = Object.freeze({
   invalid_message_shape: '未提交：消息格式无效。',
@@ -38,6 +39,14 @@ export function routeVideoRequest(content) {
   if (natural.kind === 'match') {
     return { kind: 'submit', route: 'natural', videoPath: natural.videoPath }
   }
+  const status = parseStatusRequest(content)
+  if (status.kind === 'match') {
+    return { kind: 'status', taskId: status.taskId }
+  }
+  if (status.kind === 'needs_task_id') {
+    return { kind: 'status_needs_task_id' }
+  }
+  if (status.kind === 'invalid') return { kind: 'status_invalid' }
   if (natural.kind === 'pass') {
     return { kind: 'respond', text: conversationResponse(natural.reason) }
   }

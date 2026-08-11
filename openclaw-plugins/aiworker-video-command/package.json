@@ -1,8 +1,8 @@
 {
   "name": "@aiworker/openclaw-aiworker-video-command",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Deterministic Telegram video dispatch before model execution for AI-worker",
+  "description": "Deterministic Telegram video dispatch and task status queries before model execution",
   "type": "module",
   "peerDependencies": {
     "openclaw": ">=2026.7.1-2"

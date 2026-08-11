@@ -24,10 +24,20 @@
 - The native plugin is the only single-video conversation entry. If it is absent
   or unavailable, fail closed; never fall back to a generic task, `exec`, direct
   media commands, or filesystem discovery.
-- For `查一下刚才的视频`, use only the full task ID in the current
-  conversation's most recent plugin receipt. If it is absent or ambiguous, ask
-  for the ID; never call `memory_search`, search memory, scan the database,
-  guess, or resubmit.
+- Later progress/result questions are deterministic plugin work too. The same
+  native `before_dispatch` route resolves a complete task ID explicitly supplied
+  in the current message or the
+  plugin's trusted unique most-recent receipt binding, calls the formal
+  read-only status client exactly once, returns one human short reply, and
+  stops without starting Qwen.
+- If there is no trusted unambiguous recent ID, reply `请提供完整任务编号。`.
+  Never recover it from model reasoning, conversation scraping,
+  `memory_search`, `exec`, process supervision, filesystem discovery, direct
+  SQLite access, n8n inspection, polling, retry, resubmission, or a generic
+  task. Only `succeeded` proves completion. Ordinary replies use
+  `任务已受理，正在等待处理。`, `任务正在处理中。`, `任务已完成。`,
+  `任务处理失败。`, or `暂时无法查询任务状态。`; they do not repeat the
+  long task ID. A safe bounded result/reason may follow completion/failure.
 - OpenClaw performs Telegram DM allowlist/pairing admission before the hook. The
   plugin then validates private-chat and stable session/sender identity and
   compares the sender with the domain-separated SHA-256 configured from the
