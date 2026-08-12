@@ -12,7 +12,8 @@ import {
 const GIT_SHA = /^[a-f0-9]{40}$/u
 const SHA256 = /^[a-f0-9]{64}$/u
 const BACKUP_NAME = /^status-upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
-const PREVIOUS_VERSION = '0.3.0'
+const PREVIOUS_VERSION = '0.4.0'
+const CANDIDATE_VERSION = '0.4.1'
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -47,8 +48,11 @@ async function assertReal(pathname, kind, label, expectedMode) {
   return entry
 }
 
-export function validateStatusUpgradeVersion(candidateVersion) {
-  assert(candidateVersion === '0.4.0', 'Status-query candidate version must be exactly 0.4.0.')
+export function validateStatusUpgradeVersion(candidateVersion, manifestVersion = candidateVersion) {
+  assert(candidateVersion === CANDIDATE_VERSION,
+    `Status-query patch candidate version must be exactly ${CANDIDATE_VERSION}.`)
+  assert(manifestVersion === candidateVersion,
+    'Plugin package and manifest versions must match exactly.')
   return candidateVersion
 }
 
@@ -161,7 +165,7 @@ export async function validateStatusUpgradeBackup({
     linkText: metadata.peerLinkText,
     realPath: metadata.peerRealPath,
   })
-  assert(previous.fingerprint === metadata.previousPayloadSha256, 'Backed-up 0.3 payload changed after audit.')
+  assert(previous.fingerprint === metadata.previousPayloadSha256, 'Backed-up 0.4.0 payload changed after audit.')
   assert(await fingerprintConfig(join(backupDir, 'openclaw.json')) === metadata.configSha256,
     'Backed-up qwen-current config changed after audit.')
   const packageJson = await readJson(join(previousPlugin, 'package.json'), 'Previous plugin package')
@@ -173,7 +177,7 @@ async function main() {
   const [command, ...args] = process.argv.slice(2)
   switch (command) {
     case 'version':
-      process.stdout.write(`${validateStatusUpgradeVersion(args[0])}\n`)
+      process.stdout.write(`${validateStatusUpgradeVersion(args[0], args[1])}\n`)
       break
     case 'config-fingerprint':
       process.stdout.write(`${await fingerprintConfig(args[0])}\n`)

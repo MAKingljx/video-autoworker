@@ -392,6 +392,7 @@ describe('before_dispatch handler', () => {
     await handler(event({ content: '帮我分析一下这个视频 /tmp/demo.mp4' }), context)
     for (const content of [
       '查一下结果',
+      '再帮我查一下视频分析情况',
       '这个视频结果出来了吗',
       '刚才的视频分析完了吗',
       '上次的视频好了没',
@@ -402,7 +403,30 @@ describe('before_dispatch handler', () => {
       })
     }
     expect(runner).toHaveBeenCalledTimes(1)
-    expect(statusRunner).toHaveBeenCalledTimes(4)
+    expect(statusRunner).toHaveBeenCalledTimes(5)
+  })
+
+  it('does not turn negation, method questions, or examples into status reads', async () => {
+    const runner = vi.fn()
+    const statusRunner = vi.fn()
+    const handler = createBeforeDispatchHandler({
+      runner,
+      statusRunner,
+      allowedSenderSha256: deriveTelegramSenderHash(event().senderId),
+    })
+
+    for (const content of [
+      '不要查询视频分析情况',
+      '先告诉我怎么查询视频分析情况',
+      '比如“查询视频分析情况”',
+    ]) {
+      await expect(handler(event({ content }), context)).resolves.toEqual({
+        handled: true,
+        text: expect.any(String),
+      })
+    }
+    expect(runner).not.toHaveBeenCalled()
+    expect(statusRunner).not.toHaveBeenCalled()
   })
 
   it('accepts one complete explicit task id without a recent-task hint', async () => {

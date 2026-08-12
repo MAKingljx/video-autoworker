@@ -1,6 +1,6 @@
 # AI-worker Video Command plugin
 
-This directory contains the hook-only `0.4.0` implementation of the native
+This directory contains the hook-only `0.4.1` implementation of the native
 OpenClaw single-video ingress. The files describe the release contract; runtime
 and production acceptance still require their own evidence.
 
@@ -39,6 +39,11 @@ through this plugin.
 A later explicit status request is the only video-related exception. A clearly
 affirmative request with an invalid execution input is handled with one short
 rejection.
+
+`0.4.1` also recognizes the bounded conversational form
+`再帮我查一下视频分析情况`. The grammar is anchored to the complete
+request: negation, method questions, examples, video meetings, video coding,
+orders, and other unrelated uses of “情况” do not start a status read.
 
 ## Request outcomes
 
@@ -222,25 +227,26 @@ After promotion, verify Mission Control / SQLite, one n8n video-analysis
 execution, `prepare/audio/vision/finalize`, `memoryMode=none`, `delivery=none`,
 service health, and temporary residue separately.
 
-### Controlled 0.3.0 to 0.4.0 status-query release
+### Controlled 0.4.0 to 0.4.1 status-intent patch
 
-The earlier upgrade entry is intentionally limited to its one-time
-`0.2.0 -> 0.3.0` tool-removal migration. Do not reuse that migration to deploy
-`0.4.0`. The hook-only status-query release has a separate, config-preserving
-entry:
+The status upgrade entry now accepts only the deployed hook-only `0.4.0` as its
+previous state and the grammar-only `0.4.1` candidate as its target. Historical
+`0.3.0 -> 0.4.0` promotion remains in Git and recovery evidence, but is no
+longer an accepted current production entry:
 
 ```bash
-bash scripts/upgrade-aiworker-video-command-status-plugin.sh --dry-run --target-sha <approved-0.4.0-sha>
-bash scripts/upgrade-aiworker-video-command-status-plugin.sh --apply --target-sha <same-approved-0.4.0-sha>
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --dry-run --target-sha <approved-0.4.1-sha>
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --apply --target-sha <same-approved-0.4.1-sha>
 ```
 
-It accepts only installed `0.3.0` and source `0.4.0`. The gate requires a clean
+It accepts only installed `0.4.0` and source `0.4.1`, with identical versions
+in `package.json` and `openclaw.plugin.json`. The gate requires a clean
 canonical `main` whose `HEAD`, local `origin/main`, and live GitHub `main` all
 equal the explicit target SHA. The installed recovery payload must also match
-the immutable `0.3.0` source commit `3c385f19308b4d36cf624d3c95a20cc65acaf903`,
+the immutable `0.4.0` source commit `db3632713b54be5e8797ff2d85ab91ebccd134f5`,
 which must be an ancestor of the target. Dry-run performs an isolated official force
 install and fingerprints production state before and after. Apply makes and
-validates a complete `0.3.0` plugin/config recovery point, enforces the shared
+validates a complete `0.4.0` plugin/config recovery point, enforces the shared
 two-backup limit, installs only through the official OpenClaw command, and
 refreshes only `qwen-current`.
 
@@ -256,14 +262,14 @@ the same approved target SHA for an explicit rollback:
 
 ```bash
 bash scripts/upgrade-aiworker-video-command-status-plugin.sh --rollback \
-  --target-sha <same-approved-0.4.0-sha> \
+  --target-sha <same-approved-0.4.1-sha> \
   --backup /absolute/path/to/status-upgrade-YYYYMMDD-HHMMSS.suffix
 ```
 
-Any failed apply automatically reinstalls the fingerprinted `0.3.0` payload,
+Any failed apply automatically reinstalls the fingerprinted `0.4.0` payload,
 restores the exact saved qwen-current config, refreshes only qwen-current, and
 revalidates the live hook-only/runtime/tool boundary. A failed rollback attempts
-to restore the audited `0.4.0` candidate and accepts that compensation only
+to restore the audited `0.4.1` candidate and accepts that compensation only
 after config, index, payload, runtime, live catalog, effective tools, and all
 protected listeners pass again. If compensation is incomplete, it exits for
 manual inspection rather than reporting success.

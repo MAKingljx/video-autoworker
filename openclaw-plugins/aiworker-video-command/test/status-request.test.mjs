@@ -12,6 +12,7 @@ describe('parseStatusRequest', () => {
     '现在查询一下任务进度',
     '查看状态',
     '查一下结果',
+    '再帮我查一下视频分析情况',
     '查一下刚才的视频',
     '查询上次提交的视频',
     '这个视频结果出来了吗',
@@ -53,6 +54,11 @@ describe('parseStatusRequest', () => {
     '这个任务编号是什么意思',
     TASK_ID,
     '分析视频编码原理',
+    '查询视频编码情况',
+    '查询视频会议情况',
+    '不要查询视频分析情况',
+    '先告诉我怎么查询视频分析情况',
+    '比如“查询视频分析情况”',
     '查询订单进度',
   ])('does not claim unrelated text: %s', content => {
     expect(parseStatusRequest(content)).toEqual({ kind: 'unmatched' })

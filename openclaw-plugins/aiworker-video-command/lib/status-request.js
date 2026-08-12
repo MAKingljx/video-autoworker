@@ -5,6 +5,7 @@ const TASK_ID_PREFIX = /video-(?:command|natural)-/giu
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u
 const QUERY_VERB = /(?:查|查询|查看|看一下)/u
 const STATUS_WORD = /(?:进度|状态|结果)/u
+const VIDEO_ANALYSIS_SITUATION_INTENT = /^(?:(?:再|现在|请|麻烦)\s*)*(?:帮我\s*)?(?:查|查询|查看|看)(?:一下|下)?\s*(?:(?:这个|该|刚才|上次|之前)\s*(?:的)?\s*)?(?:视频\s*(?:分析|处理)|任务\s*(?:分析|处理))\s*情况[？?。！!]?$/u
 const TASK_CONTEXT = /(?:任务|视频)/u
 const SHORT_STATUS_INTENT = /^(?:现在)?(?:查|查询|查看|看)(?:一下)?(?:任务|视频)?(?:进度|状态|结果)[？?。！!]?$/u
 const RECENT_VIDEO_INTENT = /(?:查(?:询|看)?(?:一下)?|查询|查看|看一下).{0,24}(?:刚才|上次|之前).{0,16}视频/iu
@@ -22,6 +23,7 @@ function hasStatusIntent(text, prefixCount) {
   return SHORT_STATUS_INTENT.test(text)
     || RECENT_VIDEO_INTENT.test(text)
     || COMPLETION_QUESTION.test(text)
+    || VIDEO_ANALYSIS_SITUATION_INTENT.test(text)
     || (
       QUERY_VERB.test(text)
       && STATUS_WORD.test(text)

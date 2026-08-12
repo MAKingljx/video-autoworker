@@ -5,8 +5,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 RETIRED_TOOL_NAME="aiworker_analyze_video"
-PREVIOUS_VERSION="0.3.0"
-PREVIOUS_SOURCE_SHA="3c385f19308b4d36cf624d3c95a20cc65acaf903"
+PREVIOUS_VERSION="0.4.0"
+PREVIOUS_SOURCE_SHA="db3632713b54be5e8797ff2d85ab91ebccd134f5"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -80,7 +80,8 @@ for command_name in awk chmod cmp cp date env git hostname id install lsof mkdir
 done
 
 CANDIDATE_VERSION="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$PLUGIN_DIR/package.json")"
-node "$STATUS_VALIDATOR" version "$CANDIDATE_VERSION" >/dev/null
+MANIFEST_VERSION="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$PLUGIN_DIR/openclaw.plugin.json")"
+node "$STATUS_VALIDATOR" version "$CANDIDATE_VERSION" "$MANIFEST_VERSION" >/dev/null
 
 run_clean_openclaw() {
   env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
@@ -195,7 +196,7 @@ validate_host_and_source() {
   validate_git_target
   git -C "$REPOSITORY_ROOT" cat-file -e "$PREVIOUS_SOURCE_SHA^{commit}"
   git -C "$REPOSITORY_ROOT" merge-base --is-ancestor "$PREVIOUS_SOURCE_SHA" "$TARGET_SHA" || {
-    printf 'Approved 0.3 source is not an ancestor of the target SHA.\n' >&2
+    printf 'Approved 0.4.0 source is not an ancestor of the target SHA.\n' >&2
     return 1
   }
   node --check "$STATUS_VALIDATOR"
@@ -252,7 +253,7 @@ validate_current_hook() {
   installed_fingerprint="$(node -e 'const p=JSON.parse(process.argv[1]);process.stdout.write(p.fingerprint)' "$installed_report")"
   if [[ "$expected_version" == "$PREVIOUS_VERSION" ]]; then
     [[ "$installed_fingerprint" == "$PREVIOUS_SOURCE_FINGERPRINT" ]] || {
-      printf 'Installed 0.3 payload does not match approved source %s.\n' "$PREVIOUS_SOURCE_SHA" >&2
+      printf 'Installed 0.4.0 payload does not match approved source %s.\n' "$PREVIOUS_SOURCE_SHA" >&2
       return 1
     }
   fi
@@ -379,14 +380,14 @@ create_verified_backup() {
   chmod 600 "$BACKUP_DIR/backup-validation.json"
 }
 
-restore_v03() {
+restore_previous() {
   local backup_dir="$1"
   local report_dir="$2"
   local failed=0
   local restored_fingerprint marker_fingerprint source_marker_fingerprint marker_temp
   set +e
   install -d -m 700 "$report_dir"
-  run_qwen_openclaw plugins install --force "$backup_dir/previous-plugin" > "$report_dir/install-v03.txt" 2>&1 || failed=1
+  run_qwen_openclaw plugins install --force "$backup_dir/previous-plugin" > "$report_dir/install-previous.txt" 2>&1 || failed=1
   install -m 600 "$backup_dir/openclaw.json" "$PROFILE_CONFIG" || failed=1
   cmp -s "$backup_dir/openclaw.json" "$PROFILE_CONFIG" || failed=1
   run_qwen_openclaw gateway restart --wait 60s --json > "$report_dir/gateway-restart.json" 2>&1 || failed=1
@@ -545,7 +546,7 @@ if [[ "$MODE" == "rollback" ]]; then
     "$CANDIDATE_VERSION" "$PLUGIN_DIR" "$INSTALLED_PLUGIN_DIR" > "$work_root/rollback-backup.json"
   candidate_config="$work_root/candidate-openclaw.json"
   install -m 600 "$PROFILE_CONFIG" "$candidate_config"
-  if ! restore_v03 "$ROLLBACK_BACKUP" "$work_root/rollback"; then
+  if ! restore_previous "$ROLLBACK_BACKUP" "$work_root/rollback"; then
     if recover_candidate_after_failed_explicit_rollback \
       "$ROLLBACK_BACKUP" "$candidate_config" "$work_root/recover-candidate"; then
       printf 'Rollback failed; the audited %s candidate/config/runtime/live state was fully restored.\n' \
@@ -564,7 +565,7 @@ fi
 
 create_verified_backup
 if ! install_and_validate_candidate; then
-  if restore_v03 "$BACKUP_DIR" "$BACKUP_DIR/automatic-rollback" \
+  if restore_previous "$BACKUP_DIR" "$BACKUP_DIR/automatic-rollback" \
     && [[ "$(service_snapshot)" == "$protected_before" ]]; then
     printf 'Upgrade failed; exact %s payload and qwen-current config were restored.\n' "$PREVIOUS_VERSION" >&2
     printf 'Verified recovery point: %s\n' "$BACKUP_DIR" >&2

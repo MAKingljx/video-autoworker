@@ -39,9 +39,9 @@ async function createFixture() {
     await writeFile(join(plugin, 'index.js'), 'export default {}\n')
     await writeFile(join(plugin, 'openclaw.plugin.json'), '{"id":"aiworker-video-command"}\n')
   }
-  await writeFile(join(source, 'package.json'), '{"version":"0.4.0"}\n')
+  await writeFile(join(source, 'package.json'), '{"version":"0.4.1"}\n')
   for (const plugin of [installed, previous]) {
-    await writeFile(join(plugin, 'package.json'), '{"version":"0.3.0"}\n')
+    await writeFile(join(plugin, 'package.json'), '{"version":"0.4.0"}\n')
     await mkdir(join(plugin, 'node_modules'))
     await symlink(peer, join(plugin, 'node_modules', 'openclaw'), 'dir')
   }
@@ -51,7 +51,7 @@ async function createFixture() {
   const previousPayload = await fingerprintInstalledPayload(previous)
   const metadata = buildBackupMetadata({
     pluginId: 'aiworker-video-command',
-    candidateVersion: '0.4.0',
+    candidateVersion: '0.4.1',
     targetSha: 'a'.repeat(40),
     canonicalSourcePath: source,
     installedPath: installed,
@@ -67,30 +67,31 @@ async function createFixture() {
   return { backupRoot, backupDir, source, installed, config }
 }
 
-describe('0.3.0 to 0.4.0 status-upgrade policy', () => {
-  it('permits only the fixed 0.4.0 release boundary', () => {
-    expect(validateStatusUpgradeVersion('0.4.0')).toBe('0.4.0')
-    for (const value of ['0.3.1', '0.4.1', '1.0.0', 'latest']) {
-      expect(() => validateStatusUpgradeVersion(value)).toThrow(/exactly 0\.4\.0/u)
+describe('0.4.0 to 0.4.1 status-patch policy', () => {
+  it('permits only the fixed 0.4.1 release boundary with matching package and manifest versions', () => {
+    expect(validateStatusUpgradeVersion('0.4.1', '0.4.1')).toBe('0.4.1')
+    expect(() => validateStatusUpgradeVersion('0.4.1', '0.4.0')).toThrow(/versions must match/u)
+    for (const value of ['0.4.0', '0.4.2', '1.0.0', 'latest']) {
+      expect(() => validateStatusUpgradeVersion(value, value)).toThrow(/exactly 0\.4\.1/u)
     }
   })
 
-  it('validates a complete 0.3 payload/config recovery point and rejects later drift', async () => {
+  it('validates a complete 0.4.0 payload/config recovery point and rejects later drift', async () => {
     const fixture = await createFixture()
     await expect(validateStatusUpgradeBackup({
       backupRoot: fixture.backupRoot,
       backupDir: fixture.backupDir,
       targetSha: 'a'.repeat(40),
-      candidateVersion: '0.4.0',
+      candidateVersion: '0.4.1',
       canonicalSourcePath: fixture.source,
       installedPath: fixture.installed,
-    })).resolves.toMatchObject({ metadata: { previousVersion: '0.3.0', candidateVersion: '0.4.0' } })
+    })).resolves.toMatchObject({ metadata: { previousVersion: '0.4.0', candidateVersion: '0.4.1' } })
     await writeFile(fixture.config, '{"tampered":true}\n', { mode: 0o600 })
     await expect(validateStatusUpgradeBackup({
       backupRoot: fixture.backupRoot,
       backupDir: fixture.backupDir,
       targetSha: 'a'.repeat(40),
-      candidateVersion: '0.4.0',
+      candidateVersion: '0.4.1',
       canonicalSourcePath: fixture.source,
       installedPath: fixture.installed,
     })).rejects.toThrow(/config changed/u)
@@ -99,6 +100,8 @@ describe('0.3.0 to 0.4.0 status-upgrade policy', () => {
   it('keeps the release entry limited to explicit SHA, qwen-current, and protected listeners', async () => {
     const script = await readFile(resolve(process.cwd(), 'scripts/upgrade-aiworker-video-command-status-plugin.sh'), 'utf8')
     expect(script).toContain('--target-sha')
+    expect(script).toContain('PREVIOUS_VERSION="0.4.0"')
+    expect(script).toContain('PREVIOUS_SOURCE_SHA="db3632713b54be5e8797ff2d85ab91ebccd134f5"')
     expect(script).toContain('HEAD, local origin/main, live GitHub main, and target SHA must match.')
     expect(script).toContain('gateway restart --wait 60s')
     expect(script).toContain('for port in 3017 5678 5679 18091 18789 18989')
@@ -109,6 +112,8 @@ describe('0.3.0 to 0.4.0 status-upgrade policy', () => {
     expect(script).toContain('recover_candidate_after_failed_explicit_rollback')
     expect(script).toContain('validate_installed_candidate "$report_dir/installed"')
     expect(script).toContain('validate_live_candidate "$report_dir/live"')
+    expect(script).toContain('plugins install --force')
+    expect(script).not.toContain('restore_v03')
     expect(script).not.toMatch(/launchctl|kickstart|:3017.*restart|:5678.*restart/iu)
   })
 
