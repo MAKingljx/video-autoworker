@@ -5,8 +5,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 RETIRED_TOOL_NAME="aiworker_analyze_video"
-PREVIOUS_VERSION="0.4.0"
-PREVIOUS_SOURCE_SHA="db3632713b54be5e8797ff2d85ab91ebccd134f5"
+PREVIOUS_VERSION="0.4.1"
+PREVIOUS_SOURCE_SHA="e615d8dc68d089f11afe1581c1f56c614e01b796"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -196,7 +196,7 @@ validate_host_and_source() {
   validate_git_target
   git -C "$REPOSITORY_ROOT" cat-file -e "$PREVIOUS_SOURCE_SHA^{commit}"
   git -C "$REPOSITORY_ROOT" merge-base --is-ancestor "$PREVIOUS_SOURCE_SHA" "$TARGET_SHA" || {
-    printf 'Approved 0.4.0 source is not an ancestor of the target SHA.\n' >&2
+    printf 'Approved 0.4.1 source is not an ancestor of the target SHA.\n' >&2
     return 1
   }
   node --check "$STATUS_VALIDATOR"
@@ -253,7 +253,7 @@ validate_current_hook() {
   installed_fingerprint="$(node -e 'const p=JSON.parse(process.argv[1]);process.stdout.write(p.fingerprint)' "$installed_report")"
   if [[ "$expected_version" == "$PREVIOUS_VERSION" ]]; then
     [[ "$installed_fingerprint" == "$PREVIOUS_SOURCE_FINGERPRINT" ]] || {
-      printf 'Installed 0.4.0 payload does not match approved source %s.\n' "$PREVIOUS_SOURCE_SHA" >&2
+      printf 'Installed 0.4.1 payload does not match approved source %s.\n' "$PREVIOUS_SOURCE_SHA" >&2
       return 1
     }
   fi
@@ -268,6 +268,8 @@ validate_current_hook() {
 validate_current_candidate() {
   local report_dir="$1"
   validate_current_hook "$report_dir" "$CANDIDATE_VERSION"
+  node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" candidate "$PLUGIN_ID" "$AGENT_ID" \
+    > "$report_dir/classifier-config.json"
   node "$VALIDATOR" payload-match "$PLUGIN_DIR" "$INSTALLED_PLUGIN_DIR" "$SOURCE_FINGERPRINT" \
     "$PEER_LINK_TEXT" "$PEER_REAL_PATH" > "$report_dir/candidate-payload.json"
 }
@@ -279,15 +281,42 @@ run_isolated_upgrade() {
   local isolated_config="$isolated_state/openclaw.json"
   local isolated_install="$isolated_state/extensions/$PLUGIN_ID"
   install -d -m 700 "$isolated_state"
-  printf '{"plugins":{"allow":["%s"]}}\n' "$PLUGIN_ID" > "$isolated_config"
+  node - "$isolated_config" "$PLUGIN_ID" <<'NODE'
+const { writeFileSync } = require('node:fs')
+const [configPath, pluginId] = process.argv.slice(2)
+writeFileSync(configPath, `${JSON.stringify({
+  plugins: {
+    allow: [pluginId],
+    entries: { [pluginId]: { enabled: true, config: { allowedSenderSha256: 'a'.repeat(64) } } },
+  },
+  agents: { list: [{ id: 'second-original', tools: { profile: 'standard', allow: ['read'] } }] },
+}, null, 2)}\n`, { mode: 0o600 })
+NODE
   chmod 600 "$isolated_config"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins install --force "$INSTALLED_PLUGIN_DIR" > "$isolated_root/install-old.txt"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins inspect "$PLUGIN_ID" --runtime --json > "$isolated_root/runtime-old.json"
   node "$VALIDATOR" runtime-hook-only "$isolated_root/runtime-old.json" "$PLUGIN_ID" "$PREVIOUS_VERSION" "$RETIRED_TOOL_NAME"
+  node "$STATUS_VALIDATOR" classifier-config "$isolated_config" baseline "$PLUGIN_ID" "$AGENT_ID"
+  install -m 600 "$isolated_config" "$isolated_root/baseline-openclaw.json"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
     plugins install --force "$PLUGIN_DIR" > "$isolated_root/install-new.txt"
+  run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
+    config set "plugins.entries.$PLUGIN_ID.llm" \
+    '{"allowAgentIdOverride":true}' --strict-json \
+    > "$isolated_root/config-set-llm.txt"
+  # The official installer may update volatile metadata. Rebuild from the
+  # audited baseline so the isolated transition proves the same exact config
+  # delta that the production primitive permits.
+  node "$STATUS_VALIDATOR" classifier-config-candidate \
+    "$isolated_root/baseline-openclaw.json" "$PLUGIN_ID" \
+    > "$isolated_root/candidate-openclaw.json"
+  install -m 600 "$isolated_root/candidate-openclaw.json" "$isolated_config"
+  node "$STATUS_VALIDATOR" classifier-config "$isolated_config" candidate "$PLUGIN_ID" "$AGENT_ID"
+  node "$STATUS_VALIDATOR" classifier-config-transition \
+    "$isolated_root/baseline-openclaw.json" "$isolated_config" "$PLUGIN_ID" "$AGENT_ID" \
+    > "$isolated_root/classifier-config-transition.json"
   node "$VALIDATOR" payload-match "$PLUGIN_DIR" "$isolated_install" "$SOURCE_FINGERPRINT" \
     "$PEER_LINK_TEXT" "$PEER_REAL_PATH" > "$isolated_root/payload-new.json"
   run_isolated_openclaw "$isolated_home" "$isolated_state" "$isolated_config" \
@@ -328,10 +357,19 @@ install_and_validate_candidate() {
   # candidate so the release changes only the plugin payload and install index.
   install -m 600 "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || return 1
   cmp -s "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || return 1
+  run_qwen_openclaw config set "plugins.entries.$PLUGIN_ID.llm" \
+    '{"allowAgentIdOverride":true}' --strict-json \
+    > "$BACKUP_DIR/config-set-llm.txt" || return 1
+  node "$STATUS_VALIDATOR" classifier-config-candidate "$BACKUP_DIR/openclaw.json" "$PLUGIN_ID" \
+    > "$work_root/candidate-openclaw.json" || return 1
+  install -m 600 "$work_root/candidate-openclaw.json" "$PROFILE_CONFIG" || return 1
+  node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" candidate "$PLUGIN_ID" "$AGENT_ID" \
+    > "$BACKUP_DIR/classifier-config.json" || return 1
+  node "$STATUS_VALIDATOR" classifier-config-transition "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" \
+    "$PLUGIN_ID" "$AGENT_ID" > "$BACKUP_DIR/classifier-config-transition.json" || return 1
   assert_source_unchanged || return 1
   validate_installed_candidate "$BACKUP_DIR/candidate-validation" || return 1
   validate_live_candidate "$BACKUP_DIR/live-validation" || return 1
-  [[ "$(node "$STATUS_VALIDATOR" config-fingerprint "$PROFILE_CONFIG")" == "$config_before" ]] || return 1
   [[ "$(service_snapshot)" == "$protected_before" ]] || return 1
 }
 
@@ -390,6 +428,8 @@ restore_previous() {
   run_qwen_openclaw plugins install --force "$backup_dir/previous-plugin" > "$report_dir/install-previous.txt" 2>&1 || failed=1
   install -m 600 "$backup_dir/openclaw.json" "$PROFILE_CONFIG" || failed=1
   cmp -s "$backup_dir/openclaw.json" "$PROFILE_CONFIG" || failed=1
+  node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" baseline "$PLUGIN_ID" "$AGENT_ID" \
+    > "$report_dir/classifier-config.json" 2>&1 || failed=1
   run_qwen_openclaw gateway restart --wait 60s --json > "$report_dir/gateway-restart.json" 2>&1 || failed=1
   run_qwen_openclaw gateway status --deep --require-rpc --json > "$report_dir/gateway-status.json" 2>&1 || failed=1
   run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$report_dir/runtime.json" 2>&1 || failed=1
@@ -456,6 +496,8 @@ recover_candidate_after_failed_explicit_rollback() {
   run_qwen_openclaw plugins install --force "$PLUGIN_DIR" > "$report_dir/install-candidate.txt" 2>&1 || failed=1
   install -m 600 "$candidate_config" "$PROFILE_CONFIG" || failed=1
   cmp -s "$candidate_config" "$PROFILE_CONFIG" || failed=1
+  node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" candidate "$PLUGIN_ID" "$AGENT_ID" \
+    > "$report_dir/classifier-config.json" 2>&1 || failed=1
   assert_source_unchanged > "$report_dir/source-validation.txt" 2>&1 || failed=1
   validate_installed_candidate "$report_dir/installed" > "$report_dir/installed-validation.txt" 2>&1 || failed=1
   validate_live_candidate "$report_dir/live" > "$report_dir/live-validation.txt" 2>&1 || failed=1
@@ -496,6 +538,8 @@ if [[ "$MODE" == "rollback" ]]; then
   config_before="$(node "$STATUS_VALIDATOR" config-fingerprint "$PROFILE_CONFIG")"
 else
   validate_current_hook "$preflight" "$PREVIOUS_VERSION"
+  node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" baseline "$PLUGIN_ID" "$AGENT_ID" \
+    > "$preflight/classifier-config.json"
   config_before="$(node "$STATUS_VALIDATOR" config-fingerprint "$PROFILE_CONFIG")"
   installed_before="$(node "$STATUS_VALIDATOR" installed-payload "$INSTALLED_PLUGIN_DIR" "$PEER_LINK_TEXT" "$PEER_REAL_PATH")"
   index_before="$(shasum -a 256 "$preflight/index.json" | awk '{print $1}')"
@@ -513,9 +557,10 @@ else
   [[ "$(service_snapshot)" == "$protected_before" ]] || { printf 'Dry-run changed a protected listener.\n' >&2; exit 1; }
 
   if [[ "$MODE" == "dry-run" ]]; then
-    printf 'Dry run passed the controlled %s to %s hook-only status upgrade at %s.\n' \
+    printf 'Dry run passed the controlled %s to %s hook-owned classifier transition at %s.\n' \
       "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
     printf 'No production profile, plugin, listener, Mission Control, n8n, or task state was changed.\n'
+    printf 'The candidate release gate remains closed until the final release activation verifies task-flow schema v2 and the lane supervisor.\n'
     exit 0
   fi
 fi
@@ -589,6 +634,8 @@ fi
 printf 'Upgraded %s from %s to %s at approved target %s.\n' \
   "$PLUGIN_ID" "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
 printf 'Verified full canonical/installed payload fingerprints and retained at most two verified backups.\n'
-printf 'Runtime and live Gateway expose only before_dispatch; effective tools and qwen-current config are unchanged.\n'
+printf 'Runtime and live Gateway expose only before_dispatch; effective tools are unchanged.\n'
+printf 'qwen-current config changed only by adding plugins.entries.%s.llm={allowAgentIdOverride:true} and plugins.entries.%s.config.releaseReady=false.\n' "$PLUGIN_ID" "$PLUGIN_ID"
+printf 'The candidate release gate remains closed. The final orchestrator must install and verify task-flow schema v2 and the lane supervisor before it activates video dispatch.\n'
 printf 'Only qwen-current was refreshed; Mission Control 3017 and n8n were untouched.\n'
 printf 'Rollback: %s --rollback --target-sha %s --backup %s\n' "$0" "$TARGET_SHA" "$BACKUP_DIR"

@@ -1,8 +1,8 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "version": "0.4.1",
-  "description": "Handles video requests and bounded task status queries before model dispatch.",
+  "version": "0.5.0",
+  "description": "Classifies eligible video-learning messages once with Qwen, then owns dispatch or status handling.",
   "activation": {
     "onStartup": true,
     "onCapabilities": [
@@ -13,10 +13,13 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "allowedSenderSha256": {
-        "type": "string",
-        "pattern": "^[a-f0-9]{64}$"
-      }
+        "allowedSenderSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "releaseReady": {
+          "type": "boolean"
+        }
     }
   }
 }

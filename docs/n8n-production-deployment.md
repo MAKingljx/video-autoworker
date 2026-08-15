@@ -223,105 +223,50 @@ bash scripts/install-aiworker-task-flow-skill.sh
 openclaw --profile qwen-current skills info aiworker-task-flow --agent second-original
 ```
 
-`aiworker-task-flow` 是原生插件共享的受控提交客户端，不是让 Telegram 用户记忆参数的
-对话入口。加载 `0.3.0` 插件后，用户可用精确命令或肯定的自然语言表达同一个单视频请求：
+`aiworker-task-flow` 是原生插件共享的受控调度客户端，不是 Agent tool，也不是让
+Telegram 用户记忆参数的对话入口。`0.5` 本地候选由 `second-original` 的
+`before_dispatch` 在 handler 内通过宿主 `api.runtime.llm.complete` 调用 Qwen 一次，
+完成无工具结构化语义分类；宿主仍独立完成 Telegram 私聊鉴权、原消息证据校验、
+稳定身份派生与 runner 调用。这里描述的是候选契约，不表示生产已经升级。
 
 ```text
 分析视频 /完整路径/video.mp4
 帮我分析一下这个视频 /完整路径/video.mp4
 ```
 
-在已授权的 Telegram 私聊中，插件 router 只有四种结果：合法执行请求进入 `submit`；
-视频方法、能力、条件、否定和示例进入 `respond` 并直接返回固定短答；明确执行但输入非法
-进入 `reject`；真正无关的私聊才 `pass` 给 Qwen。Telegram 群聊和其他渠道不在这项
-hook-owned 对话保证内，且不得通过本插件提交视频。路径始终作为一个完整参数处理；中文、空格和括号不得被拆分或进行 shell
-展开。合法请求生成稳定任务 ID，并只调用一次共享客户端，固定使用 `delivery=none`、
-`wait-seconds=0` 和插件专用 `--no-trigger-recovery`。Whisper、视觉模型、分钟分段与
-`memoryMode=none` 继续由已登记的视频任务链配置提供，不要求用户重复描述。
+候选分类结果为 `dispatch_single`、`dispatch_directory`、`status_task`、
+`status_batch`、`respond` 或 `pass`。模型输出本身不构成授权；宿主只接受当前原始
+消息中的唯一规范绝对文件/目录路径，或唯一完整显式 taskId/batchId。不得从 recent
+receipt、对话历史、记忆、文件或数据库补齐路径或 ID。只有真正无关的 `pass` 进入正常
+Qwen；classifier、鉴权、证据校验和 runner 失败均由 handler catch 后 handled
+fail-closed。
 
-正常新任务和幂等任务都只返回含稳定任务号的短回执，不展示内部 `status` 或 `duplicate`
-字段。若客户端超时，或以 exit 75 报告 trigger 受理边界尚未确认，插件返回
-`提交状态暂未确认，任务编号：<taskId>。请稍后查询。`；同一轮不得查询状态、监控、重试或
-再次提交。用户之后明确要求查询时，才允许用当前对话最近一次完整任务号执行一次有界状态
-查询。`delivery=none` 表示完成结果保存在任务运行记录中，不自动回投 Telegram。
+单视频与目录都先写入持久任务状态并进入同一个进程级全局串行 video lane；单视频是
+一个 item 的任务，目录是确定性排序的多 item 任务。所有 job 共用全局锁，任一时刻最多
+处理一个视频，并能在 worker 重启后续跑且跳过终态 item。正常新任务和幂等任务只返回
+含稳定 taskId 或 batchId 的 handled 短回执。同一轮不得查询状态、监控、等待、重试、
+再次提交或完成回投。以后查询必须在当前新消息中显式提供完整 taskId 或 batchId，正式
+状态客户端只读一次；`delivery=none` 表示结果保存在任务运行记录中，不自动回投 Telegram。
 
 ### 原生视频命令与受控媒体审计边界
 
-`qwen-current` 的版本化原生视频插件在授权 Telegram 私聊消息进入模型前，通过一个
-`before_dispatch` 同时识别精确命令、肯定自然语言、视频说明类消息和非法执行输入。只有 `submit` 会以参数
-数组调用已安装的共享客户端；`respond` 与 `reject` 都在 hook 内结束，`pass` 才交给
-Agent。随插件提供的 synthetic DM harness 只验证同一处理器、解析器、稳定键和真实任务
-提交边界，不能替代由真实 allowlisted 用户发出的 Telegram 入口验收。
+候选插件在模型正常对话之前只注册原生 `before_dispatch`。它可使用宿主 Qwen 完成
+一次无工具结构化语义分类，但不得注册或伪装成 Agent tool。分类器只判断单视频、目录、
+task 状态、batch 状态、无副作用短答或无关放行；宿主仍必须验证 Telegram 私聊、唯一
+发送者、event/context 一致性，以及分类值确实逐字来自当前原始消息。
 
-`0.3.0` 把精确命令和肯定自然语言统一收敛到同一个 `before_dispatch`。插件在模型运行
-前完成解析、Telegram 私聊身份一致性检查、稳定任务键生成、一次 runner 提交和短回执；
-Qwen 不再选择视频执行工具，manifest 不声明 tool contract，runtime 也不得注册工具。
-在插件已加载时，目标 Telegram 私聊中的视频说明、方法、能力、否定、条件和示例由
-同一个 `before_dispatch` 直接返回固定短答，不进入模型且不调用任何工具；只有真正无关
-的私聊才进入正常 Qwen 对话。群聊和其他渠道不属于这项零模型、零工具保证，也不能借此
-插件提交视频。明确执行但路径非法的请求只返回短拒绝，不得退化到 generic prompt、`exec` 或
-直接媒体处理。上述零模型、零工具是 loaded-plugin 的结构性保证；生产发布门必须用 live
-runtime 证明 hook 已加载。插件缺失时 workspace 规则只能提供防御性失败回复，不能把它
-表述为与已加载 hook 等价的结构保证。
+生产发布门应特别证明：单视频和目录都进入同一个持久化全局 video lane；派发后的当前
+轮状态读取、轮询、重试、重提与完成回投均为零；状态只接受显式完整 taskId/batchId 并
+只读一次；所有 classifier、鉴权、证据与 runner 失败都在 handler 内 handled
+fail-closed。`0.4.1` 的纯正则状态入口和 implicit recent task 不得继续存在。
 
-插件 runner 固定向视频提交客户端增加 `--no-trigger-recovery`。该参数只允许和
-`--video-file` 一起使用，关闭 trigger 报错后的内部 `getRun` 恢复查询，确保本轮既不
-轮询也不查状态；批次和普通非插件调用继续保留原有默认恢复行为。
+随插件提供的本地或 installed synthetic harness 只验证处理器、分类、稳定键、runner
+和队列边界，不能替代由真实授权用户发出的 Telegram 网络入口验收。具体安装、升级、
+恢复点和回滚步骤必须在候选实现及其安装脚本稳定后另行审核；本文不猜测尚未定稿的
+版本载荷、模块清单或生产变更计数。
 
-插件复用 OpenClaw 已完成的 Telegram 上游私聊准入。升级前必须确认
-`channels.telegram.dmPolicy` 缺失（`2026.7.1-2` 默认 pairing）、等于 `pairing` 或等于
-`allowlist`；`open` 和未知值一律拒绝。Telegram binding 必须恰好一条且目标仍为唯一的
-`second-original` agent。在这个上游门之后，视频插件还有一层更窄的 sender gate：
-`commands.ownerAllowFrom` 中必须恰好存在一个 canonical
-`telegram:<positive-numeric-id>` owner；其他明确带 channel 前缀且不含 wildcard 的
-owner 可以保留，但任何 wildcard、Telegram 非数字/别名、重复或无前缀条目一律失败
-关闭。安装器使用
-`SHA-256(UTF8("aiworker-video-command:telegram-sender:v1\0" + numericId))` 派生值，
-插件配置只保存 `allowedSenderSha256`，普通证据只保留 owner 数量 1 和哈希，不输出原 ID。
-`before_dispatch` 在提交前对 event/context 一致的 sender 做同样的哈希比较，因此后续即使
-新增 paired 用户，也不会自动扩大视频入口。
-
-生产 `0.2.0` 曾为可选工具把 `second-original.tools` 改成 `profile=full` 加限制性
-allow。受控 `0.2.0 -> 0.3.0` 升级不得猜测原权限：必须从唯一兼容、已经 `.verified` 的
-`0.2.0` 升级备份读取升级前完整 tools 对象和有效工具基线。安装器先证明当前 tools 正好
-等于当时已知的 `0.2.0` 变换，再恢复整份旧对象；这会保留原先通过全局 `coding` profile
-继承的行为和原 allow 中的 `image`，同时移除仅为 `0.2.0` 迁移存在的可选工具授权。
-当前对象有任何额外、缺失或字段漂移时都在写入前失败关闭。
-
-生产 path-source 插件不能使用会跳过它的 `plugins update`。dry-run 必须在 0700 临时
-OpenClaw state 中真实依次安装现有 `0.2.0` 和候选 `0.3.0`，验证 SQLite/WAL、安装索引、
-runtime 和 doctor，且生产 profile 指纹前后不变。dry-run 与 apply 都必须显式传入同一个
-`--target-sha <40位小写提交SHA>`，并证明干净 `HEAD`、本地 `origin/main` 和实时查询的
-GitHub `refs/heads/main` 均等于该 SHA。apply 持有 profile 锁后，在官方安装紧邻前后再次
-核对 HEAD 与已审核源码载荷指纹，成功门还必须证明已安装载荷指纹与该源码完全相同。
-官方安装生成的 `node_modules/openclaw` 只有在它仍是该目录唯一条目、link 文本及 realpath
-都与升级前已验证的 peer link 完全一致时才从载荷归一化中排除；其他文件一律参与比较。
-apply 只通过官方
-`plugins install --force <canonical-plugin-dir>` 替换插件，并只使用官方配置命令恢复目标
-agent 的 tools 对象和写入 `plugins.entries.aiworker-video-command.config.allowedSenderSha256`；
-不得直接编辑 OpenClaw SQLite。0.3 安装到 sender hash 写入之间插件必须对视频请求失败
-关闭，不能形成短暂的无鉴权窗口。
-
-apply 备份必须为 0700，证据文件和 `.verified` 为 0600，并与 first installer 共用排他锁。
-有变化的安装先创建并完整验证新恢复点；只有安装、配置、runtime 和 live Gateway 全部门
-通过后，才允许精确删除最旧且未被活动索引或 rollback marker 保护的 verified 备份，使
-共享家族收敛到最多两份。失败或回滚路径不得删除既有 verified 备份。成功前只重启
-`qwen-current`，随后必须证明：
-deep RPC 健康；runtime 只有 `before_dispatch`；manifest/runtime 没有工具能力；live
-`tools.catalog` 不含 `0.2.0` 的旧可选工具；唯一 Telegram 私聊 session 的
-`tools.effective` 与升级前基线严格相等。脚本不得重启 `3017`、n8n 或其他 profile，也
-不得提交视频任务。
-
-若官方安装、配置恢复、restart、RPC、runtime、catalog 或 effective 任一门失败，回滚
-保持 armed：官方回装本轮备份的 `0.2.0 previous-plugin`，恢复变更前完整配置，再次只
-刷新 `qwen-current`，并证明 `0.2.0` 的 hooks、旧工具 catalog 和有效工具集合均精确恢复。
-恢复完整配置也必须删除本轮 0.3-only sender hash，不得把它残留在 0.2 插件配置中。
-自动回滚后的安装索引只允许指向带 0600 active marker、载荷指纹一致的本轮 0700 备份；
-活动来源不得移动或删除。回滚验证失败必须报告 rollback failure，不能写 `.verified` 或
-成功口径。
-
-以下是旧版原生处理器的历史下游闭环证据，不证明尚未部署的 `0.3.0`
-Telegram / `before_dispatch` 自然语言入口已经通过生产验收。历史隔离验收曾证明
+以下是旧版原生处理器的历史下游闭环证据，不证明尚未部署的 `0.5`
+Telegram / `before_dispatch` 调度入口已经通过生产验收。历史隔离验收曾证明
 一次处理只创建一个视频工作流执行，普通任务工作流不增加执行；父任务和
 `prepare`、`audio`、`vision`、`finalize` 四个子任务均以首次
 尝试成功，所有实际出现的 `memoryMode` 均为 `none`，Whisper 与本地视觉模型分别

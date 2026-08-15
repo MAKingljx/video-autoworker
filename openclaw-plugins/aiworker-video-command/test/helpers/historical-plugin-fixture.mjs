@@ -9,6 +9,7 @@ const PLUGIN_PATH = 'openclaw-plugins/aiworker-video-command'
 
 export const V03_SOURCE_SHA = '3c385f19308b4d36cf624d3c95a20cc65acaf903'
 export const V04_SOURCE_SHA = 'db3632713b54be5e8797ff2d85ab91ebccd134f5'
+export const V041_SOURCE_SHA = 'e615d8dc68d089f11afe1581c1f56c614e01b796'
 
 export async function materializeHistoricalPlugin(destination, commit = V03_SOURCE_SHA) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'video-command-history-')))

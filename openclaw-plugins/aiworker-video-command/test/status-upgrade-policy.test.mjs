@@ -13,6 +13,10 @@ import {
   fingerprintInstalledPayload,
   validateStatusUpgradeBackup,
   validateStatusUpgradeVersion,
+  validateClassifierConfig,
+  validateClassifierConfigTransition,
+  buildActiveClassifierConfig,
+  buildClassifierCandidateConfig,
 } from '../../../scripts/validate-aiworker-video-status-upgrade.mjs'
 
 const roots = []
@@ -39,19 +43,24 @@ async function createFixture() {
     await writeFile(join(plugin, 'index.js'), 'export default {}\n')
     await writeFile(join(plugin, 'openclaw.plugin.json'), '{"id":"aiworker-video-command"}\n')
   }
-  await writeFile(join(source, 'package.json'), '{"version":"0.4.1"}\n')
+  await writeFile(join(source, 'package.json'), '{"version":"0.5.0"}\n')
   for (const plugin of [installed, previous]) {
-    await writeFile(join(plugin, 'package.json'), '{"version":"0.4.0"}\n')
+    await writeFile(join(plugin, 'package.json'), '{"version":"0.4.1"}\n')
     await mkdir(join(plugin, 'node_modules'))
     await symlink(peer, join(plugin, 'node_modules', 'openclaw'), 'dir')
   }
   const config = join(backupDir, 'openclaw.json')
-  await writeFile(config, '{"plugins":{"allow":["aiworker-video-command"]}}\n', { mode: 0o600 })
+  await writeFile(config, JSON.stringify({
+    plugins: { allow: ['aiworker-video-command'], entries: {
+      'aiworker-video-command': { enabled: true, config: { allowedSenderSha256: 'a'.repeat(64) } },
+    } },
+    agents: { list: [{ id: 'second-original', tools: { profile: 'standard', allow: ['read'] } }] },
+  }), { mode: 0o600 })
   const peerRealPath = await realpath(peer)
   const previousPayload = await fingerprintInstalledPayload(previous)
   const metadata = buildBackupMetadata({
     pluginId: 'aiworker-video-command',
-    candidateVersion: '0.4.1',
+    candidateVersion: '0.5.0',
     targetSha: 'a'.repeat(40),
     canonicalSourcePath: source,
     installedPath: installed,
@@ -67,31 +76,31 @@ async function createFixture() {
   return { backupRoot, backupDir, source, installed, config }
 }
 
-describe('0.4.0 to 0.4.1 status-patch policy', () => {
-  it('permits only the fixed 0.4.1 release boundary with matching package and manifest versions', () => {
-    expect(validateStatusUpgradeVersion('0.4.1', '0.4.1')).toBe('0.4.1')
-    expect(() => validateStatusUpgradeVersion('0.4.1', '0.4.0')).toThrow(/versions must match/u)
-    for (const value of ['0.4.0', '0.4.2', '1.0.0', 'latest']) {
-      expect(() => validateStatusUpgradeVersion(value, value)).toThrow(/exactly 0\.4\.1/u)
+describe('0.4.1 to 0.5.0 classifier upgrade policy', () => {
+  it('permits only the fixed 0.5.0 release boundary with matching package and manifest versions', () => {
+    expect(validateStatusUpgradeVersion('0.5.0', '0.5.0')).toBe('0.5.0')
+    expect(() => validateStatusUpgradeVersion('0.5.0', '0.4.1')).toThrow(/versions must match/u)
+    for (const value of ['0.4.1', '0.5.1', '1.0.0', 'latest']) {
+      expect(() => validateStatusUpgradeVersion(value, value)).toThrow(/exactly 0\.5\.0/u)
     }
   })
 
-  it('validates a complete 0.4.0 payload/config recovery point and rejects later drift', async () => {
+  it('validates a complete 0.4.1 payload/config recovery point and rejects later drift', async () => {
     const fixture = await createFixture()
     await expect(validateStatusUpgradeBackup({
       backupRoot: fixture.backupRoot,
       backupDir: fixture.backupDir,
       targetSha: 'a'.repeat(40),
-      candidateVersion: '0.4.1',
+      candidateVersion: '0.5.0',
       canonicalSourcePath: fixture.source,
       installedPath: fixture.installed,
-    })).resolves.toMatchObject({ metadata: { previousVersion: '0.4.0', candidateVersion: '0.4.1' } })
+    })).resolves.toMatchObject({ metadata: { previousVersion: '0.4.1', candidateVersion: '0.5.0' } })
     await writeFile(fixture.config, '{"tampered":true}\n', { mode: 0o600 })
     await expect(validateStatusUpgradeBackup({
       backupRoot: fixture.backupRoot,
       backupDir: fixture.backupDir,
       targetSha: 'a'.repeat(40),
-      candidateVersion: '0.4.1',
+      candidateVersion: '0.5.0',
       canonicalSourcePath: fixture.source,
       installedPath: fixture.installed,
     })).rejects.toThrow(/config changed/u)
@@ -100,8 +109,8 @@ describe('0.4.0 to 0.4.1 status-patch policy', () => {
   it('keeps the release entry limited to explicit SHA, qwen-current, and protected listeners', async () => {
     const script = await readFile(resolve(process.cwd(), 'scripts/upgrade-aiworker-video-command-status-plugin.sh'), 'utf8')
     expect(script).toContain('--target-sha')
-    expect(script).toContain('PREVIOUS_VERSION="0.4.0"')
-    expect(script).toContain('PREVIOUS_SOURCE_SHA="db3632713b54be5e8797ff2d85ab91ebccd134f5"')
+    expect(script).toContain('PREVIOUS_VERSION="0.4.1"')
+    expect(script).toContain('PREVIOUS_SOURCE_SHA="e615d8dc68d089f11afe1581c1f56c614e01b796"')
     expect(script).toContain('HEAD, local origin/main, live GitHub main, and target SHA must match.')
     expect(script).toContain('gateway restart --wait 60s')
     expect(script).toContain('for port in 3017 5678 5679 18091 18789 18989')
@@ -113,8 +122,52 @@ describe('0.4.0 to 0.4.1 status-patch policy', () => {
     expect(script).toContain('validate_installed_candidate "$report_dir/installed"')
     expect(script).toContain('validate_live_candidate "$report_dir/live"')
     expect(script).toContain('plugins install --force')
+    expect(script).toContain('plugins.entries.%s.config.releaseReady=false')
+    expect(script).toContain('The candidate release gate remains closed.')
+    expect(script).toContain('install and verify task-flow schema v2 and the lane supervisor')
+    expect(script).toContain('Only qwen-current was refreshed; Mission Control 3017 and n8n were untouched.')
     expect(script).not.toContain('restore_v03')
     expect(script).not.toMatch(/launchctl|kickstart|:3017.*restart|:5678.*restart/iu)
+  })
+
+  it('allows only the closed release gate and llm additions while preserving sender hash and target tools', async () => {
+    const fixture = await createFixture()
+    const candidate = join(fixture.backupRoot, 'candidate.json')
+    const parsed = JSON.parse(await readFile(fixture.config, 'utf8'))
+    parsed.plugins.entries['aiworker-video-command'].llm = { allowAgentIdOverride: true }
+    parsed.plugins.entries['aiworker-video-command'].config.releaseReady = false
+    await writeFile(candidate, `${JSON.stringify(parsed)}\n`, { mode: 0o600 })
+    await expect(validateClassifierConfig({ pathname: fixture.config, mode: 'baseline' }))
+      .resolves.toMatchObject({ mode: 'baseline' })
+    await expect(validateClassifierConfig({ pathname: candidate, mode: 'candidate' }))
+      .resolves.toMatchObject({ mode: 'candidate' })
+    await expect(validateClassifierConfigTransition({
+      baselinePath: fixture.config, candidatePath: candidate,
+    })).resolves.toMatchObject({
+      changedPaths: [
+        'plugins.entries.aiworker-video-command.llm',
+        'plugins.entries.aiworker-video-command.config.releaseReady',
+      ],
+    })
+    parsed.plugins.entries['aiworker-video-command'].llm.allowModelOverride = true
+    await writeFile(candidate, `${JSON.stringify(parsed)}\n`, { mode: 0o600 })
+    await expect(validateClassifierConfig({ pathname: candidate, mode: 'candidate' }))
+      .rejects.toThrow(/exactly allowAgentIdOverride/u)
+  })
+
+  it('builds the canonical candidate without mutating the baseline object', async () => {
+    const fixture = await createFixture()
+    const baseline = JSON.parse(await readFile(fixture.config, 'utf8'))
+    const candidate = buildClassifierCandidateConfig(baseline)
+    expect(candidate.plugins.entries['aiworker-video-command'].llm)
+      .toEqual({ allowAgentIdOverride: true })
+    expect(candidate.plugins.entries['aiworker-video-command'].config.releaseReady).toBe(false)
+    expect(baseline.plugins.entries['aiworker-video-command']).not.toHaveProperty('llm')
+    expect(baseline.plugins.entries['aiworker-video-command'].config).not.toHaveProperty('releaseReady')
+
+    const active = buildActiveClassifierConfig(candidate)
+    expect(active.plugins.entries['aiworker-video-command'].config.releaseReady).toBe(true)
+    expect(candidate.plugins.entries['aiworker-video-command'].config.releaseReady).toBe(false)
   })
 
   it('counts status-upgrade recovery points in the shared two-backup family', async () => {

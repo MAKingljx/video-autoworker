@@ -15,7 +15,7 @@ describe('OpenClaw plugin package contract', () => {
       'openclaw-plugins/aiworker-video-command/vitest.config.mjs',
     )
     expect(packageJson.type).toBe('module')
-    expect(packageJson.version).toBe('0.4.1')
+    expect(packageJson.version).toBe('0.5.0')
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(packageJson.openclaw.compat.pluginApi).toBe('>=2026.7.1')
     expect(manifest.id).toBe('aiworker-video-command')
@@ -31,6 +31,9 @@ describe('OpenClaw plugin package contract', () => {
           type: 'string',
           pattern: '^[a-f0-9]{64}$',
         },
+        releaseReady: {
+          type: 'boolean',
+        },
       },
     })
     expect(manifest).not.toHaveProperty('contracts')
@@ -38,18 +41,21 @@ describe('OpenClaw plugin package contract', () => {
     expect(JSON.stringify(manifest)).not.toMatch(/secret|token|password|api.?key/iu)
   })
 
-  it('registers only the native before-dispatch hook', async () => {
+  it('registers only one hook-owned Qwen classifier boundary', async () => {
     const entry = await readFile(resolve(PLUGIN_ROOT, 'index.js'), 'utf8')
     expect(entry).toContain("from 'openclaw/plugin-sdk/plugin-entry'")
     expect(entry).toContain("api.on('before_dispatch'")
+    expect(entry).toContain('timeoutMs: 140_000')
     expect(entry).not.toContain("api.on('before_prompt_build'")
-    expect(entry).not.toContain("api.on('before_tool_call'")
+    expect(entry).not.toContain('api.registerTrustedToolPolicy')
+    expect(entry).not.toContain('api.registerAgentToolResultMiddleware')
     expect(entry).not.toContain('api.registerTool')
-    expect(entry).not.toContain('runContext')
-    expect(entry).not.toContain('aiworker_analyze_video')
-    expect(entry).not.toContain('inbound_claim')
-    expect(entry).not.toContain('message_received')
+    expect(entry).toContain('api.runtime.llm.complete')
+    expect(entry).not.toContain('createBeforeDispatchHandler')
+    expect(entry).not.toContain('recent-task-store')
+    expect(entry).not.toContain('video-request-router')
     expect(entry).toContain('api.pluginConfig?.allowedSenderSha256')
-    expect(entry).toContain('bounded task status queries')
+    expect(entry).toContain('api.pluginConfig?.releaseReady === true')
+    expect(entry).toContain('Qwen-classified')
   })
 })

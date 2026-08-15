@@ -2,15 +2,19 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { mkdir, open, readFile, rm, stat } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPlatformClient } from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
-import { submitVideoTask, VideoTriggerUnconfirmedError } from '../lib/video-task.mjs'
 import {
   batchStatePath,
   createBatchState,
+  createSingleVideoState,
+  defaultBatchRoot,
+  markBatchQueued,
   readBatchState,
+  readSingleVideoTaskState,
   summarizeBatchState,
   validateBatchId,
 } from '../lib/video-batch-state.mjs'
@@ -18,6 +22,19 @@ import {
 const args = process.argv.slice(2)
 const VIDEO_ACTION = /(?:分析|解析|处理|识别|总结)/u
 const VIDEO_SUBJECT = /(?:视频|影片|录像|video|\/[^\r\n\0]*\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ts|webm|wmv))/iu
+const VALUE_OPTIONS = new Set([
+  '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
+  '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
+  '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
+  '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
+])
+const FLAG_OPTIONS = new Set(['--no-trigger-recovery', '--resume-pending'])
+const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
+const publicLocalTaskStatus = status => ({
+  staging: 'queued',
+  submitted: 'accepted',
+  waiting: 'running',
+}[status] || status)
 
 function option(name) {
   const index = args.indexOf(name)
@@ -29,6 +46,57 @@ function option(name) {
 
 function flag(name) {
   return args.includes(name)
+}
+
+function validateCliArguments() {
+  const present = new Set()
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    if (!VALUE_OPTIONS.has(argument) && !FLAG_OPTIONS.has(argument)) {
+      throw new Error(`未知参数：${argument}`)
+    }
+    if (present.has(argument)) throw new Error(`参数不能重复：${argument}`)
+    present.add(argument)
+    if (VALUE_OPTIONS.has(argument)) {
+      const value = args[index + 1]
+      if (!value || value.startsWith('--')) throw new Error(`${argument} 缺少参数值`)
+      index += 1
+    }
+  }
+
+  if (present.has('--prompt') && present.has('--prompt-file')) {
+    throw new Error('--prompt 与 --prompt-file 不能同时使用')
+  }
+  const primaryModes = ['--batch-status', '--resume-batch', '--resume-pending', '--status', '--video-dir', '--video-file']
+    .filter(name => present.has(name))
+  if (primaryModes.length > 1) throw new Error(`任务模式参数不能同时使用：${primaryModes.join('、')}`)
+  if (present.has('--batch-id') !== present.has('--video-dir')) {
+    throw new Error('--video-dir 必须与 --batch-id 同时使用')
+  }
+
+  const mode = primaryModes[0] || 'generic'
+  const allowedByMode = {
+    '--batch-status': new Set(['--batch-status']),
+    '--resume-batch': new Set(['--resume-batch']),
+    '--resume-pending': new Set(['--resume-pending']),
+    '--status': new Set(['--status', '--base-url']),
+    '--video-dir': new Set([
+      '--video-dir', '--batch-id', '--base-url', '--binding-id', '--prompt', '--prompt-file',
+      '--vision-route', '--delivery',
+    ]),
+    '--video-file': new Set([
+      '--video-file', '--base-url', '--binding-id', '--prompt', '--prompt-file', '--vision-route',
+      '--delivery', '--session-key', '--channel', '--target', '--account-id', '--task-id',
+      '--idempotency-key', '--wait-seconds', '--no-trigger-recovery',
+    ]),
+    generic: new Set([
+      '--base-url', '--binding-id', '--prompt', '--prompt-file', '--planner-route',
+      '--executor-route', '--reviewer-route', '--vision-route', '--delivery', '--session-key',
+      '--channel', '--target', '--account-id', '--task-id', '--idempotency-key', '--wait-seconds',
+    ]),
+  }
+  const disallowed = [...present].filter(name => !allowedByMode[mode].has(name))
+  if (disallowed.length) throw new Error(`${mode} 模式不支持参数：${disallowed.join('、')}`)
 }
 
 function fail(message, code = 1) {
@@ -60,14 +128,53 @@ function chooseBinding(bindings, requestedBinding, video) {
   return binding
 }
 
-function spawnBatchWorker(statePath) {
+async function spawnBatchWorker({ batchRoot = defaultBatchRoot() } = {}) {
   const worker = fileURLToPath(new URL('./run-video-batch.mjs', import.meta.url))
-  const child = spawn(process.execPath, [worker, '--state-file', statePath], {
-    detached: true,
-    stdio: 'ignore',
-    env: process.env,
-  })
-  child.unref()
+  await mkdir(batchRoot, { recursive: true, mode: 0o700 })
+  const launchLockPath = resolve(batchRoot, '.worker-launch.lock')
+  let launchLock
+  try {
+    launchLock = await open(launchLockPath, 'wx', 0o600)
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      const lockStat = await stat(launchLockPath).catch(() => null)
+      if (lockStat && Date.now() - lockStat.mtimeMs < 30_000) return false
+      await rm(launchLockPath, { force: true })
+      launchLock = await open(launchLockPath, 'wx', 0o600)
+    } else {
+      throw error
+    }
+  }
+  try {
+    const child = spawn(process.execPath, [worker, '--serve-root', batchRoot], {
+      detached: true,
+      stdio: 'ignore',
+      env: process.env,
+    })
+    await new Promise((resolvePromise, rejectPromise) => {
+      let settled = false
+      const finish = callback => value => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        callback(value)
+      }
+      const succeed = finish(resolvePromise)
+      const failWorker = finish(error => rejectPromise(error))
+      const timeout = setTimeout(succeed, 100)
+      child.once('error', error => failWorker(new Error(`视频队列 worker 启动失败：${error.message}`)))
+      child.once('exit', code => {
+        if (!settled && code === 0) succeed()
+        else if (!settled) failWorker(new Error(
+          `视频队列 worker 启动失败${Number.isInteger(code) ? `（退出码 ${code}）` : ''}`,
+        ))
+      })
+    })
+    child.unref()
+    return true
+  } finally {
+    await launchLock?.close().catch(() => undefined)
+  }
 }
 
 async function readPromptInput() {
@@ -91,9 +198,17 @@ async function handleBatchStatus(batchId) {
 
 async function handleBatchResume(batchId) {
   const statePath = batchStatePath(validateBatchId(batchId))
-  const state = await readBatchState(statePath)
-  if (!['succeeded', 'completed_with_errors'].includes(state.status)) spawnBatchWorker(statePath)
+  let state = await readBatchState(statePath)
+  if (!['succeeded', 'completed_with_errors'].includes(state.status)) {
+    state = await markBatchQueued(statePath)
+    await spawnBatchWorker()
+  }
   output({ ...summarizeBatchState(state), resumed: !['succeeded', 'completed_with_errors'].includes(state.status) })
+}
+
+async function handlePendingResume() {
+  await spawnBatchWorker()
+  output({ resumed: true })
 }
 
 async function handleBatchCreate(client, videoDir) {
@@ -113,7 +228,7 @@ async function handleBatchCreate(client, videoDir) {
     inboxRoot: defaultMediaInboxRoot(),
   })
   if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
-    spawnBatchWorker(created.statePath)
+    await spawnBatchWorker()
   }
   output({
     ...summarizeBatchState(created.state),
@@ -140,15 +255,41 @@ async function waitForTask(client, taskId, waitSeconds) {
 }
 
 async function main() {
+  validateCliArguments()
   const batchStatus = option('--batch-status')
   if (batchStatus) return handleBatchStatus(batchStatus)
   const resumeBatch = option('--resume-batch')
   if (resumeBatch) return handleBatchResume(resumeBatch)
+  if (flag('--resume-pending')) return handlePendingResume()
 
   const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
   const statusTaskId = option('--status')
   if (statusTaskId) {
+    const local = await readSingleVideoTaskState(statusTaskId).catch(error => {
+      if (error?.code === 'ENOENT') return null
+      throw error
+    })
+    if (local && !terminalTaskStatus(local.item.status)) {
+      output({
+        taskId: statusTaskId,
+        status: publicLocalTaskStatus(local.item.status),
+        output: null,
+        error: local.item.error || null,
+        updatedAt: local.state.updatedAt,
+      })
+      return
+    }
     const run = await client.getRun(statusTaskId)
+    if (!run && local) {
+      output({
+        taskId: statusTaskId,
+        status: publicLocalTaskStatus(local.item.status),
+        output: null,
+        error: local.item.error || null,
+        updatedAt: local.state.updatedAt,
+      })
+      return
+    }
     if (!run) throw new Error(`未找到任务：${statusTaskId}`)
     output({
       taskId: run.taskId,
@@ -223,19 +364,31 @@ async function main() {
     { routeId, fallbackRouteIds: [] },
   ]))
 
-  const response = videoFile
-    ? await submitVideoTask({
-      client,
-      bindingId: binding.id,
+  if (videoFile) {
+    const created = await createSingleVideoState({
       taskId,
       idempotencyKey,
+      baseUrl: client.baseUrl,
+      bindingId: binding.id,
       prompt,
       videoFile,
       visionRoute: option('--vision-route'),
       inboxRoot: defaultMediaInboxRoot(),
-      recoverAfterTriggerError: !noTriggerRecovery,
     })
-    : await client.trigger({
+    if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
+      await spawnBatchWorker()
+    }
+    const item = created.state.items[0]
+    output({
+      taskId,
+      status: item.status,
+      duplicate: created.duplicate,
+      bindingId: binding.id,
+    })
+    return
+  }
+
+  const response = await client.trigger({
       bindingId: binding.id,
       taskId,
       idempotencyKey,
@@ -264,8 +417,5 @@ async function main() {
 }
 
 main().catch(error => {
-  if (error instanceof VideoTriggerUnconfirmedError) {
-    fail('video_trigger_unconfirmed', 75)
-  }
   fail(error instanceof Error ? error.message : String(error))
 })

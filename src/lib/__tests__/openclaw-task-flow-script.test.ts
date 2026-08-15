@@ -61,6 +61,7 @@ globalThis.fetch = async (input, init = {}) => {
       const childEnv = {
         ...process.env,
         AIWORKER_MEDIA_INGEST_DIR: inboxRoot,
+        AIWORKER_VIDEO_BATCH_DIR: resolve(root, 'batch-state'),
         FAKE_PLATFORM_LOG: requestLog,
         NODE_OPTIONS: [
           process.env.NODE_OPTIONS,
@@ -90,7 +91,7 @@ globalThis.fetch = async (input, init = {}) => {
       expect(videoRun.stderr).toBe('')
       expect(JSON.parse(videoRun.stdout)).toMatchObject({
         taskId: 'explicit-video-task',
-        status: 'accepted',
+        status: 'queued',
         bindingId: 'video-binding',
       })
 
@@ -284,10 +285,13 @@ globalThis.fetch = async (input, init = {}) => {
           })
         })
       })
-      expect(noRecoveryRun.failed).toBe(true)
-      expect(noRecoveryRun.exitCode).toBe(75)
-      expect(noRecoveryRun.stdout).toBe('')
-      expect(noRecoveryRun.stderr).toBe('video_trigger_unconfirmed\n')
+      expect(noRecoveryRun.failed).toBe(false)
+      expect(noRecoveryRun.exitCode).toBe(null)
+      expect(JSON.parse(noRecoveryRun.stdout)).toMatchObject({
+        taskId: 'no-recovery-task',
+        status: 'queued',
+      })
+      expect(noRecoveryRun.stderr).toBe('')
 
       const requests = (await readFile(requestLog, 'utf8'))
         .trim()
@@ -300,35 +304,27 @@ globalThis.fetch = async (input, init = {}) => {
       const triggerRequests = requests.filter(({ method, url }) => (
         method === 'POST' && url === '/api/n8n/trigger'
       ))
-      expect(triggerRequests).toHaveLength(3)
+      expect(triggerRequests).toHaveLength(1)
       expect(triggerRequests[0]?.body).toMatchObject({
-        bindingId: 'video-binding',
-        taskId: 'explicit-video-task',
-        idempotencyKey: 'explicit-video-task',
-        delivery: { mode: 'none' },
-        input: { prompt: '分析视频中的语音内容和画面信息，分别给出结果后合并。' },
-      })
-      expect((triggerRequests[0]?.body?.input as Record<string, unknown>).videoKey).toEqual(expect.any(String))
-      expect(triggerRequests[1]?.body).toMatchObject({
         bindingId: 'generic-binding',
         taskId: 'generic-command-task',
         delivery: { mode: 'none' },
         input: { prompt: '请分析这个普通任务' },
       })
-      expect(triggerRequests.filter(request => request.body?.taskId === 'explicit-video-task')).toHaveLength(1)
+      expect(triggerRequests.filter(request => request.body?.taskId === 'explicit-video-task')).toHaveLength(0)
       expect(requests.filter(({ method, url }) => (
         method === 'GET' && url === '/api/n8n/runs?taskId=explicit-video-task'
-      ))).toHaveLength(1)
+      )).length).toBeGreaterThanOrEqual(1)
       const noRecoveryRequests = requests.filter(request => (
         request.body?.taskId === 'no-recovery-task'
         || request.url.includes('taskId=no-recovery-task')
       ))
       expect(noRecoveryRequests.filter(({ method, url }) => (
         method === 'POST' && url === '/api/n8n/trigger'
-      ))).toHaveLength(1)
-      expect(noRecoveryRequests.some(({ method, url }) => (
-        method === 'GET' && url.startsWith('/api/n8n/runs?')
-      ))).toBe(false)
+      ))).toHaveLength(0)
+      // The durable lane may start a same-ID recovery query asynchronously;
+      // the CLI contract only requires that the submitting process returns
+      // immediately without issuing a second trigger.
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -367,7 +363,7 @@ globalThis.fetch = async (input, init = {}) => {
     expect(result.stderr).not.toContain('does not provide an export named')
   })
 
-  it('classifies loopback service outages as retryable batch pauses', async () => {
+  it('classifies loopback service outages as retryable recovery conditions', async () => {
     const moduleUrl = pathToFileURL(resolve(
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/lib/platform-client.mjs',
@@ -381,45 +377,44 @@ globalThis.fetch = async (input, init = {}) => {
     expect(platform.isRetryablePlatformError(error)).toBe(true)
   })
 
-  it('requires one explicit stable identity for durable task submissions', () => {
+  it('documents stable identities for the persistent video lane', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
 
-    expect(skill).toContain('Reuse one stable task/idempotency key')
-    expect(skill).toContain('--task-id <stable-request-key>')
-    expect(skill).toContain('--idempotency-key <stable-request-key>')
-    expect(skill).toContain('--task-id <stable-key>')
-    expect(skill).toContain('--idempotency-key <stable-key>')
+    expect(skill).toContain('--task-id <stable-task-id>')
+    expect(skill).toContain('--idempotency-key <same-stable-task-id>')
+    expect(skill).toContain('--batch-id <stable-batch-id>')
     expect(skill).toContain('A batch ID is not a task ID')
-    expect(skill).toContain('--batch-status <stable-batch-key>')
+    expect(skill).toContain('--batch-status <complete-batch-id>')
+    expect(skill).toMatch(/persistent\s+process-wide video lane/u)
   })
 
-  it('defines both single-video conversation forms as native asynchronous entries', () => {
+  it('defines single-video and directory dispatch as native asynchronous scheduler entries', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
 
-    expect(skill).toContain('分析视频 /完整路径/video.mp4')
-    expect(skill).toContain('帮我分析一下这个视频 /完整路径/video.mp4')
-    expect(skill).toContain('`分析视频 <绝对路径>`')
-    expect(skill).toContain('--video-file "<absolute-video-path>"')
-    expect(skill).toContain('--task-id <stable-request-key>')
-    expect(skill).toContain('--idempotency-key <stable-request-key>')
+    expect(skill).toContain('`dispatch_single`')
+    expect(skill).toContain('`dispatch_directory`')
+    expect(skill).toContain('--video-file "<validated-absolute-video-path>"')
+    expect(skill).toContain('--video-dir "<validated-absolute-directory-path>"')
+    expect(skill).toContain('--task-id <stable-task-id>')
+    expect(skill).toContain('--idempotency-key <same-stable-task-id>')
     expect(skill).toContain('--delivery none')
     expect(skill).toContain('--wait-seconds 0')
     expect(skill).toContain('--no-trigger-recovery')
-    expect(workspaceRules).toContain('`分析视频 <绝对路径>`')
-    expect(workspaceRules).toContain('`帮我分析一下这个视频 <绝对路径>`')
-    expect(skill).toContain("plugin's `before_dispatch` hook")
-    expect(workspaceRules).toContain('in `before_dispatch`, before')
+    expect(workspaceRules).toContain('one canonical absolute video-file path')
+    expect(workspaceRules).toContain('one canonical absolute directory path')
+    expect(skill).toContain('native `before_dispatch` hook')
+    expect(workspaceRules).toContain('native `before_dispatch` handler')
     const stableEntry = 'node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs"'
     expect(skill).toContain(stableEntry)
-    expect(skill).toContain('implementation reference, not an')
-    expect(workspaceRules).toContain('Do not ask Qwen to choose a video tool')
+    expect(skill).toContain('implementation references, not commands')
+    expect(workspaceRules).toContain('not an agent tool')
   })
 
-  it('contracts native single-video dispatch to one silent submission and one receipt', () => {
+  it('contracts video dispatch to one enqueue, one receipt, and no same-turn supervision', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -429,23 +424,22 @@ globalThis.fetch = async (input, init = {}) => {
     for (const contract of [skill, workspaceRules]) {
       expect(contract).toContain('shared runner')
       expect(contract).toMatch(/exactly\s+once/u)
-      expect(contract).toMatch(/Do not narrate|Do not\s+narrate/u)
-      expect(contract).toMatch(/generic prompt|generic task/u)
-      expect(contract).toMatch(/same turn/u)
-      expect(contract).toMatch(/later explicit user request/u)
+      expect(contract).toMatch(/short (?:handled )?receipt/u)
+      expect(contract).toMatch(/generic task/u)
+      expect(contract).toMatch(/same turn|current turn|end\s+the turn/u)
+      expect(contract).toMatch(/explicit/u)
       expect(contract).toContain('`delivery=none`')
       expect(contract).toContain('`memoryMode=none`')
     }
-    expect(skill).toContain('After any receipt, rejection, or failure, stop the turn')
-    expect(skill).toContain('已提交，任务编号：<taskId>。结果请稍后查询。')
-    expect(skill).toContain('任务已存在，任务编号：<taskId>。结果请稍后查询。')
-    expect(skill).toContain('提交状态暂未确认，任务编号：<taskId>。请稍后查询。')
-    expect(workspaceRules).toContain('return only')
+    expect(skill).toContain('End the turn immediately after any receipt or')
+    expect(skill).toContain('no polling, status read, retry, resubmission')
+    expect(skill).toContain('does not automatically return')
+    expect(workspaceRules).toContain('Do not read status')
     expect(workspaceRules).toContain('`--wait-seconds 0`')
     expect(workspaceRules).toContain('`--no-trigger-recovery`')
   })
 
-  it('answers video-chain explanation questions without tools or retired routes', () => {
+  it('documents one no-tool Qwen semantic classification with host-owned authorization', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -455,24 +449,26 @@ globalThis.fetch = async (input, init = {}) => {
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
-    const fixedReply = '视频会由原生插件一次派发到 AI-worker，后台依次执行 prepare、Whisper 音频、本地 Qwen 画面和 finalize；当前轮不等待，结果按任务编号另查。'
+    const architecture = readFileSync(resolve(
+      process.cwd(),
+      'docs/architecture/openclaw-video-analysis-flow.md',
+    ), 'utf8')
 
-    expect([...fixedReply].length).toBeLessThanOrEqual(120)
-    for (const contract of [skill, workspaceRules]) {
-      expect(contract).toContain(fixedReply)
-      expect(contract).toMatch(/does not return the completed|never automatically returns the completed/u)
-      expect(contract).toMatch(/local Qwen vision/)
-      expect(contract).toContain('`video-learning-pipeline`')
+    for (const contract of [skill, workspaceRules, workspaceMemory, architecture]) {
+      expect(contract).toContain('api.runtime.llm.complete')
+      expect(contract).toMatch(/exactly once|一次/u)
+      expect(contract).toMatch(/no-tool|无工具/u)
+      expect(contract).toMatch(/structured|结构化/u)
+      expect(contract).toMatch(/host|宿主/u)
+      expect(contract).toMatch(/authorized Telegram private|授权 Telegram 私聊/u)
     }
-    for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toMatch(/zero\s+tools/i)
-      expect(contract).toMatch(/memory_search|memory lookup/u)
-      expect(contract).toMatch(/generic task/u)
-      expect(contract).toMatch(/later explicit\s+status\s+request/u)
-    }
+    expect(skill).toContain('The classifier is advisory')
+    expect(workspaceRules).toContain('semantic advice, never authorization')
+    expect(workspaceMemory).toContain('The host, not the model')
+    expect(architecture).toContain('模型只表达意图判断')
   })
 
-  it('routes affirmative natural-language video execution through native before_dispatch', () => {
+  it('keeps the scheduler out of the native agent-tool surface and fails closed', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -485,20 +481,21 @@ globalThis.fetch = async (input, init = {}) => {
     const description = skill.match(/^description: (.+)$/m)?.[1]
 
     expect(description?.length).toBeLessThanOrEqual(160)
-    for (const contract of [workspaceRules, workspaceMemory]) {
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
       expect(contract).toContain('`before_dispatch`')
-      expect(contract).toMatch(/exact|精确/u)
-      expect(contract).toMatch(/affirmative\s+natural-language|肯定自然语言/u)
-      expect(contract).toMatch(/generic prompt|generic task/u)
+      expect(contract).toMatch(/not an agent tool|不是 Agent tool/u)
+      expect(contract).toMatch(/fail(?:s)? closed|fail-closed/u)
+      expect(contract).toMatch(/runner (?:failure|errors?)|runner 失败/u)
       expect(contract).not.toContain('`aiworker_analyze_video`')
       expect(contract).not.toContain('`tools.allow`')
       expect(contract).not.toContain('`tools.profile`')
     }
-    expect(workspaceRules).toContain('fail closed')
-    expect(workspaceMemory).toContain('local target contract')
+    expect(skill).toContain('Only `pass` continues')
+    expect(workspaceRules).toContain('Only genuinely unrelated `pass`')
+    expect(workspaceMemory).toContain('Only a truly unrelated `pass`')
   })
 
-  it('keeps later human status lookup separate and bounded to the latest receipt', () => {
+  it('requires explicit complete task or batch IDs for one bounded status read', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -515,33 +512,44 @@ globalThis.fetch = async (input, init = {}) => {
 
     for (const contract of [skill, workspaceRules, workspaceMemory]) {
       expect(contract).toContain('`before_dispatch`')
-      expect(contract).toMatch(/trusted[\s\S]{0,100}most-recent receipt|trusted unique most-recent receipt/u)
       expect(contract).toMatch(/complete task ID/u)
+      expect(contract).toMatch(/complete batch ID/u)
       expect(contract).toMatch(/exactly once/u)
-      expect(contract).toMatch(/read-only\s+status/u)
-      expect(contract).toMatch(/Qwen/u)
-      expect(contract).toContain('`memory_search`')
-      expect(contract).toMatch(/filesystem|file/u)
+      expect(contract).toMatch(/read-only|read only/u)
+      expect(contract).toMatch(/current original message/u)
+      expect(contract).toMatch(/recent/u)
+      expect(contract).toMatch(/memory/u)
+      expect(contract).toMatch(/files|filesystem/u)
       expect(contract).toMatch(/SQLite/u)
-      expect(contract).toMatch(/polling/u)
-      expect(contract).toMatch(/resubmission|resubmit/u)
+      expect(contract).toMatch(/poll/u)
+      expect(contract).toMatch(/submit|resubmission|resubmit/u)
+      expect(contract).not.toMatch(/trusted[\s\S]{0,100}most-recent receipt|trusted unique most-recent receipt/u)
     }
-    expect(skill).toContain('请提供完整任务编号。')
-    expect(workspaceRules).toContain('请提供完整任务编号。')
-    for (const reply of [
-      '任务已受理，正在等待处理。',
-      '任务正在处理中。',
-      '任务已完成。',
-      '任务处理失败。',
-      '暂时无法查询任务状态。',
-    ]) {
-      expect(skill).toContain(reply)
-      expect(workspaceRules).toContain(reply)
+    expect(skill).toContain('--status <complete-task-id>')
+    expect(skill).toContain('--batch-status <complete-batch-id>')
+    expect(architecture).toMatch(/取代 `0\.4\.1` 的纯正则状态入口|不再保留 `0\.4\.1` 的纯正则状态入口/u)
+    expect(architecture).toContain('不提交、不恢复')
+  })
+
+  it('documents one process-wide persistent lane for single videos and directories', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
+      expect(contract).toMatch(/single video|single videos/u)
+      expect(contract).toMatch(/director(?:y|ies)/u)
+      expect(contract).toMatch(/persistent/u)
+      expect(contract).toMatch(/process-wide/u)
+      expect(contract).toMatch(/one video at a time/u)
+      expect(contract).toMatch(/restart/u)
     }
-    expect(architecture).toContain('before_dispatch 状态分类')
-    expect(architecture).toContain('只读状态 runner 查询一次')
-    expect(architecture).toContain('禁止启动 Qwen')
-    expect(architecture).toContain('不产生新提交')
   })
 
   it('installs the componentized client, media, batch state, and worker modules', () => {
@@ -576,7 +584,9 @@ globalThis.fetch = async (input, init = {}) => {
 
       const agents = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
       expect(agents).toContain('Keep this rule.')
-      expect(agents).toContain('`分析视频 <绝对路径>`')
+      expect(agents).toContain('`dispatch_single`')
+      expect(agents).toContain('`dispatch_directory`')
+      expect(agents).toContain('api.runtime.llm.complete')
       expect(agents.match(/^## Video Analysis Task Flow Rule$/gm)).toHaveLength(1)
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -628,7 +638,7 @@ globalThis.fetch = async (input, init = {}) => {
     }
   })
 
-  it('persists one immutable batch identity without exposing source paths in status', async () => {
+  it('persists one immutable batch identity and rejects batch-id input drift', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-batch-state-test-'))
     try {
       await writeFile(resolve(root, '01-red.mp4'), 'red')
@@ -656,13 +666,435 @@ globalThis.fetch = async (input, init = {}) => {
         batchRoot: resolve(root, 'state'),
       }
       const created = await batch.createBatchState(input)
-      const duplicate = await batch.createBatchState({ ...input, prompt: 'changed prompt' })
+      const duplicate = await batch.createBatchState(input)
       expect(created.duplicate).toBe(false)
       expect(duplicate.duplicate).toBe(true)
       expect(duplicate.state.prompt).toBe('first prompt')
+      await expect(batch.createBatchState({ ...input, prompt: 'changed prompt' }))
+        .rejects.toThrow('同一批次 ID 已绑定其他视频目录、提示词或执行配置')
+      for (const drift of [
+        { baseUrl: 'http://127.0.0.1:3999' },
+        { bindingId: 'changed-binding' },
+        { visionRoute: 'changed-vision' },
+        { inboxRoot: resolve(root, 'changed-inbox') },
+      ]) {
+        await expect(batch.createBatchState({ ...input, ...drift }))
+          .rejects.toThrow('执行配置')
+      }
       expect(batch.summarizeBatchState(created.state).items[0]).not.toHaveProperty('sourcePath')
     } finally {
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('uses one process-wide batch lock for every persisted batch state', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-global-lock-test-'))
+    try {
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        acquireGlobalBatchLock: (path: string) => Promise<{ acquired: boolean; release: () => Promise<void> }>
+        globalBatchLockPath: (path: string) => string
+      }
+      const firstPath = resolve(root, 'first.json')
+      const secondPath = resolve(root, 'second.json')
+      expect(batch.globalBatchLockPath(firstPath)).toBe(batch.globalBatchLockPath(secondPath))
+      const first = await batch.acquireGlobalBatchLock(firstPath)
+      const second = await batch.acquireGlobalBatchLock(secondPath)
+      expect(first.acquired).toBe(true)
+      expect(second.acquired).toBe(false)
+      await first.release()
+      const resumed = await batch.acquireGlobalBatchLock(secondPath)
+      expect(resumed.acquired).toBe(true)
+      await resumed.release()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('stores single videos as schema-v2 one-item jobs and detects source drift', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-single-video-lane-test-'))
+    try {
+      const video = resolve(root, 'single.mp4')
+      await writeFile(video, 'first')
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{
+          duplicate: boolean
+          state: { schemaVersion: number; kind: string; requestFingerprint: string; items: Array<Record<string, unknown>> }
+        }>
+        verifyBatchItemSource: (item: Record<string, unknown>) => Promise<unknown>
+      }
+      const input = {
+        taskId: 'single-lane-task',
+        idempotencyKey: 'single-lane-task',
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot: resolve(root, 'inbox'),
+        batchRoot: resolve(root, 'state'),
+      }
+      const created = await batch.createSingleVideoState(input)
+      expect(created.state).toMatchObject({ schemaVersion: 2, kind: 'single' })
+      expect(created.state.requestFingerprint).toMatch(/^[a-f0-9]{64}$/)
+      expect(created.state.items).toHaveLength(1)
+      await expect(batch.createSingleVideoState({ ...input, prompt: 'changed' }))
+        .rejects.toThrow('同一任务 ID 已绑定其他视频、提示词或执行配置')
+      for (const drift of [
+        { baseUrl: 'http://127.0.0.1:3999' },
+        { bindingId: 'changed-binding' },
+        { visionRoute: 'changed-vision' },
+        { inboxRoot: resolve(root, 'changed-inbox') },
+      ]) {
+        await expect(batch.createSingleVideoState({ ...input, ...drift }))
+          .rejects.toThrow('执行配置')
+      }
+      await writeFile(video, 'changed-source')
+      await expect(batch.verifyBatchItemSource(created.state.items[0]))
+        .rejects.toThrow('视频源文件在入队后发生变化')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('isolates invalid state files, skips terminal v1, and safely migrates runnable v1', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-v1-migration-test-'))
+    const stateRoot = resolve(root, 'state')
+    try {
+      await mkdir(stateRoot)
+      const video = resolve(root, 'legacy.mp4')
+      await writeFile(video, 'legacy-video')
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        batchStatePath: (id: string, root: string) => string
+        listBatchStatePaths: (path: string, options?: { onWarning?: (warning: string) => void }) => Promise<string[]>
+        prepareBatchStateForExecution: (path: string) => Promise<Record<string, unknown> & {
+          schemaVersion: number
+          requestFingerprint: string
+          status: string
+          items: Array<Record<string, unknown>>
+        }>
+      }
+      const base = {
+        schemaVersion: 1,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        sourceDirectory: root,
+        inboxRoot: resolve(root, 'inbox'),
+        createdAt: '2026-08-01T00:00:00.000Z',
+        updatedAt: '2026-08-01T00:00:00.000Z',
+        error: null,
+        items: [{
+          index: 1,
+          name: 'legacy.mp4',
+          sourcePath: video,
+          sourceBytes: 12,
+          taskId: 'legacy:video:001:test',
+          idempotencyKey: 'legacy:video:001:test',
+          status: 'queued',
+          error: null,
+          submittedAt: null,
+          completedAt: null,
+        }],
+      }
+      const runnablePath = batch.batchStatePath('legacy-runnable', stateRoot)
+      const terminalPath = batch.batchStatePath('legacy-terminal', stateRoot)
+      await writeFile(runnablePath, JSON.stringify({ ...base, batchId: 'legacy-runnable', status: 'queued' }))
+      await writeFile(terminalPath, JSON.stringify({ ...base, batchId: 'legacy-terminal', status: 'succeeded' }))
+      await writeFile(resolve(stateRoot, `${'a'.repeat(64)}.json`), '{invalid')
+      const warnings: string[] = []
+      const paths = await batch.listBatchStatePaths(runnablePath, { onWarning: warning => warnings.push(warning) })
+      expect(paths).toEqual([runnablePath])
+      expect(warnings).toHaveLength(1)
+      const migrated = await batch.prepareBatchStateForExecution(runnablePath)
+      expect(migrated.schemaVersion).toBe(2)
+      expect(migrated.requestFingerprint).toMatch(/^[a-f0-9]{64}$/)
+      expect(migrated.items[0]?.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps unsafe v1 migration paused without poisoning later jobs', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-v1-unsafe-test-'))
+    try {
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        batchStatePath: (id: string, root: string) => string
+        prepareBatchStateForExecution: (path: string) => Promise<{ status: string; error: string }>
+      }
+      const stateRoot = resolve(root, 'state')
+      await mkdir(stateRoot)
+      const statePath = batch.batchStatePath('legacy-unsafe', stateRoot)
+      await writeFile(statePath, JSON.stringify({
+        schemaVersion: 1,
+        batchId: 'legacy-unsafe',
+        status: 'queued',
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        sourceDirectory: root,
+        inboxRoot: resolve(root, 'inbox'),
+        items: [{ taskId: 'legacy-task', sourcePath: resolve(root, 'missing.mp4'), sourceBytes: 1 }],
+      }))
+      const migrated = await batch.prepareBatchStateForExecution(statePath)
+      expect(migrated.status).toBe('paused')
+      expect(migrated.error).toContain('旧版批次不能安全迁移')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects conflicting or ignored CLI modes before any request', async () => {
+    const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+    const cases = [
+      ['--batch-status', 'batch-a', '--status', 'task-a'],
+      ['--batch-status', 'batch-a', '--base-url', 'http://127.0.0.1:9'],
+      ['--video-dir', '/tmp', '--batch-id', 'batch-a', '--wait-seconds', '0'],
+      ['--prompt', 'a', '--prompt-file', '/tmp/prompt.txt'],
+      ['--unknown-option', 'value'],
+      ['--resume-pending', '--status', 'task-a'],
+    ]
+    for (const cliArgs of cases) {
+      const result = await new Promise<{ failed: boolean; stdout: string; stderr: string }>(resolvePromise => {
+        execFile(process.execPath, [script, ...cliArgs], { encoding: 'utf8' }, (error, stdout, stderr) => {
+          resolvePromise({ failed: Boolean(error), stdout, stderr })
+        })
+      })
+      expect(result.failed).toBe(true)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).not.toBe('')
+    }
+  })
+
+  it('serves queued single-video status from local durable state before platform acceptance', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-single-local-status-test-'))
+    const stateRoot = resolve(root, 'state')
+    try {
+      const video = resolve(root, 'queued.mp4')
+      await writeFile(video, 'queued-video')
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<unknown>
+      }
+      const taskId = 'video-natural-' + 'a'.repeat(64)
+      await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot: resolve(root, 'inbox'),
+        batchRoot: stateRoot,
+      })
+      const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+      const result = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [script, '--status', taskId], {
+          env: { ...process.env, AIWORKER_VIDEO_BATCH_DIR: stateRoot },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      expect(result.stderr).toBe('')
+      expect(JSON.parse(result.stdout)).toMatchObject({ taskId, status: 'queued', output: null })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('exposes a stable serve-root controller interface and distinct recovery states', () => {
+    const worker = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs',
+    ), 'utf8')
+    expect(worker).toContain("option('--serve-root')")
+    expect(worker).toContain("['queued', 'running', 'recovering']")
+    expect(worker).toContain("failedState.status = isRetryablePlatformError(error) ? 'recovering' : 'paused'")
+    expect(worker).toContain("if (batchTerminal(state.status) || !recoveryRunnable(state.status)) continue")
+  })
+
+  it('leaves a paused batch untouched while processing a later queued batch', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-paused-skip-test-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const fakePlatform = resolve(root, 'fake-paused-platform.mjs')
+    try {
+      const pausedDir = resolve(root, 'paused')
+      const queuedDir = resolve(root, 'queued')
+      await mkdir(pausedDir)
+      await mkdir(queuedDir)
+      await writeFile(resolve(pausedDir, '01-paused.mp4'), 'paused')
+      await writeFile(resolve(queuedDir, '01-queued.mp4'), 'queued')
+      await writeFile(fakePlatform, `
+import { appendFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  if ((init.method || 'GET') === 'POST') {
+    const body = JSON.parse(String(init.body))
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, body.taskId + '\\n')
+    return json({ taskId: body.taskId, status: 'succeeded' })
+  }
+  return json({ runs: [] })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createBatchState: (input: Record<string, unknown>) => Promise<{ statePath: string; state: Record<string, unknown> }>
+        readBatchState: (path: string) => Promise<{ status: string }>
+        writeBatchState: (path: string, state: Record<string, unknown>) => Promise<Record<string, unknown>>
+      }
+      const common = {
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        inboxRoot,
+        batchRoot: stateRoot,
+      }
+      const paused = await batch.createBatchState({ ...common, batchId: 'paused-first', videoDir: pausedDir })
+      await batch.writeBatchState(paused.statePath, { ...paused.state, status: 'paused', error: 'manual' })
+      const queued = await batch.createBatchState({ ...common, batchId: 'queued-second', videoDir: queuedDir })
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', queued.statePath], {
+          env: {
+            ...process.env,
+            FAKE_PLATFORM_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+      expect((await batch.readBatchState(paused.statePath)).status).toBe('paused')
+      expect((await batch.readBatchState(queued.statePath)).status).toBe('succeeded')
+      expect(await readFile(requestLog, 'utf8')).toContain('queued-second:video:001:')
+      expect(await readFile(requestLog, 'utf8')).not.toContain('paused-first:video:001:')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('drains concurrent batch workers through one global queue without replaying terminal items', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-worker-queue-test-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const runState = resolve(root, 'runs.json')
+    const fakePlatform = resolve(root, 'fake-batch-platform.mjs')
+    try {
+      const firstDir = resolve(root, 'first')
+      const secondDir = resolve(root, 'second')
+      await mkdir(firstDir)
+      await mkdir(secondDir)
+      await writeFile(resolve(firstDir, '01-first.mp4'), 'first')
+      await writeFile(resolve(secondDir, '01-second.mp4'), 'second')
+      await writeFile(runState, '{}')
+      await writeFile(fakePlatform, `
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const runs = JSON.parse(readFileSync(process.env.FAKE_RUN_STATE, 'utf8'))
+  if ((init.method || 'GET') === 'POST' && url.pathname === '/api/n8n/trigger') {
+    const body = JSON.parse(String(init.body))
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, body.taskId + '\\n')
+    runs[body.taskId] = { polls: 0 }
+    writeFileSync(process.env.FAKE_RUN_STATE, JSON.stringify(runs))
+    return json({ taskId: body.taskId, status: 'accepted' })
+  }
+  if (url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
+    const run = runs[taskId]
+    if (!run) return json({ runs: [] })
+    run.polls += 1
+    writeFileSync(process.env.FAKE_RUN_STATE, JSON.stringify(runs))
+    return json({ runs: [{ taskId, status: 'succeeded', output: { ok: true } }] })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createBatchState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<{ status: string; items: Array<{ status: string }> }>
+      }
+      const common = {
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        inboxRoot,
+        batchRoot: stateRoot,
+      }
+      const first = await batch.createBatchState({ ...common, batchId: 'queue-first', videoDir: firstDir })
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 5))
+      const second = await batch.createBatchState({ ...common, batchId: 'queue-second', videoDir: secondDir })
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      const env = {
+        ...process.env,
+        FAKE_PLATFORM_LOG: requestLog,
+        FAKE_RUN_STATE: runState,
+        NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+          .filter(Boolean).join(' '),
+      }
+      const runWorker = (statePath: string) => new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', statePath], { env }, (error, _stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise()
+        })
+      })
+      await Promise.all([runWorker(first.statePath), runWorker(second.statePath)])
+      const firstState = await batch.readBatchState(first.statePath)
+      const secondState = await batch.readBatchState(second.statePath)
+      expect(firstState.status).toBe('succeeded')
+      expect(secondState.status).toBe('succeeded')
+      expect(firstState.items.map(item => item.status)).toEqual(['succeeded'])
+      expect(secondState.items.map(item => item.status)).toEqual(['succeeded'])
+      const firstLog = (await readFile(requestLog, 'utf8')).trim().split('\n')
+      expect(firstLog).toHaveLength(2)
+      expect(firstLog[0]).toContain('queue-first:video:001:')
+      expect(firstLog[1]).toContain('queue-second:video:001:')
+
+      await runWorker(second.statePath)
+      expect((await readFile(requestLog, 'utf8')).trim().split('\n')).toEqual(firstLog)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 10_000)
 })

@@ -1,8 +1,60 @@
 # AI-worker Video Command plugin
 
-This directory contains the hook-only `0.4.1` implementation of the native
-OpenClaw single-video ingress. The files describe the release contract; runtime
-and production acceptance still require their own evidence.
+This directory contains the hook-only `0.5.0` candidate for the native OpenClaw
+video-learning ingress. The files describe the local candidate contract;
+runtime and production acceptance still require their own evidence.
+
+`0.5.0` keeps `before_dispatch` as the sole conversation owner, but replaces
+the accumulated deterministic natural-language router with one host-owned,
+no-tool Qwen classification call. Only an authorized `second-original`
+Telegram direct message with a video/path or explicit-ID status shape reaches
+that classifier. Ordinary chat passes to the normal agent without an extra
+model call.
+
+The classifier returns one strict single-line JSON enum:
+
+```text
+dispatch_single | dispatch_directory | status_task | status_batch | respond | pass
+```
+
+The host never trusts the model as an executor. It independently requires the
+returned path or ID to occur exactly once in the current message, applies the
+absolute/canonical path and ID policy, rejects negative/conditional/example
+execution, checks the configured Telegram sender hash, and invokes only the
+fixed `aiworker-task-flow` argv. Single videos and directories enter the shared
+durable serial lane. Explicit task or batch status performs exactly one read;
+there is no recent-task pointer, monitoring, retry loop, result push, or second
+model turn.
+
+Classifier/provider errors, invalid JSON, host-evidence mismatch, and runner
+errors are caught inside the hook and become one fixed handled failure. The
+classifier has a 90-second internal deadline for the observed local-Qwen
+latency; the hook timeout is 140 seconds, above that deadline plus the runner's
+25-second subprocess bound, so the host cannot fail open first.
+
+This architecture intentionally registers no agent tools, prompt hooks,
+trusted tool policy, or tool-result middleware. OpenClaw 2026.7.1-2 exposes
+`api.runtime.llm.complete({systemPrompt,messages,purpose,maxTokens,temperature,signal})`
+for the no-tool classification call, while `before_dispatch` remains the only
+user-visible receipt boundary.
+
+The controlled `0.4.1 -> 0.5.0` profile transition must add exactly this one
+plugin permission and no other LLM override keys:
+
+```json
+{"llm":{"allowAgentIdOverride":true}}
+```
+
+It is stored under `plugins.entries.aiworker-video-command`. The sender hash
+config and the complete `second-original.tools` object must remain byte-for-byte
+equivalent as JSON values. Rollback restores the `0.4.1` config without the
+`llm` field. A successful plugin payload install and hook-only runtime check do
+not by themselves complete production deployment: the queue skill/supervisor
+transaction and an installed real-classifier QA must pass separately.
+
+The remainder of this file below documents the deployed `0.4.1` behavior and
+its historical upgrade/rollback gates. It is retained as migration evidence;
+it is not the `0.5.0` runtime contract.
 
 ## Business contract
 
@@ -227,49 +279,63 @@ After promotion, verify Mission Control / SQLite, one n8n video-analysis
 execution, `prepare/audio/vision/finalize`, `memoryMode=none`, `delivery=none`,
 service health, and temporary residue separately.
 
-### Controlled 0.4.0 to 0.4.1 status-intent patch
+### Controlled 0.4.1 to 0.5.0 classifier transition
 
-The status upgrade entry now accepts only the deployed hook-only `0.4.0` as its
-previous state and the grammar-only `0.4.1` candidate as its target. Historical
-`0.3.0 -> 0.4.0` promotion remains in Git and recovery evidence, but is no
-longer an accepted current production entry:
+The status-upgrade entry is retained as the controlled plugin transition
+primitive. It accepts only the deployed hook-only `0.4.1` as its previous state
+and the hook-owned Qwen classifier `0.5.0` candidate as its target:
 
 ```bash
-bash scripts/upgrade-aiworker-video-command-status-plugin.sh --dry-run --target-sha <approved-0.4.1-sha>
-bash scripts/upgrade-aiworker-video-command-status-plugin.sh --apply --target-sha <same-approved-0.4.1-sha>
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --dry-run --target-sha <approved-0.5.0-sha>
+bash scripts/upgrade-aiworker-video-command-status-plugin.sh --apply --target-sha <same-approved-0.5.0-sha>
 ```
 
-It accepts only installed `0.4.0` and source `0.4.1`, with identical versions
+It accepts only installed `0.4.1` and source `0.5.0`, with identical versions
 in `package.json` and `openclaw.plugin.json`. The gate requires a clean
 canonical `main` whose `HEAD`, local `origin/main`, and live GitHub `main` all
 equal the explicit target SHA. The installed recovery payload must also match
-the immutable `0.4.0` source commit `db3632713b54be5e8797ff2d85ab91ebccd134f5`,
+the immutable `0.4.1` source commit `e615d8dc68d089f11afe1581c1f56c614e01b796`,
 which must be an ancestor of the target. Dry-run performs an isolated official force
 install and fingerprints production state before and after. Apply makes and
-validates a complete `0.4.0` plugin/config recovery point, enforces the shared
+validates a complete `0.4.1` plugin/config recovery point, enforces the shared
 two-backup limit, installs only through the official OpenClaw command, and
 refreshes only `qwen-current`.
 
 Success requires the canonical and installed payload fingerprints to match,
 runtime and live Gateway inspection to expose only `before_dispatch`, the
-Telegram direct-session effective tools and qwen-current config to remain
-unchanged, and the protected `3017`, `5678`, `5679`, `18091`, `gpt-main`, and
-`qwen-weixin-new` listener identities to remain unchanged. It does not submit a
-task or restart Mission Control or n8n.
+Telegram direct-session effective tools to remain unchanged, and qwen-current
+config to differ only by the exact
+`plugins.entries.aiworker-video-command.llm={"allowAgentIdOverride":true}`
+object. `allowedSenderSha256` and the complete `second-original.tools` JSON
+value must remain exactly unchanged. The protected
+`3017`, `5678`, `5679`, `18091`, `gpt-main`, and `qwen-weixin-new` listener
+identities must remain unchanged. It does not submit a task or restart Mission
+Control or n8n.
+
+This primitive is not an independently deployable production release. It stages
+the `0.5.0` plugin with `releaseReady=false`, so the loaded hook rejects every
+eligible video request before it can call the classifier or runner. The
+production sequence is: stage the closed plugin, install the task-flow skill,
+install and verify the persistent lane supervisor, then run the release
+activator with the same approved SHA. The activator rechecks the canonical Git
+state, candidate config, hook-only runtime, lane dry-run, Gateway RPC, and
+protected listener identities before it changes only `releaseReady` to `true`
+and refreshes `qwen-current`. A failure restores the closed candidate config.
+This sequence deliberately permits no mixed-version dispatch window.
 
 The successful apply prints the exact verified backup path. Use that path and
 the same approved target SHA for an explicit rollback:
 
 ```bash
 bash scripts/upgrade-aiworker-video-command-status-plugin.sh --rollback \
-  --target-sha <same-approved-0.4.1-sha> \
+  --target-sha <same-approved-0.5.0-sha> \
   --backup /absolute/path/to/status-upgrade-YYYYMMDD-HHMMSS.suffix
 ```
 
-Any failed apply automatically reinstalls the fingerprinted `0.4.0` payload,
+Any failed apply automatically reinstalls the fingerprinted `0.4.1` payload,
 restores the exact saved qwen-current config, refreshes only qwen-current, and
 revalidates the live hook-only/runtime/tool boundary. A failed rollback attempts
-to restore the audited `0.4.1` candidate and accepts that compensation only
+to restore the audited `0.5.0` candidate and accepts that compensation only
 after config, index, payload, runtime, live catalog, effective tools, and all
 protected listeners pass again. If compensation is incomplete, it exits for
 manual inspection rather than reporting success.

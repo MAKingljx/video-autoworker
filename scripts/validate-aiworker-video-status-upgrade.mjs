@@ -12,8 +12,8 @@ import {
 const GIT_SHA = /^[a-f0-9]{40}$/u
 const SHA256 = /^[a-f0-9]{64}$/u
 const BACKUP_NAME = /^status-upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u
-const PREVIOUS_VERSION = '0.4.0'
-const CANDIDATE_VERSION = '0.4.1'
+const PREVIOUS_VERSION = '0.4.1'
+const CANDIDATE_VERSION = '0.5.0'
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -62,6 +62,135 @@ export async function fingerprintConfig(pathname) {
     .update(`${entry.mode & 0o777}\0`)
     .update(await readFile(pathname))
     .digest('hex')
+}
+
+function pluginEntry(config, pluginId) {
+  const entry = config?.plugins?.entries?.[pluginId]
+  assert(entry && typeof entry === 'object' && !Array.isArray(entry),
+    'Plugin entry is missing from qwen-current config.')
+  return entry
+}
+
+function targetAgent(config, agentId) {
+  const matches = Array.isArray(config?.agents?.list)
+    ? config.agents.list.filter(agent => agent?.id === agentId)
+    : []
+  assert(matches.length === 1, 'Target agent must occur exactly once in qwen-current config.')
+  assert(matches[0].tools && typeof matches[0].tools === 'object' && !Array.isArray(matches[0].tools),
+    'Target agent tools object is missing.')
+  return matches[0]
+}
+
+function withoutCandidateReleaseConfig(config, pluginId) {
+  const clone = structuredClone(config)
+  const entry = pluginEntry(clone, pluginId)
+  delete entry.llm
+  if (entry.config && typeof entry.config === 'object' && !Array.isArray(entry.config)) {
+    delete entry.config.releaseReady
+  }
+  return clone
+}
+
+export function buildClassifierCandidateConfig(config, pluginId = 'aiworker-video-command') {
+  const candidate = structuredClone(config)
+  const entry = pluginEntry(candidate, pluginId)
+  assert(entry.llm === undefined,
+    'Baseline plugin entry must not contain an llm override contract.')
+  assert(entry?.config?.releaseReady === undefined,
+    'Baseline plugin config must not contain a release gate.')
+  entry.llm = { allowAgentIdOverride: true }
+  entry.config = { ...entry.config, releaseReady: false }
+  return candidate
+}
+
+export function buildActiveClassifierConfig(config, pluginId = 'aiworker-video-command') {
+  const active = structuredClone(config)
+  const entry = pluginEntry(active, pluginId)
+  assert(JSON.stringify(entry.llm) === JSON.stringify({ allowAgentIdOverride: true }),
+    'Candidate plugin llm contract must be exactly allowAgentIdOverride=true.')
+  assert(entry?.config?.releaseReady === false,
+    'Candidate plugin release gate must be false before activation.')
+  entry.config.releaseReady = true
+  return active
+}
+
+export async function validateClassifierConfig({
+  pathname,
+  pluginId = 'aiworker-video-command',
+  agentId = 'second-original',
+  mode,
+}) {
+  const config = await readJson(pathname, 'qwen-current config')
+  const entry = pluginEntry(config, pluginId)
+  targetAgent(config, agentId)
+  if (mode === 'baseline') {
+    assert(entry.llm === undefined,
+      'Baseline plugin entry must not contain an llm override contract.')
+    assert(entry?.config?.releaseReady === undefined,
+      'Baseline plugin config must not contain a release gate.')
+  } else if (mode === 'candidate') {
+    assert(
+      JSON.stringify(entry.llm) === JSON.stringify({ allowAgentIdOverride: true }),
+      'Candidate plugin llm contract must be exactly allowAgentIdOverride=true.',
+    )
+    assert(entry?.config?.releaseReady === false,
+      'Candidate plugin release gate must be false.')
+  } else if (mode === 'active') {
+    assert(
+      JSON.stringify(entry.llm) === JSON.stringify({ allowAgentIdOverride: true }),
+      'Active plugin llm contract must be exactly allowAgentIdOverride=true.',
+    )
+    assert(entry?.config?.releaseReady === true,
+      'Active plugin release gate must be true.')
+  } else {
+    throw new Error('Unknown classifier config mode.')
+  }
+  return {
+    mode,
+    pluginId,
+    agentId,
+    allowedSenderSha256: entry?.config?.allowedSenderSha256,
+    releaseReady: entry?.config?.releaseReady,
+    tools: targetAgent(config, agentId).tools,
+  }
+}
+
+export async function validateClassifierConfigTransition({
+  baselinePath,
+  candidatePath,
+  pluginId = 'aiworker-video-command',
+  agentId = 'second-original',
+}) {
+  const baseline = await readJson(baselinePath, 'Baseline qwen-current config')
+  const candidate = await readJson(candidatePath, 'Candidate qwen-current config')
+  const baselineEntry = pluginEntry(baseline, pluginId)
+  const candidateEntry = pluginEntry(candidate, pluginId)
+  const baselineAgent = targetAgent(baseline, agentId)
+  const candidateAgent = targetAgent(candidate, agentId)
+  assert(baselineEntry.llm === undefined,
+    'Baseline plugin entry must not contain an llm override contract.')
+  assert(
+    JSON.stringify(candidateEntry.llm) === JSON.stringify({ allowAgentIdOverride: true }),
+    'Candidate plugin llm contract must be exactly allowAgentIdOverride=true.',
+  )
+  assert(candidateEntry?.config?.releaseReady === false,
+    'Candidate plugin release gate must be false.')
+  assert(
+    baselineEntry?.config?.allowedSenderSha256 === candidateEntry?.config?.allowedSenderSha256,
+    'allowedSenderSha256 changed during classifier upgrade.',
+  )
+  assert(JSON.stringify(baselineAgent.tools) === JSON.stringify(candidateAgent.tools),
+    'second-original tools changed during classifier upgrade.')
+  assert(JSON.stringify(baseline) === JSON.stringify(withoutCandidateReleaseConfig(candidate, pluginId)),
+    'Classifier upgrade changed qwen-current config outside the approved llm contract.')
+  return {
+    pluginId,
+    agentId,
+    changedPaths: [
+      `plugins.entries.${pluginId}.llm`,
+      `plugins.entries.${pluginId}.config.releaseReady`,
+    ],
+  }
 }
 
 export async function fingerprintInstalledPayload(pathname, peer = {}) {
@@ -165,9 +294,15 @@ export async function validateStatusUpgradeBackup({
     linkText: metadata.peerLinkText,
     realPath: metadata.peerRealPath,
   })
-  assert(previous.fingerprint === metadata.previousPayloadSha256, 'Backed-up 0.4.0 payload changed after audit.')
+  assert(previous.fingerprint === metadata.previousPayloadSha256, 'Backed-up 0.4.1 payload changed after audit.')
   assert(await fingerprintConfig(join(backupDir, 'openclaw.json')) === metadata.configSha256,
     'Backed-up qwen-current config changed after audit.')
+  await validateClassifierConfig({
+    pathname: join(backupDir, 'openclaw.json'),
+    pluginId: metadata.pluginId,
+    agentId: 'second-original',
+    mode: 'baseline',
+  })
   const packageJson = await readJson(join(previousPlugin, 'package.json'), 'Previous plugin package')
   assert(packageJson.version === PREVIOUS_VERSION, `Rollback payload must be ${PREVIOUS_VERSION}.`)
   return { schemaVersion: 1, metadata, previousPlugin }
@@ -188,6 +323,32 @@ async function main() {
         realPath: args[2] || undefined,
       })
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      break
+    }
+    case 'classifier-config': {
+      const [pathname, mode, pluginId, agentId] = args
+      process.stdout.write(`${JSON.stringify(await validateClassifierConfig({
+        pathname, mode, pluginId, agentId,
+      }), null, 2)}\n`)
+      break
+    }
+    case 'classifier-config-transition': {
+      const [baselinePath, candidatePath, pluginId, agentId] = args
+      process.stdout.write(`${JSON.stringify(await validateClassifierConfigTransition({
+        baselinePath, candidatePath, pluginId, agentId,
+      }), null, 2)}\n`)
+      break
+    }
+    case 'classifier-config-candidate': {
+      const [baselinePath, pluginId] = args
+      const baseline = await readJson(baselinePath, 'Baseline qwen-current config')
+      process.stdout.write(`${JSON.stringify(buildClassifierCandidateConfig(baseline, pluginId), null, 2)}\n`)
+      break
+    }
+    case 'classifier-config-active': {
+      const [candidatePath, pluginId] = args
+      const candidate = await readJson(candidatePath, 'Candidate qwen-current config')
+      process.stdout.write(`${JSON.stringify(buildActiveClassifierConfig(candidate, pluginId), null, 2)}\n`)
       break
     }
     case 'metadata': {

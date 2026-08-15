@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
-import { materializeHistoricalPlugin, V04_SOURCE_SHA } from './helpers/historical-plugin-fixture.mjs'
+import { materializeHistoricalPlugin, V041_SOURCE_SHA } from './helpers/historical-plugin-fixture.mjs'
 
 const execFileAsync = promisify(execFile)
 const sourceRoot = process.cwd()
@@ -57,15 +57,15 @@ const args = process.argv.slice(2)
 const joined = args.join(' ')
 const gitDrift = process.env.FAKE_GIT_DRIFT_AFTER_INSTALL === '1'
   && existsSync(process.env.FAKE_QWEN_DB + '.record.json')
-  && JSON.parse(readFileSync(process.env.FAKE_QWEN_DB + '.record.json', 'utf8')).version === '0.4.1'
+  && JSON.parse(readFileSync(process.env.FAKE_QWEN_DB + '.record.json', 'utf8')).version === '0.5.0'
 if (joined.includes('remote get-url origin')) process.stdout.write('https://github.com/MAKingljx/video-autoworker.git\\n')
 else if (joined.includes('symbolic-ref --short -q HEAD')) process.stdout.write((gitDrift ? 'drifted' : 'main') + '\\n')
 else if (joined.includes('status --porcelain')) process.stdout.write('')
 else if (joined.includes('rev-parse') && joined.includes('refs/remotes/origin/main')) process.stdout.write('${targetSha}\\n')
 else if (joined.includes('rev-parse') && joined.includes('HEAD')) process.stdout.write('${targetSha}\\n')
 else if (joined.includes('ls-remote')) process.stdout.write('${targetSha}\\trefs/heads/main\\n')
-else if (joined.includes('cat-file -e ${V04_SOURCE_SHA}^{commit}')) process.exit(0)
-else if (joined.includes('merge-base --is-ancestor ${V04_SOURCE_SHA} ${targetSha}')) process.exit(0)
+else if (joined.includes('cat-file -e ${V041_SOURCE_SHA}^{commit}')) process.exit(0)
+else if (joined.includes('merge-base --is-ancestor ${V041_SOURCE_SHA} ${targetSha}')) process.exit(0)
 else if (args.includes('archive')) {
   const result = spawnSync('/usr/bin/tar', ['-cf', '-', '-C', process.env.FAKE_HISTORY_ROOT, 'openclaw-plugins/${pluginId}'])
   if (result.status !== 0) process.exit(result.status || 1)
@@ -79,7 +79,7 @@ const match = /-iTCP:(\\d+)/.exec(joined)
 if (!match) process.exit(2)
 const port = match[1]
 const record = JSON.parse(readFileSync(process.env.FAKE_QWEN_DB + '.record.json', 'utf8'))
-const drift = process.env.FAKE_PROTECTED_PID_DRIFT === '1' && record.version === '0.4.1' && port === '3017'
+const drift = process.env.FAKE_PROTECTED_PID_DRIFT === '1' && record.version === '0.5.0' && port === '3017'
 const values = { '3017': '3017', '5678': '5678', '5679': '5679', '18091': '18091', '18789': '18789', '18989': '18989' }
 if (!values[port]) process.exit(1)
 process.stdout.write((drift ? '93017' : values[port]) + '\\n')
@@ -109,8 +109,8 @@ if (args[0] === 'plugins' && args[1] === 'install') {
   const sourceVersion = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8')).version
   const failMarker = process.env.FAKE_INSTALL_FAIL_MARKER
   const shouldFail = isProduction && failMarker && !existsSync(failMarker)
-    && ((process.env.FAKE_FAIL_CANDIDATE_INSTALL === '1' && sourceVersion === '0.4.1')
-      || (process.env.FAKE_FAIL_ROLLBACK_INSTALL === '1' && sourceVersion === '0.4.0'))
+    && ((process.env.FAKE_FAIL_CANDIDATE_INSTALL === '1' && sourceVersion === '0.5.0')
+      || (process.env.FAKE_FAIL_ROLLBACK_INSTALL === '1' && sourceVersion === '0.4.1'))
   if (shouldFail) { writeFileSync(failMarker, 'failed'); process.stderr.write('injected install failure\\n'); process.exit(91) }
   rmSync(installed, { recursive: true, force: true })
   mkdirSync(join(state, 'extensions'), { recursive: true })
@@ -136,6 +136,16 @@ if (args[0] === 'plugins' && args[1] === 'inspect') {
   process.stdout.write(JSON.stringify({ plugin: { id: '${pluginId}', status: 'loaded', version: version() },
     typedHooks: [{ name: 'before_dispatch' }], tools: [], diagnostics: [] }) + '\\n'); process.exit(0)
 }
+if (args[0] === 'config' && args[1] === 'set') {
+  if (args[2] !== 'plugins.entries.${pluginId}.llm'
+    || args[3] !== '{"allowAgentIdOverride":true}'
+    || args[4] !== '--strict-json') process.exit(75)
+  const configPath = join(state, 'openclaw.json')
+  const config = JSON.parse(readFileSync(configPath, 'utf8'))
+  config.plugins.entries['${pluginId}'].llm = { allowAgentIdOverride: true }
+  writeFileSync(configPath, JSON.stringify(config, null, 2) + '\\n')
+  process.stdout.write('configured\\n'); process.exit(0)
+}
 if (args[0] === 'gateway' && args[1] === 'restart') {
   process.stdout.write(JSON.stringify({ ok: true }) + '\\n'); process.exit(0)
 }
@@ -148,7 +158,7 @@ if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'sessions.list') 
 }
 if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'tools.catalog') {
   const marker = process.env.FAKE_LIVE_FAIL_MARKER
-  if (isProduction && version() === '0.4.1' && process.env.FAKE_FAIL_CANDIDATE_LIVE === '1'
+  if (isProduction && version() === '0.5.0' && process.env.FAKE_FAIL_CANDIDATE_LIVE === '1'
     && marker && !existsSync(marker)) {
     writeFileSync(marker, 'failed'); process.stderr.write('injected live failure\\n'); process.exit(92)
   }
@@ -191,15 +201,15 @@ async function fixture() {
     cp(sourceCandidate, join(repo, 'openclaw-plugins', pluginId), { recursive: true }),
   ])
   await chmod(entry, 0o755)
-  await materializeHistoricalPlugin(join(history, 'openclaw-plugins', pluginId), V04_SOURCE_SHA)
-  await materializeHistoricalPlugin(installed, V04_SOURCE_SHA)
+  await materializeHistoricalPlugin(join(history, 'openclaw-plugins', pluginId), V041_SOURCE_SHA)
+  await materializeHistoricalPlugin(installed, V041_SOURCE_SHA)
   await mkdir(join(installed, 'node_modules'))
   await symlink(peer, join(installed, 'node_modules', 'openclaw'))
   await writeFile(database, '')
   await json(config, profileConfig())
   await json(`${database}.record.json`, {
     source: 'path', sourcePath: join(repo, 'openclaw-plugins', pluginId), installPath: installed,
-    version: '0.4.0', installedAt: '2026-08-11T00:00:00.000Z',
+    version: '0.4.1', installedAt: '2026-08-11T00:00:00.000Z',
   })
   await fakeCommands(bin)
   const env = {
@@ -263,13 +273,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
+describe('controlled 0.4.1 to 0.5.0 classifier upgrade entry', () => {
   it('dry-runs through an isolated official install with zero production change', async () => {
     const value = await fixture()
     const configBefore = await readFile(value.config)
     const result = await run(value, '--dry-run')
     expect(result.stdout).toContain('Dry run passed')
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(result.stdout).toContain('release gate remains closed')
+    expect(await packageVersion(value)).toBe('0.4.1')
     expect(await readFile(value.config)).toEqual(configBefore)
     expect(await statusBackups(value)).toEqual([])
     expect((await readFile(value.log, 'utf8')).split('\n').filter(Boolean)
@@ -277,14 +288,21 @@ describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
         && JSON.parse(line).args[1] === 'restart')).toBe(false)
   }, 30_000)
 
-  it('applies 0.4.1 with config unchanged and one verified recovery point', async () => {
+  it('stages 0.5.0 behind the closed release gate with one verified recovery point', async () => {
     const value = await fixture()
     const history = await seedVerifiedHistory(value)
     const configBefore = await readFile(value.config)
     const result = await run(value, '--apply')
-    expect(result.stdout).toContain('from 0.4.0 to 0.4.1')
-    expect(await packageVersion(value)).toBe('0.4.1')
-    expect(await readFile(value.config)).toEqual(configBefore)
+    expect(result.stdout).toContain('from 0.4.1 to 0.5.0')
+    expect(result.stdout).toContain('release gate remains closed')
+    expect(await packageVersion(value)).toBe('0.5.0')
+    const before = JSON.parse(configBefore)
+    const after = JSON.parse(await readFile(value.config, 'utf8'))
+    expect(after.plugins.entries[pluginId].llm).toEqual({ allowAgentIdOverride: true })
+    expect(after.plugins.entries[pluginId].config.releaseReady).toBe(false)
+    delete after.plugins.entries[pluginId].llm
+    delete after.plugins.entries[pluginId].config.releaseReady
+    expect(after).toEqual(before)
     const backups = await statusBackups(value)
     expect(backups.map(pathname => basename(pathname))).not.toContain(basename(history[0]))
     expect(backups.map(pathname => basename(pathname))).toContain(basename(history[1]))
@@ -302,31 +320,33 @@ describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
     expect(restarts[0].profile).toBe('qwen-current')
   }, 30_000)
 
-  it('restores exact 0.4.0 after an official candidate install failure', async () => {
+  it('restores exact 0.4.1 after an official candidate install failure', async () => {
     const value = await fixture()
     const configBefore = await readFile(value.config)
     await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_INSTALL: '1' })).rejects.toMatchObject({
       code: 1,
-      stderr: expect.stringContaining('Upgrade failed; exact 0.4.0 payload'),
+      stderr: expect.stringContaining('Upgrade failed; exact 0.4.1 payload'),
     })
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.1')
     expect(await readFile(value.config)).toEqual(configBefore)
     const [backup] = await statusBackups(value)
     expect(await markerState(backup)).toEqual({ active: true, verified: false })
     const record = JSON.parse(await readFile(`${value.database}.record.json`, 'utf8'))
-    expect(record.version).toBe('0.4.0')
+    expect(record.version).toBe('0.4.1')
     expect(record.sourcePath).toBe(join(backup, 'previous-plugin'))
   }, 30_000)
 
-  it('automatically restores exact 0.4.0 and active-only marker after candidate live failure', async () => {
+  it('automatically restores exact 0.4.1 and active-only marker after candidate live failure', async () => {
     const value = await fixture()
     const history = await seedVerifiedHistory(value)
+    const configBefore = await readFile(value.config)
     await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' })).rejects.toMatchObject({
       code: 1,
-      stderr: expect.stringContaining('Upgrade failed; exact 0.4.0 payload'),
+      stderr: expect.stringContaining('Upgrade failed; exact 0.4.1 payload'),
     })
     await expect(access(join(value.root, 'live.fail'))).resolves.toBeUndefined()
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.1')
+    expect(await readFile(value.config)).toEqual(configBefore)
     for (const backup of history) {
       await expect(access(join(backup, '.verified'))).resolves.toBeUndefined()
     }
@@ -339,21 +359,21 @@ describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
     expect(marker.pluginFingerprint).toBe(await payloadFingerprint(value.installed))
   }, 30_000)
 
-  it('retries from an active 0.4.0 recovery source without leaving a stale active marker', async () => {
+  it('retries from an active 0.4.1 recovery source without leaving a stale active marker', async () => {
     const value = await fixture()
     await seedVerifiedHistory(value)
     await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
       .rejects.toMatchObject({ code: 1 })
     const retry = await run(value, '--apply')
-    expect(retry.stdout).toContain('from 0.4.0 to 0.4.1')
-    expect(await packageVersion(value)).toBe('0.4.1')
+    expect(retry.stdout).toContain('from 0.4.1 to 0.5.0')
+    expect(await packageVersion(value)).toBe('0.5.0')
     const states = await Promise.all((await statusBackups(value))
       .map(async backup => ({ backup, ...await markerState(backup) })))
     expect(states.filter(state => state.active)).toEqual([])
     expect(states.filter(state => state.verified)).toHaveLength(2)
   }, 45_000)
 
-  it('keeps exactly one active 0.4.0 source when a retry also fails', async () => {
+  it('keeps exactly one active 0.4.1 source when a retry also fails', async () => {
     const value = await fixture()
     await seedVerifiedHistory(value)
     await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
@@ -361,7 +381,7 @@ describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
     await rm(join(value.root, 'live.fail'))
     await expect(run(value, '--apply', { FAKE_FAIL_CANDIDATE_LIVE: '1' }))
       .rejects.toMatchObject({ code: 1 })
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.1')
     const states = await Promise.all((await statusBackups(value))
       .map(async backup => ({ backup, ...await markerState(backup) })))
     const active = states.filter(state => state.active)
@@ -371,38 +391,46 @@ describe('controlled 0.4.0 to 0.4.1 status patch entry', () => {
     expect(record.sourcePath).toBe(join(active[0].backup, 'previous-plugin'))
   }, 45_000)
 
-  it('explicitly rolls a successful 0.4.1 release back to exact 0.4.0', async () => {
+  it('explicitly rolls a successful 0.5.0 release back to exact 0.4.1', async () => {
     const value = await fixture()
+    const configBefore = await readFile(value.config)
     await run(value, '--apply')
     const [backup] = await statusBackups(value)
     const result = await run(value, '--rollback', { backup })
-    expect(result.stdout).toContain('from 0.4.1 to exact 0.4.0')
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(result.stdout).toContain('from 0.5.0 to exact 0.4.1')
+    expect(await packageVersion(value)).toBe('0.4.1')
+    expect(await readFile(value.config)).toEqual(configBefore)
+    expect(JSON.parse(await readFile(value.config, 'utf8')).plugins.entries[pluginId])
+      .not.toHaveProperty('llm')
     expect(await markerState(backup)).toEqual({ active: true, verified: false })
   }, 30_000)
 
-  it('fully restores 0.4.1 and verified-only backup when explicit rollback install fails', async () => {
+  it('fully restores 0.5.0 and verified-only backup when explicit rollback install fails', async () => {
     const value = await fixture()
     await run(value, '--apply')
     const [backup] = await statusBackups(value)
     await expect(run(value, '--rollback', { backup, FAKE_FAIL_ROLLBACK_INSTALL: '1' }))
       .rejects.toMatchObject({ code: 1 })
-    expect(await packageVersion(value)).toBe('0.4.1')
+    expect(await packageVersion(value)).toBe('0.5.0')
+    expect(JSON.parse(await readFile(value.config, 'utf8')).plugins.entries[pluginId].llm)
+      .toEqual({ allowAgentIdOverride: true })
+    expect(JSON.parse(await readFile(value.config, 'utf8')).plugins.entries[pluginId].config.releaseReady)
+      .toBe(false)
     expect(await markerState(backup)).toEqual({ active: false, verified: true })
   }, 30_000)
 
-  it('rejects protected PID drift and restores 0.4.0 without dual marker state', async () => {
+  it('rejects protected PID drift and restores 0.4.1 without dual marker state', async () => {
     const value = await fixture()
     await expect(run(value, '--apply', { FAKE_PROTECTED_PID_DRIFT: '1' })).rejects.toMatchObject({ code: 1 })
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.1')
     const [backup] = await statusBackups(value)
     expect(await markerState(backup)).toEqual({ active: true, verified: false })
   }, 30_000)
 
-  it('rejects a post-install Git target drift and restores exact 0.4.0', async () => {
+  it('rejects a post-install Git target drift and restores exact 0.4.1', async () => {
     const value = await fixture()
     await expect(run(value, '--apply', { FAKE_GIT_DRIFT_AFTER_INSTALL: '1' })).rejects.toMatchObject({ code: 1 })
-    expect(await packageVersion(value)).toBe('0.4.0')
+    expect(await packageVersion(value)).toBe('0.4.1')
     const [backup] = await statusBackups(value)
     expect(await markerState(backup)).toEqual({ active: true, verified: false })
   }, 30_000)

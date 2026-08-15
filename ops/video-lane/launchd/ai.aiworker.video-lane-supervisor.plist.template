@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.aiworker.video-lane-supervisor</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_BIN__</string>
+    <string>__WORKER_SCRIPT__</string>
+    <string>--serve-root</string>
+    <string>__BATCH_ROOT__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__SKILL_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>__NODE_BIN_DIR__:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AIWORKER_VIDEO_BATCH_DIR</key>
+    <string>__BATCH_ROOT__</string>
+  </dict>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>ExitTimeOut</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/video-lane-supervisor.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/video-lane-supervisor.error.log</string>
+</dict>
+</plist>

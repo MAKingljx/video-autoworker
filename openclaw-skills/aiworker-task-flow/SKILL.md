@@ -1,299 +1,168 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker/n8n tasks, native single-video dispatch and status lookup, and durable video batches.
+description: Use for AI-worker/n8n tasks, native Qwen video scheduling, explicit status lookup, and the durable global video lane.
 ---
 
 # AI-worker Task Flow
 
-Use this skill to explain or operate the versioned AI-worker task client. Keep
-single-video conversation handling separate from generic tasks and durable
-batches.
+Use this skill to explain the versioned AI-worker task client and the local 0.5
+Qwen video-scheduling contract. This is a local candidate, not proof of GitHub
+mainline, installation, production deployment, or Telegram acceptance.
 
 ## Core boundary
 
-- Submit only to the loopback Video AutoWorker endpoint at `127.0.0.1:3017`.
-- Never put credentials in task input, logs, receipts, or memory.
-- Reuse one stable task/idempotency key for one user request. A duplicate must
-  return the existing task instead of creating another side effect.
-- Use `delivery=none` for video analysis. The conversation receives only an
-  immediate acceptance receipt; n8n does not return the completed result to the
-  chat automatically.
-- Treat a task as complete only after a later status query returns `succeeded`.
-- Keep every video worker stateless with `memoryMode=none`. Do not pass an
-  OpenClaw session key or memory directory to Whisper or local Qwen.
-- Never replace the managed chain with direct ffmpeg, Whisper, Qwen, an old
-  video-learning flow, a generic task, or an ad-hoc shell command.
+- Video conversation routing belongs to the native `before_dispatch` hook for
+  `second-original`; it is not an agent tool and Qwen never constructs a shell
+  command or directly submits a task.
+- The hook may call the host-provided `api.runtime.llm.complete` exactly once,
+  without tools, to return one strictly structured semantic classification.
+- The classifier is advisory. The host independently validates an authorized
+  Telegram private message and requires the classifier value to be copied
+  exactly from the current original message.
+- Dispatch accepts exactly one canonical absolute local video file path or one
+  canonical absolute local directory path. Status accepts exactly one explicit,
+  complete task ID or batch ID. Never infer a recent task from conversation,
+  memory, files, SQLite, or process state.
+- Single videos and directories both enter one persistent process-wide video lane.
+  The lane runs at most one video at a time across all jobs and survives
+  chat turns and worker restarts.
+- Use `delivery=none`. After enqueueing, return one short handled receipt and end
+  the turn: no polling, status read, retry, resubmission, progress narration, or
+  completion pushback.
+- Every downstream model worker uses `memoryMode=none`. Do not replace the
+  managed chain with direct ffmpeg, Whisper, Qwen, an old video-learning flow,
+  a generic task, or an ad-hoc shell command.
 
-## Single-video conversation entry
+## Native Qwen classification
 
-The native `aiworker-video-command` plugin owns both supported forms before the
-chat model runs:
+For a candidate video message in the authorized Telegram private chat, the
+hook calls its internal, no-tool Qwen classifier once. The result must contain
+only a recognized action and one string value:
 
-```text
-分析视频 /完整路径/video.mp4
-帮我分析一下这个视频 /完整路径/video.mp4
-```
+- `dispatch_single`: analyze one video file now;
+- `dispatch_directory`: analyze one video directory now;
+- `status_task`: read one explicitly supplied complete task ID once;
+- `status_batch`: read one explicitly supplied complete batch ID once;
+- `respond`: video-related but non-executing, ambiguous, conditional, negative,
+  explanatory, or missing required evidence;
+- `pass`: genuinely unrelated ordinary chat.
 
-Keep the exact command path-only. If the user adds interaction preferences such
-as `不要等待` or `不要回投`, use the natural-language form; prose appended to
-the exact form is invalid and must not be guessed.
+The host does not trust semantic output as authorization. Before any runner
+call, it checks the Telegram channel, private-chat shape, `second-original`
+session identity, consistent conversation/sender fields, the configured
+domain-separated sender hash, and a valid message timestamp. It then extracts
+evidence from the current original message and requires an exact single match:
 
-For an affirmative request containing exactly one supported absolute local
-video path, the plugin's `before_dispatch` hook must:
+- a supported canonical absolute path for `dispatch_single`;
+- one canonical absolute directory path, with directory intent, for
+  `dispatch_directory`;
+- one complete scheduler task ID and no batch ID for `status_task`;
+- one complete scheduler batch ID and no task ID for `status_batch`.
 
-1. classify the current message;
-2. validate the trusted Telegram private-message identity;
-3. derive one stable internal task/idempotency key;
-4. call the shared runner exactly once; and
-5. return one human-readable short receipt and end the turn.
+The host never guesses, normalizes, searches for, or substitutes classifier
+values. Multiple candidates, relative paths, URLs, unsupported paths, partial
+IDs, classifier schema errors, timeout, identity mismatch, validation failure,
+or runner failure are caught inside the handler and return a handled fail-closed
+short reply. They must not fall through to Qwen, a generic task, `exec`, or a
+media command. Only `pass` continues to normal `second-original` conversation.
 
-The shared runner calls the installed `aiworker-task-flow` client with the
-equivalent fixed contract below. This is an implementation reference, not an
-instruction for the chat model to execute:
+## Dispatch contract
+
+The shared runner invokes the installed client with parameter arrays. These are
+implementation references, not commands for the chat model to construct.
+
+Single video:
 
 ```bash
 node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
-  --video-file "<absolute-video-path>" \
-  --task-id <stable-request-key> \
-  --idempotency-key <stable-request-key> \
+  --video-file "<validated-absolute-video-path>" \
+  --task-id <stable-task-id> \
+  --idempotency-key <same-stable-task-id> \
   --delivery none \
   --wait-seconds 0 \
   --no-trigger-recovery
 ```
 
-Do not make Qwen choose a video tool, construct this command, inspect the file,
-or select a workflow. The plugin and runner own parsing, identity, ingestion,
-idempotency, and submission.
-
-### Classification
-
-- **Submit:** an exact `分析视频 <绝对路径>` command or an affirmative
-  natural-language request to analyze one video now, with exactly one absolute
-  path ending in `.mp4`, `.mov`, `.mkv`, `.webm`, or `.m4v`. `只分析这个视频`
-  and `仅分析这个视频` remain affirmative full-chain requests; `只` or `仅`
-  alone is not execution negation.
-- **Respond in the hook:** in the authorized Telegram private chat, a method,
-  architecture, capability, example, conditional, or negative request. Return
-  the managed short response without starting `second-original`, using tools,
-  or submitting. Telegram groups and other channels are outside this response
-  guarantee and cannot submit video through the plugin.
-- **Reject briefly:** a clearly affirmative execution request with a missing,
-  relative, URL, malformed, unsupported, non-canonical, or multiple video
-  path, or one restricted to only picture, audio, subtitles, or another partial
-  modality that the complete audio-visual entry does not support. Do not let
-  the model guess or search for a replacement path.
-- **Ignore as unrelated:** a message that is not a video-analysis request.
-
-A quoted or earlier execution instruction never authorizes a new run. A current
-negative phrase such as `不要开始`, `不要执行`, `不要提交`, `先别执行`,
-`暂不执行`, `只给方案`, or `先告诉我方法` prevents submission and receives
-the native short response without model execution.
-
-For paths containing spaces, use one matching pair of quotes. Preserve Chinese
-characters and parentheses. Do not expand shell variables, globs,
-substitutions, URLs, or additional commands.
-
-OpenClaw completes Telegram DM allowlist/pairing admission before this hook. The
-plugin also compares the consistent inbound sender against the domain-separated
-SHA-256 configured from the unique Telegram command owner; the raw sender ID is
-not stored in the plugin config. A newly paired sender therefore receives no
-video-dispatch authority. Multi-user dispatch requires an explicit sender-policy
-change and a new review; pairing alone is insufficient.
-
-If the native plugin is missing, unloaded, or does not claim an affirmative
-single-video request, fail closed. Do not fall back to a generic prompt,
-`exec`, `submit-task.mjs`, filesystem discovery, or direct media processing.
-Return only:
-
-```text
-未提交：视频入口当前不可用。
-```
-
-### Conversation response
-
-Do not narrate a preflight such as `马上开始`, `我先找`, or `让我检查`. A valid
-request's first observable response is the plugin's final short receipt. For a
-new task, return:
-
-```text
-已提交，任务编号：<taskId>。结果请稍后查询。
-```
-
-When idempotency returns the existing task, return:
-
-```text
-任务已存在，任务编号：<taskId>。结果请稍后查询。
-```
-
-Keep `status` and `duplicate` in the internal validation/audit result; do not
-show those fields to an ordinary user.
-
-An invalid execution input receives one short rejection, for example:
-
-```text
-未提交：请提供一个绝对视频路径。
-未提交：一次只能分析一个视频。
-未提交：只支持本机绝对视频路径。
-未提交：视频路径或格式无效。
-```
-
-If the one submission call times out, do not query status in the same turn.
-Return the stable task number so a later turn can query it, without the video
-path, child output, or credentials:
-
-```text
-提交状态暂未确认，任务编号：<taskId>。请稍后查询。
-```
-
-After any receipt, rejection, or failure, stop the turn. Do not query status,
-inspect Mission Control or n8n, wait, retry, resubmit, or send progress updates
-in the same turn.
-
-## Explanation-only questions
-
-When the user asks which skill or chain handles video analysis, how it works, or
-requests a plan without authorizing execution, the loaded `before_dispatch`
-hook returns the managed reply before `second-original` starts. This uses zero
-tools: do not call `memory_search`, `memory_get`, `exec`, a generic task,
-filesystem search, or any media command. Do not submit a task. A later explicit
-status request is the only video-related case that may call the bounded status
-client described below.
-
-The concise architecture is:
-
-- the native plugin handles both exact and affirmative natural-language
-  single-video messages in `before_dispatch`;
-- its shared runner submits once through the installed `aiworker-task-flow`
-  client;
-- Video AutoWorker persists the task in Mission Control / SQLite and n8n runs
-  `prepare -> Whisper audio + local Qwen vision -> finalize`;
-- all worker stages use `memoryMode=none`, and video submission uses
-  `delivery=none`;
-- OpenClaw returns the receipt and leaves the background task alone; it reads
-  the result only after a later explicit user request.
-
-The managed explanation reply is exactly:
-
-```text
-视频会由原生插件一次派发到 AI-worker，后台依次执行 prepare、Whisper 音频、本地 Qwen 画面和 finalize；当前轮不等待，结果按任务编号另查。
-```
-
-Never describe this route as `VL`, `video-learning-pipeline`,
-`DIRECTOR_BRAIN`, director-brain extraction, or direct full-video processing.
-
-## Generic task submission
-
-The generic entry is never a fallback for any video request. Use it only for a
-non-video AI-worker task that the current message explicitly authorizes.
-
-Write the task to a UTF-8 temporary file inside the current workspace, then run:
+Directory:
 
 ```bash
-node skills/aiworker-task-flow/scripts/submit-task.mjs \
-  --prompt-file <task-file> \
-  --task-id <stable-key> \
-  --idempotency-key <stable-key> \
+node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs" \
+  --video-dir "<validated-absolute-directory-path>" \
+  --batch-id <stable-batch-id> \
   --delivery none
 ```
 
-Use `--planner-route`, `--executor-route`, or `--reviewer-route` only for a
-user-requested registered route override. Delete the temporary task file after
-a successful submission. Report only the returned task ID, status, and
-duplicate flag.
+Both calls only create or reuse durable queue state and wake the same global
+video worker. A fresh enqueue returns `queued`; an idempotent duplicate returns
+the existing state. The receipt includes only the stable task or batch ID and a
+  brief instruction to query later. End the turn immediately after any receipt or
+handled error.
 
-## Stateless video worker chain
+## Persistent global video lane
 
-The managed client copies the source into a mode-0700 inbox and submits a random
-media key; it does not place an arbitrary filesystem path in the task payload.
-Mission Control / SQLite records the parent task before n8n runs these stages:
+The client persists both a single video and a directory batch as durable video
+job state. A single video is a one-item job; a directory is a deterministic,
+non-recursive, sorted job of supported files. The process-wide lane lock is
+shared by every job, so concurrent chat messages cannot overlap ffmpeg,
+Whisper, Qwen, or media I/O.
 
-1. `prepare`: validate controlled media, segment the video, and create stage
-   metadata;
-2. `audio`: use the registered Whisper worker;
-3. `vision`: use the registered local Qwen vision route;
-4. `finalize`: merge audio, visual, and timeline evidence and persist the
-   structured result.
+The worker drains queued jobs in durable order, submits one item, follows that
+same item to a terminal state, and only then starts the next. Stable IDs,
+immutable request fingerprints, atomic state updates, source-drift checks,
+idempotency, terminal-item skipping, and restart resumption prevent silent
+replay or input substitution. A temporary platform outage pauses the job for
+later resumption; it does not authorize a new task ID.
 
-Audio and vision may execute according to the workflow's controlled scheduling,
-but OpenClaw never supervises them from the conversation. Minute-level
-checkpoints resume the same task after a worker interruption; never create a new
-task merely because a chat turn timed out or compacted.
+The formal downstream chain remains:
 
-## Multiple videos
+`persistent global video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen vision -> finalize -> SQLite`
 
-For several videos in one directory, use one durable batch instead of repeated
-single-video conversation requests:
+All worker stages use `memoryMode=none`, and n8n does not automatically return
+the completed result to Telegram.
 
-```bash
-node skills/aiworker-task-flow/scripts/submit-task.mjs \
-  --video-dir <directory> \
-  --batch-id <stable-batch-key> \
-  --prompt "分别分析每个视频的语音和画面，不要混合不同视频" \
-  --delivery none
-```
+## Explicit later status lookup
 
-The non-recursive sorted batch is limited to 100 supported files and processes
-one video at a time. Reuse the same batch ID for the same request. Do not launch
-parallel per-video calls.
+Status is a new, explicit user action handled in `before_dispatch`. It is not a
+pure-regex conversational shortcut and never uses an implicit recent receipt.
+The internal Qwen classifier runs once, and the host requires exactly one
+complete ID copied from the current original message.
 
-Query or resume that batch only in a later authorized turn:
+For an explicit task ID, the runner calls the formal status client once:
 
 ```bash
-node skills/aiworker-task-flow/scripts/submit-task.mjs --batch-status <stable-batch-key>
-node skills/aiworker-task-flow/scripts/submit-task.mjs --resume-batch <stable-batch-key>
+node skills/aiworker-task-flow/scripts/submit-task.mjs --status <complete-task-id>
 ```
 
-A batch ID is not a task ID. Use `--batch-status` for the batch and plain
-`--status` only for an individual task ID returned by the batch summary.
-
-## Later status query
-
-A later explicit progress or result request is also owned by the native
-`aiworker-video-command` plugin in `before_dispatch`. It is not ordinary chat
-and must not start Qwen. The plugin first validates the same authorized
-Telegram private-message identity used for submission, then resolves exactly
-one task ID by either:
-
-1. accepting the complete task ID explicitly supplied in the current message;
-   or
-2. using the plugin's trusted, unambiguous most-recent receipt binding for this
-   private conversation.
-
-Do not recover an ID by asking the model, parsing free-form conversation text,
-searching memory, scanning files, or reading SQLite. If no trusted recent ID
-exists, if several receipts are ambiguous, or if an explicit ID is incomplete,
-return one short request for the complete task ID and stop:
-
-```text
-请提供完整任务编号。
-```
-
-With one resolved ID, the plugin calls its dedicated read-only status runner
-exactly once. The runner uses the installed client contract below; this is an
-implementation reference and is never constructed or executed by Qwen:
+For an explicit batch ID, it calls the durable batch status client once:
 
 ```bash
-node skills/aiworker-task-flow/scripts/submit-task.mjs --status <task-id>
+node skills/aiworker-task-flow/scripts/submit-task.mjs --batch-status <complete-batch-id>
 ```
 
-The status turn performs no model inference, OpenClaw tool selection,
-`memory_search`, `exec`, process supervision, filesystem discovery, direct
-Mission Control/SQLite access, n8n inspection, polling, retry, resubmission, or
-generic-task fallback. A query failure returns one short failure message and
-stops; it never authorizes a new video task.
+A batch ID is not a task ID. Status handling performs one read-only call, returns one
+bounded human reply, and ends. It does not start an agent tool, query memory,
+scrape conversation text, search files, inspect SQLite/n8n directly, poll,
+retry, submit, resume, or recommend resubmission. Missing or ambiguous IDs are
+handled with a short request to provide the complete task or batch ID.
 
-Translate the one returned state into a concise human response:
+Only `succeeded` proves a task completed. Batch replies may report the formal
+batch state and bounded counts returned by the batch client. Query or result
+validation failure returns a handled unavailable reply for the same explicit ID.
 
-- `accepted` or `queued`: `任务已受理，正在等待处理。`;
-- `running`: `任务正在处理中。`;
-- `succeeded`: `任务已完成。`, optionally followed by only a safe bounded
-  summary already returned by the formal status client;
-- `failed` or `cancelled`: `任务处理失败。`, optionally followed by only a
-  safe bounded reason already returned by the formal status client;
-- query error or an unsupported state: `暂时无法查询任务状态。`.
+## Explanation and unrelated chat
 
-Do not repeat a long task ID in an ordinary status reply. The complete ID is
-requested only when the plugin lacks a trusted unambiguous mapping.
+Video explanations, capabilities, examples, negation, conditions, missing
+paths, and missing IDs classify as `respond` and receive a handled short reply.
+They cause no submission or status read. Truly unrelated chat classifies as
+`pass` and only then continues to normal Qwen conversation.
 
-Only `succeeded` proves completion. After that one response, end the turn. Do
-not narrate lookup steps, expose internal reasoning or suggest resubmission.
+Describe the route as native `before_dispatch` scheduling with an internal
+no-tool Qwen semantic classifier and a persistent global video lane. Never call
+it a native agent tool, `VL`, `video-learning-pipeline`, `DIRECTOR_BRAIN`, or
+direct full-video processing.
+
+## Generic tasks
+
+Generic AI-worker submission remains separate and is never a fallback for a
+video-shaped request. Use it only when the current message explicitly authorizes
+a non-video task and follow the ordinary stable-ID task contract.
