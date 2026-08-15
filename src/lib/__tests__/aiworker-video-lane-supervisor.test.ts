@@ -185,6 +185,7 @@ process.exit(2)
     backupRoot,
     plist: join(launchAgents, 'ai.aiworker.video-lane-supervisor.plist'),
     launchState,
+    qwenConfig,
   }
 }
 
@@ -240,6 +241,20 @@ describe('persistent global video-lane supervisor', () => {
     expect(createHash('sha256').update(await readFile(sentinel)).digest('hex')).toBe(before)
     expect(await readdir(entry.backupRoot)).toHaveLength(2)
   }, 20_000)
+
+  it('accepts the required Telegram binding when the agent also has a WhatsApp route', async () => {
+    const entry = await fixture()
+    const config = JSON.parse(await readFile(entry.qwenConfig, 'utf8'))
+    config.bindings.push({
+      agentId: 'second-original',
+      match: { channel: 'whatsapp-official' },
+    })
+    await writeFile(entry.qwenConfig, `${JSON.stringify(config)}\n`, { mode: 0o600 })
+
+    const dryRun = await run(entry, '--dry-run')
+
+    expect(dryRun.stdout).toContain('No LaunchAgent, queue state')
+  })
 
   it('keeps at most two verified backups without deleting unrelated evidence', async () => {
     const entry = await fixture()

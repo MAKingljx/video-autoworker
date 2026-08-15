@@ -145,10 +145,12 @@ async function validateProfile(configPath, workspaceRoot) {
     assert(resolve(agents[0].workspace) === workspaceRoot,
       'second-original workspace does not match the supervised task-flow workspace.')
   }
-  const bindings = Array.isArray(config?.bindings)
-    ? config.bindings.filter(binding => binding?.agentId === 'second-original')
+  const telegramBindings = Array.isArray(config?.bindings)
+    ? config.bindings.filter(binding => (
+      binding?.agentId === 'second-original' && binding?.match?.channel === 'telegram'
+    ))
     : []
-  assert(bindings.length === 1 && bindings[0]?.match?.channel === 'telegram',
+  assert(telegramBindings.length === 1,
     'qwen-current must contain one Telegram binding for second-original.')
   const plugin = config?.plugins?.entries?.['aiworker-video-command']
   assert(plugin?.enabled === true, 'qwen-current video command plugin must be enabled.')
