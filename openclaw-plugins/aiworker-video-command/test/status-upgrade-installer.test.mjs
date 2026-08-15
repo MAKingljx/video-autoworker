@@ -42,7 +42,7 @@ function profileConfig() {
       allow: [pluginId],
       entries: { [pluginId]: { enabled: true, config: { allowedSenderSha256: senderHash } } },
     },
-    agents: { list: [{ id: 'second-original', tools: { profile: 'standard', allow: ['read', 'exec'] } }] },
+    agents: { list: [{ id: 'second-original', tools: { profile: 'coding', allow: ['read', 'exec'] } }] },
   }
 }
 
@@ -165,7 +165,7 @@ if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'tools.catalog') 
   process.stdout.write(JSON.stringify({ agentId: 'second-original', groups: [] }) + '\\n'); process.exit(0)
 }
 if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'tools.effective') {
-  process.stdout.write(JSON.stringify({ agentId: 'second-original', profile: 'standard', groups: [{
+  process.stdout.write(JSON.stringify({ agentId: 'second-original', profile: 'coding', groups: [{
     id: 'core', source: 'core', tools: [{ id: 'exec' }, { id: 'read' }],
   }] }) + '\\n'); process.exit(0)
 }

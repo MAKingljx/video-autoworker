@@ -30,9 +30,10 @@ function runInstaller(
   workspace: string,
   backupRoot: string,
   extraEnv: Record<string, string> = {},
+  mode: '--dry-run' | '--apply' = '--apply',
 ) {
   return new Promise<InstallerResult>((resolvePromise, rejectPromise) => {
-    execFile('bash', [installer], {
+    execFile('bash', [installer, mode], {
       cwd: repositoryRoot,
       env: {
         ...process.env,
@@ -172,6 +173,31 @@ describe('managed AI-worker workspace section renderer', () => {
 })
 
 describe('transactional AI-worker task-flow installer', () => {
+  it('keeps the workspace and backup root unchanged during a dry-run', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-dry-run-test-'))
+    const workspace = resolve(root, 'workspace')
+    const backupRoot = resolve(root, 'backups')
+    try {
+      await mkdir(workspace)
+      await createExistingInstallation(workspace)
+      const agentsBefore = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
+      const memoryBefore = await readFile(resolve(workspace, 'MEMORY.md'), 'utf8')
+      const originalSkill = await readFile(resolve(workspace, 'skills/aiworker-task-flow/original.txt'), 'utf8')
+
+      const result = await runInstaller(workspace, backupRoot, {}, '--dry-run')
+
+      expect(result.stdout).toContain('installation dry-run passed')
+      expect(await pathExists(backupRoot)).toBe(false)
+      expect(await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')).toBe(agentsBefore)
+      expect(await readFile(resolve(workspace, 'MEMORY.md'), 'utf8')).toBe(memoryBefore)
+      expect(await readFile(resolve(workspace, 'skills/aiworker-task-flow/original.txt'), 'utf8'))
+        .toBe(originalSkill)
+      expect((await readdir(workspace)).filter(name => name.includes('.aiworker-task-flow'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('backs up and installs all three objects, then performs a true content no-op', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-transaction-test-'))
     const workspace = resolve(root, 'workspace')
@@ -279,7 +305,7 @@ describe('transactional AI-worker task-flow installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it.each([
     'after-skill-original',

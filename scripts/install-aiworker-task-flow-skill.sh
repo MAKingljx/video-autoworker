@@ -7,6 +7,22 @@ SOURCE_DIR="$REPOSITORY_ROOT/openclaw-skills/aiworker-task-flow"
 RENDERER="$REPOSITORY_ROOT/scripts/lib/render-managed-markdown-section.mjs"
 WORKSPACE_ROOT="${AIWORKER_QWEN_WORKSPACE:-$HOME/AI-worker-second-original-workspace}"
 BACKUP_ROOT="${AIWORKER_SKILL_BACKUP_ROOT:-$HOME/ai-worker/backups/aiworker-task-flow-skill}"
+MODE=""
+
+usage() {
+  printf 'Usage: %s (--dry-run|--apply)\n' "$0"
+}
+
+if [[ "$#" -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+case "$1" in
+  --dry-run) MODE="dry-run" ;;
+  --apply) MODE="apply" ;;
+  -h|--help) usage; exit 0 ;;
+  *) usage >&2; exit 2 ;;
+esac
 
 case "$WORKSPACE_ROOT" in
   /*) ;;
@@ -455,7 +471,7 @@ cleanup() {
 
   if [[ -n "$TRANSACTION_DIR" && "$PRESERVE_TRANSACTION" != "1" ]]; then
     case "$TRANSACTION_DIR" in
-      "$WORKSPACE_ROOT"/.aiworker-task-flow.txn.*)
+      "$WORKSPACE_ROOT"/.aiworker-task-flow.txn.*|/tmp/aiworker-task-flow.dry-run.*|/private/tmp/aiworker-task-flow.dry-run.*)
         rm -rf -- "$TRANSACTION_DIR" || cleanup_failed=1
         ;;
       *)
@@ -484,16 +500,20 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  printf 'Another task-flow installation already holds the workspace lock: %s\n' "$LOCK_DIR" >&2
-  exit 1
+if [[ "$MODE" == "apply" ]]; then
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    printf 'Another task-flow installation already holds the workspace lock: %s\n' "$LOCK_DIR" >&2
+    exit 1
+  fi
+  LOCK_OWNED=1
+  chmod 700 "$LOCK_DIR"
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  chmod 600 "$LOCK_DIR/pid"
+  TRANSACTION_DIR="$(mktemp -d "$WORKSPACE_ROOT/.aiworker-task-flow.txn.XXXXXX")"
+else
+  TRANSACTION_DIR="$(mktemp -d /tmp/aiworker-task-flow.dry-run.XXXXXX)"
+  TRANSACTION_DIR="$(cd "$TRANSACTION_DIR" && pwd -P)"
 fi
-LOCK_OWNED=1
-chmod 700 "$LOCK_DIR"
-printf '%s\n' "$$" > "$LOCK_DIR/pid"
-chmod 600 "$LOCK_DIR/pid"
-
-TRANSACTION_DIR="$(mktemp -d "$WORKSPACE_ROOT/.aiworker-task-flow.txn.XXXXXX")"
 chmod 700 "$TRANSACTION_DIR"
 install -d -m 700 \
   "$TRANSACTION_DIR/expected/aiworker-task-flow/scripts" \
@@ -561,6 +581,14 @@ if cmp -s "$CURRENT_AGENTS_MANIFEST" "$EXPECTED_AGENTS_MANIFEST"; then
 fi
 if cmp -s "$CURRENT_MEMORY_MANIFEST" "$EXPECTED_MEMORY_MANIFEST"; then
   MEMORY_MATCHES=1
+fi
+
+if [[ "$MODE" == "dry-run" ]]; then
+  TRANSACTION_COMPLETE=1
+  printf 'AI-worker task-flow installation dry-run passed: target=%s skill_matches=%s agents_matches=%s memory_matches=%s\n' \
+    "$TARGET_DIR" "$SKILL_MATCHES" "$AGENTS_MATCHES" "$MEMORY_MATCHES"
+  printf 'No skill, workspace control file, backup, queue state, n8n, or Gateway was changed.\n'
+  exit 0
 fi
 
 if [[ "$SKILL_MATCHES" == "1" && "$AGENTS_MATCHES" == "1" && "$MEMORY_MATCHES" == "1" ]]; then

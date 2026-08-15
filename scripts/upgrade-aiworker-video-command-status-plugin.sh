@@ -242,9 +242,11 @@ validate_current_hook() {
   package_version="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$INSTALLED_PLUGIN_DIR/package.json")"
   [[ "$package_version" == "$expected_version" ]] || { printf 'Installed plugin must be %s.\n' "$expected_version" >&2; return 1; }
   node "$VALIDATOR" telegram-policy "$PROFILE_CONFIG" "$AGENT_ID"
-  local sender_hash
-  sender_hash="$(node "$VALIDATOR" owner-sender-plan "$PROFILE_CONFIG" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).allowedSenderSha256))')"
-  node "$VALIDATOR" sender-hash-config "$PROFILE_CONFIG" "$PLUGIN_ID" "$sender_hash"
+  if [[ "$expected_version" == "$PREVIOUS_VERSION" ]]; then
+    local sender_hash
+    sender_hash="$(node "$VALIDATOR" owner-sender-plan "$PROFILE_CONFIG" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).allowedSenderSha256))')"
+    node "$VALIDATOR" sender-hash-config "$PROFILE_CONFIG" "$PLUGIN_ID" "$sender_hash"
+  fi
   installed_report="$(node "$STATUS_VALIDATOR" installed-payload "$INSTALLED_PLUGIN_DIR")"
   printf '%s\n' "$installed_report" > "$report_dir/installed-payload.json"
   PEER_LINK_TEXT="$(node -e 'const p=JSON.parse(process.argv[1]);process.stdout.write(p.peer.linkText)' "$installed_report")"
@@ -267,9 +269,16 @@ validate_current_hook() {
 
 validate_current_candidate() {
   local report_dir="$1"
+  local owner_sender_hash candidate_sender_hash
   validate_current_hook "$report_dir" "$CANDIDATE_VERSION"
   node "$STATUS_VALIDATOR" classifier-config "$PROFILE_CONFIG" candidate "$PLUGIN_ID" "$AGENT_ID" \
     > "$report_dir/classifier-config.json"
+  owner_sender_hash="$(node "$VALIDATOR" owner-sender-plan "$PROFILE_CONFIG" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).allowedSenderSha256))')"
+  candidate_sender_hash="$(node -e 'const report=require(process.argv[1]);process.stdout.write(report.allowedSenderSha256 || "")' "$report_dir/classifier-config.json")"
+  [[ "$candidate_sender_hash" == "$owner_sender_hash" ]] || {
+    printf 'Candidate plugin sender hash does not match the authorized Telegram owner.\n' >&2
+    return 1
+  }
   node "$VALIDATOR" payload-match "$PLUGIN_DIR" "$INSTALLED_PLUGIN_DIR" "$SOURCE_FINGERPRINT" \
     "$PEER_LINK_TEXT" "$PEER_REAL_PATH" > "$report_dir/candidate-payload.json"
 }
@@ -289,7 +298,7 @@ writeFileSync(configPath, `${JSON.stringify({
     allow: [pluginId],
     entries: { [pluginId]: { enabled: true, config: { allowedSenderSha256: 'a'.repeat(64) } } },
   },
-  agents: { list: [{ id: 'second-original', tools: { profile: 'standard', allow: ['read'] } }] },
+  agents: { list: [{ id: 'second-original', tools: { profile: 'coding', allow: ['read'] } }] },
 }, null, 2)}\n`, { mode: 0o600 })
 NODE
   chmod 600 "$isolated_config"

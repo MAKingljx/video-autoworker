@@ -565,7 +565,7 @@ globalThis.fetch = async (input, init = {}) => {
     const workspace = resolve(root, 'workspace')
     const installer = resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh')
     const runInstaller = (backupRoot: string) => new Promise<void>((resolvePromise, rejectPromise) => {
-      execFile('bash', [installer], {
+      execFile('bash', [installer, '--apply'], {
         cwd: process.cwd(),
         env: {
           ...process.env,
