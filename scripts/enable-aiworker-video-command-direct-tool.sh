@@ -17,6 +17,7 @@ PROFILE_STATE_DIR="$HOME/.openclaw-qwen-current"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
 INSTALLED_PLUGIN_DIR="$PROFILE_STATE_DIR/extensions/$PLUGIN_ID"
 BACKUP_ROOT="$HOME/ai-worker/backups/aiworker-video-command-direct-tool"
+POLICY_HELPER="$REPOSITORY_ROOT/scripts/lib/direct-tool-access-policy.mjs"
 WORK_ROOT=""
 MODE=""
 TARGET_SHA=""
@@ -188,6 +189,14 @@ process.stdout.write(matches[0].key)
 NODE
 }
 
+capture_baseline() {
+  DIRECT_SESSION_KEY="$(find_direct_session)"
+  run_qwen_openclaw gateway call tools.catalog \
+    --params "{\"agentId\":\"$AGENT_ID\",\"includePlugins\":true}" \
+    --timeout 20000 --json > "$WORK_ROOT/tools-catalog.json"
+  validate_effective absent "$WORK_ROOT/tools-effective-before.json" "$DIRECT_SESSION_KEY"
+}
+
 validate_effective() {
   local expected="$1" report="$2" session_key="$3"
   run_qwen_openclaw gateway call tools.effective \
@@ -206,6 +215,32 @@ if (expected === 'present') {
   }
 } else if (matches.length !== 0) {
   throw new Error('direct video tool remains effective after rollback')
+}
+NODE
+}
+
+validate_effective_exact() {
+  local report="$1" session_key="$2"
+  run_qwen_openclaw gateway call tools.effective \
+    --params "{\"agentId\":\"$AGENT_ID\",\"sessionKey\":\"$session_key\"}" \
+    --timeout 20000 --json > "$report"
+  node - "$WORK_ROOT/tools-effective-before.json" "$report" "$AGENT_ID" "$TOOL_ID" <<'NODE'
+const fs = require('node:fs')
+const [beforePath, afterPath, agentId, toolId] = process.argv.slice(2)
+const read = pathname => JSON.parse(fs.readFileSync(pathname, 'utf8'))
+const ids = report => new Set(report.groups.flatMap(group => (group.tools || []).map(tool => tool.id)))
+const before = read(beforePath)
+const after = read(afterPath)
+if (before.agentId !== agentId || after.agentId !== agentId) throw new Error('effective report agent mismatch')
+const expected = ids(before)
+expected.add(toolId)
+const actual = ids(after)
+if (actual.size !== expected.size || [...expected].some(id => !actual.has(id))) {
+  throw new Error('effective tools differ from the baseline plus the direct video tool')
+}
+const matches = after.groups.flatMap(group => (group.tools || []).filter(tool => tool.id === toolId))
+if (matches.length !== 1 || matches[0].source !== 'plugin' || matches[0].pluginId !== 'aiworker-video-command') {
+  throw new Error('direct video tool is not effective exactly once')
 }
 NODE
 }
@@ -250,8 +285,11 @@ fi
 BEFORE_LISTENERS="$(listener_snapshot)"
 
 if [[ "$MODE" == "dry-run" ]]; then
-  session_key="$(find_direct_session)"
-  validate_effective absent "$WORK_ROOT/tools-effective-before.json" "$session_key"
+  capture_baseline
+  node "$POLICY_HELPER" build "$PROFILE_CONFIG" "$WORK_ROOT/tools-effective-before.json" \
+    "$WORK_ROOT/tools-catalog.json" "$AGENT_ID" "$TOOL_ID" "$WORK_ROOT/candidate.json"
+  node "$POLICY_HELPER" validate "$PROFILE_CONFIG" "$WORK_ROOT/tools-effective-before.json" \
+    "$WORK_ROOT/tools-catalog.json" "$AGENT_ID" "$TOOL_ID" "$WORK_ROOT/candidate.json"
   printf 'Direct video tool access dry-run passed at %s.\n' "$TARGET_SHA"
   printf 'No config, gateway, queue, n8n, media, or database state changed.\n'
   exit 0
@@ -273,33 +311,20 @@ printf '{"schemaVersion":1,"agentId":"%s","toolId":"%s","version":"%s","targetSh
   "$AGENT_ID" "$TOOL_ID" "$EXPECTED_VERSION" "$TARGET_SHA" > "$BACKUP_DIR/metadata.json"
 chmod 600 "$BACKUP_DIR/metadata.json"
 
-node - "$PROFILE_CONFIG" "$PROFILE_CONFIG.tmp" "$AGENT_ID" "$TOOL_ID" <<'NODE'
-const fs = require('node:fs')
-const [configPath, tempPath, agentId, toolId] = process.argv.slice(2)
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
-const agent = config.agents.list.find(item => item?.id === agentId)
-if (!agent) throw new Error('target agent not found')
-if (!Array.isArray(agent.tools?.allow) || agent.tools.allow.includes(toolId)) {
-  throw new Error('target agent tools.allow is not the expected pre-access baseline')
-}
-agent.tools.allow = [...agent.tools.allow, toolId]
-fs.writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
-fs.renameSync(tempPath, configPath)
-NODE
+capture_baseline
+node "$POLICY_HELPER" build "$BACKUP_DIR/openclaw.json" "$WORK_ROOT/tools-effective-before.json" \
+  "$WORK_ROOT/tools-catalog.json" "$AGENT_ID" "$TOOL_ID" "$WORK_ROOT/candidate.json"
+node "$POLICY_HELPER" validate "$BACKUP_DIR/openclaw.json" "$WORK_ROOT/tools-effective-before.json" \
+  "$WORK_ROOT/tools-catalog.json" "$AGENT_ID" "$TOOL_ID" "$WORK_ROOT/candidate.json"
+install -m 600 "$WORK_ROOT/candidate.json" "$PROFILE_CONFIG"
 
 run_qwen_openclaw gateway restart --wait 60s --json > "$BACKUP_DIR/gateway-restart.json"
-if validate_pre_access_config 2>/dev/null; then
-  printf 'Config still matches the pre-access baseline after apply.\n' >&2
-  restore_config "$BACKUP_DIR"
-  exit 1
-fi
-session_key="$(find_direct_session)"
-if ! validate_effective present "$BACKUP_DIR/tools-effective-after-apply.json" "$session_key" \
+if ! validate_effective_exact "$BACKUP_DIR/tools-effective-after-apply.json" "$DIRECT_SESSION_KEY" \
   || [[ "$(listener_snapshot)" != "$BEFORE_LISTENERS" ]]; then
   restore_config "$BACKUP_DIR"
   exit 1
 fi
 install -m 600 /dev/null "$BACKUP_DIR/.verified"
 enforce_retention
-printf 'Enabled %s for %s by appending one item to the existing tools.allow list.\n' "$TOOL_ID" "$AGENT_ID"
+printf 'Enabled %s for %s with profile coding plus one additive allow and an exact deny set.\n' "$TOOL_ID" "$AGENT_ID"
 printf 'Config backup: %s\n' "$BACKUP_DIR"
