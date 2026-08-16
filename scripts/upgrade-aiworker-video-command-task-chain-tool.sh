@@ -219,13 +219,15 @@ restore_previous() {
 
 enforce_retention() {
   node - "$BACKUP_ROOT" <<'NODE'
-const { readdirSync, rmSync, statSync } = require('node:fs')
+const { existsSync, readdirSync, rmSync, statSync } = require('node:fs')
 const { join } = require('node:path')
 const root = process.argv[2]
 const entries = readdirSync(root)
   .filter(name => /^task-chain-tool-upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(name))
   .map(name => ({ path: join(root, name), time: statSync(join(root, name)).mtimeMs }))
-  .filter(entry => statSync(entry.path).isDirectory() && statSync(join(entry.path, '.verified')).isFile())
+  .filter(entry => statSync(entry.path).isDirectory()
+    && existsSync(join(entry.path, '.verified'))
+    && statSync(join(entry.path, '.verified')).isFile())
   .sort((left, right) => right.time - left.time)
 for (const entry of entries.slice(2)) rmSync(entry.path, { recursive: true, force: true })
 NODE

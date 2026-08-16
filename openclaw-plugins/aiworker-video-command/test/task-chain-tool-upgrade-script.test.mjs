@@ -17,4 +17,11 @@ describe('task-chain tool upgrade script', () => {
     expect(script).not.toContain("tr '\\n' ','")
     expect(script).not.toContain("printf '%s=%s\\n' \"$port\" \"$pids\"")
   })
+
+  it('ignores unverified recovery directories during backup retention', async () => {
+    const script = await readFile(SCRIPT_PATH, 'utf8')
+
+    expect(script).toContain("const { existsSync, readdirSync, rmSync, statSync } = require('node:fs')")
+    expect(script).toContain("existsSync(join(entry.path, '.verified'))")
+  })
 })
