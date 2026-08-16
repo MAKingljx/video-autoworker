@@ -15,6 +15,7 @@ import {
   markBatchQueued,
   readBatchState,
   readSingleVideoTaskState,
+  searchVideoTaskStates,
   summarizeBatchState,
   validateBatchId,
 } from '../lib/video-batch-state.mjs'
@@ -26,7 +27,7 @@ const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
   '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
   '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
-  '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
+  '--search-status', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--no-trigger-recovery', '--resume-pending'])
 const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
@@ -67,7 +68,9 @@ function validateCliArguments() {
   if (present.has('--prompt') && present.has('--prompt-file')) {
     throw new Error('--prompt 与 --prompt-file 不能同时使用')
   }
-  const primaryModes = ['--batch-status', '--resume-batch', '--resume-pending', '--status', '--video-dir', '--video-file']
+  const primaryModes = [
+    '--batch-status', '--resume-batch', '--resume-pending', '--search-status', '--status', '--video-dir', '--video-file',
+  ]
     .filter(name => present.has(name))
   if (primaryModes.length > 1) throw new Error(`任务模式参数不能同时使用：${primaryModes.join('、')}`)
   if (present.has('--batch-id') !== present.has('--video-dir')) {
@@ -80,6 +83,7 @@ function validateCliArguments() {
     '--resume-batch': new Set(['--resume-batch']),
     '--resume-pending': new Set(['--resume-pending']),
     '--status': new Set(['--status', '--base-url']),
+    '--search-status': new Set(['--search-status']),
     '--video-dir': new Set([
       '--video-dir', '--batch-id', '--base-url', '--binding-id', '--prompt', '--prompt-file',
       '--vision-route', '--delivery',
@@ -211,6 +215,10 @@ async function handlePendingResume() {
   output({ resumed: true })
 }
 
+async function handleStatusSearch(query) {
+  output(await searchVideoTaskStates(query))
+}
+
 async function handleBatchCreate(client, videoDir) {
   const batchId = validateBatchId(option('--batch-id'))
   const prompt = await resolvePrompt({ video: true })
@@ -261,6 +269,8 @@ async function main() {
   const resumeBatch = option('--resume-batch')
   if (resumeBatch) return handleBatchResume(resumeBatch)
   if (flag('--resume-pending')) return handlePendingResume()
+  const searchStatus = option('--search-status')
+  if (searchStatus) return handleStatusSearch(searchStatus)
 
   const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
   const statusTaskId = option('--status')

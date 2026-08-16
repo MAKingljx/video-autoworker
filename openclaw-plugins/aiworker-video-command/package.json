@@ -1,6 +1,6 @@
 {
   "name": "@aiworker/openclaw-aiworker-video-command",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Qwen-classified, hook-owned video learning dispatch and one-shot status reads",
   "type": "module",

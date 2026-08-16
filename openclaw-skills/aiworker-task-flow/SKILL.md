@@ -20,9 +20,14 @@ mainline, installation, production deployment, or Telegram acceptance.
   Telegram private message and requires the classifier value to be copied
   exactly from the current original message.
 - Dispatch accepts exactly one canonical absolute local video file path or one
-  canonical absolute local directory path. Status accepts exactly one explicit,
-  complete task ID or batch ID. Never infer a recent task from conversation,
-  memory, files, SQLite, or process state.
+  canonical absolute local directory path. Status accepts one explicit complete
+  task or batch ID, or a title/keyword search over the controlled video-task
+  registry. It runs only after the same configured Telegram-sender authorization
+  as dispatch, is not a cross-user/general-library API, and matches only public
+  task identifiers, display names, normalized season/episode aliases, and status
+  metadata. Never infer a recent task from conversation or memory, inspect a
+  prompt or source path, or scan SQLite, n8n executions, media directories,
+  credentials, or process state.
 - Single videos and directories both enter one persistent process-wide video lane.
   The lane runs at most one video at a time across all jobs and survives
   chat turns and worker restarts.
@@ -43,6 +48,8 @@ only a recognized action and one string value:
 - `dispatch_directory`: analyze one video directory now;
 - `status_task`: read one explicitly supplied complete task ID once;
 - `status_batch`: read one explicitly supplied complete batch ID once;
+- `status_search`: find controlled video task state by a title, filename,
+  season/episode, or other current-message keyword;
 - `respond`: video-related but non-executing, ambiguous, conditional, negative,
   explanatory, or missing required evidence;
 - `pass`: genuinely unrelated ordinary chat.
@@ -58,6 +65,8 @@ evidence from the current original message and requires an exact single match:
   `dispatch_directory`;
 - one complete scheduler task ID and no batch ID for `status_task`;
 - one complete scheduler batch ID and no task ID for `status_batch`.
+- a non-empty, bounded query copied from the current original message for
+  `status_search`.
 
 The host never guesses, normalizes, searches for, or substitutes classifier
 values. Multiple candidates, relative paths, URLs, unsupported paths, partial
@@ -120,12 +129,12 @@ The formal downstream chain remains:
 All worker stages use `memoryMode=none`, and n8n does not automatically return
 the completed result to Telegram.
 
-## Explicit later status lookup
+## Later status lookup
 
 Status is a new, explicit user action handled in `before_dispatch`. It is not a
 pure-regex conversational shortcut and never uses an implicit recent receipt.
-The internal Qwen classifier runs once, and the host requires exactly one
-complete ID copied from the current original message.
+The internal Qwen classifier runs once. A complete ID is copied from the
+current message; a search query is likewise copied from the current message.
 
 For an explicit task ID, the runner calls the formal status client once:
 
@@ -139,11 +148,23 @@ For an explicit batch ID, it calls the durable batch status client once:
 node skills/aiworker-task-flow/scripts/submit-task.mjs --batch-status <complete-batch-id>
 ```
 
-A batch ID is not a task ID. Status handling performs one read-only call, returns one
-bounded human reply, and ends. It does not start an agent tool, query memory,
-scrape conversation text, search files, inspect SQLite/n8n directly, poll,
-retry, submit, resume, or recommend resubmission. Missing or ambiguous IDs are
-handled with a short request to provide the complete task or batch ID.
+For title or keyword lookup, it calls the controlled state client once:
+
+```bash
+node skills/aiworker-task-flow/scripts/submit-task.mjs --search-status <title-or-keyword>
+```
+
+A batch ID is not a task ID. The search is read-only, operates only after the
+configured Telegram-sender authorization, and reads valid records in the
+controlled batch-state root solely for public task identifiers, display names,
+season/episode aliases, and status metadata. It is not a cross-user search API.
+One search match triggers exactly one formal task or batch status read; multiple
+matches return only bounded filename/status candidates and do not choose or query
+one. Status handling does not start an agent tool, query memory, scrape
+conversation text, inspect prompts or source paths, search arbitrary files,
+inspect SQLite/n8n directly, poll, retry, submit, resume, or recommend
+resubmission. Missing or ambiguous matches are handled with a short refinement
+request.
 
 Only `succeeded` proves a task completed. Batch replies may report the formal
 batch state and bounded counts returned by the batch client. Query or result

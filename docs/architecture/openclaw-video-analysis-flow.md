@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-本文描述 `0.5` 本地候选契约，不代表 GitHub main、已安装组件或生产环境已经
+本文描述 `0.5.1` 本地候选契约，不代表 GitHub main、已安装组件或生产环境已经
 升级，也不构成真实 Telegram 入站验收。生产事实必须由后续单独的提交、部署和
 验收证据确认。
 
@@ -14,7 +14,7 @@
 或副作用权限。
 
 宿主随后从当前原始消息中独立校验授权 Telegram 私聊、会话与发送者一致性、
-唯一绝对文件/目录路径或唯一完整 taskId/batchId。单视频与目录批次都进入同一个
+唯一绝对文件/目录路径、唯一完整 taskId/batchId，或当前消息复制的标题/关键词。单视频与目录批次都进入同一个
 持久化全局串行 video lane。派发成功后 handler 返回 handled 短回执并结束；同轮
 不读状态、不轮询、不重试、不重提、不等待，也不在完成后回投 Telegram。
 
@@ -28,6 +28,7 @@ flowchart TD
   C -->|"pass"| Q["真正无关聊天进入正常 Qwen"]
   C -->|"dispatch_single / dispatch_directory"| V{"宿主核对当前原消息中的唯一绝对路径"}
   C -->|"status_task / status_batch"| E{"宿主核对当前原消息中的唯一完整显式 ID"}
+  C -->|"status_search"| T["只读搜索受控视频任务登记"]
   V -->|"失败"| X
   V -->|"成功"| L["持久化全局串行 video lane"]
   L --> A["handled 短回执并结束当前轮"]
@@ -42,11 +43,14 @@ flowchart TD
   E -->|"失败"| X
   E -->|"成功"| S["正式状态客户端只读一次"]
   S --> H["handled 有界状态回复并结束"]
+  T -->|"零条"| H
+  T -->|"唯一"| S
+  T -->|"多条"| K["返回有界候选，不自动选择"]
 ```
 
 ## 语义分类与确定性门禁
 
-内部分类器只允许六类动作：
+内部分类器只允许七类动作：
 
 | 动作 | 语义 | 宿主必须再次确认的证据 |
 |---|---|---|
@@ -54,6 +58,7 @@ flowchart TD
 | `dispatch_directory` | 现在分析一个视频目录 | 当前原消息中唯一、规范的绝对本地目录路径及明确目录意图 |
 | `status_task` | 查询一个任务 | 当前原消息中唯一完整 taskId，且不存在 batchId |
 | `status_batch` | 查询一个批次 | 当前原消息中唯一完整 batchId，且不存在 taskId |
+| `status_search` | 按标题/关键词查询 | 当前原消息中复制的非空、有界搜索词；仅在已授权单发送者入口搜索受控视频任务登记 |
 | `respond` | 视频相关但不执行或证据不足 | 无 runner 副作用 |
 | `pass` | 真正无关的普通聊天 | 才允许进入正常 `second-original` |
 
@@ -62,9 +67,11 @@ flowchart TD
 举例、方法咨询、多个候选、缺少路径或 ID、相对路径、URL、非规范路径和部分 ID
 均不能触发 runner。
 
-这条边界取代 `0.4.1` 的纯正则状态入口与内存 recent receipt。状态必须由当前
-消息显式携带完整 taskId 或 batchId；对话历史、模型记忆、文件、SQLite、n8n、
-进程和“刚才那个”都不能补出缺失身份。
+这条边界取代 `0.4.1` 的纯正则状态入口与内存 recent receipt。状态可由当前
+消息显式携带完整 taskId/batchId，或由当前消息中的标题/关键词查询。后者只在已授权
+单发送者入口读取受控 video-batch 状态根目录的有效 JSON，匹配任务公开 ID、显示名、
+季集别名和状态元数据；它不是跨用户或全库搜索，不读取提示词、源路径、任意文件、
+SQLite、n8n、媒体、进程或聊天历史，也不回显源路径或提示词。
 
 ## 鉴权与失败关闭
 
@@ -102,10 +109,11 @@ runner 异常都由 handler 自行 catch，并返回 handled 的失败关闭短�
 派发后立即返回含稳定 taskId 或 batchId 的短回执并结束。当前轮禁止状态读取、
 Mission Control/n8n 检查、等待、轮询、重试、重提、进度播报和完成回投。
 
-以后只有携带完整显式 ID 的新消息才可查询：taskId 调正式 task status 一次，
-batchId 调正式 batch status 一次。查询不启动 Agent tool，不扫描数据库或文件，
-不轮询、不重试、不提交、不恢复。只有正式 task 状态 `succeeded` 可表述为完成；
-批次只报告正式接口返回的有界状态和计数。
+以后新的状态消息可携带完整显式 ID，或携带标题/关键词：taskId 调正式 task
+status 一次，batchId 调正式 batch status 一次；标题搜索唯一命中后只调对应正式
+状态接口一次，多个命中仅返回候选。查询不启动 Agent tool，不扫描数据库或任意
+文件，不轮询、不重试、不提交、不恢复。只有正式 task 状态 `succeeded` 可表述为
+完成；批次只报告正式接口返回的有界状态和计数。
 
 ## 下游无状态边界
 
@@ -126,7 +134,8 @@ batchId 调正式 batch status 一次。查询不启动 Agent tool，不扫描�
 2. 模型分类不能绕过 Telegram 私聊、sender、原消息证据与完整 ID 校验；
 3. 单视频与目录任务共享持久化全局锁，跨任务也不会并行执行视频；
 4. 派发只产生一次入队及一个短回执，同轮状态读取、重试、重提和回投均为零；
-5. status_task/status_batch 只接受当前消息中的显式完整 ID，各只读一次；
+5. status_task/status_batch 只接受当前消息中的显式完整 ID，各只读一次；status_search
+   仅在已授权单发送者入口搜索受控任务登记，唯一命中才额外读取一次正式状态，多命中不选择；
 6. classifier/校验/runner 失败均 handled fail-closed，只有无关 `pass` 进入 Qwen；
 7. 下游 `prepare/audio/vision/finalize` 可追踪，所有模型节点均为
    `memoryMode=none`，视频 `delivery=none`；

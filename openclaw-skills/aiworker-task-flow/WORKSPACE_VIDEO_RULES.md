@@ -5,7 +5,7 @@ The local 0.5 candidate uses one native `before_dispatch` handler for
 
 - For a candidate message, call the host-provided `api.runtime.llm.complete`
   exactly once with no tools and accept only the strict structured actions
-  `dispatch_single`, `dispatch_directory`, `status_task`, `status_batch`,
+  `dispatch_single`, `dispatch_directory`, `status_task`, `status_batch`, `status_search`,
   `respond`, or `pass`.
 - Treat classification as semantic advice, never authorization. The host must
   independently validate the authorized Telegram private chat, consistent
@@ -16,8 +16,14 @@ The local 0.5 candidate uses one native `before_dispatch` handler for
   current original message. Do not guess, normalize, search, download, expand,
   or reuse a quoted or earlier path.
 - Before status, require exactly one explicit complete task ID or complete batch ID from
-  the current original message. Never infer a recent task or batch from a
-  receipt, conversation history, model memory, files, SQLite, n8n, or processes.
+  the current original message, or one non-empty bounded title/keyword query
+  copied from that message. The current rollout admits only the configured
+  authorized Telegram sender, so `status_search` is not a cross-user or
+  general-library search API. It reads only valid controlled video-batch state
+  records and matches public task identifiers, display names, normalized
+  season/episode aliases, and status metadata. It must not inspect prompts,
+  source paths, arbitrary files, SQLite, n8n, media, memory, or processes.
+  Never infer a recent receipt or recent task from conversation state.
 - Send both single videos and directories to the same persistent process-wide
   video lane. A single video is a one-item durable job. Across every job, run at
   most one video at a time and resume durable state without replaying terminal
@@ -31,7 +37,9 @@ The local 0.5 candidate uses one native `before_dispatch` handler for
   wait, poll, retry, resubmit, narrate progress, or push completed output back.
 - An explicit task or batch status request calls the corresponding formal
   read-only client exactly once, returns one bounded handled reply, and ends.
-  Status never submits or resumes work.
+  One search match may trigger that corresponding formal read once; multiple
+  matches return bounded candidates without choosing one. Status never submits
+  or resumes work.
 - Catch classifier schema/timeout errors, identity or evidence mismatches,
   invalid input, and runner errors inside the handler. Return a handled
   fail-closed short reply; never fall through to normal Qwen, generic tasks,

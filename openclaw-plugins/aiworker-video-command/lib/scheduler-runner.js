@@ -14,6 +14,7 @@ export const INSTALLED_TASK_FLOW_SCRIPT = resolve(
 
 const DISPATCH_TIMEOUT_MS = 25_000
 const STATUS_TIMEOUT_MS = 15_000
+const STATUS_SEARCH_TIMEOUT_MS = 15_000
 const TASK_ID_PATTERN = /^(?:video-command|video-natural)-[a-f0-9]{64}$/u
 const BATCH_ID_PATTERN = /^video-batch-[a-f0-9]{64}$/u
 const DISPATCH_STATUSES = new Set([
@@ -24,6 +25,16 @@ const TASK_STATUSES = new Set(['queued', 'accepted', 'running', 'succeeded', 'fa
 const BATCH_STATUSES = new Set([
   'queued', 'running', 'recovering', 'paused', 'succeeded', 'completed_with_errors',
 ])
+const SEARCH_ITEM_STATUSES = new Set([
+  'staging', 'queued', 'submitted', 'accepted', 'running', 'waiting', 'succeeded', 'failed',
+  'cancelled', 'unknown',
+])
+const SEARCH_BATCH_STATUSES = new Set([
+  ...BATCH_STATUSES,
+  ...SEARCH_ITEM_STATUSES,
+])
+const MAX_SEARCH_QUERY_LENGTH = 512
+const MAX_SEARCH_MATCHES = 32
 
 export function isSchedulerTaskId(value) {
   return typeof value === 'string' && TASK_ID_PATTERN.test(value)
@@ -31,6 +42,17 @@ export function isSchedulerTaskId(value) {
 
 export function isSchedulerBatchId(value) {
   return typeof value === 'string' && BATCH_ID_PATTERN.test(value)
+}
+
+function normalizeSearchQuery(value) {
+  if (
+    typeof value !== 'string'
+    || value !== value.trim()
+    || !value
+    || value.length > MAX_SEARCH_QUERY_LENGTH
+    || /[\u0000-\u001f\u007f]/u.test(value)
+  ) throw new Error('invalid_search_query')
+  return value
 }
 
 function normalizeDispatchResult(value, expectedId, kind) {
@@ -107,6 +129,69 @@ function normalizeBatchStatus(value, expectedBatchId) {
   }
 }
 
+function normalizeSearchName(value) {
+  if (typeof value !== 'string') throw new Error('invalid_search_result')
+  const name = value
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (!name || name.length > 180) throw new Error('invalid_search_result')
+  return name
+}
+
+function normalizeSearchMatch(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_search_result')
+  if (value.kind === 'task') {
+    if (
+      !isSchedulerTaskId(value.taskId)
+      || !SEARCH_ITEM_STATUSES.has(value.status)
+      || !SEARCH_BATCH_STATUSES.has(value.batchStatus)
+    ) throw new Error('invalid_search_result')
+    return {
+      kind: 'task',
+      taskId: value.taskId,
+      name: normalizeSearchName(value.name),
+      status: value.status,
+    }
+  }
+  if (value.kind === 'batch') {
+    if (
+      !isSchedulerBatchId(value.batchId)
+      || !SEARCH_ITEM_STATUSES.has(value.status)
+      || !SEARCH_BATCH_STATUSES.has(value.batchStatus)
+    ) throw new Error('invalid_search_result')
+    return {
+      kind: 'batch',
+      batchId: value.batchId,
+      name: normalizeSearchName(value.name),
+      status: value.status,
+    }
+  }
+  throw new Error('invalid_search_result')
+}
+
+function normalizeSearchResult(value) {
+  if (
+    !value
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || !Array.isArray(value.matches)
+    || value.matches.length > MAX_SEARCH_MATCHES
+    || !Number.isInteger(value.total)
+    || value.total < value.matches.length
+    || typeof value.truncated !== 'boolean'
+    || (value.truncated !== (value.total > value.matches.length))
+  ) throw new Error('invalid_search_result')
+  const matches = value.matches.map(normalizeSearchMatch)
+  const seen = new Set()
+  for (const match of matches) {
+    const key = `${match.kind}:${match.kind === 'task' ? match.taskId : match.batchId}`
+    if (seen.has(key)) throw new Error('invalid_search_result')
+    seen.add(key)
+  }
+  return { matches, total: value.total, truncated: value.truncated }
+}
+
 export function createSchedulerRunner({
   execute = executeFile,
   scriptPath = INSTALLED_TASK_FLOW_SCRIPT,
@@ -158,6 +243,13 @@ export function createSchedulerRunner({
       return normalizeBatchStatus(
         await call(['--batch-status', batchId], STATUS_TIMEOUT_MS),
         batchId,
+      )
+    },
+
+    async searchStatus({ query }) {
+      const safeQuery = normalizeSearchQuery(query)
+      return normalizeSearchResult(
+        await call(['--search-status', safeQuery], STATUS_SEARCH_TIMEOUT_MS),
       )
     },
   }

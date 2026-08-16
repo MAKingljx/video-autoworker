@@ -235,18 +235,22 @@ Telegram 用户记忆参数的对话入口。`0.5` 本地候选由 `second-origi
 ```
 
 候选分类结果为 `dispatch_single`、`dispatch_directory`、`status_task`、
-`status_batch`、`respond` 或 `pass`。模型输出本身不构成授权；宿主只接受当前原始
-消息中的唯一规范绝对文件/目录路径，或唯一完整显式 taskId/batchId。不得从 recent
-receipt、对话历史、记忆、文件或数据库补齐路径或 ID。只有真正无关的 `pass` 进入正常
-Qwen；classifier、鉴权、证据校验和 runner 失败均由 handler catch 后 handled
-fail-closed。
+`status_batch`、`status_search`、`respond` 或 `pass`。模型输出本身不构成授权；宿主
+只接受当前原始消息中的唯一规范绝对文件/目录路径、唯一完整显式 taskId/batchId，或
+当前消息中复制的标题/关键词。`status_search` 只在已授权单发送者入口读取受控
+video-batch 状态根目录的有效 JSON，匹配任务公开 ID、显示名、季集别名和状态元数据；
+它不是跨用户或全库搜索，且不读取提示词、源路径、SQLite、n8n execution、媒体、聊天
+历史或凭据。唯一命中后才调用一次正式只读状态接口，多命中只返回有界候选。只有真正无关的
+`pass` 进入正常 Qwen；classifier、鉴权、证据校验和 runner 失败均由 handler catch
+后 handled fail-closed。
 
 单视频与目录都先写入持久任务状态并进入同一个进程级全局串行 video lane；单视频是
 一个 item 的任务，目录是确定性排序的多 item 任务。所有 job 共用全局锁，任一时刻最多
 处理一个视频，并能在 worker 重启后续跑且跳过终态 item。正常新任务和幂等任务只返回
 含稳定 taskId 或 batchId 的 handled 短回执。同一轮不得查询状态、监控、等待、重试、
-再次提交或完成回投。以后查询必须在当前新消息中显式提供完整 taskId 或 batchId，正式
-状态客户端只读一次；`delivery=none` 表示结果保存在任务运行记录中，不自动回投 Telegram。
+再次提交或完成回投。以后查询可在当前新消息中显式提供完整 taskId/batchId，或提供
+标题/关键词；完整 ID 直接调用对应正式状态客户端一次，标题搜索唯一命中后再调用一次，
+多命中只返回候选。`delivery=none` 表示结果保存在任务运行记录中，不自动回投 Telegram。
 
 ### 原生视频命令与受控媒体审计边界
 
@@ -256,8 +260,8 @@ task 状态、batch 状态、无副作用短答或无关放行；宿主仍必须
 发送者、event/context 一致性，以及分类值确实逐字来自当前原始消息。
 
 生产发布门应特别证明：单视频和目录都进入同一个持久化全局 video lane；派发后的当前
-轮状态读取、轮询、重试、重提与完成回投均为零；状态只接受显式完整 taskId/batchId 并
-只读一次；所有 classifier、鉴权、证据与 runner 失败都在 handler 内 handled
+轮状态读取、轮询、重试、重提与完成回投均为零；显式完整 taskId/batchId 或受控标题搜索
+都只读一次；所有 classifier、鉴权、证据与 runner 失败都在 handler 内 handled
 fail-closed。`0.4.1` 的纯正则状态入口和 implicit recent task 不得继续存在。
 
 随插件提供的本地或 installed synthetic harness 只验证处理器、分类、稳定键、runner

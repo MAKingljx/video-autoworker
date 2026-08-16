@@ -6,6 +6,28 @@ import { SUPPORTED_VIDEO_EXTENSIONS, inspectVideoFile } from './media-ingest.mjs
 
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]+$/
 const MAX_BATCH_ITEMS = 100
+const MAX_STATUS_SEARCH_QUERY = 512
+const MAX_STATUS_SEARCH_MATCHES = 32
+
+const SEARCH_STOPWORDS = new Set([
+  '请', '帮我', '帮', '查', '查询', '看', '一下', '下', '视频', '影片', '录像',
+  '任务', '学习', '分析', '进度', '状态', '结果', '情况', '正式', '的', '一下子',
+])
+
+const SEARCH_STATUS_ALIASES = {
+  queued: 'queued 排队 入队 已排队',
+  accepted: 'accepted 受理 已受理',
+  running: 'running 处理中 运行中',
+  waiting: 'waiting 等待中',
+  staging: 'staging 准备中',
+  submitted: 'submitted 已提交',
+  succeeded: 'succeeded 成功 完成 已完成',
+  failed: 'failed 失败',
+  cancelled: 'cancelled canceled 取消 已取消',
+  recovering: 'recovering 恢复中',
+  paused: 'paused 暂停 已暂停',
+  completed_with_errors: 'completed_with_errors 完成 含失败项',
+}
 
 function stableFingerprint(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -76,6 +98,172 @@ export function validateBatchId(value) {
 export function defaultBatchRoot() {
   return resolve(process.env.AIWORKER_VIDEO_BATCH_DIR
     || join(homedir(), 'ai-worker/state/video-autoworker/video-batches'))
+}
+
+function chineseNumeralToNumber(value) {
+  const digits = {
+    零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4,
+    五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+  }
+  if (!value || [...value].some(char => digits[char] === undefined && char !== '十' && char !== '百')) {
+    return null
+  }
+  if ([...value].every(char => digits[char] !== undefined)) {
+    return Number([...value].map(char => digits[char]).join(''))
+  }
+  let total = 0
+  let current = 0
+  for (const char of value) {
+    if (digits[char] !== undefined) {
+      current = digits[char]
+    } else if (char === '十') {
+      total += (current || 1) * 10
+      current = 0
+    } else if (char === '百') {
+      total += (current || 1) * 100
+      current = 0
+    }
+  }
+  const result = total + current
+  return Number.isInteger(result) && result > 0 ? result : null
+}
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/第([零〇一二两三四五六七八九十百]+)(季|集)/gu, (_match, number, unit) => {
+      const converted = chineseNumeralToNumber(number)
+      return converted ? `第${converted}${unit}` : `第${number}${unit}`
+    })
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+function extractSearchTerms(value) {
+  const normalized = normalizeSearchText(value)
+    .replace(/^(?:请|帮我|帮|查询|查|看|一下|下|视频|影片|录像|任务|学习)+/u, '')
+    .replace(/(?:进度|状态|结果|情况|正式|入队|排队|受理|完成|的|了)+$/u, '')
+  const segmented = normalized
+    .replace(/s\d{1,2}e\d{1,3}/giu, ' $& ')
+    .replace(/第\d{1,3}季/gu, ' $& ')
+    .replace(/第\d{1,3}集/gu, ' $& ')
+  const terms = []
+  const matcher = /s\d{1,2}e\d{1,3}|第\d{1,3}季|第\d{1,3}集|[\p{Script=Han}]+|[a-z0-9]+/giu
+  for (const match of segmented.matchAll(matcher)) {
+    const term = match[0]
+    if (SEARCH_STOPWORDS.has(term) || term.length < 2) continue
+    terms.push(term)
+  }
+  const aliases = []
+  const westernSeasonEpisode = normalized.match(/s(\d{1,2})e(\d{1,3})/iu)
+  if (westernSeasonEpisode) {
+    const season = Number(westernSeasonEpisode[1])
+    const episode = Number(westernSeasonEpisode[2])
+    aliases.push(`第${season}季`, `第${episode}集`)
+  }
+  return [...new Set([...terms, ...aliases])]
+}
+
+function searchHaystack(state, item) {
+  const statusText = [
+    SEARCH_STATUS_ALIASES[item.status] || '',
+    SEARCH_STATUS_ALIASES[state.status] || '',
+  ].join(' ')
+  // Search only the task registry's public identifiers and display metadata.
+  const source = [
+    state.batchId,
+    state.kind,
+    item.taskId,
+    item.name,
+    statusText,
+  ].join(' ')
+  const normalized = normalizeSearchText(source)
+  const aliases = []
+  const episode = normalized.match(/第(\d{1,3})季第(\d{1,3})集/u)
+  if (episode) {
+    const season = Number(episode[1])
+    const episodeNumber = Number(episode[2])
+    aliases.push(
+      `s${season}e${episodeNumber}`,
+      `s${String(season).padStart(2, '0')}e${String(episodeNumber).padStart(2, '0')}`,
+    )
+  }
+  const western = normalized.match(/s(\d{1,2})e(\d{1,3})/iu)
+  if (western) {
+    aliases.push(`第${Number(western[1])}季`, `第${Number(western[2])}集`)
+  }
+  return `${normalized}${aliases.join('')}`
+}
+
+function validateStatusSearchQuery(value) {
+  const query = String(value || '').trim()
+  if (!query || query.length > MAX_STATUS_SEARCH_QUERY || /[\u0000-\u001f\u007f]/u.test(query)) {
+    throw new Error('状态搜索关键词无效')
+  }
+  return query
+}
+
+export async function searchVideoTaskStates(query, root = defaultBatchRoot()) {
+  const normalizedQuery = validateStatusSearchQuery(query)
+  const terms = extractSearchTerms(normalizedQuery)
+  if (!terms.length) return { matches: [], total: 0, truncated: false }
+
+  const stateRoot = resolve(root)
+  let entries
+  try {
+    entries = await readdir(stateRoot, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { matches: [], total: 0, truncated: false }
+    throw error
+  }
+
+  const matches = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue
+    let state
+    try {
+      state = await readBatchState(join(stateRoot, entry.name))
+    } catch {
+      continue
+    }
+    for (const item of state.items) {
+      if (!item || typeof item !== 'object') continue
+      const haystack = searchHaystack(state, item)
+      if (!terms.every(term => haystack.includes(normalizeSearchText(term)))) continue
+      const exact = haystack.includes(normalizeSearchText(normalizedQuery))
+      matches.push({
+        kind: state.kind === 'single' ? 'task' : 'batch',
+        taskId: typeof item.taskId === 'string' ? item.taskId : null,
+        batchId: typeof state.batchId === 'string' ? state.batchId : null,
+        name: batchItemDisplayName(item),
+        status: typeof item.status === 'string' ? item.status : 'unknown',
+        batchStatus: typeof state.status === 'string' ? state.status : 'unknown',
+        updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : null,
+        score: exact ? 2 : 1,
+      })
+    }
+  }
+
+  const unique = new Map()
+  for (const match of matches) {
+    const key = `${match.kind}:${match.kind === 'task' ? match.taskId : match.batchId}`
+    const current = unique.get(key)
+    if (!current || match.score > current.score) unique.set(key, match)
+  }
+  const sorted = [...unique.values()].sort((left, right) => (
+    right.score - left.score
+    || String(right.updatedAt || '').localeCompare(String(left.updatedAt || ''))
+    || String(left.name).localeCompare(String(right.name), 'zh-CN')
+    || String(left.taskId || left.batchId).localeCompare(String(right.taskId || right.batchId))
+  ))
+  const total = sorted.length
+  const limited = sorted.slice(0, MAX_STATUS_SEARCH_MATCHES).map(({ score: _score, ...match }) => match)
+  return {
+    matches: limited,
+    total,
+    truncated: total > limited.length,
+  }
 }
 
 export function batchStatePath(batchId, root = defaultBatchRoot()) {

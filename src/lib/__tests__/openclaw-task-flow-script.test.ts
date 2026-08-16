@@ -687,6 +687,74 @@ globalThis.fetch = async (input, init = {}) => {
     }
   })
 
+  it('searches every controlled state JSON by title and keeps source paths out of the result', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-status-search-test-'))
+    try {
+      const taskId = `video-natural-${'a'.repeat(64)}`
+      const stateRoot = resolve(root, 'state')
+      await mkdir(stateRoot, { recursive: true })
+      await writeFile(resolve(stateRoot, `${'b'.repeat(64)}.json`), JSON.stringify({
+        schemaVersion: 2,
+        requestFingerprint: 'c'.repeat(64),
+        kind: 'single',
+        batchId: 'single:search-fixture',
+        status: 'queued',
+        prompt: '内部提示关键词',
+        updatedAt: '2026-08-16T12:00:00.000Z',
+        items: [{
+          index: 1,
+          taskId,
+          name: '地球之极 S03E03.mp4',
+          sourcePath: '/private/secret/video/地球之极 S03E03.mp4',
+          status: 'queued',
+        }],
+      }))
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        searchVideoTaskStates: (query: string, root: string) => Promise<{
+          matches: Array<Record<string, unknown>>
+          total: number
+          truncated: boolean
+        }>
+      }
+      const searched = await batch.searchVideoTaskStates(
+        '查询《地球之极》第三季第三集进度',
+        stateRoot,
+      )
+      expect(searched).toMatchObject({ total: 1, truncated: false })
+      expect(searched.matches[0]).toMatchObject({
+        kind: 'task', taskId, name: '地球之极 S03E03.mp4', status: 'queued',
+      })
+      expect(searched.matches[0]).not.toHaveProperty('sourcePath')
+      expect(searched.matches[0]).not.toHaveProperty('prompt')
+      await expect(batch.searchVideoTaskStates('private secret', stateRoot)).resolves.toMatchObject({
+        matches: [], total: 0, truncated: false,
+      })
+      await expect(batch.searchVideoTaskStates('内部提示关键词', stateRoot)).resolves.toMatchObject({
+        matches: [], total: 0, truncated: false,
+      })
+
+      const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+      const cli = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [script, '--search-status', '地球之极 第三季 第三集'], {
+          cwd: process.cwd(),
+          env: { ...process.env, AIWORKER_VIDEO_BATCH_DIR: stateRoot },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      expect(cli.stderr).toBe('')
+      expect(JSON.parse(cli.stdout)).toMatchObject({ total: 1, truncated: false })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('uses one process-wide batch lock for every persisted batch state', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-global-lock-test-'))
     try {

@@ -18,9 +18,11 @@ const QUOTED_PATH_PATTERN = /(["'`“‘])(\/[^\r\n]+?)(["'`”’])/gu
 const UNQUOTED_VIDEO_PATH_PATTERN = /(?:^|[\s：])(\/(?:[^\r\n"'`“”‘’])*?\.(?:m4v|mkv|mov|mp4|webm))(?=$|[\s,，。；;])/giu
 const VIDEO_SHAPE = /(?:学习|分析|解析|识别|总结|处理|看一下|观看).{0,40}(?:视频|影片|录像|目录|文件夹)|(?:视频|影片|录像|目录|文件夹).{0,40}(?:学习|分析|解析|识别|总结|处理|看一下|观看)/iu
 const LEARNING_ACTION = /(?:学习|分析|解析|识别|总结|处理|看一下|观看)/u
-const STATUS_SHAPE = /(?:查|查询|进度|状态|结果|完成|怎么样|情况)/u
+const STATUS_SHAPE = /(?:查|查询|进度|状态|结果|完成|怎么样|情况|入队|排队|受理)/u
 const NEGATIVE_OR_NONEXECUTING = /(?:不要(?:执行|学习|分析|提交)|别(?:执行|学习|分析|提交)|如果|假如|比如|例如|举例|怎么|如何|能否|可以吗|是什么|之前说|刚才说|回顾)/u
 const DIRECTORY_HINT = /(?:目录|文件夹)/u
+const STATUS_SEARCH_CONTEXT = /(?:视频|影片|录像|学习|入队|排队|批次|[《「『]|第[零〇一二两三四五六七八九十百0-9]+(?:季|集)|s\d{1,2}\s*e\d{1,3}|\.(?:m4v|mkv|mov|mp4|webm))/iu
+const STATUS_SEARCH_NOISE = /(?:帮我|请(?:你)?|查(?:询)?|看(?:看)?|一下|下|视频|影片|录像|任务|学习|进度|状态|结果|情况|正式|是否|已经|已|入队|排队|受理|完成|的|了)/gu
 const EXCLUSIVE_ANALYSIS_CLAUSE = /^\s*(?:(?:帮我|请(?:你)?|请帮我|麻烦(?:你)?|麻烦帮我|能不能帮我|可以帮我|现在|马上|立即|给我)\s*)?(?:只|仅)\s*(?:学习|分析|解析|处理|识别|总结)(?:一下|下)?\s*([^，。；;！？!?]{0,80})/iu
 const VISUAL_SCOPE = /(?:画面|视觉|图像|镜头)/u
 const AUDIO_SCOPE = /(?:音频|声音|语音|对白|台词)/u
@@ -84,12 +86,40 @@ function hasUnsupportedPartialAnalysis(value) {
   return OTHER_PARTIAL_SCOPE.test(scope) || visual !== audio
 }
 
+function isSearchQueryText(value) {
+  return typeof value === 'string'
+    && value === value.trim()
+    && value.length > 0
+    && value.length <= 512
+    && !/[\u0000-\u001f\u007f]/u.test(value)
+}
+
+function statusSearchText(content) {
+  return content
+    .normalize('NFKC')
+    .replace(STATUS_SEARCH_NOISE, '')
+    .replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+function isStatusSearchCandidate(content) {
+  if (typeof content !== 'string' || !STATUS_SHAPE.test(content)) return false
+  if (NEGATIVE_OR_NONEXECUTING.test(content)) return false
+  const evidence = extractEvidence(content)
+  if (evidence.taskIds.length || evidence.batchIds.length) return false
+  return statusSearchText(content).length >= 2
+}
+
+function isStrongStatusSearchCandidate(content) {
+  return isStatusSearchCandidate(content) && STATUS_SEARCH_CONTEXT.test(content)
+}
+
 export function isClassifierCandidate(content) {
   if (typeof content !== 'string' || !content.trim()) return false
   const evidence = extractEvidence(content)
   return evidence.paths.length > 0
     || VIDEO_SHAPE.test(content)
     || (STATUS_SHAPE.test(content) && (evidence.taskIds.length > 0 || evidence.batchIds.length > 0))
+    || isStatusSearchCandidate(content)
 }
 
 function validateDecision(decision, content) {
@@ -133,6 +163,14 @@ function validateDecision(decision, content) {
       ? { action: decision.action, batchId: decision.value }
       : null
   }
+  if (decision.action === 'status_search') {
+    if (
+      !isStatusSearchCandidate(content)
+      || !isSearchQueryText(decision.value)
+      || !content.includes(decision.value)
+    ) return null
+    return { action: decision.action, query: decision.value }
+  }
   if (decision.action === 'respond' || decision.action === 'pass') {
     return { action: decision.action }
   }
@@ -145,6 +183,7 @@ function requiresHandledVideoDecision(content) {
     || (LEARNING_ACTION.test(content) && evidence.paths.length > 0)
     || (STATUS_SHAPE.test(content)
       && (evidence.taskIds.length > 0 || evidence.batchIds.length > 0))
+    || isStrongStatusSearchCandidate(content)
 }
 
 function encode(value) {
@@ -211,6 +250,38 @@ function statusReceipt(result) {
   return replies[result.status] ?? '暂时无法查询任务状态。'
 }
 
+function searchStatusLabel(status) {
+  const labels = {
+    staging: '准备中',
+    queued: '已排队',
+    submitted: '已提交',
+    accepted: '已受理',
+    running: '处理中',
+    waiting: '等待中',
+    succeeded: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return labels[status] ?? '状态未知'
+}
+
+function searchName(value) {
+  const name = String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  if (!name) return '未命名视频'
+  return name.length > 96 ? `${name.slice(0, 96)}…` : name
+}
+
+function searchCandidatesReceipt(result) {
+  const shown = result.matches.slice(0, 5)
+    .map(match => `${searchName(match.name)}（${searchStatusLabel(match.status)}）`)
+  if (!shown.length) return '未找到匹配的视频任务进度。'
+  const prefix = result.truncated ? '匹配结果较多' : `找到 ${result.total} 条匹配任务`
+  return `${prefix}：${shown.join('；')}。请补充视频标题或关键词。`
+}
+
 export function createQwenBeforeDispatchHandler({
   classifier,
   runner = schedulerRunner,
@@ -237,7 +308,7 @@ export function createQwenBeforeDispatchHandler({
         : undefined
     }
     if (decision.action === 'respond') {
-      return handled('本次未执行。请明确提供一个绝对视频路径、视频目录或完整任务编号。')
+      return handled('本次未执行。请提供绝对视频路径、视频目录、视频标题/关键词或完整任务编号。')
     }
     if (decision.action === 'dispatch_single') {
       const taskId = stableOperationId(event, context, 'single')
@@ -259,6 +330,24 @@ export function createQwenBeforeDispatchHandler({
         })))
       } catch {
         return handled(`入队状态未确认，批次编号：${batchId}。请稍后按编号查询，不要重复提交。`)
+      }
+    }
+    if (decision.action === 'status_search') {
+      try {
+        const search = await runner.searchStatus({ query: decision.query })
+        if (!search.matches.length || search.total === 0) {
+          return handled('未找到匹配的视频任务进度。')
+        }
+        if (search.total !== 1 || search.truncated || search.matches.length !== 1) {
+          return handled(searchCandidatesReceipt(search))
+        }
+        const match = search.matches[0]
+        const result = match.kind === 'task'
+          ? await runner.taskStatus({ taskId: match.taskId })
+          : await runner.batchStatus({ batchId: match.batchId })
+        return handled(statusReceipt(result))
+      } catch {
+        return handled('暂时无法查询视频任务，本次未重试。')
       }
     }
     try {

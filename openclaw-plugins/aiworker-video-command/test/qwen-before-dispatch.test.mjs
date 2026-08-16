@@ -162,6 +162,73 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(runner.batchStatus).toHaveBeenCalledOnce()
   })
 
+  it('searches the controlled video-task registry, then reads one unique task exactly once', async () => {
+    const taskId = `video-natural-${'d'.repeat(64)}`
+    const runner = {
+      searchStatus: vi.fn(async () => ({
+        matches: [{ kind: 'task', taskId, name: '地球之极 第三季 第三集.mp4', status: 'running' }],
+        total: 1,
+        truncated: false,
+      })),
+      taskStatus: vi.fn(async () => ({ kind: 'task', id: taskId, status: 'running', summary: null })),
+      batchStatus: vi.fn(),
+    }
+    const classifier = vi.fn(async () => ({
+      action: 'status_search', value: '《地球之极》第三季第三集',
+    }))
+    const result = await handler({ classifier, runner })(event({
+      content: '查询《地球之极》第三季第三集进度',
+    }), context)
+
+    expect(result).toEqual({ handled: true, text: '任务正在处理中。' })
+    expect(runner.searchStatus).toHaveBeenCalledOnce()
+    expect(runner.searchStatus).toHaveBeenCalledWith({ query: '《地球之极》第三季第三集' })
+    expect(runner.taskStatus).toHaveBeenCalledOnce()
+    expect(runner.batchStatus).not.toHaveBeenCalled()
+  })
+
+  it('returns candidates for multiple matches without choosing or reading status', async () => {
+    const runner = {
+      searchStatus: vi.fn(async () => ({
+        matches: [
+          { kind: 'batch', batchId: `video-batch-${'e'.repeat(64)}`, name: '地球之极 第三集.mp4', status: 'queued' },
+          { kind: 'batch', batchId: `video-batch-${'f'.repeat(64)}`, name: '地球之极 第三季 第三集.mp4', status: 'running' },
+        ],
+        total: 2,
+        truncated: false,
+      })),
+      taskStatus: vi.fn(),
+      batchStatus: vi.fn(),
+    }
+    const result = await handler({
+      classifier: vi.fn(async () => ({ action: 'status_search', value: '地球之极' })),
+      runner,
+    })(event({ content: '查询地球之极的进度' }), context)
+
+    expect(result.text).toContain('找到 2 条匹配任务')
+    expect(result.text).toContain('地球之极 第三集.mp4（已排队）')
+    expect(runner.searchStatus).toHaveBeenCalledOnce()
+    expect(runner.taskStatus).not.toHaveBeenCalled()
+    expect(runner.batchStatus).not.toHaveBeenCalled()
+  })
+
+  it('reports zero search matches without retrying or touching status', async () => {
+    const runner = {
+      searchStatus: vi.fn(async () => ({ matches: [], total: 0, truncated: false })),
+      taskStatus: vi.fn(),
+      batchStatus: vi.fn(),
+    }
+    const result = await handler({
+      classifier: vi.fn(async () => ({ action: 'status_search', value: '不存在的视频' })),
+      runner,
+    })(event({ content: '查询不存在的视频进度' }), context)
+
+    expect(result).toEqual({ handled: true, text: '未找到匹配的视频任务进度。' })
+    expect(runner.searchStatus).toHaveBeenCalledOnce()
+    expect(runner.taskStatus).not.toHaveBeenCalled()
+    expect(runner.batchStatus).not.toHaveBeenCalled()
+  })
+
   it('formats an automatic batch recovery without exposing raw state details', async () => {
     const batchId = `video-batch-${'c'.repeat(64)}`
     const runner = {
@@ -279,6 +346,7 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(isClassifierCandidate('请学习视频 /data/a.mp4')).toBe(true)
     expect(isClassifierCandidate('请帮我学习 /data/a.mp4')).toBe(true)
     expect(isClassifierCandidate(`查询任务进度 video-natural-${'a'.repeat(64)}`)).toBe(true)
+    expect(isClassifierCandidate('查询《地球之极》第三季第三集进度')).toBe(true)
     expect(isClassifierCandidate('今天天气如何')).toBe(false)
   })
 })

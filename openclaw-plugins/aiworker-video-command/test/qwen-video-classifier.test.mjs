@@ -24,6 +24,14 @@ describe('Qwen one-shot classifier', () => {
     expect(complete.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('accepts a title or keyword copied from the current message for status search', () => {
+    expect(parseQwenClassifierResult(
+      '{"action":"status_search","value":"《地球之极》第三季第三集"}',
+    )).toEqual({
+      action: 'status_search', value: '《地球之极》第三季第三集',
+    })
+  })
+
   it.each([
     ['markdown', '```json\n{"action":"pass","value":""}\n```'],
     ['multiline', '{"action":"pass",\n"value":""}'],

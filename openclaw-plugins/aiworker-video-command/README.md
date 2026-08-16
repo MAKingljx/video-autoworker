@@ -1,20 +1,21 @@
 # AI-worker Video Command plugin
 
-This directory contains the hook-only `0.5.0` candidate for the native OpenClaw
+This directory contains the hook-only `0.5.1` candidate for the native OpenClaw
 video-learning ingress. The files describe the local candidate contract;
 runtime and production acceptance still require their own evidence.
 
-`0.5.0` keeps `before_dispatch` as the sole conversation owner, but replaces
+`0.5.1` keeps `before_dispatch` as the sole conversation owner, but replaces
 the accumulated deterministic natural-language router with one host-owned,
 no-tool Qwen classification call. Only an authorized `second-original`
-Telegram direct message with a video/path or explicit-ID status shape reaches
+Telegram direct message with a video/path, explicit-ID status, or title/keyword
+status-search shape reaches
 that classifier. Ordinary chat passes to the normal agent without an extra
 model call.
 
 The classifier returns one strict single-line JSON enum:
 
 ```text
-dispatch_single | dispatch_directory | status_task | status_batch | respond | pass
+dispatch_single | dispatch_directory | status_task | status_batch | status_search | respond | pass
 ```
 
 The host never trusts the model as an executor. It independently requires the
@@ -22,8 +23,17 @@ returned path or ID to occur exactly once in the current message, applies the
 absolute/canonical path and ID policy, rejects negative/conditional/example
 execution, checks the configured Telegram sender hash, and invokes only the
 fixed `aiworker-task-flow` argv. Single videos and directories enter the shared
-durable serial lane. Explicit task or batch status performs exactly one read;
-there is no recent-task pointer, monitoring, retry loop, result push, or second
+durable serial lane. Explicit task or batch status performs exactly one read.
+`status_search` is available only after the same configured Telegram-sender
+authorization as dispatch. In this single-authorized-sender rollout it searches
+the controlled video-task registry, not a cross-user or general-library API:
+only public task identifiers, display names, normalized season/episode aliases,
+and status metadata are matched. No match returns a short miss, one match
+invokes that match's formal task or batch status client once, and multiple
+matches return bounded candidate names for refinement. It never inspects
+prompts or source paths, scans SQLite, n8n executions, media directories,
+credentials, or chat history, and it never returns source paths or prompts.
+There is no recent-task pointer, monitoring, retry loop, result push, or second
 model turn.
 
 Classifier/provider errors, invalid JSON, host-evidence mismatch, and runner
@@ -54,7 +64,7 @@ transaction and an installed real-classifier QA must pass separately.
 
 The remainder of this file below documents the deployed `0.4.1` behavior and
 its historical upgrade/rollback gates. It is retained as migration evidence;
-it is not the `0.5.0` runtime contract.
+it is not the `0.5.1` runtime contract.
 
 ## Business contract
 
@@ -278,6 +288,29 @@ verified recovery points.
 After promotion, verify Mission Control / SQLite, one n8n video-analysis
 execution, `prepare/audio/vision/finalize`, `memoryMode=none`, `delivery=none`,
 service health, and temporary residue separately.
+
+### Controlled 0.5.0 to 0.5.1 status-search refresh
+
+The current release upgrades only the installed `0.5.0` hook payload to
+`0.5.1`; the `releaseReady=true` gate and the complete qwen-current config are
+preserved byte-for-byte. It has a dedicated entry because the historical
+`0.4.1 -> 0.5.0` transition changed the LLM gate and cannot be reused safely:
+
+```bash
+bash scripts/upgrade-aiworker-video-command-status-search-plugin.sh --dry-run --target-sha <approved-0.5.1-sha>
+bash scripts/upgrade-aiworker-video-command-status-search-plugin.sh --apply --target-sha <same-approved-0.5.1-sha>
+```
+
+Before either mode, the entry requires the production identity, exact
+OpenClaw version, clean canonical `main`, and agreement among `HEAD`,
+`origin/main`, live GitHub `main`, and the supplied SHA. Apply creates a
+verified plugin/config recovery point, uses only the official OpenClaw plugin
+installer, restores the exact prior config bytes, refreshes only
+`qwen-current`, validates its hook-only runtime, and checks that Mission
+Control, n8n, the task agent, the Qwen backend, and the other two gateways did
+not change. A failed candidate install or validation automatically restores the
+exact `0.5.0` payload and config; no queue, n8n execution, media, or task data
+is created or modified.
 
 ### Controlled 0.4.1 to 0.5.0 classifier transition
 

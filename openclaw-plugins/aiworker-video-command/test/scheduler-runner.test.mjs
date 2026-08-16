@@ -87,6 +87,50 @@ describe('0.5 scheduler runner', () => {
     })
   })
 
+  it('runs one bounded all-state search without constructing a task or batch query', async () => {
+    const { execute, runner } = fixture({
+      matches: [{
+        kind: 'task',
+        taskId,
+        batchId: 'single:internal-only',
+        name: '地球之极 第三季 第三集.mp4',
+        status: 'running',
+        batchStatus: 'running',
+        updatedAt: '2026-08-16T12:00:00.000Z',
+      }],
+      total: 1,
+      truncated: false,
+    })
+    await expect(runner.searchStatus({ query: '《地球之极》第三季第三集进度' })).resolves.toEqual({
+      matches: [{
+        kind: 'task',
+        taskId,
+        name: '地球之极 第三季 第三集.mp4',
+        status: 'running',
+      }],
+      total: 1,
+      truncated: false,
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs', '--search-status', '《地球之极》第三季第三集进度',
+    ])
+  })
+
+  it('rejects malformed search output and invalid query text before spawning', async () => {
+    const malformed = fixture({
+      matches: [{ kind: 'batch', batchId, name: 'one.mp4', status: 'queued', batchStatus: 'queued' }],
+      total: 2,
+      truncated: false,
+    }).runner
+    await expect(malformed.searchStatus({ query: 'one' })).rejects.toThrow('invalid_search_result')
+
+    const execute = vi.fn()
+    const runner = createSchedulerRunner({ execute, scriptPath: '/script', nodePath: '/node' })
+    await expect(runner.searchStatus({ query: 'one\ntwo' })).rejects.toThrow('invalid_search_query')
+    expect(execute).not.toHaveBeenCalled()
+  })
+
   it('fails closed on malformed, multiline, or mismatched output', async () => {
     const mismatched = fixture({ taskId: `video-natural-${'c'.repeat(64)}`, status: 'queued', duplicate: false }).runner
     await expect(mismatched.dispatchVideo({ videoPath: '/data/test.mp4', taskId })).rejects.toThrow(

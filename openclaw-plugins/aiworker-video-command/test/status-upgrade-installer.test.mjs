@@ -200,6 +200,14 @@ async function fixture() {
     cp(sourceUpgradePolicy, join(repo, 'scripts', 'lib', 'aiworker-video-command-upgrade-policy.mjs')),
     cp(sourceCandidate, join(repo, 'openclaw-plugins', pluginId), { recursive: true }),
   ])
+  for (const pathname of [
+    join(repo, 'openclaw-plugins', pluginId, 'package.json'),
+    join(repo, 'openclaw-plugins', pluginId, 'openclaw.plugin.json'),
+  ]) {
+    const value = JSON.parse(await readFile(pathname, 'utf8'))
+    value.version = '0.5.0'
+    await writeFile(pathname, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  }
   await chmod(entry, 0o755)
   await materializeHistoricalPlugin(join(history, 'openclaw-plugins', pluginId), V041_SOURCE_SHA)
   await materializeHistoricalPlugin(installed, V041_SOURCE_SHA)
