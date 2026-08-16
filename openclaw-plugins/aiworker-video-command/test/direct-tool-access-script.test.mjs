@@ -5,13 +5,13 @@ import { resolve } from 'node:path'
 const script = resolve(process.cwd(), 'scripts/enable-aiworker-video-command-direct-tool.sh')
 
 describe('direct tool access deployment gate', () => {
-  it('limits the permission change to second-original tools.alsoAllow', async () => {
+  it('limits the permission change to one appended second-original allow item', async () => {
     const source = await readFile(script, 'utf8')
-    expect(source).toContain('agent.tools.alsoAllow = [toolId]')
+    expect(source).toContain('agent.tools.allow = [...agent.tools.allow, toolId]')
     expect(source).toContain('validate_effective present')
     expect(source).toContain('validate_effective absent')
     expect(source).toContain('validate_pre_access_config')
-    expect(source).not.toContain('tools.allow.push')
+    expect(source).not.toContain('agent.tools.alsoAllow = [toolId]')
   })
 
   it('uses listener readiness rather than a Gateway PID invariant', async () => {

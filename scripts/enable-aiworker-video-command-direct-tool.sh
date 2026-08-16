@@ -279,7 +279,10 @@ const [configPath, tempPath, agentId, toolId] = process.argv.slice(2)
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 const agent = config.agents.list.find(item => item?.id === agentId)
 if (!agent) throw new Error('target agent not found')
-agent.tools.alsoAllow = [toolId]
+if (!Array.isArray(agent.tools?.allow) || agent.tools.allow.includes(toolId)) {
+  throw new Error('target agent tools.allow is not the expected pre-access baseline')
+}
+agent.tools.allow = [...agent.tools.allow, toolId]
 fs.writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
 fs.renameSync(tempPath, configPath)
 NODE
@@ -298,5 +301,5 @@ if ! validate_effective present "$BACKUP_DIR/tools-effective-after-apply.json" "
 fi
 install -m 600 /dev/null "$BACKUP_DIR/.verified"
 enforce_retention
-printf 'Enabled %s for %s using only tools.alsoAllow.\n' "$TOOL_ID" "$AGENT_ID"
+printf 'Enabled %s for %s by appending one item to the existing tools.allow list.\n' "$TOOL_ID" "$AGENT_ID"
 printf 'Config backup: %s\n' "$BACKUP_DIR"
