@@ -236,6 +236,7 @@ export async function searchVideoTaskStates(query, root = defaultBatchRoot()) {
         kind: state.kind === 'single' ? 'task' : 'batch',
         taskId: typeof item.taskId === 'string' ? item.taskId : null,
         batchId: typeof state.batchId === 'string' ? state.batchId : null,
+        index: Number.isInteger(item.index) ? item.index : null,
         name: batchItemDisplayName(item),
         status: typeof item.status === 'string' ? item.status : 'unknown',
         batchStatus: typeof state.status === 'string' ? state.status : 'unknown',
@@ -247,7 +248,9 @@ export async function searchVideoTaskStates(query, root = defaultBatchRoot()) {
 
   const unique = new Map()
   for (const match of matches) {
-    const key = `${match.kind}:${match.kind === 'task' ? match.taskId : match.batchId}`
+    const key = match.kind === 'task'
+      ? `${match.kind}:${match.taskId}`
+      : `${match.kind}:${match.batchId}:${match.index}`
     const current = unique.get(key)
     if (!current || match.score > current.score) unique.set(key, match)
   }

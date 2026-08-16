@@ -79,6 +79,34 @@ describe('0.5 scheduler runner', () => {
     ])
   })
 
+  it('reads the uniquely matched item from its batch state without submitting work', async () => {
+    const { execute, runner } = fixture({
+      batchId,
+      status: 'running',
+      total: 2,
+      counts: { running: 1, queued: 1 },
+      items: [
+        { index: 1, name: '地球之极 第三季 第三集.mp4', status: 'running' },
+        { index: 2, name: '地球之极 第三季 第十一集.mp4', status: 'queued' },
+      ],
+    })
+
+    await expect(runner.batchItemStatus({ batchId, index: 2 })).resolves.toEqual({
+      kind: 'batch_item',
+      id: batchId,
+      index: 2,
+      name: '地球之极 第三季 第十一集.mp4',
+      status: 'queued',
+      batchStatus: 'running',
+      total: 2,
+      counts: { running: 1, queued: 1 },
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    expect(execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs', '--batch-status', batchId,
+    ])
+  })
+
   it('accepts the persistent lane recovering state', async () => {
     const recovering = fixture({
       batchId,
@@ -119,6 +147,33 @@ describe('0.5 scheduler runner', () => {
     expect(execute.mock.calls[0][1]).toEqual([
       '/installed/submit-task.mjs', '--search-status', '《地球之极》第三季第三集进度',
     ])
+  })
+
+  it('preserves a matched directory item index for an item-level status read', async () => {
+    const { runner } = fixture({
+      matches: [{
+        kind: 'batch',
+        batchId,
+        index: 2,
+        name: '地球之极 第三季 第十一集.mp4',
+        status: 'queued',
+        batchStatus: 'running',
+      }],
+      total: 1,
+      truncated: false,
+    })
+
+    await expect(runner.searchStatus({ query: '地球之极 第三季 第十一集' })).resolves.toEqual({
+      matches: [{
+        kind: 'batch',
+        batchId,
+        index: 2,
+        name: '地球之极 第三季 第十一集.mp4',
+        status: 'queued',
+      }],
+      total: 1,
+      truncated: false,
+    })
   })
 
   it('rejects malformed search output and invalid query text before spawning', async () => {

@@ -223,6 +223,30 @@ export function dispatchReceipt(result) {
 }
 
 export function statusReceipt(result) {
+  if (result.kind === 'batch_item') {
+    const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
+      + (result.counts.cancelled ?? 0)
+    const itemLabels = {
+      staging: '准备中',
+      queued: '已排队',
+      submitted: '已提交',
+      accepted: '已受理',
+      running: '处理中',
+      waiting: '等待中',
+      succeeded: '已完成',
+      failed: '失败',
+      cancelled: '已取消',
+    }
+    const batchLabels = {
+      queued: '已排队',
+      running: '处理中',
+      recovering: '恢复中',
+      paused: '已暂停',
+      succeeded: '已完成',
+      completed_with_errors: '已完成（含失败项）',
+    }
+    return `${searchName(result.name)}：${itemLabels[result.status] ?? '状态未知'}；所在批次${batchLabels[result.batchStatus] ?? '状态未知'}，已结束 ${completed}/${result.total}。`
+  }
   if (result.kind === 'batch') {
     const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
       + (result.counts.cancelled ?? 0)
@@ -292,7 +316,7 @@ export async function queryStatusSearch({ runner = schedulerRunner, query } = {}
     const match = search.matches[0]
     const result = match.kind === 'task'
       ? await runner.taskStatus({ taskId: match.taskId })
-      : await runner.batchStatus({ batchId: match.batchId })
+      : await runner.batchItemStatus({ batchId: match.batchId, index: match.index })
     return statusReceipt(result)
   } catch {
     return '暂时无法查询视频任务，本次未重试。'

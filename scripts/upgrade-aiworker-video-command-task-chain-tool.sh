@@ -6,8 +6,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-PREVIOUS_VERSION="0.5.2"
-CANDIDATE_VERSION="0.5.3"
+PREVIOUS_VERSION="0.5.3"
+CANDIDATE_VERSION="0.5.4"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -171,9 +171,7 @@ const fs = require('node:fs')
 const [reportPath, pluginId, version] = process.argv.slice(2)
 const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
 const hooks = (report.typedHooks ?? []).map(item => item?.name).filter(Boolean).sort()
-const validHooks = JSON.stringify(hooks) === JSON.stringify(['before_dispatch'])
-  || JSON.stringify(hooks) === JSON.stringify(['before_agent_run', 'before_dispatch'].sort())
-if (report?.plugin?.id !== pluginId || report?.plugin?.status !== 'loaded' || report?.plugin?.version !== version || !validHooks || !Array.isArray(report.tools) || report.tools.length !== 0) process.exit(1)
+if (report?.plugin?.id !== pluginId || report?.plugin?.status !== 'loaded' || report?.plugin?.version !== version || JSON.stringify(hooks) !== JSON.stringify(['before_dispatch']) || !Array.isArray(report.tools) || report.tools.length !== 1 || !report.tools[0]?.names?.includes('aiworker_analyze_video')) process.exit(1)
 NODE
 }
 

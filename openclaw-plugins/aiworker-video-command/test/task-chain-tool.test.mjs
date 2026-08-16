@@ -78,6 +78,47 @@ describe('AI-worker direct task-chain tool', () => {
     expect(runner.searchStatus).toHaveBeenCalledOnce()
   })
 
+  it('returns one matched directory item without re-submitting its batch', async () => {
+    const batchId = `video-batch-${'b'.repeat(64)}`
+    const runner = {
+      searchStatus: vi.fn(async () => ({
+        matches: [{
+          kind: 'batch',
+          batchId,
+          index: 3,
+          name: '地球之极 第三季 第十一集.mp4',
+          status: 'queued',
+        }],
+        total: 1,
+        truncated: false,
+      })),
+      batchItemStatus: vi.fn(async () => ({
+        kind: 'batch_item',
+        id: batchId,
+        index: 3,
+        name: '地球之极 第三季 第十一集.mp4',
+        status: 'queued',
+        batchStatus: 'running',
+        total: 3,
+        counts: { running: 1, queued: 2 },
+      })),
+      dispatchDirectory: vi.fn(),
+    }
+    const value = tool({ runner })
+
+    await expect(value.execute('batch-item-status', {
+      action: 'status', query: '地球之极 第三季 第十一集',
+    })).resolves.toEqual({
+      content: [{
+        type: 'text',
+        text: '地球之极 第三季 第十一集.mp4：已排队；所在批次处理中，已结束 0/3。',
+      }],
+    })
+    expect(runner.searchStatus).toHaveBeenCalledOnce()
+    expect(runner.batchItemStatus).toHaveBeenCalledWith({ batchId, index: 3 })
+    expect(runner.dispatchDirectory).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed tool parameters before any runner call', async () => {
     const runner = {
       dispatchVideo: vi.fn(), dispatchDirectory: vi.fn(), searchStatus: vi.fn(),

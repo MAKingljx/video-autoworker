@@ -107,6 +107,23 @@ function normalizeCount(value) {
   return Number.isInteger(value) && value >= 0 ? value : undefined
 }
 
+function normalizeBatchItem(value, total) {
+  if (
+    !value
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || !Number.isInteger(value.index)
+    || value.index < 1
+    || value.index > total
+    || !SEARCH_ITEM_STATUSES.has(value.status)
+  ) throw new Error('invalid_batch_status_result')
+  return {
+    index: value.index,
+    name: normalizeSearchName(value.name),
+    status: value.status,
+  }
+}
+
 function normalizeBatchStatus(value, expectedBatchId) {
   if (
     !value
@@ -120,12 +137,20 @@ function normalizeBatchStatus(value, expectedBatchId) {
     ? Object.fromEntries(Object.entries(value.counts)
       .filter(([, count]) => normalizeCount(count) !== undefined))
     : {}
+  const items = Array.isArray(value.items)
+    ? value.items.map(item => normalizeBatchItem(item, value.total))
+    : []
+  if (items.length && items.length !== value.total) throw new Error('invalid_batch_status_result')
+  if (new Set(items.map(item => item.index)).size !== items.length) {
+    throw new Error('invalid_batch_status_result')
+  }
   return {
     kind: 'batch',
     id: expectedBatchId,
     status: value.status,
     total: value.total,
     counts,
+    items,
   }
 }
 
@@ -157,12 +182,16 @@ function normalizeSearchMatch(value) {
   if (value.kind === 'batch') {
     if (
       !isSchedulerBatchId(value.batchId)
+      || !Number.isInteger(value.index)
+      || value.index < 1
+      || value.index > 100
       || !SEARCH_ITEM_STATUSES.has(value.status)
       || !SEARCH_BATCH_STATUSES.has(value.batchStatus)
     ) throw new Error('invalid_search_result')
     return {
       kind: 'batch',
       batchId: value.batchId,
+      index: value.index,
       name: normalizeSearchName(value.name),
       status: value.status,
     }
@@ -185,7 +214,9 @@ function normalizeSearchResult(value) {
   const matches = value.matches.map(normalizeSearchMatch)
   const seen = new Set()
   for (const match of matches) {
-    const key = `${match.kind}:${match.kind === 'task' ? match.taskId : match.batchId}`
+    const key = match.kind === 'task'
+      ? `${match.kind}:${match.taskId}`
+      : `${match.kind}:${match.batchId}:${match.index}`
     if (seen.has(key)) throw new Error('invalid_search_result')
     seen.add(key)
   }
@@ -244,6 +275,28 @@ export function createSchedulerRunner({
         await call(['--batch-status', batchId], STATUS_TIMEOUT_MS),
         batchId,
       )
+    },
+
+    async batchItemStatus({ batchId, index }) {
+      if (!isSchedulerBatchId(batchId) || !Number.isInteger(index) || index < 1 || index > 100) {
+        throw new Error('invalid_batch_item')
+      }
+      const batch = normalizeBatchStatus(
+        await call(['--batch-status', batchId], STATUS_TIMEOUT_MS),
+        batchId,
+      )
+      const item = batch.items.find(candidate => candidate.index === index)
+      if (!item) throw new Error('batch_item_not_found')
+      return {
+        kind: 'batch_item',
+        id: batchId,
+        index,
+        name: item.name,
+        status: item.status,
+        batchStatus: batch.status,
+        total: batch.total,
+        counts: batch.counts,
+      }
     },
 
     async searchStatus({ query }) {
