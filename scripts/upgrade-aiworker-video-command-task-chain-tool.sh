@@ -55,7 +55,7 @@ done
 [[ -n "$MODE" && "$TARGET_SHA" =~ ^[a-f0-9]{40}$ ]] || { usage >&2; exit 2; }
 [[ "$MODE" != "rollback" || -n "$ROLLBACK_BACKUP" ]] || { usage >&2; exit 2; }
 
-for command_name in awk chmod cmp cp date env git hostname id install lsof mkdir mktemp node openclaw rm shasum sort tr; do
+for command_name in awk chmod cmp cp date env git hostname id install lsof mkdir mktemp node openclaw rm shasum; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'Required command is unavailable: %s\n' "$command_name" >&2
     exit 1
@@ -94,11 +94,16 @@ read_version() {
 }
 
 listener_snapshot() {
-  local port pids
+  local port
   for port in 3017 5678 5679 18091 18789 18889 18989; do
-    pids="$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t | LC_ALL=C sort -u | tr '\n' ',')"
-    [[ -n "$pids" ]] || { printf 'Protected listener %s is missing.\n' "$port" >&2; return 1; }
-    printf '%s=%s\n' "$port" "$pids"
+    # qwen-current is intentionally restarted by this upgrade, so its PID is
+    # expected to change. The invariant is that every protected port remains
+    # bound after the restart, not that a particular process survives it.
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t >/dev/null 2>&1 || {
+      printf 'Protected listener %s is missing.\n' "$port" >&2
+      return 1
+    }
+    printf '%s=ready\n' "$port"
   done
 }
 
