@@ -1,59 +1,30 @@
 ## Video Analysis Task Flow Rule
 
-The local 0.5 candidate uses one native `before_dispatch` handler for
-`second-original` video scheduling. It is not an agent tool.
+For `second-original`, use the `aiworker_analyze_video` tool whenever a user
+asks to learn one video, learn all videos in a directory, or query video-task
+progress. The user does not need to provide a slash command. This direct tool
+does not impose a plugin-owned sender allowlist.
 
-- For a candidate message, call the host-provided `api.runtime.llm.complete`
-  exactly once with no tools and accept only the strict structured actions
-  `dispatch_single`, `dispatch_directory`, `status_task`, `status_batch`, `status_search`,
-  `respond`, or `pass`.
-- Treat classification as semantic advice, never authorization. The host must
-  independently validate the authorized Telegram private chat, consistent
-  `second-original` session/conversation/sender identity, configured sender
-  hash, and valid message timestamp.
-- Before dispatch, require exactly one canonical absolute video-file path or
-  exactly one canonical absolute directory path copied byte-for-byte from the
-  current original message. Do not guess, normalize, search, download, expand,
-  or reuse a quoted or earlier path.
-- Before status, require exactly one explicit complete task ID or complete batch ID from
-  the current original message, or one non-empty bounded title/keyword query
-  copied from that message. The current rollout admits only the configured
-  authorized Telegram sender, so `status_search` is not a cross-user or
-  general-library search API. It reads only valid controlled video-batch state
-  records and matches public task identifiers, display names, normalized
-  season/episode aliases, and status metadata. It must not inspect prompts,
-  source paths, arbitrary files, SQLite, n8n, media, memory, or processes.
-  Never infer a recent receipt or recent task from conversation state.
-- Send both single videos and directories to the same persistent process-wide
-  video lane. A single video is a one-item durable job. Across every job, run at
-  most one video at a time and resume durable state without replaying terminal
-  items after a worker restart.
-- The shared runner calls the installed client exactly once with parameter
-  arrays. Single video uses one `--video-file`, identical task/idempotency IDs,
-  `--delivery none`, `--wait-seconds 0`, and `--no-trigger-recovery`;
-  directories use `--video-dir`, a stable `--batch-id`, and `--delivery none`.
-- After enqueueing, return one handled short receipt with the stable task or
-  batch ID and end the turn. Do not read status, inspect Mission Control/n8n,
-  wait, poll, retry, resubmit, narrate progress, or push completed output back.
-- An explicit task or batch status request calls the corresponding formal
-  read-only client exactly once, returns one bounded handled reply, and ends.
-  One search match may trigger that corresponding formal read once; multiple
-  matches return bounded candidates without choosing one. Status never submits
-  or resumes work.
-- Catch classifier schema/timeout errors, identity or evidence mismatches,
-  invalid input, and runner errors inside the handler. Return a handled
-  fail-closed short reply; never fall through to normal Qwen, generic tasks,
-  `exec`, file search, or direct media processing.
-- `respond` is handled with no side effect. Only genuinely unrelated `pass`
-  messages continue to normal `second-original` conversation.
+- Single file: `{"action":"submit_video","videoPath":"<absolute-video-path>"}`.
+- Directory: `{"action":"submit_directory","videoDirectory":"<absolute-directory-path>"}`.
+- Status: `{"action":"status","query":"<task ID, batch ID, title, season/episode, or keyword>"}`.
 
-The only formal downstream chain is:
+The task chain validates input, derives stable IDs, uses the persistent
+process-wide serial video lane, and returns one concise receipt. Do not invoke shell commands,
+SQLite, n8n, media tooling, memory, or filesystem search as an alternative.
+A single video and a directory batch share that lane. It processes one video at a time and resumes after a worker restart. After each receipt, end the turn; do not poll, retry, resubmit, or send background progress after submission.
 
-`before_dispatch -> internal no-tool Qwen classification -> host validation -> persistent global video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen vision -> finalize -> SQLite`
+The native `before_dispatch` handler remains the compatible Telegram-private
+entry. It and the direct tool use the same managed runner and fail closed on
+validation or runner errors; the raw scheduler script is not exposed as an
+agent action.
 
-Every worker uses `memoryMode=none`, and video submission uses `delivery=none`.
-Do not describe this as a native agent tool, `VL`, `video-learning-pipeline`,
-`DIRECTOR_BRAIN`, or direct full-video processing.
+Status is read-only. Title and keyword lookup searches only the controlled
+video-task registration fields and bounded status metadata. It does not search
+chat history, arbitrary files, SQLite, n8n execution records, media folders,
+credentials, or process state. A unique match may make one formal status read;
+ambiguous matches only return bounded candidates.
 
-This rule describes a local candidate. It does not claim installation, GitHub
-publication, production deployment, or Telegram acceptance.
+The plugin-owned legacy sender-hash setting is ignored. The only temporary
+unavailability condition is the explicit release-maintenance gate.
+Every worker uses `memoryMode=none`, and submission uses `delivery=none`.

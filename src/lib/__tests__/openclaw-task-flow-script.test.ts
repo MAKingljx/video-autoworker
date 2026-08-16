@@ -396,44 +396,35 @@ globalThis.fetch = async (input, init = {}) => {
     expect(platform.isRetryablePlatformError(error)).toBe(true)
   })
 
-  it('documents stable identities for the persistent video lane', () => {
+  it('documents the direct task-chain tool contract', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
 
-    expect(skill).toContain('--task-id <stable-task-id>')
-    expect(skill).toContain('--idempotency-key <same-stable-task-id>')
-    expect(skill).toContain('--batch-id <stable-batch-id>')
-    expect(skill).toContain('A batch ID is not a task ID')
-    expect(skill).toContain('--batch-status <complete-batch-id>')
-    expect(skill).toMatch(/persistent\s+process-wide video lane/u)
+    expect(skill).toContain('`aiworker_analyze_video`')
+    expect(skill).toContain('{"action":"submit_video","videoPath":"/absolute/path/video.mp4"}')
+    expect(skill).toContain('{"action":"submit_directory","videoDirectory":"/absolute/path/series"}')
+    expect(skill).toContain('{"action":"status","query":"task ID, batch ID, title, filename, season/episode, or keyword"}')
+    expect(skill).toContain('stable IDs')
+    expect(skill).toContain('persistent global video lane')
   })
 
-  it('defines single-video and directory dispatch as native asynchronous scheduler entries', () => {
+  it('keeps direct dispatch inside the managed tool boundary', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
 
-    expect(skill).toContain('`dispatch_single`')
-    expect(skill).toContain('`dispatch_directory`')
-    expect(skill).toContain('--video-file "<validated-absolute-video-path>"')
-    expect(skill).toContain('--video-dir "<validated-absolute-directory-path>"')
-    expect(skill).toContain('--task-id <stable-task-id>')
-    expect(skill).toContain('--idempotency-key <same-stable-task-id>')
-    expect(skill).toContain('--delivery none')
-    expect(skill).toContain('--wait-seconds 0')
-    expect(skill).toContain('--no-trigger-recovery')
-    expect(workspaceRules).toContain('one canonical absolute video-file path')
-    expect(workspaceRules).toContain('one canonical absolute directory path')
+    expect(workspaceRules).toContain('`aiworker_analyze_video`')
+    expect(workspaceRules).toContain('`before_dispatch`')
+    expect(skill).toContain('Do not require a user to remember a slash command')
+    expect(skill).toContain('Use neither `exec` nor direct ffmpeg')
+    expect(workspaceRules).toContain('Do not invoke shell commands')
     expect(skill).toContain('native `before_dispatch` hook')
-    expect(workspaceRules).toContain('native `before_dispatch` handler')
-    const stableEntry = 'node "$HOME/AI-worker-second-original-workspace/skills/aiworker-task-flow/scripts/submit-task.mjs"'
-    expect(skill).toContain(stableEntry)
-    expect(skill).toContain('implementation references, not commands')
-    expect(workspaceRules).toContain('not an agent tool')
+    expect(workspaceRules).toContain('same managed runner')
+    expect(workspaceRules).toContain('raw scheduler script is not exposed')
   })
 
-  it('contracts video dispatch to one enqueue, one receipt, and no same-turn supervision', () => {
+  it('contracts submission to one receipt without same-turn supervision', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -441,24 +432,16 @@ globalThis.fetch = async (input, init = {}) => {
     ), 'utf8')
 
     for (const contract of [skill, workspaceRules]) {
-      expect(contract).toContain('shared runner')
-      expect(contract).toMatch(/exactly\s+once/u)
-      expect(contract).toMatch(/short (?:handled )?receipt/u)
-      expect(contract).toMatch(/generic task/u)
-      expect(contract).toMatch(/same turn|current turn|end\s+the turn/u)
-      expect(contract).toMatch(/explicit/u)
+      expect(contract).toMatch(/one (?:concise |short )?receipt/u)
+      expect(contract).toMatch(/end the turn|After submission/u)
       expect(contract).toContain('`delivery=none`')
       expect(contract).toContain('`memoryMode=none`')
     }
-    expect(skill).toContain('End the turn immediately after any receipt or')
-    expect(skill).toContain('no polling, status read, retry, resubmission')
-    expect(skill).toContain('does not automatically return')
-    expect(workspaceRules).toContain('Do not read status')
-    expect(workspaceRules).toContain('`--wait-seconds 0`')
-    expect(workspaceRules).toContain('`--no-trigger-recovery`')
+    expect(skill).toContain('Do not poll,')
+    expect(workspaceRules).toMatch(/do not poll, retry, resubmit/iu)
   })
 
-  it('documents one no-tool Qwen semantic classification with host-owned authorization', () => {
+  it('documents title and keyword status lookup as controlled read-only state', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -468,86 +451,56 @@ globalThis.fetch = async (input, init = {}) => {
       process.cwd(),
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
-    const architecture = readFileSync(resolve(
-      process.cwd(),
-      'docs/architecture/openclaw-video-analysis-flow.md',
-    ), 'utf8')
-
-    for (const contract of [skill, workspaceRules, workspaceMemory, architecture]) {
-      expect(contract).toContain('api.runtime.llm.complete')
-      expect(contract).toMatch(/exactly once|一次/u)
-      expect(contract).toMatch(/no-tool|无工具/u)
-      expect(contract).toMatch(/structured|结构化/u)
-      expect(contract).toMatch(/host|宿主/u)
-      expect(contract).toMatch(/authorized Telegram private|授权 Telegram 私聊/u)
-    }
-    expect(skill).toContain('The classifier is advisory')
-    expect(workspaceRules).toContain('semantic advice, never authorization')
-    expect(workspaceMemory).toContain('The host, not the model')
-    expect(architecture).toContain('模型只表达意图判断')
-  })
-
-  it('keeps the scheduler out of the native agent-tool surface and fails closed', () => {
-    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
-    const workspaceRules = readFileSync(resolve(
-      process.cwd(),
-      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
-    ), 'utf8')
-    const workspaceMemory = readFileSync(resolve(
-      process.cwd(),
-      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
-    ), 'utf8')
-    const description = skill.match(/^description: (.+)$/m)?.[1]
-
-    expect(description?.length).toBeLessThanOrEqual(160)
     for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toContain('`before_dispatch`')
-      expect(contract).toMatch(/not an agent tool|不是 Agent tool/u)
-      expect(contract).toMatch(/fail(?:s)? closed|fail-closed/u)
-      expect(contract).toMatch(/runner (?:failure|errors?)|runner 失败/u)
-      expect(contract).not.toContain('`aiworker_analyze_video`')
-      expect(contract).not.toContain('`tools.allow`')
-      expect(contract).not.toContain('`tools.profile`')
-    }
-    expect(skill).toContain('Only `pass` continues')
-    expect(workspaceRules).toContain('Only genuinely unrelated `pass`')
-    expect(workspaceMemory).toContain('Only a truly unrelated `pass`')
-  })
-
-  it('requires explicit complete task or batch IDs for one bounded status read', () => {
-    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
-    const workspaceRules = readFileSync(resolve(
-      process.cwd(),
-      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
-    ), 'utf8')
-    const workspaceMemory = readFileSync(resolve(
-      process.cwd(),
-      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
-    ), 'utf8')
-    const architecture = readFileSync(resolve(
-      process.cwd(),
-      'docs/architecture/openclaw-video-analysis-flow.md',
-    ), 'utf8')
-
-    for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toContain('`before_dispatch`')
-      expect(contract).toMatch(/complete task ID/u)
-      expect(contract).toMatch(/complete batch ID/u)
-      expect(contract).toMatch(/exactly once/u)
-      expect(contract).toMatch(/read-only|read only/u)
-      expect(contract).toMatch(/current original message/u)
-      expect(contract).toMatch(/recent/u)
-      expect(contract).toMatch(/memory/u)
-      expect(contract).toMatch(/files|filesystem/u)
+      expect(contract).toMatch(/title|标题/u)
+      expect(contract).toMatch(/keyword|关键词/u)
+      expect(contract).toMatch(/read-only|只读/u)
       expect(contract).toMatch(/SQLite/u)
-      expect(contract).toMatch(/poll/u)
-      expect(contract).toMatch(/submit|resubmission|resubmit/u)
-      expect(contract).not.toMatch(/trusted[\s\S]{0,100}most-recent receipt|trusted unique most-recent receipt/u)
+      expect(contract).toMatch(/n8n/u)
+      expect(contract).toMatch(/media/u)
     }
-    expect(skill).toContain('--status <complete-task-id>')
-    expect(skill).toContain('--batch-status <complete-batch-id>')
-    expect(architecture).toMatch(/取代 `0\.4\.1` 的纯正则状态入口|不再保留 `0\.4\.1` 的纯正则状态入口/u)
-    expect(architecture).toContain('不提交、不恢复')
+    expect(skill).toMatch(/returns bounded\s+candidates for ambiguity/u)
+    expect(workspaceRules).toContain('ambiguous matches only return bounded candidates')
+  })
+
+  it('keeps native hook compatibility separate from the direct tool', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
+      expect(contract).toContain('`before_dispatch`')
+      expect(contract).toMatch(/fail(?:s)? closed|fail-closed/u)
+      expect(contract).toContain('`aiworker_analyze_video`')
+      expect(contract).toMatch(/runner errors?|runner 失败/u)
+    }
+    expect(skill).toContain('The tool is the direct OpenClaw')
+    expect(workspaceRules).toContain('raw scheduler script is not exposed')
+  })
+
+  it('allows IDs and title queries without asking users for slash commands', () => {
+    const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
+    const workspaceRules = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+    ), 'utf8')
+    const workspaceMemory = readFileSync(resolve(
+      process.cwd(),
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+    ), 'utf8')
+    for (const contract of [skill, workspaceRules, workspaceMemory]) {
+      expect(contract).toMatch(/task ID|任务 ID/u)
+      expect(contract).toMatch(/batch ID|批次 ID/u)
+      expect(contract).toMatch(/title|标题/u)
+      expect(contract).toMatch(/keyword|关键词/u)
+    }
+    expect(skill).toContain('never demand a')
+    expect(skill).toContain('`/video-status` command')
   })
 
   it('documents one process-wide persistent lane for single videos and directories', () => {
@@ -603,9 +556,9 @@ globalThis.fetch = async (input, init = {}) => {
 
       const agents = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
       expect(agents).toContain('Keep this rule.')
-      expect(agents).toContain('`dispatch_single`')
-      expect(agents).toContain('`dispatch_directory`')
-      expect(agents).toContain('api.runtime.llm.complete')
+      expect(agents).toContain('`aiworker_analyze_video`')
+      expect(agents).toContain('`before_dispatch`')
+      expect(agents).toContain('raw scheduler script is not exposed')
       expect(agents.match(/^## Video Analysis Task Flow Rule$/gm)).toHaveLength(1)
     } finally {
       await rm(root, { recursive: true, force: true })

@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { deriveTelegramSenderHash } from '../lib/dispatch-identity.js'
 import {
   createQwenBeforeDispatchHandler,
   isClassifierCandidate,
@@ -8,7 +7,6 @@ import {
 } from '../lib/qwen-before-dispatch.js'
 
 const senderId = 'telegram:123456'
-const allowedSenderSha256 = deriveTelegramSenderHash(senderId)
 const sessionKey = 'agent:second-original:telegram:direct:123456'
 
 function event(overrides = {}) {
@@ -31,13 +29,12 @@ const context = {
   conversationId: 'conversation',
 }
 
-function handler({ classifier, runner, senderHash = allowedSenderSha256, releaseReady = true } = {}) {
+function handler({ classifier, runner, releaseReady = true } = {}) {
   return createQwenBeforeDispatchHandler({
     classifier: classifier ?? vi.fn(async () => ({
       action: 'dispatch_single', value: '/data/地球之极 第二集.mp4',
     })),
     runner: runner ?? {},
-    allowedSenderSha256: senderHash,
     releaseReady,
   })
 }
@@ -287,7 +284,7 @@ describe('hook-owned Qwen video scheduler', () => {
     )
   })
 
-  it('does not let an untrusted, group, non-target, or inconsistent DM reach Qwen', async () => {
+  it('does not let group, non-target, or inconsistent DM messages reach Qwen', async () => {
     const classifier = vi.fn()
     const beforeDispatch = handler({ classifier })
     const cases = [
@@ -296,15 +293,32 @@ describe('hook-owned Qwen video scheduler', () => {
       [event({ sessionKey: 'agent:other:telegram:direct:123456' }), {
         ...context, sessionKey: 'agent:other:telegram:direct:123456',
       }, null],
-      [event({ senderId: 'telegram:999' }), { ...context, senderId: 'telegram:999' }, {
-        handled: true, text: '未执行：当前发送者没有视频调度权限。',
-      }.text],
     ]
     for (const [inbound, ctx, expectedText] of cases) {
       const result = await beforeDispatch(inbound, ctx)
       expect(result).toEqual(expectedText === null ? undefined : { handled: true, text: expectedText })
     }
     expect(classifier).not.toHaveBeenCalled()
+  })
+
+  it('accepts another Telegram private user without a plugin-owned sender allowlist', async () => {
+    const classifier = vi.fn(async () => ({ action: 'status_search', value: '地球之极' }))
+    const runner = {
+      searchStatus: vi.fn(async () => ({ matches: [], total: 0, truncated: false })),
+    }
+    const otherSession = 'agent:second-original:telegram:direct:999'
+    const result = await handler({ classifier, runner })(event({
+      content: '查询地球之极进度',
+      sessionKey: otherSession,
+      senderId: 'telegram:999',
+    }), {
+      ...context,
+      sessionKey: otherSession,
+      senderId: 'telegram:999',
+    })
+
+    expect(result).toEqual({ handled: true, text: '未找到匹配的视频任务进度。' })
+    expect(classifier).toHaveBeenCalledOnce()
   })
 
   it('uses host validation to reject negative, altered, multiple and mode-confused values', () => {

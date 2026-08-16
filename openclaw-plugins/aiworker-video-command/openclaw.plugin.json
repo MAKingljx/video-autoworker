@@ -1,25 +1,36 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "version": "0.5.2",
-  "description": "Classifies eligible video-learning messages once with Qwen, then owns dispatch or status handling.",
+  "version": "0.5.3",
+  "description": "Handles eligible video-learning messages and exposes the direct task-chain tool.",
   "activation": {
     "onStartup": true,
     "onCapabilities": [
-      "hook"
+      "hook",
+      "tool"
     ]
+  },
+  "contracts": {
+    "tools": [
+      "aiworker_analyze_video"
+    ]
+  },
+  "toolMetadata": {
+    "aiworker_analyze_video": {
+      "optional": true
+    }
   },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
     "properties": {
-        "allowedSenderSha256": {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        "releaseReady": {
-          "type": "boolean"
-        }
+      "releaseReady": {
+        "type": "boolean"
+      },
+      "allowedSenderSha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
     }
   }
 }

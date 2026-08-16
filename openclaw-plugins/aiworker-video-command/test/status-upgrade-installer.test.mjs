@@ -206,6 +206,14 @@ async function fixture() {
   ]) {
     const value = JSON.parse(await readFile(pathname, 'utf8'))
     value.version = '0.5.0'
+    // This suite exercises the historical 0.4.1 -> 0.5.0 classifier
+    // transition. Materialize that old hook-only manifest instead of
+    // accidentally applying the current 0.5.3 tool contract to the fixture.
+    if (pathname.endsWith('openclaw.plugin.json')) {
+      value.activation = { onStartup: true, onCapabilities: ['hook'] }
+      delete value.contracts
+      delete value.toolMetadata
+    }
     await writeFile(pathname, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
   }
   await chmod(entry, 0o755)

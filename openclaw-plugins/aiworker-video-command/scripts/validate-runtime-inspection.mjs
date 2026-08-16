@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export function validateRuntimeInspection(report, pluginId, expectedVersion = '0.3.0') {
+export function validateRuntimeInspection(report, pluginId, expectedVersion = '0.5.3') {
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
     throw new Error('Runtime inspection must be a JSON object.')
   }
@@ -20,10 +20,14 @@ export function validateRuntimeInspection(report, pluginId, expectedVersion = '0
   }
   const hookNames = report.typedHooks.map(hook => hook?.name).filter(Boolean).toSorted()
   if (JSON.stringify(hookNames) !== JSON.stringify(['before_dispatch'])) {
-    throw new Error('Hook-only runtime must expose exactly before_dispatch.')
+    throw new Error('Runtime must expose exactly before_dispatch.')
   }
-  if (!Array.isArray(report.tools) || report.tools.length !== 0) {
-    throw new Error('Hook-only runtime must not register tools.')
+  if (!Array.isArray(report.tools) || report.tools.length !== 1) {
+    throw new Error('Runtime must expose exactly one task-chain tool.')
+  }
+  const toolNames = report.tools[0]?.names
+  if (!Array.isArray(toolNames) || !toolNames.includes('aiworker_analyze_video')) {
+    throw new Error('Runtime task-chain tool name is missing.')
   }
   if (!Array.isArray(report.diagnostics)) {
     throw new Error('Runtime inspection diagnostics must be an array.')
@@ -35,7 +39,7 @@ export function validateRuntimeInspection(report, pluginId, expectedVersion = '0
 }
 
 async function main() {
-  const [reportPath, pluginId, expectedVersion = '0.3.0'] = process.argv.slice(2)
+  const [reportPath, pluginId, expectedVersion = '0.5.3'] = process.argv.slice(2)
   if (!reportPath || !pluginId) {
     throw new Error('Usage: validate-runtime-inspection.mjs <report.json> <plugin-id> [expected-version]')
   }

@@ -1,70 +1,39 @@
 # AI-worker Video Command plugin
 
-This directory contains the hook-only `0.5.2` candidate for the native OpenClaw
-video-learning ingress. The files describe the local candidate contract;
-runtime and production acceptance still require their own evidence.
+This directory contains the `0.5.3` candidate for the native OpenClaw
+video-learning ingress and direct task-chain tool. The files describe the local
+candidate contract; runtime and production acceptance still require their own
+evidence.
 
-`0.5.2` keeps `before_dispatch` as the sole conversation owner, but replaces
-the accumulated deterministic natural-language router with one host-owned,
-no-tool Qwen classification call. Only an authorized `second-original`
-Telegram direct message with a video/path, explicit-ID status, or title/keyword
-status-search shape reaches
-that classifier. Ordinary chat passes to the normal agent without an extra
-model call.
-
-The classifier returns one strict single-line JSON enum:
+`0.5.3` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
+private messages and restores the established optional `aiworker_analyze_video`
+tool for direct `second-original` calls. The tool uses three structured actions:
 
 ```text
-dispatch_single | dispatch_directory | status_task | status_batch | status_search | respond | pass
+submit_video | submit_directory | status
 ```
 
-The host never trusts the model as an executor. It independently requires the
-returned path or ID to occur exactly once in the current message, applies the
-absolute/canonical path and ID policy, rejects negative/conditional/example
-execution, checks the configured Telegram sender hash, and invokes only the
-fixed `aiworker-task-flow` argv. Single videos and directories enter the shared
-durable serial lane. Explicit task or batch status performs exactly one read.
-`status_search` is available only after the same configured Telegram-sender
-authorization as dispatch. In this single-authorized-sender rollout it searches
-the controlled video-task registry, not a cross-user or general-library API:
-only public task identifiers, display names, normalized season/episode aliases,
-and status metadata are matched. No match returns a short miss, one match
-invokes that match's formal task or batch status client once, and multiple
-matches return bounded candidate names for refinement. It never inspects
-prompts or source paths, scans SQLite, n8n executions, media directories,
-credentials, or chat history, and it never returns source paths or prompts.
-There is no recent-task pointer, monitoring, retry loop, result push, or second
-model turn.
+It accepts ordinary user intent. A user never needs to remember a slash command
+or pass a plugin-owned sender authorization check. The legacy hash configuration
+is accepted only for old-profile compatibility and is ignored by the runtime.
 
-Classifier/provider errors, invalid JSON, host-evidence mismatch, and runner
-errors are caught inside the hook and become one fixed handled failure. The
-classifier has a 90-second internal deadline for the observed local-Qwen
-latency; the hook timeout is 140 seconds, above that deadline plus the runner's
-25-second subprocess bound, so the host cannot fail open first.
+The host applies absolute/canonical input validation and invokes the fixed
+`aiworker-task-flow` client. Single videos and directories enter the shared
+durable serial lane. Status accepts an exact task/batch ID or title/keyword. Its
+search is read-only against controlled video-task registration fields only: it
+does not scan conversations, prompts, arbitrary files, SQLite, n8n executions,
+media directories, credentials, or process state. A unique match results in one
+formal status read; ambiguous matches return bounded candidates.
 
-This architecture intentionally registers no agent tools, prompt hooks,
-trusted tool policy, or tool-result middleware. OpenClaw 2026.7.1-2 exposes
-`api.runtime.llm.complete({systemPrompt,messages,purpose,maxTokens,temperature,signal})`
-for the no-tool classification call, while `before_dispatch` remains the only
-user-visible receipt boundary.
+The direct tool does not add prompt hooks, trusted-tool policy, or tool-result
+middleware. The release gate remains only a temporary maintenance state. A
+successful payload install and tool/runtime check do not by themselves complete
+production deployment: the task-flow skill/lane and real OpenClaw tool
+acceptance must also pass.
 
-The controlled `0.4.1 -> 0.5.0` profile transition must add exactly this one
-plugin permission and no other LLM override keys:
-
-```json
-{"llm":{"allowAgentIdOverride":true}}
-```
-
-It is stored under `plugins.entries.aiworker-video-command`. The sender hash
-config and the complete `second-original.tools` object must remain byte-for-byte
-equivalent as JSON values. Rollback restores the `0.4.1` config without the
-`llm` field. A successful plugin payload install and hook-only runtime check do
-not by themselves complete production deployment: the queue skill/supervisor
-transaction and an installed real-classifier QA must pass separately.
-
-The remainder of this file below documents the deployed `0.4.1` behavior and
-its historical upgrade/rollback gates. It is retained as migration evidence;
-it is not the `0.5.2` runtime contract.
+The remainder of this file documents historical `0.4.1` behavior and older
+upgrade/rollback gates. It is retained as migration evidence and is not the
+`0.5.3` runtime contract.
 
 ## Business contract
 

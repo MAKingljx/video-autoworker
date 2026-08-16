@@ -2,8 +2,6 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, normalize } from 'node:path'
 
 import {
-  deriveTelegramSenderHash,
-  normalizeAllowedSenderHash,
   resolveConsistentString,
   resolveTelegramConversationIdentity,
   TARGET_CHANNEL,
@@ -217,14 +215,14 @@ function operationKey(event, context) {
   ].map(encode).join('|'), 'utf8').digest('hex')
 }
 
-function dispatchReceipt(result) {
+export function dispatchReceipt(result) {
   if (result.kind === 'batch') {
     return `${result.duplicate ? '批次已存在' : '已加入学习队列'}，批次编号：${result.id}。进度请稍后按批次编号查询。`
   }
   return `${result.duplicate ? '任务已存在' : '已提交'}，任务编号：${result.id}。结果请稍后查询。`
 }
 
-function statusReceipt(result) {
+export function statusReceipt(result) {
   if (result.kind === 'batch') {
     const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
       + (result.counts.cancelled ?? 0)
@@ -282,15 +280,32 @@ function searchCandidatesReceipt(result) {
   return `${prefix}：${shown.join('；')}。请补充视频标题或关键词。`
 }
 
+export async function queryStatusSearch({ runner = schedulerRunner, query } = {}) {
+  try {
+    const search = await runner.searchStatus({ query })
+    if (!search.matches.length || search.total === 0) {
+      return '未找到匹配的视频任务进度。'
+    }
+    if (search.total !== 1 || search.truncated || search.matches.length !== 1) {
+      return searchCandidatesReceipt(search)
+    }
+    const match = search.matches[0]
+    const result = match.kind === 'task'
+      ? await runner.taskStatus({ taskId: match.taskId })
+      : await runner.batchStatus({ batchId: match.batchId })
+    return statusReceipt(result)
+  } catch {
+    return '暂时无法查询视频任务，本次未重试。'
+  }
+}
+
 export function createQwenBeforeDispatchHandler({
   classifier,
   runner = schedulerRunner,
-  allowedSenderSha256,
   releaseReady = true,
   now = () => Date.now(),
 } = {}) {
   if (typeof classifier !== 'function') throw new TypeError('classifier is required')
-  const allowedSenderHash = normalizeAllowedSenderHash(allowedSenderSha256)
   const operations = new Map()
 
   function prune() {
@@ -333,22 +348,7 @@ export function createQwenBeforeDispatchHandler({
       }
     }
     if (decision.action === 'status_search') {
-      try {
-        const search = await runner.searchStatus({ query: decision.query })
-        if (!search.matches.length || search.total === 0) {
-          return handled('未找到匹配的视频任务进度。')
-        }
-        if (search.total !== 1 || search.truncated || search.matches.length !== 1) {
-          return handled(searchCandidatesReceipt(search))
-        }
-        const match = search.matches[0]
-        const result = match.kind === 'task'
-          ? await runner.taskStatus({ taskId: match.taskId })
-          : await runner.batchStatus({ batchId: match.batchId })
-        return handled(statusReceipt(result))
-      } catch {
-        return handled('暂时无法查询视频任务，本次未重试。')
-      }
+      return handled(await queryStatusSearch({ runner, query: decision.query }))
     }
     try {
       const result = decision.action === 'status_task'
@@ -371,11 +371,7 @@ export function createQwenBeforeDispatchHandler({
       if (sessionKey === null) return Promise.resolve(handled('未执行：消息上下文不一致。'))
       if (!sessionOwnsTargetAgent(sessionKey)) return undefined
       const identity = resolveTelegramConversationIdentity(event, context)
-      if (
-        !identity.ok
-        || !allowedSenderHash
-        || deriveTelegramSenderHash(identity.senderId) !== allowedSenderHash
-      ) return Promise.resolve(handled('未执行：当前发送者没有视频调度权限。'))
+      if (!identity.ok) return Promise.resolve(handled('未执行：消息上下文不一致。'))
       if (!releaseReady) {
         return Promise.resolve(handled('视频学习服务正在发布维护，请稍后再试。'))
       }
