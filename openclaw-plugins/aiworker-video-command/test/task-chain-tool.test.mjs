@@ -119,6 +119,36 @@ describe('AI-worker direct task-chain tool', () => {
     expect(runner.dispatchDirectory).not.toHaveBeenCalled()
   })
 
+  it('reads a complete report through the dedicated result action without status or file search', async () => {
+    const runner = {
+      taskResult: vi.fn(async ({ query, offset }) => ({
+        kind: 'report',
+        taskId: `video-command-${'c'.repeat(64)}`,
+        name: '地球之极 第三季 第三集.mp4',
+        status: 'succeeded',
+        report: {
+          source: 'summary', text: '完整学习报告正文', offset, nextOffset: 24576, totalBytes: 30000,
+        },
+        query,
+      })),
+      taskStatus: vi.fn(),
+      searchStatus: vi.fn(),
+    }
+    const value = tool({ runner })
+
+    await expect(value.execute('result', {
+      action: 'result', query: '《地球之极》第三季第三集', offset: 0,
+    })).resolves.toEqual({
+      content: [{
+        type: 'text',
+        text: '地球之极 第三季 第三集.mp4完整学习结果：\n完整学习报告正文\n\n报告较长；继续读取请使用相同查询并传 offset=24576。',
+      }],
+    })
+    expect(runner.taskResult).toHaveBeenCalledWith({ query: '《地球之极》第三季第三集', offset: 0 })
+    expect(runner.taskStatus).not.toHaveBeenCalled()
+    expect(runner.searchStatus).not.toHaveBeenCalled()
+  })
+
   it('rejects malformed tool parameters before any runner call', async () => {
     const runner = {
       dispatchVideo: vi.fn(), dispatchDirectory: vi.fn(), searchStatus: vi.fn(),
@@ -156,6 +186,9 @@ describe('AI-worker direct task-chain tool', () => {
     })
     expect(normalizeRequest({ action: 'status', query: '地球之极' })).toEqual({
       action: 'status', query: '地球之极',
+    })
+    expect(normalizeRequest({ action: 'result', query: '地球之极', offset: 24 })).toEqual({
+      action: 'result', query: '地球之极', offset: 24,
     })
     expect(normalizeRequest({ action: 'status', query: '地球之极', taskId: 'other' })).toBeNull()
   })

@@ -32,6 +32,14 @@ describe('Qwen one-shot classifier', () => {
     })
   })
 
+  it('accepts the separate complete-report classification', () => {
+    expect(parseQwenClassifierResult(
+      '{"action":"result_search","value":"《地球之极》第三季第三集"}',
+    )).toEqual({
+      action: 'result_search', value: '《地球之极》第三季第三集',
+    })
+  })
+
   it.each([
     ['markdown', '```json\n{"action":"pass","value":""}\n```'],
     ['multiline', '{"action":"pass",\n"value":""}'],

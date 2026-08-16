@@ -15,6 +15,7 @@ describe('OpenClaw task-flow submit script', () => {
     const fakePlatform = resolve(root, 'fake-platform.mjs')
     const requestLog = resolve(root, 'requests.jsonl')
     const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+    const resultTaskId = `video-natural-${'a'.repeat(64)}`
 
     try {
       await writeFile(videoPath, 'fake-video')
@@ -54,6 +55,8 @@ globalThis.fetch = async (input, init = {}) => {
       maxAttempts: 1,
       output: taskId === 'brief-video-task'
         ? { summary: '状态客户端测试摘要'.repeat(40), detail: 'x'.repeat(100_000) }
+        : taskId === '${resultTaskId}'
+          ? { summary: '完整学习报告'.repeat(8_000), combinedText: '不应作为首选' }
         : { summary: '状态客户端测试摘要' },
       updatedAt: '2026-08-11T12:00:00.000Z',
     }] })
@@ -154,6 +157,27 @@ globalThis.fetch = async (input, init = {}) => {
       expect(briefStatus).toMatchObject({ taskId: 'brief-video-task', status: 'succeeded' })
       expect(briefStatus.output.summary.length).toBeLessThanOrEqual(160)
       expect(briefStatus.output).not.toHaveProperty('detail')
+
+      const resultRun = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--result', resultTaskId,
+          '--result-offset', '0',
+        ], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      const resultPage = JSON.parse(resultRun.stdout)
+      expect(resultRun.stderr).toBe('')
+      expect(resultPage).toMatchObject({
+        kind: 'report', taskId: resultTaskId, status: 'succeeded',
+        report: { source: 'summary', offset: 0 },
+      })
+      expect(Buffer.byteLength(resultPage.report.text, 'utf8')).toBeLessThanOrEqual(24 * 1024)
+      expect(resultPage.report.nextOffset).toBeGreaterThan(0)
+      expect(resultPage.report.text).not.toContain('不应作为首选')
 
       const videoPromptRun = await new Promise<{
         failed: boolean
@@ -403,6 +427,8 @@ globalThis.fetch = async (input, init = {}) => {
     expect(skill).toContain('{"action":"submit_video","videoPath":"/absolute/path/video.mp4"}')
     expect(skill).toContain('{"action":"submit_directory","videoDirectory":"/absolute/path/series"}')
     expect(skill).toContain('{"action":"status","query":"task ID, batch ID, title, filename, season/episode, or keyword"}')
+    expect(skill).toContain('{"action":"result","query":"task ID, batch ID, title, filename, season/episode, or keyword"}')
+    expect(skill).toContain('legacy `bot-learning` search')
     expect(skill).toContain('stable IDs')
     expect(skill).toContain('persistent global video lane')
   })

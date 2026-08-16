@@ -1,7 +1,7 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Handles eligible video-learning messages and exposes the direct task-chain tool.",
   "activation": {
     "onStartup": true,

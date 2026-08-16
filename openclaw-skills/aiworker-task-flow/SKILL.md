@@ -17,6 +17,8 @@ Call the tool once with exactly one of these parameter shapes:
 {"action":"submit_video","videoPath":"/absolute/path/video.mp4"}
 {"action":"submit_directory","videoDirectory":"/absolute/path/series"}
 {"action":"status","query":"task ID, batch ID, title, filename, season/episode, or keyword"}
+{"action":"result","query":"task ID, batch ID, title, filename, season/episode, or keyword"}
+{"action":"result","query":"same query","offset":24576}
 ```
 
 - `submit_video` queues one canonical absolute video file.
@@ -26,6 +28,11 @@ Call the tool once with exactly one of these parameter shapes:
   keyword it searches the controlled video-task registry, returns bounded
   candidates for ambiguity, and reads the formal status once only for a unique
   match.
+- `result` reads the formal final learning report for a uniquely matched task.
+  It uses `output.summary` first and only falls back to `output.combinedText`
+  when no final summary exists. A long report returns a `nextOffset`; when the
+  user asks for the complete result, keep calling `result` with that offset
+  until it is absent. Do not replace this with file-system search.
 - This tool is available to `second-original` without a plugin-owned sender
   allowlist. The retained legacy hash configuration is ignored by the runtime.
 - The release gate is a maintenance state, not an identity or user permission
@@ -43,11 +50,11 @@ Call the tool once with exactly one of these parameter shapes:
   expand, download, or scan for paths yourself.
 - After a submit result, return one short receipt and end the turn. Do not poll,
   retry, resubmit, or narrate background progress.
-- Status is read-only. It must not inspect chat history, memory, arbitrary
+- Status and result reads are read-only. They must not inspect chat history, memory, arbitrary
   files, SQLite, n8n execution records, media directories, credentials, or
   process state. It never triggers a new submission.
 - Use neither `exec` nor direct ffmpeg, Whisper, Qwen, n8n, or SQLite calls as
-  a substitute for this tool.
+  a substitute for this tool. Do not use `find`, `grep`, or legacy `bot-learning` search as an alternative result source.
 
 ## Runtime boundary
 

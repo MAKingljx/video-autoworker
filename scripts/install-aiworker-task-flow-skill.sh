@@ -61,6 +61,7 @@ required_skill_files=(
   "$SOURCE_DIR/lib/media-ingest.mjs"
   "$SOURCE_DIR/lib/video-task.mjs"
   "$SOURCE_DIR/lib/video-batch-state.mjs"
+  "$SOURCE_DIR/lib/video-result-page.mjs"
   "$RENDERER"
 )
 for required_skill_file in "${required_skill_files[@]}"; do

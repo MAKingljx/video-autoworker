@@ -4,6 +4,9 @@ const ACTIONS = new Set([
   'status_task',
   'status_batch',
   'status_search',
+  'result_task',
+  'result_batch',
+  'result_search',
   'respond',
   'pass',
 ])
@@ -12,7 +15,7 @@ const CLASSIFIER_TIMEOUT_MS = 90_000
 
 const SYSTEM_PROMPT = `你是视频学习入口的意图分类器，不是执行器。你没有工具，也不能访问文件。
 只输出一行 JSON，不要 Markdown、解释或额外字段：
-{"action":"dispatch_single|dispatch_directory|status_task|status_batch|status_search|respond|pass","value":"原文中的路径、编号、标题或关键词，其他动作为空字符串"}
+{"action":"dispatch_single|dispatch_directory|status_task|status_batch|status_search|result_task|result_batch|result_search|respond|pass","value":"原文中的路径、编号、标题或关键词，其他动作为空字符串"}
 
 判定规则：
 - 用户现在明确、肯定地要求学习/分析一个视频文件：dispatch_single。
@@ -20,6 +23,8 @@ const SYSTEM_PROMPT = `你是视频学习入口的意图分类器，不是执行
 - 用户明确按完整任务编号查一次进度/结果：status_task。
 - 用户明确按完整批次编号查一次进度：status_batch。
 - 用户明确按视频标题、节目名、季集、文件名或其他自然语言关键词查询任务进度、状态、结果或入队情况：status_search；value 必须逐字复制当前消息中的标题、关键词或完整查询句，不得改写。
+- 用户明确要求完整、详细或全文学习报告，并携带完整任务编号：result_task；携带完整批次编号：result_batch。
+- 用户明确要求完整、详细或全文学习报告，并按视频标题、节目名、季集、文件名或关键词查询：result_search；value 必须逐字复制当前消息中的标题、关键词或完整查询句，不得改写。
 - 视频相关但是否定、条件、举例、回顾、方法咨询、缺少必要路径/编号、存在多个候选：respond。
 - 与视频学习和视频任务状态无关：pass。
 - 不得猜测、补全、改写、正规化、搜索路径或编号；value 必须逐字复制用户原文中的唯一值。`

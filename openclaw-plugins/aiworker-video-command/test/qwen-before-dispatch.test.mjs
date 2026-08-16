@@ -184,6 +184,28 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(runner.batchStatus).not.toHaveBeenCalled()
   })
 
+  it('routes a complete-learning-result request to the dedicated report reader', async () => {
+    const taskId = `video-natural-${'d'.repeat(64)}`
+    const runner = {
+      taskResult: vi.fn(async ({ query, offset }) => ({
+        kind: 'report', taskId, name: '地球之极 第三季 第三集.mp4', status: 'succeeded',
+        report: { source: 'summary', text: '完整学习报告', offset, nextOffset: null, totalBytes: 18 },
+        query,
+      })),
+      taskStatus: vi.fn(),
+      searchStatus: vi.fn(),
+    }
+    const result = await handler({
+      classifier: vi.fn(async () => ({ action: 'result_search', value: '《地球之极》第三季第三集' })),
+      runner,
+    })(event({ content: '请给我《地球之极》第三季第三集的完整学习报告' }), context)
+
+    expect(result).toEqual({ handled: true, text: '地球之极 第三季 第三集.mp4完整学习结果：\n完整学习报告' })
+    expect(runner.taskResult).toHaveBeenCalledWith({ query: '《地球之极》第三季第三集', offset: 0 })
+    expect(runner.taskStatus).not.toHaveBeenCalled()
+    expect(runner.searchStatus).not.toHaveBeenCalled()
+  })
+
   it('returns the matched directory item status with its batch progress', async () => {
     const batchId = `video-batch-${'e'.repeat(64)}`
     const runner = {
@@ -403,6 +425,7 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(isClassifierCandidate('请帮我学习 /data/a.mp4')).toBe(true)
     expect(isClassifierCandidate(`查询任务进度 video-natural-${'a'.repeat(64)}`)).toBe(true)
     expect(isClassifierCandidate('查询《地球之极》第三季第三集进度')).toBe(true)
+    expect(isClassifierCandidate('请给我《地球之极》第三季第三集的完整学习报告')).toBe(true)
     expect(isClassifierCandidate('今天天气如何')).toBe(false)
   })
 })

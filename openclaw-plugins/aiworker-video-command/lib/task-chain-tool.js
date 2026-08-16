@@ -4,6 +4,7 @@ import { isAbsolute, normalize } from 'node:path'
 import {
   dispatchReceipt,
   queryStatusSearch,
+  resultReceipt,
   statusReceipt,
 } from './qwen-before-dispatch.js'
 import {
@@ -28,8 +29,8 @@ const TOOL_PARAMETERS = Object.freeze({
   properties: {
     action: {
       type: 'string',
-      enum: ['submit_video', 'submit_directory', 'status'],
-      description: 'submit_video 提交单个视频；submit_directory 扫描目录入队；status 查询任务编号、批次编号、标题或关键词。',
+      enum: ['submit_video', 'submit_directory', 'status', 'result'],
+      description: 'submit_video 提交单个视频；submit_directory 扫描目录入队；status 查询进度；result 读取完整学习报告。',
     },
     videoPath: {
       type: 'string',
@@ -47,7 +48,13 @@ const TOOL_PARAMETERS = Object.freeze({
       type: 'string',
       minLength: 1,
       maxLength: MAX_QUERY_LENGTH,
-      description: '任务编号、批次编号、视频标题或关键词。由任务链状态登记搜索。',
+      description: '任务编号、批次编号、视频标题或关键词。由任务链受控登记搜索。',
+    },
+    offset: {
+      type: 'integer',
+      minimum: 0,
+      maximum: 16777216,
+      description: 'result 的下一页偏移；首次读取省略或传 0。',
     },
   },
 })
@@ -72,7 +79,7 @@ function canonicalDirectory(value) {
 function normalizeRequest(params) {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return null
   const action = params.action
-  if (!['submit_video', 'submit_directory', 'status'].includes(action)) return null
+  if (!['submit_video', 'submit_directory', 'status', 'result'].includes(action)) return null
   const keys = Object.keys(params)
   if (action === 'submit_video') {
     if (keys.sort().join(',') !== 'action,videoPath') return null
@@ -86,7 +93,13 @@ function normalizeRequest(params) {
     const videoDirectory = canonicalDirectory(params.videoDirectory)
     return videoDirectory ? { action, videoDirectory } : null
   }
-  if (keys.sort().join(',') !== 'action,query') return null
+  if (action === 'result') {
+    const expected = keys.sort().join(',')
+    if (expected !== 'action,query' && expected !== 'action,offset,query') return null
+    if (!Number.isInteger(params.offset ?? 0) || (params.offset ?? 0) < 0 || (params.offset ?? 0) > 16 * 1024 * 1024) {
+      return null
+    }
+  } else if (keys.sort().join(',') !== 'action,query') return null
   if (
     typeof params.query !== 'string'
     || params.query !== params.query.trim()
@@ -94,7 +107,9 @@ function normalizeRequest(params) {
     || params.query.length > MAX_QUERY_LENGTH
     || /[\u0000-\u001f\u007f]/u.test(params.query)
   ) return null
-  return { action, query: params.query }
+  return action === 'result'
+    ? { action, query: params.query, offset: params.offset ?? 0 }
+    : { action, query: params.query }
 }
 
 function stableOperationId({ action, sessionKey, value }) {
@@ -144,6 +159,16 @@ async function executeRequest(request, { runner, sessionKey }) {
       return textResult(`入队状态未确认，批次编号：${batchId}。请稍后按编号查询，不要重复提交。`)
     }
   }
+  if (request.action === 'result') {
+    try {
+      return textResult(resultReceipt(await runner.taskResult({
+        query: request.query,
+        offset: request.offset,
+      })))
+    } catch {
+      return textResult('暂时无法读取完整学习结果，本次未重试。')
+    }
+  }
   try {
     if (isSchedulerTaskId(request.query)) {
       return textResult(statusReceipt(await runner.taskStatus({ taskId: request.query })))
@@ -167,7 +192,7 @@ export function createTaskChainTool({
   return {
     name: TASK_CHAIN_TOOL_NAME,
     label: 'AI-worker 任务链',
-    description: '直接调用 AI-worker 视频任务链。收到用户的视频学习、目录扫描或进度查询请求时使用；不要要求用户记 slash 命令。submit_video 只提交一个绝对视频路径，submit_directory 让任务链自动扫描一个绝对目录，status 接受完整任务/批次编号或标题、文件名、季集和关键词。status 只读受控任务登记，不搜索聊天记录、SQLite、n8n 执行记录、媒体目录或其他用户数据。',
+    description: '直接调用 AI-worker 视频任务链。收到用户的视频学习、目录扫描、进度查询或完整学习结果请求时使用；不要要求用户记 slash 命令。submit_video 只提交一个绝对视频路径，submit_directory 让任务链自动扫描一个绝对目录，status 查询进度，result 读取正式任务链中的完整学习报告。完整结果必须使用 result 分页读取，禁止 exec/find/grep 或旧 bot-learning 搜索。status 与 result 只读受控任务登记和最终任务输出，不搜索聊天记录、SQLite、n8n 执行记录、媒体目录或其他用户数据。',
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {

@@ -8,6 +8,11 @@ import { fileURLToPath } from 'node:url'
 import { createPlatformClient } from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
 import {
+  paginateVideoReport,
+  parseResultOffset,
+  selectFinalVideoReport,
+} from '../lib/video-result-page.mjs'
+import {
   batchStatePath,
   createBatchState,
   createSingleVideoState,
@@ -27,7 +32,7 @@ const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
   '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
   '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
-  '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
+  '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--no-trigger-recovery', '--resume-pending'])
 const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
@@ -36,6 +41,7 @@ const publicLocalTaskStatus = status => ({
   submitted: 'accepted',
   waiting: 'running',
 }[status] || status)
+const DIRECT_VIDEO_TASK_ID = /^(?:video-command|video-natural)-[a-f0-9]{64}$/u
 
 function option(name) {
   const index = args.indexOf(name)
@@ -69,12 +75,15 @@ function validateCliArguments() {
     throw new Error('--prompt 与 --prompt-file 不能同时使用')
   }
   const primaryModes = [
-    '--batch-status', '--resume-batch', '--resume-pending', '--search-status', '--status', '--status-brief', '--video-dir', '--video-file',
+    '--batch-status', '--resume-batch', '--resume-pending', '--result', '--search-status', '--status', '--status-brief', '--video-dir', '--video-file',
   ]
     .filter(name => present.has(name))
   if (primaryModes.length > 1) throw new Error(`任务模式参数不能同时使用：${primaryModes.join('、')}`)
   if (present.has('--batch-id') !== present.has('--video-dir')) {
     throw new Error('--video-dir 必须与 --batch-id 同时使用')
+  }
+  if (present.has('--result-offset') && !present.has('--result')) {
+    throw new Error('--result-offset 必须与 --result 一起使用')
   }
 
   const mode = primaryModes[0] || 'generic'
@@ -82,6 +91,7 @@ function validateCliArguments() {
     '--batch-status': new Set(['--batch-status']),
     '--resume-batch': new Set(['--resume-batch']),
     '--resume-pending': new Set(['--resume-pending']),
+    '--result': new Set(['--result', '--result-offset', '--base-url']),
     '--status': new Set(['--status', '--base-url']),
     '--status-brief': new Set(['--status-brief', '--base-url']),
     '--search-status': new Set(['--search-status']),
@@ -119,6 +129,74 @@ function compactStatusOutput(value) {
     ? value.summary.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim()
     : ''
   return summary ? { summary: summary.slice(0, 160) } : null
+}
+
+function resultDisplayName(value) {
+  const name = String(value || '')
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim()
+  return name && name.length <= 180 ? name : null
+}
+
+function publicResultMatch(match) {
+  return {
+    kind: match.kind === 'batch' ? 'batch' : 'task',
+    name: resultDisplayName(match.name) || '未命名视频',
+    status: String(match.status || 'unknown'),
+  }
+}
+
+async function resolveResultTarget(query) {
+  if (DIRECT_VIDEO_TASK_ID.test(query)) return { taskId: query, name: null, status: null }
+  const search = await searchVideoTaskStates(query)
+  if (search.total !== 1 || search.truncated || search.matches.length !== 1) {
+    return {
+      matches: search.matches.map(publicResultMatch),
+      total: search.total,
+      truncated: search.truncated,
+    }
+  }
+  const match = search.matches[0]
+  if (typeof match?.taskId !== 'string' || !match.taskId) {
+    throw new Error('正式学习报告任务登记无效')
+  }
+  return {
+    taskId: match.taskId,
+    name: resultDisplayName(match.name),
+    status: String(match.status || 'unknown'),
+  }
+}
+
+async function handleResult(client, query, offset) {
+  const resolved = await resolveResultTarget(query)
+  if ('matches' in resolved) {
+    output({ kind: 'matches', ...resolved })
+    return
+  }
+  const run = await client.getRun(resolved.taskId)
+  if (!run) {
+    output({
+      kind: 'report',
+      taskId: resolved.taskId,
+      name: resolved.name,
+      status: resolved.status || 'unknown',
+      report: null,
+    })
+    return
+  }
+  const status = String(run.status || 'unknown')
+  const finalReport = status === 'succeeded' ? selectFinalVideoReport(run.output) : null
+  output({
+    kind: 'report',
+    taskId: resolved.taskId,
+    name: resolved.name,
+    status,
+    report: finalReport ? {
+      source: finalReport.source,
+      ...paginateVideoReport(finalReport.text, offset),
+    } : null,
+  })
 }
 
 function rejectGenericVideoPrompt(prompt) {
@@ -282,6 +360,8 @@ async function main() {
   if (searchStatus) return handleStatusSearch(searchStatus)
 
   const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
+  const resultQuery = option('--result')
+  if (resultQuery) return handleResult(client, resultQuery, parseResultOffset(option('--result-offset')))
   const statusTaskId = option('--status') || option('--status-brief')
   const briefStatus = Boolean(option('--status-brief'))
   if (statusTaskId) {

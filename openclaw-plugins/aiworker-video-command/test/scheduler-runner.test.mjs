@@ -149,6 +149,54 @@ describe('0.5 scheduler runner', () => {
     ])
   })
 
+  it('reads one UTF-8 bounded final-report page through the dedicated result command', async () => {
+    const { execute, runner } = fixture({
+      kind: 'report',
+      taskId,
+      name: '地球之极 第三季 第三集.mp4',
+      status: 'succeeded',
+      report: {
+        source: 'summary',
+        text: '完整学习报告',
+        offset: 0,
+        nextOffset: null,
+        totalBytes: Buffer.byteLength('完整学习报告', 'utf8'),
+      },
+    })
+    await expect(runner.taskResult({ query: '《地球之极》第三季第三集', offset: 0 })).resolves.toEqual({
+      kind: 'report',
+      taskId,
+      name: '地球之极 第三季 第三集.mp4',
+      status: 'succeeded',
+      report: {
+        source: 'summary',
+        text: '完整学习报告',
+        offset: 0,
+        nextOffset: null,
+        totalBytes: Buffer.byteLength('完整学习报告', 'utf8'),
+      },
+    })
+    expect(execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs', '--result', '《地球之极》第三季第三集', '--result-offset', '0',
+    ])
+  })
+
+  it('rejects result output that exceeds the plugin process boundary or changes the requested offset', async () => {
+    const overlong = fixture({
+      kind: 'report', taskId, name: null, status: 'succeeded',
+      report: {
+        source: 'summary', text: 'x'.repeat(24 * 1024 + 1), offset: 0, nextOffset: null, totalBytes: 24 * 1024 + 1,
+      },
+    }).runner
+    await expect(overlong.taskResult({ query: taskId, offset: 0 })).rejects.toThrow('invalid_result_report')
+
+    const wrongOffset = fixture({
+      kind: 'report', taskId, name: null, status: 'succeeded',
+      report: { source: 'summary', text: 'ok', offset: 1, nextOffset: null, totalBytes: 3 },
+    }).runner
+    await expect(wrongOffset.taskResult({ query: taskId, offset: 0 })).rejects.toThrow('invalid_task_result')
+  })
+
   it('preserves a matched directory item index for an item-level status read', async () => {
     const { runner } = fixture({
       matches: [{

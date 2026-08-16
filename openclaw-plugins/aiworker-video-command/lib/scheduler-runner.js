@@ -35,6 +35,9 @@ const SEARCH_BATCH_STATUSES = new Set([
 ])
 const MAX_SEARCH_QUERY_LENGTH = 512
 const MAX_SEARCH_MATCHES = 32
+const MAX_RESULT_OFFSET = 16 * 1024 * 1024
+const MAX_RESULT_PAGE_BYTES = 24 * 1024
+const BATCH_ITEM_TASK_ID_PATTERN = /^video-batch-[a-f0-9]{64}:video:\d{3}:[a-f0-9]{12}$/u
 
 export function isSchedulerTaskId(value) {
   return typeof value === 'string' && TASK_ID_PATTERN.test(value)
@@ -52,6 +55,13 @@ function normalizeSearchQuery(value) {
     || value.length > MAX_SEARCH_QUERY_LENGTH
     || /[\u0000-\u001f\u007f]/u.test(value)
   ) throw new Error('invalid_search_query')
+  return value
+}
+
+function normalizeResultOffset(value) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_RESULT_OFFSET) {
+    throw new Error('invalid_result_offset')
+  }
   return value
 }
 
@@ -223,6 +233,86 @@ function normalizeSearchResult(value) {
   return { matches, total: value.total, truncated: value.truncated }
 }
 
+function isResultTaskId(value) {
+  return isSchedulerTaskId(value) || (typeof value === 'string' && BATCH_ITEM_TASK_ID_PATTERN.test(value))
+}
+
+function normalizeResultName(value) {
+  if (value === null) return null
+  return normalizeSearchName(value)
+}
+
+function normalizeResultReport(value) {
+  if (value === null) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_result_report')
+  if (!['summary', 'combinedText'].includes(value.source) || typeof value.text !== 'string') {
+    throw new Error('invalid_result_report')
+  }
+  if (Buffer.byteLength(value.text, 'utf8') > MAX_RESULT_PAGE_BYTES) {
+    throw new Error('invalid_result_report')
+  }
+  if (!Number.isSafeInteger(value.offset) || value.offset < 0 || value.offset > MAX_RESULT_OFFSET) {
+    throw new Error('invalid_result_report')
+  }
+  if (!Number.isSafeInteger(value.totalBytes) || value.totalBytes < Buffer.byteLength(value.text, 'utf8')) {
+    throw new Error('invalid_result_report')
+  }
+  if (value.nextOffset !== null
+    && (!Number.isSafeInteger(value.nextOffset)
+      || value.nextOffset <= value.offset
+      || value.nextOffset > value.totalBytes)) {
+    throw new Error('invalid_result_report')
+  }
+  return {
+    source: value.source,
+    text: value.text,
+    offset: value.offset,
+    nextOffset: value.nextOffset,
+    totalBytes: value.totalBytes,
+  }
+}
+
+function normalizeTaskResult(value, expectedOffset) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_task_result')
+  if (value.kind === 'matches') {
+    if (
+      !Array.isArray(value.matches)
+      || value.matches.length > MAX_SEARCH_MATCHES
+      || !Number.isInteger(value.total)
+      || value.total < value.matches.length
+      || typeof value.truncated !== 'boolean'
+      || value.truncated !== (value.total > value.matches.length)
+    ) throw new Error('invalid_task_result')
+    return {
+      kind: 'matches',
+      matches: value.matches.map(match => {
+        if (!match || typeof match !== 'object' || Array.isArray(match)) throw new Error('invalid_task_result')
+        if (!['task', 'batch'].includes(match.kind) || !SEARCH_ITEM_STATUSES.has(match.status)) {
+          throw new Error('invalid_task_result')
+        }
+        return { kind: match.kind, name: normalizeSearchName(match.name), status: match.status }
+      }),
+      total: value.total,
+      truncated: value.truncated,
+    }
+  }
+  if (
+    value.kind !== 'report'
+    || !isResultTaskId(value.taskId)
+    || !SEARCH_ITEM_STATUSES.has(value.status)
+  ) throw new Error('invalid_task_result')
+  const report = normalizeResultReport(value.report)
+  if (report && report.offset !== expectedOffset) throw new Error('invalid_task_result')
+  if (value.status !== 'succeeded' && report !== null) throw new Error('invalid_task_result')
+  return {
+    kind: 'report',
+    taskId: value.taskId,
+    name: normalizeResultName(value.name),
+    status: value.status,
+    report,
+  }
+}
+
 export function createSchedulerRunner({
   execute = executeFile,
   scriptPath = INSTALLED_TASK_FLOW_SCRIPT,
@@ -303,6 +393,15 @@ export function createSchedulerRunner({
       const safeQuery = normalizeSearchQuery(query)
       return normalizeSearchResult(
         await call(['--search-status', safeQuery], STATUS_SEARCH_TIMEOUT_MS),
+      )
+    },
+
+    async taskResult({ query, offset = 0 }) {
+      const safeQuery = normalizeSearchQuery(query)
+      const safeOffset = normalizeResultOffset(offset)
+      return normalizeTaskResult(
+        await call(['--result', safeQuery, '--result-offset', String(safeOffset)], STATUS_TIMEOUT_MS),
+        safeOffset,
       )
     },
   }

@@ -16,11 +16,12 @@ const QUOTED_PATH_PATTERN = /(["'`“‘])(\/[^\r\n]+?)(["'`”’])/gu
 const UNQUOTED_VIDEO_PATH_PATTERN = /(?:^|[\s：])(\/(?:[^\r\n"'`“”‘’])*?\.(?:m4v|mkv|mov|mp4|webm))(?=$|[\s,，。；;])/giu
 const VIDEO_SHAPE = /(?:学习|分析|解析|识别|总结|处理|看一下|观看).{0,40}(?:视频|影片|录像|目录|文件夹)|(?:视频|影片|录像|目录|文件夹).{0,40}(?:学习|分析|解析|识别|总结|处理|看一下|观看)/iu
 const LEARNING_ACTION = /(?:学习|分析|解析|识别|总结|处理|看一下|观看)/u
-const STATUS_SHAPE = /(?:查|查询|进度|状态|结果|完成|怎么样|情况|入队|排队|受理)/u
+const STATUS_SHAPE = /(?:查|查询|进度|状态|结果|报告|完成|怎么样|情况|入队|排队|受理)/u
+const FULL_RESULT_SHAPE = /(?:完整|详细|全文|全部|报告|学习结果|分析结果)/u
 const NEGATIVE_OR_NONEXECUTING = /(?:不要(?:执行|学习|分析|提交)|别(?:执行|学习|分析|提交)|如果|假如|比如|例如|举例|怎么|如何|能否|可以吗|是什么|之前说|刚才说|回顾)/u
 const DIRECTORY_HINT = /(?:目录|文件夹)/u
 const STATUS_SEARCH_CONTEXT = /(?:视频|影片|录像|学习|入队|排队|批次|[《「『]|第[零〇一二两三四五六七八九十百0-9]+(?:季|集)|s\d{1,2}\s*e\d{1,3}|\.(?:m4v|mkv|mov|mp4|webm))/iu
-const STATUS_SEARCH_NOISE = /(?:帮我|请(?:你)?|查(?:询)?|看(?:看)?|一下|下|视频|影片|录像|任务|学习|进度|状态|结果|情况|正式|是否|已经|已|入队|排队|受理|完成|的|了)/gu
+const STATUS_SEARCH_NOISE = /(?:帮我|请(?:你)?|查(?:询)?|看(?:看)?|一下|下|视频|影片|录像|任务|学习|进度|状态|结果|报告|完整|详细|全文|情况|正式|是否|已经|已|入队|排队|受理|完成|的|了)/gu
 const EXCLUSIVE_ANALYSIS_CLAUSE = /^\s*(?:(?:帮我|请(?:你)?|请帮我|麻烦(?:你)?|麻烦帮我|能不能帮我|可以帮我|现在|马上|立即|给我)\s*)?(?:只|仅)\s*(?:学习|分析|解析|处理|识别|总结)(?:一下|下)?\s*([^，。；;！？!?]{0,80})/iu
 const VISUAL_SCOPE = /(?:画面|视觉|图像|镜头)/u
 const AUDIO_SCOPE = /(?:音频|声音|语音|对白|台词)/u
@@ -169,6 +170,29 @@ function validateDecision(decision, content) {
     ) return null
     return { action: decision.action, query: decision.value }
   }
+  if (decision.action === 'result_task') {
+    return evidence.taskIds.length === 1
+      && evidence.batchIds.length === 0
+      && evidence.taskIds[0] === decision.value
+      ? { action: decision.action, query: decision.value }
+      : null
+  }
+  if (decision.action === 'result_batch') {
+    return evidence.batchIds.length === 1
+      && evidence.taskIds.length === 0
+      && evidence.batchIds[0] === decision.value
+      ? { action: decision.action, query: decision.value }
+      : null
+  }
+  if (decision.action === 'result_search') {
+    if (
+      !isStatusSearchCandidate(content)
+      || !FULL_RESULT_SHAPE.test(content)
+      || !isSearchQueryText(decision.value)
+      || !content.includes(decision.value)
+    ) return null
+    return { action: decision.action, query: decision.value }
+  }
   if (decision.action === 'respond' || decision.action === 'pass') {
     return { action: decision.action }
   }
@@ -304,6 +328,25 @@ function searchCandidatesReceipt(result) {
   return `${prefix}：${shown.join('；')}。请补充视频标题或关键词。`
 }
 
+function resultCandidatesReceipt(result) {
+  const shown = result.matches.slice(0, 5)
+    .map(match => `${searchName(match.name)}（${searchStatusLabel(match.status)}）`)
+  if (!shown.length) return '未找到匹配的视频学习结果。'
+  const prefix = result.truncated ? '匹配结果较多' : `找到 ${result.total} 条匹配视频`
+  return `${prefix}：${shown.join('；')}。请补充视频标题或季集后再读取完整结果。`
+}
+
+export function resultReceipt(result) {
+  if (result.kind === 'matches') return resultCandidatesReceipt(result)
+  if (result.status !== 'succeeded') return statusReceipt({ kind: 'task', status: result.status, summary: null })
+  if (!result.report) return '任务已完成，但尚未生成可读取的完整学习报告。'
+  const title = result.name ? `${searchName(result.name)}完整学习结果：\n` : '完整学习结果：\n'
+  const continuation = result.report.nextOffset === null
+    ? ''
+    : `\n\n报告较长；继续读取请使用相同查询并传 offset=${result.report.nextOffset}。`
+  return `${title}${result.report.text}${continuation}`
+}
+
 export async function queryStatusSearch({ runner = schedulerRunner, query } = {}) {
   try {
     const search = await runner.searchStatus({ query })
@@ -373,6 +416,15 @@ export function createQwenBeforeDispatchHandler({
     }
     if (decision.action === 'status_search') {
       return handled(await queryStatusSearch({ runner, query: decision.query }))
+    }
+    if (decision.action === 'result_task'
+      || decision.action === 'result_batch'
+      || decision.action === 'result_search') {
+      try {
+        return handled(resultReceipt(await runner.taskResult({ query: decision.query, offset: 0 })))
+      } catch {
+        return handled('暂时无法读取完整学习结果，本次未重试。')
+      }
     }
     try {
       const result = decision.action === 'status_task'
