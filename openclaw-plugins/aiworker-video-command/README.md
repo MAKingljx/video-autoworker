@@ -1,10 +1,10 @@
 # AI-worker Video Command plugin
 
-This directory contains the hook-only `0.5.1` candidate for the native OpenClaw
+This directory contains the hook-only `0.5.2` candidate for the native OpenClaw
 video-learning ingress. The files describe the local candidate contract;
 runtime and production acceptance still require their own evidence.
 
-`0.5.1` keeps `before_dispatch` as the sole conversation owner, but replaces
+`0.5.2` keeps `before_dispatch` as the sole conversation owner, but replaces
 the accumulated deterministic natural-language router with one host-owned,
 no-tool Qwen classification call. Only an authorized `second-original`
 Telegram direct message with a video/path, explicit-ID status, or title/keyword
@@ -64,7 +64,7 @@ transaction and an installed real-classifier QA must pass separately.
 
 The remainder of this file below documents the deployed `0.4.1` behavior and
 its historical upgrade/rollback gates. It is retained as migration evidence;
-it is not the `0.5.1` runtime contract.
+it is not the `0.5.2` runtime contract.
 
 ## Business contract
 
@@ -311,6 +311,26 @@ Control, n8n, the task agent, the Qwen backend, and the other two gateways did
 not change. A failed candidate install or validation automatically restores the
 exact `0.5.0` payload and config; no queue, n8n execution, media, or task data
 is created or modified.
+
+### Controlled 0.5.1 to 0.5.2 bounded-status refresh
+
+The `0.5.2` patch keeps title search within the same single-authorized-sender
+boundary, but makes the handler use `--status-brief` after a unique match.
+That client response contains only a sanitized, bounded summary rather than a
+possibly large completed-task payload, so the plugin's fixed subprocess output
+limit cannot turn a valid query into an unavailable reply. The existing
+`--status` CLI continues to return its complete response for direct operational
+use.
+
+```bash
+bash scripts/upgrade-aiworker-video-command-status-brief-plugin.sh --dry-run --target-sha <approved-0.5.2-sha>
+bash scripts/upgrade-aiworker-video-command-status-brief-plugin.sh --apply --target-sha <same-approved-0.5.2-sha>
+```
+
+This entry accepts only installed `0.5.1`, validates a clean canonical SHA and
+the hook-only runtime before apply, refreshes only `qwen-current`, and restores
+the exact `0.5.1` payload/config on failure. It does not alter queue, n8n,
+media, or task data.
 
 ### Controlled 0.4.1 to 0.5.0 classifier transition
 

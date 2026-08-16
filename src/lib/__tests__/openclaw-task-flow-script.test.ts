@@ -46,12 +46,15 @@ globalThis.fetch = async (input, init = {}) => {
     return json({ taskId: body.taskId, status: 'accepted' })
   }
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
     return json({ runs: [{
-      taskId: url.searchParams.get('taskId'),
+      taskId,
       status: 'succeeded',
       attemptCount: 1,
       maxAttempts: 1,
-      output: { summary: '状态客户端测试摘要' },
+      output: taskId === 'brief-video-task'
+        ? { summary: '状态客户端测试摘要'.repeat(40), detail: 'x'.repeat(100_000) }
+        : { summary: '状态客户端测试摘要' },
       updatedAt: '2026-08-11T12:00:00.000Z',
     }] })
   }
@@ -135,6 +138,22 @@ globalThis.fetch = async (input, init = {}) => {
         output: { summary: '状态客户端测试摘要' },
         updatedAt: '2026-08-11T12:00:00.000Z',
       })
+
+      const briefStatusRun = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--status-brief', 'brief-video-task',
+        ], { cwd: process.cwd(), env: childEnv, encoding: 'utf8' }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      const briefStatus = JSON.parse(briefStatusRun.stdout)
+      expect(briefStatusRun.stderr).toBe('')
+      expect(briefStatus).toMatchObject({ taskId: 'brief-video-task', status: 'succeeded' })
+      expect(briefStatus.output.summary.length).toBeLessThanOrEqual(160)
+      expect(briefStatus.output).not.toHaveProperty('detail')
 
       const videoPromptRun = await new Promise<{
         failed: boolean

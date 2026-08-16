@@ -233,7 +233,7 @@ export function createSchedulerRunner({
     async taskStatus({ taskId }) {
       if (!isSchedulerTaskId(taskId)) throw new Error('invalid_task_id')
       return normalizeTaskStatus(
-        await call(['--status', taskId], STATUS_TIMEOUT_MS),
+        await call(['--status-brief', taskId], STATUS_TIMEOUT_MS),
         taskId,
       )
     },

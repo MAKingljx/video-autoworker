@@ -1,7 +1,7 @@
 {
   "id": "aiworker-video-command",
   "name": "AI-worker Video Command",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Classifies eligible video-learning messages once with Qwen, then owns dispatch or status handling.",
   "activation": {
     "onStartup": true,

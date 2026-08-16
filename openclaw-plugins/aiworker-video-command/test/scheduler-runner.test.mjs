@@ -59,7 +59,8 @@ describe('0.5 scheduler runner', () => {
   })
 
   it('runs exactly one task or batch status command', async () => {
-    const task = fixture({ taskId, status: 'running', output: null }).runner
+    const taskFixture = fixture({ taskId, status: 'running', output: null })
+    const task = taskFixture.runner
     const batchFixture = fixture({
       batchId,
       status: 'running',
@@ -72,6 +73,9 @@ describe('0.5 scheduler runner', () => {
     })
     expect(batchFixture.execute.mock.calls[0][1]).toEqual([
       '/installed/submit-task.mjs', '--batch-status', batchId,
+    ])
+    expect(taskFixture.execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs', '--status-brief', taskId,
     ])
   })
 

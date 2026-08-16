@@ -142,6 +142,11 @@ For an explicit task ID, the runner calls the formal status client once:
 node skills/aiworker-task-flow/scripts/submit-task.mjs --status <complete-task-id>
 ```
 
+The native plugin uses the separate `--status-brief` variant after a title
+search resolves uniquely. It emits only a sanitized summary capped at 160
+characters, preventing a large completed-task payload from crossing the
+plugin's bounded subprocess interface.
+
 For an explicit batch ID, it calls the durable batch status client once:
 
 ```bash

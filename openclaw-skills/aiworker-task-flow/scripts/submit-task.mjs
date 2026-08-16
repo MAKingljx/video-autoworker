@@ -27,7 +27,7 @@ const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
   '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
   '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
-  '--search-status', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
+  '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--no-trigger-recovery', '--resume-pending'])
 const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
@@ -69,7 +69,7 @@ function validateCliArguments() {
     throw new Error('--prompt 与 --prompt-file 不能同时使用')
   }
   const primaryModes = [
-    '--batch-status', '--resume-batch', '--resume-pending', '--search-status', '--status', '--video-dir', '--video-file',
+    '--batch-status', '--resume-batch', '--resume-pending', '--search-status', '--status', '--status-brief', '--video-dir', '--video-file',
   ]
     .filter(name => present.has(name))
   if (primaryModes.length > 1) throw new Error(`任务模式参数不能同时使用：${primaryModes.join('、')}`)
@@ -83,6 +83,7 @@ function validateCliArguments() {
     '--resume-batch': new Set(['--resume-batch']),
     '--resume-pending': new Set(['--resume-pending']),
     '--status': new Set(['--status', '--base-url']),
+    '--status-brief': new Set(['--status-brief', '--base-url']),
     '--search-status': new Set(['--search-status']),
     '--video-dir': new Set([
       '--video-dir', '--batch-id', '--base-url', '--binding-id', '--prompt', '--prompt-file',
@@ -110,6 +111,14 @@ function fail(message, code = 1) {
 
 function output(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
+}
+
+function compactStatusOutput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const summary = typeof value.summary === 'string'
+    ? value.summary.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+    : ''
+  return summary ? { summary: summary.slice(0, 160) } : null
 }
 
 function rejectGenericVideoPrompt(prompt) {
@@ -273,7 +282,8 @@ async function main() {
   if (searchStatus) return handleStatusSearch(searchStatus)
 
   const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
-  const statusTaskId = option('--status')
+  const statusTaskId = option('--status') || option('--status-brief')
+  const briefStatus = Boolean(option('--status-brief'))
   if (statusTaskId) {
     const local = await readSingleVideoTaskState(statusTaskId).catch(error => {
       if (error?.code === 'ENOENT') return null
@@ -306,7 +316,7 @@ async function main() {
       status: run.status,
       attemptCount: run.attemptCount,
       maxAttempts: run.maxAttempts,
-      output: run.output,
+      output: briefStatus ? compactStatusOutput(run.output) : run.output,
       error: run.error,
       updatedAt: run.updatedAt,
     })
