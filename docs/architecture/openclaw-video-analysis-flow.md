@@ -2,9 +2,8 @@
 
 ## 文档状态
 
-本文描述 `0.5.2` 本地候选契约，不代表 GitHub main、已安装组件或生产环境已经
-升级，也不构成真实 Telegram 入站验收。生产事实必须由后续单独的提交、部署和
-验收证据确认。
+本文描述当前生产视频任务链契约。生产事实仍以对应提交、远端实际运行仓库和验收
+记录为准；本文不替代真实 Telegram 网络入站证据。
 
 ## 核心结论
 
@@ -119,11 +118,14 @@ status 一次，batchId 调正式 batch status 一次；标题搜索唯一命中
 
 正式下游固定为：
 
-`全局 video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen vision -> finalize -> SQLite`
+`全局 video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen3.8 vision -> chapter checkpoints -> bounded final synthesis -> finalize -> SQLite`
 
-`prepare` 负责受控收件、校验、分段和阶段元数据；Whisper 处理语音，本地 Qwen
-处理画面；`finalize` 确定性合并。所有模型工作节点使用 `memoryMode=none`，视频
-任务使用 `delivery=none`。SQLite 是任务与审计状态，不是智能体长期记忆。
+`prepare` 负责受控收件、校验、分段和阶段元数据；Whisper 处理语音，本地 Qwen3.8
+视觉服务处理画面；`finalize` 先合并音画时间线，再按章节 checkpoint 做有界文本
+汇总。视觉服务和汇总均使用 `memoryMode=none`，视频任务使用 `delivery=none`。
+Qwen 的 `<think>` 私有推理不会进入 checkpoint 或下一次汇总提示；SQLite 是任务与
+审计状态，不是智能体长期记忆。章节或最终汇总失败时，重试同一 task ID 只从已有
+checkpoint 继续，不重跑已成功阶段。
 
 ## 验收口径
 

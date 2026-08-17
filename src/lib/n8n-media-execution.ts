@@ -93,6 +93,12 @@ function mediaConfig(routing: Record<string, unknown>) {
   return mediaConfigSchema.parse(objectValue(configValue.media))
 }
 
+function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(process.env[name])
+  if (!Number.isFinite(parsed)) return fallback
+  return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)))
+}
+
 export function mediaInboxRoot(): string {
   return resolve(String(process.env.AIWORKER_MEDIA_INGEST_DIR || '').trim()
     || join(homedir(), 'ai-worker/state/video-autoworker/media-inbox'))
@@ -516,7 +522,10 @@ async function callCompatibleModel(
   apiKey: string,
   content: unknown,
   failurePrefix: string,
+  options: { maxTokens?: number; timeoutSeconds?: number } = {},
 ): Promise<any> {
+  const maxTokens = options.maxTokens ?? route.maxTokens
+  const timeoutSeconds = options.timeoutSeconds ?? route.timeoutSeconds
   const response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -530,9 +539,9 @@ async function callCompatibleModel(
         { role: 'user', content },
       ],
       ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
-      ...(route.maxTokens === undefined ? {} : { max_tokens: route.maxTokens }),
+      ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
     }),
-    signal: AbortSignal.timeout(route.timeoutSeconds * 1_000),
+    signal: AbortSignal.timeout(timeoutSeconds * 1_000),
   })
   const raw = await response.text()
   let parsed: any = null
@@ -546,6 +555,21 @@ async function callCompatibleModel(
     throw new Error(`${failurePrefix}：${detail}`)
   }
   return parsed
+}
+
+/**
+ * Qwen visual checkpoints may contain a private reasoning block before the
+ * user-facing answer. Persisting that block makes the next synthesis prompt
+ * unnecessarily large and can push a slow local runtime past its callback
+ * deadline. Keep only the visible answer while preserving the raw text when
+ * the model did not emit a complete reasoning marker.
+ */
+export function visibleModelAnswer(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return ''
+  const closing = raw.lastIndexOf('</think>')
+  if (closing >= 0) return raw.slice(closing + '</think>'.length).trim()
+  return raw.replace(/<think>[\s\S]*$/i, '').trim() || raw
 }
 
 export async function analyzeN8nVideoFrames(
@@ -588,14 +612,14 @@ export async function analyzeN8nVideoFrames(
         ...images.map(url => ({ type: 'image_url', image_url: { url } })),
       ]
       const parsed = await callCompatibleModel(route, apiKey, content, '视频画面模型调用失败')
-      const analysis = parsed?.choices?.[0]?.message?.content
-      if (typeof analysis !== 'string' || !analysis.trim()) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
+      const analysis = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+      if (!analysis) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
       segmentResult = {
         index: segment.index,
         startSeconds: segment.startSeconds,
         durationSeconds: segment.durationSeconds,
         timeRange: segmentTimeLabel(segment),
-        analysis: analysis.trim().slice(0, 12_000),
+        analysis: analysis.slice(0, 12_000),
         frameCount: images.length,
       }
       await writeCheckpoint(workspace, checkpointName, segmentResult)
@@ -685,6 +709,16 @@ export async function synthesizeN8nMediaResults(
   const workspace = mediaTaskWorkspace(taskId)
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim().slice(0, 4_000)
   const chapterSize = 5
+  // Final synthesis is text-only but still runs through the local multimodal
+  // runtime. Keep the output bounded so a reasoning-heavy Qwen response cannot
+  // hold the n8n callback open until its HTTP retry window expires.
+  const synthesisMaxTokens = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS', 1_024, 256, 2_048)
+  const synthesisTimeoutSeconds = boundedIntegerEnv(
+    'AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS',
+    route.timeoutSeconds,
+    60,
+    600,
+  )
   const chapters: Record<string, unknown>[] = []
   for (let offset = 0; offset < timeline.length; offset += chapterSize) {
     const group = timeline.slice(offset, offset + chapterSize)
@@ -696,22 +730,25 @@ export async function synthesizeN8nMediaResults(
     if (!chapter) {
       const source = group.map(segment => [
         `[${String(segment.timeRange || '')}]`,
-        `语音：${String(segment.transcript || '').slice(0, 6_000) || '无'}`,
-        `画面：${String(segment.visualAnalysis || '').slice(0, 6_000) || '无'}`,
+        `语音：${String(segment.transcript || '').slice(0, 4_000) || '无'}`,
+        `画面：${visibleModelAnswer(segment.visualAnalysis).slice(0, 4_000) || '无'}`,
       ].join('\n')).join('\n\n')
       const parsed = await callCompatibleModel(route, apiKey, [
         '请把以下约 5 分钟的分段结果汇总为一个章节。',
         `业务要求：${businessPrompt}`,
-        '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。',
+        '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。只输出最终章节，不要输出思考过程。',
         source,
-      ].join('\n\n'), `第 ${chapterIndex} 章汇总失败`)
-      const summary = parsed?.choices?.[0]?.message?.content
-      if (typeof summary !== 'string' || !summary.trim()) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
+      ].join('\n\n'), `第 ${chapterIndex} 章汇总失败`, {
+        maxTokens: synthesisMaxTokens,
+        timeoutSeconds: synthesisTimeoutSeconds,
+      })
+      const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+      if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
       chapter = {
         index: chapterIndex,
         startTime: String(group[0]?.timeRange || '').split('-')[0],
         endTime: String(group.at(-1)?.timeRange || '').split('-')[1],
-        summary: summary.trim().slice(0, 16_000),
+        summary: summary.slice(0, 8_000),
       }
       await writeCheckpoint(workspace, checkpointName, chapter)
     }
@@ -723,12 +760,15 @@ export async function synthesizeN8nMediaResults(
     const parsed = await callCompatibleModel(route, apiKey, [
       '根据下面的章节汇总，生成整部视频的最终分析报告。',
       `业务要求：${businessPrompt}`,
-      '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。',
-      chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${chapter.summary}`).join('\n\n'),
-    ].join('\n\n'), '全片汇总失败')
-    const summary = parsed?.choices?.[0]?.message?.content
-    if (typeof summary !== 'string' || !summary.trim()) throw new Error('全片汇总返回空结果')
-    finalSummary = { summary: summary.trim().slice(0, 32_000) }
+      '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。只输出最终报告，不要输出思考过程。',
+      chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${visibleModelAnswer(chapter.summary).slice(0, 8_000)}`).join('\n\n'),
+    ].join('\n\n'), '全片汇总失败', {
+      maxTokens: synthesisMaxTokens,
+      timeoutSeconds: synthesisTimeoutSeconds,
+    })
+    const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+    if (!summary) throw new Error('全片汇总返回空结果')
+    finalSummary = { summary: summary.slice(0, 16_000) }
     await writeCheckpoint(workspace, 'final-summary.json', finalSummary)
   }
   return {

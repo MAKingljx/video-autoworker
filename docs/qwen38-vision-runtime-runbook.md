@@ -25,14 +25,13 @@ Qwen3.8 文本/工具运行时仍独立使用 `127.0.0.1:18092/v1` 和 `qwen38-l
 ```sh
 cd ~/Documents/Phoenix/video-autoworker
 bash scripts/install-model-routes.sh --sync-resources --sync-routes
-~/ai-worker/bin/aiworker-qwen38-vl-doctor
-~/ai-worker/bin/aiworker-qwen38-vl-install --no-start
-~/ai-worker/bin/aiworker-qwen38-vl-start-bg
-~/ai-worker/bin/aiworker-qwen38-vl-test
-~/ai-worker/bin/aiworker-openclaw-qwen38-vl-install
-~/ai-worker/bin/aiworker-qwen38-vl-route-switch qwen38
-~/ai-worker/bin/aiworker-qwen38-vl-status
+QWEN38_VL_SOURCE_ROOT="$PWD" ~/ai-worker/bin/aiworker-qwen38-vl-upgrade
 ```
+
+`aiworker-qwen38-vl-upgrade` 是后续模型升级的固定入口。它按“运行文件备份与
+doctor → 启动 → 直接视觉测试 → OpenClaw provider 校验 → n8n binding 2 切换 →
+状态复核”的顺序执行；每个边界各自生成恢复点，不把模型权重、凭据、数据库或日志
+写入仓库。单独排障时仍可使用同目录下的 doctor/start/status/stop/test 子命令。
 
 每次安装都会先在 `~/ai-worker/backups/qwen38-vl-runtime/` 生成恢复点；只有 doctor、直接图片测试、OpenClaw 图片测试、路由校验和视频整链验收全部通过后，才把该恢复点标记为已验证。恢复点默认最多保留两个已验证历史版本。
 
@@ -45,6 +44,21 @@ bash scripts/install-model-routes.sh --sync-resources --sync-routes
 5. `route-switch status` 必须显示 binding `2` 的 `vision.routeId=local-qwen38-vl-direct`、回退为 `local-qwen36-direct`。
 6. 用一段真实视频走 `prepare -> Whisper audio / Qwen3.8 vision -> finalize`；父任务与四个阶段均成功，输出非空且 `memoryMode=none`。
 7. 视频链路验收前，3017 的 `/api/n8n/workflows` 必须是 HTTP 200；若返回 `Authentication required`，先检查 standalone 是否绑定 `127.0.0.1` 并加载仓库 `.env.local`，不得重提视频任务。
+
+## 汇总超时保护
+
+Qwen3.8 视觉服务会把 `<think>...</think>` 与最终答案一起返回。视频片段 checkpoint
+只保存 `</think>` 之后的可见答案，章节和整片汇总也使用独立的有界 `max_tokens`（默认
+`1024`，上限 `2048`）以及最多 `600` 秒的请求窗口。这样最终汇总不会因为把内部推理
+全文再次送回模型而超过 n8n 的回调窗口；章节 checkpoint 和 `final-summary.json` 仍
+支持同一 task ID 失败后恢复，不会重新执行已经成功的音频/视觉阶段。
+
+可按节点性能在运行环境中调整，但不应把上限扩大到无界：
+
+```sh
+export AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS=1024
+export AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS=600
+```
 
 ## 回滚
 

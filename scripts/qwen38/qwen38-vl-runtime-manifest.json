@@ -22,6 +22,7 @@
     "av": "installed"
   },
   "upgradeOrder": [
+    "upgrade",
     "doctor",
     "install",
     "start",

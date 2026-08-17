@@ -8,6 +8,7 @@ import {
   mediaChildIdentity,
   mediaTaskWorkspace,
   mergeN8nMediaResults,
+  visibleModelAnswer,
 } from '@/lib/n8n-media-execution'
 
 describe('n8n stateless media helpers', () => {
@@ -69,6 +70,12 @@ describe('n8n stateless media helpers', () => {
       transcript: '这是一段语音。',
       visualAnalysis: '画面中有人走进房间。',
     }])
+  })
+
+  it('removes private Qwen reasoning before persisting visual checkpoints', () => {
+    expect(visibleModelAnswer('<think>internal reasoning</think>最终画面结论')).toBe('最终画面结论')
+    expect(visibleModelAnswer('没有思考标记的结果')).toBe('没有思考标记的结果')
+    expect(visibleModelAnswer('')).toBe('')
   })
 
   it('cleans only the exact finalized task workspace', async () => {

@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+# Canonical one-command upgrade path for the Qwen3.8 visual runtime.  The
+# source tree is supplied explicitly by deployment (or inferred when this
+# script is run from the repository); runtime files, OpenClaw config, and the
+# n8n binding each create their own recoverable backup before mutation.
+SOURCE_ROOT="${QWEN38_VL_SOURCE_ROOT:-}"
+if [ -z "$SOURCE_ROOT" ] && [ -f "$(pwd)/scripts/qwen38/aiworker-qwen38-vl-install" ]; then
+  SOURCE_ROOT="$(pwd)"
+fi
+[ -n "$SOURCE_ROOT" ] || {
+  echo "QWEN38_VL_SOURCE_ROOT must point to the video-autoworker checkout" >&2
+  exit 2
+}
+SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)"
+[ -f "$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-install" ] || {
+  echo "invalid QWEN38_VL_SOURCE_ROOT: $SOURCE_ROOT" >&2
+  exit 2
+}
+
+BIN_DIR="$HOME/ai-worker/bin"
+INSTALL="$BIN_DIR/aiworker-qwen38-vl-install"
+START="$BIN_DIR/aiworker-qwen38-vl-start-bg"
+TEST="$BIN_DIR/aiworker-qwen38-vl-test"
+OPENCLAW_INSTALL="$BIN_DIR/aiworker-openclaw-qwen38-vl-install"
+ROUTE_SWITCH="$BIN_DIR/aiworker-qwen38-vl-route-switch"
+STATUS="$BIN_DIR/aiworker-qwen38-vl-status"
+
+QWEN38_VL_SOURCE_ROOT="$SOURCE_ROOT" "$INSTALL" --no-start
+"$START"
+"$TEST"
+"$OPENCLAW_INSTALL"
+"$ROUTE_SWITCH" qwen38
+"$STATUS"
+
+printf 'qwen38-vl upgrade complete source=%s route=local-qwen38-vl-direct fallback=local-qwen36-direct\n' "$SOURCE_ROOT"
