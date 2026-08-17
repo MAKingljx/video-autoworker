@@ -68,11 +68,12 @@ fi
 cd "$STANDALONE_DIR"
 # Next.js standalone server reads HOSTNAME to decide bind address.
 # Bash auto-populates HOSTNAME with the machine name, so prefer MC_HOSTNAME
-# and otherwise fall back to 0.0.0.0 for standalone deployments.
+# and otherwise fall back to loopback for standalone deployments. The local
+# desktop auth boundary intentionally depends on the request remaining local.
 machine_hostname="$(hostname 2>/dev/null || true)"
 if [[ -n "${MC_HOSTNAME:-}" ]]; then
   export HOSTNAME="$MC_HOSTNAME"
 elif [[ -z "${HOSTNAME:-}" || "$HOSTNAME" == "$machine_hostname" ]]; then
-  export HOSTNAME="0.0.0.0"
+  export HOSTNAME="127.0.0.1"
 fi
 exec "${NODE_BIN:-node}" server.js

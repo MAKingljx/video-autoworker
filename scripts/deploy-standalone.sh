@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BRANCH="${BRANCH:-$(git -C "$PROJECT_ROOT" branch --show-current)}"
 PORT="${PORT:-3000}"
-LISTEN_HOST="${MC_HOSTNAME:-0.0.0.0}"
+LISTEN_HOST="${MC_HOSTNAME:-127.0.0.1}"
 LOG_PATH="${LOG_PATH:-/tmp/mc.log}"
 VERIFY_HOST="${VERIFY_HOST:-127.0.0.1}"
 PID_FILE="${PID_FILE:-$PROJECT_ROOT/.next/standalone/server.pid}"
@@ -232,9 +232,9 @@ fi
 # The managed task-flow uses loopback-only API calls. A 401 here means the
 # standalone process was started without the repository runtime environment,
 # which would strand queued video tasks even though the web page is healthy.
-n8n_probe="$(curl -fsSL "http://$VERIFY_HOST:$PORT/api/n8n/workflows")"
-if [[ "$n8n_probe" == *'"error":"Authentication required"'* ]]; then
-  echo "error: standalone runtime did not load MC_DESKTOP_MODE for loopback task-flow calls" >&2
+n8n_probe_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://$VERIFY_HOST:$PORT/api/n8n/workflows" || true)"
+if [[ "$n8n_probe_code" != 2?? ]]; then
+  echo "error: loopback task-flow API probe returned HTTP $n8n_probe_code; check MC_DESKTOP_MODE and listen host" >&2
   exit 1
 fi
 
