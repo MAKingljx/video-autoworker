@@ -36,9 +36,11 @@ fi
 install -d -m 700 "$(dirname "$TARGET")"
 if [[ -f "$TARGET" ]]; then
   if [[ "$SYNC_RESOURCES" == true ]]; then
-    sync_args=()
-    [[ "$ENABLE_VIDEO_ANALYSIS" == true ]] && sync_args+=(--enable-video-analysis)
-    node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET" "${sync_args[@]}"
+    if [[ "$ENABLE_VIDEO_ANALYSIS" == true ]]; then
+      node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET" --enable-video-analysis
+    else
+      node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET"
+    fi
   else
     printf '保留现有模型路由：%s\n' "$TARGET"
   fi
