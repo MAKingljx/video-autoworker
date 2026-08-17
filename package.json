@@ -102,10 +102,5 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/MAKingljx/video-autoworker.git"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
   }
 }

@@ -79,6 +79,7 @@ async function fixture() {
   await Promise.all([
     rm(join(installedSkill, 'WORKSPACE_VIDEO_MEMORY.md')),
     rm(join(installedSkill, 'WORKSPACE_VIDEO_RULES.md')),
+    rm(join(installedSkill, 'test'), { recursive: true, force: true }),
   ])
   await chmod(installer, 0o755)
   await chmod(validator, 0o755)

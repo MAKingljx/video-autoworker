@@ -1,0 +1,12 @@
+# pnpm 10 compatibility; pnpm 11 uses the equivalent allowBuilds map below.
+onlyBuiltDependencies:
+  - better-sqlite3
+
+allowBuilds:
+  '@parcel/watcher': false
+  '@swc/core': false
+  better-sqlite3: true
+  esbuild: false
+  sharp: false
+  unrs-resolver: false
+  vue-demi: false

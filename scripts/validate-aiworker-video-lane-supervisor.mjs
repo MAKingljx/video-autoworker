@@ -80,12 +80,16 @@ async function listPayload(root, source) {
   const result = []
   const top = await readdir(root, { withFileTypes: true })
   const expectedTop = source
-    ? new Set(['SKILL.md', 'WORKSPACE_VIDEO_MEMORY.md', 'WORKSPACE_VIDEO_RULES.md', 'lib', 'scripts'])
+    ? new Set(['SKILL.md', 'WORKSPACE_VIDEO_MEMORY.md', 'WORKSPACE_VIDEO_RULES.md', 'lib', 'scripts', 'test'])
     : new Set(['SKILL.md', 'lib', 'scripts'])
   for (const entry of top) {
     assert(expectedTop.has(entry.name), `Unexpected task-flow payload entry: ${entry.name}`)
     const pathname = join(root, entry.name)
     assert(!entry.isSymbolicLink(), `Task-flow payload must not contain symlinks: ${entry.name}`)
+    if (entry.name === 'test') {
+      assert(source && entry.isDirectory(), 'Canonical task-flow test directory must be a directory.')
+      continue
+    }
     if (entry.name === 'lib' || entry.name === 'scripts') {
       assert(entry.isDirectory(), `Task-flow ${entry.name} must be a directory.`)
       for (const child of await readdir(pathname, { withFileTypes: true })) {

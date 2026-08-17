@@ -6,7 +6,9 @@ const nextConfig = {
   outputFileTracingExcludes: {
     '/*': ['./.data/**/*'],
   },
-  turbopack: {},
+  // Keep Next/Turbopack inside the canonical repository even when a parent
+  // operations directory contains an unrelated package-lock.json.
+  turbopack: { root: __dirname },
   // Transpile ESM-only packages so they resolve correctly in all environments
   transpilePackages: ['react-markdown', 'remark-gfm'],
   
