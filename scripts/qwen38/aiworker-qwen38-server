@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+NAME="${QWEN38_NAME:-qwen38-27b-bf16}"
+PORT="${QWEN38_PORT:-18092}"
+MODEL_DIR="${QWEN38_MODEL_DIR:-$HOME/models/Qwen3.8-27B-MLX-BF16}"
+PYTHON="${QWEN38_PYTHON:-$HOME/ai-worker/venvs/mlx/bin/python}"
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+PID_FILE="$RUN_DIR/$NAME.pid"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+if [ ! -x "$PYTHON" ]; then
+  echo "Qwen3.8 Python runtime not found: $PYTHON" >&2
+  exit 1
+fi
+
+if [ ! -f "$MODEL_DIR/config.json" ]; then
+  echo "Qwen3.8 MLX model is missing or incomplete: $MODEL_DIR" >&2
+  exit 1
+fi
+
+rm -f "$PID_FILE"
+echo "$$" > "$PID_FILE"
+
+# mlx-lm is the verified Apple Silicon runtime for Qwen3.8's text/tool path.
+# The converted MLX implementation excludes the vision tower; video/image
+# work remains routed to Qwen3.6 on port 18091.
+exec "$PYTHON" -m mlx_lm server \
+  --model "$MODEL_DIR" \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --max-tokens "${QWEN38_MAX_TOKENS:-4096}" \
+  --chat-template-args '{"enable_thinking":false,"thinking":false}'

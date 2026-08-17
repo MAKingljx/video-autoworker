@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+LABEL="ai.aiworker.qwen38-server"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PORT="${QWEN38_PORT:-18092}"
+LOG_FILE="$HOME/ai-worker/logs/qwen38-server.launchd.log"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+if [ ! -f "$PLIST" ]; then
+  echo "server LaunchAgent plist not found: $PLIST" >&2
+  exit 1
+fi
+
+mkdir -p "$HOME/ai-worker/logs" "$HOME/ai-worker/run"
+
+if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || true
+fi
+
+launchctl kickstart -k "$DOMAIN/$LABEL"
+sleep 8
+
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  pid="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1)"
+  echo "started: pid=$pid port=$PORT supervisor=$LABEL log=$LOG_FILE"
+else
+  echo "start requested but port $PORT is not listening yet; check $LOG_FILE" >&2
+  launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n '1,100p' >&2 || true
+  exit 1
+fi

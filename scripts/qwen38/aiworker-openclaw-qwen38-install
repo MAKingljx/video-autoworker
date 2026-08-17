@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+PROFILE="${OPENCLAW_PROFILE_NAME:-qwen-current}"
+OPENCLAW="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
+STATE_DIR="$HOME/.openclaw-$PROFILE"
+CONFIG="$STATE_DIR/openclaw.json"
+MODELS_JSON="$STATE_DIR/agents/second-original/agent/models.json"
+BACKUP_ROOT="$HOME/ai-worker/backups/qwen38-openclaw"
+
+if [ ! -f "$CONFIG" ] || [ ! -f "$MODELS_JSON" ]; then
+  echo "OpenClaw profile files are missing for $PROFILE" >&2
+  exit 1
+fi
+
+if ! curl -fsS --max-time 5 http://127.0.0.1:18092/v1/models >/dev/null; then
+  echo "Qwen3.8 endpoint is not healthy: 127.0.0.1:18092" >&2
+  exit 1
+fi
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+backup="$BACKUP_ROOT/$timestamp"
+umask 077
+mkdir -p "$backup"
+cp -p "$CONFIG" "$backup/openclaw.json"
+cp -p "$MODELS_JSON" "$backup/models.json"
+cmp -s "$CONFIG" "$backup/openclaw.json"
+cmp -s "$MODELS_JSON" "$backup/models.json"
+
+if ! node - "$CONFIG" "$MODELS_JSON" <<'NODE'
+const fs = require("fs");
+const [configPath, modelsPath] = process.argv.slice(2);
+const provider = {
+  baseUrl: "http://127.0.0.1:18092/v1",
+  api: "openai-completions",
+  timeoutSeconds: 900,
+  request: { allowPrivateNetwork: true },
+  models: [{
+    id: "default_model",
+    name: "Qwen3.8-27B BF16 MLX text/tools",
+    api: "openai-completions",
+    reasoning: false,
+    input: ["text"],
+    contextWindow: 131072,
+    maxTokens: 4096,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: { supportsTools: true },
+    contextTokens: 98304
+  }],
+  auth: "api-key",
+  apiKey: "not-needed"
+};
+const target = "qwen38-local/default_model";
+
+const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+config.models = config.models || {};
+config.models.mode = config.models.mode || "merge";
+config.models.providers = config.models.providers || {};
+config.models.providers["qwen38-local"] = provider;
+config.agents = config.agents || {};
+config.agents.defaults = config.agents.defaults || {};
+config.agents.defaults.models = config.agents.defaults.models || {};
+config.agents.defaults.models[target] = {
+  ...(config.agents.defaults.models[target] || {}),
+  params: { chat_template_kwargs: { enable_thinking: false, thinking: false } }
+};
+
+const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
+models.providers = models.providers || {};
+models.providers["qwen38-local"] = provider;
+
+fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n");
+NODE
+then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  echo "provider write failed; restored $backup" >&2
+  exit 1
+fi
+
+if ! "$OPENCLAW" --profile "$PROFILE" models aliases add qwen36 qwen36-tools-local/default_model >/dev/null || \
+   ! "$OPENCLAW" --profile "$PROFILE" models aliases add qwen38 qwen38-local/default_model >/dev/null || \
+   ! "$OPENCLAW" --profile "$PROFILE" config validate >/dev/null; then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  echo "OpenClaw provider/alias validation failed; restored $backup" >&2
+  exit 1
+fi
+
+"$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if "$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+if ! "$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1; then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null 2>&1 || true
+  echo "Gateway health failed; restored $backup" >&2
+  exit 1
+fi
+
+if ! "$OPENCLAW" --profile "$PROFILE" infer model run --gateway --model qwen38-local/default_model --prompt "只输出一个字：好" >/dev/null; then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null 2>&1 || true
+  echo "Qwen3.8 OpenClaw inference failed; restored $backup" >&2
+  exit 1
+fi
+
+echo "installed provider=qwen38-local/default_model profile=$PROFILE backup=$backup"
+"$OPENCLAW" --profile "$PROFILE" models status --json | sed -n '1,160p'

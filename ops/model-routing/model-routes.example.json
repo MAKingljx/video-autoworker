@@ -111,6 +111,23 @@
           "tokenizer.json"
         ]
       }
+    },
+    {
+      "id": "qwen38-27b-bf16-mlx",
+      "label": "Qwen3.8-27B BF16 MLX",
+      "description": "第二台 heisenbergs-1 的本地 Qwen3.8 文本与工具模型；视觉与视频任务继续使用 Qwen3.6。",
+      "location": "local",
+      "kind": "language-model",
+      "model": "Qwen3.8-27B-MLX-BF16",
+      "production": true,
+      "enabled": true,
+      "capabilities": ["text", "tools", "structured-output"],
+      "usedBy": ["qwen-current / second-original 模型切换"],
+      "runtime": {
+        "type": "mlx-lm",
+        "baseUrl": "http://127.0.0.1:18092/v1",
+        "modelDirectory": "~/models/Qwen3.8-27B-MLX-BF16"
+      }
     }
   ],
   "routes": [
@@ -144,6 +161,22 @@
       "thinking": "off",
       "timeoutSeconds": 300,
       "capabilities": ["text", "vision", "tools", "structured-output"],
+      "enabled": true
+    },
+    {
+      "id": "local-qwen38",
+      "resourceId": "qwen38-27b-bf16-mlx",
+      "resourceLabel": "本地千问 3.8",
+      "label": "本地千问 3.8 Agent",
+      "description": "通过 qwen-current OpenClaw 配置档调用 Qwen3.8 文本与工具模型；不声明视觉能力。",
+      "location": "local",
+      "transport": "openclaw",
+      "model": "qwen38-local/default_model",
+      "profile": "qwen-current",
+      "agentId": "second-original",
+      "thinking": "off",
+      "timeoutSeconds": 300,
+      "capabilities": ["text", "tools", "structured-output"],
       "enabled": true
     },
     {

@@ -1,0 +1,30 @@
+#!/bin/sh
+set +e
+
+LABEL="ai.aiworker.qwen38-server"
+PORT="${QWEN38_PORT:-18092}"
+PID_FILE="$HOME/ai-worker/run/qwen38-27b-bf16.pid"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+    fi
+  fi
+  rm -f "$PID_FILE"
+fi
+
+pids="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)"
+if [ -n "$pids" ]; then
+  echo "$pids" | xargs kill 2>/dev/null || true
+fi
+
+echo "stopped qwen38 port=$PORT supervisor=$LABEL"

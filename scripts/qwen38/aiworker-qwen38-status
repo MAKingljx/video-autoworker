@@ -1,0 +1,51 @@
+#!/bin/sh
+set +e
+
+LABEL="ai.aiworker.qwen38-server"
+PORT="${QWEN38_PORT:-18092}"
+MODEL_DIR="${QWEN38_MODEL_DIR:-$HOME/models/Qwen3.8-27B-MLX-BF16}"
+PID_FILE="$HOME/ai-worker/run/qwen38-27b-bf16.pid"
+LOG_FILE="$HOME/ai-worker/logs/qwen38-server.launchd.log"
+ERR_FILE="$HOME/ai-worker/logs/qwen38-server.launchd.err"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+printf 'node=%s user=%s\n' "$(hostname 2>/dev/null)" "$(whoami 2>/dev/null)"
+printf 'server_port=%s\n' "$PORT"
+printf 'model_dir=%s\n' "$MODEL_DIR"
+
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  printf 'supervisor=loaded label=%s\n' "$LABEL"
+  launchctl list | grep "$LABEL" || true
+else
+  printf 'supervisor=not-loaded label=%s\n' "$LABEL"
+fi
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'server=running pid=%s\n' "$pid"
+    ps -o pid,ppid,etime,stat,%cpu,%mem,rss,command -p "$pid" || true
+  else
+    printf 'server=stale pid=%s\n' "$pid"
+  fi
+else
+  printf 'server=not-running\n'
+fi
+
+printf 'listen=%s\n' "$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
+du -sh "$MODEL_DIR" 2>/dev/null || true
+
+if command -v curl >/dev/null 2>&1; then
+  code="$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/v1/models" 2>/dev/null)"
+  printf 'models_http=%s\n' "${code:-000}"
+fi
+
+if [ -f "$LOG_FILE" ]; then
+  printf 'log=%s\n' "$LOG_FILE"
+  tail -n 80 "$LOG_FILE"
+fi
+if [ -s "$ERR_FILE" ]; then
+  printf 'err=%s\n' "$ERR_FILE"
+  tail -n 40 "$ERR_FILE"
+fi
