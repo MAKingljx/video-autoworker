@@ -195,7 +195,9 @@ echo "==> stopping existing standalone server before rebuild"
 stop_existing_server
 
 echo "==> installing dependencies"
-pnpm install --frozen-lockfile
+# SSH/LaunchAgent deployments have no TTY. Keep caller overrides, but make
+# the default non-interactive so pnpm can safely recreate node_modules.
+CI="${CI:-true}" pnpm install --frozen-lockfile
 
 echo "==> rebuilding standalone bundle"
 rm -rf .next
