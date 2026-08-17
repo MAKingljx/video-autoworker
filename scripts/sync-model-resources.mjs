@@ -13,9 +13,10 @@ import { basename, dirname, join } from 'node:path'
 
 const [templatePath, targetPath, ...options] = process.argv.slice(2)
 const enableVideoAnalysis = options.includes('--enable-video-analysis')
+const syncRoutes = options.includes('--sync-routes')
 
-if (!templatePath || !targetPath || options.some(option => option !== '--enable-video-analysis')) {
-  console.error('用法：sync-model-resources.mjs <template> <target> [--enable-video-analysis]')
+if (!templatePath || !targetPath || options.some(option => !['--enable-video-analysis', '--sync-routes'].includes(option))) {
+  console.error('用法：sync-model-resources.mjs <template> <target> [--enable-video-analysis] [--sync-routes]')
   process.exit(2)
 }
 
@@ -41,6 +42,11 @@ const templateResources = template.resources || []
 const templateIds = new Set(templateResources.map(resource => resource.id))
 const retainedResources = (target.resources || []).filter(resource => !templateIds.has(resource.id))
 let mergedRoutes = target.routes
+if (syncRoutes) {
+  const existingRouteIds = new Set(target.routes.map(route => route.id))
+  const missingRoutes = template.routes.filter(route => !existingRouteIds.has(route.id))
+  mergedRoutes = [...target.routes, ...missingRoutes]
+}
 if (enableVideoAnalysis) {
   const routeId = 'local-qwen36-direct'
   const templateRoute = template.routes.find(route => route.id === routeId)
@@ -76,4 +82,4 @@ try {
   rmSync(temporaryPath, { force: true })
 }
 
-console.log(`已同步 ${templateResources.length} 个辅助模型资源${enableVideoAnalysis ? '，并启用视频分析视觉直连能力' : ''}；备份：${backupPath}`)
+console.log(`已同步 ${templateResources.length} 个辅助模型资源${syncRoutes ? `，补充 ${template.routes.filter(route => !target.routes.some(existing => existing.id === route.id)).length} 个缺失路由` : ''}${enableVideoAnalysis ? '，并启用视频分析视觉直连能力' : ''}；备份：${backupPath}`)

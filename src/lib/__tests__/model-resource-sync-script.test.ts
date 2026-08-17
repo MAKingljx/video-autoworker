@@ -89,4 +89,34 @@ describe('model resource sync script', () => {
     expect(backups).toHaveLength(1)
     expect((await stat(join(root, backups[0]))).mode & 0o777).toBe(0o600)
   })
+
+  it('adds missing template routes without overwriting existing routes', async () => {
+    const templatePath = join(root, 'template.json')
+    const targetPath = join(root, 'target.json')
+    const template = {
+      version: 1,
+      routes: [
+        { id: 'local-qwen36-direct', model: 'template-qwen36' },
+        { id: 'local-qwen38-vl-direct', model: 'qwen38-27b-vl', capabilities: ['vision', 'video'] },
+      ],
+      resources: [],
+    }
+    const target = {
+      version: 1,
+      routes: [{ id: 'local-qwen36-direct', model: 'production-qwen36', custom: 'keep' }],
+      resources: [],
+    }
+    await writeFile(templatePath, JSON.stringify(template), { mode: 0o600 })
+    await writeFile(targetPath, JSON.stringify(target), { mode: 0o600 })
+    await chmod(targetPath, 0o600)
+
+    const result = await runScript([templatePath, targetPath, '--sync-routes'])
+    expect(result.stdout).toContain('补充 1 个缺失路由')
+
+    const updated = JSON.parse(await readFile(targetPath, 'utf8'))
+    expect(updated.routes).toEqual([
+      target.routes[0],
+      template.routes[1],
+    ])
+  })
 })

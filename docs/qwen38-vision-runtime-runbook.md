@@ -23,6 +23,8 @@ Qwen3.8 文本/工具运行时仍独立使用 `127.0.0.1:18092/v1` 和 `qwen38-l
 在远端真实仓库 `~/Documents/Phoenix/video-autoworker` 的对应提交上执行，先确认 `node`、模型目录和端口，再按以下顺序操作：
 
 ```sh
+cd ~/Documents/Phoenix/video-autoworker
+bash scripts/install-model-routes.sh --sync-resources --sync-routes
 ~/ai-worker/bin/aiworker-qwen38-vl-doctor
 ~/ai-worker/bin/aiworker-qwen38-vl-install --no-start
 ~/ai-worker/bin/aiworker-qwen38-vl-start-bg

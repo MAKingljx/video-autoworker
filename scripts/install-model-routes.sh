@@ -6,6 +6,7 @@ TEMPLATE="$APP_DIR/ops/model-routing/model-routes.example.json"
 TARGET="${AIWORKER_MODEL_ROUTES_FILE:-$HOME/.config/video-autoworker/model-routes.json}"
 SYNC_RESOURCES=false
 ENABLE_VIDEO_ANALYSIS=false
+SYNC_ROUTES=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -16,8 +17,12 @@ while [[ $# -gt 0 ]]; do
       SYNC_RESOURCES=true
       ENABLE_VIDEO_ANALYSIS=true
       ;;
+    --sync-routes)
+      SYNC_RESOURCES=true
+      SYNC_ROUTES=true
+      ;;
     *)
-      printf '用法：%s [--sync-resources] [--enable-video-analysis]\n' "$0" >&2
+      printf '用法：%s [--sync-resources] [--sync-routes] [--enable-video-analysis]\n' "$0" >&2
       exit 2
       ;;
   esac
@@ -37,10 +42,14 @@ install -d -m 700 "$(dirname "$TARGET")"
 if [[ -f "$TARGET" ]]; then
   if [[ "$SYNC_RESOURCES" == true ]]; then
     if [[ "$ENABLE_VIDEO_ANALYSIS" == true ]]; then
-      node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET" --enable-video-analysis
+      args=(--enable-video-analysis)
     else
-      node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET"
+      args=()
     fi
+    if [[ "$SYNC_ROUTES" == true ]]; then
+      args+=(--sync-routes)
+    fi
+    node "$APP_DIR/scripts/sync-model-resources.mjs" "$TEMPLATE" "$TARGET" "${args[@]}"
   else
     printf '保留现有模型路由：%s\n' "$TARGET"
   fi
