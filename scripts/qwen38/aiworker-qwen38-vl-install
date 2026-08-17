@@ -43,9 +43,10 @@ copy_file() {
 
 copy_file "$SOURCE_ROOT/scripts/qwen38/qwen38_vl_server.py" "$DEST_LIB/qwen38_vl_server.py"
 copy_file "$SOURCE_ROOT/scripts/qwen38/qwen38-vl-runtime-manifest.json" "$DEST_LIB/qwen38-vl-runtime-manifest.json"
-for name in server start-bg status stop doctor test; do
+for name in server start-bg status stop doctor test route-switch; do
   copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-$name" "$DEST_BIN/aiworker-qwen38-vl-$name"
 done
+copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-openclaw-qwen38-vl-install" "$DEST_BIN/aiworker-openclaw-qwen38-vl-install"
 copy_file "$SOURCE_ROOT/launch-agents/ai.aiworker.qwen38-vl-server.plist" "$DEST_PLIST"
 
 "$DEST_BIN/aiworker-qwen38-vl-doctor"
