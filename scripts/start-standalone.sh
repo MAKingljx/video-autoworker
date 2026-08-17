@@ -8,6 +8,23 @@ STANDALONE_ROOT="$PROJECT_ROOT/.next/standalone"
 SOURCE_STATIC_DIR="$PROJECT_ROOT/.next/static"
 SOURCE_PUBLIC_DIR="$PROJECT_ROOT/public"
 
+# A standalone server can be restarted directly without deploy-standalone.sh.
+# Load the repository-owned runtime environment here as well, so loopback
+# task-flow calls keep the desktop trust boundary and external data paths.
+load_runtime_env() {
+  local env_file
+  set -a
+  for env_file in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.local"; do
+    if [[ -f "$env_file" ]]; then
+      # shellcheck disable=SC1090
+      source "$env_file"
+    fi
+  done
+  set +a
+}
+
+load_runtime_env
+
 find_standalone_server() {
   if [[ -f "$STANDALONE_ROOT/server.js" ]]; then
     printf '%s\n' "$STANDALONE_ROOT/server.js"

@@ -229,6 +229,15 @@ if [[ -z "${css_path:-}" ]]; then
   exit 1
 fi
 
+# The managed task-flow uses loopback-only API calls. A 401 here means the
+# standalone process was started without the repository runtime environment,
+# which would strand queued video tasks even though the web page is healthy.
+n8n_probe="$(curl -fsSL "http://$VERIFY_HOST:$PORT/api/n8n/workflows")"
+if [[ "$n8n_probe" == *'"error":"Authentication required"'* ]]; then
+  echo "error: standalone runtime did not load MC_DESKTOP_MODE for loopback task-flow calls" >&2
+  exit 1
+fi
+
 listener_pid="$(list_listener_pids | head -n1)"
 if [[ -z "${listener_pid:-}" ]]; then
   echo "error: no listener detected on port $PORT after startup" >&2
