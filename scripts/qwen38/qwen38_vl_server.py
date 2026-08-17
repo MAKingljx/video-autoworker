@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from PIL import Image
 
 LOG = logging.getLogger("aiworker.qwen38.vl")
@@ -324,8 +324,6 @@ async def chat_completions(request: Request) -> JSONResponse:
     payload = await request.json()
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
-    if payload.get("stream"):
-        raise HTTPException(status_code=400, detail="当前视觉运行时暂不支持 stream")
     request_model = str(payload.get("model", MODEL_ID)).strip()
     if request_model and request_model != MODEL_ID and request_model != "default_model":
         raise HTTPException(status_code=400, detail=f"不支持的模型：{request_model}")
@@ -343,7 +341,7 @@ async def chat_completions(request: Request) -> JSONResponse:
         LOG.exception("visual completion failed")
         raise HTTPException(status_code=502, detail=_safe_error(error)) from error
 
-    return JSONResponse({
+    response_body = {
         "id": f"chatcmpl-qwen38-vl-{uuid.uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
@@ -355,7 +353,35 @@ async def chat_completions(request: Request) -> JSONResponse:
         }],
         "usage": usage,
         "system_fingerprint": f"qwen38-vl-{int(started)}",
-    })
+    }
+    if not payload.get("stream"):
+        return JSONResponse(response_body)
+
+    chunk_id = response_body["id"]
+    created = response_body["created"]
+
+    async def events():
+        yield "data: " + json.dumps({
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": MODEL_ID,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": answer},
+                "finish_reason": None,
+            }],
+        }, ensure_ascii=False) + "\n\n"
+        yield "data: " + json.dumps({
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": MODEL_ID,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }, ensure_ascii=False) + "\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
