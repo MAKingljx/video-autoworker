@@ -124,9 +124,24 @@
       "capabilities": ["text", "tools", "structured-output"],
       "usedBy": ["qwen-current / second-original 模型切换"],
       "runtime": {
-        "type": "mlx-lm",
-        "baseUrl": "http://127.0.0.1:18092/v1",
-        "modelDirectory": "~/models/Qwen3.8-27B-MLX-BF16"
+        "type": "openai-compatible",
+        "baseUrl": "http://127.0.0.1:18092/v1"
+      }
+    },
+    {
+      "id": "qwen38-27b-vl",
+      "label": "Qwen3.8-27B Vision BF16",
+      "description": "第二台 heisenbergs-1 的 Qwen3.8 原始视觉权重与 Transformers MPS 运行时，支持图片、视频和结构化无状态分析。",
+      "location": "local",
+      "kind": "language-model",
+      "model": "qwen38-27b-vl",
+      "production": true,
+      "enabled": true,
+      "capabilities": ["text", "vision", "video", "structured-output"],
+      "usedBy": ["video-autoworker n8n 视频画面节点", "qwen-current 显式视觉调用"],
+      "runtime": {
+        "type": "openai-compatible",
+        "baseUrl": "http://127.0.0.1:18094/v1"
       }
     }
   ],
@@ -145,6 +160,22 @@
       "temperature": 0,
       "maxTokens": 32768,
       "capabilities": ["text", "vision", "reasoning", "structured-output"],
+      "enabled": true
+    },
+    {
+      "id": "local-qwen38-vl-direct",
+      "resourceId": "qwen38-27b-vl",
+      "resourceLabel": "本地千问 3.8 Vision",
+      "label": "本地千问 3.8 Vision 直连",
+      "description": "由 n8n 视频画面节点直连 Qwen3.8 原始视觉权重；任务绑定保留 Qwen3.6 回退路由。",
+      "location": "local",
+      "transport": "openai-compatible",
+      "baseUrl": "http://127.0.0.1:18094/v1",
+      "model": "qwen38-27b-vl",
+      "timeoutSeconds": 600,
+      "temperature": 0,
+      "maxTokens": 16384,
+      "capabilities": ["text", "vision", "video", "structured-output"],
       "enabled": true
     },
     {

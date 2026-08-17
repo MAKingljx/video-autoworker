@@ -1,0 +1,42 @@
+{
+  "runtimeVersion": 1,
+  "modelFamily": "qwen3_5",
+  "modelLabel": "Qwen3.8-27B original multimodal weights",
+  "modelDirectory": "~/models/Qwen3.8-27B",
+  "backend": "transformers-mps",
+  "python": "~/ai-worker/venvs/mlx/bin/python",
+  "endpoint": "http://127.0.0.1:18094/v1",
+  "modelId": "qwen38-27b-vl",
+  "requiredFiles": [
+    "config.json",
+    "preprocessor_config.json",
+    "video_preprocessor_config.json",
+    "tokenizer.json"
+  ],
+  "requiredPythonPackages": {
+    "transformers": "5.8.1",
+    "torch": "2.12.0",
+    "fastapi": "installed",
+    "uvicorn": "installed",
+    "pillow": "installed",
+    "av": "installed"
+  },
+  "upgradeOrder": [
+    "doctor",
+    "install",
+    "start",
+    "direct-image-test",
+    "openclaw-image-test",
+    "n8n-video-test",
+    "route-switch",
+    "verify",
+    "mark-backup-verified"
+  ],
+  "rollback": [
+    "route-switch qwen36",
+    "stop qwen38-vl",
+    "restore previous runtime backup",
+    "start qwen36 production vision service",
+    "port-conflict: keep existing image generation API on 18093"
+  ]
+}

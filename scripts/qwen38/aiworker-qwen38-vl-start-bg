@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+LABEL="ai.aiworker.qwen38-vl-server"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+PORT="${QWEN38_VL_PORT:-18094}"
+TIMEOUT="${QWEN38_VL_START_TIMEOUT_SECONDS:-480}"
+LOG_FILE="$HOME/ai-worker/logs/qwen38-vl-server.launchd.log"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+[ -f "$PLIST" ] || { echo "VL LaunchAgent plist not found: $PLIST" >&2; exit 1; }
+mkdir -p "$HOME/ai-worker/logs" "$HOME/ai-worker/run"
+
+if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || true
+fi
+launchctl kickstart -k "$DOMAIN/$LABEL"
+
+deadline=$((SECONDS + TIMEOUT))
+while [ "$SECONDS" -lt "$deadline" ]; do
+  if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/health" 2>/dev/null | grep -q '"status":"ok"'; then
+    pid="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+    echo "started: pid=${pid:-unknown} port=$PORT supervisor=$LABEL log=$LOG_FILE"
+    exit 0
+  fi
+  sleep 5
+done
+
+echo "start requested but Qwen3.8 VL did not become ready within ${TIMEOUT}s" >&2
+tail -n 120 "$LOG_FILE" 2>/dev/null || true
+launchctl print "$DOMAIN/$LABEL" 2>/dev/null | sed -n '1,120p' >&2 || true
+exit 1

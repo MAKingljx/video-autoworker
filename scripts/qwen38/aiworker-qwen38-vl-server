@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+PORT="${QWEN38_VL_PORT:-18094}"
+MODEL_DIR="${QWEN38_VL_MODEL_DIR:-$HOME/models/Qwen3.8-27B}"
+PYTHON="${QWEN38_VL_PYTHON:-$HOME/ai-worker/venvs/mlx/bin/python}"
+SERVER_SCRIPT="${QWEN38_VL_SERVER_SCRIPT:-$HOME/ai-worker/lib/qwen38/qwen38_vl_server.py}"
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+PID_FILE="$RUN_DIR/qwen38-vl.pid"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+[ -x "$PYTHON" ] || { echo "Qwen3.8 VL Python runtime not found: $PYTHON" >&2; exit 1; }
+[ -f "$SERVER_SCRIPT" ] || { echo "Qwen3.8 VL server script not found: $SERVER_SCRIPT" >&2; exit 1; }
+[ -f "$MODEL_DIR/config.json" ] || { echo "Qwen3.8 original model is missing: $MODEL_DIR" >&2; exit 1; }
+
+rm -f "$PID_FILE"
+echo "$$" > "$PID_FILE"
+trap 'rm -f "$PID_FILE"' EXIT
+
+export QWEN38_VL_PORT="$PORT"
+export QWEN38_VL_MODEL_DIR="$MODEL_DIR"
+export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+export PYTORCH_ENABLE_MPS_FALLBACK="${PYTORCH_ENABLE_MPS_FALLBACK:-1}"
+
+# This is deliberately a separate service from mlx-lm on 18092.  The raw
+# safetensors directory is required because it contains the vision tower.
+exec "$PYTHON" "$SERVER_SCRIPT"

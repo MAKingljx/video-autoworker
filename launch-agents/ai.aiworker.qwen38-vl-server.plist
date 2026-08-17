@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.aiworker.qwen38-vl-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/heisenbergs-1/ai-worker/bin/aiworker-qwen38-vl-server</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LowPriorityIO</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/heisenbergs-1/ai-worker/logs/qwen38-vl-server.launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/heisenbergs-1/ai-worker/logs/qwen38-vl-server.launchd.err</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/heisenbergs-1/ai-worker</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/heisenbergs-1</string>
+    <key>PATH</key>
+    <string>/Users/heisenbergs-1/ai-worker/bin:/Users/heisenbergs-1/ai-worker/node/current/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>QWEN38_VL_PORT</key>
+    <string>18094</string>
+    <key>QWEN38_VL_MODEL_DIR</key>
+    <string>/Users/heisenbergs-1/models/Qwen3.8-27B</string>
+    <key>QWEN38_VL_MODEL_ID</key>
+    <string>qwen38-27b-vl</string>
+    <key>QWEN38_VL_MAX_NEW_TOKENS</key>
+    <string>1024</string>
+    <key>QWEN38_VL_MAX_IMAGES</key>
+    <string>8</string>
+    <key>QWEN38_VL_REQUEST_TIMEOUT_SECONDS</key>
+    <string>900</string>
+    <key>TOKENIZERS_PARALLELISM</key>
+    <string>false</string>
+    <key>PYTORCH_ENABLE_MPS_FALLBACK</key>
+    <string>1</string>
+  </dict>
+</dict>
+</plist>

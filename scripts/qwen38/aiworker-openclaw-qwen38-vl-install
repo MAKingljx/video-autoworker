@@ -1,0 +1,93 @@
+#!/bin/sh
+set -eu
+
+PROFILE="${OPENCLAW_PROFILE_NAME:-qwen-current}"
+OPENCLAW="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
+STATE_DIR="$HOME/.openclaw-$PROFILE"
+CONFIG="$STATE_DIR/openclaw.json"
+MODELS_JSON="$STATE_DIR/agents/second-original/agent/models.json"
+BACKUP_ROOT="$HOME/ai-worker/backups/qwen38-vl-openclaw"
+ENDPOINT="${QWEN38_VL_ENDPOINT:-http://127.0.0.1:18094/v1}"
+TARGET="qwen38-vl-local/qwen38-27b-vl"
+
+[ -f "$CONFIG" ] && [ -f "$MODELS_JSON" ] || { echo "OpenClaw profile files are missing for $PROFILE" >&2; exit 1; }
+curl -fsS --max-time 8 "$ENDPOINT/models" >/dev/null || { echo "Qwen3.8 VL endpoint is not healthy: $ENDPOINT" >&2; exit 1; }
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+backup="$BACKUP_ROOT/$timestamp"
+umask 077
+mkdir -p "$backup"
+cp -p "$CONFIG" "$backup/openclaw.json"
+cp -p "$MODELS_JSON" "$backup/models.json"
+
+if ! node - "$CONFIG" "$MODELS_JSON" "$ENDPOINT" "$TARGET" <<'NODE'
+const fs = require('fs');
+const [configPath, modelsPath, endpoint, target] = process.argv.slice(2);
+const provider = {
+  baseUrl: endpoint,
+  api: 'openai-completions',
+  timeoutSeconds: 900,
+  request: { allowPrivateNetwork: true },
+  models: [{
+    id: 'qwen38-27b-vl',
+    name: 'Qwen3.8-27B Vision BF16',
+    api: 'openai-completions',
+    reasoning: true,
+    input: ['text', 'image'],
+    contextWindow: 131072,
+    maxTokens: 4096,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: { supportsTools: false, thinkingFormat: 'qwen-chat-template' },
+    contextTokens: 98304,
+  }],
+  auth: 'api-key',
+  apiKey: 'not-needed',
+};
+for (const path of [configPath, modelsPath]) {
+  const value = JSON.parse(fs.readFileSync(path, 'utf8'));
+  value.models = value.models || {};
+  value.models.mode = value.models.mode || 'merge';
+  value.models.providers = value.models.providers || {};
+  value.models.providers['qwen38-vl-local'] = provider;
+  if (path === configPath) {
+    value.agents = value.agents || {};
+    value.agents.defaults = value.agents.defaults || {};
+    value.agents.defaults.models = value.agents.defaults.models || {};
+    value.agents.defaults.models[target] = {
+      ...(value.agents.defaults.models[target] || {}),
+      params: { chat_template_kwargs: { enable_thinking: true, thinking: true, preserve_thinking: true } },
+    };
+  }
+  fs.writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
+}
+NODE
+then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  echo "OpenClaw VL provider write failed; restored $backup" >&2
+  exit 1
+fi
+
+if ! "$OPENCLAW" --profile "$PROFILE" models aliases add qwen38-vl "$TARGET" >/dev/null || \
+   ! "$OPENCLAW" --profile "$PROFILE" config validate >/dev/null; then
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null 2>&1 || true
+  echo "OpenClaw VL provider validation failed; restored $backup" >&2
+  exit 1
+fi
+
+"$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  "$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1 && break
+  sleep 2
+done
+"$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1 || {
+  cp -p "$backup/openclaw.json" "$CONFIG"
+  cp -p "$backup/models.json" "$MODELS_JSON"
+  "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null 2>&1 || true
+  echo "OpenClaw health failed; restored $backup" >&2
+  exit 1
+}
+
+echo "installed provider=$TARGET profile=$PROFILE backup=$backup"

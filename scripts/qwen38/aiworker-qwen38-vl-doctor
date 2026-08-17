@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+MODEL_DIR="${QWEN38_VL_MODEL_DIR:-$HOME/models/Qwen3.8-27B}"
+PYTHON="${QWEN38_VL_PYTHON:-$HOME/ai-worker/venvs/mlx/bin/python}"
+PORT="${QWEN38_VL_PORT:-18094}"
+
+"$PYTHON" - "$MODEL_DIR" <<'PY'
+import importlib.util
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+config = json.loads((root / "config.json").read_text())
+required = ["config.json", "preprocessor_config.json", "video_preprocessor_config.json", "tokenizer.json"]
+missing = [name for name in required if not (root / name).is_file()]
+if missing:
+    raise SystemExit("missing model files: " + ",".join(missing))
+if not config.get("vision_config"):
+    raise SystemExit("vision_config missing")
+if "image_token_id" not in config or "video_token_id" not in config:
+    raise SystemExit("image/video token missing")
+from transformers import Qwen3_5ForConditionalGeneration, AutoProcessor  # noqa: F401
+print("model_config=ok")
+print("vision_architecture=" + ",".join(config.get("architectures") or []))
+print("transformers_qwen35=ok")
+for name in ["fastapi", "uvicorn", "PIL", "torch"]:
+    if not importlib.util.find_spec(name):
+        raise SystemExit("python dependency missing: " + name)
+    print("dependency=" + name)
+PY
+
+if curl -fsS --max-time 8 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+  echo "endpoint=healthy port=$PORT"
+else
+  echo "endpoint=not-running port=$PORT"
+fi

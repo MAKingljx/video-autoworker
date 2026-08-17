@@ -7,7 +7,7 @@ const routeIdSchema = z.string().trim().min(1).max(80).regex(/^[A-Za-z0-9._:-]+$
 const safeComponentSchema = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9._:-]+$/)
 const envReferenceSchema = z.string().trim().regex(/^[A-Z][A-Z0-9_]*$/)
 const modelCapabilitySchema = z.enum([
-  'text', 'vision', 'audio', 'tools', 'reasoning', 'structured-output',
+  'text', 'vision', 'video', 'audio', 'tools', 'reasoning', 'structured-output',
   'transcription', 'embedding', 'reranking', 'multilingual',
 ])
 
@@ -90,12 +90,28 @@ const localFilesResourceRuntimeSchema = z.object({
   requiredFiles: z.array(relativeModelFileSchema).min(1).max(30),
 }).strict()
 
+const openAiCompatibleResourceRuntimeSchema = z.object({
+  type: z.literal('openai-compatible'),
+  baseUrl: z.string().trim().url().max(500),
+}).strict().superRefine((runtime, ctx) => {
+  let url: URL
+  try {
+    url = new URL(runtime.baseUrl)
+  } catch {
+    return
+  }
+  const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
+  if (!loopback || url.protocol !== 'http:') {
+    ctx.addIssue({ code: 'custom', path: ['baseUrl'], message: '本地兼容模型服务必须使用回环 HTTP' })
+  }
+})
+
 export const auxiliaryModelResourceSchema = z.object({
   id: routeIdSchema,
   label: z.string().trim().min(1).max(120),
   description: z.string().trim().max(500).default(''),
   location: z.literal('local').default('local'),
-  kind: z.enum(['speech-recognition', 'embedding', 'reranker', 'other']),
+  kind: z.enum(['speech-recognition', 'embedding', 'reranker', 'language-model', 'other']),
   model: z.string().trim().min(1).max(180),
   production: z.boolean().default(true),
   enabled: z.boolean().default(true),
@@ -105,9 +121,10 @@ export const auxiliaryModelResourceSchema = z.object({
     cliResourceRuntimeSchema,
     ollamaResourceRuntimeSchema,
     localFilesResourceRuntimeSchema,
+    openAiCompatibleResourceRuntimeSchema,
   ]),
 }).strict().superRefine((resource, ctx) => {
-  if (resource.runtime.type !== 'ollama') return
+  if (resource.runtime.type !== 'ollama' && resource.runtime.type !== 'openai-compatible') return
   let url: URL
   try {
     url = new URL(resource.runtime.baseUrl)
@@ -116,7 +133,13 @@ export const auxiliaryModelResourceSchema = z.object({
   }
   const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(url.hostname)
   if (!loopback || url.protocol !== 'http:') {
-    ctx.addIssue({ code: 'custom', path: ['runtime', 'baseUrl'], message: '本地 Ollama 地址必须使用回环 HTTP' })
+    ctx.addIssue({
+      code: 'custom',
+      path: ['runtime', 'baseUrl'],
+      message: resource.runtime.type === 'ollama'
+        ? '本地 Ollama 地址必须使用回环 HTTP'
+        : '本地兼容模型服务必须使用回环 HTTP',
+    })
   }
 })
 
@@ -325,6 +348,24 @@ export async function publicAuxiliaryModelResource(
       } catch {
         available = false
         unavailableReason = 'Ollama 当前不可访问'
+      }
+    }
+  } else if (resource.runtime.type === 'openai-compatible') {
+    const baseUrl = resource.runtime.baseUrl.replace(/\/+$/, '')
+    endpoint = `OpenAI 兼容服务 · ${new URL(baseUrl).host}`
+    if (resource.enabled) {
+      try {
+        const response = await fetch(`${baseUrl}/models`, {
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(1_500),
+        })
+        if (!response.ok) {
+          available = false
+          unavailableReason = `模型服务 HTTP ${response.status}`
+        }
+      } catch {
+        available = false
+        unavailableReason = '模型服务当前不可访问'
       }
     }
   } else {

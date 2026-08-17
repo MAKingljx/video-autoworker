@@ -52,6 +52,19 @@ const registry = {
         requiredFiles: ['sh'],
       },
     },
+    {
+      id: 'qwen38-27b-vl',
+      label: 'Qwen3.8-27B Vision BF16',
+      location: 'local',
+      kind: 'language-model',
+      model: 'qwen38-27b-vl',
+      capabilities: ['text', 'vision', 'video', 'structured-output'],
+      usedBy: ['video-autoworker n8n 视频画面节点'],
+      runtime: {
+        type: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:18094/v1',
+      },
+    },
   ],
   routes: [
     {
@@ -107,6 +120,7 @@ describe('n8n model routing', () => {
       'whisper-large-v3-turbo',
       'nomic-embed-text',
       'sensevoice-small',
+      'qwen38-27b-vl',
     ])
     expect(publicN8nModelRoute(loaded.routes[2])).toMatchObject({
       available: false,
@@ -187,6 +201,37 @@ describe('n8n model routing', () => {
     expect(JSON.stringify(result)).not.toContain('/bin')
   })
 
+  it('checks an OpenAI-compatible local vision runtime without exposing a local path', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify(registry)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      object: 'list',
+      data: [{ id: 'qwen38-27b-vl' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const loaded = loadN8nModelRegistry()
+    const result = await publicAuxiliaryModelResource(loaded.resources[3])
+
+    expect(result).toMatchObject({
+      id: 'qwen38-27b-vl',
+      kind: 'language-model',
+      runtime: 'openai-compatible',
+      available: true,
+      endpoint: 'OpenAI 兼容服务 · 127.0.0.1:18094',
+    })
+    expect(JSON.stringify(result)).not.toContain('18094/v1')
+  })
+
+  it('reports an unavailable OpenAI-compatible local vision runtime', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify(registry)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 503 }))
+
+    const loaded = loadN8nModelRegistry()
+    await expect(publicAuxiliaryModelResource(loaded.resources[3])).resolves.toMatchObject({
+      available: false,
+      unavailableReason: '模型服务 HTTP 503',
+    })
+  })
+
   it('rejects an auxiliary Ollama endpoint outside the local machine', () => {
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       ...registry,
@@ -200,6 +245,21 @@ describe('n8n model routing', () => {
     expect(loaded.routes).toEqual([])
     expect(loaded.resources).toEqual([])
     expect(loaded.errors.join(' ')).toContain('本地 Ollama 地址必须使用回环 HTTP')
+  })
+
+  it('rejects an auxiliary OpenAI-compatible endpoint outside the local machine', () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      ...registry,
+      resources: [{
+        ...registry.resources[3],
+        runtime: { type: 'openai-compatible', baseUrl: 'https://example.com/v1' },
+      }],
+    })
+    const loaded = loadN8nModelRegistry()
+
+    expect(loaded.routes).toEqual([])
+    expect(loaded.resources).toEqual([])
+    expect(loaded.errors.join(' ')).toContain('本地兼容模型服务必须使用回环 HTTP')
   })
 
   it('uses a task route override before the saved node route', () => {

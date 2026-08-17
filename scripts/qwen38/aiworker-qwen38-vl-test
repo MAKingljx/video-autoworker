@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+PORT="${QWEN38_VL_PORT:-18094}"
+PYTHON="${QWEN38_VL_PYTHON:-$HOME/ai-worker/venvs/mlx/bin/python}"
+MODEL="${QWEN38_VL_MODEL_ID:-qwen38-27b-vl}"
+
+payload="$($PYTHON - "$MODEL" <<'PY'
+import base64, io, json, sys
+from PIL import Image
+buf = io.BytesIO()
+Image.new("RGB", (256, 256), (220, 30, 30)).save(buf, format="PNG")
+image = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+print(json.dumps({
+  "model": sys.argv[1],
+  "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "这张图片的主体颜色是什么？只回答颜色。"},
+    {"type": "image_url", "image_url": {"url": image}},
+  ]}],
+  "max_tokens": 64,
+}, ensure_ascii=False))
+PY
+)"
+response="$(curl -fsS --max-time "${QWEN38_VL_TEST_TIMEOUT_SECONDS:-900}" \
+  -H 'Content-Type: application/json' \
+  "http://127.0.0.1:$PORT/v1/chat/completions" \
+  --data-binary "$payload")"
+"$PYTHON" - "$response" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+answer = value.get("choices", [{}])[0].get("message", {}).get("content", "")
+if not isinstance(answer, str) or not answer.strip():
+    raise SystemExit("empty visual answer")
+print(json.dumps({"ok": True, "answer": answer.strip(), "model": value.get("model"), "usage": value.get("usage")}, ensure_ascii=False))
+PY

@@ -1,0 +1,61 @@
+#!/bin/sh
+set -eu
+
+SOURCE_ROOT="${QWEN38_VL_SOURCE_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
+DEST_LIB="$HOME/ai-worker/lib/qwen38"
+DEST_BIN="$HOME/ai-worker/bin"
+DEST_PLIST="$HOME/Library/LaunchAgents/ai.aiworker.qwen38-vl-server.plist"
+BACKUP_ROOT="$HOME/ai-worker/backups/qwen38-vl-runtime"
+START=false
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --start) START=true ;;
+    --no-start) START=false ;;
+    *) echo "usage: $0 [--start|--no-start]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+backup="$BACKUP_ROOT/$timestamp"
+umask 077
+mkdir -p "$backup" "$DEST_LIB" "$DEST_BIN" "$HOME/Library/LaunchAgents"
+
+backup_file() {
+  target="$1"
+  if [ -e "$target" ] || [ -L "$target" ]; then
+    mkdir -p "$backup$(dirname "$target")"
+    cp -p "$target" "$backup$target"
+  fi
+}
+
+copy_file() {
+  source="$1"
+  target="$2"
+  [ -f "$source" ] || { echo "missing source file: $source" >&2; exit 1; }
+  backup_file "$target"
+  case "$target" in
+    *.plist|*.json|*.py) install -m 644 "$source" "$target" ;;
+    *) install -m 755 "$source" "$target" ;;
+  esac
+}
+
+copy_file "$SOURCE_ROOT/scripts/qwen38/qwen38_vl_server.py" "$DEST_LIB/qwen38_vl_server.py"
+copy_file "$SOURCE_ROOT/scripts/qwen38/qwen38-vl-runtime-manifest.json" "$DEST_LIB/qwen38-vl-runtime-manifest.json"
+for name in server start-bg status stop doctor test; do
+  copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-$name" "$DEST_BIN/aiworker-qwen38-vl-$name"
+done
+copy_file "$SOURCE_ROOT/launch-agents/ai.aiworker.qwen38-vl-server.plist" "$DEST_PLIST"
+
+"$DEST_BIN/aiworker-qwen38-vl-doctor"
+
+if [ "$START" = true ]; then
+  "$DEST_BIN/aiworker-qwen38-vl-start-bg"
+  "$DEST_BIN/aiworker-qwen38-vl-test"
+fi
+
+printf 'installed qwen38-vl runtime backup=%s start=%s\n' "$backup" "$START"
+if [ "$START" = true ]; then
+  : > "$backup/.verified"
+fi

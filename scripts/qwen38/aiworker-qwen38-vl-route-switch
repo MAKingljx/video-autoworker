@@ -1,0 +1,102 @@
+#!/bin/sh
+set -eu
+
+MODE="${1:-status}"
+BASE_URL="${MC_BASE_URL:-http://127.0.0.1:3017}"
+BINDING_ID="${QWEN38_VL_VIDEO_BINDING_ID:-2}"
+BACKUP_ROOT="$HOME/ai-worker/backups/qwen38-vl-routing"
+ROUTE38="local-qwen38-vl-direct"
+ROUTE36="local-qwen36-direct"
+
+case "$MODE" in
+  qwen38|qwen36|status) ;;
+  *) echo "usage: $0 qwen38|qwen36|status" >&2; exit 2 ;;
+esac
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/qwen38-vl-route.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+curl -fsS --max-time 10 "$BASE_URL/api/n8n/workflows" > "$tmp/workflows.json"
+
+if [ "$MODE" = status ]; then
+  node - "$tmp/workflows.json" "$BINDING_ID" <<'NODE'
+const fs = require('fs');
+const [path, id] = process.argv.slice(2);
+const body = JSON.parse(fs.readFileSync(path, 'utf8'));
+const binding = (body.bindings || []).find((item) => String(item.id) === String(id));
+if (!binding) throw new Error(`binding ${id} not found`);
+console.log(JSON.stringify({
+  id: binding.id,
+  name: binding.name,
+  enabled: binding.enabled,
+  vision: binding.config?.modelRouting?.nodes?.vision || null,
+}, null, 2));
+NODE
+  exit 0
+fi
+
+if [ "$MODE" = qwen38 ]; then
+  curl -fsS --max-time 10 http://127.0.0.1:18094/health | grep -q '"status":"ok"' || {
+    echo "Qwen3.8 VL service is not ready; refusing to switch video route" >&2
+    exit 1
+  }
+  route="$ROUTE38"
+  fallback="$ROUTE36"
+else
+  route="$ROUTE36"
+  fallback=""
+fi
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+backup="$BACKUP_ROOT/$timestamp"
+umask 077
+mkdir -p "$backup"
+
+node - "$tmp/workflows.json" "$BINDING_ID" "$backup/binding.json" "$tmp/payload.json" "$route" "$fallback" <<'NODE'
+const fs = require('fs');
+const [workflowsPath, id, backupPath, payloadPath, route, fallback] = process.argv.slice(2);
+const body = JSON.parse(fs.readFileSync(workflowsPath, 'utf8'));
+const binding = (body.bindings || []).find((item) => String(item.id) === String(id));
+if (!binding) throw new Error(`binding ${id} not found`);
+fs.writeFileSync(backupPath, JSON.stringify(binding, null, 2) + '\n', { mode: 0o600 });
+const config = JSON.parse(JSON.stringify(binding.config || {}));
+config.modelRouting = config.modelRouting || { allowTaskOverride: true, nodes: {} };
+config.modelRouting.allowTaskOverride = config.modelRouting.allowTaskOverride !== false;
+config.modelRouting.nodes = config.modelRouting.nodes || {};
+config.modelRouting.nodes.vision = {
+  ...(config.modelRouting.nodes.vision || {}),
+  routeId: route,
+  fallbackRouteIds: fallback ? [fallback] : [],
+};
+const payload = {
+  id: binding.id,
+  name: binding.name,
+  description: binding.description || '',
+  workflowId: binding.workflowId || '',
+  webhookPath: binding.webhookPath,
+  taskType: binding.taskType,
+  agentRole: binding.agentRole,
+  model: binding.model,
+  timeoutSeconds: binding.timeoutSeconds,
+  retryCount: binding.retryCount,
+  enabled: Boolean(binding.enabled),
+  config,
+};
+fs.writeFileSync(payloadPath, JSON.stringify(payload, null, 2), { mode: 0o600 });
+NODE
+
+curl -fsS --max-time 15 -X PUT -H 'Content-Type: application/json' \
+  --data-binary "@$tmp/payload.json" "$BASE_URL/api/n8n/workflows" > "$tmp/updated.json"
+curl -fsS --max-time 10 "$BASE_URL/api/n8n/workflows" > "$tmp/after.json"
+node - "$tmp/after.json" "$BINDING_ID" "$route" <<'NODE'
+const fs = require('fs');
+const [path, id, route] = process.argv.slice(2);
+const body = JSON.parse(fs.readFileSync(path, 'utf8'));
+const binding = (body.bindings || []).find((item) => String(item.id) === String(id));
+if (binding?.config?.modelRouting?.nodes?.vision?.routeId !== route) {
+  throw new Error(`video vision route did not become ${route}`);
+}
+console.log(JSON.stringify({id: binding.id, route: binding.config.modelRouting.nodes.vision}, null, 2));
+NODE
+
+: > "$backup/.verified"
+printf 'video vision route=%s fallback=%s backup=%s\n' "$route" "${fallback:-none}" "$backup"

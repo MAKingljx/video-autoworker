@@ -41,6 +41,7 @@ function kindLabel(kind: 'generative' | PublicAuxiliaryModelResource['kind']): s
   if (kind === 'speech-recognition') return '语音识别'
   if (kind === 'embedding') return '向量模型'
   if (kind === 'reranker') return '重排模型'
+  if (kind === 'language-model') return '语言模型'
   if (kind === 'other') return '专用模型'
   return '生成模型'
 }
