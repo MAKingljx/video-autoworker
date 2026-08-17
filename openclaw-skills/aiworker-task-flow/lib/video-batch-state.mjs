@@ -128,16 +128,45 @@ function chineseNumeralToNumber(value) {
   return Number.isInteger(result) && result > 0 ? result : null
 }
 
-function normalizeSearchText(value) {
-  return String(value || '')
+function formatSearchSequence(value) {
+  const number = Number(value)
+  if (!Number.isSafeInteger(number) || number < 0) return String(value)
+  return String(number).padStart(3, '0')
+}
+
+function normalizeSeasonEpisodeMarkers(value) {
+  let text = String(value || '')
     .normalize('NFKC')
     .toLocaleLowerCase('zh-CN')
     .replace(/[\u0000-\u001f\u007f]/gu, ' ')
-    .replace(/第([零〇一二两三四五六七八九十百]+)(季|集)/gu, (_match, number, unit) => {
-      const converted = chineseNumeralToNumber(number)
-      return converted ? `第${converted}${unit}` : `第${number}${unit}`
-    })
-    .replace(/[\s\p{P}\p{S}]+/gu, '')
+
+  // Convert Chinese numerals before normalizing the marker spelling. This
+  // keeps “第三季第三集” equivalent to “s3e3” and “season03 episode03”.
+  text = text.replace(/第([零〇一二两三四五六七八九十百]+)(季|集)/gu, (_match, number, unit) => {
+    const converted = chineseNumeralToNumber(number)
+    return converted === null ? `第${number}${unit}` : `第${converted}${unit}`
+  })
+
+  // Use fixed-width internal markers so ep4 never matches ep40. The marker
+  // is deliberately textual: it remains safe for the existing bounded
+  // substring search while preserving the original display filename.
+  text = text
+    .replace(/(?:season|s)\s*0*(\d{1,3})\s*(?:episode|ep|e)\s*0*(\d{1,4})/giu,
+      (_match, season, episode) => `season${formatSearchSequence(season)}ep${formatSearchSequence(episode)}`)
+    .replace(/第\s*0*(\d{1,4})\s*季/gu,
+      (_match, season) => `season${formatSearchSequence(season)}`)
+    .replace(/第\s*0*(\d{1,4})\s*集/gu,
+      (_match, episode) => `ep${formatSearchSequence(episode)}`)
+    .replace(/(?:season|s)\s*0*(\d{1,3})/giu,
+      (_match, season) => `season${formatSearchSequence(season)}`)
+    .replace(/(?:episode|ep|e)\s*0*(\d{1,4})/giu,
+      (_match, episode) => `ep${formatSearchSequence(episode)}`)
+
+  return text.replace(/[\s\p{P}\p{S}]+/gu, '')
+}
+
+function normalizeSearchText(value) {
+  return normalizeSeasonEpisodeMarkers(value)
 }
 
 function extractSearchTerms(value) {
@@ -145,9 +174,8 @@ function extractSearchTerms(value) {
     .replace(/^(?:请|帮我|帮|查询|查|看|一下|下|视频|影片|录像|任务|学习)+/u, '')
     .replace(/(?:进度|状态|结果|情况|正式|入队|排队|受理|完成|的|了)+$/u, '')
   const segmented = normalized
-    .replace(/s\d{1,2}e\d{1,3}/giu, ' $& ')
-    .replace(/第\d{1,3}季/gu, ' $& ')
-    .replace(/第\d{1,3}集/gu, ' $& ')
+    .replace(/season\d{3}/gu, ' $& ')
+    .replace(/ep\d{3,4}/gu, ' $& ')
   const terms = []
   const matcher = /s\d{1,2}e\d{1,3}|第\d{1,3}季|第\d{1,3}集|[\p{Script=Han}]+|[a-z0-9]+/giu
   for (const match of segmented.matchAll(matcher)) {
@@ -156,11 +184,9 @@ function extractSearchTerms(value) {
     terms.push(term)
   }
   const aliases = []
-  const westernSeasonEpisode = normalized.match(/s(\d{1,2})e(\d{1,3})/iu)
+  const westernSeasonEpisode = normalized.match(/season(\d{3})ep(\d{3,4})/u)
   if (westernSeasonEpisode) {
-    const season = Number(westernSeasonEpisode[1])
-    const episode = Number(westernSeasonEpisode[2])
-    aliases.push(`第${season}季`, `第${episode}集`)
+    aliases.push(`season${westernSeasonEpisode[1]}`, `ep${westernSeasonEpisode[2]}`)
   }
   return [...new Set([...terms, ...aliases])]
 }
@@ -179,21 +205,7 @@ function searchHaystack(state, item) {
     statusText,
   ].join(' ')
   const normalized = normalizeSearchText(source)
-  const aliases = []
-  const episode = normalized.match(/第(\d{1,3})季第(\d{1,3})集/u)
-  if (episode) {
-    const season = Number(episode[1])
-    const episodeNumber = Number(episode[2])
-    aliases.push(
-      `s${season}e${episodeNumber}`,
-      `s${String(season).padStart(2, '0')}e${String(episodeNumber).padStart(2, '0')}`,
-    )
-  }
-  const western = normalized.match(/s(\d{1,2})e(\d{1,3})/iu)
-  if (western) {
-    aliases.push(`第${Number(western[1])}季`, `第${Number(western[2])}集`)
-  }
-  return `${normalized}${aliases.join('')}`
+  return normalized
 }
 
 function validateStatusSearchQuery(value) {

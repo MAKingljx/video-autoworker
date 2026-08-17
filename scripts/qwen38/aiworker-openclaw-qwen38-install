@@ -39,12 +39,12 @@ const provider = {
     id: "default_model",
     name: "Qwen3.8-27B BF16 MLX text/tools",
     api: "openai-completions",
-    reasoning: false,
+    reasoning: true,
     input: ["text"],
     contextWindow: 131072,
     maxTokens: 4096,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    compat: { supportsTools: true },
+    compat: { supportsTools: true, thinkingFormat: "qwen-chat-template" },
     contextTokens: 98304
   }],
   auth: "api-key",
@@ -62,8 +62,13 @@ config.agents.defaults = config.agents.defaults || {};
 config.agents.defaults.models = config.agents.defaults.models || {};
 config.agents.defaults.models[target] = {
   ...(config.agents.defaults.models[target] || {}),
-  params: { chat_template_kwargs: { enable_thinking: false, thinking: false } }
+  params: { chat_template_kwargs: { enable_thinking: true, thinking: true, preserve_thinking: true } }
 };
+
+const agents = Array.isArray(config.agents.list) ? config.agents.list : [];
+const secondOriginal = agents.find((entry) => entry && entry.id === "second-original");
+if (!secondOriginal) throw new Error("second-original agent is missing");
+secondOriginal.thinkingDefault = "high";
 
 const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
 models.providers = models.providers || {};

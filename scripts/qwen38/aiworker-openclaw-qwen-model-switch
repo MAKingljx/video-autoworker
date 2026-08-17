@@ -16,10 +16,14 @@ case "$1" in
   qwen36|qwen36-tools)
     target="qwen36-tools-local/default_model"
     port=18091
+    thinking_default="off"
+    thinking_enabled="false"
     ;;
   qwen38)
     target="qwen38-local/default_model"
     port=18092
+    thinking_default="high"
+    thinking_enabled="true"
     ;;
   *)
     echo "unsupported model: $1" >&2
@@ -56,15 +60,53 @@ if ! "$OPENCLAW" --profile "$PROFILE" models set "$target" >/dev/null; then
   echo "model switch failed; restored $backup" >&2
   exit 1
 fi
-if ! node - "$CONFIG" "$target" <<'NODE'
+if ! node - "$CONFIG" "$MODELS_JSON" "$target" "$thinking_default" "$thinking_enabled" <<'NODE'
 const fs = require("fs");
-const [configPath, target] = process.argv.slice(2);
+const [configPath, modelsPath, target, thinkingDefault, thinkingEnabled] = process.argv.slice(2);
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
 const agents = config.agents && Array.isArray(config.agents.list) ? config.agents.list : [];
 const agent = agents.find((entry) => entry && entry.id === "second-original");
 if (!agent) throw new Error("second-original agent is missing");
 agent.model = target;
+agent.thinkingDefault = thinkingDefault;
+config.agents.defaults = config.agents.defaults || {};
+config.agents.defaults.models = config.agents.defaults.models || {};
+config.agents.defaults.models[target] = {
+  ...(config.agents.defaults.models[target] || {}),
+  params: {
+    ...((config.agents.defaults.models[target] || {}).params || {}),
+    chat_template_kwargs: {
+      ...(((config.agents.defaults.models[target] || {}).params || {}).chat_template_kwargs || {}),
+      enable_thinking: thinkingEnabled === "true",
+      thinking: thinkingEnabled === "true",
+      preserve_thinking: thinkingEnabled === "true",
+    },
+  },
+};
+const providers = config.models && config.models.providers ? config.models.providers : {};
+const provider = providers[target.split("/", 1)[0]];
+const providerModel = provider && Array.isArray(provider.models)
+  ? provider.models.find((entry) => entry && entry.id === target.split("/", 2)[1])
+  : null;
+if (!providerModel) throw new Error(`provider model is missing: ${target}`);
+providerModel.reasoning = thinkingEnabled === "true";
+providerModel.compat = {
+  ...(providerModel.compat || {}),
+  ...(thinkingEnabled === "true" ? { thinkingFormat: "qwen-chat-template" } : {}),
+};
+const modelProvider = models.providers && models.providers[target.split("/", 1)[0]];
+const modelProviderModel = modelProvider && Array.isArray(modelProvider.models)
+  ? modelProvider.models.find((entry) => entry && entry.id === target.split("/", 2)[1])
+  : null;
+if (!modelProviderModel) throw new Error(`agent model provider is missing: ${target}`);
+modelProviderModel.reasoning = thinkingEnabled === "true";
+modelProviderModel.compat = {
+  ...(modelProviderModel.compat || {}),
+  ...(thinkingEnabled === "true" ? { thinkingFormat: "qwen-chat-template" } : {}),
+};
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
+fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n");
 NODE
 then
   restore
