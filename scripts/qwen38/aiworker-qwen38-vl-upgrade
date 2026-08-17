@@ -20,7 +20,10 @@ SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd)"
 }
 
 BIN_DIR="$HOME/ai-worker/bin"
-INSTALL="$BIN_DIR/aiworker-qwen38-vl-install"
+# The installer is a repository entrypoint, not a runtime binary.  Keeping
+# this source path explicit makes the first upgrade after a fresh checkout
+# work even when the runtime bin directory has not received an installer copy.
+INSTALL="$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-install"
 START="$BIN_DIR/aiworker-qwen38-vl-start-bg"
 TEST="$BIN_DIR/aiworker-qwen38-vl-test"
 OPENCLAW_INSTALL="$BIN_DIR/aiworker-openclaw-qwen38-vl-install"
