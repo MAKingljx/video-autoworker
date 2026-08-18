@@ -46,6 +46,27 @@ else
   fallback=""
 fi
 
+if [ "$(node - "$tmp/workflows.json" "$BINDING_ID" "$route" "$fallback" <<'NODE'
+const fs = require('fs');
+const [path, id, route, fallback] = process.argv.slice(2);
+const body = JSON.parse(fs.readFileSync(path, 'utf8'));
+const binding = (body.bindings || []).find((item) => String(item.id) === String(id));
+if (!binding) throw new Error(`binding ${id} not found`);
+const vision = binding.config?.modelRouting?.nodes?.vision || {};
+const expectedFallback = fallback ? [fallback] : [];
+const actualFallback = Array.isArray(vision.fallbackRouteIds) ? vision.fallbackRouteIds : [];
+process.stdout.write(
+  vision.routeId === route && JSON.stringify(actualFallback) === JSON.stringify(expectedFallback)
+    ? 'unchanged'
+    : 'update',
+);
+NODE
+)" = "unchanged" ]; then
+  printf 'video vision route already=%s fallback=%s; no production binding write\n' \
+    "$route" "${fallback:-none}"
+  exit 0
+fi
+
 timestamp="$(date +%Y%m%d-%H%M%S)"
 backup="$BACKUP_ROOT/$timestamp"
 umask 077
@@ -99,4 +120,7 @@ console.log(JSON.stringify({id: binding.id, route: binding.config.modelRouting.n
 NODE
 
 : > "$backup/.verified"
+if [ -n "${QWEN38_VL_ROUTE_BACKUP_FILE:-}" ]; then
+  printf '%s\n' "$backup" > "$QWEN38_VL_ROUTE_BACKUP_FILE"
+fi
 printf 'video vision route=%s fallback=%s backup=%s\n' "$route" "${fallback:-none}" "$backup"

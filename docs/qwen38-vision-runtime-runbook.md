@@ -29,11 +29,13 @@ QWEN38_VL_SOURCE_ROOT="$PWD" ~/ai-worker/bin/aiworker-qwen38-vl-upgrade
 ```
 
 `aiworker-qwen38-vl-upgrade` 是后续模型升级的固定入口。它按“运行文件备份与
-doctor → 启动 → 直接视觉测试 → OpenClaw provider 校验 → n8n binding 2 切换 →
+doctor → 启动 → 直接视觉测试 → OpenClaw provider 校验 → n8n binding 2 校验或切换 →
 状态复核”的顺序执行；每个边界各自生成恢复点，不把模型权重、凭据、数据库或日志
-写入仓库。单独排障时仍可使用同目录下的 doctor/start/status/stop/test 子命令。
+写入仓库。若 binding 已是 `local-qwen38-vl-direct` 且回退仍为 `local-qwen36-direct`，
+入口只读核对并跳过 n8n 写入；只有路由实际变化才会备份并更新 binding。单独排障时仍可使用
+同目录下的 doctor/start/status/stop/test 子命令。
 
-每次安装都会先在 `~/ai-worker/backups/qwen38-vl-runtime/` 生成恢复点；只有 doctor、直接图片测试、OpenClaw 图片测试、路由校验和视频整链验收全部通过后，才把该恢复点标记为已验证。恢复点默认最多保留两个已验证历史版本。
+每次安装都会先在 `~/ai-worker/backups/qwen38-vl-runtime/` 生成恢复点；只有 doctor、直接图片测试、OpenClaw 图片测试、路由校验和视频整链验收全部通过后，才把运行时、OpenClaw 和路由恢复点标记为已验证。固定入口随后只保留每个恢复点家族最近两个已验证版本；失败或中断的恢复点不标记、不自动删除，便于排障和回滚。
 
 ## 验收门
 

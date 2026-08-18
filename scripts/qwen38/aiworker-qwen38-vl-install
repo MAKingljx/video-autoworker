@@ -51,6 +51,10 @@ copy_file "$SOURCE_ROOT/launch-agents/ai.aiworker.qwen38-vl-server.plist" "$DEST
 
 "$DEST_BIN/aiworker-qwen38-vl-doctor"
 
+if [ -n "${QWEN38_VL_RUNTIME_BACKUP_FILE:-}" ]; then
+  printf '%s\n' "$backup" > "$QWEN38_VL_RUNTIME_BACKUP_FILE"
+fi
+
 if [ "$START" = true ]; then
   "$DEST_BIN/aiworker-qwen38-vl-start-bg"
   "$DEST_BIN/aiworker-qwen38-vl-test"

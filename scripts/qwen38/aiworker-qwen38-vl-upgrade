@@ -30,11 +30,47 @@ OPENCLAW_INSTALL="$BIN_DIR/aiworker-openclaw-qwen38-vl-install"
 ROUTE_SWITCH="$BIN_DIR/aiworker-qwen38-vl-route-switch"
 STATUS="$BIN_DIR/aiworker-qwen38-vl-status"
 
-QWEN38_VL_SOURCE_ROOT="$SOURCE_ROOT" "$INSTALL" --no-start
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/qwen38-vl-upgrade.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+runtime_backup_file="$tmp/runtime-backup"
+openclaw_backup_file="$tmp/openclaw-backup"
+route_backup_file="$tmp/route-backup"
+
+mark_verified_and_prune() {
+  backup_file="$1"
+  backup_root="$2"
+  [ -s "$backup_file" ] || return 0
+  backup="$(cat "$backup_file")"
+  [ -d "$backup" ] || {
+    echo "reported backup does not exist: $backup" >&2
+    exit 1
+  }
+  : > "$backup/.verified"
+
+  find "$backup_root" -mindepth 1 -maxdepth 1 -type d -exec sh -c \
+    'test -f "$1/.verified" && printf "%s\\n" "$1"' sh {} \; | \
+    sort -r | awk 'NR > 2 { print }' | while IFS= read -r expired; do
+      rm -rf "$expired"
+    done
+
+  verified_count="$(find "$backup_root" -mindepth 2 -maxdepth 2 -type f -name .verified -print | wc -l | tr -d ' ')"
+  [ "$verified_count" -le 2 ] || {
+    echo "verified backup retention check failed for $backup_root" >&2
+    exit 1
+  }
+}
+
+QWEN38_VL_SOURCE_ROOT="$SOURCE_ROOT" \
+QWEN38_VL_RUNTIME_BACKUP_FILE="$runtime_backup_file" \
+  "$INSTALL" --no-start
 "$START"
 "$TEST"
-"$OPENCLAW_INSTALL"
-"$ROUTE_SWITCH" qwen38
+QWEN38_VL_OPENCLAW_BACKUP_FILE="$openclaw_backup_file" "$OPENCLAW_INSTALL"
+QWEN38_VL_ROUTE_BACKUP_FILE="$route_backup_file" "$ROUTE_SWITCH" qwen38
 "$STATUS"
+
+mark_verified_and_prune "$runtime_backup_file" "$HOME/ai-worker/backups/qwen38-vl-runtime"
+mark_verified_and_prune "$openclaw_backup_file" "$HOME/ai-worker/backups/qwen38-vl-openclaw"
+mark_verified_and_prune "$route_backup_file" "$HOME/ai-worker/backups/qwen38-vl-routing"
 
 printf 'qwen38-vl upgrade complete source=%s route=local-qwen38-vl-direct fallback=local-qwen36-direct\n' "$SOURCE_ROOT"

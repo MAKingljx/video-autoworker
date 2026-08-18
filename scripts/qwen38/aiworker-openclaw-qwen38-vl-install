@@ -90,4 +90,8 @@ done
   exit 1
 }
 
+if [ -n "${QWEN38_VL_OPENCLAW_BACKUP_FILE:-}" ]; then
+  printf '%s\n' "$backup" > "$QWEN38_VL_OPENCLAW_BACKUP_FILE"
+fi
+
 echo "installed provider=$TARGET profile=$PROFILE backup=$backup"
