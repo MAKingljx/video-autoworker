@@ -42,7 +42,8 @@ doctor → 启动 → 直接视觉测试 → OpenClaw provider 校验 → n8n bi
 1. `doctor` 必须确认原始权重、`vision_config`、视频预处理文件和 Python 依赖存在。
 2. `status` 必须显示 18094 loopback listener、模型 ID 和 `health=ok`。
 3. 直接图片测试必须得到非空回答，不能只验证 HTTP 200。
-4. OpenClaw `qwen38-vl` 图片测试必须实际返回视觉结论。
+4. OpenClaw 图片测试必须使用完整模型 ID `qwen38-vl-local/qwen38-27b-vl`，并实际返回视觉结论；
+   短别名 `qwen38-vl` 仅作人工选择别名，不作为图片能力探测依据。
 5. `route-switch status` 必须显示 binding `2` 的 `vision.routeId=local-qwen38-vl-direct`、回退为 `local-qwen36-direct`。
 6. 用一段真实视频走 `prepare -> Whisper audio / Qwen3.8 vision -> finalize`；父任务与四个阶段均成功，输出非空且 `memoryMode=none`。
 7. 视频链路验收前，3017 的 `/api/n8n/workflows` 必须是 HTTP 200；若返回 `Authentication required`，先检查 standalone 是否绑定 `127.0.0.1` 并加载仓库 `.env.local`，不得重提视频任务。

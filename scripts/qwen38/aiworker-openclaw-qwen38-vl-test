@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+PROFILE="${OPENCLAW_PROFILE_NAME:-qwen-current}"
+OPENCLAW="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
+PYTHON="${AIWORKER_PYTHON:-$HOME/ai-worker/bin/ai-python}"
+MODEL="qwen38-vl-local/qwen38-27b-vl"
+
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/qwen38-vl-openclaw-test.XXXXXX")"
+trap 'rm -rf "$tmp"' EXIT
+image="$tmp/red.png"
+
+"$PYTHON" - "$image" <<'PY'
+from pathlib import Path
+import sys
+
+from PIL import Image
+
+target = Path(sys.argv[1])
+Image.new("RGB", (32, 32), (255, 0, 0)).save(target, format="PNG")
+PY
+
+result="$($OPENCLAW --profile "$PROFILE" infer model run \
+  --gateway \
+  --model "$MODEL" \
+  --file "$image" \
+  --prompt '只回答图片主体颜色，最多两个字。' \
+  --json)"
+
+printf '%s\n' "$result"
+printf '%s\n' "$result" > "$tmp/result.json"
+node - "$tmp/result.json" <<'NODE'
+const fs = require('fs');
+const body = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const text = body?.outputs?.[0]?.text?.trim();
+if (!text) throw new Error('OpenClaw Qwen3.8 VL returned an empty visual answer');
+if (body.provider !== 'qwen38-vl-local' || body.model !== 'qwen38-27b-vl') {
+  throw new Error(`unexpected visual route ${body.provider}/${body.model}`);
+}
+console.log(`openclaw qwen38-vl image test ok answer=${text}`);
+NODE

@@ -47,6 +47,7 @@ for name in server start-bg status stop doctor test route-switch upgrade; do
   copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-$name" "$DEST_BIN/aiworker-qwen38-vl-$name"
 done
 copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-openclaw-qwen38-vl-install" "$DEST_BIN/aiworker-openclaw-qwen38-vl-install"
+copy_file "$SOURCE_ROOT/scripts/qwen38/aiworker-openclaw-qwen38-vl-test" "$DEST_BIN/aiworker-openclaw-qwen38-vl-test"
 copy_file "$SOURCE_ROOT/launch-agents/ai.aiworker.qwen38-vl-server.plist" "$DEST_PLIST"
 
 "$DEST_BIN/aiworker-qwen38-vl-doctor"

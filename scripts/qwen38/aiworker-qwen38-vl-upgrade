@@ -27,6 +27,7 @@ INSTALL="$SOURCE_ROOT/scripts/qwen38/aiworker-qwen38-vl-install"
 START="$BIN_DIR/aiworker-qwen38-vl-start-bg"
 TEST="$BIN_DIR/aiworker-qwen38-vl-test"
 OPENCLAW_INSTALL="$BIN_DIR/aiworker-openclaw-qwen38-vl-install"
+OPENCLAW_TEST="$BIN_DIR/aiworker-openclaw-qwen38-vl-test"
 ROUTE_SWITCH="$BIN_DIR/aiworker-qwen38-vl-route-switch"
 STATUS="$BIN_DIR/aiworker-qwen38-vl-status"
 
@@ -66,6 +67,7 @@ QWEN38_VL_RUNTIME_BACKUP_FILE="$runtime_backup_file" \
 "$START"
 "$TEST"
 QWEN38_VL_OPENCLAW_BACKUP_FILE="$openclaw_backup_file" "$OPENCLAW_INSTALL"
+"$OPENCLAW_TEST"
 QWEN38_VL_ROUTE_BACKUP_FILE="$route_backup_file" "$ROUTE_SWITCH" qwen38
 "$STATUS"
 
