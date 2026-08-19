@@ -23,5 +23,7 @@ describe('short natural-language result defaults', () => {
     expect(compact).toMatch(/(?:taskId|task ID|任务 ID|任务编号)/u)
     expect(compact).toMatch(/(?:中文|Chinese)/u)
     expect(compact).toMatch(/(?:一句|一句话|one-sentence)/u)
+    expect(compact).toMatch(/(?:三行|three lines)/u)
+    expect(compact).toMatch(/(?:如需全文|follow-up offer)/u)
   })
 })

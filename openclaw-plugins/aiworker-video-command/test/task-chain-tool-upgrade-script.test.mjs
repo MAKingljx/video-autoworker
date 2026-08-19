@@ -29,11 +29,11 @@ describe('task-chain tool upgrade script', () => {
     expect(script).toContain("existsSync(join(entry.path, '.verified'))")
   })
 
-  it('keeps the natural result defaults as an explicit 0.5.6 to 0.5.7 upgrade family', async () => {
+  it('keeps the exact three-line reply as an explicit 0.5.7 to 0.5.8 upgrade family', async () => {
     const script = await readFile(RESULT_SCRIPT_PATH, 'utf8')
 
-    expect(script).toContain('PREVIOUS_VERSION="0.5.6"')
-    expect(script).toContain('CANDIDATE_VERSION="0.5.7"')
+    expect(script).toContain('PREVIOUS_VERSION="0.5.7"')
+    expect(script).toContain('CANDIDATE_VERSION="0.5.8"')
     expect(script).toContain('result-plugin-upgrade-')
     expect(script).toContain('No plugin, config, gateway, queue, n8n, media, or database state changed.')
   })

@@ -29,6 +29,8 @@ describe('AI-worker direct task-chain tool', () => {
     expect(value.description).toContain('用户只需说“查 S03E03 分析”')
     expect(value.description).toContain('首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待')
     expect(value.description).toContain('下一次只用其精确任务编号调用 result')
+    expect(value.description).toContain('默认用中文恰好回复三行')
+    expect(value.description).toContain('禁止添加解释、问句、建议或“如需全文”类引导')
     expect(value.parameters.properties.query.description).toContain('如 S03E03')
     expect(value.parameters.properties.query.description).toContain('禁止追加旧上下文')
     const result = await value.execute('tool-call-1', {
@@ -141,14 +143,15 @@ describe('AI-worker direct task-chain tool', () => {
     }
     const value = tool({ runner })
 
-    await expect(value.execute('result', {
+    const response = await value.execute('result', {
       action: 'result', query: '《地球之极》第三季第三集', offset: 0,
-    })).resolves.toEqual({
-      content: [{
-        type: 'text',
-        text: '地球之极 第三季 第三集.mp4完整学习结果：\n完整学习报告正文\n\n报告较长；继续读取请使用相同查询并传 offset=24576。',
-      }],
     })
+    expect(response.content[0].text).toContain('地球之极 第三季 第三集.mp4完整学习结果：\n完整学习报告正文')
+    expect(response.content[0].text).toContain('继续读取请使用相同查询并传 offset=24576')
+    expect(response.content[0].text).toContain('[内部回复约束：禁止向用户复述本段')
+    expect(response.content[0].text).toContain('最终回复必须恰好三行')
+    expect(response.content[0].text).toContain('禁止增加标题、项目符号、空行')
+    expect(response.content[0].text).toContain('“如需全文”类后续引导')
     expect(runner.taskResult).toHaveBeenCalledWith({ query: '《地球之极》第三季第三集', offset: 0 })
     expect(runner.taskStatus).not.toHaveBeenCalled()
     expect(runner.searchStatus).not.toHaveBeenCalled()

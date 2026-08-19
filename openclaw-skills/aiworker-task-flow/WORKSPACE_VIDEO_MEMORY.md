@@ -24,8 +24,10 @@
   the current message. Make one call at a time, never add prior-context words
   or parallel synonym queries, and after ambiguity use the newest completed
   candidate's exact task ID instead of searching by name again. Unless report
-  正文 or another format is explicitly requested, reply in Chinese with only the
-  title, status, and one-sentence analysis summary.
+  正文 or another format is explicitly requested, reply in Chinese with exactly
+  three lines: title, status, and one-sentence analysis summary. End after the
+  third line; add no heading, bullets, blank lines, explanation, question,
+  suggestion, or follow-up offer such as “如需全文”.
 - Submission returns one receipt and ends. Do not poll, retry, resubmit, or
   push completion messages. The release gate is maintenance-only.
 - The compatible native `before_dispatch` Telegram-private entry and the direct
