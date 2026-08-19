@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   requireN8nRole: vi.fn(),
   getDatabase: vi.fn(),
   getScopedN8nTaskRunByTaskId: vi.fn(),
+  listN8nTaskRunSummaries: vi.fn(),
   listN8nTaskRuns: vi.fn(),
 }))
 
@@ -15,6 +16,7 @@ vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   return {
     ...actual,
     getScopedN8nTaskRunByTaskId: mocks.getScopedN8nTaskRunByTaskId,
+    listN8nTaskRunSummaries: mocks.listN8nTaskRunSummaries,
     listN8nTaskRuns: mocks.listN8nTaskRuns,
   }
 })
@@ -48,5 +50,55 @@ describe('n8n task runs route', () => {
 
     expect(response.status).toBe(400)
     expect(mocks.getScopedN8nTaskRunByTaskId).not.toHaveBeenCalled()
+  })
+
+  it('returns the compact paginated list view without changing the legacy response', async () => {
+    mocks.listN8nTaskRunSummaries.mockReturnValue({
+      runs: [{ taskId: 'task-2', title: 'S03E03.mp4', status: 'succeeded' }],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    })
+
+    const response = await GET(new NextRequest(
+      'http://127.0.0.1:3017/api/n8n/runs?view=list&limit=25&status=succeeded&query=S03E03',
+    ))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      runs: [{ taskId: 'task-2', title: 'S03E03.mp4', status: 'succeeded' }],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    })
+    expect(mocks.listN8nTaskRunSummaries).toHaveBeenCalledWith(
+      {},
+      { workspaceId: 2, tenantId: 3 },
+      { limit: 25, offset: 0, status: 'succeeded', query: 'S03E03' },
+    )
+    expect(mocks.listN8nTaskRuns).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unsupported list status', async () => {
+    const response = await GET(new NextRequest(
+      'http://127.0.0.1:3017/api/n8n/runs?view=list&status=waiting',
+    ))
+
+    expect(response.status).toBe(400)
+    expect(mocks.listN8nTaskRunSummaries).not.toHaveBeenCalled()
+  })
+
+  it('keeps the default list contract for existing callers', async () => {
+    mocks.listN8nTaskRuns.mockReturnValue([{ taskId: 'legacy-task', output: { ok: true } }])
+
+    const response = await GET(new NextRequest('http://127.0.0.1:3017/api/n8n/runs?limit=10'))
+
+    expect(await response.json()).toEqual({
+      runs: [{ taskId: 'legacy-task', output: { ok: true } }],
+    })
+    expect(mocks.listN8nTaskRuns).toHaveBeenCalledWith(
+      {}, { workspaceId: 2, tenantId: 3 }, 10,
+    )
+    expect(mocks.listN8nTaskRunSummaries).not.toHaveBeenCalled()
   })
 })

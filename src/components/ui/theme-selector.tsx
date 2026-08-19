@@ -32,7 +32,7 @@ export function ThemeSelector() {
       size="icon-sm"
       title={isDark ? '切换到白色背景' : '切换到 GitHub 黑色背景'}
       aria-label={isDark ? '切换到白色背景' : '切换到 GitHub 黑色背景'}
-      className={isDark ? 'text-amber-300 hover:text-amber-200' : 'text-muted-foreground hover:text-foreground'}
+      className={isDark ? 'text-primary hover:text-primary/80' : 'text-muted-foreground hover:text-foreground'}
     >
       <LightbulbIcon lit={isDark} />
     </Button>

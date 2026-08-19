@@ -391,7 +391,7 @@ export function HeaderBar() {
           aria-modal="true"
           aria-label="命令搜索"
         >
-          <div className="absolute inset-0 bg-gradient-to-b from-black/30 via-black/30 to-black/30" onClick={() => setSearchOpen(false)} />
+          <div className="absolute inset-0 bg-black/35" onClick={() => setSearchOpen(false)} />
           <div className="absolute inset-0 flex items-center justify-center p-4">
             <div className="command-palette-in w-full max-w-[44rem] max-h-[min(78vh,40rem)] bg-card border border-border rounded-lg shadow-2xl overflow-hidden">
               <div className="p-2 border-b border-border">

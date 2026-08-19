@@ -10,7 +10,7 @@ import { LogViewerPanel } from '@/components/panels/log-viewer-panel'
 import { CronManagementPanel } from '@/components/panels/cron-management-panel'
 import { MemoryBrowserPanel } from '@/components/panels/memory-browser-panel'
 import { CostTrackerPanel } from '@/components/panels/cost-tracker-panel'
-import { TaskBoardPanel } from '@/components/panels/task-board-panel'
+import { TasksPanel } from '@/components/panels/tasks-panel'
 import { ActivityFeedPanel } from '@/components/panels/activity-feed-panel'
 import { AgentCommsPanel } from '@/components/panels/agent-comms-panel'
 import { StandupPanel } from '@/components/panels/standup-panel'
@@ -534,7 +534,7 @@ function ContentRouter({ tab }: { tab: string }) {
         </>
       )
     case 'tasks':
-      return <TaskBoardPanel />
+      return <TasksPanel />
     case 'projects':
       return <WorkspaceProjectsPanel />
     case 'agents':

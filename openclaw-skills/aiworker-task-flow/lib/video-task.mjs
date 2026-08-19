@@ -7,13 +7,39 @@ export class VideoTriggerUnconfirmedError extends Error {
   }
 }
 
-export function buildVideoTaskPayload({ bindingId, taskId, idempotencyKey, prompt, videoKey, visionRoute }) {
+function safeDisplayName(value) {
+  const compacted = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim()
+  const segments = compacted.split(/[\\/]/).filter(Boolean)
+  return String(segments.at(-1) || '未命名视频').slice(0, 160)
+}
+
+export function buildVideoTaskPayload({
+  bindingId,
+  taskId,
+  idempotencyKey,
+  prompt,
+  videoKey,
+  displayName,
+  batchId,
+  batchIndex,
+  visionRoute,
+}) {
+  const normalizedBatchId = String(batchId || '').trim().slice(0, 120)
+  const normalizedBatchIndex = Number(batchIndex)
   return {
     bindingId,
     taskId,
     idempotencyKey,
     source: 'openclaw',
-    input: { prompt: prompt.trim(), videoKey },
+    input: {
+      prompt: prompt.trim(),
+      videoKey,
+      displayName: safeDisplayName(displayName),
+      ...(normalizedBatchId ? { batchId: normalizedBatchId } : {}),
+      ...(Number.isInteger(normalizedBatchIndex) && normalizedBatchIndex > 0
+        ? { batchIndex: normalizedBatchIndex }
+        : {}),
+    },
     ...(visionRoute ? {
       routing: { nodes: { vision: { routeId: visionRoute, fallbackRouteIds: [] } } },
     } : {}),
@@ -28,6 +54,9 @@ export async function submitVideoTask({
   idempotencyKey,
   prompt,
   videoFile,
+  displayName = null,
+  batchId = null,
+  batchIndex = null,
   visionRoute = null,
   inboxRoot,
   maxBytes,
@@ -44,6 +73,9 @@ export async function submitVideoTask({
         idempotencyKey,
         prompt,
         videoKey: staged.videoKey,
+        displayName: displayName || staged.sourcePath,
+        batchId,
+        batchIndex,
         visionRoute,
       }))
     } catch (error) {

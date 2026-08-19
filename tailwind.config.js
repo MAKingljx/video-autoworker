@@ -1,3 +1,18 @@
+const semanticScale = (variable) => ({
+  50: `hsl(var(--${variable}) / <alpha-value>)`,
+  100: `hsl(var(--${variable}) / <alpha-value>)`,
+  200: `hsl(var(--${variable}) / <alpha-value>)`,
+  300: `hsl(var(--${variable}) / <alpha-value>)`,
+  400: `hsl(var(--${variable}) / <alpha-value>)`,
+  500: `hsl(var(--${variable}) / <alpha-value>)`,
+  600: `hsl(var(--${variable}) / <alpha-value>)`,
+  700: `hsl(var(--${variable}) / <alpha-value>)`,
+  800: `hsl(var(--${variable}) / <alpha-value>)`,
+  900: `hsl(var(--${variable}) / <alpha-value>)`,
+  950: `hsl(var(--${variable}) / <alpha-value>)`,
+  DEFAULT: `hsl(var(--${variable}) / <alpha-value>)`,
+})
+
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   darkMode: 'class',
@@ -13,6 +28,25 @@ module.exports = {
         mono: ['var(--font-mono)', 'ui-monospace', 'monospace'],
       },
       colors: {
+        // Collapse legacy decorative hues into one product accent. Status
+        // families remain semantic so old utilities no longer form a rainbow.
+        blue: semanticScale('primary'),
+        sky: semanticScale('primary'),
+        cyan: semanticScale('primary'),
+        indigo: semanticScale('primary'),
+        violet: semanticScale('primary'),
+        purple: semanticScale('primary'),
+        fuchsia: semanticScale('primary'),
+        pink: semanticScale('primary'),
+        green: semanticScale('success'),
+        emerald: semanticScale('success'),
+        lime: semanticScale('success'),
+        teal: semanticScale('success'),
+        yellow: semanticScale('warning'),
+        amber: semanticScale('warning'),
+        orange: semanticScale('warning'),
+        red: semanticScale('destructive'),
+        rose: semanticScale('destructive'),
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',

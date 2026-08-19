@@ -4,15 +4,15 @@
 
 @layer base {
   :root {
-    /* oklch-based color system for perceptual uniformity */
+    /* Restrained neutral palette with one product-blue accent. */
     --background: 0 0% 100%;
     --foreground: 240 10% 3.9%;
     --card: 0 0% 100%;
     --card-foreground: 240 10% 3.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
+    --primary: 212 92% 45%;
+    --primary-foreground: 0 0% 100%;
     --secondary: 240 4.8% 95.9%;
     --secondary-foreground: 240 5.9% 10%;
     --muted: 240 4.8% 95.9%;
@@ -23,7 +23,7 @@
     --destructive-foreground: 0 0% 98%;
     --border: 240 5.9% 90%;
     --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
+    --ring: 212 92% 45%;
     --radius: 0.375rem;
 
     /* Semantic status colors */
@@ -34,12 +34,12 @@
     --info: 217 91% 60%;
     --info-foreground: 0 0% 98%;
 
-    /* Void accent colors (light fallbacks) */
-    --void-cyan: 187 82% 40%;
-    --void-mint: 160 60% 40%;
-    --void-amber: 38 92% 42%;
-    --void-violet: 263 70% 55%;
-    --void-crimson: 0 72% 45%;
+    /* Legacy accent aliases now map to product/status semantics. */
+    --void-cyan: 212 92% 45%;
+    --void-mint: 137 54% 36%;
+    --void-amber: 34 90% 38%;
+    --void-violet: 212 92% 45%;
+    --void-crimson: 356 71% 44%;
 
     /* Surface hierarchy */
     --surface-0: 0 0% 100%;
@@ -49,47 +49,44 @@
   }
 
   .dark {
-    /* Void palette */
-    --background: 215 27% 4%;
-    --foreground: 210 20% 92%;
-    --card: 220 30% 8%;
-    --card-foreground: 210 20% 92%;
-    --popover: 220 30% 8%;
-    --popover-foreground: 210 20% 92%;
-    --primary: 187 82% 53%;
-    --primary-foreground: 220 30% 6%;
-    --secondary: 220 25% 11%;
-    --secondary-foreground: 210 20% 92%;
-    --muted: 220 20% 14%;
-    --muted-foreground: 220 15% 50%;
-    --accent: 220 20% 14%;
-    --accent-foreground: 210 20% 92%;
-    --destructive: 0 72% 51%;
+    --background: 216 28% 7%;
+    --foreground: 210 18% 82%;
+    --card: 215 21% 11%;
+    --card-foreground: 210 18% 82%;
+    --popover: 215 21% 11%;
+    --popover-foreground: 210 18% 82%;
+    --primary: 212 100% 67%;
+    --primary-foreground: 215 28% 7%;
+    --secondary: 215 15% 15%;
+    --secondary-foreground: 210 18% 82%;
+    --muted: 215 15% 15%;
+    --muted-foreground: 212 9% 58%;
+    --accent: 215 15% 15%;
+    --accent-foreground: 210 18% 82%;
+    --destructive: 3 93% 63%;
     --destructive-foreground: 0 0% 98%;
-    --border: 220 20% 14%;
-    --input: 220 20% 14%;
-    --ring: 187 82% 53%;
+    --border: 212 12% 21%;
+    --input: 212 12% 21%;
+    --ring: 212 100% 67%;
 
-    /* Void accent colors */
-    --void-cyan: 187 82% 53%;
-    --void-mint: 160 60% 52%;
-    --void-amber: 38 92% 50%;
-    --void-violet: 263 90% 66%;
-    --void-crimson: 0 72% 51%;
+    --void-cyan: 212 100% 67%;
+    --void-mint: 128 49% 49%;
+    --void-amber: 41 72% 48%;
+    --void-violet: 212 100% 67%;
+    --void-crimson: 3 93% 63%;
 
     /* Void status */
-    --success: 160 60% 52%;
+    --success: 128 49% 49%;
     --success-foreground: 0 0% 98%;
-    --warning: 38 92% 50%;
+    --warning: 41 72% 48%;
     --warning-foreground: 0 0% 9%;
-    --info: 187 82% 53%;
+    --info: 212 100% 67%;
     --info-foreground: 0 0% 98%;
 
-    /* Void surface hierarchy */
-    --surface-0: 215 27% 4%;
-    --surface-1: 222 35% 7%;
-    --surface-2: 220 30% 10%;
-    --surface-3: 220 25% 14%;
+    --surface-0: 216 28% 7%;
+    --surface-1: 215 21% 11%;
+    --surface-2: 215 15% 15%;
+    --surface-3: 212 12% 21%;
   }
 }
 
@@ -164,27 +161,27 @@
 
   /* Status badge styles */
   .badge-success {
-    @apply bg-green-500/15 text-green-400 border border-green-500/20;
+    @apply bg-success/15 text-success border border-success/20;
   }
   .badge-warning {
-    @apply bg-amber-500/15 text-amber-400 border border-amber-500/20;
+    @apply bg-warning/15 text-warning border border-warning/20;
   }
   .badge-error {
-    @apply bg-red-500/15 text-red-400 border border-red-500/20;
+    @apply bg-destructive/15 text-destructive border border-destructive/20;
   }
   .badge-info {
-    @apply bg-blue-500/15 text-blue-400 border border-blue-500/20;
+    @apply bg-primary/15 text-primary border border-primary/20;
   }
   .badge-neutral {
     @apply bg-muted text-muted-foreground border border-border;
   }
 
-  /* Glow effects for active states */
+  /* Legacy glow names are retained for compatibility, but no longer glow. */
   .glow-primary {
-    box-shadow: 0 0 20px hsl(var(--primary) / 0.15);
+    box-shadow: none;
   }
   .glow-success {
-    box-shadow: 0 0 20px hsl(var(--success) / 0.15);
+    box-shadow: none;
   }
 
   /* Smooth transitions */
@@ -194,25 +191,22 @@
 
   /* Void glow utilities */
   .glow-cyan {
-    box-shadow: 0 0 20px hsl(var(--void-cyan) / 0.2), 0 0 40px hsl(var(--void-cyan) / 0.08);
+    box-shadow: none;
   }
   .glow-mint {
-    box-shadow: 0 0 20px hsl(var(--void-mint) / 0.2), 0 0 40px hsl(var(--void-mint) / 0.08);
+    box-shadow: none;
   }
   .glow-amber {
-    box-shadow: 0 0 20px hsl(var(--void-amber) / 0.2), 0 0 40px hsl(var(--void-amber) / 0.08);
+    box-shadow: none;
   }
   .glow-violet {
-    box-shadow: 0 0 20px hsl(var(--void-violet) / 0.2), 0 0 40px hsl(var(--void-violet) / 0.08);
+    box-shadow: none;
   }
 
-  /* Void panel — glass card with luminous border */
+  /* Legacy panel utility, now a plain elevated surface. */
   .void-panel {
-    @apply bg-card/90 backdrop-blur-sm border border-border rounded-lg;
-    box-shadow:
-      inset 0 1px 0 hsl(var(--void-cyan) / 0.04),
-      0 4px 24px hsl(var(--background) / 0.5),
-      0 0 0 1px hsl(var(--void-cyan) / 0.04);
+    @apply bg-card border border-border rounded-lg;
+    box-shadow: 0 1px 2px hsl(var(--background) / 0.35);
   }
 
   /* Void border glow — animated gradient border */
@@ -220,24 +214,7 @@
     position: relative;
   }
   .void-border-glow::before {
-    content: '';
-    position: absolute;
-    inset: -1px;
-    border-radius: inherit;
-    background: linear-gradient(
-      135deg,
-      hsl(var(--void-cyan) / 0.3),
-      transparent 40%,
-      transparent 60%,
-      hsl(var(--void-violet) / 0.2)
-    );
-    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-    -webkit-mask-composite: xor;
-    mask-composite: exclude;
-    padding: 1px;
-    pointer-events: none;
-    animation: edgeGlow 2s ease-in-out infinite;
+    display: none;
   }
 
   /* Neon button hover effect */
@@ -245,31 +222,23 @@
     @apply transition-all duration-200;
   }
   .btn-neon:hover {
-    box-shadow: 0 0 16px hsl(var(--void-cyan) / 0.25);
+    box-shadow: none;
   }
 
   /* Status badge glow variants */
   .badge-glow-success {
-    box-shadow: 0 0 12px hsl(var(--void-mint) / 0.25);
+    box-shadow: none;
   }
   .badge-glow-warning {
-    box-shadow: 0 0 12px hsl(var(--void-amber) / 0.25);
+    box-shadow: none;
   }
   .badge-glow-error {
-    box-shadow: 0 0 12px hsl(var(--void-crimson) / 0.25);
+    box-shadow: none;
   }
 
-  /* Void background — layered CSS gradients */
+  /* Keep legacy class names but render a calm flat background. */
   .void-bg {
-    background-image:
-      /* Subtle cyan spotlight at top */
-      radial-gradient(ellipse 60% 30% at 50% 0%, hsl(var(--void-cyan) / 0.03), transparent),
-      /* Grid lines */
-      repeating-linear-gradient(0deg, hsl(var(--border) / 0.08) 0px, transparent 1px, transparent 40px),
-      repeating-linear-gradient(90deg, hsl(var(--border) / 0.08) 0px, transparent 1px, transparent 40px),
-      /* Dot intersections */
-      radial-gradient(circle 0.5px at 0px 0px, hsl(var(--border) / 0.2) 0.5px, transparent 0.5px);
-    background-size: 100% 100%, 40px 40px, 40px 40px, 40px 40px;
+    background-image: none;
   }
 
   /* Panel styles */

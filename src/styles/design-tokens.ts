@@ -1,5 +1,5 @@
 /**
- * Design tokens for Mission Control "Void" aesthetic.
+ * Design tokens for the restrained Mission Control palette.
  * Server-safe — no 'use client' directive needed.
  *
  * Use the `hsl()` helper when you need inline styles (ReactFlow nodes, recharts),
@@ -16,38 +16,38 @@ export interface HSL {
 }
 
 // ---------------------------------------------------------------------------
-// Void palette
+// Product palette
 // ---------------------------------------------------------------------------
 export const voidPalette = {
-  background: { h: 215, s: 27, l: 4 },   // #07090C — deepest void
-  card:       { h: 220, s: 30, l: 8 },    // #0F141C
-  primary:    { h: 187, s: 82, l: 53 },   // #22D3EE — cyan
-  secondary:  { h: 220, s: 25, l: 11 },
-  muted:      { h: 220, s: 20, l: 14 },
-  border:     { h: 220, s: 20, l: 14 },
-  ring:       { h: 187, s: 82, l: 53 },
+  background: { h: 216, s: 28, l: 7 },
+  card:       { h: 215, s: 21, l: 11 },
+  primary:    { h: 212, s: 100, l: 67 },
+  secondary:  { h: 215, s: 15, l: 15 },
+  muted:      { h: 215, s: 15, l: 15 },
+  border:     { h: 212, s: 12, l: 21 },
+  ring:       { h: 212, s: 100, l: 67 },
 } as const satisfies Record<string, HSL>
 
 export const voidAccents = {
-  cyan:    { h: 187, s: 82, l: 53 },  // #22D3EE
-  mint:    { h: 160, s: 60, l: 52 },  // #34D399
-  amber:   { h: 38,  s: 92, l: 50 },  // #F59E0B
-  violet:  { h: 263, s: 90, l: 66 },  // #A78BFA
-  crimson: { h: 0,   s: 72, l: 51 },  // #DC2626
+  cyan:    { h: 212, s: 100, l: 67 },
+  mint:    { h: 128, s: 49, l: 49 },
+  amber:   { h: 41,  s: 72, l: 48 },
+  violet:  { h: 212, s: 100, l: 67 },
+  crimson: { h: 3,   s: 93, l: 63 },
 } as const satisfies Record<string, HSL>
 
 export const statusColors = {
-  success: { h: 160, s: 60, l: 52 },  // mint
-  warning: { h: 38,  s: 92, l: 50 },  // amber
-  error:   { h: 0,   s: 72, l: 51 },  // crimson
-  info:    { h: 187, s: 82, l: 53 },  // cyan
+  success: { h: 128, s: 49, l: 49 },
+  warning: { h: 41,  s: 72, l: 48 },
+  error:   { h: 3,   s: 93, l: 63 },
+  info:    { h: 212, s: 100, l: 67 },
 } as const satisfies Record<string, HSL>
 
 export const surfaces = {
-  0: { h: 215, s: 27, l: 4 },   // deepest void
-  1: { h: 222, s: 35, l: 7 },   // dark navy
-  2: { h: 220, s: 30, l: 10 },
-  3: { h: 220, s: 25, l: 14 },
+  0: { h: 216, s: 28, l: 7 },
+  1: { h: 215, s: 21, l: 11 },
+  2: { h: 215, s: 15, l: 15 },
+  3: { h: 212, s: 12, l: 21 },
 } as const
 
 // ---------------------------------------------------------------------------

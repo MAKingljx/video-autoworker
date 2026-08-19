@@ -105,7 +105,7 @@ export function WorkspaceProjectsPanel() {
   return (
     <div className="p-4 md:p-6 space-y-6">
       <section className="rounded-2xl border border-border bg-card overflow-hidden">
-        <div className="border-b border-border bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.12),transparent_35%),linear-gradient(135deg,rgba(255,255,255,0.02),rgba(0,0,0,0.08))] px-5 py-5 md:px-6">
+        <div className="border-b border-border bg-secondary/35 px-5 py-5 md:px-6">
           <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
             <div className="space-y-2">
               <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-muted-foreground/70">Workspace summary</p>

@@ -110,6 +110,9 @@ async function runBatch(statePath) {
         idempotencyKey: item.idempotencyKey,
         prompt: state.prompt,
         videoFile: item.sourcePath,
+        displayName: item.name,
+        batchId: state.batchId,
+        batchIndex: item.index,
         visionRoute: state.visionRoute,
         inboxRoot: state.inboxRoot,
       })

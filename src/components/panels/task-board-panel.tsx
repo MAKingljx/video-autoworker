@@ -88,12 +88,12 @@ interface MentionOption {
 
 const STATUS_COLUMN_KEYS = [
   { key: 'inbox', titleKey: 'colInbox', color: 'bg-secondary text-foreground' },
-  { key: 'assigned', titleKey: 'colAssigned', color: 'bg-blue-500/20 text-blue-400' },
-  { key: 'awaiting_owner', titleKey: 'colAwaitingOwner', color: 'bg-orange-500/20 text-orange-400' },
-  { key: 'in_progress', titleKey: 'colInProgress', color: 'bg-yellow-500/20 text-yellow-400' },
-  { key: 'review', titleKey: 'colReview', color: 'bg-purple-500/20 text-purple-400' },
-  { key: 'quality_review', titleKey: 'colQualityReview', color: 'bg-indigo-500/20 text-indigo-400' },
-  { key: 'done', titleKey: 'colDone', color: 'bg-green-500/20 text-green-400' },
+  { key: 'assigned', titleKey: 'colAssigned', color: 'bg-secondary text-foreground' },
+  { key: 'awaiting_owner', titleKey: 'colAwaitingOwner', color: 'bg-secondary text-foreground' },
+  { key: 'in_progress', titleKey: 'colInProgress', color: 'bg-secondary text-foreground' },
+  { key: 'review', titleKey: 'colReview', color: 'bg-secondary text-foreground' },
+  { key: 'quality_review', titleKey: 'colQualityReview', color: 'bg-secondary text-foreground' },
+  { key: 'done', titleKey: 'colDone', color: 'bg-secondary text-foreground' },
 ]
 
 const AWAITING_OWNER_KEYWORDS = [
@@ -155,10 +155,10 @@ function useAgentSessions(agentName: string | undefined) {
 }
 
 const priorityColors: Record<string, string> = {
-  low: 'border-l-green-500',
-  medium: 'border-l-yellow-500',
-  high: 'border-l-orange-500',
-  critical: 'border-l-red-500',
+  low: 'border-l-border',
+  medium: 'border-l-border',
+  high: 'border-l-warning',
+  critical: 'border-l-destructive',
 }
 
 function useMentionTargets() {
@@ -706,21 +706,9 @@ export function TaskBoardPanel() {
   const getTagColor = (tag: string) => {
     const lowerTag = tag.toLowerCase()
     if (lowerTag.includes('urgent') || lowerTag.includes('critical')) {
-      return 'bg-red-500/20 text-red-400 border-red-500/30'
+      return 'bg-destructive/10 text-destructive border-destructive/25'
     }
-    if (lowerTag.includes('bug') || lowerTag.includes('fix')) {
-      return 'bg-orange-500/20 text-orange-400 border-orange-500/30'
-    }
-    if (lowerTag.includes('feature') || lowerTag.includes('enhancement')) {
-      return 'bg-green-500/20 text-green-400 border-green-500/30'
-    }
-    if (lowerTag.includes('research') || lowerTag.includes('analysis')) {
-      return 'bg-purple-500/20 text-purple-400 border-purple-500/30'
-    }
-    if (lowerTag.includes('deploy') || lowerTag.includes('release')) {
-      return 'bg-blue-500/20 text-blue-400 border-blue-500/30'
-    }
-    return 'bg-muted-foreground/10 text-muted-foreground border-muted-foreground/20'
+    return 'bg-secondary text-muted-foreground border-border'
   }
 
   // Get agent name by session key
@@ -764,7 +752,7 @@ export function TaskBoardPanel() {
             </div>
           ))}
         </div>
-        <span className="sr-only">{t('loadingTasks')}</span>
+        <span className="sr-only">{t('title')}</span>
       </div>
     )
   }
@@ -779,12 +767,12 @@ export function TaskBoardPanel() {
             <button
               onClick={handleGnapSync}
               disabled={gnapSyncing}
-              className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 text-xs font-medium rounded-full bg-primary/10 text-primary hover:bg-primary/15 transition-colors disabled:opacity-50"
               title={gnapStatus.lastSync ? `Last sync: ${gnapStatus.lastSync}` : 'Click to sync'}
             >
               GNAP
               {gnapStatus.taskCount != null && (
-                <span className="text-emerald-400/70">{gnapStatus.taskCount}</span>
+                <span className="text-primary/70">{gnapStatus.taskCount}</span>
               )}
               {gnapSyncing && (
                 <svg className="w-3 h-3 animate-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
@@ -892,10 +880,10 @@ export function TaskBoardPanel() {
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="font-medium text-foreground truncate">{request.label}</span>
                       <span className={`px-1.5 py-0.5 text-xs rounded-full ${
-                        request.status === 'pending' ? 'bg-yellow-500/20 text-yellow-400' :
-                        request.status === 'running' ? 'bg-blue-500/20 text-blue-400' :
-                        request.status === 'completed' ? 'bg-green-500/20 text-green-400' :
-                        'bg-red-500/20 text-red-400'
+                        request.status === 'pending' ? 'bg-warning/10 text-warning' :
+                        request.status === 'running' ? 'bg-primary/10 text-primary' :
+                        request.status === 'completed' ? 'bg-success/10 text-success' :
+                        'bg-destructive/10 text-destructive'
                       }`}>
                         {request.status}
                       </span>
@@ -911,13 +899,13 @@ export function TaskBoardPanel() {
 
       {/* Error Display */}
       {error && (
-        <div role="alert" className="bg-red-500/10 border border-red-500/20 text-red-400 p-3 m-4 rounded-lg text-sm flex items-center justify-between">
+        <div role="alert" className="bg-destructive/10 border border-destructive/20 text-destructive p-3 m-4 rounded-lg text-sm flex items-center justify-between">
           <span>{error}</span>
           <Button
             variant="ghost"
             size="icon-xs"
             onClick={() => setError(null)}
-            className="text-red-400/60 hover:text-red-400 ml-2"
+            className="text-destructive/60 hover:text-destructive ml-2"
             aria-label={t('dismissError')}
           >
             ×
@@ -926,7 +914,7 @@ export function TaskBoardPanel() {
       )}
 
       {/* Kanban Board */}
-      <div className="flex-1 min-h-0 flex gap-4 p-4 overflow-x-auto" role="region" aria-label={t('taskBoard')}>
+      <div className="flex-1 min-h-0 flex gap-4 p-4 overflow-x-auto" role="region" aria-label={t('title')}>
         {statusColumns.map(column => (
           <div
             key={column.key}
@@ -986,12 +974,12 @@ export function TaskBoardPanel() {
                         </h4>
                         <div className="flex items-center gap-1.5 shrink-0">
                           {task.metadata?.recurrence?.enabled && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-400 font-mono" title={task.metadata.recurrence.natural_text || task.metadata.recurrence.cron_expr}>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-mono" title={task.metadata.recurrence.natural_text || task.metadata.recurrence.cron_expr}>
                               {t('recurring')}
                             </span>
                           )}
                           {task.metadata?.recurrence?.parent_task_id && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/10 text-cyan-400/70 font-mono" title={t('spawnedFromTask', { id: task.metadata.recurrence.parent_task_id })}>
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground font-mono" title={t('spawnedFromTask', { id: task.metadata.recurrence.parent_task_id })}>
                               {t('spawned')}
                             </span>
                           )}
@@ -1019,9 +1007,9 @@ export function TaskBoardPanel() {
                               target="_blank"
                               rel="noopener noreferrer"
                               className={`text-[10px] px-1.5 py-0.5 rounded font-mono flex items-center gap-1 transition-colors ${
-                                task.github_pr_state === 'merged' ? 'bg-purple-500/20 text-purple-400' :
-                                task.github_pr_state === 'closed' ? 'bg-red-500/20 text-red-400' :
-                                'bg-green-500/20 text-green-400'
+                                task.github_pr_state === 'merged' ? 'bg-success/10 text-success' :
+                                task.github_pr_state === 'closed' ? 'bg-destructive/10 text-destructive' :
+                                'bg-primary/10 text-primary'
                               }`}
                               onClick={(e) => e.stopPropagation()}
                               title={`PR #${task.github_pr_number} (${task.github_pr_state || 'open'})`}
@@ -1031,12 +1019,12 @@ export function TaskBoardPanel() {
                             </a>
                           )}
                           {task.aegisApproved && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-success/10 text-success border border-success/20">
                               Aegis
                             </span>
                           )}
                           {detectAwaitingOwner(task) && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30 font-mono">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-warning/10 text-warning border border-warning/25 font-mono">
                               {t('colAwaitingOwner')}
                             </span>
                           )}
@@ -1068,10 +1056,9 @@ export function TaskBoardPanel() {
                         <DunkItButton taskId={task.id} onDunked={() => fetchData()} />
                       )}
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                        task.priority === 'critical' ? 'bg-red-500/20 text-red-400' :
-                        task.priority === 'high' ? 'bg-orange-500/20 text-orange-400' :
-                        task.priority === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
-                        'bg-green-500/20 text-green-400'
+                        task.priority === 'critical' ? 'bg-destructive/10 text-destructive' :
+                        task.priority === 'high' ? 'bg-warning/10 text-warning' :
+                        'bg-secondary text-muted-foreground'
                       }`}>
                         {t(`priority_${task.priority}` as any)}
                       </span>
@@ -1100,7 +1087,7 @@ export function TaskBoardPanel() {
                   {task.due_date && (
                     <div className="mt-1.5 ml-5.5 text-[10px]">
                       <span className={`inline-flex items-center gap-1 ${
-                        task.due_date * 1000 < Date.now() ? 'text-red-400 font-medium' : 'text-muted-foreground/60'
+                        task.due_date * 1000 < Date.now() ? 'text-destructive font-medium' : 'text-muted-foreground/60'
                       }`}>
                         {task.due_date * 1000 < Date.now() ? '! ' : ''}{t('due')} {formatTaskTimestamp(task.due_date)}
                       </span>
@@ -1545,9 +1532,9 @@ function TaskDetailModal({
                         target="_blank"
                         rel="noopener noreferrer"
                         className={`ml-2 font-mono hover:underline ${
-                          task.github_pr_state === 'merged' ? 'text-purple-400' :
-                          task.github_pr_state === 'closed' ? 'text-red-400' :
-                          'text-green-400'
+                          task.github_pr_state === 'merged' ? 'text-success' :
+                          task.github_pr_state === 'closed' ? 'text-destructive' :
+                          'text-primary'
                         }`}
                       >
                         #{task.github_pr_number} ({task.github_pr_state || 'open'})
@@ -1571,7 +1558,7 @@ function TaskDetailModal({
                       View Session {task.metadata.dispatch_session_id.slice(0, 8)}...
                     </Button>
                     {task.status === 'in_progress' && (
-                      <span className="ml-2 text-xs text-green-400 animate-pulse">{t('live')}</span>
+                      <span className="ml-2 text-xs text-success animate-pulse">{t('live')}</span>
                     )}
                   </div>
                 </>
@@ -1583,13 +1570,13 @@ function TaskDetailModal({
             <div id="tabpanel-comments" role="tabpanel" aria-label={t('tabComments')} className="mt-6">
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-lg font-semibold text-foreground">{t('tabComments')}</h4>
-              <Button variant="link" size="xs" onClick={fetchComments} className="text-blue-400 hover:text-blue-300">
+              <Button variant="link" size="xs" onClick={fetchComments} className="text-primary hover:text-primary/80">
                 {t('refresh')}
               </Button>
             </div>
 
             {commentError && (
-              <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-2 rounded-md text-sm mb-3">
+              <div className="bg-destructive/10 border border-destructive/20 text-destructive p-2 rounded-md text-sm mb-3">
                 {commentError}
               </div>
             )}
@@ -1627,8 +1614,8 @@ function TaskDetailModal({
               </div>
             </form>
 
-            <div className="mt-5 bg-blue-500/5 border border-blue-500/15 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
-              <div className="font-medium text-blue-300">How notifications work</div>
+            <div className="mt-5 bg-primary/5 border border-primary/15 rounded-lg p-3 text-xs text-muted-foreground space-y-1">
+              <div className="font-medium text-primary">How notifications work</div>
               <div><strong className="text-foreground">Comments</strong> are persisted on the task and notify all subscribers. Subscribers are auto-added when they: create the task, are assigned to it, comment on it, or are @mentioned.</div>
               <div><strong className="text-foreground">Broadcasts</strong> send a one-time notification to all current subscribers without creating a comment record.</div>
             </div>
@@ -1648,7 +1635,7 @@ function TaskDetailModal({
                   mentionTargets={mentionTargets}
                 />
                 <div className="flex justify-end">
-                  <Button type="submit" size="sm" className="bg-purple-500/20 text-purple-400 border border-purple-500/30 hover:bg-purple-500/30">
+                  <Button type="submit" size="sm">
                     {t('broadcast')}
                   </Button>
                 </div>
@@ -1661,7 +1648,7 @@ function TaskDetailModal({
             <div id="tabpanel-quality" role="tabpanel" aria-label={t('tabQualityReview')} className="mt-6">
               <h5 className="text-sm font-medium text-foreground mb-2">{t('aegisQualityReview')}</h5>
               {reviewError && (
-                <div className="text-xs text-red-400 mb-2">{reviewError}</div>
+                <div className="text-xs text-destructive mb-2">{reviewError}</div>
               )}
               {reviews.length > 0 ? (
                 <div className="space-y-2 mb-3">
@@ -1783,13 +1770,13 @@ function TaskSessionFeed({ sessionId, agentName, isLive }: { sessionId: string; 
             </span>
           )}
         </div>
-        <Button variant="link" size="xs" onClick={fetchTranscript} className="text-blue-400 hover:text-blue-300">
+        <Button variant="link" size="xs" onClick={fetchTranscript} className="text-primary hover:text-primary/80">
           {t('refresh')}
         </Button>
       </div>
 
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-2 rounded-md text-xs">
+        <div className="bg-destructive/10 border border-destructive/20 text-destructive p-2 rounded-md text-xs">
           {error}
         </div>
       )}
@@ -2051,12 +2038,12 @@ function CreateTaskModal({
                     placeholder='e.g. "every morning at 9am" or "every 2 hours"'
                   />
                   {parsedSchedule && (
-                    <p className="text-xs text-cyan-400 mt-1">
+                    <p className="text-xs text-primary mt-1">
                       {parsedSchedule.humanReadable} <span className="text-muted-foreground font-mono">({parsedSchedule.cronExpr})</span>
                     </p>
                   )}
                   {scheduleError && (
-                    <p className="text-xs text-red-400 mt-1">{scheduleError}. Try: &quot;daily at 9am&quot;, &quot;every 2 hours&quot;, &quot;weekly on monday&quot;</p>
+                    <p className="text-xs text-destructive mt-1">{scheduleError}. Try: &quot;daily at 9am&quot;, &quot;every 2 hours&quot;, &quot;weekly on monday&quot;</p>
                   )}
                 </div>
               )}
