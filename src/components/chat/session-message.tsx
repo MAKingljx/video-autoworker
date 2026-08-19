@@ -20,9 +20,9 @@ interface SessionMessageProps {
 }
 
 const ROLE_CONFIG = {
-  user: { indicator: '$', indicatorClass: 'text-green-400', borderClass: 'border-l-green-500/40' },
+  user: { indicator: '$', indicatorClass: 'text-primary', borderClass: 'border-l-primary/40' },
   assistant: { indicator: '\u25C6', indicatorClass: 'text-primary', borderClass: 'border-l-primary/40' },
-  system: { indicator: '', indicatorClass: '', borderClass: 'border-l-amber-500/20' },
+  system: { indicator: '', indicatorClass: '', borderClass: 'border-l-border' },
 } as const
 
 export function SessionMessage({ message, showTimestamp }: SessionMessageProps) {
@@ -100,7 +100,7 @@ function ThinkingPart({ thinking }: { thinking: string }) {
 function ToolUsePart({ name, input }: { name: string; input: string }) {
   return (
     <div className="flex items-baseline gap-1.5 font-mono-tight text-[11px]">
-      <span className="text-amber-400/80">{'\u2699'} {name}</span>
+      <span className="text-primary/80">{'\u2699'} {name}</span>
       <span className="truncate text-muted-foreground/40">{input.length > 80 ? input.slice(0, 80) + '\u2026' : input}</span>
     </div>
   )

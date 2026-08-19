@@ -11,6 +11,7 @@ describe('OpenClaw task-flow submit script', () => {
     const root = await mkdtemp(resolve(tmpdir(), 'openclaw-video-command-test-'))
     const inboxRoot = resolve(root, 'inbox')
     const videoPath = resolve(root, '中文 样片 (终版).mp4')
+    const noRecoveryVideoPath = resolve(root, '独立无恢复样片.mp4')
     const promptFile = resolve(root, 'video-command.txt')
     const fakePlatform = resolve(root, 'fake-platform.mjs')
     const requestLog = resolve(root, 'requests.jsonl')
@@ -19,6 +20,7 @@ describe('OpenClaw task-flow submit script', () => {
 
     try {
       await writeFile(videoPath, 'fake-video')
+      await writeFile(noRecoveryVideoPath, 'fake-video-no-recovery')
       await writeFile(promptFile, `分析视频 "${videoPath}"`)
       await writeFile(fakePlatform, `
 import { appendFileSync } from 'node:fs'
@@ -309,7 +311,7 @@ globalThis.fetch = async (input, init = {}) => {
         execFile(process.execPath, [
           script,
           '--base-url', 'http://127.0.0.1:3017',
-          '--video-file', videoPath,
+          '--video-file', noRecoveryVideoPath,
           '--task-id', 'no-recovery-task',
           '--idempotency-key', 'no-recovery-task',
           '--delivery', 'none',

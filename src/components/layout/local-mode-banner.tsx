@@ -14,8 +14,8 @@ export function LocalModeBanner() {
   if (!capabilitiesChecked || dashboardMode === 'full' || bannerDismissed) return null
 
   return (
-    <div className="mx-4 mt-3 mb-0 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-void-cyan/5 border border-void-cyan/15 text-sm">
-      <span className="w-1.5 h-1.5 rounded-full bg-void-cyan shrink-0" />
+    <div className="mx-4 mt-3 mb-0 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-card border border-border text-sm">
+      <span className="w-1.5 h-1.5 rounded-full bg-primary shrink-0" />
       <p className="flex-1 text-xs text-muted-foreground">
         <span className="font-medium text-foreground">{t('noGatewayDetected')}</span>
         {t('runningInLocalMode')}
@@ -24,7 +24,7 @@ export function LocalModeBanner() {
         variant="outline"
         size="xs"
         onClick={() => navigateToPanel('gateways')}
-        className="shrink-0 text-2xs font-medium text-void-cyan hover:text-void-cyan/80 border-void-cyan/20 hover:border-void-cyan/40"
+        className="shrink-0 text-2xs font-medium text-primary hover:text-primary/80 border-border hover:border-primary/30"
       >
         {t('configureGateway')}
       </Button>
@@ -32,7 +32,7 @@ export function LocalModeBanner() {
         variant="ghost"
         size="icon-xs"
         onClick={dismissBanner}
-        className="shrink-0 text-void-cyan/60 hover:text-void-cyan hover:bg-transparent"
+        className="shrink-0 text-muted-foreground hover:text-foreground hover:bg-transparent"
         title={tc('dismiss')}
       >
         <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">

@@ -198,8 +198,8 @@ export function SystemMonitorPanel() {
                 <Area
                   type="monotone"
                   dataKey="cpuPercent"
-                  stroke="hsl(var(--chart-1, 221 83% 53%))"
-                  fill="hsl(var(--chart-1, 221 83% 53%))"
+                  stroke="#0969DA"
+                  fill="#0969DA"
                   fillOpacity={0.15}
                   strokeWidth={1.5}
                   isAnimationActive={false}
@@ -234,8 +234,8 @@ export function SystemMonitorPanel() {
                 <Area
                   type="monotone"
                   dataKey="memPercent"
-                  stroke="hsl(var(--chart-2, 142 71% 45%))"
-                  fill="hsl(var(--chart-2, 142 71% 45%))"
+                  stroke="#1F6FEB"
+                  fill="#1F6FEB"
                   fillOpacity={0.15}
                   strokeWidth={1.5}
                   isAnimationActive={false}
@@ -263,7 +263,7 @@ export function SystemMonitorPanel() {
                   <div className="h-2.5 bg-muted rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all ${
-                        d.usagePercent >= 90 ? 'bg-red-500' : d.usagePercent >= 75 ? 'bg-amber-500' : 'bg-blue-500'
+                        d.usagePercent >= 90 ? 'bg-red-500' : d.usagePercent >= 75 ? 'bg-amber-500' : 'bg-primary'
                       }`}
                       style={{ width: `${d.usagePercent}%` }}
                     />
@@ -308,8 +308,8 @@ export function SystemMonitorPanel() {
                       <Area
                         type="monotone"
                         dataKey="gpuPercent"
-                        stroke="hsl(var(--chart-4, 280 65% 60%))"
-                        fill="hsl(var(--chart-4, 280 65% 60%))"
+                        stroke="#54AEFF"
+                        fill="#54AEFF"
                         fillOpacity={0.15}
                         strokeWidth={1.5}
                         isAnimationActive={false}
@@ -401,8 +401,8 @@ export function SystemMonitorPanel() {
                     <Area
                       type="monotone"
                       dataKey="netRxRate"
-                      stroke="hsl(var(--chart-5, 25 95% 53%))"
-                      fill="hsl(var(--chart-5, 25 95% 53%))"
+                      stroke="#218BFF"
+                      fill="#218BFF"
                       fillOpacity={0.15}
                       strokeWidth={1.5}
                       isAnimationActive={false}
@@ -410,8 +410,8 @@ export function SystemMonitorPanel() {
                     <Area
                       type="monotone"
                       dataKey="netTxRate"
-                      stroke="hsl(var(--chart-3, 173 58% 39%))"
-                      fill="hsl(var(--chart-3, 173 58% 39%))"
+                      stroke="#80CCFF"
+                      fill="#80CCFF"
                       fillOpacity={0.15}
                       strokeWidth={1.5}
                       isAnimationActive={false}

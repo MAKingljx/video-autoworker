@@ -45,11 +45,14 @@ interface SystemCapabilities {
 }
 
 
-/** Mode-aware Tailwind classes — local=amber, gateway=cyan */
-function modeColors(isGateway: boolean) {
-  return isGateway
-    ? { text: 'text-void-cyan', border: 'border-void-cyan/30', bg: 'bg-void-cyan', bgLight: 'bg-void-cyan/5', bgBtn: 'bg-void-cyan/20', hoverBg: 'hover:bg-void-cyan/30', hoverBorder: 'hover:border-void-cyan/30', hoverBgLight: 'hover:bg-void-cyan/10', dot: 'bg-void-cyan', dotDim: 'bg-void-cyan/40' }
-    : { text: 'text-void-amber', border: 'border-void-amber/30', bg: 'bg-void-amber', bgLight: 'bg-void-amber/5', bgBtn: 'bg-void-amber/20', hoverBg: 'hover:bg-void-amber/30', hoverBorder: 'hover:border-void-amber/30', hoverBgLight: 'hover:bg-void-amber/10', dot: 'bg-void-amber', dotDim: 'bg-void-amber/40' }
+/** Navigation and selection use the single product accent in every runtime mode. */
+function modeColors(_isGateway: boolean) {
+  return {
+    text: 'text-primary-foreground',
+    border: 'border-primary',
+    bgBtn: 'bg-primary',
+    hoverBg: 'hover:bg-primary/90',
+  }
 }
 
 export function OnboardingWizard() {
@@ -228,7 +231,7 @@ export function OnboardingWizard() {
         {/* Progress bar */}
         <div className="h-0.5 bg-surface-2">
           <div
-            className={`h-full transition-all duration-500 ${isGateway ? 'bg-void-cyan' : 'bg-void-amber'}`}
+            className="h-full bg-primary transition-all duration-500"
             style={{ width: `${((step + 1) / totalSteps) * 85 + 15}%` }}
           />
         </div>
@@ -241,9 +244,9 @@ export function OnboardingWizard() {
                 key={i}
                 className={`w-1.5 h-1.5 rounded-full transition-colors ${
                   i === step
-                    ? (isGateway ? 'bg-void-cyan' : 'bg-void-amber')
+                    ? 'bg-primary'
                     : i < step
-                      ? (isGateway ? 'bg-void-cyan/40' : 'bg-void-amber/40')
+                      ? 'bg-primary/40'
                       : 'bg-surface-2'
                 }`}
               />
@@ -260,7 +263,7 @@ export function OnboardingWizard() {
         }`}>
           {completionMessage && (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-background/95 backdrop-blur-sm">
-              <div className={`text-2xl font-bold mb-2 ${isGateway ? 'text-void-cyan' : 'text-void-amber'}`}>{t('stationOnline')}</div>
+              <div className="mb-2 text-2xl font-bold text-success">{t('stationOnline')}</div>
               <p className="text-sm text-muted-foreground">{t('stationReady')}</p>
             </div>
           )}
@@ -352,15 +355,15 @@ function StepWelcome({ isGateway, capabilities, onNext, onSkip }: {
             {/* Local mode card */}
             <div className={`relative p-3 rounded-lg border text-left transition-colors ${
               !isGateway
-                ? 'border-void-amber/40 bg-void-amber/5 border-l-2 border-l-void-amber'
+                ? 'border-primary/40 bg-primary/[0.04] border-l-2 border-l-primary'
                 : 'border-border/20 bg-surface-1/30 opacity-50'
             }`}>
               {!isGateway && (
-                <span className="absolute -top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-amber/20 text-void-amber border border-void-amber/30">
+                <span className="absolute -top-2 right-2 rounded-full border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">
                   {tc('detected')}
                 </span>
               )}
-              <p className={`text-xs font-medium mb-1.5 ${!isGateway ? 'text-void-amber' : 'text-muted-foreground'}`}>
+              <p className={`text-xs font-medium mb-1.5 ${!isGateway ? 'text-primary' : 'text-muted-foreground'}`}>
                 {t('localMode')}
               </p>
               <ul className={`text-2xs space-y-0.5 ${!isGateway ? 'text-muted-foreground' : 'text-muted-foreground/60'}`}>
@@ -376,15 +379,15 @@ function StepWelcome({ isGateway, capabilities, onNext, onSkip }: {
             {/* Gateway mode card */}
             <div className={`relative p-3 rounded-lg border text-left transition-colors ${
               isGateway
-                ? 'border-void-cyan/40 bg-void-cyan/5 border-l-2 border-l-void-cyan'
+                ? 'border-primary/40 bg-primary/[0.04] border-l-2 border-l-primary'
                 : 'border-border/20 bg-surface-1/30 opacity-50'
             }`}>
               {isGateway && (
-                <span className="absolute -top-2 right-2 text-2xs px-1.5 py-0.5 rounded-full bg-void-cyan/20 text-void-cyan border border-void-cyan/30">
+                <span className="absolute -top-2 right-2 rounded-full border border-primary/25 bg-primary/10 px-1.5 py-0.5 text-2xs text-primary">
                   {tc('detected')}
                 </span>
               )}
-              <p className={`text-xs font-medium mb-1.5 ${isGateway ? 'text-void-cyan' : 'text-muted-foreground'}`}>
+              <p className={`text-xs font-medium mb-1.5 ${isGateway ? 'text-primary' : 'text-muted-foreground'}`}>
                 {t('gatewayMode')}
               </p>
               <ul className={`text-2xs space-y-0.5 ${isGateway ? 'text-muted-foreground' : 'text-muted-foreground/60'}`}>
@@ -450,8 +453,8 @@ function StepInterfaceMode({ isGateway, onNext, onBack }: {
         </p>
 
         <div className="grid grid-cols-1 gap-3">
-          <div className="relative p-4 rounded-lg border text-left border-void-amber/50 bg-void-amber/5 border-l-2 border-l-void-amber ring-1 ring-void-amber/20">
-            <p className="text-sm font-medium mb-2 text-void-amber">
+          <div className="relative rounded-lg border border-primary/40 border-l-2 border-l-primary bg-primary/[0.04] p-4 text-left ring-1 ring-primary/15">
+            <p className="mb-2 text-sm font-medium text-primary">
               {t('essential')}
             </p>
             <p className="text-xs text-muted-foreground mb-3">

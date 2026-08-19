@@ -431,15 +431,15 @@ export function TokenDashboardPanel() {
     }
   })
 
-  const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d']
+  const COLORS = ['#0969DA', '#1F6FEB', '#218BFF', '#54AEFF', '#80CCFF', '#A5D6FF']
   const PROVIDER_COLORS: Record<string, string> = {
-    Anthropic: '#d97706',
-    OpenAI: '#10b981',
-    Google: '#3b82f6',
-    Mistral: '#f97316',
-    Meta: '#6366f1',
-    DeepSeek: '#06b6d4',
-    Cohere: '#ec4899',
+    Anthropic: '#0969DA',
+    OpenAI: '#1F6FEB',
+    Google: '#218BFF',
+    Mistral: '#54AEFF',
+    Meta: '#80CCFF',
+    DeepSeek: '#A5D6FF',
+    Cohere: '#C2E0FF',
     Other: '#6b7280',
   }
 
@@ -622,7 +622,7 @@ export function TokenDashboardPanel() {
                 onClick={() => toggleSessionFilter(sessionId)}
                 className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
                   sessionFilters.has(sessionId)
-                    ? 'bg-blue-500/30 text-blue-300 border-blue-500/50'
+                    ? 'bg-primary/15 text-primary border-primary/30'
                     : 'bg-card text-muted-foreground border-border hover:text-foreground hover:border-foreground/30'
                 }`}
               >
@@ -766,7 +766,7 @@ export function TokenDashboardPanel() {
             {cacheStats && (
               <>
                 <div className="bg-card border border-border rounded-lg p-6">
-                  <div className="text-3xl font-bold text-cyan-400">
+                  <div className="text-3xl font-bold text-primary">
                     {formatNumber(cacheStats.cacheRead)}
                   </div>
                   <div className="text-sm text-muted-foreground">
@@ -775,7 +775,7 @@ export function TokenDashboardPanel() {
                 </div>
 
                 <div className="bg-card border border-border rounded-lg p-6">
-                  <div className="text-3xl font-bold text-amber-400">
+                  <div className="text-3xl font-bold text-primary/75">
                     {formatNumber(cacheStats.cacheWrite)}
                   </div>
                   <div className="text-sm text-muted-foreground">
@@ -828,14 +828,14 @@ export function TokenDashboardPanel() {
                     <Line
                       type="monotone"
                       dataKey="tokens"
-                      stroke="#8884d8"
+                      stroke="#0969DA"
                       strokeWidth={2}
                       name={t('chartTokens')}
                     />
                     <Line
                       type="monotone"
                       dataKey="requests"
-                      stroke="#82ca9d"
+                      stroke="#54AEFF"
                       strokeWidth={2}
                       name={t('chartRequests')}
                     />
@@ -864,7 +864,7 @@ export function TokenDashboardPanel() {
                     />
                     <YAxis />
                     <Tooltip formatter={(value, name) => [formatNumber(Number(value)), name]} />
-                    <Bar dataKey="tokens" fill="#8884d8" name={t('chartTokens')} />
+                    <Bar dataKey="tokens" fill="#0969DA" name={t('chartTokens')} />
                   </BarChart>
                 </ResponsiveContainer>
                 )}
@@ -958,21 +958,20 @@ export function TokenDashboardPanel() {
                 <Button
                   onClick={exportClientCsv}
                   disabled={isExporting}
-                  className="bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30"
                 >
                   {isExporting ? t('exporting') : t('exportCsvFiltered')}
                 </Button>
                 <Button
                   onClick={() => exportData('csv')}
                   disabled={isExporting}
-                  className="bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30"
+                  variant="outline"
                 >
                   {isExporting ? t('exporting') : t('exportCsvFull')}
                 </Button>
                 <Button
                   onClick={() => exportData('json')}
                   disabled={isExporting}
-                  variant="success"
+                  variant="outline"
                 >
                   {isExporting ? t('exporting') : t('exportJson')}
                 </Button>
@@ -996,8 +995,8 @@ export function TokenDashboardPanel() {
                       key={index}
                       className={`border-l-4 p-4 rounded ${
                         alert.type === 'warning'
-                          ? 'border-yellow-500 bg-yellow-50 dark:bg-yellow-900/20'
-                          : 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                          ? 'border-amber-500 bg-amber-500/10'
+                          : 'border-primary bg-primary/5'
                       }`}
                     >
                       <div className="flex items-start">
@@ -1007,7 +1006,7 @@ export function TokenDashboardPanel() {
                         <div className="ml-3">
                           <p className="text-sm font-medium">{alert.title}</p>
                           <p className="text-xs text-muted-foreground mt-1">{alert.message}</p>
-                          <p className="text-xs text-blue-600 dark:text-blue-400 mt-2">{alert.suggestion}</p>
+                          <p className="text-xs text-primary mt-2">{alert.suggestion}</p>
                         </div>
                       </div>
                     </div>
@@ -1029,7 +1028,7 @@ export function TokenDashboardPanel() {
 
                 <div className="bg-secondary rounded-lg p-4">
                   <h3 className="text-sm font-medium text-muted-foreground mb-2">{t('mostUsedModel')}</h3>
-                  <div className="text-lg font-bold text-blue-600 dark:text-blue-400">
+                  <div className="text-lg font-bold text-primary">
                     {getModelDisplayName(performanceMetrics.mostUsed.model)}
                   </div>
                   <div className="text-xs text-muted-foreground">
@@ -1039,7 +1038,7 @@ export function TokenDashboardPanel() {
 
                 <div className="bg-secondary rounded-lg p-4">
                   <h3 className="text-sm font-medium text-muted-foreground mb-2">{t('optimizationPotential')}</h3>
-                  <div className="text-lg font-bold text-orange-600 dark:text-orange-400">
+                  <div className="text-lg font-bold text-primary">
                     {formatCost(performanceMetrics.potentialSavings)}
                   </div>
                   <div className="text-xs text-muted-foreground">

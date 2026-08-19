@@ -30,10 +30,13 @@ interface Props {
   onBack: () => void
 }
 
-function modeColors(isGateway: boolean) {
-  return isGateway
-    ? { text: 'text-void-cyan', border: 'border-void-cyan/30', bgBtn: 'bg-void-cyan/20', hoverBg: 'hover:bg-void-cyan/30' }
-    : { text: 'text-void-amber', border: 'border-void-amber/30', bgBtn: 'bg-void-amber/20', hoverBg: 'hover:bg-void-amber/30' }
+function modeColors(_isGateway: boolean) {
+  return {
+    text: 'text-primary-foreground',
+    border: 'border-primary',
+    bgBtn: 'bg-primary',
+    hoverBg: 'hover:bg-primary/90',
+  }
 }
 
 export function StepAgentRuntimes({ isGateway, onNext, onBack }: Props) {

@@ -26,12 +26,12 @@ function AgentCoreNodeInner({ data }: NodeProps & { data: CoreNodeData }) {
       <div className="absolute inset-6 rounded-full border border-primary/35" />
 
       {/* Core circle */}
-      <div className="relative z-10 w-16 h-16 rounded-full bg-card border-2 border-void-cyan glow-cyan flex flex-col items-center justify-center">
-        <span className="font-mono text-xs font-bold tracking-widest text-void-cyan">
+      <div className="relative z-10 flex h-16 w-16 flex-col items-center justify-center rounded-full border-2 border-primary bg-card">
+        <span className="font-mono text-xs font-bold tracking-widest text-primary">
           {label}
         </span>
         {agentCount > 0 && (
-          <span className="font-mono text-[10px] text-void-cyan/70 mt-0.5">
+          <span className="mt-0.5 font-mono text-[10px] text-primary/70">
             {agentCount}
           </span>
         )}

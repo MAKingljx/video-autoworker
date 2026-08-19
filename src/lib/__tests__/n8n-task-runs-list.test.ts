@@ -1,8 +1,11 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  getN8nVideoResultDetail,
   listN8nTaskRunSummaries,
+  listN8nVideoResults,
   projectN8nTaskRunListItem,
+  projectN8nVideoResultDetail,
 } from '@/lib/n8n-task-runs'
 
 describe('n8n task run list projection', () => {
@@ -38,6 +41,56 @@ describe('n8n task run list projection', () => {
     expect(item).not.toHaveProperty('input')
     expect(item).not.toHaveProperty('routing')
     expect(item).not.toHaveProperty('output')
+  })
+
+  it('projects only the formal video report fields and never returns routing or input', () => {
+    const detail = projectN8nVideoResultDetail({
+      taskId: 'season-three:video:003:abcdef123456',
+      status: 'succeeded',
+      source: 'openclaw',
+      routing: { taskType: 'video-analysis', secret: 'hidden-route' },
+      input: { displayName: '/Users/operator/videos/S03E03.mp4', prompt: 'private prompt' },
+      output: {
+        summary: '一句话总结',
+        chapters: [{ index: 1, startTime: '00:00:00', endTime: '00:05:00', summary: '第一章' }],
+        timeline: [{
+          index: 1,
+          timeRange: '00:00:00-00:01:00',
+          transcript: '人物对白',
+          visualAnalysis: '雪山远景',
+        }],
+        audio: { transcript: '完整转写', model: 'private-audio-model' },
+        vision: { analysis: '完整画面证据', routeId: 'private-route' },
+        combinedText: '完整报告',
+        workers: { internal: true },
+      },
+      error: null,
+      attemptCount: 1,
+      maxAttempts: 2,
+      createdAt: 10,
+      acceptedAt: 11,
+      startedAt: 12,
+      completedAt: 20,
+      updatedAt: 20,
+      workflowName: '视频深度分析',
+      bindingTaskType: 'video-analysis',
+      resultAvailable: true,
+    })
+
+    expect(detail).toMatchObject({
+      title: 'S03E03.mp4',
+      summary: '一句话总结',
+      chapterCount: 1,
+      timelineCount: 1,
+      transcript: '完整转写',
+      visualAnalysis: '完整画面证据',
+      fullReport: '完整报告',
+      timeline: [{ startSeconds: 0, endSeconds: 60 }],
+    })
+    expect(JSON.stringify(detail)).not.toContain('private prompt')
+    expect(JSON.stringify(detail)).not.toContain('hidden-route')
+    expect(JSON.stringify(detail)).not.toContain('private-audio-model')
+    expect(JSON.stringify(detail)).not.toContain('/Users/operator')
   })
 })
 
@@ -91,7 +144,19 @@ describe('listN8nTaskRunSummaries', () => {
       'batch-a:video:002:abcdef123456', 1, 'succeeded', 'openclaw',
       JSON.stringify({ name: '不可返回的路由配置' }),
       JSON.stringify({ displayName: '/Users/operator/videos/S03E03.mp4', prompt: 'private prompt' }),
-      JSON.stringify({ privateResult: true }), null,
+      JSON.stringify({
+        summary: 'S03E03 的正式分析摘要。',
+        chapters: [{ index: 1, startTime: '00:00:00', endTime: '00:05:00', summary: '开场章节' }],
+        timeline: [{
+          index: 1,
+          timeRange: '00:00:00-00:01:00',
+          transcript: '旁白内容',
+          visualAnalysis: '冰川画面',
+        }],
+        audio: { transcript: '完整旁白' },
+        vision: { analysis: '完整视觉证据' },
+        combinedText: 'S03E03 完整报告',
+      }), null,
       1, 2, 2, 3, 100, 101, 102, 160, 160,
     )
     insert.run(
@@ -162,5 +227,45 @@ describe('listN8nTaskRunSummaries', () => {
     )
     expect(secondPage.total).toBe(2)
     expect(secondPage.runs[0].taskId).toBe('legacy-task-with-a-very-long-identifier')
+  })
+
+  it('lists and reads only scoped video-analysis results through the safe projection', () => {
+    const list = listN8nVideoResults(
+      db,
+      { workspaceId: 2, tenantId: 3 },
+      { status: 'succeeded', query: 'S03E03', limit: 10 },
+    )
+    expect(list).toMatchObject({ total: 1, limit: 10, offset: 0 })
+    expect(list.results[0]).toMatchObject({
+      taskId: 'batch-a:video:002:abcdef123456',
+      title: 'S03E03.mp4',
+      summary: 'S03E03 的正式分析摘要。',
+      chapterCount: 1,
+      timelineCount: 1,
+    })
+    expect(list.results[0]).not.toHaveProperty('output')
+
+    const detail = getN8nVideoResultDetail(
+      db,
+      'batch-a:video:002:abcdef123456',
+      { workspaceId: 2, tenantId: 3 },
+    )
+    expect(detail).toMatchObject({
+      transcript: '完整旁白',
+      visualAnalysis: '完整视觉证据',
+      fullReport: 'S03E03 完整报告',
+      chapters: [{ summary: '开场章节' }],
+      timeline: [{ transcript: '旁白内容', visualAnalysis: '冰川画面' }],
+    })
+    expect(getN8nVideoResultDetail(
+      db,
+      'other-workspace',
+      { workspaceId: 2, tenantId: 3 },
+    )).toBeNull()
+    expect(getN8nVideoResultDetail(
+      db,
+      'legacy-task-with-a-very-long-identifier',
+      { workspaceId: 2, tenantId: 3 },
+    )).toBeNull()
   })
 })

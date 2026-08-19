@@ -173,7 +173,7 @@ export function LogViewerPanel() {
     switch (level.toLowerCase()) {
       case 'error': return 'text-red-400'
       case 'warn': return 'text-yellow-400'
-      case 'info': return 'text-blue-400'
+      case 'info': return 'text-primary'
       case 'debug': return 'text-muted-foreground'
       default: return 'text-foreground'
     }
@@ -183,7 +183,7 @@ export function LogViewerPanel() {
     switch (level.toLowerCase()) {
       case 'error': return 'bg-red-500/10 border-red-500/20'
       case 'warn': return 'bg-yellow-500/10 border-yellow-500/20'
-      case 'info': return 'bg-blue-500/10 border-blue-500/20'
+      case 'info': return 'bg-primary/5 border-primary/20'
       case 'debug': return 'bg-gray-500/10 border-gray-500/20'
       default: return 'bg-secondary border-border'
     }
@@ -303,13 +303,13 @@ export function LogViewerPanel() {
           <div className="flex items-end space-x-2">
             <Button
               onClick={() => setIsAutoScroll(!isAutoScroll)}
-              variant={isAutoScroll ? 'success' : 'outline'}
+              variant={isAutoScroll ? 'default' : 'outline'}
             >
               {isAutoScroll ? t('auto') : t('manual')}
             </Button>
             <Button
               onClick={handleScrollToBottom}
-              className="bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30"
+              variant="outline"
             >
               {t('bottom')}
             </Button>
@@ -320,14 +320,14 @@ export function LogViewerPanel() {
             <Button
               onClick={handleExportText}
               disabled={filteredLogs.length === 0}
-              className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 disabled:opacity-40"
+              variant="outline"
             >
               {t('exportLog')}
             </Button>
             <Button
               onClick={handleExportJson}
               disabled={filteredLogs.length === 0}
-              className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/30 disabled:opacity-40"
+              variant="outline"
             >
               {t('exportJson')}
             </Button>

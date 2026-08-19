@@ -34,7 +34,7 @@ const VALUE_OPTIONS = new Set([
   '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
   '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
-const FLAG_OPTIONS = new Set(['--no-trigger-recovery', '--resume-pending'])
+const FLAG_OPTIONS = new Set(['--confirm-duplicate', '--no-trigger-recovery', '--resume-pending'])
 const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
 const publicLocalTaskStatus = status => ({
   staging: 'queued',
@@ -99,12 +99,12 @@ function validateCliArguments() {
     '--search-status': new Set(['--search-status']),
     '--video-dir': new Set([
       '--video-dir', '--batch-id', '--base-url', '--binding-id', '--prompt', '--prompt-file',
-      '--vision-route', '--delivery',
+      '--vision-route', '--delivery', '--confirm-duplicate',
     ]),
     '--video-file': new Set([
       '--video-file', '--base-url', '--binding-id', '--prompt', '--prompt-file', '--vision-route',
       '--delivery', '--session-key', '--channel', '--target', '--account-id', '--task-id',
-      '--idempotency-key', '--wait-seconds', '--no-trigger-recovery',
+      '--idempotency-key', '--wait-seconds', '--no-trigger-recovery', '--confirm-duplicate',
     ]),
     generic: new Set([
       '--base-url', '--binding-id', '--prompt', '--prompt-file', '--planner-route',
@@ -145,6 +145,20 @@ function resultTimestamp(value) {
   const timestamp = String(value || '').trim()
   if (!timestamp || timestamp.length > 64 || !Number.isFinite(Date.parse(timestamp))) return null
   return timestamp
+}
+
+function publicDuplicateConfirmation(historical) {
+  const matches = Array.isArray(historical?.matches) ? historical.matches : []
+  const names = [...new Set(matches
+    .map(match => resultDisplayName(match?.name))
+    .filter(Boolean))].slice(0, 10)
+  return {
+    duplicateCount: Number.isInteger(historical?.total) && historical.total > 0
+      ? historical.total
+      : names.length,
+    duplicateNames: names,
+    truncated: historical?.truncated === true,
+  }
 }
 
 function publicResultMatch(match) {
@@ -344,7 +358,18 @@ async function handleBatchCreate(client, videoDir) {
     visionRoute: option('--vision-route'),
     videoDir,
     inboxRoot: defaultMediaInboxRoot(),
+    confirmDuplicate: flag('--confirm-duplicate'),
   })
+  if (created.confirmationRequired) {
+    output({
+      batchId,
+      status: 'confirmation_required',
+      duplicate: false,
+      confirmationRequired: true,
+      ...publicDuplicateConfirmation(created.historical),
+    })
+    return
+  }
   if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
     await spawnBatchWorker()
   }
@@ -497,7 +522,18 @@ async function main() {
       videoFile,
       visionRoute: option('--vision-route'),
       inboxRoot: defaultMediaInboxRoot(),
+      confirmDuplicate: flag('--confirm-duplicate'),
     })
+    if (created.confirmationRequired) {
+      output({
+        taskId,
+        status: 'confirmation_required',
+        duplicate: false,
+        confirmationRequired: true,
+        ...publicDuplicateConfirmation(created.historical),
+      })
+      return
+    }
     if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
       await spawnBatchWorker()
     }

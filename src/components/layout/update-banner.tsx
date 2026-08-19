@@ -67,9 +67,9 @@ export function UpdateBanner() {
   const isbusy = state === 'updating' || state === 'restarting'
 
   return (
-    <div className="mx-4 mt-3 mb-0 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-sm">
-      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-      <p className="flex-1 text-xs text-emerald-300">
+    <div className="mx-4 mt-3 mb-0 flex items-center gap-3 px-4 py-2.5 rounded-lg bg-card border border-border text-sm">
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${state === 'error' ? 'bg-destructive' : isbusy ? 'bg-warning' : 'bg-primary'}`} />
+      <p className="flex-1 text-xs text-muted-foreground">
         {state === 'updating' && (
           <span className="font-medium text-amber-300">{t('updating')}</span>
         )}
@@ -81,7 +81,7 @@ export function UpdateBanner() {
         )}
         {state === 'idle' && (
           <>
-            <span className="font-medium text-emerald-200">
+            <span className="font-medium text-foreground">
               {t('updateAvailable', { version: updateAvailable.latestVersion })}
             </span>
             {t('newerVersionAvailable')}
@@ -90,18 +90,19 @@ export function UpdateBanner() {
       </p>
       {!isbusy && (
         <>
-          <button
+          <Button
             onClick={handleUpdate}
             disabled={isbusy}
-            className="shrink-0 text-2xs font-medium text-emerald-900 bg-emerald-500 hover:bg-emerald-400 px-2.5 py-1 rounded transition-colors"
+            size="xs"
+            className="shrink-0 text-2xs"
           >
             {tc('updateNow')}
-          </button>
+          </Button>
           <a
             href={updateAvailable.releaseUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="shrink-0 text-2xs font-medium text-emerald-400 hover:text-emerald-300 px-2 py-1 rounded border border-emerald-500/20 hover:border-emerald-500/40 transition-colors"
+            className="shrink-0 text-2xs font-medium text-muted-foreground hover:text-foreground px-2 py-1 rounded border border-border hover:border-primary/30 transition-colors"
           >
             {tc('viewRelease')}
           </a>
@@ -109,7 +110,7 @@ export function UpdateBanner() {
             variant="ghost"
             size="icon-xs"
             onClick={() => dismissUpdate(updateAvailable.latestVersion)}
-            className="shrink-0 text-emerald-400/60 hover:text-emerald-300 hover:bg-transparent"
+            className="shrink-0 text-muted-foreground hover:text-foreground hover:bg-transparent"
             title={tc('dismiss')}
           >
             <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">

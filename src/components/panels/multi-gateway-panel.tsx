@@ -337,7 +337,7 @@ export function MultiGatewayPanel() {
                           {dg.active ? t('running') : t('stopped')}
                         </span>
                         {dg.tailscale?.mode && (
-                          <span className="text-2xs px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-400 border border-violet-500/30 font-medium">
+                          <span className="text-2xs px-1.5 py-0.5 rounded bg-secondary text-muted-foreground border border-border font-medium">
                             TS:{dg.tailscale.mode}
                           </span>
                         )}
@@ -410,7 +410,7 @@ export function MultiGatewayPanel() {
                     <div className="flex items-center gap-2">
                       <span className={`w-2 h-2 rounded-full ${conn.status === 'connected' ? 'bg-green-500' : 'bg-red-500'}`} />
                       <span className="text-sm font-semibold text-foreground">{conn.agent_name}</span>
-                      <span className="text-2xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30 font-medium">
+                      <span className="text-2xs px-1.5 py-0.5 rounded bg-secondary text-muted-foreground border border-border font-medium">
                         {conn.tool_name}{conn.tool_version ? ` v${conn.tool_version}` : ''}
                       </span>
                       <span className={`text-2xs px-1.5 py-0.5 rounded font-medium ${
@@ -595,7 +595,7 @@ function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurren
             <Button
               onClick={onConnect}
               size="xs"
-              className="text-2xs bg-blue-500/20 text-blue-400 hover:bg-blue-500/30"
+              className="text-2xs"
               title={t('connectToGateway')}
             >
               {t('connect')}

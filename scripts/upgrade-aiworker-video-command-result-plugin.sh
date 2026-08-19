@@ -6,8 +6,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-PREVIOUS_VERSION="0.5.7"
-CANDIDATE_VERSION="0.5.8"
+PREVIOUS_VERSION="0.5.8"
+CANDIDATE_VERSION="0.5.9"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -73,7 +73,7 @@ cleanup() {
   trap - EXIT HUP INT TERM
   if [[ -n "$WORK_ROOT" && -d "$WORK_ROOT" ]]; then
     case "$WORK_ROOT" in
-      /tmp/aiworker-result-plugin-upgrade.*|/private/tmp/aiworker-result-plugin-upgrade.*)
+      /tmp/aiworker-duplicate-confirm-upgrade.*|/private/tmp/aiworker-duplicate-confirm-upgrade.*)
         rm -rf -- "$WORK_ROOT"
         ;;
       *) printf 'Refusing unexpected temporary cleanup path.\n' >&2; status=70 ;;
@@ -82,7 +82,7 @@ cleanup() {
   exit "$status"
 }
 
-WORK_ROOT="$(mktemp -d /tmp/aiworker-result-plugin-upgrade.XXXXXX)"
+WORK_ROOT="$(mktemp -d /tmp/aiworker-duplicate-confirm-upgrade.XXXXXX)"
 chmod 700 "$WORK_ROOT"
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -221,7 +221,7 @@ const { existsSync, readdirSync, rmSync, statSync } = require('node:fs')
 const { join } = require('node:path')
 const root = process.argv[2]
 const entries = readdirSync(root)
-  .filter(name => /^result-plugin-upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(name))
+  .filter(name => /^duplicate-confirm-upgrade-[0-9]{8}-[0-9]{6}\.[A-Za-z0-9]+$/u.test(name))
   .map(name => ({ path: join(root, name), time: statSync(join(root, name)).mtimeMs }))
   .filter(entry => statSync(entry.path).isDirectory()
     && existsSync(join(entry.path, '.verified'))
@@ -242,14 +242,14 @@ BEFORE_CONFIG_SHA="$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')"
 BEFORE_LISTENERS="$(listener_snapshot)"
 
 if [[ "$MODE" == "dry-run" ]]; then
-  printf 'Final-report tool upgrade dry-run passed for %s -> %s at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
+  printf 'Duplicate-confirmation upgrade dry-run passed for %s -> %s at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
   printf 'No plugin, config, gateway, queue, n8n, media, or database state changed.\n'
   exit 0
 fi
 
 if [[ "$MODE" == "rollback" ]]; then
   case "$ROLLBACK_BACKUP" in
-    "$BACKUP_ROOT"/result-plugin-upgrade-*) ;;
+    "$BACKUP_ROOT"/duplicate-confirm-upgrade-*) ;;
     *) printf 'Rollback backup is outside the approved family.\n' >&2; exit 1 ;;
   esac
   [[ -d "$ROLLBACK_BACKUP/previous-plugin" && -f "$ROLLBACK_BACKUP/openclaw.json" ]] || exit 1
@@ -266,7 +266,7 @@ fi
 
 mkdir -p "$BACKUP_ROOT"
 chmod 700 "$BACKUP_ROOT"
-BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/result-plugin-upgrade-$(date +%Y%m%d-%H%M%S).XXXXXX")"
+BACKUP_DIR="$(mktemp -d "$BACKUP_ROOT/duplicate-confirm-upgrade-$(date +%Y%m%d-%H%M%S).XXXXXX")"
 chmod 700 "$BACKUP_DIR"
 install -m 600 "$PROFILE_CONFIG" "$BACKUP_DIR/openclaw.json"
 cp -R -p "$INSTALLED_PLUGIN_DIR" "$BACKUP_DIR/previous-plugin"
@@ -289,5 +289,5 @@ if ! validate_installed_version "$CANDIDATE_VERSION" \
 fi
 install -m 600 /dev/null "$BACKUP_DIR/.verified"
 enforce_retention
-printf 'Upgraded qwen-current %s -> %s with short natural-language result defaults at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
+printf 'Upgraded qwen-current %s -> %s with duplicate confirmation gating at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
 printf 'Only the qwen-current plugin payload and its gateway were refreshed; config, queue, n8n, media, and database state were preserved.\n'

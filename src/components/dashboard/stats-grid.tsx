@@ -82,27 +82,20 @@ interface StatCardProps {
 function StatCard({ title, value, icon, trend, subtitle, color = 'default' }: StatCardProps) {
   const colorClasses = {
     default: 'void-panel',
-    success: 'void-panel border-void-mint/30',
-    warning: 'void-panel border-void-amber/30',
-    danger: 'void-panel border-void-crimson/30'
+    success: 'void-panel border-success/30',
+    warning: 'void-panel border-warning/30',
+    danger: 'void-panel border-destructive/30'
   }
 
   const iconColorClasses = {
-    default: 'text-void-cyan',
-    success: 'text-void-mint',
-    warning: 'text-void-amber',
-    danger: 'text-void-crimson'
-  }
-
-  const glowClasses = {
-    default: '',
-    success: 'badge-glow-success',
-    warning: 'badge-glow-warning',
-    danger: 'badge-glow-error'
+    default: 'text-primary',
+    success: 'text-success',
+    warning: 'text-warning',
+    danger: 'text-destructive'
   }
 
   return (
-    <div className={`p-6 ${colorClasses[color]} ${glowClasses[color]}`}>
+    <div className={`p-6 ${colorClasses[color]}`}>
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-muted-foreground">{title}</p>
@@ -110,8 +103,8 @@ function StatCard({ title, value, icon, trend, subtitle, color = 'default' }: St
             <p className="text-2xl font-bold font-mono text-foreground">{value}</p>
             {trend && (
               <span className={`text-sm ${
-                trend === 'up' ? 'text-void-mint' :
-                trend === 'down' ? 'text-void-crimson' :
+                trend === 'up' ? 'text-success' :
+                trend === 'down' ? 'text-destructive' :
                 'text-muted-foreground'
               }`}>
                 {trend === 'up' ? '\u2197' : trend === 'down' ? '\u2198' : '\u2192'}

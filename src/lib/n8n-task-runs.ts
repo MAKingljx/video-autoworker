@@ -114,6 +114,17 @@ interface N8nTaskRunSummaryRow {
   result_available: number
 }
 
+interface N8nVideoResultRow extends N8nTaskRunRow {
+  workflow_name: string | null
+  binding_task_type: string | null
+}
+
+interface N8nVideoResultListRow extends N8nTaskRunSummaryRow {
+  result_summary: string | null
+  chapter_count: number
+  timeline_count: number
+}
+
 export interface N8nTaskRunListItem {
   taskId: string
   title: string
@@ -136,6 +147,54 @@ export interface N8nTaskRunListItem {
 
 export interface N8nTaskRunListResult {
   runs: N8nTaskRunListItem[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface N8nVideoResultListItem {
+  taskId: string
+  title: string
+  status: string
+  source: string
+  createdAt: number
+  completedAt: number | null
+  updatedAt: number
+  batchId: string | null
+  batchIndex: number | null
+  summary: string | null
+  chapterCount: number
+  timelineCount: number
+  resultAvailable: boolean
+}
+
+export interface N8nVideoResultChapter {
+  index: number
+  startTime: string | null
+  endTime: string | null
+  summary: string
+}
+
+export interface N8nVideoResultTimelineItem {
+  index: number
+  timeRange: string | null
+  startSeconds: number | null
+  endSeconds: number | null
+  transcript: string | null
+  visualAnalysis: string | null
+}
+
+export interface N8nVideoResultDetail extends N8nVideoResultListItem {
+  summary: string | null
+  chapters: N8nVideoResultChapter[]
+  timeline: N8nVideoResultTimelineItem[]
+  transcript: string | null
+  visualAnalysis: string | null
+  fullReport: string | null
+}
+
+export interface N8nVideoResultListResult {
+  results: N8nVideoResultListItem[]
   total: number
   limit: number
   offset: number
@@ -166,6 +225,46 @@ function compactString(value: unknown, maxLength: number): string | null {
   if (typeof value !== 'string') return null
   const compacted = value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
   return compacted ? compacted.slice(0, maxLength) : null
+}
+
+function safeMultilineText(value: unknown, maxLength: number): string | null {
+  if (typeof value !== 'string') return null
+  const cleaned = value
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]+/g, ' ')
+    .split('\n')
+    .map(line => line.replace(/[ \t]+/g, ' ').trimEnd())
+    .join('\n')
+    .replace(/\n{4,}/g, '\n\n\n')
+    .trim()
+  const redacted = cleaned
+    .replace(/(?:\/Users|\/home|\/private|\/var|\/tmp)\/[^\s，。；;]+/g, '[路径]')
+    .replace(/[A-Za-z]:\\[^\s，。；;]+/g, '[路径]')
+  return redacted ? redacted.slice(0, maxLength) : null
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+function clockSeconds(value: string): number | null {
+  const parts = value.trim().split(':').map(Number)
+  if (!parts.length || parts.length > 3 || parts.some(part => !Number.isFinite(part) || part < 0)) return null
+  const seconds = parts.reduce((total, part) => total * 60 + part, 0)
+  return Number.isFinite(seconds) ? seconds : null
+}
+
+function timeRangeSeconds(value: string | null): { startSeconds: number | null; endSeconds: number | null } {
+  if (!value) return { startSeconds: null, endSeconds: null }
+  const match = value.match(/^\s*([0-9:.]+)\s*-\s*([0-9:.]+)\s*$/)
+  if (!match) return { startSeconds: null, endSeconds: null }
+  return { startSeconds: clockSeconds(match[1]), endSeconds: clockSeconds(match[2]) }
 }
 
 function safeDisplayName(value: unknown): string | null {
@@ -238,6 +337,82 @@ export function projectN8nTaskRunListItem(
     resultAvailable: run.resultAvailable,
     batchId: batch.batchId,
     batchIndex: batch.batchIndex,
+  }
+}
+
+interface N8nVideoResultProjection extends N8nTaskRunListProjection {
+  output: Record<string, unknown> | null
+}
+
+function videoResultSummary(output: Record<string, unknown> | null, maxLength: number): string | null {
+  if (!output) return null
+  return compactString(output.summary, maxLength)
+    || compactString(output.combinedText, maxLength)
+}
+
+export function projectN8nVideoResultListItem(
+  run: N8nVideoResultProjection,
+): N8nVideoResultListItem {
+  const base = projectN8nTaskRunListItem(run)
+  return {
+    taskId: base.taskId,
+    title: base.title,
+    status: base.status,
+    source: base.source,
+    createdAt: base.createdAt,
+    completedAt: base.completedAt,
+    updatedAt: base.updatedAt,
+    batchId: base.batchId,
+    batchIndex: base.batchIndex,
+    summary: videoResultSummary(run.output, 320),
+    chapterCount: arrayValue(run.output?.chapters).length,
+    timelineCount: arrayValue(run.output?.timeline).length,
+    resultAvailable: run.output !== null,
+  }
+}
+
+export function projectN8nVideoResultDetail(
+  run: N8nVideoResultProjection,
+): N8nVideoResultDetail {
+  const listItem = projectN8nVideoResultListItem(run)
+  const output = objectValue(run.output)
+  const audio = objectValue(output.audio)
+  const vision = objectValue(output.vision)
+  const chapters = arrayValue(output.chapters).slice(0, 64).flatMap((value, offset) => {
+    const chapter = objectValue(value)
+    const summary = safeMultilineText(chapter.summary, 8_000)
+    if (!summary) return []
+    const index = Number(chapter.index)
+    return [{
+      index: Number.isInteger(index) && index > 0 ? index : offset + 1,
+      startTime: compactString(chapter.startTime, 32),
+      endTime: compactString(chapter.endTime, 32),
+      summary,
+    }]
+  })
+  const timeline = arrayValue(output.timeline).slice(0, 240).map((value, offset) => {
+    const segment = objectValue(value)
+    const timeRange = compactString(segment.timeRange, 64)
+    const seconds = timeRangeSeconds(timeRange)
+    const index = Number(segment.index)
+    return {
+      index: Number.isInteger(index) && index > 0 ? index : offset + 1,
+      timeRange,
+      ...seconds,
+      transcript: safeMultilineText(segment.transcript, 4_000),
+      visualAnalysis: safeMultilineText(segment.visualAnalysis, 6_000),
+    }
+  })
+  return {
+    ...listItem,
+    summary: safeMultilineText(output.summary, 16_000)
+      || safeMultilineText(output.combinedText, 16_000),
+    chapters,
+    timeline,
+    transcript: safeMultilineText(audio.transcript, 100_000),
+    visualAnalysis: safeMultilineText(vision.analysis, 100_000),
+    fullReport: safeMultilineText(output.combinedText, 180_000)
+      || safeMultilineText(output.summary, 16_000),
   }
 }
 
@@ -527,4 +702,191 @@ export function listN8nTaskRunSummaries(
     limit,
     offset,
   }
+}
+
+function videoResultWhere(
+  scope: N8nTaskScope,
+  options: { status?: N8nTaskRunListStatus; query?: string } = {},
+) {
+  const where = [
+    'r.tenant_id = ?',
+    'r.workspace_id = ?',
+    `r.source IN (${TOP_LEVEL_TASK_SOURCES.map(() => '?').join(', ')})`,
+    `(b.task_type = 'video-analysis' OR (
+      json_valid(r.routing) = 1
+      AND json_extract(r.routing, '$.taskType') = 'video-analysis'
+    ))`,
+  ]
+  const params: Array<string | number> = [
+    scope.tenantId,
+    scope.workspaceId,
+    ...TOP_LEVEL_TASK_SOURCES,
+  ]
+  if (options.status) {
+    where.push('r.status = ?')
+    params.push(options.status)
+  }
+  const query = compactString(options.query, 120)?.toLowerCase()
+  if (query) {
+    const escaped = `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`
+    where.push(`(
+      lower(r.task_id) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(b.name, '')) LIKE ? ESCAPE '\\'
+      OR lower(r.input) LIKE ? ESCAPE '\\'
+    )`)
+    params.push(escaped, escaped, escaped)
+  }
+  return { whereSql: where.join('\n      AND '), params }
+}
+
+function projectVideoResultRow(row: N8nVideoResultRow): N8nVideoResultProjection {
+  const run = rowToTaskRun(row)
+  return {
+    taskId: run.taskId,
+    status: run.status,
+    source: run.source,
+    routing: run.routing,
+    input: run.input,
+    output: run.output,
+    error: run.error,
+    attemptCount: run.attemptCount,
+    maxAttempts: run.maxAttempts,
+    createdAt: run.createdAt,
+    acceptedAt: run.acceptedAt,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    updatedAt: run.updatedAt,
+    workflowName: row.workflow_name,
+    bindingTaskType: row.binding_task_type,
+    resultAvailable: run.output !== null,
+  }
+}
+
+function projectVideoResultListRow(row: N8nVideoResultListRow): N8nVideoResultListItem {
+  const base = projectN8nTaskRunListItem({
+    taskId: row.task_id,
+    status: row.status,
+    source: row.source,
+    routing: parseObject(row.routing) || {},
+    input: parseObject(row.input) || {},
+    error: row.error,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    createdAt: row.created_at,
+    acceptedAt: row.accepted_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    updatedAt: row.updated_at,
+    workflowName: row.workflow_name,
+    bindingTaskType: row.binding_task_type,
+    resultAvailable: row.result_available === 1,
+  })
+  return {
+    taskId: base.taskId,
+    title: base.title,
+    status: base.status,
+    source: base.source,
+    createdAt: base.createdAt,
+    completedAt: base.completedAt,
+    updatedAt: base.updatedAt,
+    batchId: base.batchId,
+    batchIndex: base.batchIndex,
+    summary: compactString(row.result_summary, 320),
+    chapterCount: Math.max(0, Number(row.chapter_count) || 0),
+    timelineCount: Math.max(0, Number(row.timeline_count) || 0),
+    resultAvailable: base.resultAvailable,
+  }
+}
+
+export function listN8nVideoResults(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  options: {
+    limit?: number
+    offset?: number
+    status?: N8nTaskRunListStatus
+    query?: string
+  } = {},
+): N8nVideoResultListResult {
+  const limit = Math.max(1, Math.min(100, Math.floor(options.limit || 25)))
+  const offset = Math.max(0, Math.min(100_000, Math.floor(options.offset || 0)))
+  const { whereSql, params } = videoResultWhere(scope, options)
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) AS total
+    FROM n8n_task_runs r
+    LEFT JOIN n8n_workflow_bindings b
+      ON b.id = r.binding_id
+      AND b.tenant_id = r.tenant_id
+      AND b.workspace_id = r.workspace_id
+    WHERE ${whereSql}
+  `).get(...params) as { total: number }
+  const rows = db.prepare(`
+    SELECT
+      r.task_id,
+      r.status,
+      r.source,
+      r.routing,
+      r.input,
+      r.error,
+      r.attempt_count,
+      r.max_attempts,
+      r.created_at,
+      r.accepted_at,
+      r.started_at,
+      r.completed_at,
+      r.updated_at,
+      b.name AS workflow_name,
+      b.task_type AS binding_task_type,
+      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available,
+      CASE
+        WHEN json_valid(r.output) = 1 AND json_type(r.output, '$.summary') = 'text'
+          THEN substr(json_extract(r.output, '$.summary'), 1, 320)
+        WHEN json_valid(r.output) = 1 AND json_type(r.output, '$.combinedText') = 'text'
+          THEN substr(json_extract(r.output, '$.combinedText'), 1, 320)
+        ELSE NULL
+      END AS result_summary,
+      CASE
+        WHEN json_valid(r.output) = 1 AND json_type(r.output, '$.chapters') = 'array'
+          THEN json_array_length(r.output, '$.chapters')
+        ELSE 0
+      END AS chapter_count,
+      CASE
+        WHEN json_valid(r.output) = 1 AND json_type(r.output, '$.timeline') = 'array'
+          THEN json_array_length(r.output, '$.timeline')
+        ELSE 0
+      END AS timeline_count
+    FROM n8n_task_runs r
+    LEFT JOIN n8n_workflow_bindings b
+      ON b.id = r.binding_id
+      AND b.tenant_id = r.tenant_id
+      AND b.workspace_id = r.workspace_id
+    WHERE ${whereSql}
+    ORDER BY COALESCE(r.completed_at, r.updated_at) DESC, r.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset) as N8nVideoResultListRow[]
+  return {
+    results: rows.map(projectVideoResultListRow),
+    total: totalRow.total,
+    limit,
+    offset,
+  }
+}
+
+export function getN8nVideoResultDetail(
+  db: Database.Database,
+  taskId: string,
+  scope: N8nTaskScope,
+): N8nVideoResultDetail | null {
+  const { whereSql, params } = videoResultWhere(scope)
+  const row = db.prepare(`
+    SELECT r.*, b.name AS workflow_name, b.task_type AS binding_task_type
+    FROM n8n_task_runs r
+    LEFT JOIN n8n_workflow_bindings b
+      ON b.id = r.binding_id
+      AND b.tenant_id = r.tenant_id
+      AND b.workspace_id = r.workspace_id
+    WHERE ${whereSql} AND r.task_id = ?
+    LIMIT 1
+  `).get(...params, taskId) as N8nVideoResultRow | undefined
+  return row ? projectN8nVideoResultDetail(projectVideoResultRow(row)) : null
 }

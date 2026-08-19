@@ -160,7 +160,7 @@ export function WorkspaceProjectsPanel() {
                   onClick={() => setSelectedMonth(month.name)}
                   className={`rounded-2xl border p-5 text-left transition-all ${
                     isActive
-                      ? 'border-void-cyan/50 bg-void-cyan/10 shadow-[0_18px_40px_rgba(0,0,0,0.18)]'
+                      ? 'border-primary/40 bg-primary/[0.04]'
                       : 'border-border bg-card hover:border-void-cyan/30 hover:bg-secondary/30'
                   }`}
                 >

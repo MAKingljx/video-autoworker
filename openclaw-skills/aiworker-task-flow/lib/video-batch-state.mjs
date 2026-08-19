@@ -8,6 +8,7 @@ const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]+$/
 const MAX_BATCH_ITEMS = 100
 const MAX_STATUS_SEARCH_QUERY = 512
 const MAX_STATUS_SEARCH_MATCHES = 32
+const MAX_DUPLICATE_MATCHES = 32
 
 const SEARCH_STOPWORDS = new Set([
   '请', '帮我', '帮', '查', '查询', '看', '一下', '下', '视频', '影片', '录像',
@@ -288,6 +289,99 @@ export function batchStatePath(batchId, root = defaultBatchRoot()) {
   return join(resolve(root), `${digest}.json`)
 }
 
+function duplicateSubmissionLockPath(root = defaultBatchRoot()) {
+  return join(resolve(root), '.duplicate-submission.lock')
+}
+
+async function acquireDuplicateSubmissionLock(root) {
+  const path = duplicateSubmissionLockPath(root)
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const lock = await acquireFileLock(path)
+    if (lock.acquired) return lock
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
+  }
+  throw new Error('视频重复检查正在进行，请稍后重试')
+}
+
+function publicDuplicateMatch(state, item) {
+  return {
+    kind: state.kind === 'single' ? 'task' : 'batch',
+    name: batchItemDisplayName(item),
+    status: typeof item.status === 'string' ? item.status : 'unknown',
+    taskId: typeof item.taskId === 'string' ? item.taskId : null,
+    batchId: state.kind === 'single' ? null : (typeof state.batchId === 'string' ? state.batchId : null),
+    index: Number.isInteger(item.index) ? item.index : null,
+    completedAt: typeof item.completedAt === 'string' ? item.completedAt : null,
+    updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : null,
+  }
+}
+
+/**
+ * Read only the controlled task registry and match a video by both canonical
+ * path and basename. Broken historical paths and malformed state files are
+ * ignored; no source path is returned across the caller boundary.
+ */
+export async function findHistoricalVideoMatches(
+  videos,
+  { root = defaultBatchRoot(), excludeStatePaths = [] } = {},
+) {
+  const requested = new Map()
+  for (const video of videos) {
+    const canonicalPath = await realpath(resolve(video.path))
+    const name = basename(canonicalPath)
+    requested.set(`${canonicalPath}\0${name}`, { path: canonicalPath, name })
+  }
+  if (!requested.size) return { matches: [], total: 0, truncated: false }
+
+  const stateRoot = resolve(root)
+  const excluded = new Set(excludeStatePaths.map(path => resolve(path)))
+  let entries
+  try {
+    entries = await readdir(stateRoot, { withFileTypes: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { matches: [], total: 0, truncated: false }
+    throw error
+  }
+
+  const matches = []
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue
+    const path = join(stateRoot, entry.name)
+    if (excluded.has(resolve(path))) continue
+    let state
+    try {
+      state = await readBatchState(path)
+    } catch {
+      continue
+    }
+    for (const item of state.items) {
+      if (!item || typeof item !== 'object' || typeof item.sourcePath !== 'string') continue
+      let canonicalPath
+      try {
+        canonicalPath = await realpath(resolve(item.sourcePath))
+      } catch {
+        continue
+      }
+      const name = batchItemDisplayName(item)
+      if (!requested.has(`${canonicalPath}\0${name}`)) continue
+      matches.push(publicDuplicateMatch(state, item))
+    }
+  }
+
+  matches.sort((left, right) => (
+    String(right.completedAt || right.updatedAt || '').localeCompare(
+      String(left.completedAt || left.updatedAt || ''),
+    )
+    || String(left.name).localeCompare(String(right.name), 'zh-CN')
+  ))
+  const total = matches.length
+  return {
+    matches: matches.slice(0, MAX_DUPLICATE_MATCHES),
+    total,
+    truncated: total > MAX_DUPLICATE_MATCHES,
+  }
+}
+
 export function globalBatchLockPath(statePath) {
   return join(dirname(resolve(statePath)), '.global-video-worker.lock')
 }
@@ -352,6 +446,7 @@ export async function createBatchState({
   videoDir,
   inboxRoot,
   batchRoot,
+  confirmDuplicate = false,
 }) {
   const safeId = validateBatchId(batchId)
   const statePath = batchStatePath(safeId, batchRoot)
@@ -396,37 +491,60 @@ export async function createBatchState({
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    const discovered = await discoverBatchVideos(requestedDirectory)
-    const createdAt = new Date().toISOString()
-    const state = {
-      schemaVersion: 2,
-      batchId: safeId,
-      requestFingerprint,
-      status: 'queued',
-      ...requestedIdentity,
-      sourceDirectory: discovered.directory,
-      createdAt,
-      updatedAt: createdAt,
-      error: null,
-      items: await Promise.all(discovered.videos.map(async (video, offset) => {
-        const index = offset + 1
-        const taskId = deriveBatchTaskId(safeId, index, video.path)
+    const duplicateLock = await acquireDuplicateSubmissionLock(batchRoot)
+    try {
+      const discovered = await discoverBatchVideos(requestedDirectory)
+      const historical = await findHistoricalVideoMatches(
+        discovered.videos,
+        { root: batchRoot, excludeStatePaths: [statePath] },
+      )
+      if (historical.total > 0 && !confirmDuplicate) {
         return {
-          index,
-          name: video.name,
-          sourcePath: video.path,
-          sourceBytes: video.bytes,
-          sourceFingerprint: await sourceFingerprint(video.path),
-          taskId,
-          idempotencyKey: taskId,
-          status: 'queued',
-          error: null,
-          submittedAt: null,
-          completedAt: null,
+          statePath,
+          state: null,
+          duplicate: false,
+          confirmationRequired: true,
+          historical,
         }
-      })),
+      }
+      const createdAt = new Date().toISOString()
+      const state = {
+        schemaVersion: 2,
+        batchId: safeId,
+        requestFingerprint,
+        status: 'queued',
+        ...requestedIdentity,
+        sourceDirectory: discovered.directory,
+        createdAt,
+        updatedAt: createdAt,
+        error: null,
+        items: await Promise.all(discovered.videos.map(async (video, offset) => {
+          const index = offset + 1
+          const taskId = deriveBatchTaskId(safeId, index, video.path)
+          return {
+            index,
+            name: video.name,
+            sourcePath: video.path,
+            sourceBytes: video.bytes,
+            sourceFingerprint: await sourceFingerprint(video.path),
+            taskId,
+            idempotencyKey: taskId,
+            status: 'queued',
+            error: null,
+            submittedAt: null,
+            completedAt: null,
+          }
+        })),
+      }
+      return {
+        statePath,
+        state: await writeBatchState(statePath, state),
+        duplicate: false,
+        confirmedDuplicate: historical.total > 0,
+      }
+    } finally {
+      await duplicateLock.release()
     }
-    return { statePath, state: await writeBatchState(statePath, state), duplicate: false }
   } finally {
     await createLock.release()
   }
@@ -451,6 +569,7 @@ export async function createSingleVideoState({
   videoFile,
   inboxRoot,
   batchRoot,
+  confirmDuplicate = false,
 }) {
   const inspected = await inspectVideoFile(videoFile)
   const requestIdentity = singleRequestIdentity({
@@ -487,37 +606,60 @@ export async function createSingleVideoState({
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    const createdAt = new Date().toISOString()
-    const state = {
-      schemaVersion: 2,
-      batchId,
-      requestFingerprint,
-      kind: 'single',
-      status: 'queued',
-      baseUrl,
-      bindingId,
-      prompt: String(prompt || '').trim(),
-      visionRoute: visionRoute || null,
-      sourceDirectory: dirname(inspected.sourcePath),
-      inboxRoot: resolve(inboxRoot),
-      createdAt,
-      updatedAt: createdAt,
-      error: null,
-      items: [{
-        index: 1,
-        name: basename(inspected.sourcePath),
-        sourcePath: inspected.sourcePath,
-        sourceBytes: inspected.sourceBytes,
-        sourceFingerprint: await sourceFingerprint(inspected.sourcePath),
-        taskId,
-        idempotencyKey,
+    const duplicateLock = await acquireDuplicateSubmissionLock(batchRoot)
+    try {
+      const historical = await findHistoricalVideoMatches(
+        [{ path: inspected.sourcePath }],
+        { root: batchRoot, excludeStatePaths: [statePath] },
+      )
+      if (historical.total > 0 && !confirmDuplicate) {
+        return {
+          statePath,
+          state: null,
+          duplicate: false,
+          confirmationRequired: true,
+          historical,
+        }
+      }
+      const createdAt = new Date().toISOString()
+      const state = {
+        schemaVersion: 2,
+        batchId,
+        requestFingerprint,
+        kind: 'single',
         status: 'queued',
+        baseUrl,
+        bindingId,
+        prompt: String(prompt || '').trim(),
+        visionRoute: visionRoute || null,
+        sourceDirectory: dirname(inspected.sourcePath),
+        inboxRoot: resolve(inboxRoot),
+        createdAt,
+        updatedAt: createdAt,
         error: null,
-        submittedAt: null,
-        completedAt: null,
-      }],
+        items: [{
+          index: 1,
+          name: basename(inspected.sourcePath),
+          sourcePath: inspected.sourcePath,
+          sourceBytes: inspected.sourceBytes,
+          sourceFingerprint: await sourceFingerprint(inspected.sourcePath),
+          taskId,
+          idempotencyKey,
+          status: 'queued',
+          error: null,
+          submittedAt: null,
+          completedAt: null,
+        }],
+      }
+      return {
+        statePath,
+        state: await writeBatchState(statePath, state),
+        duplicate: false,
+        confirmedDuplicate: historical.total > 0,
+      }
+    } finally {
+      await duplicateLock.release()
     }
-    return { statePath, state: await writeBatchState(statePath, state), duplicate: false }
   } finally {
     await createLock.release()
   }

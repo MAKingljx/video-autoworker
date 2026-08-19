@@ -16,20 +16,8 @@ interface DayJobSummary {
   firstRunMs: number
 }
 
-const AGENT_COLORS = [
-  'bg-blue-500/20 text-blue-300 border-blue-500/30',
-  'bg-emerald-500/20 text-emerald-300 border-emerald-500/30',
-  'bg-amber-500/20 text-amber-300 border-amber-500/30',
-  'bg-purple-500/20 text-purple-300 border-purple-500/30',
-  'bg-rose-500/20 text-rose-300 border-rose-500/30',
-  'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
-  'bg-orange-500/20 text-orange-300 border-orange-500/30',
-  'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
-]
-
-function getAgentColorClass(agentId: string, allAgents: string[]): string {
-  const idx = allAgents.indexOf(agentId)
-  return AGENT_COLORS[idx >= 0 ? idx % AGENT_COLORS.length : 0]
+function getAgentColorClass(_agentId: string, _allAgents: string[]): string {
+  return 'border-primary/25 bg-primary/10 text-primary'
 }
 
 interface NewJobForm {
@@ -492,7 +480,7 @@ export function CronManagementPanel() {
     switch (status) {
       case 'success': return 'text-green-400'
       case 'error': return 'text-red-400'
-      case 'running': return 'text-blue-400'
+      case 'running': return 'text-primary'
       default: return 'text-muted-foreground'
     }
   }
@@ -501,7 +489,7 @@ export function CronManagementPanel() {
     switch (status) {
       case 'success': return 'bg-green-500/20'
       case 'error': return 'bg-red-500/20'
-      case 'running': return 'bg-blue-500/20'
+      case 'running': return 'bg-primary/15'
       default: return 'bg-gray-500/20'
     }
   }
@@ -695,7 +683,7 @@ export function CronManagementPanel() {
             <Button
               onClick={loadCronJobs}
               disabled={isLoading}
-              className="bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30"
+              variant="outline"
             >
               {isLoading ? t('loading') : t('refresh')}
             </Button>
@@ -1253,14 +1241,13 @@ export function CronManagementPanel() {
                   <Button
                     onClick={() => triggerJob(selectedJob, 'force')}
                     size="sm"
-                    className="bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 border-blue-500/30"
                   >
                     {t('runNowForce')}
                   </Button>
                   <Button
                     onClick={() => triggerJob(selectedJob, 'due')}
                     size="sm"
-                    className="bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 border-blue-500/30"
+                    variant="outline"
                   >
                     {t('runNowIfDue')}
                   </Button>
@@ -1270,7 +1257,7 @@ export function CronManagementPanel() {
                     size="sm"
                     className={selectedJob.enabled
                       ? 'bg-yellow-500/20 text-yellow-400 hover:bg-yellow-500/30 border-yellow-500/30'
-                      : 'bg-green-500/20 text-green-400 hover:bg-green-500/30 border-green-500/30'}
+                      : 'bg-primary/15 text-primary hover:bg-primary/20 border-primary/25'}
                   >
                     {selectedJob.enabled ? t('disable') : t('enable')}
                   </Button>

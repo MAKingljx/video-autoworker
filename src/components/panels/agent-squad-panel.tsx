@@ -407,7 +407,7 @@ function AgentDetailModal({
                   type="text"
                   value={formData.role}
                   onChange={(e) => setFormData(prev => ({ ...prev, role: e.target.value }))}
-                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 />
               ) : (
                 <p className="text-white">{agent.role}</p>
@@ -421,7 +421,7 @@ function AgentDetailModal({
                   type="text"
                   value={formData.session_key}
                   onChange={(e) => setFormData(prev => ({ ...prev, session_key: e.target.value }))}
-                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 />
               ) : (
                 <p className="text-white font-mono">{agent.session_key || t('notSet')}</p>
@@ -435,7 +435,7 @@ function AgentDetailModal({
                   value={formData.soul_content}
                   onChange={(e) => setFormData(prev => ({ ...prev, soul_content: e.target.value }))}
                   rows={4}
-                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                   placeholder={t('soulPlaceholder')}
                 />
               ) : (
@@ -453,7 +453,7 @@ function AgentDetailModal({
                     <div className="text-xs text-gray-400">{t('total')}</div>
                   </div>
                   <div className="bg-gray-700/50 rounded p-3 text-center">
-                    <div className="text-lg font-semibold text-blue-400">{agent.taskStats.assigned}</div>
+                    <div className="text-lg font-semibold text-primary">{agent.taskStats.assigned}</div>
                     <div className="text-xs text-gray-400">{t('assigned')}</div>
                   </div>
                   <div className="bg-gray-700/50 rounded p-3 text-center">
@@ -562,7 +562,7 @@ function CreateAgentModal({
                 type="text"
                 value={formData.name}
                 onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
-                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 required
               />
             </div>
@@ -573,7 +573,7 @@ function CreateAgentModal({
                 type="text"
                 value={formData.role}
                 onChange={(e) => setFormData(prev => ({ ...prev, role: e.target.value }))}
-                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 placeholder={t('rolePlaceholder')}
                 required
               />
@@ -585,7 +585,7 @@ function CreateAgentModal({
                 type="text"
                 value={formData.session_key}
                 onChange={(e) => setFormData(prev => ({ ...prev, session_key: e.target.value }))}
-                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 placeholder={t('sessionKeyPlaceholder')}
               />
             </div>
@@ -595,7 +595,7 @@ function CreateAgentModal({
               <textarea
                 value={formData.soul_content}
                 onChange={(e) => setFormData(prev => ({ ...prev, soul_content: e.target.value }))}
-                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full bg-gray-700 text-white rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary"
                 rows={3}
                 placeholder={t('soulPlaceholder')}
               />

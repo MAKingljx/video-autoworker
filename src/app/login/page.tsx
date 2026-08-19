@@ -232,15 +232,15 @@ export default function LoginPage() {
         )}
 
         {needsSetup && (
-          <div className="mb-4 p-4 rounded-lg bg-blue-500/10 border border-blue-500/20 text-center">
+          <div className="mb-4 rounded-lg border border-primary/20 bg-primary/10 p-4 text-center">
             <div className="flex justify-center mb-2">
-              <svg className="w-8 h-8 text-blue-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="h-8 w-8 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10" />
                 <line x1="12" y1="8" x2="12" y2="12" />
                 <line x1="12" y1="16" x2="12.01" y2="16" />
               </svg>
             </div>
-            <div className="text-sm font-medium text-blue-200">{t('noAdminAccount')}</div>
+            <div className="text-sm font-medium text-foreground">{t('noAdminAccount')}</div>
             <p className="text-xs text-muted-foreground mt-1">
               {t('noAdminDescription')}
             </p>

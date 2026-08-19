@@ -17,23 +17,6 @@ function getInitials(name: string): string {
   return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase()
 }
 
-function hashString(value: string): number {
-  let hash = 0
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) >>> 0
-  }
-  return hash
-}
-
-function getAvatarColors(name: string): { backgroundColor: string; color: string } {
-  const hash = hashString(name.toLowerCase())
-  const hue = hash % 360
-  return {
-    backgroundColor: `hsl(${hue} 70% 38%)`,
-    color: 'hsl(0 0% 98%)',
-  }
-}
-
 const sizeClasses: Record<NonNullable<AgentAvatarProps['size']>, string> = {
   xs: 'w-5 h-5 text-[10px]',
   sm: 'w-6 h-6 text-[10px]',
@@ -42,12 +25,10 @@ const sizeClasses: Record<NonNullable<AgentAvatarProps['size']>, string> = {
 
 export function AgentAvatar({ name, size = 'sm', className = '' }: AgentAvatarProps) {
   const initials = getInitials(name)
-  const colors = getAvatarColors(name)
 
   return (
     <div
-      className={`rounded-full flex items-center justify-center font-semibold shrink-0 ${sizeClasses[size]} ${className}`}
-      style={colors}
+      className={`rounded-full border border-primary/20 bg-primary/10 text-primary flex items-center justify-center font-semibold shrink-0 ${sizeClasses[size]} ${className}`}
       title={name}
       aria-label={name}
     >
@@ -55,4 +36,3 @@ export function AgentAvatar({ name, size = 'sm', className = '' }: AgentAvatarPr
     </div>
   )
 }
-

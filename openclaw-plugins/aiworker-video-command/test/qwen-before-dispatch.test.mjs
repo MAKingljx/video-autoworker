@@ -84,6 +84,54 @@ describe('hook-owned Qwen video scheduler', () => {
     })
   })
 
+  it('does not create a duplicate task until the user sends the exact follow-up confirmation', async () => {
+    const classifier = vi.fn(async () => ({
+      action: 'dispatch_single', value: '/data/S03E03.mp4',
+    }))
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId, confirmDuplicate = false }) => (
+        confirmDuplicate
+          ? { kind: 'task', id: taskId, status: 'queued', duplicate: false }
+          : {
+            kind: 'task', id: taskId, status: 'confirmation_required', duplicate: false,
+            confirmationRequired: true, duplicateCount: 1,
+            duplicateNames: ['S03E03.mp4'], truncated: false,
+          }
+      )),
+    }
+    const beforeDispatch = handler({ classifier, runner })
+    const first = await beforeDispatch(event({
+      content: '帮我学习视频 /data/S03E03.mp4',
+    }), context)
+
+    expect(first).toEqual({
+      handled: true,
+      text: '这个视频已经分析过：S03E03.mp4。如需重新分析，请回复“确认重新分析”。',
+    })
+    expect(runner.dispatchVideo).toHaveBeenCalledTimes(1)
+
+    const confirmed = await beforeDispatch(event({
+      content: '确认重新分析',
+      timestamp: event().timestamp + 1,
+    }), context)
+    expect(confirmed.text).toMatch(/^已提交，任务编号：video-natural-/u)
+    expect(classifier).toHaveBeenCalledTimes(1)
+    expect(runner.dispatchVideo).toHaveBeenCalledTimes(2)
+    expect(runner.dispatchVideo.mock.calls[1][0]).toMatchObject({
+      videoPath: '/data/S03E03.mp4',
+      taskId: runner.dispatchVideo.mock.calls[0][0].taskId,
+      confirmDuplicate: true,
+    })
+
+    await expect(beforeDispatch(event({
+      content: '确认重新分析',
+      timestamp: event().timestamp + 2,
+    }), context)).resolves.toEqual({
+      handled: true,
+      text: '当前没有等待确认的重复视频任务。',
+    })
+  })
+
   it('keeps authorized video requests closed while the release gate is disabled', async () => {
     const classifier = vi.fn()
     const runner = { dispatchVideo: vi.fn(), taskStatus: vi.fn() }

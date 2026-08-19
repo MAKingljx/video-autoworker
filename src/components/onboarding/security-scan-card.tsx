@@ -51,9 +51,9 @@ const FIXABLE_IDS = new Set(Object.keys(FIX_SAFETY))
 
 const SEVERITY_BADGE: Record<CheckSeverity, { label: string; className: string }> = {
   critical: { label: 'C', className: 'bg-red-500/20 text-red-400' },
-  high: { label: 'H', className: 'bg-orange-500/20 text-orange-400' },
+  high: { label: 'H', className: 'bg-amber-500/20 text-amber-400' },
   medium: { label: 'M', className: 'bg-amber-500/20 text-amber-400' },
-  low: { label: 'L', className: 'bg-blue-500/20 text-blue-300' },
+  low: { label: 'L', className: 'bg-secondary text-muted-foreground' },
 }
 
 const STATUS_ICON: Record<string, string> = {

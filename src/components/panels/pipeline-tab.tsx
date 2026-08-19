@@ -537,7 +537,7 @@ function RunStatusBadge({ status }: { status: string }) {
     completed: 'bg-green-500/20 text-green-400',
     failed: 'bg-red-500/20 text-red-400',
     cancelled: 'bg-gray-500/20 text-gray-400',
-    pending: 'bg-blue-500/20 text-blue-400',
+    pending: 'bg-primary/15 text-primary',
   }
   return (
     <span className={`text-2xs px-1.5 py-0.5 rounded-full ${styles[status] || 'bg-secondary text-muted-foreground'}`}>

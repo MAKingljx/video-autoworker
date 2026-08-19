@@ -112,14 +112,14 @@ const STATUS_COLORS: Record<string, string> = {
   offline: 'bg-muted-foreground/30',
 }
 const TAG_COLORS: Record<string, string> = {
-  slate: 'bg-slate-500',
-  blue: 'bg-blue-500',
-  green: 'bg-green-500',
-  amber: 'bg-amber-500',
-  red: 'bg-red-500',
-  purple: 'bg-purple-500',
-  pink: 'bg-pink-500',
-  teal: 'bg-teal-500',
+  slate: 'bg-muted-foreground',
+  blue: 'bg-primary',
+  green: 'bg-primary',
+  amber: 'bg-primary',
+  red: 'bg-primary',
+  purple: 'bg-primary',
+  pink: 'bg-primary',
+  teal: 'bg-primary',
 }
 
 interface ConversationListProps {

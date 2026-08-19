@@ -287,20 +287,20 @@ export function WebhookPanel() {
       {/* Webhook list */}
       <div className="space-y-2">
         {isLocalMode && webhookAutomations.length > 0 && (
-          <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 p-3">
-            <h3 className="text-sm font-semibold text-cyan-200">{t('localAutomations')}</h3>
-            <p className="text-2xs text-cyan-300/80 mt-0.5 mb-2">
+          <div className="rounded-lg border border-border bg-secondary/25 p-3">
+            <h3 className="text-sm font-semibold text-foreground">{t('localAutomations')}</h3>
+            <p className="text-2xs text-muted-foreground mt-0.5 mb-2">
               {t('localAutomationsDesc')}
             </p>
             <div className="space-y-2">
               {webhookAutomations.map((task) => (
-                <div key={task.id} className="rounded border border-cyan-500/20 bg-background/30 p-2.5">
+                <div key={task.id} className="rounded border border-border bg-background/30 p-2.5">
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${task.running ? 'bg-blue-400' : task.enabled ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
+                        <span className={`w-2 h-2 rounded-full ${task.running ? 'bg-primary' : task.enabled ? 'bg-green-500' : 'bg-muted-foreground/40'}`} />
                         <span className="text-xs font-medium text-foreground truncate">{task.name}</span>
-                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-cyan-500/15 text-cyan-300 font-mono">{task.id}</span>
+                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-primary/10 text-primary font-mono">{task.id}</span>
                       </div>
                       <div className="text-2xs text-muted-foreground mt-1">
                         {task.nextRun ? t('nextRun', { time: formatTime(task.nextRun / 1000) }) : t('noNextRun')}
@@ -312,7 +312,7 @@ export function WebhookPanel() {
                       size="xs"
                       onClick={() => handleRunAutomation(task.id)}
                       disabled={runningAutomationId === task.id}
-                      className="text-cyan-300 hover:text-cyan-200 hover:bg-cyan-500/10 text-2xs"
+                      className="text-primary hover:text-primary/80 hover:bg-primary/10 text-2xs"
                     >
                       {runningAutomationId === task.id ? t('running') : t('run')}
                     </Button>

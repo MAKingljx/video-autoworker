@@ -158,7 +158,7 @@ export function OverviewTab({
             {agent.session_key && (
               <button
                 onClick={() => onWakeAgent(agent.name, agent.session_key!)}
-                className="ml-auto px-3 py-1 text-xs rounded-full border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition-colors"
+                className="ml-auto px-3 py-1 text-xs rounded-full border border-primary/30 bg-primary/10 text-primary hover:bg-primary/15 transition-colors"
               >
                 Wake
               </button>
@@ -254,7 +254,7 @@ export function OverviewTab({
                 <div className="text-[10px] text-muted-foreground uppercase tracking-wide">{t('statsTotal')}</div>
               </div>
               <div className="text-center">
-                <div className="text-lg font-semibold text-blue-400">{agent.taskStats.assigned}</div>
+                <div className="text-lg font-semibold text-primary">{agent.taskStats.assigned}</div>
                 <div className="text-[10px] text-muted-foreground uppercase tracking-wide">{t('statsAssigned')}</div>
               </div>
               <div className="text-center">
@@ -295,7 +295,7 @@ export function OverviewTab({
           <div className="flex items-center justify-between mb-3">
             <h4 className="text-sm font-medium text-foreground">{t('message')}</h4>
             {messageStatus && (
-              <span className={`text-xs ${messageStatus === 'Sent' ? 'text-green-400' : 'text-rose-400'}`}>
+              <span className={`text-xs ${messageStatus === 'Sent' ? 'text-green-400' : 'text-red-400'}`}>
                 {messageStatus}
               </span>
             )}
@@ -533,10 +533,10 @@ export function MemoryTab({
       </div>
 
       {/* Info Banner */}
-      <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-xs text-blue-300">
-        <strong className="text-blue-200">{t('memoryBannerTitle')}</strong>{' '}
+      <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 text-xs text-muted-foreground">
+        <strong className="text-foreground">{t('memoryBannerTitle')}</strong>{' '}
         {t('memoryBannerDesc')}{' '}
-        <Link href="/memory" className="text-blue-400 underline hover:text-blue-300">{t('memoryBrowserLink')}</Link> {t('memoryBannerPage')}
+        <Link href="/memory" className="text-primary underline hover:text-primary/80">{t('memoryBrowserLink')}</Link> {t('memoryBannerPage')}
       </div>
 
       {/* Memory Content */}
@@ -679,15 +679,15 @@ export function TasksTab({ agent }: { agent: Agent }) {
                   <span className={`px-2 py-1 text-xs rounded-md font-medium ${
                     task.status === 'in_progress' ? 'bg-yellow-500/20 text-yellow-400' :
                     task.status === 'done' ? 'bg-green-500/20 text-green-400' :
-                    task.status === 'review' ? 'bg-blue-500/20 text-blue-400' :
-                    task.status === 'quality_review' ? 'bg-indigo-500/20 text-indigo-400' :
+                    task.status === 'review' ? 'bg-primary/15 text-primary' :
+                    task.status === 'quality_review' ? 'bg-primary/15 text-primary' :
                     'bg-secondary text-muted-foreground'
                   }`}>
                     {task.status}
                   </span>
                   <span className={`px-2 py-1 text-xs rounded-md font-medium ${
                     task.priority === 'urgent' ? 'bg-red-500/20 text-red-400' :
-                    task.priority === 'high' ? 'bg-orange-500/20 text-orange-400' :
+                    task.priority === 'high' ? 'bg-amber-500/20 text-amber-400' :
                     task.priority === 'medium' ? 'bg-yellow-500/20 text-yellow-400' :
                     'bg-secondary text-muted-foreground'
                   }`}>
@@ -805,9 +805,9 @@ const TEMPLATES = [
 ]
 
 const MODEL_TIER_COLORS: Record<string, string> = {
-  opus: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  sonnet: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  haiku: 'bg-green-500/20 text-green-400 border-green-500/30',
+  opus: 'bg-secondary text-muted-foreground border-border',
+  sonnet: 'bg-secondary text-muted-foreground border-border',
+  haiku: 'bg-secondary text-muted-foreground border-border',
 }
 
 const MODEL_TIER_LABELS: Record<string, string> = {
@@ -1917,12 +1917,12 @@ export function ConfigTab({
             {editing ? (
               <div className="space-y-3">
                 <div>
-                  <label className="block text-xs text-green-400 font-medium mb-1">{t('allowList')}</label>
+                  <label className="mb-1 block text-xs font-medium text-foreground">{t('allowList')}</label>
                   <div className="flex flex-wrap gap-1 mb-2">
                     {toolAllow.map((tool: string, i: number) => (
-                      <span key={`${tool}-${i}`} className="px-2 py-0.5 text-xs bg-green-500/10 text-green-400 rounded border border-green-500/20 flex items-center gap-1">
+                      <span key={`${tool}-${i}`} className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
                         {tool}
-                        <Button onClick={() => removeTool('allow', i)} variant="ghost" size="icon-xs" className="text-green-400/60 hover:text-green-400 ml-1 h-auto w-auto p-0">&times;</Button>
+                        <Button onClick={() => removeTool('allow', i)} variant="ghost" size="icon-xs" className="ml-1 h-auto w-auto p-0 text-muted-foreground hover:text-foreground">&times;</Button>
                       </span>
                     ))}
                   </div>
@@ -1938,19 +1938,18 @@ export function ConfigTab({
                       onClick={() => { addTool('allow', newAllowTool); setNewAllowTool('') }}
                       variant="outline"
                       size="sm"
-                      className="bg-green-500/20 text-green-400 border-green-500/30 hover:bg-green-500/30"
                     >
                       {t('add')}
                     </Button>
                   </div>
                 </div>
                 <div>
-                  <label className="block text-xs text-red-400 font-medium mb-1">{t('denyList')}</label>
+                  <label className="mb-1 block text-xs font-medium text-foreground">{t('denyList')}</label>
                   <div className="flex flex-wrap gap-1 mb-2">
                     {toolDeny.map((tool: string, i: number) => (
-                      <span key={`${tool}-${i}`} className="px-2 py-0.5 text-xs bg-red-500/10 text-red-400 rounded border border-red-500/20 flex items-center gap-1">
+                      <span key={`${tool}-${i}`} className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
                         {tool}
-                        <Button onClick={() => removeTool('deny', i)} variant="ghost" size="icon-xs" className="text-red-400/60 hover:text-red-400 ml-1 h-auto w-auto p-0">&times;</Button>
+                        <Button onClick={() => removeTool('deny', i)} variant="ghost" size="icon-xs" className="ml-1 h-auto w-auto p-0 text-muted-foreground hover:text-foreground">&times;</Button>
                       </span>
                     ))}
                   </div>
@@ -1966,7 +1965,6 @@ export function ConfigTab({
                       onClick={() => { addTool('deny', newDenyTool); setNewDenyTool('') }}
                       variant="outline"
                       size="sm"
-                      className="bg-red-500/20 text-red-400 border-red-500/30 hover:bg-red-500/30"
                     >
                       {t('add')}
                     </Button>
@@ -1977,20 +1975,20 @@ export function ConfigTab({
               <>
                 {toolAllow.length > 0 && (
                   <div className="mb-2">
-                    <span className="text-xs text-green-400 font-medium">{t('allowCount', { count: toolAllow.length })}:</span>
+                    <span className="text-xs font-medium text-foreground">{t('allowCount', { count: toolAllow.length })}:</span>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {toolAllow.map((tool: string) => (
-                        <span key={tool} className="px-2 py-0.5 text-xs bg-green-500/10 text-green-400 rounded border border-green-500/20">{tool}</span>
+                        <span key={tool} className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">{tool}</span>
                       ))}
                     </div>
                   </div>
                 )}
                 {toolDeny.length > 0 && (
                   <div>
-                    <span className="text-xs text-red-400 font-medium">{t('denyCount', { count: toolDeny.length })}:</span>
+                    <span className="text-xs font-medium text-foreground">{t('denyCount', { count: toolDeny.length })}:</span>
                     <div className="flex flex-wrap gap-1 mt-1">
                       {toolDeny.map((tool: string) => (
-                        <span key={tool} className="px-2 py-0.5 text-xs bg-red-500/10 text-red-400 rounded border border-red-500/20">{tool}</span>
+                        <span key={tool} className="rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">{tool}</span>
                       ))}
                     </div>
                   </div>
@@ -2014,7 +2012,7 @@ export function ConfigTab({
               <div className="space-y-3">
                 <div className="flex flex-wrap gap-1">
                   {(subagents.allowAgents || []).map((a: string, idx: number) => (
-                    <span key={a} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-violet-500/10 text-violet-400 rounded border border-violet-500/20">
+                    <span key={a} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-secondary text-muted-foreground rounded border border-border">
                       {a}
                       <button
                         onClick={() => {
@@ -2025,7 +2023,7 @@ export function ConfigTab({
                             return { ...prev, subagents: { ...sa, allowAgents: list } }
                           })
                         }}
-                        className="text-violet-400/60 hover:text-violet-400 ml-0.5"
+                        className="text-muted-foreground/60 hover:text-foreground ml-0.5"
                         title={`Remove sub-agent ${a}`}
                       >
                         x
@@ -2097,7 +2095,7 @@ export function ConfigTab({
                   <>
                     <div className="flex flex-wrap gap-1">
                       {subagents.allowAgents.map((a: string) => (
-                        <span key={a} className="px-2 py-0.5 text-xs bg-violet-500/10 text-violet-400 rounded border border-violet-500/20">{a}</span>
+                        <span key={a} className="px-2 py-0.5 text-xs bg-secondary text-muted-foreground rounded border border-border">{a}</span>
                       ))}
                     </div>
                     {subagents.model && (
@@ -2117,7 +2115,7 @@ export function ConfigTab({
               <h5 className="text-sm font-medium text-foreground mb-2">{t('memorySearch')}</h5>
               <div className="flex gap-1">
                 {memorySearch.sources.map((s: string) => (
-                  <span key={s} className="px-2 py-0.5 text-xs bg-cyan-500/10 text-cyan-400 rounded">{s}</span>
+                  <span key={s} className="px-2 py-0.5 text-xs bg-secondary text-muted-foreground rounded">{s}</span>
                 ))}
               </div>
             </div>
@@ -2416,12 +2414,12 @@ export function ToolsTab({ agent }: { agent: Agent }) {
 
       {/* Allow list */}
       <div className="bg-surface-1/50 rounded-lg p-4">
-        <h5 className="text-sm font-medium text-green-400 mb-2">{t('allowListCount', { count: allowList.length })}</h5>
+        <h5 className="mb-2 text-sm font-medium text-foreground">{t('allowListCount', { count: allowList.length })}</h5>
         <div className="flex flex-wrap gap-1 mb-3">
           {allowList.map((tool, i) => (
-            <span key={`${tool}-${i}`} className="px-2 py-0.5 text-xs bg-green-500/10 text-green-400 rounded border border-green-500/20 flex items-center gap-1">
+            <span key={`${tool}-${i}`} className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
               {tool}
-              <button onClick={() => removeFromList(allowList, setAllowList, i)} className="text-green-400/60 hover:text-green-400 ml-0.5">x</button>
+              <button onClick={() => removeFromList(allowList, setAllowList, i)} className="ml-0.5 text-muted-foreground hover:text-foreground">x</button>
             </span>
           ))}
           {allowList.length === 0 && <span className="text-xs text-muted-foreground">{t('noExplicitAllowList')}</span>}
@@ -2448,13 +2446,13 @@ export function ToolsTab({ agent }: { agent: Agent }) {
 
       {/* Also-Allow list */}
       <div className="bg-surface-1/50 rounded-lg p-4">
-        <h5 className="text-sm font-medium text-cyan-400 mb-2">{t('alsoAllowCount', { count: alsoAllowList.length })}</h5>
+        <h5 className="mb-2 text-sm font-medium text-foreground">{t('alsoAllowCount', { count: alsoAllowList.length })}</h5>
         <p className="text-2xs text-muted-foreground mb-2">{t('alsoAllowDesc')}</p>
         <div className="flex flex-wrap gap-1 mb-3">
           {alsoAllowList.map((tool, i) => (
-            <span key={`${tool}-${i}`} className="px-2 py-0.5 text-xs bg-cyan-500/10 text-cyan-400 rounded border border-cyan-500/20 flex items-center gap-1">
+            <span key={`${tool}-${i}`} className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
               {tool}
-              <button onClick={() => removeFromList(alsoAllowList, setAlsoAllowList, i)} className="text-cyan-400/60 hover:text-cyan-400 ml-0.5">x</button>
+              <button onClick={() => removeFromList(alsoAllowList, setAlsoAllowList, i)} className="ml-0.5 text-muted-foreground hover:text-foreground">x</button>
             </span>
           ))}
           {alsoAllowList.length === 0 && <span className="text-xs text-muted-foreground">{t('none')}</span>}
@@ -2463,12 +2461,12 @@ export function ToolsTab({ agent }: { agent: Agent }) {
 
       {/* Deny list */}
       <div className="bg-surface-1/50 rounded-lg p-4">
-        <h5 className="text-sm font-medium text-red-400 mb-2">{t('denyListCount', { count: denyList.length })}</h5>
+        <h5 className="mb-2 text-sm font-medium text-foreground">{t('denyListCount', { count: denyList.length })}</h5>
         <div className="flex flex-wrap gap-1 mb-3">
           {denyList.map((tool, i) => (
-            <span key={`${tool}-${i}`} className="px-2 py-0.5 text-xs bg-red-500/10 text-red-400 rounded border border-red-500/20 flex items-center gap-1">
+            <span key={`${tool}-${i}`} className="flex items-center gap-1 rounded border border-border bg-secondary px-2 py-0.5 text-xs text-muted-foreground">
               {tool}
-              <button onClick={() => removeFromList(denyList, setDenyList, i)} className="text-red-400/60 hover:text-red-400 ml-0.5">x</button>
+              <button onClick={() => removeFromList(denyList, setDenyList, i)} className="ml-0.5 text-muted-foreground hover:text-foreground">x</button>
             </span>
           ))}
           {denyList.length === 0 && <span className="text-xs text-muted-foreground">{t('noDeniedTools')}</span>}
@@ -2741,7 +2739,7 @@ export function CronTab({ agent }: { agent: Agent }) {
                       </span>
                     )}
                     {job.agentId && (
-                      <span className="px-2 py-0.5 text-xs bg-violet-500/10 text-violet-400 rounded">
+                      <span className="px-2 py-0.5 text-xs bg-secondary text-muted-foreground rounded">
                         {job.agentId}
                       </span>
                     )}

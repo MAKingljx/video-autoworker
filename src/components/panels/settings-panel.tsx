@@ -419,14 +419,14 @@ export function SettingsPanel() {
 
       {/* Workspace Info */}
       {currentUser?.role === 'admin' && (
-        <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-xs text-blue-300">
-          <strong className="text-blue-200">{t('workspaceManagementLabel')}</strong>{' '}
+        <div className="bg-primary/5 border border-primary/20 rounded-lg p-3 text-xs text-muted-foreground">
+          <strong className="text-foreground">{t('workspaceManagementLabel')}</strong>{' '}
           {t('workspaceManagementDesc1')}{' '}
           <Button
             onClick={() => navigateToPanel('super-admin')}
             variant="link"
             size="xs"
-            className="text-blue-400 hover:text-blue-300 p-0 h-auto"
+            className="text-primary hover:text-primary/80 p-0 h-auto"
           >
             {t('superAdmin')}
           </Button>{' '}

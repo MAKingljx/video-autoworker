@@ -354,7 +354,7 @@ export function SessionDetailsPanel() {
                         {session.flags.map((flag: string, index: number) => (
                           <span
                             key={index}
-                            className="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 rounded"
+                            className="px-2 py-1 text-xs bg-secondary text-muted-foreground rounded"
                           >
                             {flag}
                           </span>
@@ -540,7 +540,6 @@ export function SessionDetailsPanel() {
                         <div className="flex space-x-2">
                           <Button
                             size="xs"
-                            className="bg-blue-500/20 text-blue-400 border border-blue-500/30 hover:bg-blue-500/30"
                             disabled={controllingSession !== null}
                             onClick={async (e) => {
                               e.stopPropagation()

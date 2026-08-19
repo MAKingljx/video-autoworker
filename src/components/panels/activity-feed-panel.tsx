@@ -50,15 +50,15 @@ const activityIcons: Record<string, string> = {
 }
 
 const activityColors: Record<string, string> = {
-  task_created: 'text-green-400',
-  task_updated: 'text-blue-400',
-  task_deleted: 'text-red-400',
-  comment_added: 'text-purple-400',
-  agent_created: 'text-cyan-400',
-  agent_status_change: 'text-yellow-400',
-  standup_generated: 'text-orange-400',
-  mention: 'text-pink-400',
-  assignment: 'text-indigo-400',
+  task_created: 'text-primary',
+  task_updated: 'text-primary',
+  task_deleted: 'text-destructive',
+  comment_added: 'text-primary',
+  agent_created: 'text-primary',
+  agent_status_change: 'text-muted-foreground',
+  standup_generated: 'text-primary',
+  mention: 'text-primary',
+  assignment: 'text-primary',
 }
 
 function formatRelativeTime(timestamp: number) {
@@ -97,9 +97,7 @@ function ActivityRow({ activity }: { activity: Activity }) {
       <div className="flex items-start gap-3">
         <div
           className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold ${
-            activityColors[activity.type]
-              ?.replace('text-', 'bg-')
-              .replace('-400', '-500/15') || 'bg-surface-2'
+            activity.type === 'task_deleted' ? 'bg-destructive/10' : 'bg-primary/10'
           } ${activityColors[activity.type] || 'text-muted-foreground'}`}
         >
           {activityIcons[activity.type] || '•'}
@@ -110,7 +108,7 @@ function ActivityRow({ activity }: { activity: Activity }) {
             <div className="flex-1">
               <p className="text-foreground text-sm">
                 <span className="font-medium text-primary">{activity.actor}</span>{' '}
-                <span className={activityColors[activity.type] || 'text-muted-foreground'}>
+                <span className="text-foreground/80">
                   {activity.description}
                 </span>
               </p>
@@ -144,7 +142,7 @@ function ActivityRow({ activity }: { activity: Activity }) {
                       <span className="text-muted-foreground">{t('entityAgent')}</span>
                       <span className="text-foreground ml-1">{activity.entity.name}</span>
                       {activity.entity.status && (
-                        <span className="ml-2 px-1.5 py-0.5 bg-green-500/10 text-green-400 rounded text-[10px]">
+                        <span className="ml-2 px-1.5 py-0.5 bg-secondary text-muted-foreground rounded text-[10px]">
                           {activity.entity.status}
                         </span>
                       )}
@@ -181,10 +179,10 @@ function TimelineRow({ activity }: { activity: Activity }) {
     <div className="flex items-start gap-2.5 pl-3 py-1.5 hover:bg-secondary/30 rounded-r-lg transition-smooth relative">
       <span
         className={`absolute -left-[5px] top-3 w-2 h-2 rounded-full bg-card border-2 ${
-          activity.type === 'agent_status_change'
-            ? 'border-yellow-400'
+          activity.type === 'task_deleted'
+            ? 'border-destructive'
             : activity.type.startsWith('task')
-              ? 'border-blue-400'
+              ? 'border-primary'
               : 'border-muted-foreground'
         }`}
       />

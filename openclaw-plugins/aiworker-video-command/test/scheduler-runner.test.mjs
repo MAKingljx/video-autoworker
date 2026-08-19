@@ -58,6 +58,44 @@ describe('0.5 scheduler runner', () => {
     ])
   })
 
+  it('returns a bounded duplicate confirmation contract without creating a task', async () => {
+    const { execute, runner } = fixture({
+      taskId,
+      status: 'confirmation_required',
+      duplicate: false,
+      confirmationRequired: true,
+      duplicateCount: 1,
+      duplicateNames: ['S03E03.mp4'],
+      truncated: false,
+    })
+    await expect(runner.dispatchVideo({ videoPath: '/data/S03E03.mp4', taskId })).resolves.toEqual({
+      kind: 'task',
+      id: taskId,
+      status: 'confirmation_required',
+      duplicate: false,
+      confirmationRequired: true,
+      duplicateCount: 1,
+      duplicateNames: ['S03E03.mp4'],
+      truncated: false,
+    })
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it('adds the duplicate confirmation flag only after the caller confirms', async () => {
+    const { execute, runner } = fixture({ taskId, status: 'queued', duplicate: false })
+    await runner.dispatchVideo({ videoPath: '/data/S03E03.mp4', taskId, confirmDuplicate: true })
+    expect(execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs',
+      '--video-file', '/data/S03E03.mp4',
+      '--task-id', taskId,
+      '--idempotency-key', taskId,
+      '--delivery', 'none',
+      '--wait-seconds', '0',
+      '--no-trigger-recovery',
+      '--confirm-duplicate',
+    ])
+  })
+
   it('runs exactly one task or batch status command', async () => {
     const taskFixture = fixture({ taskId, status: 'running', output: null })
     const task = taskFixture.runner

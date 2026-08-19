@@ -23,24 +23,17 @@ function SessionCard({ session }: SessionCardProps) {
     return '📄'
   }
 
-  const getModelColor = (model: string) => {
-    if (model.includes('opus')) return 'text-purple-400'
-    if (model.includes('sonnet')) return 'text-blue-400'
-    if (model.includes('haiku')) return 'text-green-400'
-    return 'text-gray-400'
-  }
-
   const getRoleBadge = (key: string) => {
     if (key.includes('main:main')) {
-      return { label: 'LEAD', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30' }
+      return { label: 'LEAD', color: 'bg-primary/15 text-primary border-primary/25' }
     }
     if (key.includes('subagent')) {
-      return { label: 'WORKER', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' }
+      return { label: 'WORKER', color: 'bg-secondary text-muted-foreground border-border' }
     }
     if (key.includes('cron')) {
-      return { label: 'CRON', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
+      return { label: 'CRON', color: 'bg-secondary text-muted-foreground border-border' }
     }
-    return { label: 'SYSTEM', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30' }
+    return { label: 'SYSTEM', color: 'bg-secondary text-muted-foreground border-border' }
   }
 
   const getCurrentTask = (session: Session) => {
@@ -87,7 +80,7 @@ function SessionCard({ session }: SessionCardProps) {
             </p>
             
             <div className="flex items-center space-x-2 mt-2">
-              <span className={`text-xs font-mono ${getModelColor(session.model)}`}>
+              <span className="text-xs font-mono text-muted-foreground">
                 {session.model}
               </span>
               <span className="text-xs text-muted-foreground">

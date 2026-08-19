@@ -69,7 +69,7 @@ describe('buildTaskStatParts', () => {
     })!
     expect(result.find(p => p.label === 'assigned')?.color).toBeUndefined()
     expect(result.find(p => p.label === 'active')?.color).toBe('text-amber-300')
-    expect(result.find(p => p.label === 'review')?.color).toBe('text-violet-300')
+    expect(result.find(p => p.label === 'review')?.color).toBe('text-primary')
     expect(result.find(p => p.label === 'done')?.color).toBe('text-emerald-300')
   })
 })

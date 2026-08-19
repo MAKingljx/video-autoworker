@@ -81,7 +81,7 @@ interface TaskCostsResponse {
 
 const REFRESH_INTERVAL = 30_000 // 30s auto-refresh
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d', '#ffc658', '#ff6b6b']
+const COLORS = ['#0969DA', '#1F6FEB', '#218BFF', '#54AEFF', '#80CCFF', '#A5D6FF', '#C2E0FF', '#DDF4FF']
 
 function PerAgentBreakdown({
   data,
@@ -154,7 +154,7 @@ function PerAgentBreakdown({
                 dataKey === 'cost' ? formatCost(Number(value)) : formatNumber(Number(value))
               } />
               <Legend />
-              <Bar dataKey="cost" fill="#0088FE" name={t('chartCost')} />
+              <Bar dataKey="cost" fill="#0969DA" name={t('chartCost')} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -179,7 +179,7 @@ function PerAgentBreakdown({
                     <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground shrink-0">
                       {t('sessionCount', { count: agent.session_count })}
                     </span>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 shrink-0">
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground shrink-0">
                       {t('requestCount', { count: agent.request_count })}
                     </span>
                   </div>
@@ -188,7 +188,7 @@ function PerAgentBreakdown({
                     <div className="w-24 hidden md:block">
                       <div className="w-full bg-secondary rounded-full h-2">
                         <div
-                          className="bg-blue-500 h-2 rounded-full"
+                          className="bg-primary h-2 rounded-full"
                           style={{ width: `${(agent.total_cost / maxCost) * 100}%` }}
                         />
                       </div>
@@ -448,12 +448,12 @@ export function AgentCostPanel() {
               <div className="text-sm text-muted-foreground">{t('totalCost', { timeframe: selectedTimeframe })}</div>
             </div>
             <div className="bg-card border border-border rounded-lg p-5">
-              <div className="text-3xl font-bold text-orange-500 truncate">{mostExpensive?.[0] || '-'}</div>
+              <div className="text-3xl font-bold text-foreground truncate">{mostExpensive?.[0] || '-'}</div>
               <div className="text-sm text-muted-foreground">{t('mostExpensive')}</div>
               {mostExpensive && <div className="text-xs text-muted-foreground mt-1">{formatCost(mostExpensive[1].stats.totalCost)} ({((mostExpensive[1].stats.totalCost / Math.max(totalCost, 0.0001)) * 100).toFixed(0)}%)</div>}
             </div>
             <div className="bg-card border border-border rounded-lg p-5">
-              <div className="text-3xl font-bold text-green-500 truncate">{mostEfficient?.[0] || '-'}</div>
+              <div className="text-3xl font-bold text-primary truncate">{mostEfficient?.[0] || '-'}</div>
               <div className="text-sm text-muted-foreground">{t('mostEfficient')}</div>
               {mostEfficient && (
                 <div className="text-xs text-muted-foreground mt-1">
@@ -539,7 +539,7 @@ export function AgentCostPanel() {
                       dataKey === 'cost' ? formatCost(Number(value)) : formatNumber(Number(value))
                     } />
                     <Legend />
-                    <Bar dataKey="cost" fill="#0088FE" name={t('chartCost')} />
+                    <Bar dataKey="cost" fill="#0969DA" name={t('chartCost')} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -556,7 +556,7 @@ export function AgentCostPanel() {
                   <div className="flex-1 mx-3">
                     <div className="w-full bg-secondary rounded-full h-2">
                       <div
-                        className="bg-blue-500 h-2 rounded-full"
+                        className="bg-primary h-2 rounded-full"
                         style={{ width: `${(costPer1k / maxCostPer1k) * 100}%` }}
                       />
                     </div>
@@ -588,7 +588,7 @@ export function AgentCostPanel() {
                           {t('sessionCount', { count: a.sessions.length })}
                         </span>
                         {agentTasks.length > 0 && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500">
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground">
                             {t('tasksTab', { count: agentTasks.length })}
                           </span>
                         )}
@@ -644,7 +644,7 @@ export function AgentCostPanel() {
                                       <div className="flex items-center gap-2 min-w-0 flex-1">
                                         <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                                           task.priority === 'critical' ? 'bg-red-500/10 text-red-500' :
-                                          task.priority === 'high' ? 'bg-orange-500/10 text-orange-500' :
+                                          task.priority === 'high' ? 'bg-amber-500/10 text-amber-500' :
                                           task.priority === 'medium' ? 'bg-yellow-500/10 text-yellow-500' :
                                           'bg-secondary text-muted-foreground'
                                         }`}>{task.priority}</span>
@@ -654,7 +654,7 @@ export function AgentCostPanel() {
                                         <span className="text-foreground truncate">{task.title}</span>
                                         <span className={`px-1.5 py-0.5 rounded text-[10px] ${
                                           task.status === 'done' ? 'bg-green-500/10 text-green-500' :
-                                          task.status === 'in_progress' ? 'bg-blue-500/10 text-blue-500' :
+                                          task.status === 'in_progress' ? 'bg-primary/10 text-primary' :
                                           'bg-secondary text-muted-foreground'
                                         }`}>{task.status}</span>
                                       </div>

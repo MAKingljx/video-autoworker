@@ -28,14 +28,12 @@ interface Agent {
 }
 
 const COLOR_PALETTE = [
-  '#3b82f6', // blue
-  '#10b981', // emerald
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#ec4899', // pink
-  '#06b6d4', // cyan
-  '#f97316', // orange
+  '#0969da', // product blue
+  '#1f6feb',
+  '#388bfd',
+  '#57606a', // neutral grays
+  '#6e7781',
+  '#8c959f',
 ]
 
 export function ProjectManagerModal({
@@ -267,7 +265,7 @@ export function ProjectManagerModal({
                     <div className="flex items-center gap-2.5">
                       <div
                         className="w-3 h-3 rounded-full shrink-0"
-                        style={{ backgroundColor: project.color || '#6b7280' }}
+                        style={{ backgroundColor: project.color && COLOR_PALETTE.includes(project.color.toLowerCase()) ? project.color : '#0969da' }}
                       />
                       <div>
                         <div className="text-sm font-medium text-foreground flex items-center gap-2">

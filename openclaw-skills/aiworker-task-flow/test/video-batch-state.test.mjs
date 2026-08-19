@@ -1,10 +1,14 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { searchVideoTaskStates } from '../lib/video-batch-state.mjs'
+import {
+  createBatchState,
+  createSingleVideoState,
+  searchVideoTaskStates,
+} from '../lib/video-batch-state.mjs'
 
 test('status search keeps distinct queued items from the same directory batch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-search-'))
@@ -70,6 +74,104 @@ test('status search treats ep4, ep04, and 第4集 as one canonical episode witho
       assert.equal(result.total, 1)
       assert.equal(result.matches[0].index, 1)
     }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('same canonical video path requires confirmation before a new single task state is created', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-duplicate-single-'))
+  const sourceDir = join(root, 'source')
+  const batchRoot = join(root, 'states')
+  const inboxRoot = join(root, 'inbox')
+  const videoFile = join(sourceDir, 'S03E03.mp4')
+  try {
+    await mkdir(sourceDir, { recursive: true })
+    await writeFile(videoFile, 'video-bytes')
+    const common = {
+      baseUrl: 'http://127.0.0.1:3017',
+      bindingId: 7,
+      prompt: '分析视频',
+      visionRoute: null,
+      videoFile,
+      inboxRoot,
+      batchRoot,
+    }
+    const first = await createSingleVideoState({
+      ...common,
+      taskId: 'video-command-first',
+      idempotencyKey: 'video-command-first',
+    })
+    assert.equal(first.duplicate, false)
+
+    const blocked = await createSingleVideoState({
+      ...common,
+      taskId: 'video-command-second',
+      idempotencyKey: 'video-command-second',
+    })
+    assert.equal(blocked.confirmationRequired, true)
+    assert.equal(blocked.state, null)
+    assert.equal(blocked.historical.total, 1)
+    assert.equal(blocked.historical.matches[0].name, 'S03E03.mp4')
+    assert.equal(Object.hasOwn(blocked.historical.matches[0], 'sourcePath'), false)
+    await assert.rejects(access(blocked.statePath), error => error?.code === 'ENOENT')
+
+    const confirmed = await createSingleVideoState({
+      ...common,
+      taskId: 'video-command-second',
+      idempotencyKey: 'video-command-second',
+      confirmDuplicate: true,
+    })
+    assert.equal(confirmed.confirmedDuplicate, true)
+    assert.equal(confirmed.state.status, 'queued')
+
+    const idempotent = await createSingleVideoState({
+      ...common,
+      taskId: 'video-command-second',
+      idempotencyKey: 'video-command-second',
+    })
+    assert.equal(idempotent.duplicate, true)
+    assert.equal(idempotent.confirmationRequired, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('directory submission blocks the whole new batch when any exact path already exists', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-duplicate-batch-'))
+  const videoDir = join(root, 'series')
+  const batchRoot = join(root, 'states')
+  try {
+    await mkdir(videoDir, { recursive: true })
+    await writeFile(join(videoDir, 'episode-01.mp4'), 'one')
+    await writeFile(join(videoDir, 'episode-02.mp4'), 'two')
+    const common = {
+      baseUrl: 'http://127.0.0.1:3017',
+      bindingId: 7,
+      prompt: '分析整季',
+      visionRoute: null,
+      videoDir,
+      inboxRoot: join(root, 'inbox'),
+      batchRoot,
+    }
+    await createBatchState({ ...common, batchId: 'first-batch' })
+
+    const blocked = await createBatchState({ ...common, batchId: 'second-batch' })
+    assert.equal(blocked.confirmationRequired, true)
+    assert.equal(blocked.historical.total, 2)
+    assert.deepEqual(
+      blocked.historical.matches.map(item => item.name).sort(),
+      ['episode-01.mp4', 'episode-02.mp4'],
+    )
+    await assert.rejects(access(blocked.statePath), error => error?.code === 'ENOENT')
+
+    const confirmed = await createBatchState({
+      ...common,
+      batchId: 'second-batch',
+      confirmDuplicate: true,
+    })
+    assert.equal(confirmed.confirmedDuplicate, true)
+    assert.equal(confirmed.state.items.length, 2)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

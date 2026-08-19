@@ -67,6 +67,29 @@ function normalizeResultOffset(value) {
 
 function normalizeDispatchResult(value, expectedId, kind) {
   const idKey = kind === 'batch' ? 'batchId' : 'taskId'
+  if (value?.confirmationRequired === true) {
+    if (
+      value[idKey] !== expectedId
+      || value.status !== 'confirmation_required'
+      || value.duplicate !== false
+      || !Number.isInteger(value.duplicateCount)
+      || value.duplicateCount < 1
+      || !Array.isArray(value.duplicateNames)
+      || value.duplicateNames.length < 1
+      || value.duplicateNames.length > 10
+      || typeof value.truncated !== 'boolean'
+    ) throw new Error('invalid_dispatch_confirmation')
+    return {
+      kind,
+      id: expectedId,
+      status: value.status,
+      duplicate: false,
+      confirmationRequired: true,
+      duplicateCount: value.duplicateCount,
+      duplicateNames: value.duplicateNames.map(normalizeSearchName),
+      truncated: value.truncated,
+    }
+  }
   if (
     !value
     || value[idKey] !== expectedId
@@ -371,8 +394,9 @@ export function createSchedulerRunner({
   }
 
   return {
-    async dispatchVideo({ videoPath, taskId }) {
+    async dispatchVideo({ videoPath, taskId, confirmDuplicate = false }) {
       if (!isSchedulerTaskId(taskId)) throw new Error('invalid_task_id')
+      if (typeof confirmDuplicate !== 'boolean') throw new Error('invalid_confirmation')
       const value = await call([
         '--video-file', videoPath,
         '--task-id', taskId,
@@ -380,16 +404,19 @@ export function createSchedulerRunner({
         '--delivery', 'none',
         '--wait-seconds', '0',
         '--no-trigger-recovery',
+        ...(confirmDuplicate ? ['--confirm-duplicate'] : []),
       ], DISPATCH_TIMEOUT_MS)
       return normalizeDispatchResult(value, taskId, 'task')
     },
 
-    async dispatchDirectory({ videoDirectory, batchId }) {
+    async dispatchDirectory({ videoDirectory, batchId, confirmDuplicate = false }) {
       if (!isSchedulerBatchId(batchId)) throw new Error('invalid_batch_id')
+      if (typeof confirmDuplicate !== 'boolean') throw new Error('invalid_confirmation')
       const value = await call([
         '--video-dir', videoDirectory,
         '--batch-id', batchId,
         '--delivery', 'none',
+        ...(confirmDuplicate ? ['--confirm-duplicate'] : []),
       ], DISPATCH_TIMEOUT_MS)
       return normalizeDispatchResult(value, batchId, 'batch')
     },

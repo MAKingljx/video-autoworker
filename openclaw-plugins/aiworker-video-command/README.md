@@ -1,16 +1,16 @@
 # AI-worker Video Command plugin
 
-This directory contains the `0.5.8` candidate for the native OpenClaw
+This directory contains the `0.5.9` candidate for the native OpenClaw
 video-learning ingress and direct task-chain tool. The files describe the local
 candidate contract; runtime and production acceptance still require their own
 evidence.
 
-`0.5.8` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
+`0.5.9` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
 private messages and restores the established optional `aiworker_analyze_video`
-tool for direct `second-original` calls. The tool uses three structured actions:
+tool for direct `second-original` calls. The tool uses five structured actions:
 
 ```text
-submit_video | submit_directory | status | result
+submit_video | submit_directory | confirm_duplicate | status | result
 ```
 
 It accepts ordinary user intent. A user never needs to remember a slash command
@@ -24,6 +24,17 @@ Chinese reply must be exactly three lines—title, status, and one-sentence
 analysis—and end after the third line unless the user explicitly requests
 report正文 or another format. It must not add a follow-up offer such as
 “如需全文”.
+
+Before a new task state is created, the task-flow client reads only its
+controlled state registry and checks both the canonical `realpath` and basename.
+If either a single submission or any item in a directory has the same name and
+same real path as a historical task, the first call returns a bounded Chinese
+confirmation prompt. It does not create a state file, stage media, launch the
+worker, or trigger n8n. The native hook accepts only the later exact reply
+`确认重新分析`; the direct tool may call `confirm_duplicate` only after that new
+user message and must stop the original tool round. Confirmed work receives a
+new stable task or batch identity, while a retry of an already-created identity
+keeps the existing idempotent result without prompting again.
 
 The host applies absolute/canonical input validation and invokes the fixed
 `aiworker-task-flow` client. Single videos and directories enter the shared
@@ -48,7 +59,7 @@ acceptance must also pass.
 
 The remainder of this file documents historical `0.4.1` behavior and older
 upgrade/rollback gates. It is retained as migration evidence and is not the
-`0.5.8` runtime contract.
+`0.5.9` runtime contract.
 
 ## Business contract
 

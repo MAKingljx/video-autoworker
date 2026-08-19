@@ -5,27 +5,10 @@ import { useState } from 'react'
 import { ChatMessage } from '@/store'
 import { detectTextDirection } from '@/lib/chat-utils'
 
-const AGENT_COLORS: Record<string, { bg: string; text: string; border: string }> = {
-  coordinator: { bg: 'bg-purple-500/10', text: 'text-purple-400', border: 'border-purple-500/20' },
-  aegis: { bg: 'bg-red-500/10', text: 'text-red-400', border: 'border-red-500/20' },
-  research: { bg: 'bg-green-500/10', text: 'text-green-400', border: 'border-green-500/20' },
-  design: { bg: 'bg-pink-500/10', text: 'text-pink-400', border: 'border-pink-500/20' },
-  quant: { bg: 'bg-yellow-500/10', text: 'text-yellow-400', border: 'border-yellow-500/20' },
-  ops: { bg: 'bg-orange-500/10', text: 'text-orange-400', border: 'border-orange-500/20' },
-  reviewer: { bg: 'bg-teal-500/10', text: 'text-teal-400', border: 'border-teal-500/20' },
-  content: { bg: 'bg-indigo-500/10', text: 'text-indigo-400', border: 'border-indigo-500/20' },
-  seo: { bg: 'bg-cyan-500/10', text: 'text-cyan-400', border: 'border-cyan-500/20' },
-  security: { bg: 'bg-rose-500/10', text: 'text-rose-400', border: 'border-rose-500/20' },
-  ai: { bg: 'bg-violet-500/10', text: 'text-violet-400', border: 'border-violet-500/20' },
-  'frontend-dev': { bg: 'bg-sky-500/10', text: 'text-sky-400', border: 'border-sky-500/20' },
-  'backend-dev': { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/20' },
-  'solana-dev': { bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/20' },
-  system: { bg: 'bg-muted/50', text: 'text-muted-foreground', border: 'border-border' },
-  human: { bg: 'bg-primary/10', text: 'text-primary', border: 'border-primary/20' },
-}
-
 function getAgentTheme(name: string) {
-  return AGENT_COLORS[name.toLowerCase()] || { bg: 'bg-muted/50', text: 'text-muted-foreground', border: 'border-border' }
+  return name.toLowerCase() === 'system'
+    ? { bg: 'bg-muted/50', text: 'text-muted-foreground', border: 'border-border' }
+    : { bg: 'bg-primary/10', text: 'text-primary', border: 'border-primary/20' }
 }
 
 function formatTime(timestamp: number): string {
@@ -179,7 +162,7 @@ export function MessageBubble({ message, isHuman, isGrouped }: MessageBubbleProp
   if (isHandoff) {
     return (
       <div className="flex justify-center my-3">
-        <div className="flex items-center gap-2 text-[11px] text-amber-400/80 bg-amber-500/5 px-3 py-1.5 rounded-full border border-amber-500/20">
+        <div className="flex items-center gap-2 rounded-full border border-primary/20 bg-primary/[0.04] px-3 py-1.5 text-[11px] text-primary">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
             <path d="M5 3l6 5-6 5" />
           </svg>

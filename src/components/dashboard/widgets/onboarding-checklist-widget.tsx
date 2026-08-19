@@ -13,13 +13,11 @@ interface ChecklistItem {
 }
 
 export function OnboardingChecklistWidget() {
-  const { agents, tasks, securityPosture, dashboardMode } = useMissionControl()
+  const { agents, tasks, securityPosture } = useMissionControl()
   const navigateToPanel = useNavigateToPanel()
   const [visible, setVisible] = useState(false)
   const [dismissing, setDismissing] = useState(false)
   const [celebrating, setCelebrating] = useState(false)
-
-  const isGateway = dashboardMode === 'full'
 
   // Check if checklist should be visible
   useEffect(() => {
@@ -98,9 +96,9 @@ export function OnboardingChecklistWidget() {
 
   if (!visible) return null
 
-  const accentText = isGateway ? 'text-void-cyan' : 'text-void-amber'
-  const accentBg = isGateway ? 'bg-void-cyan' : 'bg-void-amber'
-  const accentBorder = isGateway ? 'border-void-cyan/30' : 'border-void-amber/30'
+  const accentText = 'text-primary'
+  const accentBg = 'bg-primary'
+  const accentBorder = 'border-primary/30'
 
   if (celebrating) {
     return (

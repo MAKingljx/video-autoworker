@@ -129,9 +129,9 @@ const SCAN_STATUS_COLOR: Record<string, string> = { pass: 'text-green-400', fail
 
 const SEVERITY_BADGE: Record<CheckSeverity, { label: string; className: string }> = {
   critical: { label: 'C', className: 'bg-red-500/20 text-red-400' },
-  high: { label: 'H', className: 'bg-orange-500/20 text-orange-400' },
+  high: { label: 'H', className: 'bg-amber-500/20 text-amber-400' },
   medium: { label: 'M', className: 'bg-amber-500/20 text-amber-400' },
-  low: { label: 'L', className: 'bg-blue-500/20 text-blue-300' },
+  low: { label: 'L', className: 'bg-secondary text-muted-foreground' },
 }
 
 function ScanCategoryRow({ label, icon, category, failingCount }: {
@@ -313,14 +313,14 @@ export function SecurityAuditPanel() {
   const postureColor = (score: number) => {
     if (score >= 80) return 'text-green-400'
     if (score >= 60) return 'text-yellow-400'
-    if (score >= 40) return 'text-orange-400'
+    if (score >= 40) return 'text-amber-400'
     return 'text-red-400'
   }
 
   const postureRingColor = (score: number) => {
     if (score >= 80) return 'stroke-green-500'
     if (score >= 60) return 'stroke-yellow-500'
-    if (score >= 40) return 'stroke-orange-500'
+    if (score >= 40) return 'stroke-amber-500'
     return 'stroke-red-500'
   }
 
@@ -458,7 +458,7 @@ export function SecurityAuditPanel() {
                           <td className="py-1.5 pr-3">
                             <span className={`px-1.5 py-0.5 rounded text-2xs font-medium ${
                               evt.type === 'login_failure' ? 'bg-red-500/15 text-red-400'
-                              : evt.type === 'token_rotation' ? 'bg-blue-500/15 text-blue-400'
+                              : evt.type === 'token_rotation' ? 'bg-primary/10 text-primary'
                               : 'bg-muted text-muted-foreground'
                             }`}>
                               {evt.type.replace(/_/g, ' ')}
@@ -631,7 +631,7 @@ export function SecurityAuditPanel() {
                     {data.injectionAttempts.map(attempt => (
                       <tr key={attempt.id} className="text-xs">
                         <td className="py-1.5 pr-3">
-                          <span className="px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-400 text-2xs font-medium">{attempt.type}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-secondary text-muted-foreground text-2xs font-medium">{attempt.type}</span>
                         </td>
                         <td className="py-1.5 pr-3 text-foreground">{attempt.source}</td>
                         <td className="py-1.5 pr-3 font-mono text-muted-foreground max-w-48 truncate">{attempt.input}</td>
@@ -666,10 +666,10 @@ export function SecurityAuditPanel() {
                     <YAxis />
                     <Tooltip />
                     <Legend />
-                    <Line type="monotone" dataKey="authEvents" stroke="#8884d8" strokeWidth={2} name={t('chartAuthEvents')} />
+                    <Line type="monotone" dataKey="authEvents" stroke="#0969DA" strokeWidth={2} name={t('chartAuthEvents')} />
                     <Line type="monotone" dataKey="injectionAttempts" stroke="#ef4444" strokeWidth={2} name={t('chartInjections')} />
                     <Line type="monotone" dataKey="secretAlerts" stroke="#f59e0b" strokeWidth={2} name={t('chartSecrets')} />
-                    <Line type="monotone" dataKey="toolCalls" stroke="#22c55e" strokeWidth={2} name={t('chartToolCalls')} />
+                    <Line type="monotone" dataKey="toolCalls" stroke="#54AEFF" strokeWidth={2} name={t('chartToolCalls')} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>

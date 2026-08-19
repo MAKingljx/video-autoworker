@@ -32,7 +32,7 @@ export function buildTaskStatParts(stats: TaskStats | undefined | null): TaskSta
   const parts: TaskStatPart[] = []
   if (stats.assigned) parts.push({ label: 'assigned', count: stats.assigned })
   if (stats.in_progress) parts.push({ label: 'active', count: stats.in_progress, color: 'text-amber-300' })
-  if (stats.quality_review) parts.push({ label: 'review', count: stats.quality_review, color: 'text-violet-300' })
+  if (stats.quality_review) parts.push({ label: 'review', count: stats.quality_review, color: 'text-primary' })
   if (stats.done) parts.push({ label: 'done', count: stats.done, color: 'text-emerald-300' })
   return parts.length > 0 ? parts : null
 }

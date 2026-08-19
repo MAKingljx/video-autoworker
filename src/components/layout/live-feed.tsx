@@ -65,7 +65,7 @@ export function LiveFeed() {
               className={`w-1.5 h-1.5 rounded-full ${
                 item.level === 'error' ? 'bg-red-500' :
                 item.level === 'warn' ? 'bg-amber-500' :
-                'bg-blue-500/40'
+                'bg-primary/40'
               }`}
             />
           ))}
@@ -156,7 +156,7 @@ function FeedItem({ item }: { item: { id: string; type: string; level: string; m
     ? 'bg-amber-500'
     : item.level === 'debug'
     ? 'bg-gray-500'
-    : 'bg-blue-500/50'
+    : 'bg-primary/50'
 
   const timeStr = formatRelativeTime(item.timestamp)
 

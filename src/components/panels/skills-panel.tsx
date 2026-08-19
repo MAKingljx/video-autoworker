@@ -397,7 +397,7 @@ export function SkillsPanel() {
     if (!status || status === 'unchecked') return <span className="text-2xs text-muted-foreground/50">unchecked</span>
     if (status === 'clean') return <span className="text-2xs text-emerald-400">clean</span>
     if (status === 'warning') return <span className="text-2xs text-amber-400">warning</span>
-    if (status === 'rejected') return <span className="text-2xs text-rose-400">rejected</span>
+    if (status === 'rejected') return <span className="text-2xs text-destructive">rejected</span>
     return null
   }
 
@@ -503,7 +503,7 @@ export function SkillsPanel() {
                     <div className="flex items-center gap-3 text-2xs">
                       <span className="text-emerald-400">{scanAll.results.clean} clean</span>
                       {scanAll.results.warning > 0 && <span className="text-amber-400">{scanAll.results.warning} warning</span>}
-                      {scanAll.results.rejected > 0 && <span className="text-rose-400">{scanAll.results.rejected} rejected</span>}
+                      {scanAll.results.rejected > 0 && <span className="text-destructive">{scanAll.results.rejected} rejected</span>}
                       {scanAll.results.error > 0 && <span className="text-destructive">{scanAll.results.error} errors</span>}
                       <span className="text-muted-foreground">— {t('skillsScanned', { count: scanAll.total })}</span>
                     </div>
@@ -568,8 +568,8 @@ export function SkillsPanel() {
                     className={`rounded-lg border bg-card p-3 text-left transition-colors ${
                       activeRoot === group.source
                         ? 'border-primary ring-1 ring-primary/30'
-                        : group.source === 'openclaw' ? 'border-cyan-500/30 hover:border-cyan-500/50'
-                        : group.source.startsWith('workspace-') ? 'border-violet-500/30 hover:border-violet-500/50'
+                        : group.source === 'openclaw' ? 'border-primary/25 hover:border-primary/45'
+                        : group.source.startsWith('workspace-') ? 'border-border hover:border-primary/35'
                         : 'border-border hover:border-border/80'
                     }`}
                   >
@@ -594,7 +594,7 @@ export function SkillsPanel() {
                           <div className="flex items-center gap-2">
                             <div className="font-medium text-sm text-foreground">{skill.name}</div>
                             {skill.registry_slug && (
-                              <span className="text-2xs rounded-full bg-violet-500/15 text-violet-300 border border-violet-500/30 px-1.5 py-0.5">
+                              <span className="text-2xs rounded-full bg-secondary text-muted-foreground border border-border px-1.5 py-0.5">
                                 registry
                               </span>
                             )}
@@ -603,11 +603,11 @@ export function SkillsPanel() {
                             {securityBadge(skill.security_status)}
                             <span className={`text-2xs rounded-full border px-2 py-0.5 ${
                               skill.source === 'openclaw'
-                                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30'
+                                ? 'bg-primary/10 text-primary border-primary/25'
                                 : skill.source.startsWith('workspace-')
-                                  ? 'bg-violet-500/10 text-violet-400 border-violet-500/30'
+                                  ? 'bg-secondary text-muted-foreground border-border'
                                   : skill.source.startsWith('project-')
-                                    ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                                    ? 'bg-secondary text-muted-foreground border-border'
                                     : 'border-border text-muted-foreground'
                             }`}>
                               {getSourceLabel(skill.source)}
@@ -796,7 +796,7 @@ export function SkillsPanel() {
                     <span className={
                       installModal.securityStatus === 'clean' ? 'text-emerald-400'
                         : installModal.securityStatus === 'warning' ? 'text-amber-400'
-                        : 'text-rose-400'
+                        : 'text-destructive'
                     }>{installModal.securityStatus}</span>
                   </div>
                 )}
@@ -860,7 +860,7 @@ export function SkillsPanel() {
                   {selectedContent.security && selectedContent.security.issues.length > 0 && (
                     <div className={`mx-4 mt-3 rounded-lg border p-3 text-xs ${
                       selectedContent.security.status === 'rejected'
-                        ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                        ? 'bg-destructive/10 border-destructive/30 text-destructive'
                         : selectedContent.security.status === 'warning'
                           ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
                           : 'bg-slate-500/10 border-slate-500/30 text-slate-300'
@@ -869,7 +869,7 @@ export function SkillsPanel() {
                       {selectedContent.security.issues.map((issue, i) => (
                         <div key={i} className="flex items-start gap-1.5 mt-1">
                           <span className={`mt-0.5 text-2xs font-mono ${
-                            issue.severity === 'critical' ? 'text-rose-400' : issue.severity === 'warning' ? 'text-amber-400' : 'text-slate-400'
+                            issue.severity === 'critical' ? 'text-destructive' : issue.severity === 'warning' ? 'text-amber-400' : 'text-slate-400'
                           }`}>[{issue.severity}]</span>
                           <span>{issue.description}{issue.line ? ` (line ${issue.line})` : ''}</span>
                         </div>

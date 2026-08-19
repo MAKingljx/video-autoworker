@@ -252,10 +252,10 @@ export function Dashboard() {
             </p>
           </div>
           <div className="grid grid-cols-2 gap-2 min-w-[280px]">
-            <SignalPill label="模式" value={isLocal ? '本地' : '网关'} tone="info" />
-            <SignalPill label="事件" value={`${mergedRecentLogs.length} 条流`} tone={recentErrorLogs > 0 ? 'warning' : 'success'} />
-            <SignalPill label="队列" value={String(backlogCount)} tone={backlogCount > 10 ? 'warning' : 'info'} />
-            <SignalPill label="错误" value={String(errorCount)} tone={errorCount > 0 ? 'warning' : 'success'} />
+            <SignalPill label="模式" value={isLocal ? '本地' : '网关'} tone="neutral" />
+            <SignalPill label="事件" value={`${mergedRecentLogs.length} 条流`} tone={recentErrorLogs > 0 ? 'danger' : 'neutral'} />
+            <SignalPill label="队列" value={String(backlogCount)} tone={backlogCount > 10 ? 'warning' : 'neutral'} />
+            <SignalPill label="错误" value={String(errorCount)} tone={errorCount > 0 ? 'danger' : 'success'} />
           </div>
         </div>
       </section>

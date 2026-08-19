@@ -3,9 +3,14 @@
 import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  VideoAnalysisResultsPanel,
+  type AnalysisMaterialVideo,
+} from '@/components/panels/video-analysis-results-panel'
 
 type SearchMode = 'keyword' | 'vector' | 'hybrid'
 type SearchScope = 'all' | 'selected'
+type WorkspaceView = 'materials' | 'analysis'
 
 interface MaterialVideo {
   name: string
@@ -326,6 +331,7 @@ function seekVideo(video: HTMLVideoElement, seconds: number) {
 }
 
 export function MaterialsPanel() {
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('materials')
   const [overview, setOverview] = useState<MaterialsOverview | null>(null)
   const [selectedProject, setSelectedProject] = useState<string>('')
   const [selectedVideoPath, setSelectedVideoPath] = useState<string>('')
@@ -367,6 +373,16 @@ export function MaterialsPanel() {
   const orderedProjects = useMemo(
     () => [...(overview?.projects || [])].sort(compareProjects),
     [overview?.projects],
+  )
+
+  const analysisVideos = useMemo<AnalysisMaterialVideo[]>(
+    () => orderedProjects.flatMap(project => project.videos.map(video => ({
+      projectId: project.id,
+      projectName: project.name,
+      name: video.name,
+      path: video.path,
+    }))),
+    [orderedProjects],
   )
 
   const projectMap = useMemo(
@@ -511,13 +527,40 @@ export function MaterialsPanel() {
 
   return (
     <div className="space-y-4 p-4 md:p-5">
-      {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          {error}
+      <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h1 className="text-lg font-semibold text-foreground">视频可视化</h1>
+            <p className="mt-1 text-xs text-muted-foreground">素材检索与正式任务结果共用一个工作台，数据来源保持清晰分离。</p>
+          </div>
+          <div className="inline-flex w-fit rounded-md border border-border bg-background p-1">
+            <WorkspaceViewButton
+              active={workspaceView === 'materials'}
+              onClick={() => setWorkspaceView('materials')}
+            >
+              素材检索
+            </WorkspaceViewButton>
+            <WorkspaceViewButton
+              active={workspaceView === 'analysis'}
+              onClick={() => setWorkspaceView('analysis')}
+            >
+              分析结果
+            </WorkspaceViewButton>
+          </div>
         </div>
-      )}
+      </section>
 
-      {loading ? (
+      {workspaceView === 'analysis' ? (
+        <VideoAnalysisResultsPanel videos={analysisVideos} />
+      ) : (
+        <>
+          {error && (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+              {error}
+            </div>
+          )}
+
+          {loading ? (
         <div className="rounded-lg border border-border bg-card px-5 py-10 text-sm text-muted-foreground">
           正在加载素材库...
         </div>
@@ -687,8 +730,34 @@ export function MaterialsPanel() {
             </section>
           )}
         </>
+          )}
+        </>
       )}
     </div>
+  )
+}
+
+function WorkspaceViewButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded px-3 py-1.5 text-sm transition-colors ${
+        active
+          ? 'bg-primary text-primary-foreground'
+          : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -967,8 +1036,7 @@ function VideoListItem({
               loading="lazy"
             />
           ) : (
-            <div className="aspect-video bg-[linear-gradient(135deg,rgba(24,24,27,1),rgba(9,9,11,1))]">
-              <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.12),transparent_42%)]" />
+            <div className="aspect-video bg-neutral-950">
             </div>
           )}
 

@@ -150,7 +150,7 @@ function statusTone(status: string | null | undefined): string {
     return 'border-red-500/25 bg-red-500/10 text-red-400'
   }
   if (normalized === 'running' || normalized === 'waiting' || normalized === 'accepted') {
-    return 'border-cyan-500/25 bg-cyan-500/10 text-cyan-400'
+    return 'border-primary/25 bg-primary/10 text-primary'
   }
   return 'border-border bg-secondary/60 text-muted-foreground'
 }

@@ -10,17 +10,17 @@ const SESSION_KIND_META: Record<SessionKind, {
   'claude-code': {
     label: '本地会话',
     shortLabel: '本地',
-    pillClassName: 'bg-primary/15 text-primary/80',
+    pillClassName: 'bg-secondary text-muted-foreground',
   },
   'codex-cli': {
     label: '本地会话',
     shortLabel: '本地',
-    pillClassName: 'bg-amber-500/15 text-amber-400/80',
+    pillClassName: 'bg-secondary text-muted-foreground',
   },
   hermes: {
     label: '本地会话',
     shortLabel: '本地',
-    pillClassName: 'bg-cyan-500/15 text-cyan-300/80',
+    pillClassName: 'bg-secondary text-muted-foreground',
   },
   gateway: {
     label: 'OpenClaw',

@@ -61,7 +61,7 @@ function resourceStatus(resource: ModelClusterResource): { label: string; classN
   }
   return {
     label: resource.routes.length > 0 ? '配置可调度' : '生产可用',
-    className: 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-400',
+    className: 'border-primary/20 bg-primary/[0.06] text-primary',
   }
 }
 
@@ -297,7 +297,7 @@ export function ModelClusterPanel() {
                                         </div>
                                         <div className="shrink-0 text-right">
                                           <p className="text-2xs text-muted-foreground">{transportLabel(route.transport)}</p>
-                                          <p className={`mt-0.5 text-[10px] ${route.available ? 'text-emerald-400' : 'text-destructive'}`}>
+                                          <p className={`mt-0.5 text-[10px] ${route.available ? 'text-primary' : 'text-destructive'}`}>
                                             {route.available ? `${routeAssignments.length} 项职责` : route.unavailableReason || '不可用'}
                                           </p>
                                         </div>

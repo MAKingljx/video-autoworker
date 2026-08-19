@@ -57,9 +57,9 @@ function LoaderDots({ size = 'md' }: { size?: 'sm' | 'md' }) {
   const dotSize = size === 'sm' ? 'w-1 h-1' : 'w-1.5 h-1.5'
   return (
     <div className="flex items-center gap-1.5">
-      <div className={`${dotSize} rounded-full bg-void-cyan animate-pulse`} style={{ animationDelay: '0ms' }} />
-      <div className={`${dotSize} rounded-full bg-void-cyan animate-pulse`} style={{ animationDelay: '200ms' }} />
-      <div className={`${dotSize} rounded-full bg-void-cyan animate-pulse`} style={{ animationDelay: '400ms' }} />
+      <div className={`${dotSize} animate-pulse rounded-full bg-primary`} style={{ animationDelay: '0ms' }} />
+      <div className={`${dotSize} animate-pulse rounded-full bg-primary`} style={{ animationDelay: '200ms' }} />
+      <div className={`${dotSize} animate-pulse rounded-full bg-primary`} style={{ animationDelay: '400ms' }} />
     </div>
   )
 }
@@ -105,11 +105,6 @@ function PageLoader({ steps }: { steps?: InitStep[] }) {
       <div className="flex flex-col items-center gap-8 w-64">
         {/* Animated logo sequence: OpenClaw + local Qwen nodes converge into MC mark */}
         <div className="relative flex items-center justify-center h-28 w-full">
-          {/* Ambient glow */}
-          <div
-            className="absolute w-28 h-28 rounded-full bg-primary/8 blur-2xl animate-glow-pulse"
-            style={{ animationDelay: '2.2s' }}
-          />
           {/* Phase 1: Four logos converge from cardinal directions (fades out at 1.8s) */}
           <div className="absolute inset-0 flex items-center justify-center animate-pair-fade-out">
             <div className="relative w-28 h-28">
@@ -122,7 +117,7 @@ function PageLoader({ steps }: { steps?: InitStep[] }) {
                       width={36}
                       height={36}
                       priority
-                      className="w-9 h-9 rounded-lg border border-border/60 bg-card/90 shadow-[0_0_24px_rgba(14,165,233,0.12)]"
+                      className="h-9 w-9 rounded-lg border border-border/60 bg-card"
                     />
                     <span className={`${agent.labelClass} rounded-full border border-border/50 bg-background/85 px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-[0.18em] text-muted-foreground shadow-sm`}>
                       {agent.name}

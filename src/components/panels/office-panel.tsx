@@ -98,20 +98,13 @@ interface OfficeEvent {
 }
 
 interface ThemePalette {
-  shell: string
   gridLine: string
-  haze: string
-  glow: string
   corridor: string
   corridorStripe: string
-  atmosphere: string
-  shadowVeil: string
   floorFilter: string
   spriteFilter: string
-  roomTone: string
   floorOpacityA: number
   floorOpacityB: number
-  accentGlow: string
 }
 
 interface PersistedOfficePrefs {
@@ -130,16 +123,16 @@ interface PersistedOfficePrefs {
 }
 
 const statusGlow: Record<string, string> = {
-  idle: 'shadow-[0_0_12px_hsl(var(--void-mint)/0.3)] border-void-mint/60',
-  busy: 'shadow-[0_0_12px_hsl(var(--void-amber)/0.3)] border-void-amber/60',
-  error: 'shadow-[0_0_12px_hsl(var(--void-crimson)/0.3)] border-void-crimson/60',
-  offline: 'shadow-[0_0_8px_hsl(var(--border)/0.2)] border-border/40',
+  idle: 'border-success/50',
+  busy: 'border-warning/50',
+  error: 'border-destructive/50',
+  offline: 'border-border',
 }
 
 const statusDot: Record<string, string> = {
-  idle: 'bg-void-mint',
-  busy: 'bg-void-amber',
-  error: 'bg-void-crimson',
+  idle: 'bg-success',
+  busy: 'bg-warning',
+  error: 'bg-destructive',
   offline: 'bg-muted-foreground/40',
 }
 
@@ -167,15 +160,8 @@ function getInitials(name: string): string {
     .slice(0, 2)
 }
 
-function hashColor(name: string): string {
-  let hash = 0
-  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash)
-  const colors = [
-    'bg-blue-600', 'bg-emerald-600', 'bg-violet-600', 'bg-amber-600',
-    'bg-rose-600', 'bg-cyan-600', 'bg-indigo-600', 'bg-teal-600',
-    'bg-orange-600', 'bg-pink-600', 'bg-lime-600', 'bg-fuchsia-600',
-  ]
-  return colors[Math.abs(hash) % colors.length]
+function hashColor(_name: string): string {
+  return 'bg-primary'
 }
 
 function hashNumber(value: string): number {
@@ -237,25 +223,25 @@ const MAP_COLS = 24
 const MAP_ROWS = 16
 
 const ROOM_LAYOUT: MapRoom[] = [
-  { id: 'eng', label: 'Engine Bay', x: 16, y: 22, w: 28, h: 22, style: 'bg-[#0c1628]' },
-  { id: 'product', label: 'Bridge', x: 48, y: 22, w: 24, h: 22, style: 'bg-[#0a1a2a]' },
-  { id: 'ops', label: 'Ops Deck', x: 16, y: 49, w: 24, h: 24, style: 'bg-[#10132a]' },
-  { id: 'research', label: 'Lab', x: 44, y: 49, w: 22, h: 24, style: 'bg-[#0d1526]' },
-  { id: 'lounge', label: 'Crew Quarters', x: 70, y: 49, w: 16, h: 24, style: 'bg-[#0c1a1a]' },
+  { id: 'eng', label: 'Engine Bay', x: 16, y: 22, w: 28, h: 22, style: 'bg-[#0d1117]' },
+  { id: 'product', label: 'Bridge', x: 48, y: 22, w: 24, h: 22, style: 'bg-[#0d1117]' },
+  { id: 'ops', label: 'Ops Deck', x: 16, y: 49, w: 24, h: 24, style: 'bg-[#0d1117]' },
+  { id: 'research', label: 'Lab', x: 44, y: 49, w: 22, h: 24, style: 'bg-[#0d1117]' },
+  { id: 'lounge', label: 'Crew Quarters', x: 70, y: 49, w: 16, h: 24, style: 'bg-[#0d1117]' },
 ]
 
 const MAP_PROPS: MapProp[] = [
-  { id: 'desk-a', x: 22, y: 30, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-b', x: 33, y: 30, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-c', x: 52, y: 30, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-d', x: 61, y: 30, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-e', x: 22, y: 58, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-f', x: 31, y: 58, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-g', x: 48, y: 58, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'desk-h', x: 57, y: 58, w: 8, h: 2.8, style: 'bg-[#0f1c30]', border: 'border-void-cyan/25' },
-  { id: 'plant-l', x: 14, y: 47, w: 3, h: 5, style: 'bg-void-mint/30', border: 'border-void-mint/20' },
-  { id: 'plant-r', x: 84, y: 47, w: 3, h: 5, style: 'bg-void-mint/30', border: 'border-void-mint/20' },
-  { id: 'kitchen', x: 72, y: 57, w: 12, h: 10, style: 'bg-[#0c1a1a]', border: 'border-void-mint/20' },
+  { id: 'desk-a', x: 22, y: 30, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-b', x: 33, y: 30, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-c', x: 52, y: 30, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-d', x: 61, y: 30, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-e', x: 22, y: 58, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-f', x: 31, y: 58, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-g', x: 48, y: 58, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'desk-h', x: 57, y: 58, w: 8, h: 2.8, style: 'bg-[#111820]', border: 'border-primary/20' },
+  { id: 'plant-l', x: 14, y: 47, w: 3, h: 5, style: 'bg-primary/10', border: 'border-primary/15' },
+  { id: 'plant-r', x: 84, y: 47, w: 3, h: 5, style: 'bg-primary/10', border: 'border-primary/15' },
+  { id: 'kitchen', x: 72, y: 57, w: 12, h: 10, style: 'bg-[#0d1117]', border: 'border-primary/15' },
 ]
 
 const LOUNGE_WAYPOINTS = [
@@ -293,11 +279,7 @@ interface WorkerVariant {
 }
 
 const WORKER_VARIANTS: WorkerVariant[] = [
-  { id: 'default', filter: 'none', accent: 'border-cyan-300/60' },
-  { id: 'warm', filter: 'hue-rotate(18deg) saturate(1.08)', accent: 'border-amber-300/60' },
-  { id: 'cool', filter: 'hue-rotate(-20deg) saturate(1.1)', accent: 'border-sky-300/60' },
-  { id: 'mint', filter: 'hue-rotate(42deg) saturate(1.08)', accent: 'border-emerald-300/60' },
-  { id: 'violet', filter: 'hue-rotate(64deg) saturate(1.12)', accent: 'border-violet-300/60' },
+  { id: 'default', filter: 'saturate(0.82)', accent: 'border-primary/60' },
 ]
 
 function getWorkerVariant(name: string): WorkerVariant {
@@ -889,111 +871,23 @@ export function OfficePanel() {
   }, [])
 
   const themePalette = useMemo<ThemePalette>(() => {
-    if (timeTheme === 'dawn') {
-      return {
-        shell: 'radial-gradient(circle at 20% 10%, rgba(245,158,11,0.25) 0, rgba(15,20,28,0.92) 48%, rgba(7,9,12,1) 100%)',
-        gridLine: 'rgba(245,158,11,0.1)',
-        haze: 'radial-gradient(circle at 52% 26%, rgba(245,158,11,0.15), transparent 62%)',
-        glow: 'linear-gradient(to bottom, rgba(245,158,11,0.08), transparent 35%, rgba(0,0,0,0.2))',
-        corridor: '#14181e',
-        corridorStripe: 'rgba(245,158,11,0.4)',
-        atmosphere: 'radial-gradient(circle at 15% 8%, rgba(245,158,11,0.18), transparent 46%), radial-gradient(circle at 82% 18%, rgba(52,211,153,0.1), transparent 40%)',
-        shadowVeil: 'linear-gradient(to bottom, rgba(7,9,12,0.15), rgba(7,9,12,0.38))',
-        floorFilter: 'hue-rotate(160deg) saturate(0.7) brightness(0.65) contrast(1.1)',
-        spriteFilter: 'hue-rotate(155deg) saturate(0.8) brightness(0.8)',
-        roomTone: 'linear-gradient(to bottom right, rgba(245,158,11,0.1), rgba(7,9,12,0.12))',
-        floorOpacityA: 0.7,
-        floorOpacityB: 0.55,
-        accentGlow: 'rgba(245,158,11,0.18)',
-      }
-    }
-    if (timeTheme === 'day') {
-      return {
-        shell: 'radial-gradient(circle at 20% 12%, rgba(52,211,153,0.2) 0, rgba(15,20,28,0.9) 46%, rgba(7,9,12,1) 100%)',
-        gridLine: 'rgba(52,211,153,0.12)',
-        haze: 'radial-gradient(circle at 52% 28%, rgba(52,211,153,0.12), transparent 58%)',
-        glow: 'linear-gradient(to bottom, rgba(52,211,153,0.06), transparent 30%, rgba(0,0,0,0.1))',
-        corridor: '#101820',
-        corridorStripe: 'rgba(52,211,153,0.35)',
-        atmosphere: 'radial-gradient(circle at 18% 5%, rgba(52,211,153,0.14), transparent 45%), radial-gradient(circle at 84% 16%, rgba(34,211,238,0.08), transparent 42%)',
-        shadowVeil: 'linear-gradient(to bottom, rgba(7,9,12,0.08), rgba(7,9,12,0.24))',
-        floorFilter: 'hue-rotate(165deg) saturate(0.8) brightness(0.75) contrast(1.08)',
-        spriteFilter: 'hue-rotate(158deg) saturate(0.85) brightness(0.85)',
-        roomTone: 'linear-gradient(to bottom right, rgba(52,211,153,0.08), rgba(7,9,12,0.08))',
-        floorOpacityA: 0.75,
-        floorOpacityB: 0.6,
-        accentGlow: 'rgba(52,211,153,0.15)',
-      }
-    }
-    if (timeTheme === 'dusk') {
-      return {
-        shell: 'radial-gradient(circle at 20% 10%, rgba(167,139,250,0.25) 0, rgba(15,20,28,0.92) 47%, rgba(7,9,12,1) 100%)',
-        gridLine: 'rgba(167,139,250,0.1)',
-        haze: 'radial-gradient(circle at 48% 30%, rgba(167,139,250,0.12), transparent 62%)',
-        glow: 'linear-gradient(to bottom, rgba(167,139,250,0.06), transparent 30%, rgba(0,0,0,0.24))',
-        corridor: '#12141e',
-        corridorStripe: 'rgba(167,139,250,0.35)',
-        atmosphere: 'radial-gradient(circle at 14% 10%, rgba(167,139,250,0.14), transparent 44%), radial-gradient(circle at 85% 18%, rgba(34,211,238,0.08), transparent 40%)',
-        shadowVeil: 'linear-gradient(to bottom, rgba(7,9,12,0.18), rgba(7,9,12,0.42))',
-        floorFilter: 'hue-rotate(175deg) saturate(0.65) brightness(0.6) contrast(1.12)',
-        spriteFilter: 'hue-rotate(168deg) saturate(0.75) brightness(0.75)',
-        roomTone: 'linear-gradient(to bottom right, rgba(167,139,250,0.08), rgba(7,9,12,0.16))',
-        floorOpacityA: 0.65,
-        floorOpacityB: 0.5,
-        accentGlow: 'rgba(167,139,250,0.14)',
-      }
-    }
+    const phase = {
+      dawn: { grid: 0.08, stripe: 0.28, floor: 0.68, sprite: 0.8, floorA: 0.7, floorB: 0.55 },
+      day: { grid: 0.09, stripe: 0.25, floor: 0.75, sprite: 0.85, floorA: 0.75, floorB: 0.6 },
+      dusk: { grid: 0.08, stripe: 0.24, floor: 0.6, sprite: 0.75, floorA: 0.65, floorB: 0.5 },
+      night: { grid: 0.06, stripe: 0.2, floor: 0.5, sprite: 0.7, floorA: 0.6, floorB: 0.4 },
+    }[timeTheme]
+
     return {
-      shell: 'radial-gradient(circle at 22% 10%, rgba(34,211,238,0.15) 0, rgba(7,9,12,0.95) 42%, rgba(7,9,12,1) 100%)',
-      gridLine: 'rgba(34,211,238,0.08)',
-      haze: 'radial-gradient(circle at 50% 30%, rgba(34,211,238,0.08), transparent 60%)',
-      glow: 'linear-gradient(to bottom, rgba(34,211,238,0.04), transparent 30%, rgba(0,0,0,0.24))',
+      gridLine: `rgba(88,166,255,${phase.grid})`,
       corridor: '#0d1420',
-      corridorStripe: 'rgba(34,211,238,0.3)',
-      atmosphere: 'radial-gradient(circle at 16% 7%, rgba(34,211,238,0.1), transparent 45%), radial-gradient(circle at 82% 15%, rgba(167,139,250,0.08), transparent 42%)',
-      shadowVeil: 'linear-gradient(to bottom, rgba(7,9,12,0.34), rgba(7,9,12,0.56))',
-      floorFilter: 'hue-rotate(170deg) saturate(0.6) brightness(0.5) contrast(1.2)',
-      spriteFilter: 'hue-rotate(160deg) saturate(0.7) brightness(0.7)',
-      roomTone: 'linear-gradient(to bottom right, rgba(34,211,238,0.06), rgba(7,9,12,0.24))',
-      floorOpacityA: 0.6,
-      floorOpacityB: 0.4,
-      accentGlow: 'rgba(34,211,238,0.12)',
+      corridorStripe: `rgba(88,166,255,${phase.stripe})`,
+      floorFilter: `saturate(0.58) brightness(${phase.floor}) contrast(1.12)`,
+      spriteFilter: `saturate(0.72) brightness(${phase.sprite})`,
+      floorOpacityA: phase.floorA,
+      floorOpacityB: phase.floorB,
     }
   }, [timeTheme])
-
-  const nightSparkles = useMemo(
-    () =>
-      Array.from({ length: 14 }, (_, idx) => {
-        const seed = hashNumber(`night-${idx}`)
-        return {
-          id: idx,
-          x: 6 + (seed % 88),
-          y: 6 + ((seed >> 3) % 38),
-          delay: (seed % 7) * 0.4,
-          size: 2 + (seed % 3),
-        }
-      }),
-    [],
-  )
-
-  const heatmapPoints = useMemo(() => {
-    return renderedWorkers.map((worker) => {
-      const action = agentActionOverrides.get(worker.agent.id)
-      let intensity = worker.agent.status === 'busy' ? 0.95 : worker.agent.status === 'idle' ? 0.45 : 0.7
-      if (action === 'focus') intensity += 0.25
-      if (action === 'pair') intensity += 0.15
-      if (worker.isMoving) intensity += 0.2
-      const radius = worker.agent.status === 'busy' ? 14 : 10
-      const hue = worker.agent.status === 'busy' ? 'rgba(255,191,84,' : worker.agent.status === 'idle' ? 'rgba(88,220,139,' : 'rgba(120,189,255,'
-      return {
-        id: worker.agent.id,
-        x: worker.x,
-        y: worker.y,
-        radius,
-        color: `${hue}${Math.min(0.85, Math.max(0.2, intensity)).toFixed(2)})`,
-      }
-    })
-  }, [agentActionOverrides, renderedWorkers])
 
   const rosterRows = useMemo(() => {
     return gameWorkers.map(({ agent }) => {
@@ -1519,9 +1413,9 @@ export function OfficePanel() {
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-3 text-xs text-muted-foreground mr-4">
-              {counts.busy > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-amber" />{t('activeCount', { count: counts.busy })}</span>}
-              {counts.idle > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-mint" />{t('standbyCount', { count: counts.idle })}</span>}
-              {counts.error > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-crimson" />{t('alertCount', { count: counts.error })}</span>}
+              {counts.busy > 0 && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-warning" />{t('activeCount', { count: counts.busy })}</span>}
+              {counts.idle > 0 && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-success" />{t('standbyCount', { count: counts.idle })}</span>}
+              {counts.error > 0 && <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-destructive" />{t('alertCount', { count: counts.error })}</span>}
               {counts.offline > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-muted-foreground/40" />{t('offlineCount', { count: counts.offline })}</span>}
             </div>
             <div className="flex rounded-md overflow-hidden border border-border">
@@ -1551,7 +1445,7 @@ export function OfficePanel() {
 
       {visibleDisplayAgents.length === 0 ? (
         <div className="text-center py-16 text-muted-foreground">
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="w-12 h-12 mx-auto mb-3 text-void-cyan/30">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-3 h-12 w-12 text-primary/30">
             <path d="M8 1l6 4v6l-6 4-6-4V5l6-4z" />
             <path d="M8 1v14M2 5l6 4 6-4" />
           </svg>
@@ -1563,7 +1457,7 @@ export function OfficePanel() {
           {showSidebar && (
           <div className="void-panel text-foreground p-3 h-fit">
             <div className="flex items-center justify-between mb-2">
-              <div className="text-xs font-semibold font-mono tracking-wider text-void-cyan">{t('crewHeader')}</div>
+              <div className="font-mono text-xs font-semibold tracking-wider text-primary">{t('crewHeader')}</div>
               <div className="text-[10px] text-muted-foreground">{t('onlineCount', { count: visibleDisplayAgents.length })}</div>
             </div>
             <div className="mb-2 flex flex-wrap gap-1.5">
@@ -1580,7 +1474,7 @@ export function OfficePanel() {
                   onClick={() => setSidebarFilter(item.key)}
                   className={`h-auto px-2 py-1 text-[10px] font-mono border ${
                     sidebarFilter === item.key
-                      ? 'bg-void-cyan/15 border-void-cyan/30 text-void-cyan'
+                      ? 'bg-primary/15 border-primary/30 text-primary'
                       : 'bg-secondary border-border text-muted-foreground hover:bg-muted'
                   }`}
                 >
@@ -1596,7 +1490,7 @@ export function OfficePanel() {
                   onClick={() => setLocalSessionFilter('running')}
                   className={`flex-1 h-auto px-2 py-1 text-[10px] font-mono border ${
                     localSessionFilter === 'running'
-                      ? 'bg-void-cyan/15 border-void-cyan/30 text-void-cyan'
+                      ? 'border-primary/30 bg-primary/15 text-primary'
                       : 'bg-secondary border-border text-muted-foreground hover:bg-muted'
                   }`}
                 >
@@ -1608,7 +1502,7 @@ export function OfficePanel() {
                   onClick={() => setLocalSessionFilter('not-running')}
                   className={`flex-1 h-auto px-2 py-1 text-[10px] font-mono border ${
                     localSessionFilter === 'not-running'
-                      ? 'bg-void-amber/15 border-void-amber/30 text-void-amber'
+                      ? 'bg-primary/15 border-primary/30 text-primary'
                       : 'bg-secondary border-border text-muted-foreground hover:bg-muted'
                   }`}
                 >
@@ -1638,21 +1532,21 @@ export function OfficePanel() {
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block text-xs font-medium truncate">{agent.name}</span>
-                    <span className="block text-[10px] text-slate-300 truncate">{agent.role}</span>
-                    <span className="block text-[9px] text-slate-400 truncate">
+                    <span className="block truncate text-[10px] text-muted-foreground">{agent.role}</span>
+                    <span className="block truncate text-[9px] text-muted-foreground/80">
                       {agent.last_activity || t('noRecentActivity')}
                     </span>
                   </span>
                   <span className="flex flex-col items-end gap-1">
                     <span className={`w-2 h-2 rounded-full ${statusDot[agent.status]}`} />
-                    <span className={`text-[9px] ${needsAttention ? 'text-amber-300 font-semibold' : 'text-slate-400'}`}>
+                    <span className={`text-[9px] ${needsAttention ? 'font-semibold text-warning' : 'text-muted-foreground/80'}`}>
                       {agent.status === 'busy' ? t('activeStatus') : t('idleMinutes', { minutes: minutesIdle })}
                     </span>
                   </span>
                 </Button>
               ))}
               {filteredRosterRows.length === 0 && (
-                <div className="text-[11px] text-slate-400 px-1 py-2">{t('noWorkersInFilter')}</div>
+                <div className="px-1 py-2 text-[11px] text-muted-foreground">{t('noWorkersInFilter')}</div>
               )}
             </div>
           </div>
@@ -1660,11 +1554,11 @@ export function OfficePanel() {
 
           <div
             ref={mapViewportRef}
-            className="relative rounded-lg border border-border overflow-hidden min-h-[560px] cursor-grab active:cursor-grabbing shadow-[0_20px_60px_rgba(0,0,0,0.55)]"
+            className="relative min-h-[560px] cursor-grab overflow-hidden rounded-lg border border-border active:cursor-grabbing"
             style={{
-              backgroundColor: 'hsl(var(--background))',
-              backgroundImage: `${themePalette.shell}, linear-gradient(90deg, ${themePalette.gridLine} 1px, transparent 1px), linear-gradient(${themePalette.gridLine} 1px, transparent 1px)`,
-              backgroundSize: 'auto, 64px 64px, 64px 64px',
+              backgroundColor: '#07090c',
+              backgroundImage: `linear-gradient(90deg, ${themePalette.gridLine} 1px, transparent 1px), linear-gradient(${themePalette.gridLine} 1px, transparent 1px)`,
+              backgroundSize: '64px 64px, 64px 64px',
             }}
             onWheel={onMapWheel}
             onMouseDown={onMapMouseDown}
@@ -1672,104 +1566,33 @@ export function OfficePanel() {
             onMouseUp={endMapDrag}
             onMouseLeave={endMapDrag}
           >
-            <div className="absolute inset-0 pointer-events-none z-0" style={{ backgroundImage: themePalette.haze }} />
-            <div className="absolute inset-0 pointer-events-none z-0" style={{ backgroundImage: themePalette.glow }} />
-            <div className="absolute inset-0 pointer-events-none z-0" style={{ backgroundImage: themePalette.atmosphere, mixBlendMode: 'screen', opacity: 0.9 }} />
-            <div className="absolute inset-0 pointer-events-none z-0" style={{ backgroundImage: themePalette.shadowVeil }} />
-            {timeTheme === 'dawn' && (
-              <div
-                className="absolute inset-0 pointer-events-none z-[2]"
-                style={{
-                  background: `linear-gradient(115deg, transparent 8%, ${themePalette.accentGlow} 24%, transparent 42%)`,
-                  mixBlendMode: 'screen',
-                  animation: 'mcSunSweep 17s ease-in-out infinite',
-                }}
-              />
-            )}
-            {timeTheme === 'day' && (
-              <>
-                <div
-                  className="absolute inset-0 pointer-events-none z-[2]"
-                  style={{
-                    background: `linear-gradient(112deg, transparent 10%, ${themePalette.accentGlow} 24%, transparent 44%)`,
-                    mixBlendMode: 'screen',
-                    animation: 'mcSunSweep 16s ease-in-out infinite',
-                  }}
-                />
-                <div
-                  className="absolute inset-0 pointer-events-none z-[2]"
-                  style={{
-                    background: 'linear-gradient(96deg, transparent 24%, rgba(255,255,255,0.15) 38%, transparent 58%)',
-                    mixBlendMode: 'screen',
-                    animation: 'mcSunSweepReverse 20s ease-in-out infinite',
-                  }}
-                />
-              </>
-            )}
-            {timeTheme === 'dusk' && (
-              <div
-                className="absolute inset-0 pointer-events-none z-[2]"
-                style={{
-                  background: `radial-gradient(circle at 50% 22%, ${themePalette.accentGlow} 0, transparent 56%)`,
-                  mixBlendMode: 'screen',
-                  animation: 'mcDuskPulse 7.5s ease-in-out infinite',
-                }}
-              />
-            )}
-            {timeTheme === 'night' && (
-              <>
-                <div
-                  className="absolute inset-0 pointer-events-none z-[2]"
-                  style={{
-                    background: `radial-gradient(circle at 18% 12%, ${themePalette.accentGlow} 0, transparent 44%), radial-gradient(circle at 82% 16%, rgba(138,178,255,0.2) 0, transparent 42%)`,
-                    mixBlendMode: 'screen',
-                    animation: 'mcNightBloom 8.5s ease-in-out infinite',
-                  }}
-                />
-                {nightSparkles.map((spark) => (
-                  <div
-                    key={`spark-${spark.id}`}
-                    className="absolute pointer-events-none z-[2] rounded-full bg-white/80"
-                    style={{
-                      left: `${spark.x}%`,
-                      top: `${spark.y}%`,
-                      width: `${spark.size}px`,
-                      height: `${spark.size}px`,
-                      boxShadow: '0 0 8px rgba(180,210,255,0.9)',
-                      animation: `mcTwinkle 2.6s ease-in-out ${spark.delay}s infinite`,
-                    }}
-                  />
-                ))}
-              </>
-            )}
-
-            <div className="absolute left-[8%] top-[8%] rounded-md bg-card/80 backdrop-blur-sm border border-void-cyan/20 text-void-cyan text-xs px-2 py-1 font-mono z-30">
+            <div className="absolute left-[8%] top-[8%] z-30 rounded-md border border-primary/20 bg-card px-2 py-1 font-mono text-xs text-primary">
               {t('mainDeck')}
             </div>
-            <div className="absolute right-3 top-3 z-30 flex items-center gap-1 rounded-md bg-card/80 backdrop-blur-sm border border-border text-foreground/90 px-2 py-1">
-              <Button variant="ghost" size="xs" onClick={() => setMapZoom((z) => Math.max(0.8, Number((z - 0.1).toFixed(2))))} className="h-auto px-1.5 py-0.5 text-xs hover:bg-void-cyan/10">-</Button>
+            <div className="absolute right-3 top-3 z-30 flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-foreground/90">
+              <Button variant="ghost" size="xs" onClick={() => setMapZoom((z) => Math.max(0.8, Number((z - 0.1).toFixed(2))))} className="h-auto px-1.5 py-0.5 text-xs hover:bg-primary/10">-</Button>
               <span className="text-[11px] font-mono w-10 text-center">{Math.round(mapZoom * 100)}%</span>
-              <Button variant="ghost" size="xs" onClick={() => setMapZoom((z) => Math.min(2.2, Number((z + 0.1).toFixed(2))))} className="h-auto px-1.5 py-0.5 text-xs hover:bg-void-cyan/10">+</Button>
-              <Button variant="ghost" size="xs" onClick={resetMapView} className="h-auto px-1.5 py-0.5 text-[11px] hover:bg-void-cyan/10">{t('resetView')}</Button>
+              <Button variant="ghost" size="xs" onClick={() => setMapZoom((z) => Math.min(2.2, Number((z + 0.1).toFixed(2))))} className="h-auto px-1.5 py-0.5 text-xs hover:bg-primary/10">+</Button>
+              <Button variant="ghost" size="xs" onClick={resetMapView} className="h-auto px-1.5 py-0.5 text-[11px] hover:bg-primary/10">{t('resetView')}</Button>
             </div>
-            <div className="absolute right-3 top-12 z-30 flex items-center gap-1 rounded-md bg-card/80 backdrop-blur-sm border border-border text-foreground/90 px-2 py-1">
+            <div className="absolute right-3 top-12 z-30 flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-foreground/90">
               {(['dawn', 'day', 'dusk', 'night'] as TimeTheme[]).map((item) => (
                 <Button
                   key={item}
                   variant="ghost"
                   size="xs"
                   onClick={() => setTimeTheme(item)}
-                  className={`h-auto px-1.5 py-0.5 text-[10px] font-mono uppercase ${timeTheme === item ? 'bg-void-cyan/20 text-void-cyan' : 'hover:bg-void-cyan/10 text-muted-foreground'}`}
+                  className={`h-auto px-1.5 py-0.5 text-[10px] font-mono uppercase ${timeTheme === item ? 'bg-primary/15 text-primary' : 'text-muted-foreground hover:bg-primary/10'}`}
                 >
                   {item}
                 </Button>
               ))}
             </div>
-            <div className="absolute left-3 top-3 z-30 flex items-center gap-1 rounded-md bg-card/80 backdrop-blur-sm border border-border text-foreground/90 px-2 py-1">
-              <Button variant="ghost" size="xs" onClick={() => setShowSidebar((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-void-cyan/10">{showSidebar ? t('hideCrewButton') : t('showCrewButton')}</Button>
-              <Button variant="ghost" size="xs" onClick={() => setShowMinimap((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-void-cyan/10">{showMinimap ? t('hideRadarButton') : t('showRadarButton')}</Button>
-              <Button variant="ghost" size="xs" onClick={() => setShowEvents((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-void-cyan/10">{showEvents ? t('hideLogButton') : t('showLogButton')}</Button>
-              <Button variant="ghost" size="xs" onClick={resetOfficeLayout} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-void-cyan/10">{t('resetLayout')}</Button>
+            <div className="absolute left-3 top-3 z-30 flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-foreground/90">
+              <Button variant="ghost" size="xs" onClick={() => setShowSidebar((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-primary/10">{showSidebar ? t('hideCrewButton') : t('showCrewButton')}</Button>
+              <Button variant="ghost" size="xs" onClick={() => setShowMinimap((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-primary/10">{showMinimap ? t('hideRadarButton') : t('showRadarButton')}</Button>
+              <Button variant="ghost" size="xs" onClick={() => setShowEvents((v) => !v)} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-primary/10">{showEvents ? t('hideLogButton') : t('showLogButton')}</Button>
+              <Button variant="ghost" size="xs" onClick={resetOfficeLayout} className="h-auto px-1.5 py-0.5 text-[10px] font-mono hover:bg-primary/10">{t('resetLayout')}</Button>
             </div>
 
             <div
@@ -1780,7 +1603,7 @@ export function OfficePanel() {
                 {floorTiles.map((tile) => (
                   <div
                     key={tile.id}
-                    className="absolute border border-void-cyan/[0.06]"
+                    className="absolute border border-primary/[0.06]"
                     style={{
                       left: `${tile.x}%`,
                       top: `${tile.y}%`,
@@ -1796,37 +1619,21 @@ export function OfficePanel() {
               </div>
 
               {/* Corridor base */}
-              <div className="absolute left-[14%] top-[45%] w-[72%] h-[6%] border-y border-void-cyan/15 shadow-[0_0_30px_hsl(var(--void-cyan)/0.1)]" style={{ backgroundColor: themePalette.corridor }} />
+              <div className="absolute left-[14%] top-[45%] h-[6%] w-[72%] border-y border-primary/15" style={{ backgroundColor: themePalette.corridor }} />
               <div className="absolute left-[14%] top-[47.6%] w-[72%] h-[0.7%]" style={{ backgroundColor: themePalette.corridorStripe }} />
-
-              <div className="absolute inset-0 pointer-events-none z-[1]">
-                {heatmapPoints.map((point) => (
-                  <div
-                    key={`heat-${point.id}`}
-                    className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full blur-xl"
-                    style={{
-                      left: `${point.x}%`,
-                      top: `${point.y}%`,
-                      width: `${point.radius * 2}px`,
-                      height: `${point.radius * 2}px`,
-                      background: `radial-gradient(circle, ${point.color} 0%, rgba(0,0,0,0) 72%)`,
-                    }}
-                  />
-                ))}
-              </div>
 
               {/* Zone rooms */}
               {roomLayoutState.map((room) => (
                 <div
                   key={room.id}
-                  className={`absolute border border-void-cyan/15 ${room.style} shadow-[inset_0_0_0_1px_hsl(var(--void-cyan)/0.04),0_8px_24px_rgba(0,0,0,0.3)]`}
+                  className={`absolute border border-primary/15 ${room.style}`}
                   style={{
                     left: `${room.x}%`,
                     top: `${room.y}%`,
                     width: `${room.w}%`,
                     height: `${room.h}%`,
-                    backgroundImage: `linear-gradient(to bottom right, rgba(255,255,255,0.04), rgba(0,0,0,0.1)), url('/office-sprites/kenney/floorFull.png')`,
-                    backgroundSize: 'auto, 22% 22%',
+                    backgroundImage: `url('/office-sprites/kenney/floorFull.png')`,
+                    backgroundSize: '22% 22%',
                     filter: themePalette.floorFilter,
                   }}
                   onClick={(event) => {
@@ -1851,8 +1658,7 @@ export function OfficePanel() {
                     })
                   }}
                 >
-                  <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: `${themePalette.roomTone}, linear-gradient(to bottom right, rgba(255,255,255,0.08), transparent 45%)` }} />
-                  <div className="absolute left-2 top-1 rounded bg-card/70 backdrop-blur-sm border border-void-cyan/15 text-void-cyan/80 text-[9px] px-1.5 py-0.5 font-mono uppercase tracking-wide">
+                  <div className="absolute left-2 top-1 rounded border border-primary/15 bg-card px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-primary/80">
                     {room.label}
                   </div>
                 </div>
@@ -1862,7 +1668,7 @@ export function OfficePanel() {
               {mapPropsState.map((prop) => (
                 <div
                   key={prop.id}
-                  className={`absolute relative border ${prop.style} ${prop.border} shadow-[0_0_12px_rgba(108,164,255,0.18)] overflow-hidden`}
+                  className={`absolute relative overflow-hidden border ${prop.style} ${prop.border}`}
                   style={{ left: `${prop.x}%`, top: `${prop.y}%`, width: `${prop.w}%`, height: `${prop.h}%` }}
                   onClick={(event) => {
                     event.stopPropagation()
@@ -1909,7 +1715,7 @@ export function OfficePanel() {
                     y1={`${edge.y1}%`}
                     x2={`${edge.x2}%`}
                     y2={`${edge.y2}%`}
-                    stroke="rgba(170, 203, 255, 0.42)"
+                    stroke="rgba(88, 166, 255, 0.32)"
                     strokeWidth="2"
                     strokeDasharray="4 6"
                   />
@@ -1970,7 +1776,7 @@ export function OfficePanel() {
                     className="absolute -translate-x-1/2 -translate-y-1/2 transition-all duration-500 hover:scale-110 h-auto p-0 rounded-none hover:bg-transparent"
                     style={{ left: `${x}%`, top: `${y}%` }}
                   >
-                    <div className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full bg-black/70 border border-white/10 text-white text-[11px] px-2 py-0.5 shadow-[0_0_12px_rgba(0,0,0,0.4)]">
+                    <div className="absolute -top-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full border border-white/10 bg-black/70 px-2 py-0.5 text-[11px] text-white">
                       <span className={`inline-block w-2 h-2 rounded-full ${statusDot[agent.status]} mr-1`} />
                       {agent.name}
                     </div>
@@ -1998,12 +1804,12 @@ export function OfficePanel() {
                       />
                       <div className={`absolute left-[8px] top-[14px] w-4 h-3 ${hashColor(agent.name)} border border-black/60`} />
                     </div>
-                    {!isMoving && <div className="text-[9px] text-slate-300 font-mono mt-0.5">#{seatLabel}</div>}
+                    {!isMoving && <div className="mt-0.5 font-mono text-[9px] text-muted-foreground">#{seatLabel}</div>}
                   </Button>
 
                   {agentActionOverrides.has(agent.id) && (
                     <div
-                      className="absolute -translate-x-1/2 text-[9px] px-1.5 py-0.5 rounded bg-black/70 border border-white/15 text-cyan-200"
+                      className="absolute -translate-x-1/2 rounded border border-white/15 bg-black/70 px-1.5 py-0.5 text-[9px] text-foreground"
                       style={{ left: `${x}%`, top: `calc(${y}% - 24px)` }}
                     >
                       {agentActionOverrides.get(agent.id)}
@@ -2012,7 +1818,7 @@ export function OfficePanel() {
 
                   {(transitioningAgentIds.has(agent.id) || isMoving) && (
                     <div
-                      className="absolute -translate-x-1/2 text-[9px] text-slate-200/85 font-medium px-1.5 py-0.5 rounded bg-black/45 border border-white/10"
+                      className="absolute -translate-x-1/2 rounded border border-white/10 bg-black/45 px-1.5 py-0.5 text-[9px] font-medium text-foreground/85"
                       style={{ left: `${x}%`, top: `calc(${y}% + 22px)` }}
                     >
                       {t('moving')}
@@ -2020,7 +1826,7 @@ export function OfficePanel() {
                   )}
 
                   <div
-                    className="absolute text-[9px] text-slate-500/70 font-mono pointer-events-none"
+                    className="pointer-events-none absolute font-mono text-[9px] text-muted-foreground/70"
                     style={{ left: `${x}%`, top: `calc(${y}% + 38px)` }}
                   >
                     {zoneLabel}
@@ -2031,7 +1837,7 @@ export function OfficePanel() {
 
             {showMinimap && (
             <div
-              className="absolute right-3 bottom-3 z-30 w-44 h-28 rounded-md border border-void-cyan/15 bg-card/85 backdrop-blur-sm p-1.5"
+              className="absolute right-3 bottom-3 z-30 h-28 w-44 rounded-md border border-primary/15 bg-card p-1.5"
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation()
@@ -2042,16 +1848,16 @@ export function OfficePanel() {
                 focusMapPoint(x, y)
               }}
             >
-              <div className="text-[9px] text-void-cyan/60 font-mono uppercase tracking-wider mb-1">{t('radarLabel')}</div>
-              <div className="relative w-full h-[calc(100%-16px)] rounded-sm overflow-hidden border border-void-cyan/10 bg-background">
+              <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-primary/70">{t('radarLabel')}</div>
+              <div className="relative h-[calc(100%-16px)] w-full overflow-hidden rounded-sm border border-primary/10 bg-background">
                 {roomLayoutState.map((room) => (
                   <div
                     key={`mini-${room.id}`}
-                    className="absolute border border-void-cyan/15 bg-void-cyan/5"
+                    className="absolute border border-primary/15 bg-primary/5"
                     style={{ left: `${room.x}%`, top: `${room.y}%`, width: `${room.w}%`, height: `${room.h}%` }}
                   />
                 ))}
-                <div className="absolute left-[14%] top-[47%] w-[72%] h-[4%] bg-void-cyan/20" />
+                <div className="absolute left-[14%] top-[47%] h-[4%] w-[72%] bg-primary/20" />
                 {renderedWorkers.map((worker) => (
                   <Button
                     key={`mini-worker-${worker.agent.id}`}
@@ -2072,14 +1878,14 @@ export function OfficePanel() {
 
             {showEvents && (
             <div
-              className="absolute left-3 bottom-3 z-30 w-72 rounded-md border border-void-cyan/15 bg-card/88 backdrop-blur-sm p-2.5 space-y-2"
+              className="absolute left-3 bottom-3 z-30 w-72 space-y-2 rounded-md border border-primary/15 bg-card p-2.5"
               onWheel={(event) => event.stopPropagation()}
             >
-              <div className="text-[10px] text-void-cyan/60 font-mono uppercase tracking-wider">{t('deckLog')}</div>
+              <div className="font-mono text-[10px] uppercase tracking-wider text-primary/70">{t('deckLog')}</div>
               <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-amber" />{t('legendActive')}</span>
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-mint" />{t('legendStandby')}</span>
-                <span className="inline-flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-void-cyan" />{t('legendOther')}</span>
+                <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-warning" />{t('legendActive')}</span>
+                <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-success" />{t('legendStandby')}</span>
+                <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-primary" />{t('legendOther')}</span>
               </div>
               <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1" onWheel={(event) => event.stopPropagation()}>
                 {officeEvents.length === 0 && (
@@ -2091,10 +1897,10 @@ export function OfficePanel() {
                       <span
                         className={`uppercase font-mono text-[9px] ${
                           event.severity === 'good'
-                            ? 'text-void-mint'
+                            ? 'text-success'
                             : event.severity === 'warn'
-                              ? 'text-void-amber'
-                              : 'text-void-cyan'
+                              ? 'text-warning'
+                              : 'text-primary'
                         }`}
                       >
                         {event.kind}
@@ -2106,14 +1912,14 @@ export function OfficePanel() {
                 ))}
               </div>
               {selectedHotspot && (
-                <div className="rounded border border-void-cyan/15 bg-secondary/50 p-2">
+                <div className="rounded border border-primary/15 bg-secondary/50 p-2">
                   <div className="flex items-center justify-between">
                     <div className="text-[11px] font-semibold text-foreground">{selectedHotspot.label}</div>
-                    <div className="text-[9px] font-mono uppercase text-void-cyan/60">{selectedHotspot.kind}</div>
+                    <div className="font-mono text-[9px] uppercase text-primary/70">{selectedHotspot.kind}</div>
                   </div>
                   <div className="mt-1.5 space-y-1">
                     {selectedHotspot.stats.map((line) => (
-                      <div key={line} className="text-[10px] text-slate-300">{line}</div>
+                      <div key={line} className="text-[10px] text-muted-foreground">{line}</div>
                     ))}
                   </div>
                   <div className="mt-2 grid grid-cols-3 gap-1">
@@ -2213,7 +2019,7 @@ export function OfficePanel() {
           <div className="bg-card border border-border rounded-lg max-w-sm w-full p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="flex justify-between items-start mb-4">
               <div className="flex items-center gap-3">
-                <div className={`w-14 h-14 rounded-full ${hashColor(selectedAgent.name)} flex items-center justify-center text-white font-bold text-lg ring-2 ring-offset-2 ring-offset-card ${selectedAgent.status === 'busy' ? 'ring-yellow-500' : selectedAgent.status === 'idle' ? 'ring-green-500' : selectedAgent.status === 'error' ? 'ring-red-500' : 'ring-gray-600'}`}>
+                <div className={`flex h-14 w-14 items-center justify-center rounded-full ${hashColor(selectedAgent.name)} text-lg font-bold text-white ring-2 ring-offset-2 ring-offset-card ${selectedAgent.status === 'busy' ? 'ring-warning' : selectedAgent.status === 'idle' ? 'ring-success' : selectedAgent.status === 'error' ? 'ring-destructive' : 'ring-border'}`}>
                   {getInitials(selectedAgent.name)}
                 </div>
                 <div>
@@ -2245,15 +2051,15 @@ export function OfficePanel() {
                     <div className="text-[10px] text-muted-foreground">{t('taskStatTotal')}</div>
                   </div>
                   <div className="text-center bg-secondary rounded-lg p-2">
-                    <div className="text-lg font-bold text-blue-400">{selectedAgent.taskStats.assigned}</div>
+                    <div className="text-lg font-bold text-primary">{selectedAgent.taskStats.assigned}</div>
                     <div className="text-[10px] text-muted-foreground">{t('taskStatAssigned')}</div>
                   </div>
                   <div className="text-center bg-secondary rounded-lg p-2">
-                    <div className="text-lg font-bold text-yellow-400">{selectedAgent.taskStats.in_progress}</div>
+                    <div className="text-lg font-bold text-warning">{selectedAgent.taskStats.in_progress}</div>
                     <div className="text-[10px] text-muted-foreground">{t('taskStatActive')}</div>
                   </div>
                   <div className="text-center bg-secondary rounded-lg p-2">
-                    <div className="text-lg font-bold text-green-400">{selectedAgent.taskStats.completed}</div>
+                    <div className="text-lg font-bold text-success">{selectedAgent.taskStats.completed}</div>
                     <div className="text-[10px] text-muted-foreground">{t('taskStatDone')}</div>
                   </div>
                 </div>
@@ -2361,15 +2167,15 @@ export function OfficePanel() {
       )}
 
       {launchToast && (
-        <div className="fixed right-4 bottom-4 z-[70] max-w-sm rounded-lg border border-border bg-card/95 backdrop-blur px-4 py-3 shadow-2xl">
+        <div className="fixed bottom-4 right-4 z-[70] max-w-sm rounded-lg border border-border bg-card px-4 py-3 shadow-lg">
           <div className="flex items-start gap-2">
             <span
               className={`mt-1 inline-block h-2.5 w-2.5 rounded-full ${
                 launchToast.kind === 'success'
-                  ? 'bg-green-400'
+                  ? 'bg-success'
                   : launchToast.kind === 'info'
-                    ? 'bg-blue-400'
-                    : 'bg-red-400'
+                    ? 'bg-primary'
+                    : 'bg-destructive'
               }`}
             />
             <div>
@@ -2379,33 +2185,6 @@ export function OfficePanel() {
           </div>
         </div>
       )}
-      <style jsx>{`
-        @keyframes mcSunSweep {
-          0% { transform: translateX(-10%) translateY(-2%); opacity: 0.34; }
-          50% { transform: translateX(8%) translateY(2%); opacity: 0.56; }
-          100% { transform: translateX(-10%) translateY(-2%); opacity: 0.34; }
-        }
-        @keyframes mcSunSweepReverse {
-          0% { transform: translateX(8%) translateY(2%); opacity: 0.18; }
-          50% { transform: translateX(-8%) translateY(-2%); opacity: 0.32; }
-          100% { transform: translateX(8%) translateY(2%); opacity: 0.18; }
-        }
-        @keyframes mcDuskPulse {
-          0% { opacity: 0.28; transform: scale(1); }
-          50% { opacity: 0.52; transform: scale(1.03); }
-          100% { opacity: 0.28; transform: scale(1); }
-        }
-        @keyframes mcNightBloom {
-          0% { opacity: 0.25; }
-          50% { opacity: 0.5; }
-          100% { opacity: 0.25; }
-        }
-        @keyframes mcTwinkle {
-          0% { opacity: 0.25; transform: scale(0.9); }
-          50% { opacity: 1; transform: scale(1.15); }
-          100% { opacity: 0.25; transform: scale(0.9); }
-        }
-      `}</style>
     </div>
   )
 }

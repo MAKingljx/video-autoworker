@@ -170,10 +170,10 @@ export function StandupPanel() {
   // Get priority color
   const getPriorityColor = (priority: string) => {
     const colors: Record<string, string> = {
-      low: 'text-green-400',
-      medium: 'text-yellow-400',
-      high: 'text-orange-400',
-      urgent: 'text-red-400'
+      low: 'text-muted-foreground',
+      medium: 'text-primary',
+      high: 'text-warning',
+      urgent: 'text-destructive'
     }
     return colors[priority] || 'text-muted-foreground'
   }
@@ -346,7 +346,7 @@ export function StandupPanel() {
                 </div>
                 <div className="bg-card rounded-lg p-4 border border-border text-center">
                   <div className="text-2xl font-bold text-foreground">{standupReport.summary.totalInProgress}</div>
-                  <div className="text-sm text-yellow-400">{t('statInProgress')}</div>
+                  <div className="text-sm text-primary">{t('statInProgress')}</div>
                 </div>
                 <div className="bg-card rounded-lg p-4 border border-border text-center">
                   <div className="text-2xl font-bold text-foreground">{standupReport.summary.totalBlocked}</div>
@@ -354,7 +354,7 @@ export function StandupPanel() {
                 </div>
                 <div className="bg-card rounded-lg p-4 border border-border text-center">
                   <div className="text-2xl font-bold text-foreground">{standupReport.summary.overdue}</div>
-                  <div className="text-sm text-orange-400">{t('statOverdue')}</div>
+                  <div className="text-sm text-amber-400">{t('statOverdue')}</div>
                 </div>
               </div>
 
@@ -399,14 +399,14 @@ export function StandupPanel() {
                   <h4 className="text-lg font-semibold text-foreground mb-3">⏰ {t('overdueTasks')}</h4>
                   <div className="space-y-2">
                     {standupReport.overdueTasks.map(task => (
-                      <div key={task.id} className="flex justify-between items-center p-2 bg-orange-900/20 rounded border-l-4 border-orange-500">
+                      <div key={task.id} className="flex justify-between items-center p-2 bg-amber-500/10 rounded border-l-4 border-amber-500">
                         <div>
                           <span className="text-foreground">{task.title}</span>
-                          <span className="text-orange-400 text-sm ml-2">
+                          <span className="text-amber-400 text-sm ml-2">
                             (Due: {new Date(task.due_date * 1000).toLocaleDateString()})
                           </span>
                         </div>
-                        <span className="text-orange-400 text-sm">{task.agent_name || t('unassigned')}</span>
+                        <span className="text-amber-400 text-sm">{task.agent_name || t('unassigned')}</span>
                       </div>
                     ))}
                   </div>
@@ -449,7 +449,7 @@ export function StandupPanel() {
 
                       {/* In Progress */}
                       <div>
-                        <h6 className="text-yellow-400 font-medium mb-2">🔄 {t('sectionInProgress', { count: report.inProgress.length })}</h6>
+                        <h6 className="text-primary font-medium mb-2">🔄 {t('sectionInProgress', { count: report.inProgress.length })}</h6>
                         <div className="space-y-1">
                           {report.inProgress.map(task => (
                             <div key={task.id} className="text-sm text-foreground/80 truncate" title={task.title}>
@@ -464,7 +464,7 @@ export function StandupPanel() {
 
                       {/* Assigned */}
                       <div>
-                        <h6 className="text-blue-400 font-medium mb-2">📋 {t('sectionAssigned', { count: report.assigned.length })}</h6>
+                        <h6 className="text-primary font-medium mb-2">📋 {t('sectionAssigned', { count: report.assigned.length })}</h6>
                         <div className="space-y-1">
                           {report.assigned.map(task => (
                             <div key={task.id} className="text-sm text-foreground/80">

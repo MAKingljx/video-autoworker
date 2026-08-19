@@ -29,15 +29,15 @@ interface SessionInfo {
 }
 
 const typeColors: Record<string, string> = {
-  agent_status_change: 'text-yellow-400',
-  task_created: 'text-green-400',
-  task_updated: 'text-blue-400',
-  task_deleted: 'text-red-400',
-  comment_added: 'text-purple-400',
-  agent_created: 'text-cyan-400',
-  standup_generated: 'text-orange-400',
-  mention: 'text-pink-400',
-  assignment: 'text-indigo-400',
+  agent_status_change: 'text-muted-foreground',
+  task_created: 'text-primary',
+  task_updated: 'text-primary',
+  task_deleted: 'text-destructive',
+  comment_added: 'text-primary',
+  agent_created: 'text-primary',
+  standup_generated: 'text-primary',
+  mention: 'text-primary',
+  assignment: 'text-primary',
 }
 
 const typeIcons: Record<string, string> = {
@@ -276,8 +276,8 @@ export function AgentHistoryPanel() {
                         <div key={act.id} className="flex items-start gap-2.5 pl-3 py-1.5 hover:bg-secondary/30 rounded-r-lg transition-smooth relative">
                           {/* Timeline dot */}
                           <span className={`absolute -left-[5px] top-3 w-2 h-2 rounded-full bg-card border-2 ${
-                            act.type === 'agent_status_change' ? 'border-yellow-400' :
-                            act.type.startsWith('task') ? 'border-blue-400' :
+                            act.type === 'task_deleted' ? 'border-destructive' :
+                            act.type.startsWith('task') ? 'border-primary' :
                             'border-muted-foreground'
                           }`} />
 

@@ -8,6 +8,11 @@ import {
 } from './dispatch-identity.js'
 import { schedulerRunner } from './scheduler-runner.js'
 import { validateVideoPath } from './video-path-policy.js'
+import {
+  createDuplicateConfirmationStore,
+  DUPLICATE_CONFIRMATION_TEXT,
+  isDuplicateConfirmationText,
+} from './duplicate-confirmation-store.js'
 
 const TARGET_AGENT = 'second-original'
 const TASK_ID_PATTERN = /(?:video-command|video-natural)-[a-f0-9]{64}/gu
@@ -240,6 +245,14 @@ function operationKey(event, context) {
 }
 
 export function dispatchReceipt(result) {
+  if (result.confirmationRequired) {
+    const names = result.duplicateNames.map(searchName)
+    if (result.kind === 'batch') {
+      const suffix = result.truncated ? '等' : ''
+      return `这个目录中有 ${result.duplicateCount} 个同名同路径的视频已有分析记录：${names.join('、')}${suffix}。如需整批重新分析，请回复“${DUPLICATE_CONFIRMATION_TEXT}”。`
+    }
+    return `这个视频已经分析过：${names[0]}。如需重新分析，请回复“${DUPLICATE_CONFIRMATION_TEXT}”。`
+  }
   if (result.kind === 'batch') {
     return `${result.duplicate ? '批次已存在' : '已加入学习队列'}，批次编号：${result.id}。进度请稍后按批次编号查询。`
   }
@@ -377,6 +390,7 @@ export function createQwenBeforeDispatchHandler({
   runner = schedulerRunner,
   releaseReady = true,
   now = () => Date.now(),
+  duplicateConfirmationStore = createDuplicateConfirmationStore({ now }),
 } = {}) {
   if (typeof classifier !== 'function') throw new TypeError('classifier is required')
   const operations = new Map()
@@ -387,7 +401,7 @@ export function createQwenBeforeDispatchHandler({
     while (operations.size > MAX_PENDING_OPERATIONS) operations.delete(operations.keys().next().value)
   }
 
-  async function classifyAndRun(event, context) {
+  async function classifyAndRun(event, context, scopeKey) {
     const decision = validateDecision(await classifier(event.content), event.content)
     if (!decision) return handled('未执行：暂时无法理解这个视频请求。')
     if (decision.action === 'pass') {
@@ -401,10 +415,16 @@ export function createQwenBeforeDispatchHandler({
     if (decision.action === 'dispatch_single') {
       const taskId = stableOperationId(event, context, 'single')
       try {
-        return handled(dispatchReceipt(await runner.dispatchVideo({
+        const result = await runner.dispatchVideo({
           videoPath: decision.videoPath,
           taskId,
-        })))
+        })
+        if (result.confirmationRequired) {
+          duplicateConfirmationStore.set(scopeKey, {
+            kind: 'task', id: taskId, path: decision.videoPath,
+          })
+        }
+        return handled(dispatchReceipt(result))
       } catch {
         return handled(`提交状态未确认，任务编号：${taskId}。请稍后按编号查询，不要重复提交。`)
       }
@@ -412,10 +432,16 @@ export function createQwenBeforeDispatchHandler({
     if (decision.action === 'dispatch_directory') {
       const batchId = stableOperationId(event, context, 'directory')
       try {
-        return handled(dispatchReceipt(await runner.dispatchDirectory({
+        const result = await runner.dispatchDirectory({
           videoDirectory: decision.videoDirectory,
           batchId,
-        })))
+        })
+        if (result.confirmationRequired) {
+          duplicateConfirmationStore.set(scopeKey, {
+            kind: 'batch', id: batchId, path: decision.videoDirectory,
+          })
+        }
+        return handled(dispatchReceipt(result))
       } catch {
         return handled(`入队状态未确认，批次编号：${batchId}。请稍后按编号查询，不要重复提交。`)
       }
@@ -442,8 +468,32 @@ export function createQwenBeforeDispatchHandler({
     }
   }
 
+  async function confirmAndRun(scopeKey) {
+    const pending = duplicateConfirmationStore.take(scopeKey)
+    if (!pending) return handled('当前没有等待确认的重复视频任务。')
+    try {
+      const result = pending.kind === 'batch'
+        ? await runner.dispatchDirectory({
+          videoDirectory: pending.path,
+          batchId: pending.id,
+          confirmDuplicate: true,
+        })
+        : await runner.dispatchVideo({
+          videoPath: pending.path,
+          taskId: pending.id,
+          confirmDuplicate: true,
+        })
+      if (result.confirmationRequired) duplicateConfirmationStore.set(scopeKey, pending)
+      return handled(dispatchReceipt(result))
+    } catch {
+      const label = pending.kind === 'batch' ? '批次编号' : '任务编号'
+      return handled(`提交状态未确认，${label}：${pending.id}。请稍后按编号查询，不要重复提交。`)
+    }
+  }
+
   return function beforeDispatch(event, context) {
-    if (!isClassifierCandidate(event?.content)) return undefined
+    const confirmsDuplicate = isDuplicateConfirmationText(event?.content)
+    if (!confirmsDuplicate && !isClassifierCandidate(event?.content)) return undefined
     try {
       const channel = resolveConsistentString(event?.channel, context?.channelId)
       if (channel === null) return Promise.resolve(handled('未执行：消息上下文不一致。'))
@@ -465,7 +515,9 @@ export function createQwenBeforeDispatchHandler({
       const key = operationKey(event, context)
       const existing = operations.get(key)
       if (existing) return existing.promise
-      const promise = classifyAndRun(event, context).catch(() => (
+      const promise = (confirmsDuplicate
+        ? confirmAndRun(identity.scopeKey)
+        : classifyAndRun(event, context, identity.scopeKey)).catch(() => (
         handled('未执行：暂时无法理解这个视频请求。')
       ))
       operations.set(key, { promise, createdAt: now() })

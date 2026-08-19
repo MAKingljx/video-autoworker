@@ -49,10 +49,10 @@ const OPERATORS = [
 ]
 
 const ENTITY_COLORS: Record<string, string> = {
-  agent: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  task: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  session: 'bg-green-500/20 text-green-400 border-green-500/30',
-  activity: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
+  agent: 'bg-secondary text-muted-foreground border-border',
+  task: 'bg-secondary text-muted-foreground border-border',
+  session: 'bg-secondary text-muted-foreground border-border',
+  activity: 'bg-secondary text-muted-foreground border-border',
 }
 
 export function AlertRulesPanel() {

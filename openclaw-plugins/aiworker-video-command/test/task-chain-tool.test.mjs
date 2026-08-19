@@ -31,6 +31,8 @@ describe('AI-worker direct task-chain tool', () => {
     expect(value.description).toContain('下一次只用其精确任务编号调用 result')
     expect(value.description).toContain('默认用中文恰好回复三行')
     expect(value.description).toContain('禁止添加解释、问句、建议或“如需全文”类引导')
+    expect(value.description).toContain('必须立即停止本轮')
+    expect(value.description).toContain('禁止模型在同一轮自行确认')
     expect(value.parameters.properties.query.description).toContain('如 S03E03')
     expect(value.parameters.properties.query.description).toContain('禁止追加旧上下文')
     const result = await value.execute('tool-call-1', {
@@ -42,6 +44,42 @@ describe('AI-worker direct task-chain tool', () => {
       taskId: expect.stringMatching(/^video-command-[a-f0-9]{64}$/u),
     })
     expect(result.content[0].text).toMatch(/^已提交，任务编号：video-command-[a-f0-9]{64}。/u)
+  })
+
+  it('requires a second user-confirmed tool action before re-analyzing an exact duplicate', async () => {
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId, confirmDuplicate = false }) => (
+        confirmDuplicate
+          ? { kind: 'task', id: taskId, status: 'queued', duplicate: false }
+          : {
+            kind: 'task', id: taskId, status: 'confirmation_required', duplicate: false,
+            confirmationRequired: true, duplicateCount: 1,
+            duplicateNames: ['S03E03.mp4'], truncated: false,
+          }
+      )),
+    }
+    const value = tool({ runner })
+
+    const first = await value.execute('duplicate', {
+      action: 'submit_video', videoPath: '/data/S03E03.mp4',
+    })
+    expect(first.content[0].text).toBe(
+      '这个视频已经分析过：S03E03.mp4。如需重新分析，请回复“确认重新分析”。',
+    )
+    expect(runner.dispatchVideo).toHaveBeenCalledTimes(1)
+
+    const confirmed = await value.execute('confirmed-next-turn', { action: 'confirm_duplicate' })
+    expect(confirmed.content[0].text).toMatch(/^已提交，任务编号：video-command-/u)
+    expect(runner.dispatchVideo).toHaveBeenCalledTimes(2)
+    expect(runner.dispatchVideo.mock.calls[1][0]).toMatchObject({
+      videoPath: '/data/S03E03.mp4',
+      taskId: runner.dispatchVideo.mock.calls[0][0].taskId,
+      confirmDuplicate: true,
+    })
+
+    await expect(value.execute('confirmed-again', { action: 'confirm_duplicate' })).resolves.toEqual({
+      content: [{ type: 'text', text: '当前没有等待确认的重复视频任务。' }],
+    })
   })
 
   it('submits a directory with a stable batch id and does not expose the tool to other agents', async () => {
@@ -232,6 +270,8 @@ describe('AI-worker direct task-chain tool', () => {
     expect(normalizeRequest({ action: 'result', query: '地球之极', offset: 24 })).toEqual({
       action: 'result', query: '地球之极', offset: 24,
     })
+    expect(normalizeRequest({ action: 'confirm_duplicate' })).toEqual({ action: 'confirm_duplicate' })
+    expect(normalizeRequest({ action: 'confirm_duplicate', videoPath: '/data/a.mp4' })).toBeNull()
     expect(normalizeRequest({ action: 'status', query: '地球之极', taskId: 'other' })).toBeNull()
   })
 })

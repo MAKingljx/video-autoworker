@@ -72,7 +72,7 @@ interface SessionCostEntry {
 
 // ── Helpers ──────────────────────────────────────────
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d', '#ffc658', '#ff6b6b']
+const COLORS = ['#0969DA', '#1F6FEB', '#218BFF', '#54AEFF', '#80CCFF', '#A5D6FF', '#C2E0FF', '#DDF4FF']
 
 const formatNumber = (num: number) => {
   if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M'
@@ -371,8 +371,8 @@ function OverviewView({
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="time" /><YAxis />
                   <Tooltip /><Legend />
-                  <Line type="monotone" dataKey="tokens" stroke="#8884d8" strokeWidth={2} name="Tokens" />
-                  <Line type="monotone" dataKey="requests" stroke="#82ca9d" strokeWidth={2} name="Requests" />
+                  <Line type="monotone" dataKey="tokens" stroke="#0969DA" strokeWidth={2} name="Tokens" />
+                  <Line type="monotone" dataKey="requests" stroke="#54AEFF" strokeWidth={2} name="Requests" />
                 </LineChart>
               </ResponsiveContainer>
             )}
@@ -391,7 +391,7 @@ function OverviewView({
                   <CartesianGrid strokeDasharray="3 3" />
                   <XAxis dataKey="name" angle={-45} textAnchor="end" height={80} interval={0} />
                   <YAxis /><Tooltip formatter={(v, n) => [formatNumber(Number(v)), n]} />
-                  <Bar dataKey="tokens" fill="#8884d8" name="Tokens" />
+                  <Bar dataKey="tokens" fill="#0969DA" name="Tokens" />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -425,7 +425,7 @@ function OverviewView({
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
             <div className="bg-secondary rounded-lg p-4">
               <div className="text-xs text-muted-foreground mb-1">{t('mostEfficientModel')}</div>
-              <div className="text-lg font-bold text-green-500">{mostEfficient ? getModelDisplayName(mostEfficient[0]) : '-'}</div>
+              <div className="text-lg font-bold text-primary">{mostEfficient ? getModelDisplayName(mostEfficient[0]) : '-'}</div>
               {mostEfficient && <div className="text-xs text-muted-foreground">${(efficientCostPerToken * 1000).toFixed(4)}/1K tokens</div>}
             </div>
             <div className="bg-secondary rounded-lg p-4">
@@ -434,7 +434,7 @@ function OverviewView({
             </div>
             <div className="bg-secondary rounded-lg p-4">
               <div className="text-xs text-muted-foreground mb-1">{t('optimizationPotential')}</div>
-              <div className="text-lg font-bold text-orange-500">{formatCost(potentialSavings)}</div>
+              <div className="text-lg font-bold text-primary">{formatCost(potentialSavings)}</div>
               <div className="text-xs text-muted-foreground">{stats.summary.totalCost > 0 ? ((potentialSavings / stats.summary.totalCost) * 100).toFixed(1) : '0'}% {t('savingsPossible')}</div>
             </div>
           </div>
@@ -448,7 +448,7 @@ function OverviewView({
                   <div className="w-32 truncate text-muted-foreground">{m.name}</div>
                   <div className="flex-1 mx-3">
                     <div className="w-full bg-secondary rounded-full h-2">
-                      <div className="bg-green-500 h-2 rounded-full" style={{ width: `${(costPer1k / maxCostPer1k) * 100}%` }} />
+                      <div className="bg-primary h-2 rounded-full" style={{ width: `${(costPer1k / maxCostPer1k) * 100}%` }} />
                     </div>
                   </div>
                   <div className="w-20 text-right text-xs text-muted-foreground">${costPer1k.toFixed(4)}/1K</div>
@@ -535,7 +535,7 @@ function AgentsView({
               <CartesianGrid strokeDasharray="3 3" />
               <XAxis dataKey="name" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} />
               <Tooltip formatter={(v) => formatCost(Number(v))} />
-              <Bar dataKey="cost" fill="#0088FE" name="Cost ($)" />
+              <Bar dataKey="cost" fill="#0969DA" name="Cost ($)" />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -558,11 +558,11 @@ function AgentsView({
                     <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground shrink-0">
                       {agent.session_count} session{agent.session_count !== 1 ? 's' : ''}
                     </span>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-500 shrink-0">
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground shrink-0">
                       {agent.request_count} req{agent.request_count !== 1 ? 's' : ''}
                     </span>
                     {agentTasks.length > 0 && (
-                      <span className="text-xs px-2 py-0.5 rounded-full bg-green-500/10 text-green-500 shrink-0">
+                      <span className="text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground shrink-0">
                         {agentTasks.length} task{agentTasks.length !== 1 ? 's' : ''}
                       </span>
                     )}
@@ -570,7 +570,7 @@ function AgentsView({
                   <div className="flex items-center gap-4 text-sm shrink-0">
                     <div className="w-24 hidden md:block">
                       <div className="w-full bg-secondary rounded-full h-2">
-                        <div className="bg-blue-500 h-2 rounded-full" style={{ width: `${(agent.total_cost / maxCost) * 100}%` }} />
+                        <div className="bg-primary h-2 rounded-full" style={{ width: `${(agent.total_cost / maxCost) * 100}%` }} />
                       </div>
                     </div>
                     <div className="text-right">
@@ -613,7 +613,7 @@ function AgentsView({
                                 <div className="flex items-center gap-2 min-w-0 flex-1">
                                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                                     task.priority === 'critical' ? 'bg-red-500/10 text-red-500' :
-                                    task.priority === 'high' ? 'bg-orange-500/10 text-orange-500' :
+                                    task.priority === 'high' ? 'bg-amber-500/10 text-amber-500' :
                                     task.priority === 'medium' ? 'bg-yellow-500/10 text-yellow-500' :
                                     'bg-secondary text-muted-foreground'
                                   }`}>{task.priority}</span>
@@ -759,7 +759,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
           <div className="text-sm text-muted-foreground">{t('attributedTokens')}</div>
         </div>
         <div className="bg-card border border-border rounded-lg p-5">
-          <div className="text-3xl font-bold text-orange-500">{formatCost(taskData.unattributed.totalCost)}</div>
+          <div className="text-3xl font-bold text-amber-500">{formatCost(taskData.unattributed.totalCost)}</div>
           <div className="text-sm text-muted-foreground">{t('unattributed')}</div>
         </div>
       </div>
@@ -774,7 +774,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium shrink-0 ${
                     task.priority === 'critical' ? 'bg-red-500/10 text-red-500' :
-                    task.priority === 'high' ? 'bg-orange-500/10 text-orange-500' :
+                    task.priority === 'high' ? 'bg-amber-500/10 text-amber-500' :
                     task.priority === 'medium' ? 'bg-yellow-500/10 text-yellow-500' :
                     'bg-secondary text-muted-foreground'
                   }`}>{task.priority}</span>
@@ -782,7 +782,7 @@ function TasksView({ taskData, onRefresh }: { taskData: TaskCostsResponse | null
                   <span className="font-medium text-foreground truncate">{task.title}</span>
                   <span className={`px-1.5 py-0.5 rounded text-[10px] shrink-0 ${
                     task.status === 'done' ? 'bg-green-500/10 text-green-500' :
-                    task.status === 'in_progress' ? 'bg-blue-500/10 text-blue-500' :
+                    task.status === 'in_progress' ? 'bg-primary/10 text-primary' :
                     'bg-secondary text-muted-foreground'
                   }`}>{task.status}</span>
                 </div>

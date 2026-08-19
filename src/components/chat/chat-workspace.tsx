@@ -666,7 +666,7 @@ function SessionConversationView({
       {/* Continue session input */}
       <div className="border-t border-border/50 px-4 py-2">
         <div className="flex items-center gap-2">
-          <span className={`font-mono-tight text-xs ${isGatewaySession ? 'text-cyan-400/60' : 'text-green-400/60'}`}>{isGatewaySession ? '>' : '$'}</span>
+          <span className="font-mono-tight text-xs text-primary/70">{isGatewaySession ? '>' : '$'}</span>
           <input
             value={continuePrompt}
             onChange={(e) => setContinuePrompt(e.target.value)}
@@ -724,7 +724,7 @@ function ChatIndicators({ notifications }: { notifications: Array<{ id: number; 
             key={toast.id}
             className={`flex items-center gap-2 rounded-md px-3 py-1.5 text-[11px] animate-in fade-in slide-in-from-bottom-1 ${
               isCompaction
-                ? 'bg-blue-500/10 text-blue-300 border border-blue-500/20'
+                ? 'bg-primary/10 text-primary border border-primary/20'
                 : isFallback
                 ? 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
                 : 'bg-surface-1 text-muted-foreground border border-border/30'
@@ -740,21 +740,10 @@ function ChatIndicators({ notifications }: { notifications: Array<{ id: number; 
 }
 
 function AgentAvatar({ name, size = 'md' }: { name: string; size?: 'sm' | 'md' }) {
-  const colors: Record<string, string> = {
-    coordinator: 'bg-purple-500/20 text-purple-400',
-    aegis: 'bg-red-500/20 text-red-400',
-    research: 'bg-green-500/20 text-green-400',
-    ops: 'bg-orange-500/20 text-orange-400',
-    reviewer: 'bg-teal-500/20 text-teal-400',
-    content: 'bg-indigo-500/20 text-indigo-400',
-    human: 'bg-primary/20 text-primary',
-  }
-
-  const colorClass = colors[name.toLowerCase()] || 'bg-muted text-muted-foreground'
   const sizeClass = size === 'sm' ? 'w-6 h-6 text-[10px]' : 'w-8 h-8 text-xs'
 
   return (
-    <div className={`${sizeClass} ${colorClass} flex flex-shrink-0 items-center justify-center rounded-full font-bold`}>
+    <div className={`${sizeClass} flex flex-shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10 font-bold text-primary`}>
       {name.charAt(0).toUpperCase()}
     </div>
   )

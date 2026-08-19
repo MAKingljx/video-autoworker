@@ -281,15 +281,15 @@ export function HeaderBar() {
     message: 'M', notification: 'N', webhook: 'W', pipeline: 'P',
   }
   const typeColors: Record<string, string> = {
-    panel: 'bg-primary/20 text-primary',
-    task: 'bg-blue-500/20 text-blue-400',
-    agent: 'bg-purple-500/20 text-purple-400',
-    activity: 'bg-green-500/20 text-green-400',
-    audit: 'bg-amber-500/20 text-amber-400',
-    message: 'bg-cyan-500/20 text-cyan-400',
-    notification: 'bg-red-500/20 text-red-400',
-    webhook: 'bg-orange-500/20 text-orange-400',
-    pipeline: 'bg-indigo-500/20 text-indigo-400',
+    panel: 'bg-primary/10 text-primary',
+    task: 'bg-secondary text-muted-foreground',
+    agent: 'bg-secondary text-muted-foreground',
+    activity: 'bg-secondary text-muted-foreground',
+    audit: 'bg-secondary text-muted-foreground',
+    message: 'bg-secondary text-muted-foreground',
+    notification: 'bg-secondary text-muted-foreground',
+    webhook: 'bg-secondary text-muted-foreground',
+    pipeline: 'bg-secondary text-muted-foreground',
   }
 
   return (
@@ -610,8 +610,8 @@ function SseBadge({ connected }: { connected: boolean }) {
   return (
     <div className="flex items-center gap-1.5 text-xs">
       <span className="text-muted-foreground">{th('events')}</span>
-      <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-blue-500' : 'bg-muted-foreground/30'}`} />
-      <span className={`font-medium font-mono-tight ${connected ? 'text-blue-400' : 'text-muted-foreground'}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-primary' : 'bg-muted-foreground/30'}`} />
+      <span className={`font-medium font-mono-tight ${connected ? 'text-primary' : 'text-muted-foreground'}`}>
         {connected ? th('live') : th('off')}
       </span>
     </div>

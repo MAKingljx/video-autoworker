@@ -87,7 +87,7 @@ export function EmptyStateLaunchpad({ agentCount, taskCount, onNavigate }: Props
               </p>
               <Button
                 size="sm"
-                className="text-xs w-full bg-void-amber/20 text-void-amber border border-void-amber/30 hover:bg-void-amber/30"
+                className="text-xs w-full"
                 onClick={() => onNavigate('settings')}
               >
                 配置 OpenClaw
@@ -120,7 +120,7 @@ export function EmptyStateLaunchpad({ agentCount, taskCount, onNavigate }: Props
               </p>
               <Button
                 size="sm"
-                className="text-xs w-full bg-void-amber/20 text-void-amber border border-void-amber/30 hover:bg-void-amber/30"
+                className="text-xs w-full"
                 disabled={!hasRuntimes}
                 onClick={() => onNavigate('agents')}
               >
@@ -154,7 +154,7 @@ export function EmptyStateLaunchpad({ agentCount, taskCount, onNavigate }: Props
               </p>
               <Button
                 size="sm"
-                className="text-xs w-full bg-void-cyan/20 text-void-cyan border border-void-cyan/30 hover:bg-void-cyan/30"
+                className="text-xs w-full"
                 disabled={!hasAgents}
                 onClick={() => onNavigate('tasks')}
               >
@@ -180,7 +180,6 @@ export function EmptyStateLaunchpad({ agentCount, taskCount, onNavigate }: Props
                 : 'hsl(var(--primary))',
             }}
           >
-            <div className="absolute inset-0 shimmer-bar" />
           </div>
         </div>
         <span className={`text-2xs tabular-nums font-mono transition-colors duration-500 ${
@@ -204,17 +203,17 @@ function StepCard({ step, title, done, active, doneContent, pendingContent }: {
   return (
     <div className={`p-4 rounded-lg border transition-all ${
       done
-        ? 'border-emerald-500/30 bg-emerald-500/5'
+        ? 'border-border bg-card'
         : active
-          ? 'border-void-amber/30 bg-void-amber/5'
+          ? 'border-primary/35 bg-primary/[0.03]'
           : 'border-border/40 bg-surface-1/20 opacity-50'
     }`}>
       <div className="flex items-center gap-2 mb-2">
         <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${
           done
-            ? 'bg-emerald-500/20 text-emerald-400'
+            ? 'bg-success/10 text-success'
             : active
-              ? 'bg-void-amber/20 text-void-amber'
+              ? 'bg-primary/10 text-primary'
               : 'bg-muted/30 text-muted-foreground'
         }`}>
           {done ? '✓' : `0${step}`}

@@ -58,7 +58,7 @@ const statusBadgeStyles: Record<string, string> = {
   offline: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
   idle: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
   busy: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  error: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+  error: 'bg-destructive/15 text-destructive border-destructive/30',
 }
 
 const statusIcons: Record<string, string> = {
@@ -69,27 +69,23 @@ const statusIcons: Record<string, string> = {
 }
 
 const defaultCardStyle = {
-  edge: 'from-slate-400/60 to-slate-600/30',
-  glow: 'from-slate-500/10 via-transparent to-transparent',
-  dot: 'bg-slate-400',
+  edge: 'bg-border',
+  dot: 'bg-muted-foreground',
 }
 
-const statusCardStyles: Record<string, { edge: string; glow: string; dot: string }> = {
+const statusCardStyles: Record<string, { edge: string; dot: string }> = {
   offline: defaultCardStyle,
   idle: {
-    edge: 'from-emerald-300/80 to-emerald-600/30',
-    glow: 'from-emerald-400/15 via-transparent to-transparent',
-    dot: 'bg-emerald-300',
+    edge: 'bg-success/60',
+    dot: 'bg-success',
   },
   busy: {
-    edge: 'from-amber-300/80 to-amber-600/30',
-    glow: 'from-amber-400/15 via-transparent to-transparent',
-    dot: 'bg-amber-300',
+    edge: 'bg-warning/60',
+    dot: 'bg-warning',
   },
   error: {
-    edge: 'from-rose-300/80 to-rose-600/30',
-    glow: 'from-rose-400/15 via-transparent to-transparent',
-    dot: 'bg-rose-300',
+    edge: 'bg-destructive/70',
+    dot: 'bg-destructive',
   },
 }
 
@@ -323,7 +319,7 @@ export function AgentSquadPanelPhase3() {
 
           {/* Active Heartbeats Indicator */}
           <div className="flex items-center gap-1">
-            <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse"></div>
+            <div className="w-2 h-2 rounded-full bg-success animate-pulse"></div>
             <span className="text-sm text-muted-foreground">
               {t('activeHeartbeats', { count: agents.filter(hasRecentHeartbeat).length })}
             </span>
@@ -341,16 +337,16 @@ export function AgentSquadPanelPhase3() {
           <Button
             onClick={() => syncFromConfig()}
             disabled={syncing}
+            variant="outline"
             size="sm"
-            className="bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-500/30"
           >
             {syncing ? t('syncing') : t('syncConfig')}
           </Button>
           <Button
             onClick={() => syncFromConfig('local')}
             disabled={syncing}
+            variant="outline"
             size="sm"
-            className="bg-violet-500/20 text-violet-400 border border-violet-500/30 hover:bg-violet-500/30"
           >
             {t('syncLocal')}
           </Button>
@@ -426,7 +422,7 @@ export function AgentSquadPanelPhase3() {
                   className="group relative overflow-hidden rounded-xl border border-border/70 bg-card p-4 transition-all duration-200 ease-out hover:-translate-y-0.5 hover:border-border hover:shadow-lg cursor-pointer"
                   onClick={() => setSelectedAgent(agent)}
                 >
-                  <div className={`pointer-events-none absolute inset-y-0 left-0 w-1 bg-gradient-to-b ${(statusCardStyles[agent.status] || defaultCardStyle).edge}`} />
+                  <div className={`pointer-events-none absolute inset-y-0 left-0 w-1 ${(statusCardStyles[agent.status] || defaultCardStyle).edge}`} />
                   {agent.hidden ? <div className="absolute top-2 right-2 text-2xs text-slate-500">hidden</div> : null}
 
                   {/* Header: avatar + name + status */}
@@ -437,13 +433,7 @@ export function AgentSquadPanelPhase3() {
                         <div className="flex items-center gap-1.5">
                           <h3 className="font-semibold text-foreground truncate">{agent.name}</h3>
                           {(agent as any).source && (agent as any).source !== 'manual' && (
-                            <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
-                              (agent as any).source === 'local'
-                                ? 'bg-violet-500/15 text-violet-300 border-violet-500/30'
-                                : (agent as any).source === 'gateway'
-                                  ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
-                                  : 'bg-slate-500/15 text-slate-300 border-slate-500/30'
-                            }`}>
+                            <span className="text-2xs px-1.5 py-0.5 rounded-full border border-border bg-secondary/60 text-muted-foreground">
                               {(agent as any).source}
                             </span>
                           )}
@@ -456,7 +446,7 @@ export function AgentSquadPanelPhase3() {
 
                     <div className="flex items-center gap-2 shrink-0">
                       {hasRecentHeartbeat(agent) && (
-                        <div className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" title="Recent heartbeat" />
+                        <div className="w-2 h-2 rounded-full bg-success animate-pulse" title="Recent heartbeat" />
                       )}
                       <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs capitalize ${statusBadgeStyles[agent.status]}`}>
                         <span className={`h-1.5 w-1.5 rounded-full ${(statusCardStyles[agent.status] || defaultCardStyle).dot}`} />
@@ -492,7 +482,7 @@ export function AgentSquadPanelPhase3() {
                           }}
                           size="xs"
                           variant="ghost"
-                          className="h-6 px-2 text-xs text-cyan-300 hover:bg-cyan-500/15 hover:text-cyan-200"
+                          className="h-6 px-2 text-xs text-primary hover:bg-primary/10 hover:text-primary"
                           title="Wake agent via session"
                         >
                           {t('wake')}
@@ -519,7 +509,7 @@ export function AgentSquadPanelPhase3() {
                         }}
                         size="xs"
                         variant="ghost"
-                        className="h-6 px-2 text-xs text-blue-300 hover:bg-blue-500/15 hover:text-blue-200"
+                        className="h-6 px-2 text-xs text-primary hover:bg-primary/10 hover:text-primary/80"
                       >
                         {t('spawn')}
                       </Button>
@@ -873,7 +863,7 @@ function AgentDetailModalPhase3({
                     {agentState.status}
                   </span>
                   {agentState.session_key && (
-                    <span className="text-[11px] px-2 py-0.5 rounded-full border border-cyan-500/30 bg-cyan-500/10 text-cyan-300">
+                    <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary text-muted-foreground">
                       Session
                     </span>
                   )}
@@ -890,7 +880,7 @@ function AgentDetailModalPhase3({
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className="text-muted-foreground hover:text-rose-400"
+                  className="text-muted-foreground hover:text-destructive"
                   title="Delete agent"
                   onClick={() => setShowDeleteMenu(prev => !prev)}
                 >
@@ -903,7 +893,7 @@ function AgentDetailModalPhase3({
                     <button
                       onClick={() => handleDelete(false)}
                       disabled={deleteBusy}
-                      className="text-left text-xs px-2.5 py-1.5 rounded text-rose-300 hover:bg-rose-500/10 transition-colors disabled:opacity-50"
+                      className="text-left text-xs px-2.5 py-1.5 rounded text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
                     >
                       {deleteBusy ? (
                         <span className="flex items-center gap-1.5">
@@ -917,7 +907,7 @@ function AgentDetailModalPhase3({
                     <button
                       onClick={() => handleDelete(true)}
                       disabled={deleteBusy}
-                      className="text-left text-xs px-2.5 py-1.5 rounded text-rose-400 hover:bg-rose-500/10 transition-colors disabled:opacity-50"
+                      className="text-left text-xs px-2.5 py-1.5 rounded text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
                     >
                       {deleteBusy ? (
                         <span className="flex items-center gap-1.5">
@@ -946,7 +936,7 @@ function AgentDetailModalPhase3({
           </div>
 
           {deleteError && (
-            <div className="mb-3 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+            <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {deleteError}
             </div>
           )}

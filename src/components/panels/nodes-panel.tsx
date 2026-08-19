@@ -348,7 +348,7 @@ function PendingDevicesSection({
                   )}
                   {device.remoteIp && <span>{device.remoteIp}</span>}
                   {device.isRepair && (
-                    <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">
+                    <span className="px-1.5 py-0.5 rounded bg-primary/10 text-primary border border-primary/25">
                       repair
                     </span>
                   )}

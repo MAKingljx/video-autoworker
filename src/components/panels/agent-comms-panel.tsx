@@ -25,26 +25,26 @@ interface FeedEvent {
   data?: any
 }
 
-// Agent identity: color + emoji (matches openclaw.json)
+// Agent identity: one product accent plus neutral system entries.
 const AGENT_IDENTITY: Record<string, { color: string; emoji: string; label: string }> = {
-  [COORDINATOR_AGENT]: { color: '#a78bfa', emoji: '🧭', label: 'Coordinator' },
-  builder:        { color: '#60a5fa', emoji: '🛠️', label: 'Builder' },
-  research:       { color: '#4ade80', emoji: '🔬', label: 'Research' },
-  content:        { color: '#818cf8', emoji: '✏️', label: 'Content' },
-  ops:            { color: '#fb923c', emoji: '⚡', label: 'Ops' },
-  quant:          { color: '#facc15', emoji: '📈', label: 'Quant' },
-  aegis:          { color: '#f87171', emoji: '🧪', label: 'Aegis' },
-  reviewer:       { color: '#2dd4bf', emoji: '🧪', label: 'Reviewer' },
-  design:         { color: '#f472b6', emoji: '🎨', label: 'Design' },
-  seo:            { color: '#22d3ee', emoji: '🔎', label: 'SEO' },
-  security:       { color: '#fb7185', emoji: '🛡️', label: 'Security' },
-  ai:             { color: '#8b5cf6', emoji: '🤖', label: 'AI' },
-  'frontend-dev': { color: '#38bdf8', emoji: '🧩', label: 'Frontend Dev' },
-  'backend-dev':  { color: '#34d399', emoji: '⚙️', label: 'Backend Dev' },
-  'solana-dev':   { color: '#fbbf24', emoji: '🦀', label: 'Solana Dev' },
+  [COORDINATOR_AGENT]: { color: '#58a6ff', emoji: '🧭', label: 'Coordinator' },
+  builder:        { color: '#58a6ff', emoji: '🛠️', label: 'Builder' },
+  research:       { color: '#58a6ff', emoji: '🔬', label: 'Research' },
+  content:        { color: '#58a6ff', emoji: '✏️', label: 'Content' },
+  ops:            { color: '#58a6ff', emoji: '⚡', label: 'Ops' },
+  quant:          { color: '#58a6ff', emoji: '📈', label: 'Quant' },
+  aegis:          { color: '#58a6ff', emoji: '🧪', label: 'Aegis' },
+  reviewer:       { color: '#58a6ff', emoji: '🧪', label: 'Reviewer' },
+  design:         { color: '#58a6ff', emoji: '🎨', label: 'Design' },
+  seo:            { color: '#58a6ff', emoji: '🔎', label: 'SEO' },
+  security:       { color: '#58a6ff', emoji: '🛡️', label: 'Security' },
+  ai:             { color: '#58a6ff', emoji: '🤖', label: 'AI' },
+  'frontend-dev': { color: '#58a6ff', emoji: '🧩', label: 'Frontend Dev' },
+  'backend-dev':  { color: '#58a6ff', emoji: '⚙️', label: 'Backend Dev' },
+  'solana-dev':   { color: '#58a6ff', emoji: '🦀', label: 'Solana Dev' },
   gateway:        { color: '#94a3b8', emoji: '🌐', label: 'Gateway' },
   system:         { color: '#64748b', emoji: '⚙️', label: 'System' },
-  websocket:      { color: '#a78bfa', emoji: '🔌', label: 'WebSocket' },
+  websocket:      { color: '#58a6ff', emoji: '🔌', label: 'WebSocket' },
 }
 
 function getIdentity(name: string) {
@@ -61,11 +61,11 @@ function formatTs(ts: number): string {
 }
 
 const CATEGORY_META: Record<FeedCategory, { label: string; color: string }> = {
-  chat:   { label: 'chat',   color: '#a78bfa' },
-  tools:  { label: 'tools',  color: '#22d3ee' },
+  chat:   { label: 'chat',   color: '#58a6ff' },
+  tools:  { label: 'tools',  color: '#58a6ff' },
   trace:  { label: 'trace',  color: '#94a3b8' },
   system: { label: 'system', color: '#64748b' },
-  safety: { label: 'safety', color: '#f87171' },
+  safety: { label: 'safety', color: '#f85149' },
 }
 
 const FILTER_OPTIONS: { value: FeedFilter; label: string }[] = [
@@ -387,7 +387,7 @@ export function AgentCommsPanel() {
               connection.isConnected
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                 : connection.sseConnected
-                  ? 'bg-sky-500/10 text-sky-400 border-sky-500/30'
+                  ? 'bg-primary/10 text-primary border-primary/25'
                   : 'bg-muted text-muted-foreground border-border/40'
             }`}
           >
@@ -400,7 +400,7 @@ export function AgentCommsPanel() {
                   ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                   : sourceMode === 'mixed'
                     ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                    : 'bg-sky-500/10 text-sky-400 border-sky-500/30'
+                    : 'bg-secondary text-muted-foreground border-border'
               }`}
             >
               {sourceMode === 'live' ? t('sourceLive') : sourceMode === 'mixed' ? t('sourceMixed') : t('sourceSeeded')}

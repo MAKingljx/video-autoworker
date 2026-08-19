@@ -23,7 +23,7 @@ export function ConnectionStatus({
   const getStatusColor = () => {
     if (isConnected) return 'bg-green-500 animate-pulse'
     if (connection.reconnectAttempts > 0) return 'bg-yellow-500'
-    if (isGatewayOptional && !isConnected) return 'bg-blue-500'
+    if (isGatewayOptional && !isConnected) return 'bg-primary'
     return 'bg-red-500'
   }
 
@@ -77,7 +77,7 @@ export function ConnectionStatus({
         ) : (
           <div className="flex space-x-1">
             <Button
-              variant="success"
+              variant="default"
               size="xs"
               onClick={onConnect}
               title="Connect to gateway"
@@ -89,7 +89,6 @@ export function ConnectionStatus({
                 variant="outline"
                 size="xs"
                 onClick={onReconnect}
-                className="bg-blue-500/20 text-blue-400 border-blue-500/30 hover:bg-blue-500/30"
                 title="Reconnect with fresh session"
               >
                 Reconnect

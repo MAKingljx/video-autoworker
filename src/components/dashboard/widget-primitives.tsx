@@ -87,32 +87,34 @@ export interface DashboardData {
 
 // --- Sub-components ---
 
-export function MetricCard({ label, value, total, subtitle, icon, color }: {
+export function MetricCard({ label, value, total, subtitle, icon, tone = 'neutral' }: {
   label: string
   value: number | string
   total?: number
   subtitle?: string
   icon: React.ReactNode
-  color: 'blue' | 'green' | 'purple' | 'red'
+  tone?: 'neutral' | 'primary' | 'success' | 'warning' | 'danger'
 }) {
-  const colorMap = {
-    blue: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-    green: 'bg-green-500/10 text-green-400 border-green-500/20',
-    purple: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
-    red: 'bg-red-500/10 text-red-400 border-red-500/20',
+  const toneMap = {
+    neutral: { frame: 'border-border bg-card', accent: 'text-foreground' },
+    primary: { frame: 'border-primary/25 bg-card', accent: 'text-primary' },
+    success: { frame: 'border-success/25 bg-card', accent: 'text-success' },
+    warning: { frame: 'border-warning/25 bg-card', accent: 'text-warning' },
+    danger: { frame: 'border-destructive/25 bg-card', accent: 'text-destructive' },
   }
+  const style = toneMap[tone]
 
   return (
-    <div className={`rounded-lg border p-3.5 ${colorMap[color]}`}>
+    <div className={`rounded-lg border p-3.5 ${style.frame}`}>
       <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium opacity-80">{label}</span>
-        <div className="w-5 h-5 opacity-60">{icon}</div>
+        <span className="text-xs font-medium text-muted-foreground">{label}</span>
+        <div className={`w-5 h-5 opacity-75 ${style.accent}`}>{icon}</div>
       </div>
       <div className="flex items-baseline gap-1">
-        <span className="text-2xl font-bold font-mono-tight">{value}</span>
-        {total != null && <span className="text-xs opacity-50 font-mono-tight">/ {total}</span>}
+        <span className={`text-2xl font-bold font-mono-tight ${style.accent}`}>{value}</span>
+        {total != null && <span className="text-xs text-muted-foreground font-mono-tight">/ {total}</span>}
       </div>
-      {subtitle && <div className="text-2xs opacity-50 font-mono-tight mt-0.5">{subtitle}</div>}
+      {subtitle && <div className="text-2xs text-muted-foreground font-mono-tight mt-0.5">{subtitle}</div>}
     </div>
   )
 }
@@ -120,18 +122,21 @@ export function MetricCard({ label, value, total, subtitle, icon, color }: {
 export function SignalPill({ label, value, tone }: {
   label: string
   value: string
-  tone: 'success' | 'warning' | 'info'
+  tone: 'neutral' | 'primary' | 'success' | 'warning' | 'danger'
 }) {
-  const toneClass = tone === 'success'
-    ? 'bg-green-500/15 border-green-500/30 text-green-300'
-    : tone === 'warning'
-      ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
-      : 'bg-blue-500/15 border-blue-500/30 text-blue-300'
+  const toneMap = {
+    neutral: { frame: 'border-border bg-secondary/35', value: 'text-foreground' },
+    primary: { frame: 'border-primary/25 bg-secondary/35', value: 'text-primary' },
+    success: { frame: 'border-success/25 bg-secondary/35', value: 'text-success' },
+    warning: { frame: 'border-warning/25 bg-secondary/35', value: 'text-warning' },
+    danger: { frame: 'border-destructive/25 bg-secondary/35', value: 'text-destructive' },
+  }
+  const style = toneMap[tone]
 
   return (
-    <div className={`rounded-lg border px-2.5 py-2 ${toneClass}`}>
-      <div className="text-2xs uppercase tracking-wide opacity-70">{label}</div>
-      <div className="text-xs font-semibold font-mono-tight truncate">{value}</div>
+    <div className={`rounded-lg border px-2.5 py-2 ${style.frame}`}>
+      <div className="text-2xs uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className={`text-xs font-semibold font-mono-tight truncate ${style.value}`}>{value}</div>
     </div>
   )
 }
@@ -181,7 +186,7 @@ export function LogRow({ log }: { log: LogLike }) {
           log.level === 'error' ? 'bg-red-500' :
           log.level === 'warn' ? 'bg-amber-500' :
           log.level === 'debug' ? 'bg-gray-500' :
-          'bg-blue-500/50'
+          'bg-primary/50'
         }`} />
         <div className="flex-1 min-w-0">
           <p className="text-xs text-foreground/80 break-words">{log.message.length > 100 ? log.message.slice(0, 100) + '...' : log.message}</p>

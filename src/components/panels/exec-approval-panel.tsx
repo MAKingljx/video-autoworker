@@ -20,7 +20,7 @@ const RISK_BORDER: Record<ExecApprovalRequest['risk'], string> = {
 const RISK_BADGE: Record<ExecApprovalRequest['risk'], { bg: string; text: string }> = {
   low: { bg: 'bg-green-500/20', text: 'text-green-400' },
   medium: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' },
-  high: { bg: 'bg-orange-500/20', text: 'text-orange-400' },
+  high: { bg: 'bg-amber-500/20', text: 'text-amber-400' },
   critical: { bg: 'bg-red-500/20', text: 'text-red-400' },
 }
 

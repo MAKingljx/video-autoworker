@@ -21,35 +21,24 @@ interface AgentGraphData {
   files: AgentFileInfo[]
 }
 
-// --- Obsidian-inspired palette (muted purples, warm grays) ---
+// --- Restrained single-hue graph palette ---
 
 const AGENT_COLORS = [
-  '#b4befe', // lavender
-  '#cba6f7', // mauve
-  '#f5c2e7', // pink
-  '#89b4fa', // blue
-  '#74c7ec', // sapphire
-  '#89dceb', // sky
-  '#94e2d5', // teal
-  '#a6e3a1', // green
-  '#f9e2af', // yellow
-  '#fab387', // peach
-  '#eba0ac', // maroon
-  '#f38ba8', // red
-  '#cdd6f4', // text
-  '#bac2de', // subtext1
-  '#a6adc8', // subtext0
-  '#b4befe', // lavender2
-  '#cba6f7', // mauve2
+  '#0969DA',
+  '#1F6FEB',
+  '#218BFF',
+  '#54AEFF',
+  '#80CCFF',
+  '#A5D6FF',
 ]
 
 function getFileColor(filePath: string): string {
-  if (filePath.startsWith('sessions/') || filePath.includes('/sessions/')) return '#89dceb'
-  if (filePath.startsWith('memory/') || filePath.includes('/memory/')) return '#94e2d5'
-  if (filePath.startsWith('knowledge') || filePath.includes('/knowledge')) return '#b4befe'
-  if (filePath.endsWith('.md')) return '#f9e2af'
-  if (filePath.endsWith('.json') || filePath.endsWith('.jsonl')) return '#cba6f7'
-  return '#89b4fa'
+  if (filePath.startsWith('sessions/') || filePath.includes('/sessions/')) return '#54AEFF'
+  if (filePath.startsWith('memory/') || filePath.includes('/memory/')) return '#80CCFF'
+  if (filePath.startsWith('knowledge') || filePath.includes('/knowledge')) return '#A5D6FF'
+  if (filePath.endsWith('.md')) return '#8C959F'
+  if (filePath.endsWith('.json') || filePath.endsWith('.jsonl')) return '#C2E0FF'
+  return '#218BFF'
 }
 
 function formatBytes(bytes: number): string {
@@ -60,47 +49,47 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
 }
 
-// --- Obsidian graph theme ---
+// --- Neutral graph theme with the product accent ---
 
 const obsidianTheme: Theme = {
   canvas: {
-    background: '#11111b',
-    fog: '#11111b',
+    background: '#0d1117',
+    fog: '#0d1117',
   },
   node: {
-    fill: '#6c7086',
-    activeFill: '#cba6f7',
+    fill: '#8b949e',
+    activeFill: '#58a6ff',
     opacity: 1,
     selectedOpacity: 1,
     inactiveOpacity: 0.1,
     label: {
-      color: '#cdd6f4',
-      stroke: '#11111b',
-      activeColor: '#f5f5f7',
+      color: '#c9d1d9',
+      stroke: '#0d1117',
+      activeColor: '#f0f6fc',
     },
   },
   ring: {
-    fill: '#6c7086',
-    activeFill: '#cba6f7',
+    fill: '#8b949e',
+    activeFill: '#58a6ff',
   },
   edge: {
-    fill: '#45475a',
-    activeFill: '#cba6f7',
+    fill: '#30363d',
+    activeFill: '#58a6ff',
     opacity: 0.15,
     selectedOpacity: 0.5,
     inactiveOpacity: 0.03,
     label: {
-      color: '#6c7086',
-      activeColor: '#cdd6f4',
+      color: '#8b949e',
+      activeColor: '#c9d1d9',
     },
   },
   arrow: {
-    fill: '#45475a',
-    activeFill: '#cba6f7',
+    fill: '#30363d',
+    activeFill: '#58a6ff',
   },
   lasso: {
-    background: 'rgba(203, 166, 247, 0.08)',
-    border: 'rgba(203, 166, 247, 0.25)',
+    background: 'rgba(88, 166, 255, 0.08)',
+    border: 'rgba(88, 166, 255, 0.25)',
   },
 }
 
@@ -334,10 +323,10 @@ export function MemoryGraph() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center h-full" style={{ background: '#11111b' }}>
+      <div className="flex items-center justify-center h-full" style={{ background: '#0d1117' }}>
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 rounded-full border-2 border-[#cba6f7]/30 border-t-[#cba6f7] animate-spin" />
-          <span className="text-[#6c7086] text-sm font-mono">{t('loading')}</span>
+          <div className="w-8 h-8 rounded-full border-2 border-[#58a6ff]/30 border-t-[#58a6ff] animate-spin" />
+          <span className="text-[#8b949e] text-sm font-mono">{t('loading')}</span>
         </div>
       </div>
     )
@@ -345,9 +334,9 @@ export function MemoryGraph() {
 
   if (error) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3" style={{ background: '#11111b' }}>
-        <span className="text-[#f38ba8] text-sm">{error}</span>
-        <button onClick={fetchData} className="px-3 py-1.5 text-xs rounded-md bg-[#1e1e2e] border border-[#45475a] text-[#cdd6f4] hover:border-[#cba6f7]/50 transition-colors">
+      <div className="flex flex-col items-center justify-center h-full gap-3" style={{ background: '#0d1117' }}>
+        <span className="text-[#f85149] text-sm">{error}</span>
+        <button onClick={fetchData} className="px-3 py-1.5 text-xs rounded-md bg-[#161b22] border border-[#30363d] text-[#c9d1d9] hover:border-[#58a6ff]/50 transition-colors">
           {t('retry')}
         </button>
       </div>
@@ -356,9 +345,9 @@ export function MemoryGraph() {
 
   if (!agents.length) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-2" style={{ background: '#11111b' }}>
-        <span className="text-[#6c7086] text-sm">{t('noMemoryDatabases')}</span>
-        <span className="text-[#45475a] text-xs">{t('noMemoryDatabasesHint')}</span>
+      <div className="flex flex-col items-center justify-center h-full gap-2" style={{ background: '#0d1117' }}>
+        <span className="text-[#8b949e] text-sm">{t('noMemoryDatabases')}</span>
+        <span className="text-[#484f58] text-xs">{t('noMemoryDatabasesHint')}</span>
       </div>
     )
   }
@@ -366,7 +355,7 @@ export function MemoryGraph() {
   const activeAgent = selectedAgent !== 'all' ? agents.find(a => a.name === selectedAgent) : null
 
   return (
-    <div className="relative h-full w-full overflow-hidden" style={{ background: '#11111b' }}>
+    <div className="relative h-full w-full overflow-hidden" style={{ background: '#0d1117' }}>
       {/* Full-bleed graph canvas */}
       <GraphCanvas
         ref={graphRef}
@@ -399,16 +388,16 @@ export function MemoryGraph() {
           onClick={goBack}
           className={`px-2.5 py-1 text-[11px] font-mono rounded-md backdrop-blur-xl transition-all ${
             selectedAgent === 'all'
-              ? 'bg-[#cba6f7]/15 text-[#cba6f7] border border-[#cba6f7]/25'
-              : 'bg-[#1e1e2e]/80 text-[#6c7086] border border-[#45475a]/50 hover:text-[#cdd6f4] hover:border-[#cba6f7]/30'
+              ? 'bg-[#58a6ff]/15 text-[#58a6ff] border border-[#58a6ff]/25'
+              : 'bg-[#161b22]/80 text-[#8b949e] border border-[#30363d]/50 hover:text-[#c9d1d9] hover:border-[#58a6ff]/30'
           }`}
         >
           {t('allAgents')}
         </button>
         {activeAgent && (
           <>
-            <span className="text-[#45475a] text-[10px]">/</span>
-            <span className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-[#cba6f7]/15 text-[#cba6f7] border border-[#cba6f7]/25">
+            <span className="text-[#484f58] text-[10px]">/</span>
+            <span className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-[#58a6ff]/15 text-[#58a6ff] border border-[#58a6ff]/25">
               {activeAgent.name}
             </span>
           </>
@@ -423,10 +412,10 @@ export function MemoryGraph() {
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={t('filterFiles')}
-            className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-[#1e1e2e]/80 backdrop-blur-xl border border-[#45475a]/50 text-[#cdd6f4] placeholder-[#45475a] focus:outline-none focus:border-[#cba6f7]/40 w-36 transition-colors"
+            className="px-2.5 py-1 text-[11px] font-mono rounded-md bg-[#161b22]/80 backdrop-blur-xl border border-[#30363d]/50 text-[#c9d1d9] placeholder-[#484f58] focus:outline-none focus:border-[#58a6ff]/40 w-36 transition-colors"
           />
         )}
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#1e1e2e]/80 backdrop-blur-xl border border-[#45475a]/30">
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-[#161b22]/80 backdrop-blur-xl border border-[#30363d]/30">
           <StatChip label={t('statAgents')} value={stats.totalAgents} />
           <Sep />
           <StatChip label={t('statFiles')} value={stats.totalFiles} />
@@ -440,10 +429,10 @@ export function MemoryGraph() {
       {/* Hover tooltip (bottom-center) */}
       {hoveredNode && (
         <div className="absolute bottom-16 left-1/2 -translate-x-1/2 z-10 pointer-events-none">
-          <div className="px-3 py-2 rounded-lg bg-[#1e1e2e]/90 backdrop-blur-xl border border-[#45475a]/40 shadow-2xl shadow-black/40 max-w-md">
-            <div className="text-[11px] font-mono text-[#cdd6f4] truncate">{hoveredNode.label}</div>
+          <div className="px-3 py-2 rounded-lg bg-[#161b22]/90 backdrop-blur-xl border border-[#30363d]/40 shadow-2xl shadow-black/40 max-w-md">
+            <div className="text-[11px] font-mono text-[#c9d1d9] truncate">{hoveredNode.label}</div>
             {hoveredNode.sub && (
-              <div className="text-[10px] font-mono text-[#6c7086] mt-0.5">{hoveredNode.sub}</div>
+              <div className="text-[10px] font-mono text-[#8b949e] mt-0.5">{hoveredNode.sub}</div>
             )}
           </div>
         </div>
@@ -452,19 +441,19 @@ export function MemoryGraph() {
       {/* Selected file detail panel (bottom-left) */}
       {selectedFile && (
         <div className="absolute bottom-3 left-3 z-10 max-w-sm">
-          <div className="px-4 py-3 rounded-lg bg-[#1e1e2e]/90 backdrop-blur-xl border border-[#45475a]/40 shadow-2xl shadow-black/40">
+          <div className="px-4 py-3 rounded-lg bg-[#161b22]/90 backdrop-blur-xl border border-[#30363d]/40 shadow-2xl shadow-black/40">
             <div className="flex items-center justify-between gap-4 mb-2">
-              <h3 className="text-[11px] font-mono text-[#cdd6f4] truncate">{selectedFile.path}</h3>
+              <h3 className="text-[11px] font-mono text-[#c9d1d9] truncate">{selectedFile.path}</h3>
               <button
                 onClick={() => setSelectedFile(null)}
-                className="text-[#6c7086] hover:text-[#cdd6f4] text-xs transition-colors shrink-0"
+                className="text-[#8b949e] hover:text-[#c9d1d9] text-xs transition-colors shrink-0"
               >
                 x
               </button>
             </div>
-            <div className="flex items-center gap-4 text-[10px] font-mono text-[#6c7086]">
-              <span><span className="text-[#cba6f7]">{selectedFile.chunks}</span> {t('chunks')}</span>
-              <span><span className="text-[#89b4fa]">{formatBytes(selectedFile.textSize)}</span> {t('text')}</span>
+            <div className="flex items-center gap-4 text-[10px] font-mono text-[#8b949e]">
+              <span><span className="text-[#58a6ff]">{selectedFile.chunks}</span> {t('chunks')}</span>
+              <span><span className="text-[#80ccff]">{formatBytes(selectedFile.textSize)}</span> {t('text')}</span>
             </div>
           </div>
         </div>
@@ -472,19 +461,19 @@ export function MemoryGraph() {
 
       {/* Color legend (bottom-right) */}
       <div className="absolute bottom-3 right-3 z-10">
-        <div className="px-3 py-2 rounded-lg bg-[#1e1e2e]/80 backdrop-blur-xl border border-[#45475a]/30">
-          <div className="flex items-center gap-3 text-[9px] font-mono text-[#585b70]">
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#89dceb]" />{t('legendSessions')}</span>
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#94e2d5]" />{t('legendMemory')}</span>
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#b4befe]" />{t('legendKnowledge')}</span>
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#f9e2af]" />.md</span>
-            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#cba6f7]" />.json</span>
+        <div className="px-3 py-2 rounded-lg bg-[#161b22]/80 backdrop-blur-xl border border-[#30363d]/30">
+          <div className="flex items-center gap-3 text-[9px] font-mono text-[#6e7681]">
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#54aeff]" />{t('legendSessions')}</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#80ccff]" />{t('legendMemory')}</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#a5d6ff]" />{t('legendKnowledge')}</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#8c959f]" />.md</span>
+            <span className="flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-[#c2e0ff]" />.json</span>
           </div>
         </div>
       </div>
 
       {/* Keyboard hint */}
-      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 text-[9px] font-mono text-[#313244] pointer-events-none select-none">
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 text-[9px] font-mono text-[#484f58] pointer-events-none select-none">
         {t('keyboardHint')}
       </div>
     </div>
@@ -495,12 +484,12 @@ function StatChip({ label, value }: { label: string; value: number | string }) {
   const display = typeof value === 'number' ? value.toLocaleString() : value
   return (
     <span className="text-[10px] font-mono">
-      <span className="text-[#cdd6f4]">{display}</span>
-      <span className="text-[#585b70] ml-1">{label}</span>
+      <span className="text-[#c9d1d9]">{display}</span>
+      <span className="text-[#6e7681] ml-1">{label}</span>
     </span>
   )
 }
 
 function Sep() {
-  return <span className="text-[#313244]">|</span>
+  return <span className="text-[#484f58]">|</span>
 }

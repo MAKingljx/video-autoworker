@@ -351,7 +351,7 @@ export function GitHubSyncPanel() {
 
       {/* Sync result banner */}
       {syncResult && (
-        <div className="rounded-lg p-3 text-xs bg-blue-500/10 text-blue-400 flex items-center gap-4">
+        <div className="rounded-lg p-3 text-xs bg-primary/10 text-primary flex items-center gap-4">
           <span>{t('syncResultImported', { count: syncResult.imported })}</span>
           <span>{t('syncResultSkipped', { count: syncResult.skipped })}</span>
           {syncResult.errors > 0 && <span className="text-destructive">{t('syncResultErrors', { count: syncResult.errors })}</span>}
@@ -572,7 +572,7 @@ export function GitHubSyncPanel() {
                       <span className={`px-1.5 py-0.5 rounded text-2xs ${
                         issue.state === 'open'
                           ? 'bg-green-500/10 text-green-400'
-                          : 'bg-purple-500/10 text-purple-400'
+                          : 'bg-secondary text-muted-foreground'
                       }`}>
                         {issue.state}
                       </span>
@@ -666,8 +666,8 @@ export function GitHubSyncPanel() {
                     <td className="px-4 py-2">
                       <span className={`px-1.5 py-0.5 rounded text-2xs ${
                         task.priority === 'critical' ? 'bg-red-500/10 text-red-400' :
-                        task.priority === 'high' ? 'bg-orange-500/10 text-orange-400' :
-                        task.priority === 'low' ? 'bg-blue-500/10 text-blue-400' :
+                        task.priority === 'high' ? 'bg-amber-500/10 text-amber-400' :
+                        task.priority === 'low' ? 'bg-secondary text-muted-foreground' :
                         'bg-secondary text-muted-foreground'
                       }`}>
                         {task.priority}
