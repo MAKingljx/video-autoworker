@@ -242,6 +242,55 @@ function normalizeResultName(value) {
   return normalizeSearchName(value)
 }
 
+function normalizeResultTimestamp(value) {
+  if (value === null) return null
+  if (
+    typeof value !== 'string'
+    || value !== value.trim()
+    || !value
+    || value.length > 64
+    || !Number.isFinite(Date.parse(value))
+  ) throw new Error('invalid_task_result')
+  return value
+}
+
+function normalizeResultMatch(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid_task_result')
+  }
+  const base = {
+    name: normalizeSearchName(value.name),
+    status: SEARCH_ITEM_STATUSES.has(value.status) ? value.status : null,
+    completedAt: normalizeResultTimestamp(value.completedAt),
+    updatedAt: normalizeResultTimestamp(value.updatedAt),
+  }
+  if (!base.status) throw new Error('invalid_task_result')
+  if (value.kind === 'task') {
+    if (!isSchedulerTaskId(value.taskId) || value.batchId !== null || value.index !== null) {
+      throw new Error('invalid_task_result')
+    }
+    return { kind: 'task', taskId: value.taskId, batchId: null, index: null, ...base }
+  }
+  if (value.kind === 'batch') {
+    if (
+      typeof value.taskId !== 'string'
+      || !BATCH_ITEM_TASK_ID_PATTERN.test(value.taskId)
+      || !isSchedulerBatchId(value.batchId)
+      || !Number.isInteger(value.index)
+      || value.index < 1
+      || value.index > 100
+    ) throw new Error('invalid_task_result')
+    return {
+      kind: 'batch',
+      taskId: value.taskId,
+      batchId: value.batchId,
+      index: value.index,
+      ...base,
+    }
+  }
+  throw new Error('invalid_task_result')
+}
+
 function normalizeResultReport(value) {
   if (value === null) return null
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_result_report')
@@ -285,13 +334,7 @@ function normalizeTaskResult(value, expectedOffset) {
     ) throw new Error('invalid_task_result')
     return {
       kind: 'matches',
-      matches: value.matches.map(match => {
-        if (!match || typeof match !== 'object' || Array.isArray(match)) throw new Error('invalid_task_result')
-        if (!['task', 'batch'].includes(match.kind) || !SEARCH_ITEM_STATUSES.has(match.status)) {
-          throw new Error('invalid_task_result')
-        }
-        return { kind: match.kind, name: normalizeSearchName(match.name), status: match.status }
-      }),
+      matches: value.matches.map(normalizeResultMatch),
       total: value.total,
       truncated: value.truncated,
     }

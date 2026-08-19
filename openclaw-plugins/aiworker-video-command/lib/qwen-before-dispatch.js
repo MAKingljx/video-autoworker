@@ -330,10 +330,16 @@ function searchCandidatesReceipt(result) {
 
 function resultCandidatesReceipt(result) {
   const shown = result.matches.slice(0, 5)
-    .map(match => `${searchName(match.name)}（${searchStatusLabel(match.status)}）`)
+    .map((match, offset) => {
+      const identifiers = [`任务编号：${match.taskId}`]
+      if (match.batchId) identifiers.push(`批次编号：${match.batchId}`, `批次项：${match.index}`)
+      if (match.completedAt) identifiers.push(`完成时间：${match.completedAt}`)
+      if (match.updatedAt) identifiers.push(`更新时间：${match.updatedAt}`)
+      return `${offset + 1}. ${searchName(match.name)}（${searchStatusLabel(match.status)}；${identifiers.join('；')}）`
+    })
   if (!shown.length) return '未找到匹配的视频学习结果。'
   const prefix = result.truncated ? '匹配结果较多' : `找到 ${result.total} 条匹配视频`
-  return `${prefix}：${shown.join('；')}。请补充视频标题或季集后再读取完整结果。`
+  return `${prefix}：\n${shown.join('\n')}\n候选按匹配度和更新时间倒序排列；请使用候选任务编号继续读取，无需用户补充编号。`
 }
 
 export function resultReceipt(result) {

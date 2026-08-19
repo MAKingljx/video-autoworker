@@ -1,11 +1,11 @@
 # AI-worker Video Command plugin
 
-This directory contains the `0.5.5` candidate for the native OpenClaw
+This directory contains the `0.5.6` candidate for the native OpenClaw
 video-learning ingress and direct task-chain tool. The files describe the local
 candidate contract; runtime and production acceptance still require their own
 evidence.
 
-`0.5.5` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
+`0.5.6` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
 private messages and restores the established optional `aiworker_analyze_video`
 tool for direct `second-original` calls. The tool uses three structured actions:
 
@@ -23,7 +23,10 @@ durable serial lane. Status accepts an exact task/batch ID or title/keyword. Its
 search is read-only against controlled video-task registration fields only: it
 does not scan conversations, prompts, arbitrary files, SQLite, n8n executions,
 media directories, credentials, or process state. A unique match results in one
-formal status read; ambiguous matches return bounded candidates. `result` uses
+formal status read; ambiguous matches return bounded candidates. Ambiguous
+`result` candidates expose their controlled task ID, applicable batch ID/item
+index, completion time, and update time so the agent can choose the requested
+record and continue without transferring identifier lookup to the user. `result` uses
 the same controlled registration lookup but reads only the final task output:
 it prefers `output.summary`, falls back to `output.combinedText` only when the
 summary is absent, and returns UTF-8-safe pages below the plugin subprocess
@@ -37,7 +40,7 @@ acceptance must also pass.
 
 The remainder of this file documents historical `0.4.1` behavior and older
 upgrade/rollback gates. It is retained as migration evidence and is not the
-`0.5.5` runtime contract.
+`0.5.6` runtime contract.
 
 ## Business contract
 

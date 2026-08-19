@@ -431,6 +431,8 @@ globalThis.fetch = async (input, init = {}) => {
     expect(skill).toContain('legacy `bot-learning` search')
     expect(skill).toContain('stable IDs')
     expect(skill).toContain('persistent global video lane')
+    expect(skill).toContain('completion time')
+    expect(skill).toContain('do not ask the user to supply an ID already returned by the tool')
   })
 
   it('keeps direct dispatch inside the managed tool boundary', () => {
@@ -486,7 +488,8 @@ globalThis.fetch = async (input, init = {}) => {
       expect(contract).toMatch(/media/u)
     }
     expect(skill).toMatch(/returns bounded\s+candidates for ambiguity/u)
-    expect(workspaceRules).toContain('ambiguous matches only return bounded candidates')
+    expect(workspaceRules).toContain('ambiguous result matches return bounded candidates containing task ID')
+    expect(workspaceRules).toContain('completion time, and update time')
   })
 
   it('keeps native hook compatibility separate from the direct tool', () => {
@@ -748,6 +751,101 @@ globalThis.fetch = async (input, init = {}) => {
       })
       expect(cli.stderr).toBe('')
       expect(JSON.parse(cli.stdout)).toMatchObject({ total: 1, truncated: false })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('returns complete controlled metadata for ambiguous result candidates', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-result-candidates-test-'))
+    try {
+      const stateRoot = resolve(root, 'state')
+      await mkdir(stateRoot, { recursive: true })
+      const newerTaskId = `video-command-${'a'.repeat(64)}`
+      const olderTaskId = `video-natural-${'b'.repeat(64)}`
+      const batchId = `video-batch-${'f'.repeat(64)}`
+      const batchTaskId = `${batchId}:video:002:${'0'.repeat(12)}`
+      const fixtures = [
+        {
+          file: `${'c'.repeat(64)}.json`,
+          taskId: newerTaskId,
+          kind: 'single',
+          batchId: 'single:newer-result-fixture',
+          index: 1,
+          updatedAt: '2026-08-19T07:01:00.000Z',
+          completedAt: '2026-08-19T07:00:00.000Z',
+        },
+        {
+          file: `${'d'.repeat(64)}.json`,
+          taskId: olderTaskId,
+          kind: 'single',
+          batchId: 'single:older-result-fixture',
+          index: 1,
+          updatedAt: '2026-08-18T07:01:00.000Z',
+          completedAt: '2026-08-18T07:00:00.000Z',
+        },
+        {
+          file: `${'e'.repeat(64)}.json`,
+          taskId: batchTaskId,
+          kind: 'batch',
+          batchId,
+          index: 2,
+          updatedAt: '2026-08-17T07:01:00.000Z',
+          completedAt: '2026-08-17T07:00:00.000Z',
+        },
+      ]
+      for (const fixture of fixtures) {
+        await writeFile(resolve(stateRoot, fixture.file), JSON.stringify({
+          schemaVersion: 2,
+          requestFingerprint: 'e'.repeat(64),
+          kind: fixture.kind,
+          batchId: fixture.batchId,
+          status: 'succeeded',
+          updatedAt: fixture.updatedAt,
+          items: [{
+            index: fixture.index,
+            taskId: fixture.taskId,
+            name: '《地球之极》第三季第三集 1025.mp4',
+            status: 'succeeded',
+            completedAt: fixture.completedAt,
+          }],
+        }))
+      }
+
+      const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+      const cli = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [script, '--result', 'S03E03', '--result-offset', '0'], {
+          cwd: process.cwd(),
+          env: { ...process.env, AIWORKER_VIDEO_BATCH_DIR: stateRoot },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise({ stdout, stderr })
+        })
+      })
+      expect(cli.stderr).toBe('')
+      expect(JSON.parse(cli.stdout)).toEqual({
+        kind: 'matches',
+        matches: [
+          {
+            kind: 'task', taskId: newerTaskId, batchId: null, index: null,
+            name: '《地球之极》第三季第三集 1025.mp4', status: 'succeeded',
+            completedAt: '2026-08-19T07:00:00.000Z', updatedAt: '2026-08-19T07:01:00.000Z',
+          },
+          {
+            kind: 'task', taskId: olderTaskId, batchId: null, index: null,
+            name: '《地球之极》第三季第三集 1025.mp4', status: 'succeeded',
+            completedAt: '2026-08-18T07:00:00.000Z', updatedAt: '2026-08-18T07:01:00.000Z',
+          },
+          {
+            kind: 'batch', taskId: batchTaskId, batchId, index: 2,
+            name: '《地球之极》第三季第三集 1025.mp4', status: 'succeeded',
+            completedAt: '2026-08-17T07:00:00.000Z', updatedAt: '2026-08-17T07:01:00.000Z',
+          },
+        ],
+        total: 3,
+        truncated: false,
+      })
     } finally {
       await rm(root, { recursive: true, force: true })
     }

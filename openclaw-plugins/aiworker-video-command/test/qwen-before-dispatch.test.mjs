@@ -206,6 +206,39 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(runner.searchStatus).not.toHaveBeenCalled()
   })
 
+  it('surfaces result candidate identifiers and timestamps without asking the user for them', async () => {
+    const newerTaskId = `video-command-${'a'.repeat(64)}`
+    const olderTaskId = `video-natural-${'b'.repeat(64)}`
+    const runner = {
+      taskResult: vi.fn(async () => ({
+        kind: 'matches',
+        matches: [
+          {
+            kind: 'task', taskId: newerTaskId, batchId: null, index: null,
+            name: '地球之极 S03E03.mp4', status: 'succeeded',
+            completedAt: '2026-08-19T07:00:00.000Z', updatedAt: '2026-08-19T07:01:00.000Z',
+          },
+          {
+            kind: 'task', taskId: olderTaskId, batchId: null, index: null,
+            name: '地球之极 S03E03.mp4', status: 'succeeded',
+            completedAt: '2026-08-18T07:00:00.000Z', updatedAt: '2026-08-18T07:01:00.000Z',
+          },
+        ],
+        total: 2,
+        truncated: false,
+      })),
+    }
+    const result = await handler({
+      classifier: vi.fn(async () => ({ action: 'result_search', value: 'S03E03' })),
+      runner,
+    })(event({ content: '读取 S03E03 的完整分析结果' }), context)
+
+    expect(result.text).toContain(`任务编号：${newerTaskId}`)
+    expect(result.text).toContain('完成时间：2026-08-19T07:00:00.000Z')
+    expect(result.text).toContain('无需用户补充编号')
+    expect(runner.taskResult).toHaveBeenCalledWith({ query: 'S03E03', offset: 0 })
+  })
+
   it('returns the matched directory item status with its batch progress', async () => {
     const batchId = `video-batch-${'e'.repeat(64)}`
     const runner = {

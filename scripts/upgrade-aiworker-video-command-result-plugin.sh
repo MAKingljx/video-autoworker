@@ -6,8 +6,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-PREVIOUS_VERSION="0.5.4"
-CANDIDATE_VERSION="0.5.5"
+PREVIOUS_VERSION="0.5.5"
+CANDIDATE_VERSION="0.5.6"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -289,5 +289,5 @@ if ! validate_installed_version "$CANDIDATE_VERSION" \
 fi
 install -m 600 /dev/null "$BACKUP_DIR/.verified"
 enforce_retention
-printf 'Upgraded qwen-current %s -> %s with paged final-report tool support at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
+printf 'Upgraded qwen-current %s -> %s with complete ambiguous-result candidate metadata at %s.\n' "$PREVIOUS_VERSION" "$CANDIDATE_VERSION" "$TARGET_SHA"
 printf 'Only the qwen-current plugin payload and its gateway were refreshed; config, queue, n8n, media, and database state were preserved.\n'

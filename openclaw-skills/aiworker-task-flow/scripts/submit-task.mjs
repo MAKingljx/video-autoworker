@@ -42,6 +42,8 @@ const publicLocalTaskStatus = status => ({
   waiting: 'running',
 }[status] || status)
 const DIRECT_VIDEO_TASK_ID = /^(?:video-command|video-natural)-[a-f0-9]{64}$/u
+const BATCH_VIDEO_TASK_ID = /^video-batch-[a-f0-9]{64}:video:\d{3}:[a-f0-9]{12}$/u
+const VIDEO_BATCH_ID = /^video-batch-[a-f0-9]{64}$/u
 
 function option(name) {
   const index = args.indexOf(name)
@@ -139,11 +141,32 @@ function resultDisplayName(value) {
   return name && name.length <= 180 ? name : null
 }
 
+function resultTimestamp(value) {
+  const timestamp = String(value || '').trim()
+  if (!timestamp || timestamp.length > 64 || !Number.isFinite(Date.parse(timestamp))) return null
+  return timestamp
+}
+
 function publicResultMatch(match) {
+  const kind = match.kind === 'batch' ? 'batch' : 'task'
+  const taskId = typeof match.taskId === 'string'
+    && (DIRECT_VIDEO_TASK_ID.test(match.taskId) || BATCH_VIDEO_TASK_ID.test(match.taskId))
+    ? match.taskId
+    : null
+  const batchId = kind === 'batch'
+    && typeof match.batchId === 'string'
+    && VIDEO_BATCH_ID.test(match.batchId)
+    ? match.batchId
+    : null
   return {
-    kind: match.kind === 'batch' ? 'batch' : 'task',
+    kind,
+    taskId,
+    batchId,
+    index: kind === 'batch' && Number.isInteger(match.index) ? match.index : null,
     name: resultDisplayName(match.name) || '未命名视频',
     status: String(match.status || 'unknown'),
+    completedAt: resultTimestamp(match.completedAt),
+    updatedAt: resultTimestamp(match.updatedAt),
   }
 }
 

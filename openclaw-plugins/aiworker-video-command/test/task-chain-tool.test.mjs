@@ -149,6 +149,38 @@ describe('AI-worker direct task-chain tool', () => {
     expect(runner.searchStatus).not.toHaveBeenCalled()
   })
 
+  it('returns actionable metadata for ambiguous result candidates', async () => {
+    const newerTaskId = `video-command-${'e'.repeat(64)}`
+    const olderTaskId = `video-natural-${'f'.repeat(64)}`
+    const runner = {
+      taskResult: vi.fn(async () => ({
+        kind: 'matches',
+        matches: [
+          {
+            kind: 'task', taskId: newerTaskId, batchId: null, index: null,
+            name: '地球之极 S03E03.mp4', status: 'succeeded',
+            completedAt: '2026-08-19T07:00:00.000Z', updatedAt: '2026-08-19T07:01:00.000Z',
+          },
+          {
+            kind: 'task', taskId: olderTaskId, batchId: null, index: null,
+            name: '地球之极 S03E03.mp4', status: 'succeeded',
+            completedAt: '2026-08-18T07:00:00.000Z', updatedAt: '2026-08-18T07:01:00.000Z',
+          },
+        ],
+        total: 2,
+        truncated: false,
+      })),
+    }
+    const value = tool({ runner })
+
+    const result = await value.execute('result-candidates', { action: 'result', query: 'S03E03' })
+    expect(result.content[0].text).toContain('找到 2 条匹配视频')
+    expect(result.content[0].text).toContain(`任务编号：${newerTaskId}`)
+    expect(result.content[0].text).toContain('完成时间：2026-08-19T07:00:00.000Z')
+    expect(result.content[0].text).toContain('无需用户补充编号')
+    expect(result.content[0].text).not.toContain('请补充视频标题')
+  })
+
   it('rejects malformed tool parameters before any runner call', async () => {
     const runner = {
       dispatchVideo: vi.fn(), dispatchDirectory: vi.fn(), searchStatus: vi.fn(),

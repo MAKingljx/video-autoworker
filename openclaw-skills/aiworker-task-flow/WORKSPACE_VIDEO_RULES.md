@@ -24,7 +24,11 @@ Status and complete-result reads are read-only. Title and keyword lookup searche
 video-task registration fields and bounded status metadata. It does not search
 chat history, arbitrary files, SQLite, n8n execution records, media folders,
 credentials, or process state. A unique match may make one formal status read;
-ambiguous matches only return bounded candidates.
+ambiguous result matches return bounded candidates containing task ID,
+applicable batch ID/item index, completion time, and update time. When those
+fields are present, choose the candidate requested by the user (default to the
+newest completed candidate) and call `result` again with its task ID; do not ask
+the user to repeat an identifier the tool already returned.
 
 用户说“完整学习结果”“详细报告”或“全文报告”时，必须调用 `result`，不得使用 `exec`、`find`、`grep`、旧 `bot-learning` 路径、任意文件搜索、SQLite 或 n8n 扫描来寻找旧报告。
 

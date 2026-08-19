@@ -17,7 +17,13 @@ test('status search keeps distinct queued items from the same directory batch', 
       status: 'running',
       updatedAt: '2026-08-16T00:00:00.000Z',
       items: [
-        { index: 1, name: '地球之极 第三季 第三集.mp4', taskId: `${batchId}:video:001`, status: 'running' },
+        {
+          index: 1,
+          name: '地球之极 第三季 第三集.mp4',
+          taskId: `${batchId}:video:001`,
+          status: 'succeeded',
+          completedAt: '2026-08-16T00:00:01.000Z',
+        },
         { index: 2, name: '地球之极 第三季 第十一集.mp4', taskId: `${batchId}:video:002`, status: 'queued' },
       ],
     })}\n`, { mode: 0o600 })
@@ -30,9 +36,11 @@ test('status search keeps distinct queued items from the same directory batch', 
       index: item.index,
       status: item.status,
     })), [
-      { batchId, index: 1, status: 'running' },
+      { batchId, index: 1, status: 'succeeded' },
       { batchId, index: 2, status: 'queued' },
     ])
+    assert.equal(result.matches[0].completedAt, '2026-08-16T00:00:01.000Z')
+    assert.equal(result.matches[0].updatedAt, '2026-08-16T00:00:00.000Z')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

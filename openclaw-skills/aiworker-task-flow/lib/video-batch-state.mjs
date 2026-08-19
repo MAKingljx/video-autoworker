@@ -252,6 +252,7 @@ export async function searchVideoTaskStates(query, root = defaultBatchRoot()) {
         name: batchItemDisplayName(item),
         status: typeof item.status === 'string' ? item.status : 'unknown',
         batchStatus: typeof state.status === 'string' ? state.status : 'unknown',
+        completedAt: typeof item.completedAt === 'string' ? item.completedAt : null,
         updatedAt: typeof state.updatedAt === 'string' ? state.updatedAt : null,
         score: exact ? 2 : 1,
       })

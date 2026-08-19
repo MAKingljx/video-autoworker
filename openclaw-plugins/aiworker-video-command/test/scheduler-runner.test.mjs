@@ -181,6 +181,56 @@ describe('0.5 scheduler runner', () => {
     ])
   })
 
+  it('preserves identifiers and timestamps for ambiguous result candidates', async () => {
+    const secondTaskId = `video-command-${'c'.repeat(64)}`
+    const batchTaskId = `${batchId}:video:002:${'d'.repeat(12)}`
+    const { runner } = fixture({
+      kind: 'matches',
+      matches: [
+        {
+          kind: 'task',
+          taskId: secondTaskId,
+          batchId: null,
+          index: null,
+          name: '地球之极 S03E03.mp4',
+          status: 'succeeded',
+          completedAt: '2026-08-19T07:00:00.000Z',
+          updatedAt: '2026-08-19T07:01:00.000Z',
+        },
+        {
+          kind: 'batch',
+          taskId: batchTaskId,
+          batchId,
+          index: 2,
+          name: '地球之极 S03E03.mp4',
+          status: 'succeeded',
+          completedAt: '2026-08-18T07:00:00.000Z',
+          updatedAt: '2026-08-18T07:01:00.000Z',
+        },
+      ],
+      total: 2,
+      truncated: false,
+    })
+
+    await expect(runner.taskResult({ query: 'S03E03', offset: 0 })).resolves.toEqual({
+      kind: 'matches',
+      matches: [
+        {
+          kind: 'task', taskId: secondTaskId, batchId: null, index: null,
+          name: '地球之极 S03E03.mp4', status: 'succeeded',
+          completedAt: '2026-08-19T07:00:00.000Z', updatedAt: '2026-08-19T07:01:00.000Z',
+        },
+        {
+          kind: 'batch', taskId: batchTaskId, batchId, index: 2,
+          name: '地球之极 S03E03.mp4', status: 'succeeded',
+          completedAt: '2026-08-18T07:00:00.000Z', updatedAt: '2026-08-18T07:01:00.000Z',
+        },
+      ],
+      total: 2,
+      truncated: false,
+    })
+  })
+
   it('rejects result output that exceeds the plugin process boundary or changes the requested offset', async () => {
     const overlong = fixture({
       kind: 'report', taskId, name: null, status: 'succeeded',

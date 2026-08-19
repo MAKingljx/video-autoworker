@@ -29,6 +29,11 @@ Call the tool once with exactly one of these parameter shapes:
   candidates for ambiguity, and reads the formal status once only for a unique
   match.
 - `result` reads the formal final learning report for a uniquely matched task.
+  When a title or keyword matches several tasks, each bounded candidate
+  includes its task ID, applicable batch ID/item index, completion time, and
+  update time. Select the candidate that satisfies the user's request (use the
+  newest completed candidate by default), then call `result` again with its
+  task ID; do not ask the user to supply an ID already returned by the tool.
   It uses `output.summary` first and only falls back to `output.combinedText`
   when no final summary exists. A long report returns a `nextOffset`; when the
   user asks for the complete result, keep calling `result` with that offset

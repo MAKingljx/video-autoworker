@@ -15,8 +15,10 @@
   state.
 - Full learning results use `result`, which reads only final `output.summary`
   and falls back to `combinedText` when needed. Continue with the returned
-  offset for later pages; never search old `bot-learning` material or invoke
-  `exec`, `find`, or `grep` as a substitute.
+  offset for later pages. Ambiguous name matches include task/batch identifiers
+  and completion/update times, so the agent can select the newest completed
+  candidate and continue without asking the user for an ID. Never search old
+  `bot-learning` material or invoke `exec`, `find`, or `grep` as a substitute.
 - Submission returns one receipt and ends. Do not poll, retry, resubmit, or
   push completion messages. The release gate is maintenance-only.
 - The compatible native `before_dispatch` Telegram-private entry and the direct
