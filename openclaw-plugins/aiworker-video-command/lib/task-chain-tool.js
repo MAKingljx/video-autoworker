@@ -48,7 +48,7 @@ const TOOL_PARAMETERS = Object.freeze({
       type: 'string',
       minLength: 1,
       maxLength: MAX_QUERY_LENGTH,
-      description: '任务编号、批次编号、视频标题或关键词。由任务链受控登记搜索。',
+      description: '任务编号、批次编号、视频标题或关键词。首次按名称读取 result 时，只传当前消息里最小且明确的原始标题、文件名或季集号（如 S03E03），禁止追加旧上下文、改写名称或并行同义查询；多候选后只传选中记录的精确任务编号。',
     },
     offset: {
       type: 'integer',
@@ -192,7 +192,7 @@ export function createTaskChainTool({
   return {
     name: TASK_CHAIN_TOOL_NAME,
     label: 'AI-worker 任务链',
-    description: '直接调用 AI-worker 视频任务链。收到用户的视频学习、目录扫描、进度查询或完整学习结果请求时使用；不要要求用户记 slash 命令。submit_video 只提交一个绝对视频路径，submit_directory 让任务链自动扫描一个绝对目录，status 查询进度，result 读取正式任务链中的完整学习报告。完整结果必须使用 result 分页读取，禁止 exec/find/grep 或旧 bot-learning 搜索。status 与 result 只读受控任务登记和最终任务输出，不搜索聊天记录、SQLite、n8n 执行记录、媒体目录或其他用户数据。',
+    description: '直接调用 AI-worker 视频任务链。用户只需说“查 S03E03 分析”等自然短句；不要要求用户记 slash 命令或复述长提示。submit_video 提交一个绝对视频路径，submit_directory 扫描一个绝对目录，status 查询进度，result 读取正式学习报告。result 首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待，禁止追加旧上下文、改写或并行同义查询；多候选时选择完成时间最新的已完成记录，下一次只用其精确任务编号调用 result，不问用户要编号。默认用中文仅回复视频标题、当前状态和一句分析摘要；用户明确要正文/全文时再分页读取。禁止 exec/find/grep 或旧 bot-learning 搜索。status 与 result 只读受控登记和最终输出，不搜索聊天记录、SQLite、n8n、媒体目录或其他用户数据。',
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {

@@ -22,6 +22,8 @@ describe('Qwen one-shot classifier', () => {
     expect(complete.mock.calls[0][0]).not.toHaveProperty('tools')
     expect(complete.mock.calls[0][0].temperature).toBe(0)
     expect(complete.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal)
+    expect(complete.mock.calls[0][0].systemPrompt).toContain('最小且唯一的标题、文件名、季集号或关键词（例如 S03E03）')
+    expect(complete.mock.calls[0][0].systemPrompt).toContain('不得加入旧上下文、改写或补全')
   })
 
   it('accepts a title or keyword copied from the current message for status search', () => {

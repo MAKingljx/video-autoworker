@@ -26,6 +26,11 @@ describe('AI-worker direct task-chain tool', () => {
 
     expect(value.name).toBe(TASK_CHAIN_TOOL_NAME)
     expect(value.description).toContain('不要要求用户记 slash 命令')
+    expect(value.description).toContain('用户只需说“查 S03E03 分析”')
+    expect(value.description).toContain('首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待')
+    expect(value.description).toContain('下一次只用其精确任务编号调用 result')
+    expect(value.parameters.properties.query.description).toContain('如 S03E03')
+    expect(value.parameters.properties.query.description).toContain('禁止追加旧上下文')
     const result = await value.execute('tool-call-1', {
       action: 'submit_video', videoPath: '/data/地球之极 第三集.mp4',
     })
@@ -177,7 +182,9 @@ describe('AI-worker direct task-chain tool', () => {
     expect(result.content[0].text).toContain('找到 2 条匹配视频')
     expect(result.content[0].text).toContain(`任务编号：${newerTaskId}`)
     expect(result.content[0].text).toContain('完成时间：2026-08-19T07:00:00.000Z')
-    expect(result.content[0].text).toContain('无需用户补充编号')
+    expect(result.content[0].text).toContain('请选择完成时间最新的已完成候选')
+    expect(result.content[0].text).toContain('下一次只使用其任务编号调用 result')
+    expect(result.content[0].text).toContain('禁止继续改写名称、并行搜索或要求用户补充编号')
     expect(result.content[0].text).not.toContain('请补充视频标题')
   })
 

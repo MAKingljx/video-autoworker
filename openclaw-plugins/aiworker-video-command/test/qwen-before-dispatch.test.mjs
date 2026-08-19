@@ -235,7 +235,8 @@ describe('hook-owned Qwen video scheduler', () => {
 
     expect(result.text).toContain(`任务编号：${newerTaskId}`)
     expect(result.text).toContain('完成时间：2026-08-19T07:00:00.000Z')
-    expect(result.text).toContain('无需用户补充编号')
+    expect(result.text).toContain('请选择完成时间最新的已完成候选')
+    expect(result.text).toContain('下一次只使用其任务编号调用 result')
     expect(runner.taskResult).toHaveBeenCalledWith({ query: 'S03E03', offset: 0 })
   })
 

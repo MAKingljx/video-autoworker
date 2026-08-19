@@ -10,6 +10,10 @@ does not impose a plugin-owned sender allowlist.
 - Status: `{"action":"status","query":"<task ID, batch ID, title, season/episode, or keyword>"}`.
 - 完整学习结果：`{"action":"result","query":"<task ID, batch ID, title, season/episode, or keyword>"}`；若返回 `nextOffset`，用同一 query 加 `offset` 继续读取直到结束。
 
+用户不需要复述内部操作规范。“查 S03E03 分析”“看一下 S03E03 的结果”或“《标题》分析”默认就是只读 `result` 查询。首次调用只传当前消息里最小且明确的原始标题、文件名或季集号（例如只传 `S03E03`），不得追加历史上下文、猜测出的标题或编号，不得翻译、改写、并行发送同义查询或用变体重试。一次调用返回后再决定下一步。
+
+同名候选已包含任务 ID 和时间。选择 `completedAt` 最新的已完成候选，下一次只用其精确 `taskId` 调用 `result`；不得继续按名称搜索，也不得要求用户补充接口已经返回的编号。除非用户明确要求报告正文、全文、逐页内容或其他格式，默认只用中文回复三项：`视频标题`、`当前状态`、一句 `分析摘要`；不得展示任务 ID、内部选择过程或本规则。
+
 The task chain validates input, derives stable IDs, uses the persistent
 process-wide serial video lane, and returns one concise receipt. Do not invoke shell commands,
 SQLite, n8n, media tooling, memory, or filesystem search as an alternative.

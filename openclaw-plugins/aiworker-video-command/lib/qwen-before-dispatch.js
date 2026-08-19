@@ -339,7 +339,7 @@ function resultCandidatesReceipt(result) {
     })
   if (!shown.length) return '未找到匹配的视频学习结果。'
   const prefix = result.truncated ? '匹配结果较多' : `找到 ${result.total} 条匹配视频`
-  return `${prefix}：\n${shown.join('\n')}\n候选按匹配度和更新时间倒序排列；请使用候选任务编号继续读取，无需用户补充编号。`
+  return `${prefix}：\n${shown.join('\n')}\n候选按匹配度和更新时间倒序排列；请选择完成时间最新的已完成候选，下一次只使用其任务编号调用 result。禁止继续改写名称、并行搜索或要求用户补充编号。`
 }
 
 export function resultReceipt(result) {

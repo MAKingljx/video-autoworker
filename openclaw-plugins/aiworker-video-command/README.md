@@ -1,11 +1,11 @@
 # AI-worker Video Command plugin
 
-This directory contains the `0.5.6` candidate for the native OpenClaw
+This directory contains the `0.5.7` candidate for the native OpenClaw
 video-learning ingress and direct task-chain tool. The files describe the local
 candidate contract; runtime and production acceptance still require their own
 evidence.
 
-`0.5.6` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
+`0.5.7` retains the host-owned Qwen `before_dispatch` path for eligible Telegram
 private messages and restores the established optional `aiworker_analyze_video`
 tool for direct `second-original` calls. The tool uses three structured actions:
 
@@ -16,6 +16,12 @@ submit_video | submit_directory | status | result
 It accepts ordinary user intent. A user never needs to remember a slash command
 or pass a plugin-owned sender authorization check. The legacy hash configuration
 is accepted only for old-profile compatibility and is ignored by the runtime.
+Short requests such as `查 S03E03 分析` are sufficient. For result lookup the
+agent first sends only the smallest explicit title or season/episode token from
+the current message, makes no parallel synonym searches, and after ambiguity
+continues only with the newest completed candidate's exact task ID. The default
+Chinese reply is limited to title, status, and one-sentence analysis unless the
+user explicitly requests report正文 or another format.
 
 The host applies absolute/canonical input validation and invokes the fixed
 `aiworker-task-flow` client. Single videos and directories enter the shared
@@ -40,7 +46,7 @@ acceptance must also pass.
 
 The remainder of this file documents historical `0.4.1` behavior and older
 upgrade/rollback gates. It is retained as migration evidence and is not the
-`0.5.6` runtime contract.
+`0.5.7` runtime contract.
 
 ## Business contract
 

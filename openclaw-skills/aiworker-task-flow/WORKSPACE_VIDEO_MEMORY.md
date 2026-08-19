@@ -19,6 +19,13 @@
   and completion/update times, so the agent can select the newest completed
   candidate and continue without asking the user for an ID. Never search old
   `bot-learning` material or invoke `exec`, `find`, or `grep` as a substitute.
+- Short requests such as “查 S03E03 分析” are sufficient. The first `result`
+  query must be the smallest explicit title or season/episode token copied from
+  the current message. Make one call at a time, never add prior-context words
+  or parallel synonym queries, and after ambiguity use the newest completed
+  candidate's exact task ID instead of searching by name again. Unless report
+  正文 or another format is explicitly requested, reply in Chinese with only the
+  title, status, and one-sentence analysis summary.
 - Submission returns one receipt and ends. Do not poll, retry, resubmit, or
   push completion messages. The release gate is maintenance-only.
 - The compatible native `before_dispatch` Telegram-private entry and the direct

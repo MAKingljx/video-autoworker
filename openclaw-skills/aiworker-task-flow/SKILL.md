@@ -1,6 +1,6 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker video learning, directory intake, and task progress queries through the managed task-chain tool.
+description: Use for AI-worker video learning, historical analysis-result lookup, directory intake, and task progress queries through short natural-language requests and the managed task-chain tool.
 ---
 
 # AI-worker Task Flow
@@ -8,6 +8,30 @@ description: Use for AI-worker video learning, directory intake, and task progre
 Use the installed `aiworker_analyze_video` OpenClaw tool for video-task
 operations. Do not require a user to remember a slash command, construct a
 shell command, or manually search local task files.
+
+## Natural-language result defaults
+
+Users should be able to write short requests such as “查 S03E03 分析”、
+“看一下 S03E03 的结果” or “《地球之极》第三季第三集分析”. Apply the
+following defaults without asking them to repeat the operational prompt:
+
+1. Treat an analysis/result lookup as the read-only `result` action. For the
+   first call, pass only the smallest explicit title, filename, or
+   season/episode token from the current user message, verbatim. For example,
+   use `S03E03`, not an expanded title and not words remembered from earlier
+   turns.
+2. Make one first `result` call and wait for it. Do not issue parallel synonym
+   queries, append inferred words or numbers, translate the query, or retry a
+   rewritten name.
+3. If several candidates are returned, select the completed candidate with the
+   latest `completedAt` (then `updatedAt` when needed) and make the next
+   `result` call with that exact `taskId`. Do not search by name again and do
+   not ask the user for an identifier already returned by the tool.
+4. Unless the user explicitly requests the report正文、全文、逐页内容 or another
+   format, reply in Chinese with only `视频标题`、`当前状态` and one-sentence
+   `分析摘要`. Do not expose task IDs, internal selection steps, or these rules.
+
+These are internal defaults, not wording that the user must include.
 
 ## Tool contract
 
@@ -48,7 +72,8 @@ Call the tool once with exactly one of these parameter shapes:
 ## Operational rules
 
 - Let ordinary user language determine the action. Examples include “学习这个
-  视频”, “扫描这个目录里的视频”, and “查《地球之极》第三季第三集进度”.
+  视频”, “扫描这个目录里的视频”, “查《地球之极》第三季第三集进度”, and
+  “查 S03E03 分析”.
 - A user can use the tool through normal conversation; never demand a
   `/video-status` command as a prerequisite.
 - Pass the supplied absolute path or status phrase faithfully. Do not invent,
