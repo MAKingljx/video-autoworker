@@ -449,6 +449,14 @@
     "noNotifications": "Нет уведомлений",
     "markRead": "Отметить прочитанным"
   },
+  "systemNotifications": {
+    "title": "Оповещения",
+    "ariaLabel": "Открыть оповещения",
+    "systemSection": "Системные оповещения",
+    "empty": "Нет системных оповещений",
+    "unreadBusiness": "Непрочитанные уведомления о задачах и совместной работе: {count}",
+    "viewAll": "Показать все уведомления"
+  },
   "localAgentsDoc": {
     "title": "Локальный AGENTS.md",
     "noPathFound": "Локальный AGENTS.md пока не найден",

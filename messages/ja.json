@@ -449,6 +449,14 @@
     "noNotifications": "通知なし",
     "markRead": "既読にする"
   },
+  "systemNotifications": {
+    "title": "お知らせ",
+    "ariaLabel": "お知らせを開く",
+    "systemSection": "システムのお知らせ",
+    "empty": "システムのお知らせはありません",
+    "unreadBusiness": "未読のタスク・共同作業通知が {count} 件あります",
+    "viewAll": "すべての通知を見る"
+  },
   "localAgentsDoc": {
     "title": "ローカル AGENTS.md",
     "noPathFound": "ローカルの AGENTS.md がまだ見つかりません",

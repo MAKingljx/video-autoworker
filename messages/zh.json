@@ -453,6 +453,14 @@
     "noNotifications": "无通知",
     "markRead": "标为已读"
   },
+  "systemNotifications": {
+    "title": "提醒",
+    "ariaLabel": "打开提醒",
+    "systemSection": "系统提醒",
+    "empty": "暂无系统提醒",
+    "unreadBusiness": "另有 {count} 条未读任务与协作通知",
+    "viewAll": "查看全部通知"
+  },
   "localAgentsDoc": {
     "title": "本地 AGENTS.md",
     "noPathFound": "尚未找到本地 AGENTS.md",

@@ -10,6 +10,7 @@ import { useNavigateToPanel, usePrefetchPanel } from '@/lib/navigation'
 import { Button } from '@/components/ui/button'
 import { DigitalClock } from '@/components/ui/digital-clock'
 import { ThemeSelector } from '@/components/ui/theme-selector'
+import { SystemNotificationsMenu } from '@/components/layout/system-notifications-menu'
 import { getNavigationMetrics, navigationMetricEventName } from '@/lib/navigation-metrics'
 
 interface SearchResult {
@@ -41,7 +42,7 @@ const QUICK_NAV_COMMANDS: Array<{ panel: string; titleKey: string; title: string
 ]
 
 export function HeaderBar() {
-  const { connection, sessions, unreadNotificationCount, activeTenant, activeProject, dashboardMode } = useMissionControl()
+  const { connection, sessions, activeTenant, activeProject } = useMissionControl()
   const { isConnected, reconnect } = useWebSocket()
   const navigateToPanel = useNavigateToPanel()
   const prefetchPanel = usePrefetchPanel()
@@ -361,21 +362,7 @@ export function HeaderBar() {
             <SearchIcon />
           </Button>
 
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => navigateToPanel('notifications')}
-            onMouseEnter={() => prefetchPanel('notifications')}
-            onFocus={() => prefetchPanel('notifications')}
-            className="relative"
-          >
-            <BellIcon />
-            {unreadNotificationCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full bg-primary text-primary-foreground text-2xs flex items-center justify-center font-medium">
-                {unreadNotificationCount > 9 ? '9+' : unreadNotificationCount}
-              </span>
-            )}
-          </Button>
+          <SystemNotificationsMenu />
 
           <ThemeSelector />
 
@@ -623,14 +610,6 @@ function SearchIcon() {
     <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="7" cy="7" r="4.5" />
       <path d="M10.5 10.5L14 14" />
-    </svg>
-  )
-}
-
-function BellIcon() {
-  return (
-    <svg className="w-4 h-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M6 13h4M3.5 10c0-1-1-2-1-4a5.5 5.5 0 0111 0c0 2-1 3-1 4H3.5z" />
     </svg>
   )
 }

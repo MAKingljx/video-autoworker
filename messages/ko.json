@@ -449,6 +449,14 @@
     "noNotifications": "알림 없음",
     "markRead": "읽음으로 표시"
   },
+  "systemNotifications": {
+    "title": "알림",
+    "ariaLabel": "알림 열기",
+    "systemSection": "시스템 알림",
+    "empty": "시스템 알림이 없습니다",
+    "unreadBusiness": "읽지 않은 작업 및 협업 알림 {count}개",
+    "viewAll": "모든 알림 보기"
+  },
   "localAgentsDoc": {
     "title": "로컬 AGENTS.md",
     "noPathFound": "로컬 AGENTS.md를 아직 찾을 수 없습니다",

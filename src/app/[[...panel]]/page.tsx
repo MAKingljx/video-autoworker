@@ -43,10 +43,6 @@ import { getPluginPanel } from '@/lib/plugins'
 import { shouldRedirectDashboardToHttps } from '@/lib/browser-security'
 import { useTranslations } from 'next-intl'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
-import { LocalModeBanner } from '@/components/layout/local-mode-banner'
-import { UpdateBanner } from '@/components/layout/update-banner'
-import { OpenClawUpdateBanner } from '@/components/layout/openclaw-update-banner'
-import { OpenClawDoctorBanner } from '@/components/layout/openclaw-doctor-banner'
 import { OnboardingWizard } from '@/components/onboarding/onboarding-wizard'
 import { Loader } from '@/components/ui/loader'
 import { ProjectManagerModal } from '@/components/modals/project-manager-modal'
@@ -79,10 +75,8 @@ const bootLabelKeys: Record<string, string> = {
 }
 
 const CURRENT_PANEL_IDS = new Set([
-  'overview', 'agents', 'tasks', 'projects', 'materials', 'automation', 'activity', 'logs', 'settings', 'profiles',
+  'overview', 'agents', 'tasks', 'projects', 'materials', 'automation', 'activity', 'logs', 'settings', 'profiles', 'notifications',
 ])
-
-const IMMERSIVE_PANEL_IDS = new Set(['materials', 'profiles'])
 
 function normalizePanelId(panel: string): string {
   return panel === 'sessions' || panel === 'chat' ? 'profiles' : panel
@@ -114,9 +108,7 @@ export default function Home() {
   const pathname = usePathname()
   const panelFromUrl = pathname === '/' ? 'overview' : pathname.slice(1)
   const normalizedPanel = normalizePanelId(panelFromUrl)
-  const isProfilesPanel = normalizedPanel === 'profiles'
   const isLocalDesktopPanel = CURRENT_PANEL_IDS.has(normalizedPanel)
-  const shouldShowSystemBanners = !showOnboarding && !IMMERSIVE_PANEL_IDS.has(normalizedPanel)
 
   useEffect(() => {
     completeNavigationTiming(pathname)
@@ -429,17 +421,7 @@ export default function Home() {
       {/* Center: Header + Content */}
       <div className="flex-1 flex flex-col min-w-0">
         {!showOnboarding && (
-          <>
-            <HeaderBar />
-            {shouldShowSystemBanners && (
-              <>
-                <LocalModeBanner />
-                <UpdateBanner />
-                <OpenClawUpdateBanner />
-                <OpenClawDoctorBanner />
-              </>
-            )}
-          </>
+          <HeaderBar />
         )}
         <main
           id="main-content"

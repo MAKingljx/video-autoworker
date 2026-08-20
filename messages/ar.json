@@ -449,6 +449,14 @@
     "noNotifications": "لا توجد إشعارات",
     "markRead": "وضع علامة مقروء"
   },
+  "systemNotifications": {
+    "title": "التنبيهات",
+    "ariaLabel": "فتح التنبيهات",
+    "systemSection": "تنبيهات النظام",
+    "empty": "لا توجد تنبيهات للنظام",
+    "unreadBusiness": "{count} إشعارات غير مقروءة للمهام والتعاون",
+    "viewAll": "عرض جميع الإشعارات"
+  },
   "localAgentsDoc": {
     "title": "AGENTS.md المحلي",
     "noPathFound": "لم يُعثَر على AGENTS.md محلي بعد",

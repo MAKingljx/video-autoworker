@@ -452,6 +452,14 @@
     "noNotifications": "No notifications",
     "markRead": "Mark read"
   },
+  "systemNotifications": {
+    "title": "Alerts",
+    "ariaLabel": "Open alerts",
+    "systemSection": "System alerts",
+    "empty": "No system alerts",
+    "unreadBusiness": "{count} unread task and collaboration notifications",
+    "viewAll": "View all notifications"
+  },
   "localAgentsDoc": {
     "title": "Local AGENTS.md",
     "noPathFound": "No local AGENTS.md found yet",
