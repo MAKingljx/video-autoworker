@@ -94,6 +94,77 @@ describe('n8n task run list projection', () => {
     expect(JSON.stringify(detail)).not.toContain('private-audio-model')
     expect(JSON.stringify(detail)).not.toContain('/Users/operator')
   })
+
+  it('removes private reasoning while preserving a visible final answer', () => {
+    const detail = projectN8nVideoResultDetail({
+      taskId: 'video-1',
+      status: 'succeeded',
+      source: 'openclaw',
+      routing: { taskType: 'video-analysis' },
+      input: { displayName: 'video.mp4' },
+      output: {
+        summary: '<think>private chain of thought</think>\n一句话结论：雪崩作业用于降低道路风险。',
+        chapters: [{
+          index: 1,
+          startTime: '00:00:00',
+          endTime: '00:05:00',
+          summary: '<analysis>internal planning</analysis>\n章节结论：炮兵实施控制性雪崩。',
+        }],
+      },
+      error: null,
+      attemptCount: 1,
+      maxAttempts: 1,
+      createdAt: 1,
+      acceptedAt: 2,
+      startedAt: 3,
+      completedAt: 4,
+      updatedAt: 4,
+      workflowName: '视频深度分析',
+      bindingTaskType: 'video-analysis',
+      resultAvailable: true,
+    })
+
+    expect(detail.summary).toBe('一句话结论：雪崩作业用于降低道路风险。')
+    expect(detail.fullReport).toBe('一句话结论：雪崩作业用于降低道路风险。')
+    expect(detail.chapters[0].summary).toBe('章节结论：炮兵实施控制性雪崩。')
+    expect(JSON.stringify(detail)).not.toContain('private chain of thought')
+    expect(JSON.stringify(detail)).not.toContain('internal planning')
+  })
+
+  it('does not publish truncated model planning as a formal result', () => {
+    const detail = projectN8nVideoResultDetail({
+      taskId: 'video-2',
+      status: 'succeeded',
+      source: 'openclaw',
+      routing: { taskType: 'video-analysis' },
+      input: { displayName: 'video.mp4' },
+      output: {
+        summary: '我们需要回答用户：根据章节汇总生成整部视频最终分析报告。只输出最终报告，不要输出思考过程。需要生成最终报告。',
+        combinedText: '我们需要整合用户提供的分段结果。用户要求分析音画，只输出最终报告。需要生成章节。',
+        chapters: [{
+          index: 1,
+          startTime: '00:00:00',
+          endTime: '00:05:00',
+          summary: '我们需要基于提供的分段结果汇总。用户要求只输出最终章节，不要输出思考过程。',
+        }],
+      },
+      error: null,
+      attemptCount: 1,
+      maxAttempts: 1,
+      createdAt: 1,
+      acceptedAt: 2,
+      startedAt: 3,
+      completedAt: 4,
+      updatedAt: 4,
+      workflowName: '视频深度分析',
+      bindingTaskType: 'video-analysis',
+      resultAvailable: true,
+    })
+
+    expect(detail.summary).toBeNull()
+    expect(detail.fullReport).toBeNull()
+    expect(detail.chapters).toMatchObject([{ index: 1, summary: null }])
+  })
 })
 
 describe('listN8nTaskRunSummaries', () => {

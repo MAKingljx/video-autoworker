@@ -174,7 +174,7 @@ export interface N8nVideoResultChapter {
   endTime: string | null
   startSeconds: number | null
   endSeconds: number | null
-  summary: string
+  summary: string | null
 }
 
 export interface N8nVideoResultTimelineItem {
@@ -271,6 +271,21 @@ function safeMultilineText(value: unknown, maxLength: number): string | null {
     .replace(/(?:\/Users|\/home|\/private|\/var|\/tmp)\/[^\s，。；;]+/g, '[路径]')
     .replace(/[A-Za-z]:\\[^\s，。；;]+/g, '[路径]')
   return redacted ? redacted.slice(0, maxLength) : null
+}
+
+function safeModelResultText(value: unknown, maxLength: number): string | null {
+  const text = safeMultilineText(value, maxLength)
+  if (!text) return null
+  const withoutClosedReasoning = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<analysis>[\s\S]*?<\/analysis>/gi, '')
+    .trim()
+  if (!withoutClosedReasoning || /^<(?:think|analysis)>/i.test(withoutClosedReasoning)) return null
+
+  const opening = withoutClosedReasoning.slice(0, 900)
+  const startsLikePlanning = /^(?:我们需要(?:回答|回复|基于|整合|分析)|需要回答用户|we need to (?:answer|respond|analy[sz]e)|the user (?:asks|wants|provided))/i.test(opening)
+  const containsPromptMeta = /(?:用户(?:的)?(?:中文)?(?:请求|要求|给了|提供)|业务要求|只输出(?:最终|报告|章节)|不要输出思考过程|提供的分段结果|需要生成(?:最终|报告|章节))/i.test(opening)
+  return startsLikePlanning && containsPromptMeta ? null : withoutClosedReasoning
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -376,8 +391,8 @@ interface N8nVideoResultProjection extends N8nTaskRunListProjection {
 
 function videoResultSummary(output: Record<string, unknown> | null, maxLength: number): string | null {
   if (!output) return null
-  return compactString(output.summary, maxLength)
-    || compactString(output.combinedText, maxLength)
+  return safeModelResultText(output.summary, maxLength)
+    || safeModelResultText(output.combinedText, maxLength)
 }
 
 export function projectN8nVideoResultListItem(
@@ -408,19 +423,18 @@ export function projectN8nVideoResultDetail(
   const output = objectValue(run.output)
   const audio = objectValue(output.audio)
   const vision = objectValue(output.vision)
-  const chapters = arrayValue(output.chapters).slice(0, 64).flatMap((value, offset) => {
+  const chapters = arrayValue(output.chapters).slice(0, 64).map((value, offset) => {
     const chapter = objectValue(value)
-    const summary = safeMultilineText(chapter.summary, 8_000)
-    if (!summary) return []
+    const summary = safeModelResultText(chapter.summary, 8_000)
     const index = Number(chapter.index)
-    return [{
+    return {
       index: Number.isInteger(index) && index > 0 ? index : offset + 1,
       startTime: compactString(chapter.startTime, 32),
       endTime: compactString(chapter.endTime, 32),
       startSeconds: clockSeconds(compactString(chapter.startTime, 32) || ''),
       endSeconds: clockSeconds(compactString(chapter.endTime, 32) || ''),
       summary,
-    }]
+    }
   })
   const timeline = arrayValue(output.timeline).slice(0, 240).map((value, offset) => {
     const segment = objectValue(value)
@@ -437,14 +451,14 @@ export function projectN8nVideoResultDetail(
   })
   return {
     ...listItem,
-    summary: safeMultilineText(output.summary, 16_000)
-      || safeMultilineText(output.combinedText, 16_000),
+    summary: safeModelResultText(output.summary, 16_000)
+      || safeModelResultText(output.combinedText, 16_000),
     chapters,
     timeline,
     transcript: safeMultilineText(audio.transcript, 100_000),
     visualAnalysis: safeMultilineText(vision.analysis, 100_000),
-    fullReport: safeMultilineText(output.combinedText, 180_000)
-      || safeMultilineText(output.summary, 16_000),
+    fullReport: safeModelResultText(output.combinedText, 180_000)
+      || safeModelResultText(output.summary, 180_000),
   }
 }
 
@@ -824,7 +838,7 @@ function projectVideoResultListRow(row: N8nVideoResultListRow): N8nVideoResultLi
     updatedAt: base.updatedAt,
     batchId: base.batchId,
     batchIndex: base.batchIndex,
-    summary: compactString(row.result_summary, 320),
+    summary: safeModelResultText(row.result_summary, 320),
     chapterCount: Math.max(0, Number(row.chapter_count) || 0),
     timelineCount: Math.max(0, Number(row.timeline_count) || 0),
     resultAvailable: base.resultAvailable,

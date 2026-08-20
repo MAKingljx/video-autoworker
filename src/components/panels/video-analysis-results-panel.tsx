@@ -35,7 +35,7 @@ interface VideoResultChapter {
   endTime: string | null
   startSeconds: number | null
   endSeconds: number | null
-  summary: string
+  summary: string | null
 }
 
 interface VideoResultTimelineItem {
@@ -549,7 +549,9 @@ export function VideoAnalysisResultsPanel({
                             )}
                           </div>
                         </div>
-                        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{chapter.summary}</p>
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+                          {chapter.summary || '该章节未生成可展示的正式总结，请查看对应时间线的音画证据。'}
+                        </p>
                       </article>
                     ))}
                   </div>
