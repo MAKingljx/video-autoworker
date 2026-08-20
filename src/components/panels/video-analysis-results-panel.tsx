@@ -103,6 +103,16 @@ function formatDate(value: number | null | undefined): string {
   return date.toLocaleString('zh-CN', { hour12: false })
 }
 
+function formatClock(seconds: number): string {
+  const rounded = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(rounded / 3_600)
+  const minutes = Math.floor((rounded % 3_600) / 60)
+  const remainder = rounded % 60
+  return hours > 0
+    ? [hours, minutes, remainder].map(value => String(value).padStart(2, '0')).join(':')
+    : [minutes, remainder].map(value => String(value).padStart(2, '0')).join(':')
+}
+
 function statusLabel(status: string): string {
   return ({
     queued: '排队中',
@@ -300,21 +310,22 @@ export function VideoAnalysisResultsPanel({
     return null
   }, [detail, matchedVideo])
 
-  useEffect(() => {
-    if (!detail || !pendingSeek || pendingSeek.taskId !== detail.taskId || !playerRef.current) return
-    seekVideo(playerRef.current, pendingSeek.seconds)
-    setPendingSeek(null)
-  }, [detail, pendingSeek, playableSource])
-
   const applySearch = () => {
     setOffset(0)
     setVisibleSearchHits(SEARCH_PAGE_SIZE)
+    setPendingSeek(null)
     setQuery(searchInput.trim())
   }
 
   const openSearchHit = (hit: VideoSearchHit) => {
     setSelectedTaskId(hit.taskId)
     setPendingSeek(hit.startSeconds === null ? null : { taskId: hit.taskId, seconds: hit.startSeconds })
+  }
+
+  const playPendingSeek = () => {
+    if (!detail || !pendingSeek || pendingSeek.taskId !== detail.taskId || !playerRef.current) return
+    seekVideo(playerRef.current, pendingSeek.seconds)
+    setPendingSeek(null)
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -427,7 +438,10 @@ export function VideoAnalysisResultsPanel({
               <button
                 type="button"
                 key={item.taskId}
-                onClick={() => setSelectedTaskId(item.taskId)}
+                onClick={() => {
+                  setPendingSeek(null)
+                  setSelectedTaskId(item.taskId)
+                }}
                 aria-label={`打开 ${item.title} 的学习档案`}
                 className={`w-full rounded-md border p-3 text-left transition-colors ${
                   item.taskId === selectedTaskId
@@ -456,7 +470,7 @@ export function VideoAnalysisResultsPanel({
             {query ? (
               <div className="flex w-full flex-col items-center gap-2">
                 <p className="text-center text-[11px] text-muted-foreground">
-                  点击命中内容可打开学习档案；带时间码且原片可用时会直接定位播放。
+                  点击命中内容可打开学习档案；带时间码且原片可用时可确认后从该处播放。
                 </p>
                 <div className="flex items-center gap-2">
                   {visibleSearchHits > SEARCH_PAGE_SIZE && (
@@ -540,6 +554,20 @@ export function VideoAnalysisResultsPanel({
                     src={playableSource.url}
                     onError={() => setPlayerError('原片暂时无法加载，学习内容仍可继续查看。')}
                   />
+                  {pendingSeek?.taskId === detail.taskId && (
+                    <div className="flex flex-col gap-2 border-t border-primary/20 bg-primary/10 px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between">
+                      <span className="text-foreground/80">
+                        已定位命中片段 {formatClock(pendingSeek.seconds)}，确认后再读取原片。
+                      </span>
+                      <button
+                        type="button"
+                        onClick={playPendingSeek}
+                        className="flex-none font-medium text-primary hover:underline"
+                      >
+                        从 {formatClock(pendingSeek.seconds)} 播放
+                      </button>
+                    </div>
+                  )}
                   <div className="border-t border-white/10 bg-background px-3 py-2 text-[11px] text-muted-foreground">
                     {playableSource.label}
                   </div>
@@ -711,7 +739,7 @@ function VideoSearchHitCard({
         <span>{formatDate(hit.completedAt)}</span>
         <span className={canSeek && hit.mediaAvailable ? 'text-primary' : undefined}>
           {canSeek
-            ? hit.mediaAvailable ? '定位播放' : '原片当前不可用'
+            ? hit.mediaAvailable ? '定位片段' : '原片当前不可用'
             : '查看档案'}
         </span>
       </div>
