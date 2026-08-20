@@ -546,7 +546,7 @@ export function VideoAnalysisResultsPanel({
               {playableSource ? (
                 <div className="overflow-hidden rounded-lg border border-border bg-black">
                   {pendingSeek?.taskId === detail.taskId && (
-                    <div className="flex flex-col gap-2 border-b border-primary/20 bg-primary/10 px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-col gap-2 border-b border-primary/20 bg-background px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between">
                       <span className="text-foreground/80">
                         已定位命中片段 {formatClock(pendingSeek.seconds)}，确认后再读取原片。
                       </span>
