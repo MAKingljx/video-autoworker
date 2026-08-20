@@ -144,7 +144,10 @@ function seekVideo(video: HTMLVideoElement, seconds: number) {
     void video.play().catch(() => undefined)
   }
   if (video.readyState >= 1) apply()
-  else video.addEventListener('loadedmetadata', apply, { once: true })
+  else {
+    video.addEventListener('loadedmetadata', apply, { once: true })
+    video.load()
+  }
 }
 
 export function VideoAnalysisResultsPanel({
@@ -531,7 +534,7 @@ export function VideoAnalysisResultsPanel({
                     ref={playerRef}
                     key={`${detail.taskId}:${playableSource.url}`}
                     controls
-                    preload="metadata"
+                    preload="none"
                     className="aspect-video w-full bg-black object-contain"
                     src={playableSource.url}
                     onError={() => setPlayerError('原片暂时无法加载，学习内容仍可继续查看。')}
