@@ -172,6 +172,8 @@ export interface N8nVideoResultChapter {
   index: number
   startTime: string | null
   endTime: string | null
+  startSeconds: number | null
+  endSeconds: number | null
   summary: string
 }
 
@@ -198,6 +200,34 @@ export interface N8nVideoResultListResult {
   total: number
   limit: number
   offset: number
+}
+
+export type N8nVideoSearchHitKind = 'timeline' | 'chapter' | 'title' | 'summary' | 'transcript' | 'visual' | 'report'
+
+export interface N8nVideoSearchHit {
+  id: string
+  taskId: string
+  title: string
+  status: string
+  completedAt: number | null
+  kind: N8nVideoSearchHitKind
+  label: string
+  snippet: string
+  matchedFields: string[]
+  timeRange: string | null
+  startSeconds: number | null
+  endSeconds: number | null
+  score: number
+}
+
+export interface N8nVideoSearchResult {
+  query: string
+  hits: N8nVideoSearchHit[]
+  total: number
+  videoCount: number
+  segmentCount: number
+  limit: number
+  truncated: boolean
 }
 
 interface N8nTaskRunListProjection {
@@ -387,6 +417,8 @@ export function projectN8nVideoResultDetail(
       index: Number.isInteger(index) && index > 0 ? index : offset + 1,
       startTime: compactString(chapter.startTime, 32),
       endTime: compactString(chapter.endTime, 32),
+      startSeconds: clockSeconds(compactString(chapter.startTime, 32) || ''),
+      endSeconds: clockSeconds(compactString(chapter.endTime, 32) || ''),
       summary,
     }]
   })
@@ -733,8 +765,9 @@ function videoResultWhere(
       lower(r.task_id) LIKE ? ESCAPE '\\'
       OR lower(COALESCE(b.name, '')) LIKE ? ESCAPE '\\'
       OR lower(r.input) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(r.output, '')) LIKE ? ESCAPE '\\'
     )`)
-    params.push(escaped, escaped, escaped)
+    params.push(escaped, escaped, escaped, escaped)
   }
   return { whereSql: where.join('\n      AND '), params }
 }
@@ -889,4 +922,168 @@ export function getN8nVideoResultDetail(
     LIMIT 1
   `).get(...params, taskId) as N8nVideoResultRow | undefined
   return row ? projectN8nVideoResultDetail(projectVideoResultRow(row)) : null
+}
+
+function normalizedSearchTerms(value: string): string[] {
+  const compacted = compactString(value, 120)
+  if (!compacted) return []
+  return [...new Set(compacted
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 8))]
+}
+
+function normalizedSearchText(value: string): string {
+  return value.normalize('NFKC').toLocaleLowerCase('zh-CN')
+}
+
+function matchesSearchTerms(value: string, terms: string[]): boolean {
+  const normalized = normalizedSearchText(value)
+  return terms.every(term => normalized.includes(term))
+}
+
+function searchSnippet(values: Array<string | null>, terms: string[], maxLength = 300): string {
+  const candidates = values
+    .map(value => safeMultilineText(value, 180_000)?.replace(/\s+/g, ' ').trim() || '')
+    .filter(Boolean)
+  const matched = candidates.find(value => matchesSearchTerms(value, terms)) || candidates[0] || ''
+  if (!matched) return ''
+  const normalized = normalizedSearchText(matched)
+  const positions = terms.map(term => normalized.indexOf(term)).filter(position => position >= 0)
+  const first = positions.length ? Math.min(...positions) : 0
+  const start = Math.max(0, first - Math.floor(maxLength * 0.28))
+  const end = Math.min(matched.length, start + maxLength)
+  return `${start > 0 ? '…' : ''}${matched.slice(start, end)}${end < matched.length ? '…' : ''}`
+}
+
+function buildVideoSearchHits(detail: N8nVideoResultDetail, terms: string[]): N8nVideoSearchHit[] {
+  const hits: N8nVideoSearchHit[] = []
+  const push = (
+    kind: N8nVideoSearchHitKind,
+    label: string,
+    values: Array<{ field: string; text: string | null }>,
+    timing: { timeRange?: string | null; startSeconds?: number | null; endSeconds?: number | null } = {},
+    score = 40,
+    suffix: string = kind,
+  ) => {
+    const combined = values.map(value => value.text || '').join('\n')
+    if (!combined || !matchesSearchTerms(combined, terms)) return false
+    const matchedFields = values
+      .filter(value => value.text && terms.some(term => normalizedSearchText(value.text!).includes(term)))
+      .map(value => value.field)
+    hits.push({
+      id: `${detail.taskId}:${suffix}`,
+      taskId: detail.taskId,
+      title: detail.title,
+      status: detail.status,
+      completedAt: detail.completedAt,
+      kind,
+      label,
+      snippet: searchSnippet(values.map(value => value.text), terms),
+      matchedFields,
+      timeRange: timing.timeRange || null,
+      startSeconds: timing.startSeconds ?? null,
+      endSeconds: timing.endSeconds ?? null,
+      score: score + matchedFields.length * 2,
+    })
+    return true
+  }
+
+  push('title', '视频标题', [{ field: '标题', text: detail.title }], {}, 72, 'title')
+  push('summary', '成片摘要', [{ field: '摘要', text: detail.summary }], {}, 66, 'summary')
+  for (const chapter of detail.chapters) {
+    push('chapter', `第 ${chapter.index} 章`, [{ field: '章节', text: chapter.summary }], {
+      timeRange: chapter.startTime && chapter.endTime ? `${chapter.startTime}-${chapter.endTime}` : null,
+      startSeconds: chapter.startSeconds,
+      endSeconds: chapter.endSeconds,
+    }, 82, `chapter:${chapter.index}`)
+  }
+  let transcriptSegmentMatched = false
+  let visualSegmentMatched = false
+  for (const segment of detail.timeline) {
+    const transcriptMatches = Boolean(segment.transcript && matchesSearchTerms(segment.transcript, terms))
+    const visualMatches = Boolean(segment.visualAnalysis && matchesSearchTerms(segment.visualAnalysis, terms))
+    if (!transcriptMatches && !visualMatches) continue
+    transcriptSegmentMatched ||= transcriptMatches
+    visualSegmentMatched ||= visualMatches
+    push('timeline', segment.timeRange || `片段 ${segment.index}`, [
+      { field: '语音', text: segment.transcript },
+      { field: '画面', text: segment.visualAnalysis },
+    ], {
+      timeRange: segment.timeRange,
+      startSeconds: segment.startSeconds,
+      endSeconds: segment.endSeconds,
+    }, 100, `timeline:${segment.index}`)
+  }
+  if (!transcriptSegmentMatched) {
+    push('transcript', '成片语音转写', [{ field: '语音', text: detail.transcript }], {}, 58, 'transcript')
+  }
+  if (!visualSegmentMatched) {
+    push('visual', '成片画面分析', [{ field: '画面', text: detail.visualAnalysis }], {}, 58, 'visual')
+  }
+  if (!hits.some(hit => !['title'].includes(hit.kind))) {
+    push('report', '完整分析报告', [{ field: '报告', text: detail.fullReport }], {}, 48, 'report')
+  }
+  return hits
+}
+
+export function searchN8nVideoResults(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  rawQuery: string,
+  requestedLimit = 80,
+): N8nVideoSearchResult {
+  const query = compactString(rawQuery, 120) || ''
+  const terms = normalizedSearchTerms(query)
+  const limit = Math.max(1, Math.min(200, Math.floor(requestedLimit || 80)))
+  if (!terms.length) {
+    return { query, hits: [], total: 0, videoCount: 0, segmentCount: 0, limit, truncated: false }
+  }
+
+  const { whereSql, params } = videoResultWhere(scope, { status: 'succeeded' })
+  const searchWhere: string[] = []
+  for (const term of terms) {
+    const escaped = `%${term.replace(/[\\%_]/g, value => `\\${value}`)}%`
+    searchWhere.push(`(
+      lower(r.task_id) LIKE ? ESCAPE '\\'
+      OR lower(r.input) LIKE ? ESCAPE '\\'
+      OR lower(COALESCE(r.output, '')) LIKE ? ESCAPE '\\'
+    )`)
+    params.push(escaped, escaped, escaped)
+  }
+  const candidateLimit = 200
+  const rows = db.prepare(`
+    SELECT r.*, b.name AS workflow_name, b.task_type AS binding_task_type
+    FROM n8n_task_runs r
+    LEFT JOIN n8n_workflow_bindings b
+      ON b.id = r.binding_id
+      AND b.tenant_id = r.tenant_id
+      AND b.workspace_id = r.workspace_id
+    WHERE ${whereSql}
+      AND ${searchWhere.join('\n      AND ')}
+    ORDER BY COALESCE(r.completed_at, r.updated_at) DESC, r.id DESC
+    LIMIT ?
+  `).all(...params, candidateLimit) as N8nVideoResultRow[]
+
+  const allHits = rows.flatMap(row => buildVideoSearchHits(
+    projectN8nVideoResultDetail(projectVideoResultRow(row)),
+    terms,
+  )).sort((left, right) => (
+    right.score - left.score
+    || (right.completedAt || 0) - (left.completedAt || 0)
+    || (left.startSeconds || 0) - (right.startSeconds || 0)
+  ))
+  const videoCount = new Set(allHits.map(hit => hit.taskId)).size
+  const segmentCount = allHits.filter(hit => hit.startSeconds !== null).length
+  return {
+    query,
+    hits: allHits.slice(0, limit),
+    total: allHits.length,
+    videoCount,
+    segmentCount,
+    limit,
+    truncated: allHits.length > limit || rows.length >= candidateLimit,
+  }
 }

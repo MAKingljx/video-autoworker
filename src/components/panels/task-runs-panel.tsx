@@ -2,6 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import {
+  formatTaskRunDuration,
+  taskRunDurationBasis,
+  taskRunFailureInsight,
+} from '@/lib/task-run-presentation'
 
 interface TaskRunListItem {
   taskId: string
@@ -70,16 +75,6 @@ function formatTimestamp(timestamp: number | null): string {
   }).format(new Date(timestamp * 1_000))
 }
 
-function formatDuration(run: TaskRunListItem): string {
-  if (!run.startedAt) return '—'
-  const end = run.completedAt || (run.status === 'running' ? Math.floor(Date.now() / 1_000) : run.updatedAt)
-  const seconds = Math.max(0, end - run.startedAt)
-  if (seconds < 60) return `${seconds} 秒`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
-  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`
-}
-
 function sourceLabel(source: string): string {
   if (source === 'openclaw') return 'OpenClaw'
   if (source === 'video-autoworker') return 'Video AutoWorker'
@@ -104,7 +99,13 @@ export function TaskRunsPanel() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [selectedRun, setSelectedRun] = useState<TaskRunListItem | null>(null)
+  const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000))
   const requestSequence = useRef(0)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowSeconds(Math.floor(Date.now() / 1_000)), 1_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -155,9 +156,13 @@ export function TaskRunsPanel() {
   const visibleSummary = useMemo(() => {
     const completed = runs.filter(run => run.status === 'succeeded').length
     const active = runs.filter(run => ['queued', 'accepted', 'running'].includes(run.status)).length
-    const failed = runs.filter(run => ['failed', 'cancelled'].includes(run.status)).length
+    const failed = runs.filter(run => run.status === 'failed').length
     return { completed, active, failed }
   }, [runs])
+  const selectedFailure = useMemo(
+    () => taskRunFailureInsight(selectedRun?.error || null),
+    [selectedRun],
+  )
 
   return (
     <div className="relative flex h-full min-h-0 flex-col bg-background">
@@ -166,7 +171,18 @@ export function TaskRunsPanel() {
           <span className="rounded-md border border-border bg-card px-2 py-1">共 {total} 条</span>
           <span>本页执行中 {visibleSummary.active}</span>
           <span>已完成 {visibleSummary.completed}</span>
-          {visibleSummary.failed > 0 && <span className="text-destructive">异常 {visibleSummary.failed}</span>}
+          {visibleSummary.failed > 0 && (
+            <button
+              type="button"
+              className="text-destructive hover:underline"
+              onClick={() => {
+                setStatus('failed')
+                setOffset(0)
+              }}
+            >
+              失败 {visibleSummary.failed}，查看原因
+            </button>
+          )}
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <label className="relative min-w-0 sm:w-64">
@@ -230,7 +246,7 @@ export function TaskRunsPanel() {
                 <th className="px-3 py-3 font-medium">状态</th>
                 <th className="px-3 py-3 font-medium">任务链</th>
                 <th className="px-3 py-3 font-medium">尝试</th>
-                <th className="px-3 py-3 font-medium">耗时</th>
+                <th className="px-3 py-3 font-medium">总耗时</th>
                 <th className="px-3 py-3 font-medium">最后更新</th>
                 <th className="w-14 px-3 py-3"><span className="sr-only">查看</span></th>
               </tr>
@@ -251,11 +267,18 @@ export function TaskRunsPanel() {
                     <div className="mt-1 text-xs text-muted-foreground">可以调整搜索词或状态筛选条件</div>
                   </td>
                 </tr>
-              ) : runs.map(run => (
+              ) : runs.map(run => {
+                const failure = taskRunFailureInsight(run.error)
+                return (
                 <tr key={run.taskId} className="border-b border-border/60 transition-colors last:border-b-0 hover:bg-secondary/50">
                   <td className="max-w-md px-4 py-3">
                     <div className="truncate font-medium text-foreground" title={run.title}>{run.title}</div>
                     <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={run.taskId}>{run.taskId}</div>
+                    {failure && (
+                      <div className="mt-1 truncate text-[11px] text-destructive" title={`${failure.stage}：${failure.detail}`}>
+                        {failure.stage} · {failure.title}
+                      </div>
+                    )}
                   </td>
                   <td className="px-3 py-3">
                     <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${statusClass(run.status)}`}>
@@ -267,7 +290,7 @@ export function TaskRunsPanel() {
                     <div className="mt-1 text-xs text-muted-foreground">{taskTypeLabel(run.taskType)} · {sourceLabel(run.source)}</div>
                   </td>
                   <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{run.attemptCount}/{run.maxAttempts}</td>
-                  <td className="px-3 py-3 text-xs text-muted-foreground">{formatDuration(run)}</td>
+                  <td className="px-3 py-3 text-xs text-muted-foreground">{formatTaskRunDuration(run, nowSeconds)}</td>
                   <td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formatTimestamp(run.updatedAt)}</td>
                   <td className="px-3 py-3 text-right">
                     <Button variant="ghost" size="icon-xs" onClick={() => setSelectedRun(run)} aria-label={`查看 ${run.title} 的任务详情`}>
@@ -277,7 +300,8 @@ export function TaskRunsPanel() {
                     </Button>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -322,12 +346,19 @@ export function TaskRunsPanel() {
                 <TimeCard label="开始" value={formatTimestamp(selectedRun.startedAt)} />
                 <TimeCard label="完成" value={formatTimestamp(selectedRun.completedAt)} />
               </div>
-              <DetailRow label="执行耗时"><span>{formatDuration(selectedRun)}</span></DetailRow>
+              <DetailRow label="总耗时">
+                <span>{formatTaskRunDuration(selectedRun, nowSeconds)}</span>
+                <p className="mt-1 text-xs text-muted-foreground">{taskRunDurationBasis(selectedRun)}</p>
+              </DetailRow>
               <DetailRow label="结果状态"><span>{selectedRun.resultAvailable ? '分析结果已保存' : '暂无可用结果'}</span></DetailRow>
-              {selectedRun.error && (
+              {selectedFailure && (
                 <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
-                  <div className="mb-1 text-xs font-medium">错误摘要</div>
-                  <p className="break-words">{selectedRun.error}</p>
+                  <div className="text-xs font-medium">{selectedFailure.stage}</div>
+                  <p className="mt-1 font-medium">{selectedFailure.title}</p>
+                  <p className="mt-1 break-words text-xs leading-5">{selectedFailure.detail}</p>
+                  <p className="mt-2 border-t border-destructive/15 pt-2 text-xs leading-5 text-foreground/75">
+                    {selectedFailure.suggestion}
+                  </p>
                 </div>
               )}
             </div>

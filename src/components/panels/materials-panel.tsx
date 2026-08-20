@@ -530,21 +530,21 @@ export function MaterialsPanel() {
       <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <h1 className="text-lg font-semibold text-foreground">视频可视化</h1>
-            <p className="mt-1 text-xs text-muted-foreground">素材检索与正式任务结果共用一个工作台，数据来源保持清晰分离。</p>
+            <h1 className="text-lg font-semibold text-foreground">媒体资源库</h1>
+            <p className="mt-1 text-xs text-muted-foreground">检索素材片段和正式学习内容。</p>
           </div>
           <div className="inline-flex w-fit rounded-md border border-border bg-background p-1">
             <WorkspaceViewButton
               active={workspaceView === 'materials'}
               onClick={() => setWorkspaceView('materials')}
             >
-              素材检索
+              片段检索
             </WorkspaceViewButton>
             <WorkspaceViewButton
               active={workspaceView === 'analysis'}
               onClick={() => setWorkspaceView('analysis')}
             >
-              分析结果
+              学习内容
             </WorkspaceViewButton>
           </div>
         </div>
@@ -555,18 +555,18 @@ export function MaterialsPanel() {
       ) : (
         <>
           {error && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               {error}
             </div>
           )}
 
           {loading ? (
         <div className="rounded-lg border border-border bg-card px-5 py-10 text-sm text-muted-foreground">
-          正在加载素材库...
+          正在加载媒体片段库...
         </div>
       ) : !overview ? (
         <div className="rounded-lg border border-border bg-card px-5 py-10 text-sm text-muted-foreground">
-          没有读取到素材库。
+          没有读取到媒体片段。
         </div>
       ) : (
         <>
@@ -575,7 +575,7 @@ export function MaterialsPanel() {
               <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h1 className="text-lg font-semibold text-foreground">素材工作台</h1>
+                    <h1 className="text-lg font-semibold text-foreground">片段资源</h1>
                     {activeProject && <Badge subtle>{activeProject.name}</Badge>}
                     {searchData && <Badge subtle>{searchData.results.length} 个命中</Badge>}
                   </div>

@@ -33,6 +33,8 @@ interface VideoResultChapter {
   index: number
   startTime: string | null
   endTime: string | null
+  startSeconds: number | null
+  endSeconds: number | null
   summary: string
 }
 
@@ -51,6 +53,7 @@ interface VideoResultDetail extends VideoResultListItem {
   transcript: string | null
   visualAnalysis: string | null
   fullReport: string | null
+  mediaAvailable: boolean
 }
 
 interface VideoResultListResponse {
@@ -58,6 +61,33 @@ interface VideoResultListResponse {
   total: number
   limit: number
   offset: number
+}
+
+interface VideoSearchHit {
+  id: string
+  taskId: string
+  title: string
+  status: string
+  completedAt: number | null
+  kind: 'timeline' | 'chapter' | 'title' | 'summary' | 'transcript' | 'visual' | 'report'
+  label: string
+  snippet: string
+  matchedFields: string[]
+  timeRange: string | null
+  startSeconds: number | null
+  endSeconds: number | null
+  mediaAvailable: boolean
+}
+
+interface VideoSearchResponse {
+  query: string
+  hits: VideoSearchHit[]
+  total: number
+  videoCount: number
+  segmentCount: number
+  playableVideos: number
+  truncated: boolean
+  error?: string
 }
 
 const PAGE_SIZE = 24
@@ -82,8 +112,8 @@ function statusLabel(status: string): string {
 }
 
 function statusClass(status: string): string {
-  if (status === 'succeeded') return 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300'
-  if (status === 'failed' || status === 'cancelled') return 'border-red-500/25 bg-red-500/10 text-red-300'
+  if (status === 'succeeded') return 'border-success/25 bg-success/10 text-success'
+  if (status === 'failed' || status === 'cancelled') return 'border-destructive/25 bg-destructive/10 text-destructive'
   if (status === 'queued' || status === 'accepted' || status === 'running') {
     return 'border-primary/25 bg-primary/10 text-primary'
   }
@@ -127,9 +157,13 @@ export function VideoAnalysisResultsPanel({
   const [query, setQuery] = useState('')
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [detail, setDetail] = useState<VideoResultDetail | null>(null)
+  const [searchResult, setSearchResult] = useState<VideoSearchResponse | null>(null)
   const [listLoading, setListLoading] = useState(true)
+  const [searchLoading, setSearchLoading] = useState(false)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [playerError, setPlayerError] = useState<string | null>(null)
+  const [pendingSeek, setPendingSeek] = useState<{ taskId: string; seconds: number } | null>(null)
   const [refreshKey, setRefreshKey] = useState(0)
   const playerRef = useRef<HTMLVideoElement | null>(null)
 
@@ -176,6 +210,38 @@ export function VideoAnalysisResultsPanel({
   }, [loadResults, refreshKey])
 
   useEffect(() => {
+    if (!query) {
+      setSearchResult(null)
+      setSearchLoading(false)
+      return undefined
+    }
+    const controller = new AbortController()
+    setSearchLoading(true)
+    setError(null)
+    const params = new URLSearchParams({ q: query, limit: '120' })
+    void fetch(`/api/n8n/video-library?${params.toString()}`, {
+      cache: 'no-store',
+      signal: controller.signal,
+    }).then(async response => {
+      const payload = await response.json().catch(() => ({})) as VideoSearchResponse
+      if (!response.ok) throw new Error(payload.error || '无法检索学习内容')
+      setSearchResult(payload)
+      setSelectedTaskId(current => (
+        current && payload.hits.some(hit => hit.taskId === current)
+          ? current
+          : payload.hits[0]?.taskId || current
+      ))
+    }).catch(searchError => {
+      if ((searchError as Error).name === 'AbortError') return
+      setSearchResult(null)
+      setError(searchError instanceof Error ? searchError.message : '无法检索学习内容')
+    }).finally(() => {
+      if (!controller.signal.aborted) setSearchLoading(false)
+    })
+    return () => controller.abort()
+  }, [query, refreshKey])
+
+  useEffect(() => {
     if (!selectedTaskId) {
       setDetail(null)
       return undefined
@@ -191,6 +257,7 @@ export function VideoAnalysisResultsPanel({
       const payload = await response.json().catch(() => ({})) as { result?: VideoResultDetail; error?: string }
       if (!response.ok || !payload.result) throw new Error(payload.error || '无法加载视频分析明细')
       setDetail(payload.result)
+      setPlayerError(null)
     }).catch(detailError => {
       if ((detailError as Error).name === 'AbortError') return
       setDetail(null)
@@ -208,9 +275,37 @@ export function VideoAnalysisResultsPanel({
     return matches.length === 1 ? matches[0] : null
   }, [detail, videos])
 
+  const playableSource = useMemo(() => {
+    if (!detail) return null
+    if (detail.mediaAvailable) {
+      return {
+        url: `/api/n8n/video-library/asset?taskId=${encodeURIComponent(detail.taskId)}`,
+        label: `任务原片 · ${detail.title}`,
+      }
+    }
+    if (matchedVideo) {
+      return {
+        url: assetUrl(matchedVideo.path),
+        label: `${matchedVideo.projectName} · ${matchedVideo.name}`,
+      }
+    }
+    return null
+  }, [detail, matchedVideo])
+
+  useEffect(() => {
+    if (!detail || !pendingSeek || pendingSeek.taskId !== detail.taskId || !playerRef.current) return
+    seekVideo(playerRef.current, pendingSeek.seconds)
+    setPendingSeek(null)
+  }, [detail, pendingSeek, playableSource])
+
   const applySearch = () => {
     setOffset(0)
     setQuery(searchInput.trim())
+  }
+
+  const openSearchHit = (hit: VideoSearchHit) => {
+    setSelectedTaskId(hit.taskId)
+    setPendingSeek(hit.startSeconds === null ? null : { taskId: hit.taskId, seconds: hit.startSeconds })
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
@@ -221,9 +316,9 @@ export function VideoAnalysisResultsPanel({
       <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
         <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <h2 className="text-base font-semibold text-foreground">正式视频分析结果</h2>
+            <h2 className="text-base font-semibold text-foreground">学习内容库</h2>
             <p className="mt-1 text-xs text-muted-foreground">
-              读取任务链最终输出；历史素材识别库与正式任务结果保持分离。
+              检索标题、章节、逐段语音、画面证据和完整报告，并直接定位原片时间点。
             </p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
@@ -231,8 +326,8 @@ export function VideoAnalysisResultsPanel({
               value={searchInput}
               onChange={event => setSearchInput(event.target.value)}
               onKeyDown={event => { if (event.key === 'Enter') applySearch() }}
-              placeholder="按视频名或任务编号搜索"
-              className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/40 sm:w-64"
+              placeholder="搜索人物、地点、对白、画面或主题"
+              className="h-9 min-w-0 rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none placeholder:text-muted-foreground/60 focus:border-primary/40 sm:w-80"
             />
             <select
               value={status}
@@ -250,16 +345,30 @@ export function VideoAnalysisResultsPanel({
               <option value="failed">失败</option>
               <option value="cancelled">已取消</option>
             </select>
-            <Button size="sm" onClick={applySearch}>搜索</Button>
+            <Button size="sm" onClick={applySearch}>检索内容</Button>
             <Button variant="outline" size="sm" onClick={() => setRefreshKey(value => value + 1)}>
               刷新
             </Button>
           </div>
         </div>
+        {query && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3 text-xs text-muted-foreground">
+            <span className="rounded border border-border bg-background px-2 py-1">关键词：{query}</span>
+            {searchResult && (
+              <>
+                <span>{searchResult.videoCount} 部视频</span>
+                <span>{searchResult.segmentCount} 个可定位片段</span>
+                <span>{searchResult.total} 条内容命中</span>
+                <span>{searchResult.playableVideos} 部原片可播放</span>
+                {searchResult.truncated && <span>已显示最相关结果</span>}
+              </>
+            )}
+          </div>
+        )}
       </section>
 
       {error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           {error}
         </div>
       )}
@@ -268,19 +377,42 @@ export function VideoAnalysisResultsPanel({
         <section className="overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-3.5 py-3">
             <div>
-              <h3 className="text-sm font-semibold text-foreground">视频记录</h3>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">共 {total} 条</p>
+              <h3 className="text-sm font-semibold text-foreground">{query ? '内容命中' : '视频学习档案'}</h3>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {query ? `覆盖 ${searchResult?.videoCount || 0} 部视频` : `共 ${total} 条`}
+              </p>
             </div>
-            <span className="text-[11px] text-muted-foreground">{currentPage}/{totalPages} 页</span>
+            <span className="text-[11px] text-muted-foreground">
+              {query ? `${searchResult?.hits.length || 0}/${searchResult?.total || 0}` : `${currentPage}/${totalPages} 页`}
+            </span>
           </div>
           <div className="max-h-[760px] space-y-2 overflow-y-auto p-2.5">
-            {listLoading && results.length === 0 && (
-              <EmptyState title="正在加载" description="正在读取正式任务结果。" />
-            )}
-            {!listLoading && results.length === 0 && (
-              <EmptyState title="暂无结果" description="当前条件下没有视频分析记录。" />
-            )}
-            {results.map(item => (
+            {query ? (
+              <>
+                {searchLoading && !searchResult && (
+                  <EmptyState title="正在检索" description="正在查找章节、语音、画面和报告内容。" />
+                )}
+                {!searchLoading && searchResult?.hits.length === 0 && (
+                  <EmptyState title="没有命中内容" description="可以换一个人物、地点、动作、对白或主题关键词。" />
+                )}
+                {searchResult?.hits.map(hit => (
+                  <VideoSearchHitCard
+                    key={hit.id}
+                    hit={hit}
+                    active={hit.taskId === selectedTaskId}
+                    onOpen={() => openSearchHit(hit)}
+                  />
+                ))}
+              </>
+            ) : (
+              <>
+                {listLoading && results.length === 0 && (
+                  <EmptyState title="正在加载" description="正在读取视频学习档案。" />
+                )}
+                {!listLoading && results.length === 0 && (
+                  <EmptyState title="暂无结果" description="当前条件下没有视频学习记录。" />
+                )}
+                {results.map(item => (
               <button
                 type="button"
                 key={item.taskId}
@@ -304,9 +436,17 @@ export function VideoAnalysisResultsPanel({
                   <span>{item.timelineCount} 段证据</span>
                 </div>
               </button>
-            ))}
+                ))}
+              </>
+            )}
           </div>
           <div className="flex items-center justify-between border-t border-border p-2.5">
+            {query ? (
+              <p className="w-full text-center text-[11px] text-muted-foreground">
+                点击命中内容可打开学习档案；带时间码且原片可用时会直接定位播放。
+              </p>
+            ) : (
+              <>
             <Button
               variant="outline"
               size="sm"
@@ -323,6 +463,8 @@ export function VideoAnalysisResultsPanel({
             >
               下一页
             </Button>
+              </>
+            )}
           </div>
         </section>
 
@@ -343,6 +485,9 @@ export function VideoAnalysisResultsPanel({
                           批次第 {detail.batchIndex || '-'} 项
                         </span>
                       )}
+                      <span className="rounded border border-border bg-background px-2 py-1 text-[10px] text-muted-foreground">
+                        {playableSource ? '原片可播放' : '仅学习档案'}
+                      </span>
                     </div>
                     <h2 className="mt-2 break-words text-xl font-semibold text-foreground">{detail.title}</h2>
                     <p className="mt-1 break-all text-[11px] text-muted-foreground">任务编号：{detail.taskId}</p>
@@ -354,19 +499,25 @@ export function VideoAnalysisResultsPanel({
                 </div>
               </header>
 
-              {matchedVideo && (
+              {playableSource ? (
                 <div className="overflow-hidden rounded-lg border border-border bg-black">
                   <video
                     ref={playerRef}
-                    key={matchedVideo.path}
+                    key={`${detail.taskId}:${playableSource.url}`}
                     controls
                     preload="metadata"
                     className="aspect-video w-full bg-black object-contain"
-                    src={assetUrl(matchedVideo.path)}
+                    src={playableSource.url}
+                    onError={() => setPlayerError('原片暂时无法加载，学习内容仍可继续查看。')}
                   />
                   <div className="border-t border-white/10 bg-background px-3 py-2 text-[11px] text-muted-foreground">
-                    已唯一匹配素材：{matchedVideo.projectName} · {matchedVideo.name}
+                    {playableSource.label}
                   </div>
+                  {playerError && <div className="border-t border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">{playerError}</div>}
+                </div>
+              ) : (
+                <div className="rounded-md border border-dashed border-border bg-background/30 px-4 py-5 text-sm text-muted-foreground">
+                  原片当前不在可播放索引中；章节、时间线、语音、画面证据与完整报告仍可检索和查看。
                 </div>
               )}
 
@@ -383,9 +534,20 @@ export function VideoAnalysisResultsPanel({
                       <article key={`${chapter.index}:${chapter.startTime}`} className="rounded-md border border-border bg-background/30 p-3">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <h4 className="text-sm font-medium text-foreground">第 {chapter.index} 章</h4>
-                          <span className="text-[11px] text-muted-foreground">
-                            {chapter.startTime || '--:--'} — {chapter.endTime || '--:--'}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] text-muted-foreground">
+                              {chapter.startTime || '--:--'} — {chapter.endTime || '--:--'}
+                            </span>
+                            {playableSource && chapter.startSeconds !== null && (
+                              <button
+                                type="button"
+                                onClick={() => playerRef.current && seekVideo(playerRef.current, chapter.startSeconds!)}
+                                className="text-xs text-primary hover:underline"
+                              >
+                                播放本章
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">{chapter.summary}</p>
                       </article>
@@ -403,7 +565,7 @@ export function VideoAnalysisResultsPanel({
                           <span className="text-xs font-medium text-foreground">
                             {segment.timeRange || `片段 ${segment.index}`}
                           </span>
-                          {matchedVideo && segment.startSeconds !== null && (
+                          {playableSource && segment.startSeconds !== null && (
                             <button
                               type="button"
                               onClick={() => playerRef.current && seekVideo(playerRef.current, segment.startSeconds!)}
@@ -450,6 +612,51 @@ function StatusBadge({ status }: { status: string }) {
     <span className={`flex-none rounded border px-2 py-1 text-[10px] font-medium ${statusClass(status)}`}>
       {statusLabel(status)}
     </span>
+  )
+}
+
+function VideoSearchHitCard({
+  hit,
+  active,
+  onOpen,
+}: {
+  hit: VideoSearchHit
+  active: boolean
+  onOpen: () => void
+}) {
+  const canSeek = hit.startSeconds !== null
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      aria-label={`打开 ${hit.title} 的${hit.label}${canSeek && hit.mediaAvailable ? '并定位原片' : ''}`}
+      className={`w-full rounded-md border p-3 text-left transition-colors ${
+        active
+          ? 'border-primary/40 bg-primary/10'
+          : 'border-border bg-background/20 hover:border-primary/20 hover:bg-background/50'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <p className="min-w-0 truncate text-sm font-medium text-foreground" title={hit.title}>{hit.title}</p>
+        <StatusBadge status={hit.status} />
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+        <span className="rounded border border-border bg-card px-1.5 py-0.5">{hit.label}</span>
+        {hit.timeRange && <span>{hit.timeRange}</span>}
+        {hit.matchedFields.length > 0 && <span>命中：{hit.matchedFields.join('、')}</span>}
+      </div>
+      <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-foreground/80">
+        {hit.snippet || '打开学习档案查看完整内容。'}
+      </p>
+      <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+        <span>{formatDate(hit.completedAt)}</span>
+        <span className={canSeek && hit.mediaAvailable ? 'text-primary' : undefined}>
+          {canSeek
+            ? hit.mediaAvailable ? '定位播放' : '原片当前不可用'
+            : '查看档案'}
+        </span>
+      </div>
+    </button>
   )
 }
 

@@ -10,6 +10,7 @@ import {
   n8nTaskIdentitySchema,
   n8nTaskRunListStatusSchema,
 } from '@/lib/n8n-task-runs'
+import { getN8nVideoSource } from '@/lib/n8n-video-sources'
 
 export async function GET(request: NextRequest) {
   const auth = requireN8nRole(request, 'viewer')
@@ -26,7 +27,8 @@ export async function GET(request: NextRequest) {
       }
       const result = getN8nVideoResultDetail(db, taskId.data, scope)
       if (!result) return NextResponse.json({ error: '未找到视频分析结果' }, { status: 404 })
-      return NextResponse.json({ result }, {
+      const mediaAvailable = Boolean(await getN8nVideoSource(taskId.data))
+      return NextResponse.json({ result: { ...result, mediaAvailable } }, {
         headers: { 'Cache-Control': 'no-store' },
       })
     }

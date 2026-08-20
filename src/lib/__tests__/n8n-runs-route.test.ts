@@ -9,10 +9,12 @@ const mocks = vi.hoisted(() => ({
   listN8nVideoResults: vi.fn(),
   listN8nTaskRunSummaries: vi.fn(),
   listN8nTaskRuns: vi.fn(),
+  getN8nVideoSource: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
 vi.mock('@/lib/n8n', () => ({ requireN8nRole: mocks.requireN8nRole }))
+vi.mock('@/lib/n8n-video-sources', () => ({ getN8nVideoSource: mocks.getN8nVideoSource }))
 vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
   return {
@@ -34,6 +36,7 @@ describe('n8n task runs route', () => {
       user: { workspace_id: 2, tenant_id: 3 },
     })
     mocks.getDatabase.mockReturnValue({})
+    mocks.getN8nVideoSource.mockResolvedValue(null)
   })
 
   it('queries only the requested workspace-scoped task', async () => {
@@ -117,11 +120,12 @@ describe('n8n task runs route', () => {
     mocks.getN8nVideoResultDetail.mockReturnValue({
       taskId: 'video-1', title: 'S03E03.mp4', fullReport: '正式报告',
     })
+    mocks.getN8nVideoSource.mockResolvedValue({ taskId: 'video-1', name: 'S03E03.mp4' })
     const detailResponse = await GET(new NextRequest(
       'http://127.0.0.1:3017/api/n8n/runs?view=video-results&taskId=video-1',
     ))
     expect(await detailResponse.json()).toEqual({
-      result: { taskId: 'video-1', title: 'S03E03.mp4', fullReport: '正式报告' },
+      result: { taskId: 'video-1', title: 'S03E03.mp4', fullReport: '正式报告', mediaAvailable: true },
     })
     expect(mocks.getN8nVideoResultDetail).toHaveBeenCalledWith(
       {}, 'video-1', { workspaceId: 2, tenantId: 3 },

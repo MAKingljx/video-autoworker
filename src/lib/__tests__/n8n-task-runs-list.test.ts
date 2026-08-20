@@ -6,6 +6,7 @@ import {
   listN8nVideoResults,
   projectN8nTaskRunListItem,
   projectN8nVideoResultDetail,
+  searchN8nVideoResults,
 } from '@/lib/n8n-task-runs'
 
 describe('n8n task run list projection', () => {
@@ -85,6 +86,7 @@ describe('n8n task run list projection', () => {
       transcript: '完整转写',
       visualAnalysis: '完整画面证据',
       fullReport: '完整报告',
+      chapters: [{ startSeconds: 0, endSeconds: 300 }],
       timeline: [{ startSeconds: 0, endSeconds: 60 }],
     })
     expect(JSON.stringify(detail)).not.toContain('private prompt')
@@ -267,5 +269,32 @@ describe('listN8nTaskRunSummaries', () => {
       'legacy-task-with-a-very-long-identifier',
       { workspaceId: 2, tenantId: 3 },
     )).toBeNull()
+  })
+
+  it('searches learned content and returns exact playable time segments', () => {
+    const byVisual = searchN8nVideoResults(
+      db,
+      { workspaceId: 2, tenantId: 3 },
+      '冰川',
+      20,
+    )
+    expect(byVisual).toMatchObject({ query: '冰川', videoCount: 1, segmentCount: 1 })
+    expect(byVisual.hits[0]).toMatchObject({
+      taskId: 'batch-a:video:002:abcdef123456',
+      kind: 'timeline',
+      startSeconds: 0,
+      endSeconds: 60,
+      matchedFields: ['画面'],
+    })
+    expect(JSON.stringify(byVisual)).not.toContain('private prompt')
+    expect(JSON.stringify(byVisual)).not.toContain('/Users/operator')
+
+    const byChapter = searchN8nVideoResults(
+      db,
+      { workspaceId: 2, tenantId: 3 },
+      '开场章节',
+      20,
+    )
+    expect(byChapter.hits[0]).toMatchObject({ kind: 'chapter', startSeconds: 0, endSeconds: 300 })
   })
 })
