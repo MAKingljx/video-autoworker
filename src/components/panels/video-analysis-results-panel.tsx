@@ -91,6 +91,9 @@ interface VideoSearchResponse {
 }
 
 const PAGE_SIZE = 24
+const SEARCH_PAGE_SIZE = 16
+const SEARCH_SNIPPET_LENGTH = 280
+const SUMMARY_PREVIEW_LENGTH = 900
 
 function formatDate(value: number | null | undefined): string {
   if (!value) return '未记录'
@@ -160,6 +163,7 @@ export function VideoAnalysisResultsPanel({
   const [searchResult, setSearchResult] = useState<VideoSearchResponse | null>(null)
   const [listLoading, setListLoading] = useState(true)
   const [searchLoading, setSearchLoading] = useState(false)
+  const [visibleSearchHits, setVisibleSearchHits] = useState(SEARCH_PAGE_SIZE)
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [playerError, setPlayerError] = useState<string | null>(null)
@@ -300,6 +304,7 @@ export function VideoAnalysisResultsPanel({
 
   const applySearch = () => {
     setOffset(0)
+    setVisibleSearchHits(SEARCH_PAGE_SIZE)
     setQuery(searchInput.trim())
   }
 
@@ -383,7 +388,9 @@ export function VideoAnalysisResultsPanel({
               </p>
             </div>
             <span className="text-[11px] text-muted-foreground">
-              {query ? `${searchResult?.hits.length || 0}/${searchResult?.total || 0}` : `${currentPage}/${totalPages} 页`}
+              {query
+                ? `${Math.min(visibleSearchHits, searchResult?.hits.length || 0)}/${searchResult?.total || 0}`
+                : `${currentPage}/${totalPages} 页`}
             </span>
           </div>
           <div className="max-h-[760px] space-y-2 overflow-y-auto p-2.5">
@@ -395,7 +402,7 @@ export function VideoAnalysisResultsPanel({
                 {!searchLoading && searchResult?.hits.length === 0 && (
                   <EmptyState title="没有命中内容" description="可以换一个人物、地点、动作、对白或主题关键词。" />
                 )}
-                {searchResult?.hits.map(hit => (
+                {searchResult?.hits.slice(0, visibleSearchHits).map(hit => (
                   <VideoSearchHitCard
                     key={hit.id}
                     hit={hit}
@@ -417,6 +424,7 @@ export function VideoAnalysisResultsPanel({
                 type="button"
                 key={item.taskId}
                 onClick={() => setSelectedTaskId(item.taskId)}
+                aria-label={`打开 ${item.title} 的学习档案`}
                 className={`w-full rounded-md border p-3 text-left transition-colors ${
                   item.taskId === selectedTaskId
                     ? 'border-primary/40 bg-primary/10'
@@ -442,9 +450,27 @@ export function VideoAnalysisResultsPanel({
           </div>
           <div className="flex items-center justify-between border-t border-border p-2.5">
             {query ? (
-              <p className="w-full text-center text-[11px] text-muted-foreground">
-                点击命中内容可打开学习档案；带时间码且原片可用时会直接定位播放。
-              </p>
+              <div className="flex w-full flex-col items-center gap-2">
+                <p className="text-center text-[11px] text-muted-foreground">
+                  点击命中内容可打开学习档案；带时间码且原片可用时会直接定位播放。
+                </p>
+                <div className="flex items-center gap-2">
+                  {visibleSearchHits > SEARCH_PAGE_SIZE && (
+                    <Button variant="outline" size="sm" onClick={() => setVisibleSearchHits(SEARCH_PAGE_SIZE)}>
+                      收起结果
+                    </Button>
+                  )}
+                  {Boolean(searchResult && visibleSearchHits < searchResult.hits.length) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setVisibleSearchHits(value => value + SEARCH_PAGE_SIZE)}
+                    >
+                      显示更多
+                    </Button>
+                  )}
+                </div>
+              </div>
             ) : (
               <>
             <Button
@@ -522,12 +548,20 @@ export function VideoAnalysisResultsPanel({
               )}
 
               <ResultSection title="分析摘要" count={detail.summary ? 1 : 0}>
-                <p className="whitespace-pre-wrap text-sm leading-7 text-foreground/90">
-                  {detail.summary || '该任务尚未生成摘要。'}
-                </p>
+                <ExpandableText
+                  key={`${detail.taskId}:summary`}
+                  text={detail.summary}
+                  emptyText="该任务尚未生成摘要。"
+                  previewLength={SUMMARY_PREVIEW_LENGTH}
+                />
               </ResultSection>
 
-              <ResultSection title="章节结构" count={detail.chapters.length}>
+              <DeferredResultSection
+                key={`${detail.taskId}:chapters`}
+                title="章节结构"
+                count={detail.chapters.length}
+                description="按章节查看叙事结构和对应原片时间段"
+              >
                 {detail.chapters.length ? (
                   <div className="space-y-2.5">
                     {detail.chapters.map(chapter => (
@@ -556,9 +590,14 @@ export function VideoAnalysisResultsPanel({
                     ))}
                   </div>
                 ) : <InlineEmpty text="没有结构化章节。" />}
-              </ResultSection>
+              </DeferredResultSection>
 
-              <ResultSection title="逐段时间线与音画证据" count={detail.timeline.length}>
+              <DeferredResultSection
+                key={`${detail.taskId}:timeline`}
+                title="逐段时间线与音画证据"
+                count={detail.timeline.length}
+                description="展开后查看逐段语音、画面证据并定位原片"
+              >
                 {detail.timeline.length ? (
                   <div className="space-y-2.5">
                     {detail.timeline.map(segment => (
@@ -585,22 +624,32 @@ export function VideoAnalysisResultsPanel({
                     ))}
                   </div>
                 ) : <InlineEmpty text="没有逐段时间线。" />}
-              </ResultSection>
+              </DeferredResultSection>
 
-              <ResultSection title="完整音画材料" count={Number(Boolean(detail.transcript)) + Number(Boolean(detail.visualAnalysis))}>
+              <DeferredResultSection
+                key={`${detail.taskId}:evidence`}
+                title="完整音画材料"
+                count={Number(Boolean(detail.transcript)) + Number(Boolean(detail.visualAnalysis))}
+                description="按需读取完整语音转写和画面分析"
+              >
                 <div className="grid gap-3 lg:grid-cols-2">
                   <LongEvidence title="完整语音转写" text={detail.transcript} />
                   <LongEvidence title="完整画面分析" text={detail.visualAnalysis} />
                 </div>
-              </ResultSection>
+              </DeferredResultSection>
 
-              <ResultSection title="完整分析报告" count={detail.fullReport ? 1 : 0}>
+              <DeferredResultSection
+                key={`${detail.taskId}:report`}
+                title="完整分析报告"
+                count={detail.fullReport ? 1 : 0}
+                description="按需展开模型生成的正式分析报告"
+              >
                 {detail.fullReport ? (
                   <pre className="max-h-[640px] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-background/40 p-3 font-sans text-sm leading-7 text-foreground/90">
                     {detail.fullReport}
                   </pre>
                 ) : <InlineEmpty text="没有可读取的完整报告。" />}
-              </ResultSection>
+              </DeferredResultSection>
             </div>
           )}
         </section>
@@ -648,7 +697,11 @@ function VideoSearchHitCard({
         {hit.matchedFields.length > 0 && <span>命中：{hit.matchedFields.join('、')}</span>}
       </div>
       <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-xs leading-5 text-foreground/80">
-        {hit.snippet || '打开学习档案查看完整内容。'}
+        {hit.snippet
+          ? hit.snippet.length > SEARCH_SNIPPET_LENGTH
+            ? `${hit.snippet.slice(0, SEARCH_SNIPPET_LENGTH).trimEnd()}…`
+            : hit.snippet
+          : '打开学习档案查看完整内容。'}
       </p>
       <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
         <span>{formatDate(hit.completedAt)}</span>
@@ -681,6 +734,72 @@ function ResultSection({
       </div>
       {children}
     </section>
+  )
+}
+
+function DeferredResultSection({
+  title,
+  count,
+  description,
+  children,
+}: {
+  title: string
+  count: number
+  description: string
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <section className="rounded-lg border border-border bg-background/20">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(value => !value)}
+        className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left hover:bg-background/40"
+      >
+        <span className="min-w-0">
+          <span className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-foreground">{title}</span>
+            <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              {count}
+            </span>
+          </span>
+          <span className="mt-1 block text-[11px] text-muted-foreground">{description}</span>
+        </span>
+        <span className="flex-none text-xs font-medium text-primary">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && <div className="border-t border-border p-3.5">{children}</div>}
+    </section>
+  )
+}
+
+function ExpandableText({
+  text,
+  emptyText,
+  previewLength,
+}: {
+  text: string | null
+  emptyText: string
+  previewLength: number
+}) {
+  const [expanded, setExpanded] = useState(false)
+  if (!text) return <p className="text-sm leading-7 text-muted-foreground">{emptyText}</p>
+  const truncated = text.length > previewLength
+  const visibleText = truncated && !expanded ? `${text.slice(0, previewLength).trimEnd()}…` : text
+  return (
+    <div>
+      <p className="whitespace-pre-wrap text-sm leading-7 text-foreground/90">{visibleText}</p>
+      {truncated && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={() => setExpanded(value => !value)}
+          className="mt-2 text-xs font-medium text-primary hover:underline"
+        >
+          {expanded ? '收起摘要' : '展开完整摘要'}
+        </button>
+      )}
+    </div>
   )
 }
 
