@@ -146,6 +146,7 @@ function seekVideo(video: HTMLVideoElement, seconds: number) {
   if (video.readyState >= 1) apply()
   else {
     video.addEventListener('loadedmetadata', apply, { once: true })
+    video.preload = 'metadata'
     video.load()
   }
 }
