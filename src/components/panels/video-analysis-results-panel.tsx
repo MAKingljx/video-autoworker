@@ -545,17 +545,8 @@ export function VideoAnalysisResultsPanel({
 
               {playableSource ? (
                 <div className="overflow-hidden rounded-lg border border-border bg-black">
-                  <video
-                    ref={playerRef}
-                    key={`${detail.taskId}:${playableSource.url}`}
-                    controls
-                    preload="none"
-                    className="aspect-video w-full bg-black object-contain"
-                    src={playableSource.url}
-                    onError={() => setPlayerError('原片暂时无法加载，学习内容仍可继续查看。')}
-                  />
                   {pendingSeek?.taskId === detail.taskId && (
-                    <div className="flex flex-col gap-2 border-t border-primary/20 bg-primary/10 px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex flex-col gap-2 border-b border-primary/20 bg-primary/10 px-3 py-2.5 text-xs sm:flex-row sm:items-center sm:justify-between">
                       <span className="text-foreground/80">
                         已定位命中片段 {formatClock(pendingSeek.seconds)}，确认后再读取原片。
                       </span>
@@ -568,6 +559,15 @@ export function VideoAnalysisResultsPanel({
                       </button>
                     </div>
                   )}
+                  <video
+                    ref={playerRef}
+                    key={`${detail.taskId}:${playableSource.url}`}
+                    controls
+                    preload="none"
+                    className="aspect-video w-full bg-black object-contain"
+                    src={playableSource.url}
+                    onError={() => setPlayerError('原片暂时无法加载，学习内容仍可继续查看。')}
+                  />
                   <div className="border-t border-white/10 bg-background px-3 py-2 text-[11px] text-muted-foreground">
                     {playableSource.label}
                   </div>
