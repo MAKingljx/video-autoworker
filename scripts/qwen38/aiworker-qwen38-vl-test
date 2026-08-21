@@ -17,6 +17,8 @@ print(json.dumps({
     {"type": "text", "text": "这张图片的主体颜色是什么？只回答颜色。"},
     {"type": "image_url", "image_url": {"url": image}},
   ]}],
+  "enable_thinking": False,
+  "aiworker_stage": "vision",
   "max_tokens": 64,
 }, ensure_ascii=False))
 PY
@@ -31,5 +33,14 @@ value = json.loads(sys.argv[1])
 answer = value.get("choices", [{}])[0].get("message", {}).get("content", "")
 if not isinstance(answer, str) or not answer.strip():
     raise SystemExit("empty visual answer")
-print(json.dumps({"ok": True, "answer": answer.strip(), "model": value.get("model"), "usage": value.get("usage")}, ensure_ascii=False))
+metrics = value.get("aiworker_metrics") or {}
+if metrics.get("reasoning_effort") != "off" or metrics.get("thinking_enabled") is not False:
+    raise SystemExit("visual runtime did not honor enable_thinking=false")
+print(json.dumps({
+  "ok": True,
+  "answer": answer.strip(),
+  "model": value.get("model"),
+  "usage": value.get("usage"),
+  "metrics": metrics,
+}, ensure_ascii=False))
 PY

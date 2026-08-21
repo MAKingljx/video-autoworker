@@ -42,6 +42,9 @@ MAX_NEW_TOKENS = int(os.environ.get("QWEN38_VL_MAX_NEW_TOKENS_HARD", "4096"))
 MAX_IMAGES = int(os.environ.get("QWEN38_VL_MAX_IMAGES", "8"))
 MAX_VIDEO_BYTES = int(os.environ.get("QWEN38_VL_MAX_VIDEO_BYTES", str(1024 * 1024 * 1024)))
 REQUEST_TIMEOUT_SECONDS = int(os.environ.get("QWEN38_VL_REQUEST_TIMEOUT_SECONDS", "900"))
+DEFAULT_REASONING_EFFORT = os.environ.get("QWEN38_VL_DEFAULT_REASONING_EFFORT", "xhigh").strip().lower()
+REASONING_EFFORTS = {"low", "medium", "xhigh"}
+AIWORKER_STAGES = {"vision", "chapter", "final"}
 
 
 class RuntimeState:
@@ -58,6 +61,38 @@ STATE = RuntimeState()
 
 def _safe_error(error: BaseException) -> str:
     return f"{type(error).__name__}: {str(error)[:800]}"
+
+
+def _boolean_value(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalised = str(value).strip().lower()
+    if normalised in {"1", "true", "yes", "on"}:
+        return True
+    if normalised in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError("enable_thinking 必须是布尔值")
+
+
+def _reasoning_settings(payload: dict[str, Any]) -> tuple[bool, str | None]:
+    raw_effort = str(payload.get("reasoning_effort", DEFAULT_REASONING_EFFORT)).strip().lower()
+    if raw_effort in {"off", "none", "disabled"}:
+        return False, None
+    # OpenAI-compatible clients commonly use high; this model template calls
+    # its highest supported level xhigh.
+    if raw_effort == "high":
+        raw_effort = "xhigh"
+    if raw_effort not in REASONING_EFFORTS:
+        raise ValueError("reasoning_effort 必须是 off、low、medium、high 或 xhigh")
+    enabled = _boolean_value(payload.get("enable_thinking"), True)
+    return (enabled, raw_effort if enabled else None)
+
+
+def _aiworker_stage(payload: dict[str, Any]) -> str:
+    stage = str(payload.get("aiworker_stage", "other")).strip().lower()
+    return stage if stage in AIWORKER_STAGES else "other"
 
 
 def _load_runtime() -> None:
@@ -219,7 +254,7 @@ def _move_to_device(value: Any, device: str) -> Any:
     return value.to(device) if hasattr(value, "to") else value
 
 
-def _answer_from_request(payload: dict[str, Any]) -> tuple[str, dict[str, int]]:
+def _answer_from_request(payload: dict[str, Any]) -> tuple[str, dict[str, int], dict[str, Any]]:
     processor, model = _require_runtime()
     messages, images, videos, temporary_files = _normalise_messages(payload.get("messages"))
     try:
@@ -235,7 +270,16 @@ def _answer_from_request(payload: dict[str, Any]) -> tuple[str, dict[str, int]]:
             else:
                 last["content"] = "请描述当前图片或视频画面。"
 
-        prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        thinking_enabled, reasoning_effort = _reasoning_settings(payload)
+        template_options: dict[str, Any] = {"enable_thinking": thinking_enabled}
+        if reasoning_effort:
+            template_options["reasoning_effort"] = reasoning_effort
+        prompt = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            **template_options,
+        )
         inputs = processor(
             text=[prompt],
             images=images or None,
@@ -262,11 +306,17 @@ def _answer_from_request(payload: dict[str, Any]) -> tuple[str, dict[str, int]]:
             raise RuntimeError("视觉模型返回空内容")
         prompt_count = int(inputs["input_ids"].numel())
         completion_count = int(generated.numel())
-        return answer, {
+        usage = {
             "prompt_tokens": prompt_count,
             "completion_tokens": completion_count,
             "total_tokens": prompt_count + completion_count,
         }
+        generation = {
+            "thinking_enabled": thinking_enabled,
+            "reasoning_effort": reasoning_effort or "off",
+            "max_new_tokens": max_new_tokens,
+        }
+        return answer, usage, generation
     finally:
         for path in temporary_files:
             try:
@@ -298,6 +348,8 @@ async def health() -> dict[str, Any]:
         "device": DEVICE,
         "vision": True,
         "video": True,
+        "reasoningEfforts": ["off", "low", "medium", "xhigh"],
+        "defaultReasoningEffort": DEFAULT_REASONING_EFFORT,
         "loadedAt": STATE.loaded_at,
         "loadError": STATE.load_error,
     }
@@ -327,10 +379,14 @@ async def chat_completions(request: Request) -> JSONResponse:
     request_model = str(payload.get("model", MODEL_ID)).strip()
     if request_model and request_model != MODEL_ID and request_model != "default_model":
         raise HTTPException(status_code=400, detail=f"不支持的模型：{request_model}")
+    stage = _aiworker_stage(payload)
     try:
         async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
             async with STATE.request_lock:
-                answer, usage = await asyncio.to_thread(_answer_from_request, payload)
+                queue_wait_ms = round((time.time() - started) * 1_000)
+                inference_started = time.time()
+                answer, usage, generation = await asyncio.to_thread(_answer_from_request, payload)
+                inference_ms = round((time.time() - inference_started) * 1_000)
     except asyncio.TimeoutError as error:
         raise HTTPException(status_code=504, detail="视觉模型请求超时") from error
     except HTTPException:
@@ -340,6 +396,18 @@ async def chat_completions(request: Request) -> JSONResponse:
     except Exception as error:  # noqa: BLE001 - return bounded diagnostic detail
         LOG.exception("visual completion failed")
         raise HTTPException(status_code=502, detail=_safe_error(error)) from error
+
+    LOG.info(
+        "visual completion stage=%s thinking=%s max_new_tokens=%s queue_wait_ms=%s "
+        "inference_ms=%s prompt_tokens=%s completion_tokens=%s",
+        stage,
+        generation["reasoning_effort"],
+        generation["max_new_tokens"],
+        queue_wait_ms,
+        inference_ms,
+        usage["prompt_tokens"],
+        usage["completion_tokens"],
+    )
 
     response_body = {
         "id": f"chatcmpl-qwen38-vl-{uuid.uuid4().hex}",
@@ -352,6 +420,12 @@ async def chat_completions(request: Request) -> JSONResponse:
             "finish_reason": "stop",
         }],
         "usage": usage,
+        "aiworker_metrics": {
+            "stage": stage,
+            **generation,
+            "queue_wait_ms": queue_wait_ms,
+            "inference_ms": inference_ms,
+        },
         "system_fingerprint": f"qwen38-vl-{int(started)}",
     }
     if not payload.get("stream"):

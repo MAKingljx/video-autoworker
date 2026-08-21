@@ -48,20 +48,37 @@ doctor → 启动 → 直接视觉测试 → OpenClaw provider 校验 → n8n bi
 6. 用一段真实视频走 `prepare -> Whisper audio / Qwen3.8 vision -> finalize`；父任务与四个阶段均成功，输出非空且 `memoryMode=none`。
 7. 视频链路验收前，3017 的 `/api/n8n/workflows` 必须是 HTTP 200；若返回 `Authentication required`，先检查 standalone 是否绑定 `127.0.0.1` 并加载仓库 `.env.local`，不得重提视频任务。
 
-## 汇总超时保护
+## 分阶段推理与超时保护
 
-Qwen3.8 视觉服务会把 `<think>...</think>` 与最终答案一起返回。视频片段 checkpoint
-只保存 `</think>` 之后的可见答案，章节和整片汇总也使用独立的有界 `max_tokens`（默认
-`1024`，上限 `2048`）以及最多 `600` 秒的请求窗口。这样最终汇总不会因为把内部推理
-全文再次送回模型而超过 n8n 的回调窗口；章节 checkpoint 和 `final-summary.json` 仍
-支持同一 task ID 失败后恢复，不会重新执行已经成功的音频/视觉阶段。
+原始模型模板在未收到参数时会默认开启 `xhigh` 思考。视频链路不能沿用这个默认值：一部
+37 分钟视频会产生 37 次逐分钟画面请求、8 次章节请求和 1 次全片请求，逐次深度思考会把
+同一层级的成本重复 46 次。生产默认按职责分层：画面事实提取使用 `off`，章节音画校验使用
+`low`，全片报告使用 `medium`。最终报告仍保留一次完整推理，逐分钟证据不消耗私有推理。
 
-可按节点性能在运行环境中调整，但不应把上限扩大到无界：
+每个请求显式发送 `enable_thinking`、`reasoning_effort` 和不含任务标识的 `aiworker_stage`。
+视觉运行时只记录阶段、排队毫秒数、推理毫秒数和 token 数，不记录提示词、图片、路径或结果
+正文。片段 checkpoint 仍只保存 `</think>` 之后的可见答案；章节 checkpoint 和
+`final-summary.json` 继续支持同一 task ID 恢复。
+
+默认生成预算为逐分钟画面 `1536`、章节 `1024`、全片 `1536` tokens；每项均限制在
+`256..4096`，请求窗口最多 `600` 秒。旧的 `AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS` 继续作为
+章节和全片预算的兼容回退。可按真实质量与耗时基准调整：
 
 ```sh
-export AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS=1024
+export AIWORKER_VIDEO_VISION_REASONING_EFFORT=off
+export AIWORKER_VIDEO_CHAPTER_REASONING_EFFORT=low
+export AIWORKER_VIDEO_FINAL_REASONING_EFFORT=medium
+export AIWORKER_VIDEO_VISION_MAX_TOKENS=1536
+export AIWORKER_VIDEO_CHAPTER_MAX_TOKENS=1024
+export AIWORKER_VIDEO_FINAL_MAX_TOKENS=1536
 export AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS=600
 ```
+
+当前原始 27B 稠密 BF16 权重由 Transformers + MPS 执行。模型 64 层中 48 层为线性注意力，
+Apple 节点没有 CUDA `flash-linear-attention` / `causal-conv1d` 快速核，因此会退回 PyTorch
+实现；这决定了它即使关闭思考也不会达到 Qwen3.6 的 llama.cpp Metal 吞吐。若仍需更大幅度
+提速，应单独验证支持完整视觉塔的 Apple 原生运行时，不能用缺失视觉塔的 18092 MLX 文本
+转换产物替换生产视觉服务。
 
 ## 回滚
 

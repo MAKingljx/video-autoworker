@@ -37,6 +37,14 @@ const mediaConfigSchema = z.object({
 })
 
 export type N8nMediaStage = 'prepare' | 'audio' | 'vision' | 'finalize'
+export type N8nVideoModelPhase = 'vision' | 'chapter' | 'final'
+export type N8nVideoReasoningEffort = 'off' | 'low' | 'medium' | 'xhigh'
+
+export interface N8nVideoGenerationProfile {
+  phase: N8nVideoModelPhase
+  reasoningEffort: N8nVideoReasoningEffort
+  maxTokens: number
+}
 
 export interface PreparedMedia extends Record<string, unknown> {
   kind: 'prepared-video'
@@ -97,6 +105,68 @@ function boundedIntegerEnv(name: string, fallback: number, minimum: number, maxi
   const parsed = Number(process.env[name])
   if (!Number.isFinite(parsed)) return fallback
   return Math.min(maximum, Math.max(minimum, Math.trunc(parsed)))
+}
+
+const VIDEO_GENERATION_DEFAULTS: Record<N8nVideoModelPhase, {
+  reasoningEffort: N8nVideoReasoningEffort
+  maxTokens: number
+}> = {
+  // Per-minute visual extraction is factual perception, not final editorial
+  // reasoning. Skipping private reasoning preserves the visible evidence while
+  // avoiding dozens of dense-model reasoning passes for one video.
+  vision: { reasoningEffort: 'off', maxTokens: 1_536 },
+  // Chapter summaries reconcile five minutes of audio and visual evidence.
+  chapter: { reasoningEffort: 'low', maxTokens: 1_024 },
+  // The whole-video report keeps one deliberate reasoning pass for quality.
+  final: { reasoningEffort: 'medium', maxTokens: 1_536 },
+}
+
+const VIDEO_REASONING_ENV: Record<N8nVideoModelPhase, string> = {
+  vision: 'AIWORKER_VIDEO_VISION_REASONING_EFFORT',
+  chapter: 'AIWORKER_VIDEO_CHAPTER_REASONING_EFFORT',
+  final: 'AIWORKER_VIDEO_FINAL_REASONING_EFFORT',
+}
+
+const VIDEO_MAX_TOKENS_ENV: Record<N8nVideoModelPhase, string> = {
+  vision: 'AIWORKER_VIDEO_VISION_MAX_TOKENS',
+  chapter: 'AIWORKER_VIDEO_CHAPTER_MAX_TOKENS',
+  final: 'AIWORKER_VIDEO_FINAL_MAX_TOKENS',
+}
+
+export function videoModelGenerationProfile(
+  phase: N8nVideoModelPhase,
+  environment: Record<string, string | undefined> = process.env,
+): N8nVideoGenerationProfile {
+  const defaults = VIDEO_GENERATION_DEFAULTS[phase]
+  const configuredReasoning = String(environment[VIDEO_REASONING_ENV[phase]] || defaults.reasoningEffort)
+    .trim()
+    .toLowerCase()
+  if (!['off', 'low', 'medium', 'xhigh'].includes(configuredReasoning)) {
+    throw new Error(`${VIDEO_REASONING_ENV[phase]} 必须是 off、low、medium 或 xhigh`)
+  }
+
+  const legacySynthesisTokens = phase === 'vision'
+    ? undefined
+    : environment.AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS
+  const configuredTokens = Number(
+    environment[VIDEO_MAX_TOKENS_ENV[phase]] || legacySynthesisTokens || defaults.maxTokens,
+  )
+  const maxTokens = Number.isFinite(configuredTokens)
+    ? Math.min(4_096, Math.max(256, Math.trunc(configuredTokens)))
+    : defaults.maxTokens
+
+  return {
+    phase,
+    reasoningEffort: configuredReasoning as N8nVideoReasoningEffort,
+    maxTokens,
+  }
+}
+
+export function compatibleReasoningPayload(
+  reasoningEffort: N8nVideoReasoningEffort,
+): { enable_thinking: boolean; reasoning_effort?: Exclude<N8nVideoReasoningEffort, 'off'> } {
+  if (reasoningEffort === 'off') return { enable_thinking: false }
+  return { enable_thinking: true, reasoning_effort: reasoningEffort }
 }
 
 export function mediaInboxRoot(): string {
@@ -522,7 +592,12 @@ async function callCompatibleModel(
   apiKey: string,
   content: unknown,
   failurePrefix: string,
-  options: { maxTokens?: number; timeoutSeconds?: number } = {},
+  options: {
+    maxTokens?: number
+    timeoutSeconds?: number
+    reasoningEffort?: N8nVideoReasoningEffort
+    phase?: N8nVideoModelPhase
+  } = {},
 ): Promise<any> {
   const maxTokens = options.maxTokens ?? route.maxTokens
   const timeoutSeconds = options.timeoutSeconds ?? route.timeoutSeconds
@@ -540,6 +615,10 @@ async function callCompatibleModel(
       ],
       ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
       ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+      ...(options.reasoningEffort === undefined
+        ? {}
+        : compatibleReasoningPayload(options.reasoningEffort)),
+      ...(options.phase === undefined ? {} : { aiworker_stage: options.phase }),
     }),
     signal: AbortSignal.timeout(timeoutSeconds * 1_000),
   })
@@ -582,6 +661,7 @@ export async function analyzeN8nVideoFrames(
   const route = assertVisionRoute(resolved.route)
   const workspace = mediaTaskWorkspace(taskId)
   const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
+  const generation = videoModelGenerationProfile('vision')
   const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
   if (route.apiKeyEnv && !apiKey) throw new Error(`视频画面路由缺少外部凭据引用 ${route.apiKeyEnv}`)
   const segments: Record<string, unknown>[] = []
@@ -611,7 +691,11 @@ export async function analyzeN8nVideoFrames(
         },
         ...images.map(url => ({ type: 'image_url', image_url: { url } })),
       ]
-      const parsed = await callCompatibleModel(route, apiKey, content, '视频画面模型调用失败')
+      const parsed = await callCompatibleModel(route, apiKey, content, '视频画面模型调用失败', {
+        maxTokens: generation.maxTokens,
+        reasoningEffort: generation.reasoningEffort,
+        phase: generation.phase,
+      })
       const analysis = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
       if (!analysis) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
       segmentResult = {
@@ -639,6 +723,10 @@ export async function analyzeN8nVideoFrames(
     model: route.model,
     location: route.location,
     transport: route.transport,
+    generation: {
+      reasoningEffort: generation.reasoningEffort,
+      maxTokens: generation.maxTokens,
+    },
     memoryMode: 'none',
   }
 }
@@ -712,7 +800,8 @@ export async function synthesizeN8nMediaResults(
   // Final synthesis is text-only but still runs through the local multimodal
   // runtime. Keep the output bounded so a reasoning-heavy Qwen response cannot
   // hold the n8n callback open until its HTTP retry window expires.
-  const synthesisMaxTokens = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS', 1_024, 256, 2_048)
+  const chapterGeneration = videoModelGenerationProfile('chapter')
+  const finalGeneration = videoModelGenerationProfile('final')
   const synthesisTimeoutSeconds = boundedIntegerEnv(
     'AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS',
     route.timeoutSeconds,
@@ -739,8 +828,10 @@ export async function synthesizeN8nMediaResults(
         '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。只输出最终章节，不要输出思考过程。',
         source,
       ].join('\n\n'), `第 ${chapterIndex} 章汇总失败`, {
-        maxTokens: synthesisMaxTokens,
+        maxTokens: chapterGeneration.maxTokens,
         timeoutSeconds: synthesisTimeoutSeconds,
+        reasoningEffort: chapterGeneration.reasoningEffort,
+        phase: chapterGeneration.phase,
       })
       const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
       if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
@@ -763,8 +854,10 @@ export async function synthesizeN8nMediaResults(
       '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。只输出最终报告，不要输出思考过程。',
       chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${visibleModelAnswer(chapter.summary).slice(0, 8_000)}`).join('\n\n'),
     ].join('\n\n'), '全片汇总失败', {
-      maxTokens: synthesisMaxTokens,
+      maxTokens: finalGeneration.maxTokens,
       timeoutSeconds: synthesisTimeoutSeconds,
+      reasoningEffort: finalGeneration.reasoningEffort,
+      phase: finalGeneration.phase,
     })
     const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
     if (!summary) throw new Error('全片汇总返回空结果')
@@ -775,6 +868,16 @@ export async function synthesizeN8nMediaResults(
     ...merged,
     chapters,
     summary: finalSummary.summary,
+    generation: {
+      chapter: {
+        reasoningEffort: chapterGeneration.reasoningEffort,
+        maxTokens: chapterGeneration.maxTokens,
+      },
+      final: {
+        reasoningEffort: finalGeneration.reasoningEffort,
+        maxTokens: finalGeneration.maxTokens,
+      },
+    },
     combinedText: `${String(finalSummary.summary)}\n\n【逐分钟证据】\n${String(merged.combinedText || '')}`,
   }
 }

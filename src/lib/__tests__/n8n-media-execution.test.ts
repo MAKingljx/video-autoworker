@@ -5,9 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   buildMediaSegmentWindows,
   cleanupN8nMediaTask,
+  compatibleReasoningPayload,
   mediaChildIdentity,
   mediaTaskWorkspace,
   mergeN8nMediaResults,
+  videoModelGenerationProfile,
   visibleModelAnswer,
 } from '@/lib/n8n-media-execution'
 
@@ -76,6 +78,35 @@ describe('n8n stateless media helpers', () => {
     expect(visibleModelAnswer('<think>internal reasoning</think>最终画面结论')).toBe('最终画面结论')
     expect(visibleModelAnswer('没有思考标记的结果')).toBe('没有思考标记的结果')
     expect(visibleModelAnswer('')).toBe('')
+  })
+
+  it('uses stage-specific Qwen reasoning without spending deep reasoning on every frame', () => {
+    expect(videoModelGenerationProfile('vision', {})).toEqual({
+      phase: 'vision', reasoningEffort: 'off', maxTokens: 1_536,
+    })
+    expect(videoModelGenerationProfile('chapter', {})).toEqual({
+      phase: 'chapter', reasoningEffort: 'low', maxTokens: 1_024,
+    })
+    expect(videoModelGenerationProfile('final', {})).toEqual({
+      phase: 'final', reasoningEffort: 'medium', maxTokens: 1_536,
+    })
+    expect(compatibleReasoningPayload('off')).toEqual({ enable_thinking: false })
+    expect(compatibleReasoningPayload('medium')).toEqual({
+      enable_thinking: true, reasoning_effort: 'medium',
+    })
+  })
+
+  it('accepts bounded stage overrides and the legacy synthesis token setting', () => {
+    expect(videoModelGenerationProfile('vision', {
+      AIWORKER_VIDEO_VISION_REASONING_EFFORT: 'low',
+      AIWORKER_VIDEO_VISION_MAX_TOKENS: '99999',
+    })).toEqual({ phase: 'vision', reasoningEffort: 'low', maxTokens: 4_096 })
+    expect(videoModelGenerationProfile('chapter', {
+      AIWORKER_VIDEO_SYNTHESIS_MAX_TOKENS: '640',
+    })).toEqual({ phase: 'chapter', reasoningEffort: 'low', maxTokens: 640 })
+    expect(() => videoModelGenerationProfile('final', {
+      AIWORKER_VIDEO_FINAL_REASONING_EFFORT: 'adaptive',
+    })).toThrow('AIWORKER_VIDEO_FINAL_REASONING_EFFORT')
   })
 
   it('cleans only the exact finalized task workspace', async () => {
