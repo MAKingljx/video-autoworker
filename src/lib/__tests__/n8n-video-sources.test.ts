@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   getN8nVideoSource,
+  listN8nVideoQueueItems,
   listN8nVideoSources,
   resetN8nVideoSourceCacheForTests,
 } from '@/lib/n8n-video-sources'
@@ -76,5 +77,50 @@ describe('n8n video source index', () => {
     }))
 
     expect(await getN8nVideoSource('same-task')).toBeNull()
+  })
+
+  it('lists only non-terminal durable queue items without exposing source paths', async () => {
+    const { states, media } = await fixture()
+    const queuedVideo = join(media, 'queued.mp4')
+    await writeFile(queuedVideo, 'queued-video')
+    await writeFile(join(states, 'queue.json'), JSON.stringify({
+      batchId: 'batch-queue',
+      bindingId: 2,
+      status: 'running',
+      createdAt: '2026-08-20T00:00:00.000Z',
+      updatedAt: '2026-08-20T00:01:00.000Z',
+      items: [
+        {
+          index: 1,
+          taskId: 'batch-queue:video:001:abcdef123456',
+          name: 'queued.mp4',
+          sourcePath: queuedVideo,
+          sourceBytes: 12,
+          status: 'queued',
+          error: null,
+        },
+        {
+          index: 2,
+          taskId: 'batch-queue:video:002:abcdef123456',
+          name: 'done.mp4',
+          sourcePath: join(media, 'done.mp4'),
+          sourceBytes: 10,
+          status: 'succeeded',
+        },
+      ],
+    }))
+
+    const queue = await listN8nVideoQueueItems()
+    expect(queue).toEqual([expect.objectContaining({
+      taskId: 'batch-queue:video:001:abcdef123456',
+      name: 'queued.mp4',
+      status: 'queued',
+      batchId: 'batch-queue',
+      batchIndex: 1,
+      bindingId: 2,
+      sourceAvailable: true,
+      queuePosition: 1,
+    })])
+    expect(JSON.stringify(queue)).not.toContain(media)
   })
 })

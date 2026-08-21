@@ -11,6 +11,7 @@ import {
   n8nTaskRunListStatusSchema,
 } from '@/lib/n8n-task-runs'
 import { getN8nVideoSource } from '@/lib/n8n-video-sources'
+import { listN8nTaskQueue } from '@/lib/n8n-task-queue'
 
 export async function GET(request: NextRequest) {
   const auth = requireN8nRole(request, 'viewer')
@@ -19,6 +20,11 @@ export async function GET(request: NextRequest) {
   const db = getDatabase()
   const rawTaskId = request.nextUrl.searchParams.get('taskId')
   const view = request.nextUrl.searchParams.get('view')
+  if (view === 'queue') {
+    return NextResponse.json(await listN8nTaskQueue(db, scope), {
+      headers: { 'Cache-Control': 'no-store' },
+    })
+  }
   if (view === 'video-results') {
     if (rawTaskId !== null) {
       const taskId = n8nTaskIdentitySchema.safeParse(rawTaskId)

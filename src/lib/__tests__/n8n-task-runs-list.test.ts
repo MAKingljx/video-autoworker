@@ -1,7 +1,9 @@
+import { createHash } from 'node:crypto'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   getN8nVideoResultDetail,
+  listN8nActiveTaskRunSummaries,
   listN8nTaskRunSummaries,
   listN8nVideoResults,
   projectN8nTaskRunListItem,
@@ -243,6 +245,15 @@ describe('listN8nTaskRunSummaries', () => {
       'internal-node', 1, 'succeeded', 'n8n-node', '{}', '{}', '{}', null,
       1, 1, 2, 3, 120, 121, 122, 123, 170,
     )
+    const mediaDigest = createHash('sha256')
+      .update('batch-a:video:002:abcdef123456:prepare')
+      .digest('hex')
+      .slice(0, 24)
+    insert.run(
+      `media-task:batch-a:video:002:abcdef123456:prepare:${mediaDigest}`,
+      1, 'succeeded', 'n8n-media-node', '{}', '{}', '{}', null,
+      1, 2, 2, 3, 103, 103, 104, 110, 110,
+    )
     insert.run(
       'other-workspace', 1, 'succeeded', 'openclaw', '{}', '{}', '{}', null,
       1, 1, 99, 3, 120, 121, 122, 123, 180,
@@ -270,6 +281,7 @@ describe('listN8nTaskRunSummaries', () => {
       resultAvailable: true,
       batchId: 'batch-a',
       batchIndex: 2,
+      processingStartedAt: 104,
     })
     expect(result.runs[1].title).toContain('历史任务链')
     expect(result.runs[1].error).toBe('文件 [路径] 处理失败')
@@ -300,6 +312,26 @@ describe('listN8nTaskRunSummaries', () => {
     )
     expect(secondPage.total).toBe(2)
     expect(secondPage.runs[0].taskId).toBe('legacy-task-with-a-very-long-identifier')
+  })
+
+  it('returns every active top-level task without a silent queue limit', () => {
+    const insert = db.prepare(`
+      INSERT INTO n8n_task_runs (
+        task_id, binding_id, status, source, routing, input, output, error,
+        attempt_count, max_attempts, workspace_id, tenant_id,
+        created_at, accepted_at, started_at, completed_at, updated_at
+      ) VALUES (?, 1, 'queued', 'openclaw', '{}', '{}', NULL, NULL, 0, 1, 2, 3, ?, NULL, NULL, NULL, ?)
+    `)
+    db.transaction(() => {
+      for (let index = 0; index < 2_001; index += 1) {
+        insert.run(`active-${String(index).padStart(4, '0')}`, 1_000 + index, 1_000 + index)
+      }
+    })()
+
+    const active = listN8nActiveTaskRunSummaries(db, { workspaceId: 2, tenantId: 3 })
+    expect(active).toHaveLength(2_001)
+    expect(active[0].taskId).toBe('active-0000')
+    expect(active.at(-1)?.taskId).toBe('active-2000')
   })
 
   it('lists and reads only scoped video-analysis results through the safe projection', () => {

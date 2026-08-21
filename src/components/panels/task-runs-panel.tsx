@@ -4,6 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   formatTaskRunDuration,
+  formatTaskRunProcessingDuration,
+  formatTaskRunQueueDuration,
   taskRunDurationBasis,
   taskRunFailureInsight,
 } from '@/lib/task-run-presentation'
@@ -20,12 +22,29 @@ interface TaskRunListItem {
   createdAt: number
   acceptedAt: number | null
   startedAt: number | null
+  processingStartedAt: number | null
   completedAt: number | null
   updatedAt: number
   error: string | null
   resultAvailable: boolean
   batchId: string | null
   batchIndex: number | null
+}
+
+interface TaskQueueItem extends TaskRunListItem {
+  queuePosition: number
+  queueOrigin: 'durable' | 'durable+n8n' | 'n8n'
+  batchStatus: string | null
+  sourceAvailable: boolean | null
+  stale: boolean
+}
+
+interface TaskQueueResponse {
+  queue: TaskQueueItem[]
+  total: number
+  counts: { waiting: number; running: number; attention: number }
+  generatedAt: number
+  error?: string
 }
 
 interface TaskRunListResponse {
@@ -48,9 +67,14 @@ const STATUS_OPTIONS = [
   { value: 'cancelled', label: '已取消' },
 ]
 
-const STATUS_LABELS: Record<string, string> = Object.fromEntries(
-  STATUS_OPTIONS.filter(option => option.value).map(option => [option.value, option.label]),
-)
+const STATUS_LABELS: Record<string, string> = {
+  ...Object.fromEntries(STATUS_OPTIONS.filter(option => option.value).map(option => [option.value, option.label])),
+  staging: '准备素材',
+  submitted: '已提交',
+  waiting: '等待恢复',
+  recovering: '恢复中',
+  paused: '已暂停',
+}
 
 function statusClass(status: string): string {
   if (status === 'succeeded') return 'border-success/25 bg-success/10 text-success'
@@ -61,6 +85,19 @@ function statusClass(status: string): string {
     return 'border-primary/25 bg-primary/10 text-primary'
   }
   return 'border-border bg-secondary text-muted-foreground'
+}
+
+function queueStatusClass(item: TaskQueueItem): string {
+  if (item.stale || item.sourceAvailable === false || ['waiting', 'recovering', 'paused'].includes(item.status)) {
+    return 'border-warning/30 bg-warning/10 text-warning'
+  }
+  return statusClass(item.status)
+}
+
+function queueStatusLabel(item: TaskQueueItem): string {
+  if (item.stale) return '异常滞留'
+  if (item.sourceAvailable === false) return '源视频不可用'
+  return STATUS_LABELS[item.status] || item.status
 }
 
 function formatTimestamp(timestamp: number | null): string {
@@ -90,6 +127,8 @@ function taskTypeLabel(taskType: string): string {
 
 export function TaskRunsPanel() {
   const [runs, setRuns] = useState<TaskRunListItem[]>([])
+  const [queue, setQueue] = useState<TaskQueueItem[]>([])
+  const [queueCounts, setQueueCounts] = useState({ waiting: 0, running: 0, attention: 0 })
   const [total, setTotal] = useState(0)
   const [search, setSearch] = useState('')
   const [query, setQuery] = useState('')
@@ -128,12 +167,19 @@ export function TaskRunsPanel() {
       })
       if (status) params.set('status', status)
       if (query) params.set('query', query)
-      const response = await fetch(`/api/n8n/runs?${params.toString()}`, { cache: 'no-store' })
+      const [response, queueResponse] = await Promise.all([
+        fetch(`/api/n8n/runs?${params.toString()}`, { cache: 'no-store' }),
+        fetch('/api/n8n/runs?view=queue', { cache: 'no-store' }),
+      ])
       const data = await response.json() as TaskRunListResponse
+      const queueData = await queueResponse.json() as TaskQueueResponse
       if (!response.ok) throw new Error(data.error || '读取任务链记录失败')
+      if (!queueResponse.ok) throw new Error(queueData.error || '读取待执行队列失败')
       if (sequence !== requestSequence.current) return
       setRuns(Array.isArray(data.runs) ? data.runs : [])
       setTotal(Number(data.total) || 0)
+      setQueue(Array.isArray(queueData.queue) ? queueData.queue : [])
+      setQueueCounts(queueData.counts || { waiting: 0, running: 0, attention: 0 })
     } catch (fetchError) {
       if (sequence !== requestSequence.current) return
       setError(fetchError instanceof Error ? fetchError.message : '读取任务链记录失败')
@@ -168,7 +214,7 @@ export function TaskRunsPanel() {
     <div className="relative flex h-full min-h-0 flex-col bg-background">
       <div className="flex flex-col gap-3 border-b border-border px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <span className="rounded-md border border-border bg-card px-2 py-1">共 {total} 条</span>
+          <span className="rounded-md border border-border bg-card px-2 py-1">运行记录 {total} 条</span>
           <span>本页执行中 {visibleSummary.active}</span>
           <span>已完成 {visibleSummary.completed}</span>
           {visibleSummary.failed > 0 && (
@@ -237,8 +283,84 @@ export function TaskRunsPanel() {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <div className="min-w-[880px] overflow-hidden rounded-lg border border-border bg-card">
+      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+        <section className="overflow-hidden rounded-lg border border-border bg-card" aria-labelledby="task-queue-title">
+          <div className="flex flex-col gap-2 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 id="task-queue-title" className="text-sm font-semibold text-foreground">待执行队列</h3>
+                <span className="rounded border border-border bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  {queue.length} 项
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">包含已加入耐久队列和已提交给任务链、尚未完成的任务。</p>
+            </div>
+            <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+              <span>等待 {queueCounts.waiting}</span>
+              <span>执行中 {queueCounts.running}</span>
+              {queueCounts.attention > 0 && <span className="text-warning">需要处理 {queueCounts.attention}</span>}
+            </div>
+          </div>
+          {loading ? (
+            <div className="space-y-2 p-4">
+              {Array.from({ length: 2 }).map((_, index) => (
+                <div key={index} className="h-10 animate-pulse rounded bg-secondary" />
+              ))}
+            </div>
+          ) : queue.length === 0 ? (
+            <div className="px-4 py-8 text-center">
+              <div className="text-sm font-medium text-foreground">当前没有待执行任务</div>
+              <div className="mt-1 text-xs text-muted-foreground">新加入的视频会在这里显示队列位置和等待时间。</div>
+            </div>
+          ) : (
+            <div className="max-h-72 overflow-auto">
+              <table className="w-full min-w-[760px] border-collapse text-left text-sm">
+                <thead className="sticky top-0 z-10 bg-surface-1 text-xs text-muted-foreground">
+                  <tr className="border-b border-border">
+                    <th className="w-20 px-4 py-2.5 font-medium">位置</th>
+                    <th className="px-3 py-2.5 font-medium">任务</th>
+                    <th className="px-3 py-2.5 font-medium">状态</th>
+                    <th className="px-3 py-2.5 font-medium">排队等待</th>
+                    <th className="px-3 py-2.5 font-medium">批次</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {queue.map(item => (
+                    <tr key={item.taskId} className="border-b border-border/60 last:border-b-0">
+                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">#{item.queuePosition}</td>
+                      <td className="max-w-md px-3 py-3">
+                        <div className="truncate font-medium text-foreground" title={item.title}>{item.title}</div>
+                        <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={item.taskId}>{item.taskId}</div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${queueStatusClass(item)}`}>
+                          {queueStatusLabel(item)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-xs text-muted-foreground">
+                        <div>{formatTaskRunQueueDuration(item, nowSeconds)}</div>
+                        {item.processingStartedAt && (
+                          <div className="mt-1 text-[11px]">处理中 {formatTaskRunProcessingDuration(item, nowSeconds)}</div>
+                        )}
+                      </td>
+                      <td className="max-w-52 px-3 py-3 text-xs text-muted-foreground">
+                        <div className="truncate" title={item.batchId || '单个任务'}>{item.batchId || '单个任务'}</div>
+                        {item.batchIndex && <div className="mt-1">第 {item.batchIndex} 项</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        <section aria-labelledby="task-history-title">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 id="task-history-title" className="text-sm font-semibold text-foreground">运行记录</h3>
+            <span className="text-xs text-muted-foreground">第 {page} / {pages} 页</span>
+          </div>
+          <div className="min-w-[880px] overflow-hidden rounded-lg border border-border bg-card">
           <table className="w-full border-collapse text-left text-sm">
             <thead className="sticky top-0 z-10 bg-surface-1 text-xs font-medium text-muted-foreground">
               <tr className="border-b border-border">
@@ -304,7 +426,8 @@ export function TaskRunsPanel() {
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </section>
       </div>
 
       <div className="flex items-center justify-between border-t border-border px-4 py-3 text-xs text-muted-foreground">
@@ -343,13 +466,17 @@ export function TaskRunsPanel() {
               <div className="grid grid-cols-2 gap-3">
                 <TimeCard label="创建" value={formatTimestamp(selectedRun.createdAt)} />
                 <TimeCard label="接收" value={formatTimestamp(selectedRun.acceptedAt)} />
-                <TimeCard label="开始" value={formatTimestamp(selectedRun.startedAt)} />
+                <TimeCard label="处理开始" value={formatTimestamp(selectedRun.processingStartedAt)} />
                 <TimeCard label="完成" value={formatTimestamp(selectedRun.completedAt)} />
               </div>
               <DetailRow label="总耗时">
                 <span>{formatTaskRunDuration(selectedRun, nowSeconds)}</span>
                 <p className="mt-1 text-xs text-muted-foreground">{taskRunDurationBasis(selectedRun)}</p>
               </DetailRow>
+              <div className="grid grid-cols-2 gap-3">
+                <TimeCard label="排队等待" value={formatTaskRunQueueDuration(selectedRun, nowSeconds)} />
+                <TimeCard label="实际处理" value={formatTaskRunProcessingDuration(selectedRun, nowSeconds)} />
+              </div>
               <DetailRow label="结果状态"><span>{selectedRun.resultAvailable ? '分析结果已保存' : '暂无可用结果'}</span></DetailRow>
               {selectedFailure && (
                 <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">

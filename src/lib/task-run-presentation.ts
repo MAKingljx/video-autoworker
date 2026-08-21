@@ -3,6 +3,7 @@ export interface TaskRunTiming {
   createdAt: number
   acceptedAt: number | null
   startedAt: number | null
+  processingStartedAt?: number | null
   completedAt: number | null
   updatedAt: number
 }
@@ -19,9 +20,10 @@ export function taskRunDurationSeconds(
   run: TaskRunTiming,
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): number | null {
-  const start = finiteTimestamp(run.startedAt)
+  const start = finiteTimestamp(run.createdAt)
     ?? finiteTimestamp(run.acceptedAt)
-    ?? finiteTimestamp(run.createdAt)
+    ?? finiteTimestamp(run.processingStartedAt)
+    ?? finiteTimestamp(run.startedAt)
   if (start === null) return null
 
   const end = finiteTimestamp(run.completedAt)
@@ -32,11 +34,35 @@ export function taskRunDurationSeconds(
   return Math.max(0, end - start)
 }
 
-export function formatTaskRunDuration(
+export function taskRunQueueDurationSeconds(
   run: TaskRunTiming,
   nowSeconds = Math.floor(Date.now() / 1_000),
-): string {
-  const seconds = taskRunDurationSeconds(run, nowSeconds)
+): number | null {
+  const created = finiteTimestamp(run.createdAt)
+  if (created === null) return null
+  const processingStarted = finiteTimestamp(run.processingStartedAt)
+  if (processingStarted !== null) return Math.max(0, processingStarted - created)
+  if (ACTIVE_STATUSES.has(run.status)) {
+    const now = finiteTimestamp(nowSeconds)
+    return now === null ? null : Math.max(0, now - created)
+  }
+  return null
+}
+
+export function taskRunProcessingDurationSeconds(
+  run: TaskRunTiming,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): number | null {
+  const start = finiteTimestamp(run.processingStartedAt)
+  if (start === null) return null
+  const end = finiteTimestamp(run.completedAt)
+    ?? (ACTIVE_STATUSES.has(run.status)
+      ? finiteTimestamp(nowSeconds)
+      : finiteTimestamp(run.updatedAt))
+  return end === null ? null : Math.max(0, end - start)
+}
+
+export function formatDurationSeconds(seconds: number | null): string {
   if (seconds === null) return '—'
   if (seconds < 1) return '< 1 秒'
   if (seconds < 60) return `${seconds} 秒`
@@ -47,11 +73,30 @@ export function formatTaskRunDuration(
   return `${hours} 小时 ${remainingMinutes} 分`
 }
 
+export function formatTaskRunDuration(
+  run: TaskRunTiming,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): string {
+  return formatDurationSeconds(taskRunDurationSeconds(run, nowSeconds))
+}
+
+export function formatTaskRunQueueDuration(
+  run: TaskRunTiming,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): string {
+  return formatDurationSeconds(taskRunQueueDurationSeconds(run, nowSeconds))
+}
+
+export function formatTaskRunProcessingDuration(
+  run: TaskRunTiming,
+  nowSeconds = Math.floor(Date.now() / 1_000),
+): string {
+  return formatDurationSeconds(taskRunProcessingDurationSeconds(run, nowSeconds))
+}
+
 export function taskRunDurationBasis(run: TaskRunTiming): string {
   const suffix = ACTIVE_STATUSES.has(run.status) && !run.completedAt ? '至今' : '到结束'
-  if (run.startedAt) return `执行开始${suffix}`
-  if (run.acceptedAt) return `任务接收${suffix}（顶层任务未单独记录开始时间）`
-  return `任务创建${suffix}（缺少接收与开始时间）`
+  return `任务创建${suffix}，包含排队与处理时间`
 }
 
 export interface TaskRunFailureInsight {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
 
@@ -137,6 +138,7 @@ export interface N8nTaskRunListItem {
   createdAt: number
   acceptedAt: number | null
   startedAt: number | null
+  processingStartedAt: number | null
   completedAt: number | null
   updatedAt: number
   error: string | null
@@ -242,6 +244,7 @@ interface N8nTaskRunListProjection {
   createdAt: number
   acceptedAt: number | null
   startedAt: number | null
+  processingStartedAt?: number | null
   completedAt: number | null
   updatedAt: number
   workflowName: string | null
@@ -250,6 +253,7 @@ interface N8nTaskRunListProjection {
 }
 
 const TOP_LEVEL_TASK_SOURCES = ['video-autoworker', 'openclaw'] as const
+const MEDIA_STAGES = ['prepare', 'audio', 'vision', 'finalize'] as const
 
 function compactString(value: unknown, maxLength: number): string | null {
   if (typeof value !== 'string') return null
@@ -376,6 +380,9 @@ export function projectN8nTaskRunListItem(
     createdAt: run.createdAt,
     acceptedAt: run.acceptedAt,
     startedAt: run.startedAt,
+    processingStartedAt: run.processingStartedAt === undefined
+      ? run.startedAt
+      : run.processingStartedAt,
     completedAt: run.completedAt,
     updatedAt: run.updatedAt,
     error: sanitizeRunError(run.error),
@@ -647,6 +654,85 @@ export function listN8nTaskRuns(
   return rows.map(rowToTaskRun)
 }
 
+function mediaChildTaskId(taskId: string, stage: typeof MEDIA_STAGES[number]): string {
+  const digest = createHash('sha256').update(`${taskId}:${stage}`).digest('hex').slice(0, 24)
+  return `media-task:${taskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
+}
+
+function videoProcessingStartTimes(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  rows: N8nTaskRunSummaryRow[],
+): Map<string, number | null> {
+  const childToParent = new Map<string, string>()
+  const processingStarts = new Map<string, number | null>()
+  for (const row of rows) {
+    const routing = parseObject(row.routing) || {}
+    const isVideo = row.binding_task_type === 'video-analysis'
+      || compactString(routing.taskType, 80) === 'video-analysis'
+    if (!isVideo) continue
+    processingStarts.set(row.task_id, null)
+    for (const stage of MEDIA_STAGES) {
+      childToParent.set(mediaChildTaskId(row.task_id, stage), row.task_id)
+    }
+  }
+  const childIds = [...childToParent.keys()]
+  if (!childIds.length) return processingStarts
+  const chunkSize = 500
+  for (let offset = 0; offset < childIds.length; offset += chunkSize) {
+    const chunk = childIds.slice(offset, offset + chunkSize)
+    const placeholders = chunk.map(() => '?').join(', ')
+    const childRows = db.prepare(`
+      SELECT task_id, started_at
+      FROM n8n_task_runs
+      WHERE tenant_id = ? AND workspace_id = ?
+        AND task_id IN (${placeholders})
+        AND started_at IS NOT NULL
+    `).all(scope.tenantId, scope.workspaceId, ...chunk) as Array<{
+      task_id: string
+      started_at: number
+    }>
+    for (const child of childRows) {
+      const parentId = childToParent.get(child.task_id)
+      if (!parentId || !Number.isFinite(child.started_at)) continue
+      const previous = processingStarts.get(parentId)
+      if (previous === null || previous === undefined || child.started_at < previous) {
+        processingStarts.set(parentId, child.started_at)
+      }
+    }
+  }
+  return processingStarts
+}
+
+function projectN8nTaskRunSummaryRows(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  rows: N8nTaskRunSummaryRow[],
+): N8nTaskRunListItem[] {
+  const processingStarts = videoProcessingStartTimes(db, scope, rows)
+  return rows.map(row => projectN8nTaskRunListItem({
+    taskId: row.task_id,
+    status: row.status,
+    source: row.source,
+    routing: parseObject(row.routing) || {},
+    input: parseObject(row.input) || {},
+    error: row.error,
+    attemptCount: row.attempt_count,
+    maxAttempts: row.max_attempts,
+    createdAt: row.created_at,
+    acceptedAt: row.accepted_at,
+    startedAt: row.started_at,
+    processingStartedAt: processingStarts.has(row.task_id)
+      ? processingStarts.get(row.task_id) || null
+      : row.started_at,
+    completedAt: row.completed_at,
+    updatedAt: row.updated_at,
+    workflowName: row.workflow_name,
+    bindingTaskType: row.binding_task_type,
+    resultAvailable: row.result_available === 1,
+  }))
+}
+
 export function listN8nTaskRunSummaries(
   db: Database.Database,
   scope: N8nTaskScope,
@@ -726,28 +812,51 @@ export function listN8nTaskRunSummaries(
   `).all(...params, limit, offset) as N8nTaskRunSummaryRow[]
 
   return {
-    runs: rows.map(row => projectN8nTaskRunListItem({
-      taskId: row.task_id,
-      status: row.status,
-      source: row.source,
-      routing: parseObject(row.routing) || {},
-      input: parseObject(row.input) || {},
-      error: row.error,
-      attemptCount: row.attempt_count,
-      maxAttempts: row.max_attempts,
-      createdAt: row.created_at,
-      acceptedAt: row.accepted_at,
-      startedAt: row.started_at,
-      completedAt: row.completed_at,
-      updatedAt: row.updated_at,
-      workflowName: row.workflow_name,
-      bindingTaskType: row.binding_task_type,
-      resultAvailable: row.result_available === 1,
-    })),
+    runs: projectN8nTaskRunSummaryRows(db, scope, rows),
     total: totalRow.total,
     limit,
     offset,
   }
+}
+
+export function listN8nActiveTaskRunSummaries(
+  db: Database.Database,
+  scope: N8nTaskScope,
+): N8nTaskRunListItem[] {
+  const rows = db.prepare(`
+    SELECT
+      r.task_id,
+      r.status,
+      r.source,
+      r.routing,
+      r.input,
+      r.error,
+      r.attempt_count,
+      r.max_attempts,
+      r.created_at,
+      r.accepted_at,
+      r.started_at,
+      r.completed_at,
+      r.updated_at,
+      b.name AS workflow_name,
+      b.task_type AS binding_task_type,
+      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available
+    FROM n8n_task_runs r
+    LEFT JOIN n8n_workflow_bindings b
+      ON b.id = r.binding_id
+      AND b.tenant_id = r.tenant_id
+      AND b.workspace_id = r.workspace_id
+    WHERE r.tenant_id = ?
+      AND r.workspace_id = ?
+      AND r.source IN (${TOP_LEVEL_TASK_SOURCES.map(() => '?').join(', ')})
+      AND r.status IN ('queued', 'accepted', 'running')
+    ORDER BY r.created_at ASC, r.id ASC
+  `).all(
+    scope.tenantId,
+    scope.workspaceId,
+    ...TOP_LEVEL_TASK_SOURCES,
+  ) as N8nTaskRunSummaryRow[]
+  return projectN8nTaskRunSummaryRows(db, scope, rows)
 }
 
 function videoResultWhere(

@@ -10,11 +10,13 @@ const mocks = vi.hoisted(() => ({
   listN8nTaskRunSummaries: vi.fn(),
   listN8nTaskRuns: vi.fn(),
   getN8nVideoSource: vi.fn(),
+  listN8nTaskQueue: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
 vi.mock('@/lib/n8n', () => ({ requireN8nRole: mocks.requireN8nRole }))
 vi.mock('@/lib/n8n-video-sources', () => ({ getN8nVideoSource: mocks.getN8nVideoSource }))
+vi.mock('@/lib/n8n-task-queue', () => ({ listN8nTaskQueue: mocks.listN8nTaskQueue }))
 vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
   return {
@@ -37,6 +39,9 @@ describe('n8n task runs route', () => {
     })
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nVideoSource.mockResolvedValue(null)
+    mocks.listN8nTaskQueue.mockResolvedValue({
+      queue: [], total: 0, counts: { waiting: 0, running: 0, attention: 0 }, generatedAt: 100,
+    })
   })
 
   it('queries only the requested workspace-scoped task', async () => {
@@ -84,6 +89,27 @@ describe('n8n task runs route', () => {
       { limit: 25, offset: 0, status: 'succeeded', query: 'S03E03' },
     )
     expect(mocks.listN8nTaskRuns).not.toHaveBeenCalled()
+  })
+
+  it('returns the scoped durable and n8n queue view', async () => {
+    mocks.listN8nTaskQueue.mockResolvedValue({
+      queue: [{ taskId: 'queued-video', title: '待执行.mp4', status: 'queued' }],
+      total: 1,
+      counts: { waiting: 1, running: 0, attention: 0 },
+      generatedAt: 100,
+    })
+    const response = await GET(new NextRequest(
+      'http://127.0.0.1:3017/api/n8n/runs?view=queue',
+    ))
+
+    expect(await response.json()).toMatchObject({
+      total: 1,
+      queue: [{ taskId: 'queued-video', status: 'queued' }],
+    })
+    expect(mocks.listN8nTaskQueue).toHaveBeenCalledWith(
+      {}, { workspaceId: 2, tenantId: 3 },
+    )
+    expect(mocks.listN8nTaskRunSummaries).not.toHaveBeenCalled()
   })
 
   it('rejects an unsupported list status', async () => {
