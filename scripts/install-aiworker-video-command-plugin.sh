@@ -482,29 +482,26 @@ verify_backup "$BACKUP_DIR" >/dev/null
 
 MIGRATED_CONFIG="$WORK_ROOT/openclaw-migrated.json"
 migration_failed=0
-if [[ "$LEGACY_SENDER_HASH_PRESENT" == "1" ]]; then
-  if ! run_qwen_openclaw config unset \
-    "plugins.entries.$PLUGIN_ID.config.allowedSenderSha256" > "$WORK_ROOT/config-unset.txt" 2>&1; then
-    migration_failed=1
-  fi
-  if [[ "$migration_failed" -eq 0 ]]; then
-    validate_config_migration "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || migration_failed=1
-  fi
-  if [[ "$migration_failed" -eq 0 ]]; then
-    install -m 600 "$PROFILE_CONFIG" "$MIGRATED_CONFIG" || migration_failed=1
-  fi
-else
-  install -m 600 "$BACKUP_DIR/openclaw.json" "$MIGRATED_CONFIG" || migration_failed=1
+if ! node - "$BACKUP_DIR/openclaw.json" "$MIGRATED_CONFIG" "$PLUGIN_ID" <<'NODE'
+const fs = require('node:fs')
+const [beforePath, outputPath, pluginId] = process.argv.slice(2)
+const config = JSON.parse(fs.readFileSync(beforePath, 'utf8'))
+const pluginConfig = config?.plugins?.entries?.[pluginId]?.config
+if (!pluginConfig || typeof pluginConfig !== 'object' || Array.isArray(pluginConfig)) process.exit(1)
+delete pluginConfig.allowedSenderSha256
+fs.writeFileSync(outputPath, `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+NODE
+then
+  migration_failed=1
+fi
+if [[ "$migration_failed" -eq 0 ]]; then
+  validate_config_migration "$BACKUP_DIR/openclaw.json" "$MIGRATED_CONFIG" || migration_failed=1
 fi
 if [[ "$migration_failed" -eq 0 ]]; then
   MIGRATED_CONFIG_SHA="$(shasum -a 256 "$MIGRATED_CONFIG" | awk '{print $1}')" || migration_failed=1
 fi
 if [[ "$migration_failed" -ne 0 ]]; then
-  if ! restore_backup "$BACKUP_DIR"; then
-    printf 'ROLLBACK FAILED after config migration error. Backup: %s\n' "$BACKUP_DIR" >&2
-    exit 70
-  fi
-  printf 'Retired sender hash removal failed; exact prior plugin and config were restored.\n' >&2
+  printf 'Could not build the offline config migration; live plugin, config, and Gateway were not changed.\n' >&2
   exit 1
 fi
 
