@@ -287,12 +287,14 @@ NODE
 
 validate_runtime() {
   local expected="$1" report="$2" catalog="$3"
-  run_qwen_openclaw gateway status --deep --require-rpc --json > "$WORK_ROOT/gateway-status.json"
-  run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$report"
-  node "$RUNTIME_VALIDATOR" "$report" "$PLUGIN_ID" "$expected"
+  run_qwen_openclaw gateway status --deep --require-rpc --json > "$WORK_ROOT/gateway-status.json" \
+    || return 1
+  run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$report" \
+    || return 1
+  node "$RUNTIME_VALIDATOR" "$report" "$PLUGIN_ID" "$expected" || return 1
   run_qwen_openclaw gateway call tools.catalog \
     --params "{\"agentId\":\"$AGENT_ID\",\"includePlugins\":true}" \
-    --timeout 20000 --json > "$catalog"
+    --timeout 20000 --json > "$catalog" || return 1
   node - "$catalog" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'
 const fs = require('node:fs')
 const [reportPath, pluginId, agentId, toolId] = process.argv.slice(2)
@@ -381,14 +383,18 @@ restore_backup() {
   local candidate="$1" metadata previous_version
   metadata="$(verify_backup "$candidate")" || return 1
   previous_version="$(printf '%s' "$metadata" | awk -F '\t' '{print $1}')"
-  run_qwen_openclaw plugins install --force "$candidate/previous-plugin" > "$WORK_ROOT/restore-install.txt" 2>&1
-  install -m 600 "$candidate/openclaw.json" "$PROFILE_CONFIG"
-  run_qwen_openclaw gateway restart --wait 60s --json > "$WORK_ROOT/restore-restart.json"
-  validate_installed_version "$previous_version"
-  validate_runtime_payload_matches "$candidate/previous-plugin"
-  validate_runtime "$previous_version" "$WORK_ROOT/runtime-restored.json" "$WORK_ROOT/catalog-restored.json"
-  [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" == "$(printf '%s' "$metadata" | awk -F '\t' '{print $3}')" ]]
-  [[ "$(listener_snapshot)" == "$BEFORE_LISTENERS" ]]
+  run_qwen_openclaw plugins install --force "$candidate/previous-plugin" \
+    > "$WORK_ROOT/restore-install.txt" 2>&1 || return 1
+  install -m 600 "$candidate/openclaw.json" "$PROFILE_CONFIG" || return 1
+  run_qwen_openclaw gateway restart --wait 60s --json \
+    > "$WORK_ROOT/restore-restart.json" || return 1
+  validate_installed_version "$previous_version" || return 1
+  validate_runtime_payload_matches "$candidate/previous-plugin" || return 1
+  validate_runtime "$previous_version" "$WORK_ROOT/runtime-restored.json" \
+    "$WORK_ROOT/catalog-restored.json" || return 1
+  [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" \
+    == "$(printf '%s' "$metadata" | awk -F '\t' '{print $3}')" ]] || return 1
+  [[ "$(listener_snapshot)" == "$BEFORE_LISTENERS" ]] || return 1
 }
 
 enforce_retention() {
@@ -402,10 +408,10 @@ enforce_retention() {
   if [[ "${#backups[@]}" -le 2 ]]; then return; fi
   remove_count=$((${#backups[@]} - 2))
   for candidate in "${backups[@]:0:$remove_count}"; do
-    verify_backup "$candidate" >/dev/null
+    verify_backup "$candidate" >/dev/null || return 1
   done
   for candidate in "${backups[@]:0:$remove_count}"; do
-    rm -rf -- "$candidate"
+    rm -rf -- "$candidate" || return 1
   done
 }
 
@@ -506,7 +512,13 @@ if [[ "$migration_failed" -ne 0 ]]; then
 fi
 
 apply_failed=0
-run_qwen_openclaw plugins install --force "$PLUGIN_DIR" > "$WORK_ROOT/install-current.txt" 2>&1 || apply_failed=1
+install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG" || apply_failed=1
+if [[ "$apply_failed" -eq 0 ]]; then
+  validate_config_migration "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || apply_failed=1
+fi
+if [[ "$apply_failed" -eq 0 ]]; then
+  run_qwen_openclaw plugins install --force "$PLUGIN_DIR" > "$WORK_ROOT/install-current.txt" 2>&1 || apply_failed=1
+fi
 if [[ "$apply_failed" -eq 0 ]]; then
   install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG" || apply_failed=1
 fi
