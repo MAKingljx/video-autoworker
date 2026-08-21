@@ -6,7 +6,7 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-PREVIOUS_VERSION="0.5.9"
+SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9")
 CURRENT_VERSION="0.5.10"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
@@ -95,6 +95,14 @@ trap 'exit 143' TERM
 
 read_version() {
   node -e 'process.stdout.write(require(process.argv[1]).version || "")' "$1"
+}
+
+is_supported_previous_version() {
+  local candidate="$1" supported
+  for supported in "${SUPPORTED_PREVIOUS_VERSIONS[@]}"; do
+    [[ "$candidate" == "$supported" ]] && return 0
+  done
+  return 1
 }
 
 listener_snapshot() {
@@ -437,14 +445,14 @@ if [[ "$installed_version" == "$CURRENT_VERSION" ]]; then
   printf 'No plugin, config, gateway, queue, n8n, media, database, or scheduler state changed.\n'
   exit 0
 fi
-[[ "$installed_version" == "$PREVIOUS_VERSION" ]] || {
+is_supported_previous_version "$installed_version" || {
   printf 'Unsupported installed plugin version: %s\n' "$installed_version" >&2
   exit 1
 }
 
 if [[ "$MODE" == "dry-run" ]]; then
   printf 'Current plugin release dry-run passed for %s -> %s at %s.\n' \
-    "$PREVIOUS_VERSION" "$CURRENT_VERSION" "$TARGET_SHA"
+    "$installed_version" "$CURRENT_VERSION" "$TARGET_SHA"
   printf 'No plugin, config, gateway, queue, n8n, media, database, or scheduler state changed.\n'
   exit 0
 fi
@@ -467,7 +475,7 @@ chmod 700 "$BACKUP_DIR"
 install -m 600 "$PROFILE_CONFIG" "$BACKUP_DIR/openclaw.json"
 cp -R -p "$INSTALLED_PLUGIN_DIR" "$BACKUP_DIR/previous-plugin"
 printf '{"schemaVersion":1,"previousVersion":"%s","candidateVersion":"%s","targetSha":"%s","configSha256":"%s"}\n' \
-  "$PREVIOUS_VERSION" "$CURRENT_VERSION" "$TARGET_SHA" "$BEFORE_CONFIG_SHA" > "$BACKUP_DIR/metadata.json"
+  "$installed_version" "$CURRENT_VERSION" "$TARGET_SHA" "$BEFORE_CONFIG_SHA" > "$BACKUP_DIR/metadata.json"
 chmod 600 "$BACKUP_DIR/metadata.json"
 write_backup_manifest
 verify_backup "$BACKUP_DIR" >/dev/null
@@ -521,7 +529,7 @@ if [[ "$apply_failed" -ne 0 ]]; then
     printf 'ROLLBACK FAILED: qwen-current requires manual inspection. Backup: %s\n' "$BACKUP_DIR" >&2
     exit 70
   fi
-  printf 'Current plugin install failed; exact %s plugin and config were restored.\n' "$PREVIOUS_VERSION" >&2
+  printf 'Current plugin install failed; exact %s plugin and config were restored.\n' "$installed_version" >&2
   exit 1
 fi
 
@@ -530,10 +538,10 @@ if ! enforce_retention; then
     printf 'ROLLBACK FAILED after backup-retention error. Backup: %s\n' "$BACKUP_DIR" >&2
     exit 70
   fi
-  printf 'Backup retention failed; exact %s plugin and config were restored.\n' "$PREVIOUS_VERSION" >&2
+  printf 'Backup retention failed; exact %s plugin and config were restored.\n' "$installed_version" >&2
   exit 1
 fi
 printf 'Installed the single current qwen-current plugin chain: %s -> %s at %s.\n' \
-  "$PREVIOUS_VERSION" "$CURRENT_VERSION" "$TARGET_SHA"
+  "$installed_version" "$CURRENT_VERSION" "$TARGET_SHA"
 printf 'Only the retired sender hash, plugin payload, and qwen-current Gateway changed; queue, n8n, media, database, and scheduler state were preserved.\n'
 printf 'Verified rollback point: %s\n' "$BACKUP_DIR"
