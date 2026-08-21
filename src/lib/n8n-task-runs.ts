@@ -254,6 +254,7 @@ interface N8nTaskRunListProjection {
 
 const TOP_LEVEL_TASK_SOURCES = ['video-autoworker', 'openclaw'] as const
 const MEDIA_STAGES = ['prepare', 'audio', 'vision', 'finalize'] as const
+const TASK_STATUS_QUERY_CHUNK_SIZE = 400
 
 function compactString(value: unknown, maxLength: number): string | null {
   if (typeof value !== 'string') return null
@@ -857,6 +858,63 @@ export function listN8nActiveTaskRunSummaries(
     ...TOP_LEVEL_TASK_SOURCES,
   ) as N8nTaskRunSummaryRow[]
   return projectN8nTaskRunSummaryRows(db, scope, rows)
+}
+
+export function listScopedN8nTaskRunStatusSummaries(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  taskIds: readonly string[],
+): N8nTaskRunListItem[] {
+  const orderedTaskIds = [...new Set(taskIds
+    .map(taskId => n8nTaskIdentitySchema.safeParse(taskId))
+    .flatMap(result => result.success ? [result.data] : []))]
+  if (!orderedTaskIds.length) return []
+
+  const rows: N8nTaskRunSummaryRow[] = []
+  for (let offset = 0; offset < orderedTaskIds.length; offset += TASK_STATUS_QUERY_CHUNK_SIZE) {
+    const chunk = orderedTaskIds.slice(offset, offset + TASK_STATUS_QUERY_CHUNK_SIZE)
+    const placeholders = chunk.map(() => '?').join(', ')
+    rows.push(...db.prepare(`
+      SELECT
+        r.task_id,
+        r.status,
+        r.source,
+        r.routing,
+        r.input,
+        r.error,
+        r.attempt_count,
+        r.max_attempts,
+        r.created_at,
+        r.accepted_at,
+        r.started_at,
+        r.completed_at,
+        r.updated_at,
+        b.name AS workflow_name,
+        b.task_type AS binding_task_type,
+        CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available
+      FROM n8n_task_runs r
+      LEFT JOIN n8n_workflow_bindings b
+        ON b.id = r.binding_id
+        AND b.tenant_id = r.tenant_id
+        AND b.workspace_id = r.workspace_id
+      WHERE r.tenant_id = ?
+        AND r.workspace_id = ?
+        AND r.source IN (${TOP_LEVEL_TASK_SOURCES.map(() => '?').join(', ')})
+        AND r.task_id IN (${placeholders})
+    `).all(
+      scope.tenantId,
+      scope.workspaceId,
+      ...TOP_LEVEL_TASK_SOURCES,
+      ...chunk,
+    ) as N8nTaskRunSummaryRow[])
+  }
+
+  const byTaskId = new Map(
+    projectN8nTaskRunSummaryRows(db, scope, rows).map(run => [run.taskId, run]),
+  )
+  return orderedTaskIds
+    .map(taskId => byTaskId.get(taskId))
+    .filter((run): run is N8nTaskRunListItem => Boolean(run))
 }
 
 function videoResultWhere(

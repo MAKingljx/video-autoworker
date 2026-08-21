@@ -2,12 +2,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   listN8nActiveTaskRunSummaries: vi.fn(),
+  listScopedN8nTaskRunStatusSummaries: vi.fn(),
   listN8nVideoQueueItems: vi.fn(),
   listN8nWorkflowBindings: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n-task-runs', () => ({
   listN8nActiveTaskRunSummaries: mocks.listN8nActiveTaskRunSummaries,
+  listScopedN8nTaskRunStatusSummaries: mocks.listScopedN8nTaskRunStatusSummaries,
 }))
 vi.mock('@/lib/n8n-video-sources', () => ({
   listN8nVideoQueueItems: mocks.listN8nVideoQueueItems,
@@ -59,27 +61,29 @@ describe('n8n task queue', () => {
         queuePosition: 1,
       },
     ])
+    const acceptedRun = {
+      taskId: 'queued-video',
+      title: '待处理.mp4',
+      taskType: 'video-analysis',
+      workflowName: '视频分析链',
+      status: 'accepted',
+      source: 'openclaw',
+      attemptCount: 0,
+      maxAttempts: 2,
+      createdAt: 100,
+      acceptedAt: 115,
+      startedAt: null,
+      processingStartedAt: null,
+      completedAt: null,
+      updatedAt: 120,
+      error: null,
+      resultAvailable: false,
+      batchId: 'batch-a',
+      batchIndex: 2,
+    }
+    mocks.listScopedN8nTaskRunStatusSummaries.mockReturnValue([acceptedRun])
     mocks.listN8nActiveTaskRunSummaries.mockReturnValue([
-      {
-        taskId: 'queued-video',
-        title: '待处理.mp4',
-        taskType: 'video-analysis',
-        workflowName: '视频分析链',
-        status: 'accepted',
-        source: 'openclaw',
-        attemptCount: 0,
-        maxAttempts: 2,
-        createdAt: 100,
-        acceptedAt: 115,
-        startedAt: null,
-        processingStartedAt: null,
-        completedAt: null,
-        updatedAt: 120,
-        error: null,
-        resultAvailable: false,
-        batchId: 'batch-a',
-        batchIndex: 2,
-      },
+      acceptedRun,
       {
         taskId: 'stale-run',
         title: '历史滞留任务',
@@ -128,5 +132,70 @@ describe('n8n task queue', () => {
     ])
     expect(result.counts).toEqual({ waiting: 1, running: 0, attention: 1 })
     expect(JSON.stringify(result)).not.toContain('不应显示')
+    expect(mocks.listScopedN8nTaskRunStatusSummaries).toHaveBeenCalledWith(
+      {}, { workspaceId: 2, tenantId: 3 }, ['queued-video'],
+    )
+  })
+
+  it('suppresses durable items when the platform has already reached a terminal state', async () => {
+    const durable = (taskId: string, status: string, index: number) => ({
+      taskId,
+      name: `${taskId}.mp4`,
+      status,
+      batchId: 'batch-terminal',
+      batchIndex: index,
+      batchStatus: 'running',
+      bindingId: 2,
+      createdAt: 100 + index,
+      updatedAt: 120 + index,
+      submittedAt: 110 + index,
+      error: '本地旧错误',
+      sourceAvailable: true,
+      queuePosition: index,
+    })
+    const platform = (taskId: string, status: string) => ({
+      taskId,
+      title: `${taskId}.mp4`,
+      taskType: 'video-analysis',
+      workflowName: '视频分析链',
+      status,
+      source: 'openclaw',
+      attemptCount: 2,
+      maxAttempts: 2,
+      createdAt: 100,
+      acceptedAt: 101,
+      startedAt: 102,
+      processingStartedAt: 103,
+      completedAt: 200,
+      updatedAt: 200,
+      error: status === 'failed' ? 'vision: fetch failed' : null,
+      resultAvailable: status === 'succeeded',
+      batchId: 'batch-terminal',
+      batchIndex: 1,
+    })
+    mocks.listN8nVideoQueueItems.mockResolvedValue([
+      durable('local-accepted-platform-failed', 'accepted', 1),
+      durable('local-running-platform-succeeded', 'running', 2),
+      durable('local-only-queued', 'queued', 3),
+    ])
+    mocks.listScopedN8nTaskRunStatusSummaries.mockReturnValue([
+      platform('local-accepted-platform-failed', 'failed'),
+      platform('local-running-platform-succeeded', 'succeeded'),
+    ])
+    mocks.listN8nActiveTaskRunSummaries.mockReturnValue([])
+
+    const result = await listN8nTaskQueue(
+      {} as never,
+      { workspaceId: 2, tenantId: 3 },
+      1_000,
+    )
+
+    expect(result.queue).toMatchObject([{
+      taskId: 'local-only-queued',
+      status: 'queued',
+      queueOrigin: 'durable',
+    }])
+    expect(result.total).toBe(1)
+    expect(result.counts).toEqual({ waiting: 1, running: 0, attention: 0 })
   })
 })

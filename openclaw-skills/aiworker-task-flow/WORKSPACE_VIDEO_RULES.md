@@ -28,7 +28,10 @@ Status and complete-result reads are read-only. Title and keyword lookup searche
 video-task registration fields and bounded status metadata. It does not search
 chat history, arbitrary files, SQLite, n8n execution records, media folders,
 credentials, or process state. A unique match may make one formal status read;
-ambiguous result matches return bounded candidates containing task ID,
+when that platform record exists, its status is authoritative. The durable
+local registry is used only when the platform has no matching record or is
+temporarily unavailable, and a platform-terminal task must never be described
+as queued, accepted, or running; ambiguous result matches return bounded candidates containing task ID,
 applicable batch ID/item index, completion time, and update time. When those
 fields are present, choose the candidate requested by the user (default to the
 newest completed candidate) and call `result` again with its task ID; do not ask

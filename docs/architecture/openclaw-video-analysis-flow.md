@@ -7,10 +7,14 @@
 
 ## 核心结论
 
-`second-original` 的候选入口是原生 `before_dispatch` 调度器，不是 Agent tool。
-候选消息由 handler 内部通过宿主 `api.runtime.llm.complete` 调用 Qwen 一次，完成
-无工具、严格结构化的语义分类；模型只表达意图判断，不拥有鉴权、路径、任务身份
-或副作用权限。
+项目只维护 `aiworker-task-flow` 一条当前视频任务链。原生 `before_dispatch` 和
+`aiworker_analyze_video` 是面向不同会话入口的薄适配器，不是两套链路；它们必须
+复用同一 runner、持久串行队列、状态权威规则和正式结果接口。
+
+Telegram 私聊由 `before_dispatch` handler 通过宿主 `api.runtime.llm.complete`
+调用 Qwen 一次，完成无工具、严格结构化的语义分类；模型只表达意图判断，不拥有
+鉴权、路径、任务身份或副作用权限。进入正常 Agent 对话的飞书等请求使用结构化
+`aiworker_analyze_video`，但不能拥有另一套提交、状态或结果实现。
 
 宿主随后从当前原始消息中独立校验授权 Telegram 私聊、会话与发送者一致性、
 唯一绝对文件/目录路径、唯一完整 taskId/batchId，或当前消息复制的标题/关键词。单视频与目录批次都进入同一个
@@ -20,6 +24,7 @@
 ```mermaid
 flowchart TD
   U["候选 Telegram 私聊消息"] --> I{"宿主身份与消息上下文门"}
+  D["飞书或普通 Agent 对话"] --> O["aiworker_analyze_video 薄适配器"]
   I -->|"不匹配或未授权"| X["handled fail-closed"]
   I -->|"授权且属于 second-original"| C["api.runtime.llm.complete 一次无工具结构化分类"]
   C -->|"分类失败或结构非法"| X
@@ -28,6 +33,9 @@ flowchart TD
   C -->|"dispatch_single / dispatch_directory"| V{"宿主核对当前原消息中的唯一绝对路径"}
   C -->|"status_task / status_batch"| E{"宿主核对当前原消息中的唯一完整显式 ID"}
   C -->|"status_search"| T["只读搜索受控视频任务登记"]
+  O -->|"submit_video / submit_directory"| V
+  O -->|"status"| T
+  O -->|"result"| J["正式结果接口只读"]
   V -->|"失败"| X
   V -->|"成功"| L["持久化全局串行 video lane"]
   L --> A["handled 短回执并结束当前轮"]
@@ -47,9 +55,16 @@ flowchart TD
   T -->|"多条"| K["返回有界候选，不自动选择"]
 ```
 
+## 单链路与单版本约束
+
+入口适配器不得复制任务提交、状态轮询、终态判断、结果选择或错误降级逻辑。公共
+行为放入 `aiworker-task-flow/lib` 的共享模块，控制台只复用该契约并生成安全投影。
+功能升级直接迁移当前实现和全部调用方，不保留长期并行的旧版链路、版本开关、
+双写或双读。生产旧 release 和备份只用于回滚，不继续接收功能修复。
+
 ## 语义分类与确定性门禁
 
-内部分类器只允许七类动作：
+内部分类器只允许十类动作：
 
 | 动作 | 语义 | 宿主必须再次确认的证据 |
 |---|---|---|
@@ -58,6 +73,9 @@ flowchart TD
 | `status_task` | 查询一个任务 | 当前原消息中唯一完整 taskId，且不存在 batchId |
 | `status_batch` | 查询一个批次 | 当前原消息中唯一完整 batchId，且不存在 taskId |
 | `status_search` | 按标题/关键词查询 | 当前原消息中复制的非空、有界搜索词；仅在已授权单发送者入口搜索受控视频任务登记 |
+| `result_task` | 按任务编号读取正式结果 | 当前原消息中唯一完整 taskId，且明确要求完整或详细结果 |
+| `result_batch` | 按批次编号读取正式结果 | 当前原消息中唯一完整 batchId，且明确要求完整或详细结果 |
+| `result_search` | 按标题/关键词读取正式结果 | 当前原消息中复制的最小明确标题、文件名、季集号或关键词 |
 | `respond` | 视频相关但不执行或证据不足 | 无 runner 副作用 |
 | `pass` | 真正无关的普通聊天 | 才允许进入正常 `second-original` |
 
@@ -66,11 +84,10 @@ flowchart TD
 举例、方法咨询、多个候选、缺少路径或 ID、相对路径、URL、非规范路径和部分 ID
 均不能触发 runner。
 
-这条边界取代 `0.4.1` 的纯正则状态入口与内存 recent receipt。状态可由当前
-消息显式携带完整 taskId/batchId，或由当前消息中的标题/关键词查询。后者只在已授权
-单发送者入口读取受控 video-batch 状态根目录的有效 JSON，匹配任务公开 ID、显示名、
-季集别名和状态元数据；它不是跨用户或全库搜索，不读取提示词、源路径、任意文件、
-SQLite、n8n、媒体、进程或聊天历史，也不回显源路径或提示词。
+当前边界不使用纯正则状态入口或内存 recent receipt。状态与结果可由当前消息显式
+携带完整 taskId/batchId，或由当前消息中的标题/关键词查询。后者只搜索受控任务登记
+字段并调用正式平台接口；它不是跨用户或任意文件搜索，不读取提示词、源路径、
+n8n execution、媒体、进程或聊天历史，也不回显源路径或提示词。
 
 ## 鉴权与失败关闭
 
@@ -110,8 +127,10 @@ Mission Control/n8n 检查、等待、轮询、重试、重提、进度播报和
 
 以后新的状态消息可携带完整显式 ID，或携带标题/关键词：taskId 调正式 task
 status 一次，batchId 调正式 batch status 一次；标题搜索唯一命中后以有界摘要状态
-接口调对应正式状态一次，多个命中仅返回候选。查询不启动 Agent tool，不扫描数据库或任意
-文件，不轮询、不重试、不提交、不恢复。只有正式 task 状态 `succeeded` 可表述为
+接口调对应正式状态一次，多个命中仅返回候选。平台存在该任务记录时，平台状态
+始终覆盖耐久本地登记；只有平台无记录或暂时不可用时才允许本地降级。平台终态
+不得继续进入待执行队列。查询不扫描任意文件，不轮询、不重试、不提交、不恢复。
+只有正式 task 状态 `succeeded` 可表述为
 完成；批次只报告正式接口返回的有界状态和计数。
 
 ## 下游无状态边界
@@ -137,7 +156,8 @@ checkpoint 继续，不重跑已成功阶段。
 3. 单视频与目录任务共享持久化全局锁，跨任务也不会并行执行视频；
 4. 派发只产生一次入队及一个短回执，同轮状态读取、重试、重提和回投均为零；
 5. status_task/status_batch 只接受当前消息中的显式完整 ID，各只读一次；status_search
-   仅在已授权单发送者入口搜索受控任务登记，唯一命中才额外读取一次正式状态，多命中不选择；
+   仅搜索受控任务登记，唯一命中才额外读取一次正式状态，多命中不选择；result 查询遵守
+   相同隔离并在同名候选中提供任务编号、批次信息和完成时间；
 6. classifier/校验/runner 失败均 handled fail-closed，只有无关 `pass` 进入 Qwen；
 7. 下游 `prepare/audio/vision/finalize` 可追踪，所有模型节点均为
    `memoryMode=none`，视频 `delivery=none`；

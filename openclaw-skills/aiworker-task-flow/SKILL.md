@@ -54,7 +54,10 @@ Call the tool once with exactly one of these parameter shapes:
 - `status` accepts a complete task ID or batch ID directly. For a title or
   keyword it searches the controlled video-task registry, returns bounded
   candidates for ambiguity, and reads the formal status once only for a unique
-  match.
+  match. When the platform has a record for that task, its status is always
+  authoritative. The durable local registry is only a fallback when the
+  platform has no matching record or is temporarily unavailable; never report
+  a platform-terminal task as queued, accepted, or running.
 - `result` reads the formal final learning report for a uniquely matched task.
   When a title or keyword matches several tasks, each bounded candidate
   includes its task ID, applicable batch ID/item index, completion time, and

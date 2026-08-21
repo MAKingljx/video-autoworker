@@ -30,6 +30,10 @@
   suggestion, or follow-up offer such as “如需全文”.
 - Submission returns one receipt and ends. Do not poll, retry, resubmit, or
   push completion messages. The release gate is maintenance-only.
+- Formal platform status overrides the durable local registry whenever a
+  matching task exists. The local registry is only a missing-record or
+  temporary-unavailability fallback; platform-terminal tasks are never active
+  queue items.
 - The compatible native `before_dispatch` Telegram-private entry and the direct
   tool use the same managed runner. Both fail closed on validation or runner errors;
   the raw scheduler script is not exposed as a model action.

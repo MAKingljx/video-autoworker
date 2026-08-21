@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   getN8nVideoResultDetail,
   listN8nActiveTaskRunSummaries,
+  listScopedN8nTaskRunStatusSummaries,
   listN8nTaskRunSummaries,
   listN8nVideoResults,
   projectN8nTaskRunListItem,
@@ -332,6 +333,37 @@ describe('listN8nTaskRunSummaries', () => {
     expect(active).toHaveLength(2_001)
     expect(active[0].taskId).toBe('active-0000')
     expect(active.at(-1)?.taskId).toBe('active-2000')
+  })
+
+  it('queries terminal and active statuses in scoped chunks without cross-workspace leakage', () => {
+    const insert = db.prepare(`
+      INSERT INTO n8n_task_runs (
+        task_id, binding_id, status, source, routing, input, output, error,
+        attempt_count, max_attempts, workspace_id, tenant_id,
+        created_at, accepted_at, started_at, completed_at, updated_at
+      ) VALUES (?, 999, ?, 'openclaw', '{"taskType":"general"}', '{}', NULL, NULL, 1, 2, 2, 3, ?, ?, ?, ?, ?)
+    `)
+    const taskIds = Array.from({ length: 405 }, (_, index) => `status-chunk-${String(index).padStart(3, '0')}`)
+    db.transaction(() => {
+      taskIds.forEach((taskId, index) => {
+        const status = index % 3 === 0 ? 'failed' : index % 3 === 1 ? 'succeeded' : 'running'
+        const terminal = status === 'running' ? null : 2_000 + index
+        insert.run(taskId, status, 1_000 + index, 1_001 + index, 1_002 + index, terminal, 2_000 + index)
+      })
+    })()
+
+    const summaries = listScopedN8nTaskRunStatusSummaries(
+      db,
+      { workspaceId: 2, tenantId: 3 },
+      [...taskIds, 'other-workspace', taskIds[0], 'invalid task id'],
+    )
+
+    expect(summaries).toHaveLength(405)
+    expect(summaries.map(run => run.taskId)).toEqual(taskIds)
+    expect(summaries[0].status).toBe('failed')
+    expect(summaries[1].status).toBe('succeeded')
+    expect(summaries[2].status).toBe('running')
+    expect(summaries.some(run => run.taskId === 'other-workspace')).toBe(false)
   })
 
   it('lists and reads only scoped video-analysis results through the safe projection', () => {

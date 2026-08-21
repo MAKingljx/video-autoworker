@@ -3,6 +3,7 @@
 import { rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { createPlatformClient, isRetryablePlatformError } from '../lib/platform-client.mjs'
+import { isTerminalTaskStatus } from '../lib/task-status-authority.mjs'
 import { submitVideoTask } from '../lib/video-task.mjs'
 import {
   acquireBatchLock,
@@ -26,7 +27,6 @@ function option(name) {
 }
 
 const sleep = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))
-const terminal = status => ['succeeded', 'failed', 'cancelled'].includes(status)
 const batchTerminal = status => ['succeeded', 'completed_with_errors'].includes(status)
 const recoveryRunnable = status => ['queued', 'running', 'recovering'].includes(status)
 const HEARTBEAT_INTERVAL_MS = Math.max(1_000, Math.min(30_000,
@@ -48,12 +48,12 @@ async function waitForTask(client, statePath, state, item, timeoutSeconds) {
     if (run) {
       item.status = run.status
       item.error = run.error || null
-      if (item.status !== lastStatus || terminal(item.status) || Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+      if (item.status !== lastStatus || isTerminalTaskStatus(item.status) || Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
         lastStatus = item.status
         lastHeartbeatAt = Date.now()
         state = await persist(statePath, state)
       }
-      if (terminal(item.status)) {
+      if (isTerminalTaskStatus(item.status)) {
         item.completedAt = new Date().toISOString()
         state = await persist(statePath, state)
         return { state, terminal: true }
@@ -81,12 +81,12 @@ async function runBatch(statePath) {
   state = await persist(statePath, state)
 
   for (const item of state.items) {
-    if (terminal(item.status)) continue
+    if (isTerminalTaskStatus(item.status)) continue
     const existing = await client.getRun(item.taskId)
     if (existing) {
       item.status = existing.status
       item.error = existing.error || null
-      if (terminal(existing.status)) {
+      if (isTerminalTaskStatus(existing.status)) {
         item.completedAt = item.completedAt || new Date().toISOString()
         state = await persist(statePath, state)
         continue
@@ -120,7 +120,7 @@ async function runBatch(statePath) {
       item.submittedAt = item.submittedAt || new Date().toISOString()
       item.error = response.error || null
       state = await persist(statePath, state)
-      if (!terminal(item.status)) {
+      if (!isTerminalTaskStatus(item.status)) {
         const waited = await waitForTask(client, statePath, state, item, timeoutSeconds)
         state = waited.state
         if (!waited.terminal) return state

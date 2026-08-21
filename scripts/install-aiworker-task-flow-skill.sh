@@ -58,6 +58,7 @@ required_skill_files=(
   "$SOURCE_DIR/scripts/submit-task.mjs"
   "$SOURCE_DIR/scripts/run-video-batch.mjs"
   "$SOURCE_DIR/lib/platform-client.mjs"
+  "$SOURCE_DIR/lib/task-status-authority.mjs"
   "$SOURCE_DIR/lib/media-ingest.mjs"
   "$SOURCE_DIR/lib/video-task.mjs"
   "$SOURCE_DIR/lib/video-batch-state.mjs"

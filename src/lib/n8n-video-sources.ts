@@ -1,6 +1,7 @@
 import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
+import { isTerminalTaskStatus } from '../../openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs'
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v'])
 const TASK_ID_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/
@@ -11,7 +12,6 @@ const MAX_STATE_ITEMS = 20_000
 const QUEUE_STATUSES = new Set([
   'queued', 'staging', 'submitted', 'accepted', 'running', 'waiting', 'recovering', 'paused',
 ])
-const TERMINAL_ITEM_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
 
 export interface N8nVideoSource {
   taskId: string
@@ -202,7 +202,7 @@ async function buildQueueIndex(
       const taskId = typeof item.taskId === 'string' ? item.taskId.trim() : ''
       if (!TASK_ID_PATTERN.test(taskId)) continue
       const rawStatus = safeQueueText(item.status, 40) || 'queued'
-      if (TERMINAL_ITEM_STATUSES.has(rawStatus)) continue
+      if (isTerminalTaskStatus(rawStatus)) continue
       let status = rawStatus
       if (batchStatus === 'paused' && !['submitted', 'accepted', 'running'].includes(status)) {
         status = 'paused'

@@ -5,8 +5,12 @@ import { spawn } from 'node:child_process'
 import { mkdir, open, readFile, rm, stat } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPlatformClient } from '../lib/platform-client.mjs'
+import { createPlatformClient, isRetryablePlatformError } from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
+import {
+  resolveAuthoritativeTaskRecord,
+  toPublicDurableTaskStatus,
+} from '../lib/task-status-authority.mjs'
 import {
   paginateVideoReport,
   parseResultOffset,
@@ -35,12 +39,6 @@ const VALUE_OPTIONS = new Set([
   '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--confirm-duplicate', '--no-trigger-recovery', '--resume-pending'])
-const terminalTaskStatus = status => ['succeeded', 'failed', 'cancelled'].includes(status)
-const publicLocalTaskStatus = status => ({
-  staging: 'queued',
-  submitted: 'accepted',
-  waiting: 'running',
-}[status] || status)
 const DIRECT_VIDEO_TASK_ID = /^(?:video-command|video-natural)-[a-f0-9]{64}$/u
 const BATCH_VIDEO_TASK_ID = /^video-batch-[a-f0-9]{64}:video:\d{3}:[a-f0-9]{12}$/u
 const VIDEO_BATCH_ID = /^video-batch-[a-f0-9]{64}$/u
@@ -413,32 +411,31 @@ async function main() {
   const statusTaskId = option('--status') || option('--status-brief')
   const briefStatus = Boolean(option('--status-brief'))
   if (statusTaskId) {
-    const local = await readSingleVideoTaskState(statusTaskId).catch(error => {
-      if (error?.code === 'ENOENT') return null
-      throw error
+    const selected = await resolveAuthoritativeTaskRecord({
+      loadPlatformRecord: () => client.getRun(statusTaskId),
+      loadDurableRecord: async () => {
+        const local = await readSingleVideoTaskState(statusTaskId).catch(error => {
+          if (error?.code === 'ENOENT') return null
+          throw error
+        })
+        return local
+          ? {
+            taskId: statusTaskId,
+            status: toPublicDurableTaskStatus(local.item.status),
+            output: null,
+            error: local.item.error || null,
+            updatedAt: local.state.updatedAt,
+          }
+          : null
+      },
+      isPlatformUnavailable: isRetryablePlatformError,
     })
-    if (local && !terminalTaskStatus(local.item.status)) {
-      output({
-        taskId: statusTaskId,
-        status: publicLocalTaskStatus(local.item.status),
-        output: null,
-        error: local.item.error || null,
-        updatedAt: local.state.updatedAt,
-      })
+    if (!selected) throw new Error(`未找到任务：${statusTaskId}`)
+    if (selected.source !== 'platform') {
+      output(selected.record)
       return
     }
-    const run = await client.getRun(statusTaskId)
-    if (!run && local) {
-      output({
-        taskId: statusTaskId,
-        status: publicLocalTaskStatus(local.item.status),
-        output: null,
-        error: local.item.error || null,
-        updatedAt: local.state.updatedAt,
-      })
-      return
-    }
-    if (!run) throw new Error(`未找到任务：${statusTaskId}`)
+    const run = selected.record
     output({
       taskId: run.taskId,
       status: run.status,

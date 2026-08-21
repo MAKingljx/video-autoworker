@@ -223,26 +223,22 @@ bash scripts/install-aiworker-task-flow-skill.sh
 openclaw --profile qwen-current skills info aiworker-task-flow --agent second-original
 ```
 
-`aiworker-task-flow` 是原生插件共享的受控调度客户端，不是 Agent tool，也不是让
-Telegram 用户记忆参数的对话入口。`0.5` 本地候选由 `second-original` 的
-`before_dispatch` 在 handler 内通过宿主 `api.runtime.llm.complete` 调用 Qwen 一次，
-完成无工具结构化语义分类；宿主仍独立完成 Telegram 私聊鉴权、原消息证据校验、
-稳定身份派生与 runner 调用。这里描述的是候选契约，不表示生产已经升级。
+`aiworker-task-flow` 是唯一受控任务链。插件只提供两个薄适配器：
+`second-original` 的 `before_dispatch` 负责 Telegram 私聊入口，
+`aiworker_analyze_video` 负责普通 Agent 会话的结构化调用。两者都调用同一个
+`scheduler-runner` 和已安装的 `aiworker-task-flow/scripts/submit-task.mjs`，不得各自
+实现任务创建、排队、状态仲裁、结果检索或重试恢复。
 
 ```text
 分析视频 /完整路径/video.mp4
 帮我分析一下这个视频 /完整路径/video.mp4
 ```
 
-候选分类结果为 `dispatch_single`、`dispatch_directory`、`status_task`、
-`status_batch`、`status_search`、`respond` 或 `pass`。模型输出本身不构成授权；宿主
-只接受当前原始消息中的唯一规范绝对文件/目录路径、唯一完整显式 taskId/batchId，或
-当前消息中复制的标题/关键词。`status_search` 只在已授权单发送者入口读取受控
-video-batch 状态根目录的有效 JSON，匹配任务公开 ID、显示名、季集别名和状态元数据；
-它不是跨用户或全库搜索，且不读取提示词、源路径、SQLite、n8n execution、媒体、聊天
-历史或凭据。唯一命中后才调用一次正式只读状态接口，多命中只返回有界候选。只有真正无关的
-`pass` 进入正常 Qwen；classifier、鉴权、证据校验和 runner 失败均由 handler catch
-后 handled fail-closed。
+分类器只输出受限结构化意图，模型输出本身不构成授权；宿主仍独立校验 Telegram
+私聊身份、当前原消息中的唯一规范路径、完整任务或批次编号，以及逐字复制的最小标题
+或关键词。状态和结果查询只搜索受控登记字段并调用正式平台接口，不读取聊天、任意
+文件、n8n execution、媒体或凭据。平台存在记录时其状态覆盖本地耐久登记；平台无记录
+或暂时不可用时才允许本地降级。
 
 单视频与目录都先写入持久任务状态并进入同一个进程级全局串行 video lane；单视频是
 一个 item 的任务，目录是确定性排序的多 item 任务。所有 job 共用全局锁，任一时刻最多
@@ -253,30 +249,19 @@ video-batch 状态根目录的有效 JSON，匹配任务公开 ID、显示名、
 状态客户端再调用一次，多命中只返回候选。`delivery=none` 表示结果保存在任务运行记录中，
 不自动回投 Telegram。
 
-### 原生视频命令与受控媒体审计边界
+### 当前插件发布与媒体审计边界
 
-候选插件在模型正常对话之前只注册原生 `before_dispatch`。它可使用宿主 Qwen 完成
-一次无工具结构化语义分类，但不得注册或伪装成 Agent tool。分类器只判断单视频、目录、
-task 状态、batch 状态、无副作用短答或无关放行；宿主仍必须验证 Telegram 私聊、唯一
-发送者、event/context 一致性，以及分类值确实逐字来自当前原始消息。
+插件源码只保留从 `index.js` 可达的当前模块。生产发布统一使用
+`scripts/install-aiworker-video-command-plugin.sh`；脚本验证 canonical Git 提交，
+创建清单化回滚点，使用 OpenClaw 官方安装命令并只刷新 `qwen-current` Gateway。
+它不得启动视频 worker、修改队列、n8n、媒体或数据库。版本化升级脚本与旧处理器不再
+作为活动源码保留，历史过程只存在于 Git 和日期化运维记录。
 
-生产发布门应特别证明：单视频和目录都进入同一个持久化全局 video lane；派发后的当前
-轮状态读取、轮询、重试、重提与完成回投均为零；显式完整 taskId/batchId 或受控标题搜索
-都只读一次；所有 classifier、鉴权、证据与 runner 失败都在 handler 内 handled
-fail-closed。`0.4.1` 的纯正则状态入口和 implicit recent task 不得继续存在。
-
-随插件提供的本地或 installed synthetic harness 只验证处理器、分类、稳定键、runner
-和队列边界，不能替代由真实授权用户发出的 Telegram 网络入口验收。具体安装、升级、
-恢复点和回滚步骤必须在候选实现及其安装脚本稳定后另行审核；本文不猜测尚未定稿的
-版本载荷、模块清单或生产变更计数。
-
-以下是旧版原生处理器的历史下游闭环证据，不证明尚未部署的 `0.5`
-Telegram / `before_dispatch` 调度入口已经通过生产验收。历史隔离验收曾证明
-一次处理只创建一个视频工作流执行，普通任务工作流不增加执行；父任务和
-`prepare`、`audio`、`vision`、`finalize` 四个子任务均以首次
-尝试成功，所有实际出现的 `memoryMode` 均为 `none`，Whisper 与本地视觉模型分别
-命中受控音频口令和纯色画面。这个结论只覆盖原生处理器至视频任务链的功能闭环，
-不扩大为真实 Telegram 入站、历史媒体保留或全局运行数据完整性的证明。
+生产验收必须证明：插件运行时只有一个 `before_dispatch` 和一个
+`aiworker_analyze_video`；二者都进入同一个持久化全局 video lane；派发后的当前轮
+状态读取、轮询、重试、重提与完成回投均为零；classifier、鉴权、证据与 runner 失败
+都 handled fail-closed。插件、任务流 Skill 和控制台投影分别验证，但不得形成第二条
+派发链。
 
 同一次验收暴露了既有媒体清理边界：执行前受控 inbox 记录了一个普通文件的数量
 基线，同时存在一条更早的 `accepted / attempt=0` 记录；执行后文件数量变为零。本轮
@@ -286,7 +271,7 @@ QA 与历史记录使用不同的视频键，且当时 `prepare` 热路径会先
 大小和哈希，运行时也没有逐文件删除审计，不能把该判断表述为完整法证结论，更不能
 据此推测或执行恢复。
 
-修复候选从 `prepare` 热路径移除全局过期清理，并要求 prepare 请求的视频键与父任务
+当前实现从 `prepare` 热路径移除全局过期清理，并要求 prepare 请求的视频键与父任务
 持久化的视频键完全一致；不匹配的请求在创建子任务或读取文件前拒绝。受控媒体检查改为独立审计入口
 `scripts/aiworker-media-retention.mjs`，核心逻辑位于
 `scripts/lib/aiworker-media-retention.mjs`。当前版本只提供审计模式，调用时必须显式
@@ -295,7 +280,7 @@ WAL 复制到权限受控的临时快照，在快照上执行 `query_only` 与�
 该精确临时目录。生产数据库及其 sidecar 在前后必须保持不变，唯一保留的写入是调用者
 指定、位于源码仓库和媒体根之外的 0700 目录中的 0600 审计计划文件。`--apply` 与
 `--delete` 会被拒绝，没有媒体恢复或删除能力，也不把审计动作
-挂回任务执行路径。该候选只修改 Video AutoWorker 应用代码和测试，不涉及 n8n
+挂回任务执行路径。该审计能力只修改 Video AutoWorker 应用代码和测试，不涉及 n8n
 release、工作流、OpenClaw 插件、模型路由或数据库 schema；生产部署只允许重新构建
 并刷新 `3017` 应用，n8n 与 OpenClaw Gateway 不应随之重启。任何后续保留、恢复或
 删除动作都必须作为独立任务重新取证并获得明确授权，不能由审计 CLI 自动完成。
