@@ -102,7 +102,7 @@ async function runBatch(statePath) {
     item.error = null
     state = await persist(statePath, state)
     try {
-      await verifyBatchItemSource(item)
+      await verifyBatchItemSource(item, { inboxRoot: state.inboxRoot })
       const response = await submitVideoTask({
         client,
         bindingId: state.bindingId,

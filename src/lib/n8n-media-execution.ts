@@ -12,6 +12,7 @@ import {
   type AuxiliaryModelResource,
   type N8nModelRoute,
 } from '@/lib/n8n-model-routing'
+import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/lib/media-policy.mjs'
 
 const videoKeySchema = z.string().trim().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:mp4|mov|mkv|webm|m4v)$/i,
@@ -22,7 +23,6 @@ const mediaConfigSchema = z.object({
   audioResourceId: z.string().trim().min(1).max(80).default('whisper-large-v3-turbo'),
   language: z.string().trim().min(2).max(20).default('zh'),
   maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(7_200),
-  maxFileBytes: z.coerce.number().int().min(1_024).max(10 * 1024 ** 3).default(10 * 1024 ** 3),
   segmentSeconds: z.coerce.number().int().min(30).max(300).default(60),
   segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(1),
   maxKeyframesPerSegment: z.coerce.number().int().min(1).max(6).default(3),
@@ -98,7 +98,12 @@ function expandHome(value: string): string {
 
 function mediaConfig(routing: Record<string, unknown>) {
   const configValue = objectValue(routing.config)
-  return mediaConfigSchema.parse(objectValue(configValue.media))
+  const mediaValue = objectValue(configValue.media)
+  // File admission is a host capability, not a per-binding policy. Ignore the
+  // old field so existing n8n bindings cannot reintroduce a second 10 GiB cap.
+  const currentMediaValue = { ...mediaValue }
+  delete currentMediaValue.maxFileBytes
+  return mediaConfigSchema.parse(currentMediaValue)
 }
 
 function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -252,7 +257,7 @@ async function probeMedia(ffmpeg: string, sourcePath: string) {
   }
 }
 
-async function assertControlledSource(videoKey: string, maxFileBytes: number) {
+async function assertControlledSource(videoKey: string) {
   const parsedKey = videoKeySchema.parse(videoKey)
   const inbox = mediaInboxRoot()
   await mkdir(inbox, { recursive: true, mode: 0o700 })
@@ -265,7 +270,7 @@ async function assertControlledSource(videoKey: string, maxFileBytes: number) {
   }
   const sourceStat = await stat(sourcePath)
   if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
-  if (sourceStat.size > maxFileBytes) throw new Error(`视频文件超过 ${maxFileBytes} 字节上限`)
+  await assertMediaCapacity({ sourcePath, destinationRoot: inbox })
   return { sourcePath, sourceBytes: sourceStat.size }
 }
 
@@ -365,12 +370,12 @@ export async function prepareN8nMedia(
   const videoKey = videoKeySchema.parse(input.videoKey)
   const cached = await readExistingMetadata(taskId)
   if (cached) {
-    const orphanedSource = await assertControlledSource(videoKey, settings.maxFileBytes).catch(() => null)
+    const orphanedSource = await assertControlledSource(videoKey).catch(() => null)
     if (orphanedSource) await unlink(orphanedSource.sourcePath).catch(() => undefined)
     return preparedOutput(cached)
   }
 
-  const { sourcePath, sourceBytes } = await assertControlledSource(videoKey, settings.maxFileBytes)
+  const { sourcePath, sourceBytes } = await assertControlledSource(videoKey)
   const ffmpeg = ffmpegCommand()
   await access(ffmpeg, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)

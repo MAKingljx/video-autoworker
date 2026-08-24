@@ -383,7 +383,8 @@ globalThis.fetch = async (input, init = {}) => {
     expect(mediaIngest).toContain("execFileAsync('/bin/cp', ['-c', '-n', inspected.sourcePath, stagedPath])")
     expect(mediaIngest).toContain("['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)")
     expect(mediaIngest).toContain('await utimes(stagedPath, ingestedAt, ingestedAt)')
-    expect(mediaIngest).toContain('10 * 1024 ** 3')
+    expect(mediaIngest).toContain("from './media-policy.mjs'")
+    expect(mediaIngest).not.toContain('10 * 1024 ** 3')
     expect(script).toContain('waitSeconds > 14_400')
   })
 

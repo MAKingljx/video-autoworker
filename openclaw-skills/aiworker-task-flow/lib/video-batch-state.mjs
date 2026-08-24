@@ -393,7 +393,7 @@ export function deriveBatchTaskId(batchId, index, sourcePath) {
   return `${prefix}:video:${String(index).padStart(3, '0')}:${suffix}`.slice(0, 120)
 }
 
-export async function discoverBatchVideos(videoDir) {
+export async function discoverBatchVideos(videoDir, { inboxRoot } = {}) {
   const directory = await realpath(resolve(videoDir))
   const directoryStat = await stat(directory)
   if (!directoryStat.isDirectory()) throw new Error('批量视频路径不是目录')
@@ -405,7 +405,9 @@ export async function discoverBatchVideos(videoDir) {
   if (names.length > MAX_BATCH_ITEMS) throw new Error(`单批最多支持 ${MAX_BATCH_ITEMS} 个视频`)
   const videos = []
   for (const name of names) {
-    const inspected = await inspectVideoFile(join(directory, name))
+    const inspected = await inspectVideoFile(join(directory, name), {
+      capacityRoot: inboxRoot,
+    })
     videos.push({ name, path: inspected.sourcePath, bytes: inspected.sourceBytes })
   }
   return { directory, videos }
@@ -493,7 +495,7 @@ export async function createBatchState({
     }
     const duplicateLock = await acquireDuplicateSubmissionLock(batchRoot)
     try {
-      const discovered = await discoverBatchVideos(requestedDirectory)
+      const discovered = await discoverBatchVideos(requestedDirectory, { inboxRoot })
       const historical = await findHistoricalVideoMatches(
         discovered.videos,
         { root: batchRoot, excludeStatePaths: [statePath] },
@@ -571,7 +573,7 @@ export async function createSingleVideoState({
   batchRoot,
   confirmDuplicate = false,
 }) {
-  const inspected = await inspectVideoFile(videoFile)
+  const inspected = await inspectVideoFile(videoFile, { capacityRoot: inboxRoot })
   const requestIdentity = singleRequestIdentity({
     taskId,
     idempotencyKey,
@@ -665,8 +667,8 @@ export async function createSingleVideoState({
   }
 }
 
-export async function verifyBatchItemSource(item) {
-  const inspected = await inspectVideoFile(item.sourcePath)
+export async function verifyBatchItemSource(item, { inboxRoot } = {}) {
+  const inspected = await inspectVideoFile(item.sourcePath, { capacityRoot: inboxRoot })
   if (inspected.sourceBytes !== item.sourceBytes
     || await sourceFingerprint(inspected.sourcePath) !== item.sourceFingerprint) {
     throw new Error('视频源文件在入队后发生变化')

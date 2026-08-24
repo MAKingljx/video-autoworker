@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { extname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { randomUUID } from 'node:crypto'
+import { assertMediaCapacity, configuredMediaFileLimit } from './media-policy.mjs'
 
 const execFileAsync = promisify(execFile)
 export const SUPPORTED_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v'])
@@ -14,25 +15,47 @@ export function defaultMediaInboxRoot() {
     || join(homedir(), 'ai-worker/state/video-autoworker/media-inbox'))
 }
 
-export async function inspectVideoFile(videoFile, maxBytes = Number(process.env.AIWORKER_MEDIA_MAX_FILE_BYTES || 10 * 1024 ** 3)) {
+function inspectOptions(value) {
+  if (typeof value === 'number' || value === null) return { maxBytes: value }
+  return value && typeof value === 'object' ? value : {}
+}
+
+export async function inspectVideoFile(videoFile, options = {}) {
+  const normalizedOptions = inspectOptions(options)
   const sourcePath = await realpath(resolve(videoFile))
   const sourceStat = await stat(sourcePath)
   if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
-  if (!Number.isFinite(maxBytes) || maxBytes < 1 || sourceStat.size > maxBytes) {
-    throw new Error('视频文件超过允许大小')
-  }
   const extension = extname(sourcePath).toLowerCase()
   if (!SUPPORTED_VIDEO_EXTENSIONS.has(extension)) {
     throw new Error('视频格式只支持 mp4、mov、mkv、webm 或 m4v')
+  }
+  const maxBytes = normalizedOptions.maxBytes === undefined
+    ? configuredMediaFileLimit()
+    : normalizedOptions.maxBytes
+  if (maxBytes !== null && maxBytes !== undefined) {
+    const limit = Number(maxBytes)
+    if (!Number.isSafeInteger(limit) || limit < 1 || sourceStat.size > limit) {
+      throw new Error(`视频文件大小 ${sourceStat.size} 字节超过系统准入上限 ${limit} 字节`)
+    }
+  }
+  if (normalizedOptions.capacityRoot) {
+    await assertMediaCapacity({
+      sourcePath,
+      destinationRoot: normalizedOptions.capacityRoot,
+      maxBytes,
+    })
   }
   return { sourcePath, sourceBytes: sourceStat.size, extension }
 }
 
 export async function stageVideoFile(videoFile, options = {}) {
-  const inspected = await inspectVideoFile(videoFile, options.maxBytes)
   const inbox = resolve(options.inboxRoot || defaultMediaInboxRoot())
   await mkdir(inbox, { recursive: true, mode: 0o700 })
   await chmod(inbox, 0o700)
+  const inspected = await inspectVideoFile(videoFile, {
+    maxBytes: options.maxBytes,
+    capacityRoot: inbox,
+  })
   const videoKey = `${randomUUID()}${inspected.extension}`
   const stagedPath = join(inbox, videoKey)
   const copyMode = process.platform === 'darwin'
