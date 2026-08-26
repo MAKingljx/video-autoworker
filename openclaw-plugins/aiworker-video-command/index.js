@@ -1,4 +1,6 @@
 import { definePluginEntry } from 'openclaw/plugin-sdk/plugin-entry'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 import { createQwenClassifier } from './lib/qwen-video-classifier.js'
 import { createQwenBeforeDispatchHandler } from './lib/qwen-before-dispatch.js'
@@ -10,7 +12,10 @@ export default definePluginEntry({
   name: 'AI-worker Video Command',
   description: 'Hook-owned video learning dispatch and direct task-chain tool access.',
   register(api) {
-    const duplicateConfirmationStore = createDuplicateConfirmationStore()
+    const stateDir = process.env.OPENCLAW_STATE_DIR?.trim() || join(homedir(), '.openclaw-qwen-current')
+    const duplicateConfirmationStore = createDuplicateConfirmationStore({
+      storagePath: join(stateDir, 'aiworker-video-command', 'duplicate-confirmations.json'),
+    })
     const handler = createQwenBeforeDispatchHandler({
       classifier: createQwenClassifier({
         complete: params => api.runtime.llm.complete(params),
