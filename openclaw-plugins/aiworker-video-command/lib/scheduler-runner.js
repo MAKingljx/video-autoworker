@@ -24,6 +24,7 @@ const DISPATCH_STATUSES = new Set([
 const TASK_STATUSES = new Set(['queued', 'accepted', 'running', 'succeeded', 'failed', 'cancelled'])
 const BATCH_STATUSES = new Set([
   'queued', 'running', 'recovering', 'paused', 'succeeded', 'completed_with_errors',
+  'not_registered', 'unavailable',
 ])
 const SEARCH_ITEM_STATUSES = new Set([
   'staging', 'queued', 'submitted', 'accepted', 'running', 'waiting', 'succeeded', 'failed',
@@ -165,6 +166,28 @@ function normalizeBatchStatus(value, expectedBatchId) {
     || normalizeCount(value.total) === undefined
   ) {
     throw new Error('invalid_batch_status_result')
+  }
+  if (value.status === 'not_registered' || value.status === 'unavailable') {
+    const emptyCounts = value.counts
+      && typeof value.counts === 'object'
+      && !Array.isArray(value.counts)
+      && Object.keys(value.counts).length === 0
+    if (
+      value.stateAvailable !== false
+      || value.total !== 0
+      || !emptyCounts
+      || !Array.isArray(value.items)
+      || value.items.length > 0
+    ) throw new Error('invalid_batch_status_result')
+    return {
+      kind: 'batch',
+      id: expectedBatchId,
+      status: value.status,
+      total: 0,
+      counts: {},
+      items: [],
+      stateAvailable: false,
+    }
   }
   const counts = value.counts && typeof value.counts === 'object' && !Array.isArray(value.counts)
     ? Object.fromEntries(Object.entries(value.counts)

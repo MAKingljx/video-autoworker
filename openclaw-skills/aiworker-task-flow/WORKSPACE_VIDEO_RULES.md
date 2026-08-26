@@ -36,6 +36,10 @@ applicable batch ID/item index, completion time, and update time. When those
 fields are present, choose the candidate requested by the user (default to the
 newest completed candidate) and call `result` again with its task ID; do not ask
 the user to repeat an identifier the tool already returned.
+For an explicit batch ID with no durable registration, the status is
+`not_registered`; when both primary and backup state are unusable, the status
+is `unavailable`. These are read-only outcomes and must not trigger recovery,
+retry, resubmission, or inferred progress.
 
 用户说“完整学习结果”“详细报告”或“全文报告”时，必须调用 `result`，不得使用 `exec`、`find`、`grep`、旧 `bot-learning` 路径、任意文件搜索、SQLite 或 n8n 扫描来寻找旧报告。
 

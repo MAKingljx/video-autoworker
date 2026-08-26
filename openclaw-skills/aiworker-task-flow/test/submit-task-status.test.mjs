@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
-import { singleVideoStatePath } from '../lib/video-batch-state.mjs'
+import { batchStatePath, singleVideoStatePath } from '../lib/video-batch-state.mjs'
 
 const execute = promisify(execFile)
 const script = new URL('../scripts/submit-task.mjs', import.meta.url)
@@ -51,6 +51,17 @@ async function queryStatus(root, taskId, baseUrl) {
   return JSON.parse(stdout)
 }
 
+async function queryBatchStatus(root, batchId) {
+  const { stdout, stderr } = await execute(process.execPath, [
+    script.pathname,
+    '--batch-status', batchId,
+  ], {
+    env: { ...process.env, AIWORKER_VIDEO_BATCH_DIR: root },
+  })
+  assert.equal(stderr, '')
+  return JSON.parse(stdout)
+}
+
 test('status CLI asks the platform before a non-terminal durable record', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aiworker-status-platform-first-'))
   const taskId = `video-command-${'a'.repeat(64)}`
@@ -92,6 +103,50 @@ test('status CLI falls back to the durable record on temporary platform failure'
 
     assert.equal(result.status, 'running')
     assert.equal(result.updatedAt, '2026-08-21T12:00:00.000Z')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('batch status returns a structured not-registered state instead of leaking ENOENT', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-batch-status-missing-'))
+  try {
+    const result = await queryBatchStatus(root, 'missing-batch')
+    assert.deepEqual(result, {
+      batchId: 'missing-batch',
+      status: 'not_registered',
+      stateAvailable: false,
+      total: 0,
+      counts: {},
+      current: null,
+      items: [],
+      error: '批次状态未登记，无法验证进度；未执行恢复或提交。',
+      updatedAt: null,
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('batch status returns unavailable when both primary and backup state are damaged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-batch-status-damaged-'))
+  try {
+    const statePath = batchStatePath('damaged-batch', root)
+    await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
+    await writeFile(statePath, '{broken')
+    await writeFile(`${statePath}.bak`, '{also-broken')
+    const result = await queryBatchStatus(root, 'damaged-batch')
+    assert.deepEqual(result, {
+      batchId: 'damaged-batch',
+      status: 'unavailable',
+      stateAvailable: false,
+      total: 0,
+      counts: {},
+      current: null,
+      items: [],
+      error: '批次状态文件损坏且备份不可用，无法验证进度；未执行恢复或提交。',
+      updatedAt: null,
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

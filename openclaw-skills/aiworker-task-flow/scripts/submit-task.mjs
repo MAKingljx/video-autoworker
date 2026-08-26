@@ -272,6 +272,17 @@ async function spawnBatchWorker({ batchRoot = defaultBatchRoot() } = {}) {
     }
   }
   try {
+    await launchLock.writeFile(`${JSON.stringify({
+      pid: process.pid,
+      createdAt: new Date().toISOString(),
+    })}\n`)
+    await launchLock.sync()
+  } catch (error) {
+    await launchLock.close().catch(() => undefined)
+    await rm(launchLockPath, { force: true }).catch(() => undefined)
+    throw error
+  }
+  try {
     const child = spawn(process.execPath, [worker, '--serve-root', batchRoot], {
       detached: true,
       stdio: 'ignore',
@@ -298,6 +309,12 @@ async function spawnBatchWorker({ batchRoot = defaultBatchRoot() } = {}) {
     })
     child.unref()
     return true
+  } catch (error) {
+    // A launcher lock is only a short handoff semaphore. If the child could
+    // not be spawned, remove it immediately so the next submission is not
+    // held behind a false in-flight marker.
+    await rm(launchLockPath, { force: true }).catch(() => undefined)
+    throw error
   } finally {
     await launchLock?.close().catch(() => undefined)
   }
@@ -318,8 +335,41 @@ async function resolvePrompt({ video = false, promptInput } = {}) {
 }
 
 async function handleBatchStatus(batchId) {
-  const state = await readBatchState(batchStatePath(validateBatchId(batchId)))
-  output(summarizeBatchState(state))
+  const safeBatchId = validateBatchId(batchId)
+  try {
+    const state = await readBatchState(batchStatePath(safeBatchId))
+    output(summarizeBatchState(state))
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      output({
+        batchId: safeBatchId,
+        status: 'not_registered',
+        stateAvailable: false,
+        total: 0,
+        counts: {},
+        current: null,
+        items: [],
+        error: '批次状态未登记，无法验证进度；未执行恢复或提交。',
+        updatedAt: null,
+      })
+      return
+    }
+    if (error?.code === 'EBADSTATE') {
+      output({
+        batchId: safeBatchId,
+        status: 'unavailable',
+        stateAvailable: false,
+        total: 0,
+        counts: {},
+        current: null,
+        items: [],
+        error: '批次状态文件损坏且备份不可用，无法验证进度；未执行恢复或提交。',
+        updatedAt: null,
+      })
+      return
+    }
+    throw error
+  }
 }
 
 async function handleBatchResume(batchId) {

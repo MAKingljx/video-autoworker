@@ -190,14 +190,15 @@ async function main() {
     ? resolve(serveRoot, '.serve-root-anchor')
     : option('--state-file')
   const persistent = Boolean(serveRoot || serve)
+  // The launch marker only protects the short parent-to-worker handoff. Clear
+  // it before acquiring the long-lived lane lock so startup failures cannot
+  // strand future submissions behind a stale semaphore.
+  await rm(resolve(dirname(statePath), '.worker-launch.lock'), { force: true }).catch(() => undefined)
   const lock = await acquireGlobalBatchLock(statePath)
   // One current worker already owns the global lane and will discover every
   // persisted queued job. Exit instead of accumulating detached waiters.
   if (!lock.acquired) return
   try {
-    // The launch semaphore covers only the handoff window: a concurrent submit
-    // that observed an existing launcher can now rely on this worker's scan.
-    await rm(resolve(dirname(statePath), '.worker-launch.lock'), { force: true }).catch(() => undefined)
     do {
       await drainQueue(statePath)
       if (!persistent) break

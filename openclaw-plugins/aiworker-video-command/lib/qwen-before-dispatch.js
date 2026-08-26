@@ -295,6 +295,12 @@ export function statusReceipt(result) {
       succeeded: '已完成',
       completed_with_errors: '已完成（含失败项）',
     }
+    if (result.status === 'not_registered') {
+      return '未找到该批次的正式登记，当前无法验证进度；未执行恢复或提交。'
+    }
+    if (result.status === 'unavailable') {
+      return '该批次状态文件不可用，当前无法验证进度；未执行恢复或提交。'
+    }
     return `批次${labels[result.status] ?? '状态未知'}；已结束 ${completed}/${result.total}。`
   }
   if (result.status === 'succeeded' && result.summary) return `任务已完成。摘要：${result.summary}`

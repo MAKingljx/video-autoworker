@@ -58,6 +58,10 @@ Call the tool once with exactly one of these parameter shapes:
   authoritative. The durable local registry is only a fallback when the
   platform has no matching record or is temporarily unavailable; never report
   a platform-terminal task as queued, accepted, or running.
+- If a complete batch ID has no durable registration, `status` returns
+  `not_registered`; if both the primary state file and its verified backup are
+  unusable, it returns `unavailable`. Both are explicit read-only outcomes:
+  do not resume, retry, resubmit, or infer progress from them.
 - `result` reads the formal final learning report for a uniquely matched task.
   When a title or keyword matches several tasks, each bounded candidate
   includes its task ID, applicable batch ID/item index, completion time, and

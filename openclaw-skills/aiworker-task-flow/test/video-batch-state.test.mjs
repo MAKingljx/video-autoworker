@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -7,8 +7,79 @@ import assert from 'node:assert/strict'
 import {
   createBatchState,
   createSingleVideoState,
+  batchStateBackupPath,
+  batchStatePath,
+  listBatchStatePaths,
+  readBatchState,
   searchVideoTaskStates,
+  writeBatchState,
 } from '../lib/video-batch-state.mjs'
+
+test('state writes keep a durable backup and recover a damaged primary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-state-backup-'))
+  const statePath = batchStatePath('backup-fixture', root)
+  const base = {
+    schemaVersion: 2,
+    requestFingerprint: 'a'.repeat(64),
+    batchId: 'backup-fixture',
+    kind: 'batch',
+    items: [],
+  }
+  try {
+    await writeBatchState(statePath, { ...base, status: 'queued' })
+    const backupPath = batchStateBackupPath(statePath)
+    await access(backupPath)
+    assert.equal(JSON.parse(await readFile(backupPath, 'utf8')).status, 'queued')
+
+    await writeBatchState(statePath, { ...base, status: 'running' })
+    assert.equal((await readBatchState(statePath)).status, 'running')
+    assert.equal(JSON.parse(await readFile(backupPath, 'utf8')).status, 'queued')
+
+    await writeFile(statePath, '{corrupt')
+    assert.equal((await readBatchState(statePath)).status, 'queued')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('backup-only state remains visible to search and queue discovery', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-backup-discovery-'))
+  const batchId = 'backup-discovery'
+  const statePath = batchStatePath(batchId, root)
+  try {
+    await writeBatchState(statePath, {
+      schemaVersion: 2,
+      requestFingerprint: 'b'.repeat(64),
+      batchId,
+      status: 'queued',
+      items: [{
+        index: 1,
+        name: '备份恢复样片.mp4',
+        taskId: 'backup-task-1',
+        status: 'queued',
+      }],
+    })
+    await rm(statePath)
+
+    assert.equal((await readBatchState(statePath)).status, 'queued')
+    assert.deepEqual(await listBatchStatePaths(statePath), [statePath])
+    const searched = await searchVideoTaskStates('备份恢复样片', root)
+    assert.equal(searched.total, 1)
+    assert.deepEqual(searched.matches[0], {
+      kind: 'batch',
+      taskId: 'backup-task-1',
+      batchId,
+      index: 1,
+      name: '备份恢复样片.mp4',
+      status: 'queued',
+      batchStatus: 'queued',
+      completedAt: null,
+      updatedAt: (await readBatchState(statePath)).updatedAt,
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('status search keeps distinct queued items from the same directory batch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-search-'))

@@ -157,6 +157,41 @@ describe('0.5 scheduler runner', () => {
     })
   })
 
+  it('accepts explicit batch state availability failures without treating them as transport errors', async () => {
+    const missing = fixture({
+      batchId,
+      status: 'not_registered',
+      stateAvailable: false,
+      total: 0,
+      counts: {},
+      items: [],
+    }).runner
+    const unavailable = fixture({
+      batchId,
+      status: 'unavailable',
+      stateAvailable: false,
+      total: 0,
+      counts: {},
+      items: [],
+    }).runner
+
+    await expect(missing.batchStatus({ batchId })).resolves.toEqual({
+      kind: 'batch',
+      id: batchId,
+      status: 'not_registered',
+      total: 0,
+      counts: {},
+      items: [],
+      stateAvailable: false,
+    })
+    await expect(unavailable.batchStatus({ batchId })).resolves.toMatchObject({
+      kind: 'batch',
+      id: batchId,
+      status: 'unavailable',
+      stateAvailable: false,
+    })
+  })
+
   it('runs one bounded all-state search without constructing a task or batch query', async () => {
     const { execute, runner } = fixture({
       matches: [{

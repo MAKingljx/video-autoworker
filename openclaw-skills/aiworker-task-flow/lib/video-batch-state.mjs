@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import { SUPPORTED_VIDEO_EXTENSIONS, inspectVideoFile } from './media-ingest.mjs'
@@ -223,20 +223,19 @@ export async function searchVideoTaskStates(query, root = defaultBatchRoot()) {
   if (!terms.length) return { matches: [], total: 0, truncated: false }
 
   const stateRoot = resolve(root)
-  let entries
+  const matches = []
+  let statePaths
   try {
-    entries = await readdir(stateRoot, { withFileTypes: true })
+    statePaths = await listControlledStatePaths(stateRoot)
   } catch (error) {
     if (error?.code === 'ENOENT') return { matches: [], total: 0, truncated: false }
     throw error
   }
 
-  const matches = []
-  for (const entry of entries) {
-    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue
+  for (const path of statePaths) {
     let state
     try {
-      state = await readBatchState(join(stateRoot, entry.name))
+      state = await readBatchState(path)
     } catch {
       continue
     }
@@ -289,6 +288,27 @@ export function batchStatePath(batchId, root = defaultBatchRoot()) {
   return join(resolve(root), `${digest}.json`)
 }
 
+export function batchStateBackupPath(statePath) {
+  return `${resolve(statePath)}.bak`
+}
+
+function controlledStatePath(root, name) {
+  const primaryName = name.endsWith('.bak') ? name.slice(0, -4) : name
+  if (!/^[a-f0-9]{64}\.json$/u.test(primaryName)) return null
+  return join(resolve(root), primaryName)
+}
+
+async function listControlledStatePaths(root) {
+  const entries = await readdir(resolve(root), { withFileTypes: true })
+  const paths = new Set()
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    const path = controlledStatePath(root, entry.name)
+    if (path) paths.add(path)
+  }
+  return [...paths]
+}
+
 function duplicateSubmissionLockPath(root = defaultBatchRoot()) {
   return join(resolve(root), '.duplicate-submission.lock')
 }
@@ -335,18 +355,16 @@ export async function findHistoricalVideoMatches(
 
   const stateRoot = resolve(root)
   const excluded = new Set(excludeStatePaths.map(path => resolve(path)))
-  let entries
+  const matches = []
+  let statePaths
   try {
-    entries = await readdir(stateRoot, { withFileTypes: true })
+    statePaths = await listControlledStatePaths(stateRoot)
   } catch (error) {
     if (error?.code === 'ENOENT') return { matches: [], total: 0, truncated: false }
     throw error
   }
 
-  const matches = []
-  for (const entry of entries) {
-    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue
-    const path = join(stateRoot, entry.name)
+  for (const path of statePaths) {
     if (excluded.has(resolve(path))) continue
     let state
     try {
@@ -413,17 +431,93 @@ export async function discoverBatchVideos(videoDir, { inboxRoot } = {}) {
   return { directory, videos }
 }
 
-export async function readBatchState(path) {
-  const parsed = JSON.parse(await readFile(resolve(path), 'utf8'))
+function invalidBatchStateError(message = '批次状态文件无效', cause) {
+  const error = new Error(message)
+  error.code = 'EBADSTATE'
+  if (cause) error.cause = cause
+  return error
+}
+
+function parseBatchStateText(text) {
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    throw invalidBatchStateError('批次状态文件不是有效 JSON', error)
+  }
   const validV1 = parsed?.schemaVersion === 1 && Array.isArray(parsed.items)
   const validV2 = parsed?.schemaVersion === 2
     && typeof parsed.requestFingerprint === 'string'
     && /^[a-f0-9]{64}$/u.test(parsed.requestFingerprint)
     && Array.isArray(parsed.items)
   if (!validV1 && !validV2) {
-    throw new Error('批次状态文件无效')
+    throw invalidBatchStateError()
   }
   return parsed
+}
+
+function isRecoverableStateError(error) {
+  return error?.code === 'ENOENT' || error?.code === 'EBADSTATE'
+}
+
+export async function readBatchState(path) {
+  const target = resolve(path)
+  let primaryError
+  try {
+    return parseBatchStateText(await readFile(target, 'utf8'))
+  } catch (error) {
+    primaryError = error
+  }
+  if (!isRecoverableStateError(primaryError)) throw primaryError
+
+  const backup = batchStateBackupPath(target)
+  try {
+    return parseBatchStateText(await readFile(backup, 'utf8'))
+  } catch (backupError) {
+    if (primaryError?.code === 'ENOENT' && backupError?.code === 'ENOENT') {
+      throw primaryError
+    }
+    if (primaryError?.code === 'EBADSTATE' && backupError?.code === 'ENOENT') {
+      throw primaryError
+    }
+    const message = primaryError?.code === 'ENOENT'
+      ? '批次状态文件缺失且备份不可用'
+      : '批次状态文件损坏且备份不可用'
+    throw invalidBatchStateError(message, backupError)
+  }
+}
+
+async function syncDirectory(path) {
+  let handle
+  try {
+    handle = await open(path, 'r')
+    await handle.sync()
+  } catch (error) {
+    // Some filesystems do not allow fsync on directories. The file itself is
+    // still durably written and the rename remains atomic on those systems.
+    if (!['EISDIR', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+async function writeDurableText(target, text) {
+  const path = resolve(target)
+  const temp = `${path}.tmp.${process.pid}.${randomUUID()}`
+  let handle
+  try {
+    handle = await open(temp, 'wx', 0o600)
+    await handle.writeFile(text, 'utf8')
+    await handle.sync()
+    await handle.close()
+    handle = null
+    await rename(temp, path)
+    await syncDirectory(dirname(path))
+  } catch (error) {
+    await handle?.close().catch(() => undefined)
+    await rm(temp, { force: true }).catch(() => undefined)
+    throw error
+  }
 }
 
 export async function writeBatchState(path, state) {
@@ -432,10 +526,38 @@ export async function writeBatchState(path, state) {
   await mkdir(parent, { recursive: true, mode: 0o700 })
   await chmod(parent, 0o700)
   const next = { ...state, updatedAt: new Date().toISOString() }
-  const temp = `${target}.tmp.${process.pid}`
-  await writeFile(temp, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 })
-  await chmod(temp, 0o600)
-  await rename(temp, target)
+  const nextText = `${JSON.stringify(next, null, 2)}\n`
+  // Refuse to create a checkpoint that cannot be read by the same validator
+  // used by workers and status queries.
+  parseBatchStateText(nextText)
+
+  const backup = batchStateBackupPath(target)
+  let currentText = null
+  try {
+    const candidate = await readFile(target, 'utf8')
+    parseBatchStateText(candidate)
+    currentText = candidate
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && error?.code !== 'EBADSTATE') throw error
+  }
+
+  if (currentText !== null) {
+    // Preserve the last known-good state before replacing the primary file.
+    await writeDurableText(backup, currentText)
+  } else {
+    let backupValid = false
+    try {
+      parseBatchStateText(await readFile(backup, 'utf8'))
+      backupValid = true
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'EBADSTATE') throw error
+    }
+    // The first write also gets a backup. This closes the window where a
+    // freshly created task could otherwise disappear before its next update.
+    if (!backupValid) await writeDurableText(backup, nextText)
+  }
+
+  await writeDurableText(target, nextText)
   return next
 }
 
@@ -787,10 +909,12 @@ async function acquireFileLock(lockPath) {
   await chmod(dirname(lockPath), 0o700)
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const token = randomUUID()
+    let handle
     try {
-      const handle = await open(lockPath, 'wx', 0o600)
+      handle = await open(lockPath, 'wx', 0o600)
       const ownership = JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })
       await handle.writeFile(`${ownership}\n`)
+      await handle.sync()
       return {
         acquired: true,
         async release() {
@@ -802,6 +926,10 @@ async function acquireFileLock(lockPath) {
         },
       }
     } catch (error) {
+      await handle?.close().catch(() => undefined)
+      // If the exclusive create succeeded, this process owns the path even if
+      // writing its metadata failed. Never leave a half-written marker behind.
+      if (handle) await rm(lockPath, { force: true }).catch(() => undefined)
       if (error?.code !== 'EEXIST') throw error
       const lockText = String(await readFile(lockPath, 'utf8').catch(() => '')).trim()
       let pid = /^\d+$/u.test(lockText) ? Number(lockText) : null
@@ -822,17 +950,21 @@ async function acquireFileLock(lockPath) {
 
 export async function listBatchStatePaths(statePath, { onWarning } = {}) {
   const root = dirname(resolve(statePath))
-  const entries = await readdir(root, { withFileTypes: true })
+  let statePaths
+  try {
+    statePaths = await listControlledStatePaths(root)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
   const states = []
-  for (const entry of entries) {
-    if (!entry.isFile() || !/^[a-f0-9]{64}\.json$/u.test(entry.name)) continue
-    const path = join(root, entry.name)
+  for (const path of statePaths) {
     try {
       const state = await readBatchState(path)
       if (state.schemaVersion === 1 && isBatchTerminal(state.status)) continue
       states.push({ path, state })
     } catch (error) {
-      onWarning?.(`忽略无效批次状态 ${entry.name}：${error instanceof Error ? error.message : String(error)}`)
+      onWarning?.(`忽略无效批次状态 ${basename(path)}：${error instanceof Error ? error.message : String(error)}`)
     }
   }
   states.sort((left, right) => {

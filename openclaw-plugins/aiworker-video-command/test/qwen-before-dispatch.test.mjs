@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createQwenBeforeDispatchHandler,
   isClassifierCandidate,
+  statusReceipt,
   validateDecision,
 } from '../lib/qwen-before-dispatch.js'
 
@@ -387,6 +388,21 @@ describe('hook-owned Qwen video scheduler', () => {
 
     expect(result).toEqual({ handled: true, text: '批次恢复中；已结束 1/3。' })
     expect(runner.batchStatus).toHaveBeenCalledOnce()
+  })
+
+  it('distinguishes a missing batch registration from a temporarily unavailable service', () => {
+    expect(statusReceipt({
+      kind: 'batch',
+      status: 'not_registered',
+      total: 0,
+      counts: {},
+    })).toBe('未找到该批次的正式登记，当前无法验证进度；未执行恢复或提交。')
+    expect(statusReceipt({
+      kind: 'batch',
+      status: 'unavailable',
+      total: 0,
+      counts: {},
+    })).toBe('该批次状态文件不可用，当前无法验证进度；未执行恢复或提交。')
   })
 
   it.each([
