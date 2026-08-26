@@ -210,20 +210,80 @@ describe('n8n media node execution route', () => {
     expect(mocks.cleanupN8nMediaTask).toHaveBeenCalledWith(parent.taskId)
   })
 
-  it('fails the child and parent when a worker errors', async () => {
+  it('fails only the child while the worker error remains retryable', async () => {
     mocks.prepareN8nMedia.mockRejectedValue(new Error('视频容器探测失败'))
     const response = await POST(request('prepare'))
     expect(response.status).toBe(502)
-    expect(await response.json()).toMatchObject({ stage: 'prepare', status: 'failed', retryable: true })
+    expect(await response.json()).toMatchObject({
+      stage: 'prepare',
+      status: 'failed',
+      retryable: true,
+      attemptCount: 1,
+      maxAttempts: 2,
+    })
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledWith(
+      {},
+      expect.stringContaining(':prepare:'),
+      '视频容器探测失败',
+    )
+  })
+
+  it('fails the parent only after the child reaches its attempt limit', async () => {
+    mocks.claimN8nTaskRun.mockReturnValue({
+      claimed: true,
+      run: { ...parent, taskId: 'media-task:video-parent-1:prepare', status: 'running', attemptCount: 2, maxAttempts: 2 },
+    })
+    mocks.prepareN8nMedia.mockRejectedValue(new Error('视频容器探测失败'))
+    const response = await POST(request('prepare'))
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ stage: 'prepare', status: 'failed', retryable: false })
     expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(2)
+    expect(mocks.failN8nTaskRun).toHaveBeenNthCalledWith(
+      2,
+      {},
+      parent.taskId,
+      expect.stringContaining('重试次数已用尽 2/2'),
+    )
+  })
+
+  it('surfaces persisted dependency failure details during finalize', async () => {
+    mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => {
+      if (taskId === parent.taskId) return parent
+      if (taskId.includes(':audio:')) return {
+        ...parent,
+        taskId,
+        status: 'succeeded',
+        output: { transcript: '音频结果', model: 'large-v3-turbo' },
+      }
+      if (taskId.includes(':vision:')) return {
+        ...parent,
+        taskId,
+        status: 'failed',
+        output: null,
+        error: 'vision: fetch failed（模型服务 HTTP 503）',
+        attemptCount: 2,
+        maxAttempts: 2,
+      }
+      return null
+    })
+    const response = await POST(request('finalize'))
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ stage: 'finalize', status: 'failed', retryable: true })
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledWith(
+      {},
+      expect.stringContaining(':finalize:'),
+      expect.stringContaining('画面分析节点尚未成功完成（状态：failed，尝试：2/2，错误：vision: fetch failed'),
+    )
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
   })
 
   it('does not report final success when media cleanup fails', async () => {
     mocks.cleanupN8nMediaTask.mockRejectedValue(new Error('媒体临时目录清理失败'))
     const response = await POST(request('finalize'))
     expect(response.status).toBe(502)
-    expect(await response.json()).toMatchObject({ stage: 'finalize', status: 'failed' })
+    expect(await response.json()).toMatchObject({ stage: 'finalize', status: 'failed', retryable: true })
     expect(mocks.completeN8nTaskRun).not.toHaveBeenCalled()
-    expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(2)
+    expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
   })
 })

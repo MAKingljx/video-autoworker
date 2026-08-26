@@ -43,6 +43,26 @@ function stageOutput(
   throw new Error(`不支持直接执行阶段：${stage}`)
 }
 
+function mediaDependencyFailure(
+  label: string,
+  run: ReturnType<typeof getN8nTaskRunByTaskId>,
+): string | null {
+  if (!run) return `${label}分析节点尚未成功完成（节点记录不存在）`
+  if (run.status === 'succeeded' && run.output) return null
+  const attempts = `${run.attemptCount}/${run.maxAttempts}`
+  const detail = run.error ? `，错误：${run.error.slice(0, 1_200)}` : ''
+  return `${label}分析节点尚未成功完成（状态：${run.status}，尝试：${attempts}${detail}）`
+}
+
+function exhaustedChildError(
+  stage: N8nMediaStage,
+  error: string,
+  attemptCount: number,
+  maxAttempts: number,
+): string {
+  return `${stage}: ${error}（子任务重试次数已用尽 ${attemptCount}/${maxAttempts}）`.slice(0, 2_000)
+}
+
 export async function POST(request: NextRequest) {
   if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
     return NextResponse.json({ error: 'n8n 媒体节点回调认证失败' }, { status: 401 })
@@ -114,12 +134,25 @@ export async function POST(request: NextRequest) {
       }, { status: 202 })
     }
     if (child.run.status === 'failed' && child.run.attemptCount >= child.run.maxAttempts) {
+      failN8nTaskRun(
+        db,
+        parent.taskId,
+        exhaustedChildError(
+          stage,
+          child.run.error || '媒体节点重试次数已用尽',
+          child.run.attemptCount,
+          child.run.maxAttempts,
+        ),
+      )
       return NextResponse.json({
         taskId: parent.taskId,
         nodeTaskId: child.run.taskId,
         stage,
         status: child.run.status,
         error: child.run.error || '媒体节点重试次数已用尽',
+        attemptCount: child.run.attemptCount,
+        maxAttempts: child.run.maxAttempts,
+        retryable: false,
       }, { status: 409 })
     }
   }
@@ -135,8 +168,14 @@ export async function POST(request: NextRequest) {
     if (stage === 'finalize') {
       const audioRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'audio'))
       const visionRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'vision'))
-      if (audioRun?.status !== 'succeeded' || !audioRun.output) throw new Error('音频分析节点尚未成功完成')
-      if (visionRun?.status !== 'succeeded' || !visionRun.output) throw new Error('画面分析节点尚未成功完成')
+      const audioFailure = mediaDependencyFailure('音频', audioRun)
+      if (audioFailure || !audioRun || !audioRun.output) {
+        throw new Error(audioFailure || '音频分析节点尚未成功完成')
+      }
+      const visionFailure = mediaDependencyFailure('画面', visionRun)
+      if (visionFailure || !visionRun || !visionRun.output) {
+        throw new Error(visionFailure || '画面分析节点尚未成功完成')
+      }
       const merged = mergeN8nMediaResults(audioRun.output, visionRun.output)
       output = await synthesizeN8nMediaResults(parent.taskId, parent.routing, parent.input, merged)
     } else {
@@ -165,8 +204,14 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : '媒体节点执行失败'
     failN8nTaskRun(db, childTaskId, message)
-    failN8nTaskRun(db, parent.taskId, `${stage}: ${message}`)
     const retryable = claimed.run.attemptCount < claimed.run.maxAttempts
+    if (!retryable) {
+      failN8nTaskRun(
+        db,
+        parent.taskId,
+        exhaustedChildError(stage, message, claimed.run.attemptCount, claimed.run.maxAttempts),
+      )
+    }
     return NextResponse.json({
       taskId: parent.taskId,
       nodeTaskId: childTaskId,
@@ -174,6 +219,8 @@ export async function POST(request: NextRequest) {
       status: 'failed',
       error: message,
       retryable,
+      attemptCount: claimed.run.attemptCount,
+      maxAttempts: claimed.run.maxAttempts,
     }, { status: 502 })
   }
 }

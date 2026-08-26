@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { config } from '@/lib/config'
 import {
   loadN8nModelRegistry,
+  publicN8nModelRoute,
   resolveN8nNodeRoute,
   type AuxiliaryModelResource,
   type N8nModelRoute,
@@ -641,6 +642,68 @@ async function callCompatibleModel(
   return parsed
 }
 
+interface CompatibleRouteAttempt {
+  payload: any
+  route: Extract<N8nModelRoute, { transport: 'openai-compatible' }>
+  routeIndex: number
+}
+
+/**
+ * Resolve the declared route candidates once, then use them as a bounded
+ * same-task failover chain. Route selection previously only checked whether a
+ * route was configured before the request; a mid-request Qwen failure could
+ * therefore fail an otherwise recoverable video even when its binding had a
+ * tested fallback route. The caller keeps the returned routeIndex for the
+ * rest of the current stage so a sick primary endpoint is not hammered for
+ * every remaining segment.
+ */
+function compatibleRouteCandidates(
+  resolved: ReturnType<typeof resolveN8nNodeRoute>,
+): Array<Extract<N8nModelRoute, { transport: 'openai-compatible' }>> {
+  const registry = loadN8nModelRegistry()
+  const byId = new Map(registry.routes.map(route => [route.id, route]))
+  const ids = resolved.candidates.length
+    ? resolved.candidates
+    : [resolved.route.id]
+  const ordered = [resolved.route.id, ...ids.filter(id => id !== resolved.route.id)]
+  const candidates: Array<Extract<N8nModelRoute, { transport: 'openai-compatible' }>> = []
+  for (const id of ordered) {
+    const route = byId.get(id) || (id === resolved.route.id ? resolved.route : null)
+    if (!route || route.transport !== 'openai-compatible') continue
+    if (!route.capabilities.includes('vision')) continue
+    if (!publicN8nModelRoute(route).available) continue
+    if (!candidates.some(candidate => candidate.id === route.id)) candidates.push(route)
+  }
+  return candidates
+}
+
+async function callCompatibleModelWithFallback(
+  resolved: ReturnType<typeof resolveN8nNodeRoute>,
+  candidates: Array<Extract<N8nModelRoute, { transport: 'openai-compatible' }>>,
+  startRouteIndex: number,
+  content: unknown,
+  failurePrefix: string,
+  options: Parameters<typeof callCompatibleModel>[4] = {},
+): Promise<CompatibleRouteAttempt> {
+  const errors: string[] = []
+  const start = Math.max(0, Math.min(startRouteIndex, Math.max(0, candidates.length - 1)))
+  for (let routeIndex = start; routeIndex < candidates.length; routeIndex += 1) {
+    const route = candidates[routeIndex]
+    try {
+      assertVisionRoute(route)
+      const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
+      if (route.apiKeyEnv && !apiKey) throw new Error(`缺少外部凭据引用 ${route.apiKeyEnv}`)
+      const payload = await callCompatibleModel(route, apiKey, content, failurePrefix, options)
+      return { payload, route, routeIndex }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      errors.push(`${route.id}: ${detail.slice(0, 600)}`)
+    }
+  }
+  const configured = resolved.candidates.length ? resolved.candidates.join('、') : resolved.route.id
+  throw new Error(`${failurePrefix}（已尝试 ${configured}）：${errors.join('；')}`.slice(0, 2_000))
+}
+
 /**
  * Qwen visual checkpoints may contain a private reasoning block before the
  * user-facing answer. Persisting that block makes the next synthesis prompt
@@ -663,14 +726,15 @@ export async function analyzeN8nVideoFrames(
 ): Promise<Record<string, unknown>> {
   const metadata = await readMetadata(taskId)
   const resolved = resolveN8nNodeRoute(routing, 'vision')
-  const route = assertVisionRoute(resolved.route)
+  const candidates = compatibleRouteCandidates(resolved)
+  if (!candidates.length) throw new Error('视频画面节点没有可用的 OpenAI-compatible 路由')
+  const route = assertVisionRoute(candidates[0])
   const workspace = mediaTaskWorkspace(taskId)
   const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
   const generation = videoModelGenerationProfile('vision')
-  const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
-  if (route.apiKeyEnv && !apiKey) throw new Error(`视频画面路由缺少外部凭据引用 ${route.apiKeyEnv}`)
   const segments: Record<string, unknown>[] = []
   let totalFrames = 0
+  let activeRouteIndex = 0
   for (const segment of metadata.segments) {
     const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
     let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
@@ -696,12 +760,20 @@ export async function analyzeN8nVideoFrames(
         },
         ...images.map(url => ({ type: 'image_url', image_url: { url } })),
       ]
-      const parsed = await callCompatibleModel(route, apiKey, content, '视频画面模型调用失败', {
-        maxTokens: generation.maxTokens,
-        reasoningEffort: generation.reasoningEffort,
-        phase: generation.phase,
-      })
-      const analysis = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+      const attempt = await callCompatibleModelWithFallback(
+        resolved,
+        candidates,
+        activeRouteIndex,
+        content,
+        '视频画面模型调用失败',
+        {
+          maxTokens: generation.maxTokens,
+          reasoningEffort: generation.reasoningEffort,
+          phase: generation.phase,
+        },
+      )
+      activeRouteIndex = attempt.routeIndex
+      const analysis = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
       if (!analysis) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
       segmentResult = {
         index: segment.index,
@@ -710,6 +782,7 @@ export async function analyzeN8nVideoFrames(
         timeRange: segmentTimeLabel(segment),
         analysis: analysis.slice(0, 12_000),
         frameCount: images.length,
+        routeId: attempt.route.id,
       }
       await writeCheckpoint(workspace, checkpointName, segmentResult)
     }
@@ -724,10 +797,12 @@ export async function analyzeN8nVideoFrames(
     segments,
     segmentCount: segments.length,
     frameCount: totalFrames,
-    routeId: route.id,
-    model: route.model,
-    location: route.location,
-    transport: route.transport,
+    routeId: candidates[activeRouteIndex]?.id || route.id,
+    routeCandidates: candidates.map(candidate => candidate.id),
+    fallbackUsed: activeRouteIndex > 0,
+    model: candidates[activeRouteIndex]?.model || route.model,
+    location: candidates[activeRouteIndex]?.location || route.location,
+    transport: candidates[activeRouteIndex]?.transport || route.transport,
     generation: {
       reasoningEffort: generation.reasoningEffort,
       maxTokens: generation.maxTokens,
@@ -796,9 +871,9 @@ export async function synthesizeN8nMediaResults(
   const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
   if (!timeline.length) return merged
   const resolved = resolveN8nNodeRoute(routing, 'vision')
-  const route = assertVisionRoute(resolved.route)
-  const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
-  if (route.apiKeyEnv && !apiKey) throw new Error(`视频汇总路由缺少外部凭据引用 ${route.apiKeyEnv}`)
+  const candidates = compatibleRouteCandidates(resolved)
+  if (!candidates.length) throw new Error('视频汇总没有可用的 OpenAI-compatible 路由')
+  const route = assertVisionRoute(candidates[0])
   const workspace = mediaTaskWorkspace(taskId)
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim().slice(0, 4_000)
   const chapterSize = 5
@@ -814,6 +889,7 @@ export async function synthesizeN8nMediaResults(
     600,
   )
   const chapters: Record<string, unknown>[] = []
+  let activeRouteIndex = 0
   for (let offset = 0; offset < timeline.length; offset += chapterSize) {
     const group = timeline.slice(offset, offset + chapterSize)
     const chapterIndex = Math.floor(offset / chapterSize) + 1
@@ -827,7 +903,7 @@ export async function synthesizeN8nMediaResults(
         `语音：${String(segment.transcript || '').slice(0, 4_000) || '无'}`,
         `画面：${visibleModelAnswer(segment.visualAnalysis).slice(0, 4_000) || '无'}`,
       ].join('\n')).join('\n\n')
-      const parsed = await callCompatibleModel(route, apiKey, [
+      const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, [
         '请把以下约 5 分钟的分段结果汇总为一个章节。',
         `业务要求：${businessPrompt}`,
         '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。只输出最终章节，不要输出思考过程。',
@@ -838,7 +914,8 @@ export async function synthesizeN8nMediaResults(
         reasoningEffort: chapterGeneration.reasoningEffort,
         phase: chapterGeneration.phase,
       })
-      const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+      activeRouteIndex = attempt.routeIndex
+      const summary = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
       if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
       chapter = {
         index: chapterIndex,
@@ -853,7 +930,7 @@ export async function synthesizeN8nMediaResults(
 
   let finalSummary = await readCheckpoint(workspace, 'final-summary.json', value => typeof value.summary === 'string')
   if (!finalSummary) {
-    const parsed = await callCompatibleModel(route, apiKey, [
+    const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, [
       '根据下面的章节汇总，生成整部视频的最终分析报告。',
       `业务要求：${businessPrompt}`,
       '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。只输出最终报告，不要输出思考过程。',
@@ -864,7 +941,8 @@ export async function synthesizeN8nMediaResults(
       reasoningEffort: finalGeneration.reasoningEffort,
       phase: finalGeneration.phase,
     })
-    const summary = visibleModelAnswer(parsed?.choices?.[0]?.message?.content)
+    activeRouteIndex = attempt.routeIndex
+    const summary = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
     if (!summary) throw new Error('全片汇总返回空结果')
     finalSummary = { summary: summary.slice(0, 16_000) }
     await writeCheckpoint(workspace, 'final-summary.json', finalSummary)
@@ -883,6 +961,9 @@ export async function synthesizeN8nMediaResults(
         maxTokens: finalGeneration.maxTokens,
       },
     },
+    routeId: candidates[activeRouteIndex]?.id || route.id,
+    routeCandidates: candidates.map(candidate => candidate.id),
+    fallbackUsed: activeRouteIndex > 0,
     combinedText: `${String(finalSummary.summary)}\n\n【逐分钟证据】\n${String(merged.combinedText || '')}`,
   }
 }

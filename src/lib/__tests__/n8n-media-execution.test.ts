@@ -1,8 +1,9 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  analyzeN8nVideoFrames,
   buildMediaSegmentWindows,
   cleanupN8nMediaTask,
   compatibleReasoningPayload,
@@ -23,6 +24,8 @@ describe('n8n stateless media helpers', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
+    delete process.env.AIWORKER_MODEL_ROUTES_JSON
     delete process.env.AIWORKER_MEDIA_WORK_DIR
     delete process.env.AIWORKER_MEDIA_INGEST_DIR
     await rm(root, { recursive: true, force: true })
@@ -94,6 +97,92 @@ describe('n8n stateless media helpers', () => {
     expect(compatibleReasoningPayload('medium')).toEqual({
       enable_thinking: true, reasoning_effort: 'medium',
     })
+  })
+
+  it('switches a failed visual route to its declared fallback once per task', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      resources: [],
+      routes: [
+        {
+          id: 'vision-primary',
+          label: '主视觉路由',
+          description: '',
+          location: 'local',
+          transport: 'openai-compatible',
+          model: 'qwen38-27b-vl',
+          baseUrl: 'http://127.0.0.1:18094/v1',
+          enabled: true,
+          capabilities: ['text', 'vision'],
+        },
+        {
+          id: 'vision-fallback',
+          label: '备用视觉路由',
+          description: '',
+          location: 'local',
+          transport: 'openai-compatible',
+          model: 'default_model',
+          baseUrl: 'http://127.0.0.1:18091/v1',
+          enabled: true,
+          capabilities: ['text', 'vision'],
+        },
+      ],
+    })
+    const taskId = 'video-fallback-test'
+    const workspace = mediaTaskWorkspace(taskId)
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'frame-001.jpg'), 'frame-one')
+    await writeFile(join(workspace, 'frame-002.jpg'), 'frame-two')
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId,
+      kind: 'prepared-video',
+      durationSeconds: 120,
+      sourceBytes: 100,
+      audioAvailable: true,
+      frameCount: 2,
+      segmentCount: 2,
+      segmentSeconds: 60,
+      memoryMode: 'none',
+      preparedAt: new Date().toISOString(),
+      segments: [
+        { index: 1, startSeconds: 0, durationSeconds: 60, audioFile: null, frameFiles: ['frame-001.jpg'] },
+        { index: 2, startSeconds: 60, durationSeconds: 60, audioFile: null, frameFiles: ['frame-002.jpg'] },
+      ],
+    }))
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes(':18094/')) {
+        return new Response(JSON.stringify({ error: { message: '主视觉服务不可用' } }), { status: 503 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: '<think>内部推理</think>备用路由画面结果' } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
+
+    const result = await analyzeN8nVideoFrames(taskId, {
+      config: {
+        modelRouting: {
+          nodes: {
+            vision: { routeId: 'vision-primary', fallbackRouteIds: ['vision-fallback'] },
+          },
+        },
+      },
+    }, { prompt: '测试视频画面' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(':18094/'))).toHaveLength(1)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(':18091/'))).toHaveLength(2)
+    expect(result).toMatchObject({
+      routeId: 'vision-fallback',
+      routeCandidates: ['vision-primary', 'vision-fallback'],
+      fallbackUsed: true,
+      segmentCount: 2,
+      model: 'default_model',
+    })
+    expect((result.segments as Array<Record<string, unknown>>).map(segment => segment.routeId))
+      .toEqual(['vision-fallback', 'vision-fallback'])
+    expect(result.analysis).toContain('备用路由画面结果')
+    expect(result.analysis).not.toContain('<think>')
   })
 
   it('accepts bounded stage overrides and the legacy synthesis token setting', () => {
