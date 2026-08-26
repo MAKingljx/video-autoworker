@@ -1,0 +1,15 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { describe, expect, it } from 'vitest'
+
+describe('standalone runtime launcher', () => {
+  it('uses the local OpenClaw binary on the managed production host', () => {
+    const script = readFileSync(resolve(process.cwd(), 'scripts/start-standalone.sh'), 'utf8')
+
+    expect(script).toContain('configure_openclaw_profile_target()')
+    expect(script).toContain('MC_OPENCLAW_PROFILE_TARGET="local"')
+    expect(script).toContain('OPENCLAW_BIN="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"')
+    expect(script.indexOf('load_runtime_env\n\n')).toBeLessThan(script.indexOf('configure_openclaw_profile_target()'))
+    expect(script).toContain('configure_openclaw_profile_target\n\nfind_standalone_server')
+  })
+})

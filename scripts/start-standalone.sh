@@ -25,6 +25,23 @@ load_runtime_env() {
 
 load_runtime_env
 
+# The production console and all three OpenClaw gateways run on the same
+# managed Mac. Default its profile commands to the local binary so a stale
+# hostname or SSH route cannot turn a healthy gateway into a dashboard error.
+configure_openclaw_profile_target() {
+  if [[ -z "${MC_OPENCLAW_PROFILE_TARGET:-}" \
+    && "$(id -un 2>/dev/null || true)" == "heisenbergs-1" \
+    && -x "$HOME/ai-worker/bin/openclaw" ]]; then
+    export MC_OPENCLAW_PROFILE_TARGET="local"
+  fi
+
+  if [[ "${MC_OPENCLAW_PROFILE_TARGET:-}" == "local" ]]; then
+    export OPENCLAW_BIN="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
+  fi
+}
+
+configure_openclaw_profile_target
+
 find_standalone_server() {
   if [[ -f "$STANDALONE_ROOT/server.js" ]]; then
     printf '%s\n' "$STANDALONE_ROOT/server.js"
