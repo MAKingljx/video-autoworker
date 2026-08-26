@@ -33,4 +33,11 @@
 ## 已知问题与下一步
 
 - 当前待确认状态只保留 15 分钟，超过期限需重新提交并再次确认；不提供跨 profile 或跨会话的模糊恢复。
-- 完成部署后记录实际插件版本、checkpoint 权限、任务编号、平台状态和 n8n execution 变化。
+
+## 生产部署与触发证据
+
+- canonical 提交 `c887c6eada099b181f58c089e0998a1e15958a70` 已推送 GitHub 并快进到实际生产仓库；运行插件由 `0.5.10` 升为 `0.5.11`。唯一安装器先完成 dry-run，再创建已验证回滚点并仅重启 `qwen-current` Gateway。
+- 运行时检查确认插件处于 `loaded`，仅有 1 个 `before_dispatch` 和 1 个可选 `aiworker_analyze_video` 工具；Gateway 连通正常。新的确认 checkpoint 在 profile 私有状态目录中以 `0600` 权限创建，确认成功后已清空待确认条目。
+- 用户对约 47.4 GiB 成片给出精确“确认重新分析”后，生产 OpenClaw 原生工具成功提交任务 `video-command-a70bb25e044f27672042f866bd04f8a45bb5bcc07904ac53d4c7a7fb77559e38`；未直接调用底层提交脚本绕过 OpenClaw。
+- 平台任务当前为 `accepted`、无错误，持久化视频 lane 为 `running`；n8n 真实 `aiworker-video-analysis-v1` execution `65` 已处于 `running`。控制台管理 execution API 因未配置管理 API Key 不列出执行项，因此以 n8n SQLite 只读查询核验实际执行态；不修改 n8n 数据库。
+- 视频分析为长时异步任务，本记录时点仅证明已正确派发且执行已启动，不将其表述为已完成。后续只读查询应使用上述任务编号和正式 `status` / `result` 链路。
