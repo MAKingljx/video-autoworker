@@ -13,9 +13,9 @@ describe('current video-command plugin installer', () => {
 
     expect(script).toContain('PROFILE="qwen-current"')
     expect(script).toContain('AGENT_ID="second-original"')
-    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10")')
+    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11")')
     expect(script).toContain('is_supported_previous_version "$installed_version"')
-    expect(script).toContain('CURRENT_VERSION="0.5.11"')
+    expect(script).toContain('CURRENT_VERSION="0.5.12"')
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('validate_git_target')
