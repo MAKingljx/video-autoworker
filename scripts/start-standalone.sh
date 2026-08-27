@@ -8,6 +8,26 @@ STANDALONE_ROOT="$PROJECT_ROOT/.next/standalone"
 SOURCE_STATIC_DIR="$PROJECT_ROOT/.next/static"
 SOURCE_PUBLIC_DIR="$PROJECT_ROOT/public"
 
+find_source_project_root() {
+  if [[ -n "${AIWORKER_SOURCE_APP_DIR:-}" && -f "${AIWORKER_SOURCE_APP_DIR}/.env.local" ]]; then
+    (cd "$AIWORKER_SOURCE_APP_DIR" && pwd -P)
+    return 0
+  fi
+
+  local candidate="$PROJECT_ROOT"
+  for _ in 1 2 3 4 5; do
+    if [[ -f "$candidate/.env.local" && -f "$candidate/package.json" ]]; then
+      (cd "$candidate" && pwd -P)
+      return 0
+    fi
+    candidate="$(dirname "$candidate")"
+  done
+
+  printf '%s\n' "$PROJECT_ROOT"
+}
+
+SOURCE_PROJECT_ROOT="$(find_source_project_root)"
+
 # A standalone server can be restarted directly without deploy-standalone.sh.
 # Load repository settings first, then the administrator-owned platform
 # environment. The latter is the canonical source for shared n8n/model
@@ -41,8 +61,8 @@ load_runtime_env_file() {
 PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
 
 load_runtime_env() {
-  load_runtime_env_file "$PROJECT_ROOT/.env"
-  load_runtime_env_file "$PROJECT_ROOT/.env.local"
+  load_runtime_env_file "$SOURCE_PROJECT_ROOT/.env"
+  load_runtime_env_file "$SOURCE_PROJECT_ROOT/.env.local"
   load_runtime_env_file "$PLATFORM_ENV_FILE"
 }
 
