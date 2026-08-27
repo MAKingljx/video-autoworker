@@ -9,18 +9,41 @@ SOURCE_STATIC_DIR="$PROJECT_ROOT/.next/static"
 SOURCE_PUBLIC_DIR="$PROJECT_ROOT/public"
 
 # A standalone server can be restarted directly without deploy-standalone.sh.
-# Load the repository-owned runtime environment here as well, so loopback
-# task-flow calls keep the desktop trust boundary and external data paths.
-load_runtime_env() {
-  local env_file
-  set -a
-  for env_file in "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.local"; do
-    if [[ -f "$env_file" ]]; then
-      # shellcheck disable=SC1090
-      source "$env_file"
+# Load repository settings first, then the administrator-owned platform
+# environment. The latter is the canonical source for shared n8n/model
+# credentials and must win over stale checkout-local values when a release is
+# started outside the repository root.
+load_runtime_env_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+
+  if [[ "$env_file" == "$PLATFORM_ENV_FILE" ]]; then
+    if [[ -L "$env_file" || ! -f "$env_file" || ! -O "$env_file" ]]; then
+      printf '拒绝加载不安全的平台环境文件：%s\n' "$env_file" >&2
+      exit 1
     fi
-  done
+    local mode group_digit other_digit
+    mode="$(stat -f '%Lp' "$env_file" 2>/dev/null || stat -c '%a' "$env_file")"
+    group_digit="${mode: -2:1}"
+    other_digit="${mode: -1}"
+    if (( (10#$group_digit & 2) != 0 || (10#$other_digit & 2) != 0 )); then
+      printf '平台环境文件不能允许组或其他用户写入：%s（mode=%s）\n' "$env_file" "$mode" >&2
+      exit 1
+    fi
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  source "$env_file"
   set +a
+}
+
+PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
+
+load_runtime_env() {
+  load_runtime_env_file "$PROJECT_ROOT/.env"
+  load_runtime_env_file "$PROJECT_ROOT/.env.local"
+  load_runtime_env_file "$PLATFORM_ENV_FILE"
 }
 
 load_runtime_env
