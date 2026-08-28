@@ -137,8 +137,8 @@ stop_service() {
 }
 
 start_service() {
-  launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
   launchctl enable "$SERVICE"
+  launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
   launchctl kickstart -k "$SERVICE"
 }
 

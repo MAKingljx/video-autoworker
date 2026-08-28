@@ -138,11 +138,20 @@ if (args[0] === 'print') {
   process.stdout.write('ai.aiworker.video-lane-supervisor = {\\n  pid = ' + state.pid + '\\n}\\n')
   process.exit(0)
 }
-if (args[0] === 'bootstrap') { save({ loaded: true, pid: 4242 }); process.exit(0) }
-if (args[0] === 'enable') process.exit(0)
+if (args[0] === 'bootstrap') {
+  const state = read()
+  if (state.disabled) process.exit(5)
+  save({ ...state, loaded: true, pid: 4242 })
+  process.exit(0)
+}
+if (args[0] === 'enable') {
+  const state = read()
+  save({ ...state, disabled: false })
+  process.exit(0)
+}
 if (args[0] === 'kickstart') {
   const state = read()
-  save({ loaded: true, pid: 4242 })
+  save({ ...state, loaded: true, pid: 4242 })
   const lock = process.env.FAKE_BATCH_ROOT + '/.global-video-worker.lock'
   require('node:fs').mkdirSync(require('node:path').dirname(lock), { recursive: true, mode: 0o700 })
   writeFileSync(lock, JSON.stringify({ pid: 4242, token: 'fixture', createdAt: new Date().toISOString() }) + '\\n', { mode: 0o600 })
@@ -151,7 +160,7 @@ if (args[0] === 'kickstart') {
 if (args[0] === 'bootout') {
   const state = read()
   if (!state.loaded) process.exit(113)
-  save({})
+  save({ disabled: Boolean(state.disabled) })
   try { require('node:fs').unlinkSync(process.env.FAKE_BATCH_ROOT + '/.global-video-worker.lock') } catch {}
   process.exit(0)
 }
@@ -255,6 +264,20 @@ describe('persistent global video-lane supervisor', () => {
     const dryRun = await run(entry, '--dry-run')
 
     expect(dryRun.stdout).toContain('No LaunchAgent, queue state')
+  })
+
+  it('enables a disabled service before bootstrapping it', async () => {
+    const entry = await fixture()
+    await writeFile(entry.launchState, '{"disabled":true}\n', { mode: 0o600 })
+
+    const applied = await run(entry, '--apply')
+
+    expect(applied.stdout).toContain('persistent global video-lane supervisor')
+    expect(JSON.parse(await readFile(entry.launchState, 'utf8'))).toMatchObject({
+      disabled: false,
+      loaded: true,
+      pid: 4242,
+    })
   })
 
   it('keeps at most two verified backups without deleting unrelated evidence', async () => {
