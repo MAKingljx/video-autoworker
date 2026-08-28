@@ -3,6 +3,7 @@ import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
   requireN8nRole: vi.fn(),
+  isN8nWebhookSecretConfigured: vi.fn(),
   triggerN8nWebhook: vi.fn(),
   getDatabase: vi.fn(),
   logAuditEvent: vi.fn(),
@@ -10,12 +11,13 @@ const mocks = vi.hoisted(() => ({
   updateN8nWorkflowRunStatus: vi.fn(),
   createN8nTaskRun: vi.fn(),
   markN8nTaskAccepted: vi.fn(),
-  failN8nTaskRun: vi.fn(),
+  failScopedUnclaimedN8nTaskRun: vi.fn(),
   mutationLimiter: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n', () => ({
   requireN8nRole: mocks.requireN8nRole,
+  isN8nWebhookSecretConfigured: mocks.isN8nWebhookSecretConfigured,
   triggerN8nWebhook: mocks.triggerN8nWebhook,
 }))
 
@@ -35,7 +37,7 @@ vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
     ...actual,
     createN8nTaskRun: mocks.createN8nTaskRun,
     markN8nTaskAccepted: mocks.markN8nTaskAccepted,
-    failN8nTaskRun: mocks.failN8nTaskRun,
+    failScopedUnclaimedN8nTaskRun: mocks.failScopedUnclaimedN8nTaskRun,
   }
 })
 
@@ -71,6 +73,7 @@ describe('n8n trigger route', () => {
     vi.clearAllMocks()
     delete process.env.AIWORKER_N8N_NODE_CALLBACK_URL
     delete process.env.AIWORKER_N8N_MEDIA_CALLBACK_URL
+    delete process.env.AIWORKER_N8N_CLAIM_CALLBACK_URL
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       version: 1,
       routes: [{
@@ -88,6 +91,7 @@ describe('n8n trigger route', () => {
       user: { id: 1, username: 'local-desktop', workspace_id: 2, tenant_id: 3 },
     })
     mocks.mutationLimiter.mockReturnValue(null)
+    mocks.isN8nWebhookSecretConfigured.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nWorkflowBinding.mockReturnValue(binding)
     mocks.triggerN8nWebhook.mockResolvedValue({
@@ -100,6 +104,10 @@ describe('n8n trigger route', () => {
       created: true,
       run: { taskId: 'task-7', status: 'queued', output: null },
     })
+    mocks.failScopedUnclaimedN8nTaskRun.mockImplementation((_db, taskId, error) => ({
+      failed: true,
+      run: { taskId, status: 'failed', error, output: null },
+    }))
   })
 
   it('sends a stable routing envelope to n8n without the reserved binding property', async () => {
@@ -128,6 +136,8 @@ describe('n8n trigger route', () => {
           retryCount: 2,
           nodeCallbackUrl: 'http://127.0.0.1:3017/api/n8n/node-execute',
           mediaCallbackUrl: 'http://127.0.0.1:3017/api/n8n/media-execute',
+          claimCallbackUrl: 'http://127.0.0.1:3017/api/n8n/claim',
+          claimScope: { workspaceId: 2, tenantId: 3 },
           config: { queue: 'heavy-model' },
           memoryMode: 'none',
         },
@@ -148,6 +158,23 @@ describe('n8n trigger route', () => {
     }), { workspaceId: 2, tenantId: 3 })
     expect(mocks.markN8nTaskAccepted).toHaveBeenCalledWith({}, 'task-7')
     expect(await response.json()).toMatchObject({ taskId: 'task-7', result: { ok: true } })
+  })
+
+  it('fails before creating a parent task when the shared webhook secret is missing', async () => {
+    mocks.isN8nWebhookSecretConfigured.mockReturnValue(false)
+
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-no-secret',
+      input: { prompt: '分析视频' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/N8N_WEBHOOK_SECRET/) })
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+    expect(mocks.logAuditEvent).not.toHaveBeenCalled()
   })
 
   it('preserves the OpenClaw source marker for agent-submitted tasks', async () => {
@@ -241,6 +268,20 @@ describe('n8n trigger route', () => {
     expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
   })
 
+  it('rejects a parent-claim callback URL outside the loopback interface', async () => {
+    process.env.AIWORKER_N8N_CLAIM_CALLBACK_URL = 'https://example.test/api/n8n/claim'
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-unsafe-claim-callback',
+      input: { prompt: 'test' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/本机回环/) })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
   it('returns the existing task without triggering n8n for a duplicate idempotency key', async () => {
     mocks.createN8nTaskRun.mockReturnValue({
       created: false,
@@ -263,6 +304,24 @@ describe('n8n trigger route', () => {
     expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
   })
 
+  it.each(['failed', 'cancelled'])('returns 409 for an existing duplicate in %s state', async status => {
+    mocks.createN8nTaskRun.mockReturnValue({
+      created: false,
+      run: { taskId: 'terminal-task', status, output: null },
+    })
+
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'duplicate-terminal-task',
+      idempotencyKey: 'terminal-key',
+      input: { prompt: 'test' },
+    }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ taskId: 'terminal-task', duplicate: true, status })
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
   it('refuses disabled bindings before calling n8n', async () => {
     mocks.getN8nWorkflowBinding.mockReturnValue({ ...binding, enabled: false })
 
@@ -278,10 +337,66 @@ describe('n8n trigger route', () => {
     const response = await POST(request({ bindingId: 7, taskId: 'task-failed', input: {} }))
 
     expect(response.status).toBe(502)
-    expect(await response.json()).toEqual({ taskId: 'task-failed', error: 'n8n unavailable' })
+    expect(await response.json()).toEqual({ taskId: 'task-failed', status: 'failed', error: 'n8n unavailable' })
     expect(mocks.updateN8nWorkflowRunStatus).toHaveBeenCalledWith(
       {}, 7, 'failed: n8n unavailable', { workspaceId: 2, tenantId: 3 },
     )
-    expect(mocks.failN8nTaskRun).toHaveBeenCalledWith({}, 'task-failed', 'n8n unavailable')
+    expect(mocks.failScopedUnclaimedN8nTaskRun).toHaveBeenCalledWith(
+      {}, 'task-failed', 'n8n unavailable', { workspaceId: 2, tenantId: 3 },
+    )
+  })
+
+  it('keeps a claimed running parent when the webhook response is lost', async () => {
+    mocks.triggerN8nWebhook.mockRejectedValue(new Error('response connection reset'))
+    mocks.failScopedUnclaimedN8nTaskRun.mockReturnValue({
+      failed: false,
+      run: { taskId: 'task-claimed', status: 'running', output: null },
+    })
+
+    const response = await POST(request({ bindingId: 7, taskId: 'task-claimed', input: {} }))
+
+    expect(response.status).toBe(202)
+    expect(await response.json()).toEqual({
+      taskId: 'task-claimed',
+      status: 'running',
+      acceptedAfterAmbiguousResponse: true,
+    })
+    expect(mocks.updateN8nWorkflowRunStatus).toHaveBeenCalledWith(
+      {}, 7, 'running', { workspaceId: 2, tenantId: 3 },
+    )
+  })
+
+  it('returns a completed parent when the workflow finishes before the response is lost', async () => {
+    mocks.triggerN8nWebhook.mockRejectedValue(new Error('response connection reset'))
+    mocks.failScopedUnclaimedN8nTaskRun.mockReturnValue({
+      failed: false,
+      run: { taskId: 'task-fast', status: 'succeeded', output: { summary: 'done' } },
+    })
+
+    const response = await POST(request({ bindingId: 7, taskId: 'task-fast', input: {} }))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      taskId: 'task-fast',
+      status: 'succeeded',
+      output: { summary: 'done' },
+    })
+  })
+
+  it.each(['failed', 'cancelled'])('returns 409 when an ambiguous response resolves to %s', async status => {
+    mocks.triggerN8nWebhook.mockRejectedValue(new Error('response connection reset'))
+    mocks.failScopedUnclaimedN8nTaskRun.mockReturnValue({
+      failed: false,
+      run: { taskId: 'task-terminal', status, error: 'already terminal', output: null },
+    })
+
+    const response = await POST(request({ bindingId: 7, taskId: 'task-terminal', input: {} }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toEqual({
+      taskId: 'task-terminal',
+      status,
+      error: 'already terminal',
+    })
   })
 })

@@ -2,6 +2,8 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   checkN8nHealth,
+  getN8nRuntimeConfig,
+  isN8nWebhookSecretConfigured,
   listN8nExecutions,
   listN8nRemoteWorkflows,
   normalizeN8nBaseUrl,
@@ -10,16 +12,21 @@ import {
   verifyN8nWebhookSecret,
 } from '@/lib/n8n'
 import {
+  claimScopedN8nVideoTaskRun,
   claimN8nTaskRun,
+  completeN8nFinalizeRun,
   completeN8nTaskRun,
+  createN8nMediaChildRunFromParent,
   createN8nTaskRun,
   failN8nTaskRun,
+  failScopedUnclaimedN8nTaskRun,
   getN8nTaskRunByIdempotencyKey,
   getN8nTaskRunByTaskId,
   getScopedN8nTaskRunByTaskId,
   listN8nTaskRuns,
   markN8nTaskAccepted,
   n8nTaskDeliverySchema,
+  reconcileScopedN8nVideoTaskRun,
 } from '@/lib/n8n-task-runs'
 import {
   createN8nWorkflowBinding,
@@ -85,8 +92,12 @@ describe('n8n endpoint validation', () => {
   })
 
   it('validates the execution callback secret without accepting an empty configuration', () => {
+    expect(isN8nWebhookSecretConfigured()).toBe(false)
+    expect(getN8nRuntimeConfig().webhookSecretConfigured).toBe(false)
     expect(verifyN8nWebhookSecret('anything')).toBe(false)
     process.env.N8N_WEBHOOK_SECRET = 'shared-secret'
+    expect(isN8nWebhookSecretConfigured()).toBe(true)
+    expect(getN8nRuntimeConfig().webhookSecretConfigured).toBe(true)
     expect(verifyN8nWebhookSecret('shared-secret')).toBe(true)
     expect(verifyN8nWebhookSecret('wrong-secret')).toBe(false)
   })
@@ -156,6 +167,7 @@ describe('n8n HTTP integration', () => {
   })
 
   it('turns a non-success webhook response into a useful error', async () => {
+    process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ message: 'workflow inactive' }),
       { status: 404, headers: { 'Content-Type': 'application/json' } },
@@ -163,6 +175,15 @@ describe('n8n HTTP integration', () => {
 
     await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-2' }))
       .rejects.toThrow(/HTTP 404.*workflow inactive/)
+  })
+
+  it('refuses to call n8n when the webhook secret is missing', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-no-secret' }))
+      .rejects.toThrow(/N8N_WEBHOOK_SECRET/)
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 
@@ -300,6 +321,264 @@ describe('n8n task run persistence', () => {
         status: 'failed',
         attemptCount: 1,
         maxAttempts: 1,
+      })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('claims a scoped video parent once and treats a repeated claim as idempotent', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      const scope = { workspaceId: 2, tenantId: 3 }
+      const binding = createN8nWorkflowBinding(db, n8nWorkflowBindingInputSchema.parse({
+        name: '视频分析任务链',
+        webhookPath: 'webhook/aiworker-video-analysis',
+        taskType: 'video-analysis',
+      }), 'tester', scope)
+      createN8nTaskRun(db, {
+        taskId: 'video-unclaimed-1',
+        idempotencyKey: 'video-unclaimed-idem-1',
+        bindingId: binding.id,
+        source: 'openclaw',
+        requestedBy: 'tester',
+        routing: { taskType: 'video-analysis' },
+        taskInput: {},
+        delivery: { mode: 'none' },
+        maxAttempts: 2,
+      }, scope)
+      expect(failScopedUnclaimedN8nTaskRun(
+        db, 'video-unclaimed-1', 'webhook rejected before claim', scope,
+      )).toMatchObject({
+        failed: true,
+        run: { status: 'failed', error: 'webhook rejected before claim' },
+      })
+      createN8nTaskRun(db, {
+        taskId: 'video-claim-1',
+        idempotencyKey: 'video-claim-idem-1',
+        bindingId: binding.id,
+        source: 'openclaw',
+        requestedBy: 'tester',
+        routing: { taskType: 'video-analysis' },
+        taskInput: { videoKey: 'video.mp4' },
+        delivery: { mode: 'none' },
+        maxAttempts: 2,
+      }, scope)
+
+      expect(claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-claim-1', idempotencyKey: 'wrong-idem', bindingId: binding.id,
+      }, scope)).toMatchObject({ outcome: 'rejected', run: { status: 'queued' } })
+      expect(claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-claim-1', idempotencyKey: 'video-claim-idem-1', bindingId: binding.id,
+      }, { workspaceId: 9, tenantId: 9 })).toEqual({ outcome: 'not_found', run: null })
+
+      const claimed = claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-claim-1', idempotencyKey: 'video-claim-idem-1', bindingId: binding.id,
+      }, scope)
+      expect(claimed).toMatchObject({ outcome: 'claimed', run: { status: 'running', attemptCount: 1 } })
+      const repeated = claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-claim-1', idempotencyKey: 'video-claim-idem-1', bindingId: binding.id,
+      }, scope)
+      expect(repeated).toMatchObject({ outcome: 'running', run: { status: 'running', attemptCount: 1 } })
+      expect(failScopedUnclaimedN8nTaskRun(
+        db, 'video-claim-1', 'ambiguous webhook failure', scope,
+      )).toMatchObject({ failed: false, run: { status: 'running', error: null } })
+
+      failN8nTaskRun(db, 'video-claim-1', 'terminal failure')
+      expect(claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-claim-1', idempotencyKey: 'video-claim-idem-1', bindingId: binding.id,
+      }, scope)).toMatchObject({ outcome: 'terminal', run: { status: 'failed', attemptCount: 1 } })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('reconciles only expired pre-media video parents within the requested scope', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      const scope = { workspaceId: 2, tenantId: 3 }
+      const binding = createN8nWorkflowBinding(db, n8nWorkflowBindingInputSchema.parse({
+        name: '视频孤儿收敛任务链',
+        webhookPath: 'webhook/aiworker-video-reconcile',
+        taskType: 'video-analysis',
+      }), 'tester', scope)
+      const createParent = (taskId: string, idempotencyKey: string) => {
+        createN8nTaskRun(db, {
+          taskId,
+          idempotencyKey,
+          bindingId: binding.id,
+          source: 'openclaw',
+          requestedBy: 'tester',
+          routing: { taskType: 'video-analysis' },
+          taskInput: { videoKey: `${taskId}.mp4` },
+          delivery: { mode: 'none' },
+          maxAttempts: 2,
+        }, scope)
+        markN8nTaskAccepted(db, taskId)
+        db.prepare(`UPDATE n8n_task_runs SET accepted_at = 100, updated_at = 100 WHERE task_id = ?`).run(taskId)
+      }
+
+      createParent('video-orphan', 'video-orphan-idem')
+      expect(reconcileScopedN8nVideoTaskRun(
+        db, 'video-orphan', { workspaceId: 9, tenantId: 9 }, { nowSeconds: 1_000 },
+      )).toEqual({ outcome: 'not_found', run: null, code: null })
+      expect(getN8nTaskRunByTaskId(db, 'video-orphan')?.status).toBe('accepted')
+      expect(reconcileScopedN8nVideoTaskRun(
+        db, 'video-orphan', scope, { nowSeconds: 999 },
+      )).toMatchObject({ outcome: 'active', run: { status: 'accepted' }, code: null })
+      const firstReconciliation = reconcileScopedN8nVideoTaskRun(
+        db, 'video-orphan', scope, { nowSeconds: 1_000 },
+      )
+      expect(firstReconciliation).toMatchObject({
+        outcome: 'reconciled',
+        code: 'VIDEO_CALLBACK_LEASE_EXPIRED',
+        run: { status: 'failed', completedAt: 1_000, error: expect.stringContaining('VIDEO_CALLBACK_LEASE_EXPIRED') },
+      })
+      const repeatedReconciliation = reconcileScopedN8nVideoTaskRun(
+        db, 'video-orphan', scope, { nowSeconds: 9_999 },
+      )
+      expect(repeatedReconciliation).toMatchObject({
+        outcome: 'terminal',
+        code: null,
+        run: {
+          status: 'failed',
+          completedAt: firstReconciliation.run?.completedAt,
+          error: firstReconciliation.run?.error,
+        },
+      })
+      expect(createN8nMediaChildRunFromParent(db, {
+        parentTaskId: 'video-orphan',
+        parentIdempotencyKey: 'video-orphan-idem',
+        stage: 'prepare',
+        taskInput: {},
+      })).toMatchObject({ outcome: 'terminal', parent: { status: 'failed' }, child: null })
+
+      for (const stage of ['prepare', 'audio', 'vision', 'finalize'] as const) {
+        for (const childStatus of ['queued', 'running'] as const) {
+          const parentTaskId = `video-with-${stage}-${childStatus}`
+          const parentIdempotencyKey = `${parentTaskId}-idem`
+          createParent(parentTaskId, parentIdempotencyKey)
+          const createdChild = createN8nMediaChildRunFromParent(db, {
+            parentTaskId,
+            parentIdempotencyKey,
+            stage,
+            taskInput: {},
+          })
+          expect(createdChild).toMatchObject({
+            outcome: 'created',
+            parent: { status: 'accepted' },
+            child: { status: 'queued' },
+          })
+          if (childStatus === 'running') {
+            expect(claimN8nTaskRun(db, createdChild.child!.taskId)).toMatchObject({
+              claimed: true,
+              run: { status: 'running' },
+            })
+          }
+          expect(reconcileScopedN8nVideoTaskRun(
+            db, parentTaskId, scope, { nowSeconds: 1_000_000_000 },
+          )).toMatchObject({
+            outcome: 'active',
+            run: { status: 'accepted' },
+            code: null,
+          })
+        }
+      }
+
+      const generalBinding = createN8nWorkflowBinding(db, n8nWorkflowBindingInputSchema.parse({
+        name: '普通任务链不可收敛',
+        webhookPath: 'webhook/general-reconcile-guard',
+        taskType: 'general',
+      }), 'tester', scope)
+      createN8nTaskRun(db, {
+        taskId: 'general-accepted-run',
+        idempotencyKey: 'general-accepted-idem',
+        bindingId: generalBinding.id,
+        source: 'openclaw',
+        requestedBy: 'tester',
+        routing: { taskType: 'video-analysis' },
+        taskInput: {},
+        delivery: { mode: 'none' },
+        maxAttempts: 2,
+      }, scope)
+      markN8nTaskAccepted(db, 'general-accepted-run')
+      db.prepare(`UPDATE n8n_task_runs SET accepted_at = 100, updated_at = 100 WHERE task_id = ?`)
+        .run('general-accepted-run')
+      expect(reconcileScopedN8nVideoTaskRun(
+        db, 'general-accepted-run', scope, { nowSeconds: 1_000_000_000 },
+      )).toMatchObject({ outcome: 'ineligible', run: { status: 'accepted' }, code: null })
+
+      createParent('video-running-orphan', 'video-running-orphan-idem')
+      claimScopedN8nVideoTaskRun(db, {
+        taskId: 'video-running-orphan',
+        idempotencyKey: 'video-running-orphan-idem',
+        bindingId: binding.id,
+      }, scope)
+      db.prepare(`UPDATE n8n_task_runs SET started_at = 100, updated_at = 100 WHERE task_id = ?`)
+        .run('video-running-orphan')
+      expect(reconcileScopedN8nVideoTaskRun(
+        db, 'video-running-orphan', scope, { nowSeconds: 1_000 },
+      )).toMatchObject({ outcome: 'reconciled', run: { status: 'failed' } })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('completes finalize child and parent atomically and repairs a legacy partial completion', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      const scope = { workspaceId: 2, tenantId: 3 }
+      const binding = createN8nWorkflowBinding(db, n8nWorkflowBindingInputSchema.parse({
+        name: '视频最终提交任务链',
+        webhookPath: 'webhook/video-finalize-atomic',
+        taskType: 'video-analysis',
+      }), 'tester', scope)
+      const createFinalizePair = (suffix: string) => {
+        const parentTaskId = `video-finalize-${suffix}`
+        const parentIdempotencyKey = `${parentTaskId}-idem`
+        createN8nTaskRun(db, {
+          taskId: parentTaskId,
+          idempotencyKey: parentIdempotencyKey,
+          bindingId: binding.id,
+          source: 'openclaw',
+          requestedBy: 'tester',
+          routing: { taskType: 'video-analysis' },
+          taskInput: {},
+          delivery: { mode: 'none' },
+          maxAttempts: 2,
+        }, scope)
+        markN8nTaskAccepted(db, parentTaskId)
+        const child = createN8nMediaChildRunFromParent(db, {
+          parentTaskId,
+          parentIdempotencyKey,
+          stage: 'finalize',
+          taskInput: {},
+        }).child!
+        markN8nTaskAccepted(db, child.taskId)
+        claimN8nTaskRun(db, child.taskId)
+        return { parentTaskId, childTaskId: child.taskId }
+      }
+
+      const atomic = createFinalizePair('atomic')
+      expect(completeN8nFinalizeRun(db, {
+        ...atomic,
+        output: { summary: 'atomic result' },
+      })).toMatchObject({
+        outcome: 'completed',
+        parent: { status: 'succeeded', output: { summary: 'atomic result' } },
+        child: { status: 'succeeded', output: { summary: 'atomic result' } },
+      })
+
+      const legacy = createFinalizePair('legacy')
+      completeN8nTaskRun(db, legacy.childTaskId, { summary: 'persisted child result' })
+      expect(getN8nTaskRunByTaskId(db, legacy.parentTaskId)).toMatchObject({ status: 'accepted' })
+      expect(completeN8nFinalizeRun(db, legacy)).toMatchObject({
+        outcome: 'completed',
+        parent: { status: 'succeeded', output: { summary: 'persisted child result' } },
+        child: { status: 'succeeded', output: { summary: 'persisted child result' } },
       })
     } finally {
       db.close()

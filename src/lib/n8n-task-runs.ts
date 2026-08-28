@@ -48,6 +48,14 @@ export interface N8nTaskScope {
   tenantId: number
 }
 
+export const N8N_VIDEO_CALLBACK_LEASE_SECONDS = 15 * 60
+export const N8N_VIDEO_CALLBACK_LEASE_EXPIRED = 'VIDEO_CALLBACK_LEASE_EXPIRED'
+
+export type N8nVideoTaskClaimOutcome = 'claimed' | 'running' | 'terminal' | 'rejected' | 'not_found'
+export type N8nVideoTaskReconcileOutcome = 'reconciled' | 'active' | 'terminal' | 'ineligible' | 'not_found'
+export type N8nMediaChildCreateOutcome = 'created' | 'existing' | 'terminal' | 'rejected' | 'not_found'
+export type N8nFinalizeOutcome = 'completed' | 'cached' | 'terminal' | 'rejected' | 'not_found'
+
 export interface N8nTaskRun {
   id: number
   taskId: string
@@ -613,6 +621,129 @@ export function claimN8nTaskRun(
   return { run: getN8nTaskRunByTaskId(db, taskId), claimed: result.changes === 1 }
 }
 
+/**
+ * Claim the parent of the canonical video-analysis workflow.
+ *
+ * This is intentionally scoped and compare-and-swap based: an authenticated
+ * n8n callback may race another delivery, but it must never claim a task from
+ * another workspace, revive a terminal task, or attach itself to a different
+ * binding/idempotency identity.
+ */
+export function claimScopedN8nVideoTaskRun(
+  db: Database.Database,
+  input: { taskId: string; idempotencyKey: string; bindingId: number },
+  scope: N8nTaskScope,
+): { outcome: N8nVideoTaskClaimOutcome; run: N8nTaskRun | null } {
+  const result = db.prepare(`
+    UPDATE n8n_task_runs
+    SET status = 'running',
+        accepted_at = COALESCE(accepted_at, unixepoch()),
+        started_at = COALESCE(started_at, unixepoch()),
+        completed_at = NULL,
+        attempt_count = attempt_count + 1,
+        updated_at = unixepoch(),
+        error = NULL
+    WHERE task_id = ?
+      AND idempotency_key = ?
+      AND binding_id = ?
+      AND tenant_id = ?
+      AND workspace_id = ?
+      AND status IN ('queued', 'accepted')
+      AND attempt_count < max_attempts
+      AND EXISTS (
+        SELECT 1
+        FROM n8n_workflow_bindings binding
+        WHERE binding.id = n8n_task_runs.binding_id
+          AND binding.tenant_id = n8n_task_runs.tenant_id
+          AND binding.workspace_id = n8n_task_runs.workspace_id
+          AND binding.task_type = 'video-analysis'
+      )
+  `).run(
+    input.taskId,
+    input.idempotencyKey,
+    input.bindingId,
+    scope.tenantId,
+    scope.workspaceId,
+  )
+
+  const run = getScopedN8nTaskRunByTaskId(db, input.taskId, scope)
+  if (result.changes === 1) return { outcome: 'claimed', run }
+  if (!run) return { outcome: 'not_found', run: null }
+  if (run.idempotencyKey !== input.idempotencyKey || run.bindingId !== input.bindingId) {
+    return { outcome: 'rejected', run }
+  }
+  const videoBinding = db.prepare(`
+    SELECT 1
+    FROM n8n_workflow_bindings
+    WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND task_type = 'video-analysis'
+  `).get(run.bindingId, scope.tenantId, scope.workspaceId)
+  if (!videoBinding) return { outcome: 'rejected', run }
+  if (run.status === 'running') return { outcome: 'running', run }
+  if (['succeeded', 'failed', 'cancelled'].includes(run.status)) return { outcome: 'terminal', run }
+  return { outcome: 'rejected', run }
+}
+
+/**
+ * Re-read a video parent and persist a deterministic media child while holding
+ * an IMMEDIATE SQLite transaction. This closes the race with orphan
+ * reconciliation: either the child exists before reconciliation checks, or
+ * the callback observes the reconciled terminal parent and cannot revive it.
+ */
+export function createN8nMediaChildRunFromParent(
+  db: Database.Database,
+  input: {
+    parentTaskId: string
+    parentIdempotencyKey: string
+    stage: typeof MEDIA_STAGES[number]
+    taskInput: Record<string, unknown>
+  },
+): {
+  outcome: N8nMediaChildCreateOutcome
+  parent: N8nTaskRun | null
+  child: N8nTaskRun | null
+} {
+  const execute = db.transaction(() => {
+    const parent = getN8nTaskRunByTaskId(db, input.parentTaskId)
+    if (!parent) return { outcome: 'not_found' as const, parent: null, child: null }
+    if (parent.idempotencyKey !== input.parentIdempotencyKey) {
+      return { outcome: 'rejected' as const, parent, child: null }
+    }
+    if (['succeeded', 'failed', 'cancelled'].includes(parent.status)) {
+      return { outcome: 'terminal' as const, parent, child: null }
+    }
+    if (
+      !['queued', 'accepted', 'running'].includes(parent.status)
+      || String(parent.routing.taskType || '') !== 'video-analysis'
+    ) {
+      return { outcome: 'rejected' as const, parent, child: null }
+    }
+
+    const childTaskId = mediaChildTaskId(parent.taskId, input.stage)
+    const childIdempotencyKey = mediaChildIdentity('idem', parent.idempotencyKey, input.stage)
+    const created = createN8nTaskRun(db, {
+      taskId: childTaskId,
+      idempotencyKey: childIdempotencyKey,
+      bindingId: parent.bindingId,
+      source: 'n8n-media-node',
+      requestedBy: parent.requestedBy,
+      routing: {
+        ...parent.routing,
+        mediaStage: input.stage,
+        memoryMode: 'none',
+      },
+      taskInput: input.taskInput,
+      delivery: { mode: 'none' },
+      maxAttempts: 2,
+    }, { workspaceId: parent.workspaceId, tenantId: parent.tenantId })
+    return {
+      outcome: created.created ? 'created' as const : 'existing' as const,
+      parent,
+      child: created.run,
+    }
+  })
+  return execute.immediate()
+}
+
 export function completeN8nTaskRun(
   db: Database.Database,
   taskId: string,
@@ -640,6 +771,173 @@ export function failN8nTaskRun(
   return getN8nTaskRunByTaskId(db, taskId)
 }
 
+/** Fail dispatch only while no authenticated worker has claimed the run. */
+export function failScopedUnclaimedN8nTaskRun(
+  db: Database.Database,
+  taskId: string,
+  error: string,
+  scope: N8nTaskScope,
+): { failed: boolean; run: N8nTaskRun | null } {
+  const result = db.prepare(`
+    UPDATE n8n_task_runs
+    SET status = 'failed', error = ?, completed_at = unixepoch(), updated_at = unixepoch()
+    WHERE task_id = ?
+      AND tenant_id = ?
+      AND workspace_id = ?
+      AND status IN ('queued', 'accepted')
+  `).run(error.slice(0, 2_000), taskId, scope.tenantId, scope.workspaceId)
+  return {
+    failed: result.changes === 1,
+    run: getScopedN8nTaskRunByTaskId(db, taskId, scope),
+  }
+}
+
+/**
+ * Persist the finalize child and its parent in one transaction. Repeating the
+ * call repairs an already-succeeded finalize child whose parent update was
+ * interrupted by an older runtime.
+ */
+export function completeN8nFinalizeRun(
+  db: Database.Database,
+  input: {
+    parentTaskId: string
+    childTaskId: string
+    output?: Record<string, unknown> | null
+  },
+): {
+  outcome: N8nFinalizeOutcome
+  parent: N8nTaskRun | null
+  child: N8nTaskRun | null
+  output: Record<string, unknown> | null
+} {
+  const execute = db.transaction(() => {
+    let parent = getN8nTaskRunByTaskId(db, input.parentTaskId)
+    let child = getN8nTaskRunByTaskId(db, input.childTaskId)
+    if (!parent || !child) {
+      return { outcome: 'not_found' as const, parent, child, output: null }
+    }
+    const expectedChildTaskId = mediaChildTaskId(parent.taskId, 'finalize')
+    if (
+      child.taskId !== expectedChildTaskId
+      || child.bindingId !== parent.bindingId
+      || child.workspaceId !== parent.workspaceId
+      || child.tenantId !== parent.tenantId
+    ) {
+      return { outcome: 'rejected' as const, parent, child, output: null }
+    }
+    if (['failed', 'cancelled'].includes(parent.status)) {
+      return { outcome: 'terminal' as const, parent, child, output: null }
+    }
+
+    let output = input.output || child.output
+    if (!output) return { outcome: 'rejected' as const, parent, child, output: null }
+    if (child.status === 'running') {
+      db.prepare(`
+        UPDATE n8n_task_runs
+        SET status = 'succeeded', output = ?, error = NULL,
+            completed_at = unixepoch(), updated_at = unixepoch()
+        WHERE task_id = ? AND status = 'running'
+      `).run(JSON.stringify(output), child.taskId)
+      child = getN8nTaskRunByTaskId(db, child.taskId)!
+    } else if (child.status === 'succeeded' && child.output) {
+      output = child.output
+    } else {
+      return { outcome: 'rejected' as const, parent, child, output: null }
+    }
+
+    if (parent.status === 'succeeded') {
+      return { outcome: 'cached' as const, parent, child, output: parent.output || output }
+    }
+    const completed = db.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'succeeded', output = ?, error = NULL,
+          completed_at = unixepoch(), updated_at = unixepoch()
+      WHERE task_id = ? AND status IN ('queued', 'accepted', 'running')
+    `).run(JSON.stringify(output), parent.taskId)
+    parent = getN8nTaskRunByTaskId(db, parent.taskId)!
+    if (completed.changes !== 1) {
+      return { outcome: 'rejected' as const, parent, child, output: null }
+    }
+    return { outcome: 'completed' as const, parent, child, output }
+  })
+  return execute.immediate()
+}
+
+/**
+ * Fail a video parent only when its callback lease expired before any
+ * deterministic media child was created. A long-running prepare/audio/vision
+ * child therefore protects its parent regardless of the video's duration.
+ */
+export function reconcileScopedN8nVideoTaskRun(
+  db: Database.Database,
+  taskId: string,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number; leaseSeconds?: number } = {},
+): { outcome: N8nVideoTaskReconcileOutcome; run: N8nTaskRun | null; code: string | null } {
+  const nowSeconds = Number.isFinite(options.nowSeconds)
+    ? Math.max(0, Math.floor(Number(options.nowSeconds)))
+    : Math.floor(Date.now() / 1_000)
+  const leaseSeconds = Number.isFinite(options.leaseSeconds)
+    ? Math.max(1, Math.min(24 * 60 * 60, Math.floor(Number(options.leaseSeconds))))
+    : N8N_VIDEO_CALLBACK_LEASE_SECONDS
+  const cutoff = nowSeconds - leaseSeconds
+  const childTaskIds = (['prepare', 'audio', 'vision', 'finalize'] as const)
+    .map(stage => mediaChildTaskId(taskId, stage))
+  const error = `[${N8N_VIDEO_CALLBACK_LEASE_EXPIRED}] n8n 视频任务已受理，但在 ${leaseSeconds} 秒内未建立媒体处理阶段`
+
+  const result = db.prepare(`
+    UPDATE n8n_task_runs
+    SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+    WHERE task_id = ?
+      AND tenant_id = ?
+      AND workspace_id = ?
+      AND status IN ('accepted', 'running')
+      AND COALESCE(started_at, accepted_at, updated_at) <= ?
+      AND EXISTS (
+        SELECT 1
+        FROM n8n_workflow_bindings binding
+        WHERE binding.id = n8n_task_runs.binding_id
+          AND binding.tenant_id = n8n_task_runs.tenant_id
+          AND binding.workspace_id = n8n_task_runs.workspace_id
+          AND binding.task_type = 'video-analysis'
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM n8n_task_runs child
+        WHERE child.tenant_id = n8n_task_runs.tenant_id
+          AND child.workspace_id = n8n_task_runs.workspace_id
+          AND child.task_id IN (?, ?, ?, ?)
+      )
+  `).run(
+    error,
+    nowSeconds,
+    nowSeconds,
+    taskId,
+    scope.tenantId,
+    scope.workspaceId,
+    cutoff,
+    ...childTaskIds,
+  )
+
+  const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
+  if (result.changes === 1) {
+    return { outcome: 'reconciled', run, code: N8N_VIDEO_CALLBACK_LEASE_EXPIRED }
+  }
+  if (!run) return { outcome: 'not_found', run: null, code: null }
+  if (['succeeded', 'failed', 'cancelled'].includes(run.status)) {
+    return { outcome: 'terminal', run, code: null }
+  }
+  if (['accepted', 'running'].includes(run.status)) {
+    const videoBinding = db.prepare(`
+      SELECT 1
+      FROM n8n_workflow_bindings
+      WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND task_type = 'video-analysis'
+    `).get(run.bindingId, scope.tenantId, scope.workspaceId)
+    return { outcome: videoBinding ? 'active' : 'ineligible', run, code: null }
+  }
+  return { outcome: 'ineligible', run, code: null }
+}
+
 export function listN8nTaskRuns(
   db: Database.Database,
   scope: N8nTaskScope,
@@ -655,9 +953,17 @@ export function listN8nTaskRuns(
   return rows.map(rowToTaskRun)
 }
 
-function mediaChildTaskId(taskId: string, stage: typeof MEDIA_STAGES[number]): string {
+function mediaChildIdentity(
+  prefix: 'task' | 'idem',
+  taskId: string,
+  stage: typeof MEDIA_STAGES[number],
+): string {
   const digest = createHash('sha256').update(`${taskId}:${stage}`).digest('hex').slice(0, 24)
-  return `media-task:${taskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
+  return `media-${prefix}:${taskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
+}
+
+function mediaChildTaskId(taskId: string, stage: typeof MEDIA_STAGES[number]): string {
+  return mediaChildIdentity('task', taskId, stage)
 }
 
 function videoProcessingStartTimes(

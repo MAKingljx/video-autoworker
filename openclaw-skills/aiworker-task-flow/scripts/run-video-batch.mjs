@@ -29,8 +29,15 @@ function option(name) {
 const sleep = ms => new Promise(resolvePromise => setTimeout(resolvePromise, ms))
 const batchTerminal = status => ['succeeded', 'completed_with_errors'].includes(status)
 const recoveryRunnable = status => ['queued', 'running', 'recovering'].includes(status)
+const activeParent = status => ['accepted', 'running'].includes(status)
 const HEARTBEAT_INTERVAL_MS = Math.max(1_000, Math.min(30_000,
   Number(process.env.AIWORKER_VIDEO_WORKER_HEARTBEAT_MS || 10_000)))
+const configuredReconcileInterval = Number(process.env.AIWORKER_VIDEO_RECONCILE_INTERVAL_MS || 60_000)
+const RECONCILE_INTERVAL_MS = Number.isFinite(configuredReconcileInterval)
+  && configuredReconcileInterval >= 1_000
+  && configuredReconcileInterval <= 5 * 60_000
+  ? configuredReconcileInterval
+  : 60_000
 const RECOVERY_BACKOFF_MS = Math.max(1_000, Math.min(5 * 60_000,
   Number(process.env.AIWORKER_VIDEO_RECOVERY_BACKOFF_MS || 30_000)))
 
@@ -43,6 +50,7 @@ async function waitForTask(client, statePath, state, item, timeoutSeconds) {
   const deadline = Date.now() + timeoutSeconds * 1_000
   let lastStatus = item.status
   let lastHeartbeatAt = 0
+  let nextReconcileAt = Date.now() + RECONCILE_INTERVAL_MS
   while (Date.now() <= deadline) {
     const run = await client.getRun(item.taskId)
     if (run) {
@@ -58,10 +66,32 @@ async function waitForTask(client, statePath, state, item, timeoutSeconds) {
         state = await persist(statePath, state)
         return { state, terminal: true }
       }
+      if (activeParent(item.status) && Date.now() >= nextReconcileAt) {
+        const reconciled = await client.request('/api/n8n/runs/reconcile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ taskId: item.taskId }),
+        })
+        nextReconcileAt = Date.now() + RECONCILE_INTERVAL_MS
+        if (reconciled?.taskId === item.taskId && typeof reconciled.status === 'string') {
+          item.status = reconciled.status
+          item.error = typeof reconciled.error === 'string' ? reconciled.error : null
+          lastStatus = item.status
+          lastHeartbeatAt = Date.now()
+          if (isTerminalTaskStatus(item.status)) item.completedAt = new Date().toISOString()
+          state = await persist(statePath, state)
+          if (isTerminalTaskStatus(item.status)) return { state, terminal: true }
+        }
+      } else if (!activeParent(item.status) && Date.now() >= nextReconcileAt) {
+        nextReconcileAt = Date.now() + RECONCILE_INTERVAL_MS
+      }
     } else {
       state = await persist(statePath, state)
+      if (Date.now() >= nextReconcileAt) {
+        nextReconcileAt = Date.now() + RECONCILE_INTERVAL_MS
+      }
     }
-    await sleep(5_000)
+    await sleep(Math.min(5_000, Math.max(1, nextReconcileAt - Date.now())))
   }
   item.status = 'waiting'
   item.error = `等待任务 ${item.taskId} 超时；队列将保留同一任务编号并由恢复控制器继续查询`

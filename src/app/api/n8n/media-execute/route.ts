@@ -14,8 +14,9 @@ import {
 import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import {
   claimN8nTaskRun,
+  completeN8nFinalizeRun,
   completeN8nTaskRun,
-  createN8nTaskRun,
+  createN8nMediaChildRunFromParent,
   failN8nTaskRun,
   getN8nTaskRunByTaskId,
   markN8nTaskAccepted,
@@ -74,47 +75,92 @@ export async function POST(request: NextRequest) {
   }
 
   const db = getDatabase()
-  const parent = getN8nTaskRunByTaskId(db, parsed.data.taskId)
-  if (!parent) return NextResponse.json({ error: '未找到父任务运行记录' }, { status: 404 })
-  if (parent.idempotencyKey !== parsed.data.idempotencyKey) {
+  const observedParent = getN8nTaskRunByTaskId(db, parsed.data.taskId)
+  if (!observedParent) return NextResponse.json({ error: '未找到父任务运行记录' }, { status: 404 })
+  if (observedParent.idempotencyKey !== parsed.data.idempotencyKey) {
     return NextResponse.json({ error: '幂等键与父任务不匹配' }, { status: 409 })
   }
-  if (parent.status === 'succeeded') {
-    return NextResponse.json({ taskId: parent.taskId, status: parent.status, output: parent.output, cached: true })
+  if (['failed', 'cancelled'].includes(observedParent.status)) {
+    return NextResponse.json({
+      taskId: observedParent.taskId,
+      status: observedParent.status,
+      error: observedParent.error || '父任务已结束，拒绝迟到的媒体节点回调',
+    }, { status: 409 })
   }
-  if (String(parent.routing.taskType || '') !== 'video-analysis') {
+  if (observedParent.status === 'succeeded') {
+    return NextResponse.json({
+      taskId: observedParent.taskId,
+      status: observedParent.status,
+      output: observedParent.output,
+      cached: true,
+    })
+  }
+  if (String(observedParent.routing.taskType || '') !== 'video-analysis') {
     return NextResponse.json({ error: '当前父任务不是视频分析任务链' }, { status: 409 })
   }
 
   const stage = parsed.data.stage
   if (stage === 'prepare') {
-    const parentVideoKey = typeof parent.input.videoKey === 'string' ? parent.input.videoKey : ''
+    const parentVideoKey = typeof observedParent.input.videoKey === 'string' ? observedParent.input.videoKey : ''
     const requestedVideoKey = typeof parsed.data.input.videoKey === 'string' ? parsed.data.input.videoKey : ''
     if (!parentVideoKey || requestedVideoKey !== parentVideoKey) {
       return NextResponse.json({ error: '视频标识与父任务不匹配' }, { status: 409 })
     }
   }
-  const childTaskId = mediaChildIdentity('task', parent.taskId, stage)
-  const childIdempotencyKey = mediaChildIdentity('idem', parent.idempotencyKey, stage)
-  const scope = { workspaceId: parent.workspaceId, tenantId: parent.tenantId }
-  const child = createN8nTaskRun(db, {
-    taskId: childTaskId,
-    idempotencyKey: childIdempotencyKey,
-    bindingId: parent.bindingId,
-    source: 'n8n-media-node',
-    requestedBy: parent.requestedBy,
-    routing: {
-      ...parent.routing,
-      mediaStage: stage,
-      memoryMode: 'none',
-    },
+  const guarded = createN8nMediaChildRunFromParent(db, {
+    parentTaskId: parsed.data.taskId,
+    parentIdempotencyKey: parsed.data.idempotencyKey,
+    stage,
     taskInput: parsed.data.input,
-    delivery: { mode: 'none' },
-    maxAttempts: 2,
-  }, scope)
+  })
+  if (guarded.outcome === 'not_found') {
+    return NextResponse.json({ error: '未找到父任务运行记录' }, { status: 404 })
+  }
+  if (guarded.outcome === 'terminal') {
+    if (guarded.parent?.status === 'succeeded') {
+      return NextResponse.json({
+        taskId: guarded.parent.taskId,
+        status: guarded.parent.status,
+        output: guarded.parent.output,
+        cached: true,
+      })
+    }
+    return NextResponse.json({
+      taskId: guarded.parent?.taskId || parsed.data.taskId,
+      status: guarded.parent?.status || 'failed',
+      error: guarded.parent?.error || '父任务已结束，拒绝迟到的媒体节点回调',
+    }, { status: 409 })
+  }
+  if (guarded.outcome === 'rejected' || !guarded.parent || !guarded.child) {
+    return NextResponse.json({ error: '父任务身份或状态不允许创建媒体节点' }, { status: 409 })
+  }
+  const parent = guarded.parent
+  const childTaskId = guarded.child.taskId
+  const child = { created: guarded.outcome === 'created', run: guarded.child }
 
   if (!child.created) {
     if (child.run.status === 'succeeded') {
+      if (stage === 'finalize') {
+        const finalized = completeN8nFinalizeRun(db, {
+          parentTaskId: parent.taskId,
+          childTaskId: child.run.taskId,
+        })
+        if (finalized.outcome === 'completed' || finalized.outcome === 'cached') {
+          return NextResponse.json({
+            taskId: parent.taskId,
+            nodeTaskId: child.run.taskId,
+            stage,
+            status: 'succeeded',
+            output: finalized.output,
+            cached: true,
+          })
+        }
+        return NextResponse.json({
+          taskId: parent.taskId,
+          status: finalized.parent?.status || 'failed',
+          error: finalized.parent?.error || '最终媒体节点无法补全父任务状态',
+        }, { status: 409 })
+      }
       return NextResponse.json({
         taskId: parent.taskId,
         nodeTaskId: child.run.taskId,
@@ -182,15 +228,23 @@ export async function POST(request: NextRequest) {
       output = await stageOutput(stage, parent.taskId, parent.routing, parent.input)
     }
     if (stage === 'finalize') await cleanupN8nMediaTask(parent.taskId)
-    completeN8nTaskRun(db, childTaskId, output)
-
+    let finalOutput = output
     if (stage === 'finalize') {
-      const currentParent = getN8nTaskRunByTaskId(db, parent.taskId)
-      const parentClaim = currentParent?.status === 'running'
-        ? { claimed: true, run: currentParent }
-        : claimN8nTaskRun(db, parent.taskId)
-      if (!parentClaim.claimed || !parentClaim.run) throw new Error('合并结果已生成，但父任务状态无法提交')
-      completeN8nTaskRun(db, parent.taskId, output)
+      const finalized = completeN8nFinalizeRun(db, {
+        parentTaskId: parent.taskId,
+        childTaskId,
+        output,
+      })
+      if (finalized.outcome !== 'completed' && finalized.outcome !== 'cached') {
+        return NextResponse.json({
+          taskId: parent.taskId,
+          status: finalized.parent?.status || 'failed',
+          error: finalized.parent?.error || '合并结果已生成，但父任务状态无法原子提交',
+        }, { status: 409 })
+      }
+      finalOutput = finalized.output || output
+    } else {
+      completeN8nTaskRun(db, childTaskId, output)
     }
 
     return NextResponse.json({
@@ -199,7 +253,7 @@ export async function POST(request: NextRequest) {
       stage,
       status: 'succeeded',
       memoryMode: 'none',
-      output,
+      output: finalOutput,
     })
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 2_000) : '媒体节点执行失败'

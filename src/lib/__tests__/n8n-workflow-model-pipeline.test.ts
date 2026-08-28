@@ -6,6 +6,8 @@ interface WorkflowNode {
   name: string
   type: string
   parameters?: Record<string, unknown>
+  continueOnFail?: boolean
+  onError?: string
 }
 
 describe('bundled n8n model pipeline', () => {
@@ -57,6 +59,7 @@ describe('bundled stateless video pipeline', () => {
     expect(workflow.name).toBe('AI-worker Segmented Video Analysis v2')
     const names = workflow.nodes.map(node => node.name)
     expect(names).toEqual(expect.arrayContaining([
+      'Claim Video Task',
       'Prepare Video',
       'Analyze Audio Stateless',
       'Analyze Frames Stateless',
@@ -69,7 +72,17 @@ describe('bundled stateless video pipeline', () => {
     ])
     expect(workflow.connections['Analyze Audio Stateless'].main[0][0].index).toBe(0)
     expect(workflow.connections['Analyze Frames Stateless'].main[0][0].index).toBe(1)
-    for (const node of workflow.nodes.filter(node => node.type === 'n8n-nodes-base.httpRequest')) {
+    const claimNode = workflow.nodes.find(node => node.name === 'Claim Video Task')
+    expect(JSON.stringify(claimNode?.parameters)).toContain('30000')
+    expect(claimNode).not.toHaveProperty('continueOnFail')
+    expect(claimNode).not.toHaveProperty('onError')
+    expect(workflow.connections['AI-worker Video Webhook'].main[0][0].node).toBe('Claim Video Task')
+    expect(workflow.connections['Claim Video Task']).toEqual({
+      main: [[{ node: 'Build Video Accepted Result', type: 'main', index: 0 }]],
+    })
+    expect(workflow.connections['Build Video Accepted Result'].main[0][0].node).toBe('Return Video Accepted')
+    for (const node of workflow.nodes.filter(node =>
+      node.type === 'n8n-nodes-base.httpRequest' && node.name !== 'Claim Video Task')) {
       expect(JSON.stringify(node.parameters)).toContain('14400000')
     }
   })
@@ -77,6 +90,8 @@ describe('bundled stateless video pipeline', () => {
   it('uses only the authenticated media callback and declares stateless stages', () => {
     const serialized = JSON.stringify(workflow)
     expect(serialized).toContain('body.routing.mediaCallbackUrl')
+    expect(serialized).toContain('body.routing.claimCallbackUrl')
+    expect(serialized).toContain('body.routing.claimScope.workspaceId')
     expect(serialized).toContain("stage: 'audio'")
     expect(serialized).toContain("stage: 'vision'")
     expect(serialized).toContain("stage: 'finalize'")

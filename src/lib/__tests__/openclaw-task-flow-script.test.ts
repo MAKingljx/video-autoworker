@@ -1101,7 +1101,229 @@ globalThis.fetch = async (input, init = {}) => {
     expect(worker).toContain("['queued', 'running', 'recovering']")
     expect(worker).toContain("failedState.status = isRetryablePlatformError(error) ? 'recovering' : 'paused'")
     expect(worker).toContain("if (batchTerminal(state.status) || !recoveryRunnable(state.status)) continue")
+    expect(worker).toContain('Number.isFinite(configuredReconcileInterval)')
+    expect(worker).toMatch(/\? configuredReconcileInterval\s+: 60_000/)
   })
+
+  it('reconciles an active parent periodically and advances the same lane as soon as it fails', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-reconcile-test-'))
+    const videoDir = resolve(root, 'videos')
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const reconcileCount = resolve(root, 'reconcile-count.txt')
+    const fakePlatform = resolve(root, 'fake-reconcile-platform.mjs')
+    try {
+      await mkdir(videoDir)
+      await writeFile(resolve(videoDir, '01-active.mp4'), 'active')
+      await writeFile(resolve(videoDir, '02-next.mp4'), 'next')
+      await writeFile(reconcileCount, '0')
+      await writeFile(fakePlatform, `
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  const body = init.body ? JSON.parse(String(init.body)) : null
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
+    return json({ runs: taskId === process.env.FAKE_ACTIVE_TASK_ID
+      ? [{ taskId, status: 'running' }]
+      : [] })
+  }
+  if (method === 'POST' && url.pathname === '/api/n8n/runs/reconcile') {
+    const count = Number(readFileSync(process.env.FAKE_RECONCILE_COUNT, 'utf8')) + 1
+    writeFileSync(process.env.FAKE_RECONCILE_COUNT, String(count))
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ action: 'reconcile', taskId: body.taskId }) + '\\n')
+    return count < 2
+      ? json({ taskId: body.taskId, status: 'running', error: null, reconciled: false, code: null })
+      : json({
+          taskId: body.taskId,
+          status: 'failed',
+          error: '视频回调租约已过期',
+          reconciled: true,
+          code: 'VIDEO_CALLBACK_LEASE_EXPIRED',
+        })
+  }
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ action: 'trigger', taskId: body.taskId }) + '\\n')
+    return json({ taskId: body.taskId, status: 'succeeded' })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createBatchState: (input: Record<string, unknown>) => Promise<{
+          statePath: string
+          state: { items: Array<{ taskId: string }> }
+        }>
+        readBatchState: (path: string) => Promise<{
+          status: string
+          items: Array<{ taskId: string; status: string; error: string | null }>
+        }>
+      }
+      const created = await batch.createBatchState({
+        batchId: 'reconcile-lane',
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoDir,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const [activeItem, nextItem] = created.state.items
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            AIWORKER_VIDEO_RECONCILE_INTERVAL_MS: '1000',
+            FAKE_ACTIVE_TASK_ID: activeItem.taskId,
+            FAKE_PLATFORM_LOG: requestLog,
+            FAKE_RECONCILE_COUNT: reconcileCount,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const state = await batch.readBatchState(created.statePath)
+      expect(state.status).toBe('completed_with_errors')
+      expect(state.items).toMatchObject([
+        { taskId: activeItem.taskId, status: 'failed', error: '视频回调租约已过期' },
+        { taskId: nextItem.taskId, status: 'succeeded', error: null },
+      ])
+      const requests = (await readFile(requestLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      expect(requests).toEqual([
+        { action: 'reconcile', taskId: activeItem.taskId },
+        { action: 'reconcile', taskId: activeItem.taskId },
+        { action: 'trigger', taskId: nextItem.taskId },
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 10_000)
+
+  it('continues from a reconciled orphan batch into the next persisted batch on the same lane', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-cross-batch-reconcile-test-'))
+    const firstDir = resolve(root, 'first')
+    const secondDir = resolve(root, 'second')
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const fakePlatform = resolve(root, 'fake-cross-batch-platform.mjs')
+    try {
+      await mkdir(firstDir)
+      await mkdir(secondDir)
+      await writeFile(resolve(firstDir, '01-orphan.mp4'), 'orphan')
+      await writeFile(resolve(secondDir, '01-next.mp4'), 'next')
+      await writeFile(fakePlatform, `
+import { appendFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  const body = init.body ? JSON.parse(String(init.body)) : null
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
+    return json({ runs: taskId === process.env.FAKE_ORPHAN_TASK_ID
+      ? [{ taskId, status: 'running' }]
+      : [] })
+  }
+  if (method === 'POST' && url.pathname === '/api/n8n/runs/reconcile') {
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ action: 'reconcile', taskId: body.taskId }) + '\\n')
+    return json({
+      taskId: body.taskId,
+      status: 'failed',
+      error: '视频回调租约已过期',
+      reconciled: true,
+      code: 'VIDEO_CALLBACK_LEASE_EXPIRED',
+    })
+  }
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ action: 'trigger', taskId: body.taskId }) + '\\n')
+    return json({ taskId: body.taskId, status: 'succeeded' })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createBatchState: (input: Record<string, unknown>) => Promise<{
+          statePath: string
+          state: { items: Array<{ taskId: string }> }
+        }>
+        readBatchState: (path: string) => Promise<{
+          status: string
+          items: Array<{ taskId: string; status: string }>
+        }>
+      }
+      const common = {
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        inboxRoot,
+        batchRoot: stateRoot,
+      }
+      const first = await batch.createBatchState({
+        ...common,
+        batchId: 'orphan-first',
+        videoDir: firstDir,
+      })
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 5))
+      const second = await batch.createBatchState({
+        ...common,
+        batchId: 'queued-second',
+        videoDir: secondDir,
+      })
+      const orphanTask = first.state.items[0]
+      const nextTask = second.state.items[0]
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', first.statePath], {
+          env: {
+            ...process.env,
+            AIWORKER_VIDEO_RECONCILE_INTERVAL_MS: '1000',
+            FAKE_ORPHAN_TASK_ID: orphanTask.taskId,
+            FAKE_PLATFORM_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const firstState = await batch.readBatchState(first.statePath)
+      const secondState = await batch.readBatchState(second.statePath)
+      expect(firstState).toMatchObject({ status: 'completed_with_errors', items: [{ status: 'failed' }] })
+      expect(secondState).toMatchObject({ status: 'succeeded', items: [{ status: 'succeeded' }] })
+      const requests = (await readFile(requestLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      expect(requests).toEqual([
+        { action: 'reconcile', taskId: orphanTask.taskId },
+        { action: 'trigger', taskId: nextTask.taskId },
+      ])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 10_000)
 
   it('leaves a paused batch untouched while processing a later queued batch', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-paused-skip-test-'))

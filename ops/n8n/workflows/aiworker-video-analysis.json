@@ -19,6 +19,38 @@
     },
     {
       "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Video Webhook').item.json.body.routing.claimCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "X-AIWorker-Webhook-Secret",
+              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, bindingId: $('AI-worker Video Webhook').item.json.body.routing.id, workspaceId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.workspaceId, tenantId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.tenantId }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "019fb12d-8000-7a10-9000-00000000000f",
+      "name": "Claim Video Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-500, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
         "assignments": {
           "assignments": [
             {
@@ -30,7 +62,7 @@
             {
               "id": "019fb12d-8000-7a10-9000-000000000004",
               "name": "taskId",
-              "value": "={{ $json.body.taskId }}",
+              "value": "={{ $('AI-worker Video Webhook').item.json.body.taskId }}",
               "type": "string"
             },
             {
@@ -220,6 +252,9 @@
   ],
   "connections": {
     "AI-worker Video Webhook": {
+      "main": [[{ "node": "Claim Video Task", "type": "main", "index": 0 }]]
+    },
+    "Claim Video Task": {
       "main": [[{ "node": "Build Video Accepted Result", "type": "main", "index": 0 }]]
     },
     "Build Video Accepted Result": {

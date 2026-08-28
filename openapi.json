@@ -11481,6 +11481,50 @@
         }
       }
     },
+    "/api/n8n/video-library": {
+      "get": {
+        "tags": ["n8n"], "summary": "Search persisted video learning results", "operationId": "searchN8nVideoLibrary",
+        "parameters": [
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 120 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "minimum": 1, "maximum": 200, "default": 80 } }
+        ],
+        "responses": {
+          "200": { "description": "Workspace-scoped video search hits and media availability", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["query", "hits", "total", "videoCount", "segmentCount", "limit", "truncated", "playableVideos"],
+            "properties": {
+              "query": { "type": "string" },
+              "hits": { "type": "array", "items": { "type": "object", "required": ["taskId", "mediaAvailable"], "properties": { "taskId": { "type": "string" }, "mediaAvailable": { "type": "boolean" } } } },
+              "total": { "type": "integer" }, "videoCount": { "type": "integer" }, "segmentCount": { "type": "integer" },
+              "limit": { "type": "integer" }, "truncated": { "type": "boolean" }, "playableVideos": { "type": "integer" }
+            }
+          } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/n8n/video-library/asset": {
+      "get": {
+        "tags": ["n8n"], "summary": "Stream a video library source asset", "operationId": "getN8nVideoLibraryAsset",
+        "parameters": [{ "name": "taskId", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" } }],
+        "responses": {
+          "200": { "description": "Complete video asset" }, "206": { "description": "Requested video byte range" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The indexed source asset changed" }, "416": { "description": "Invalid or unsatisfiable byte range" }
+        }
+      },
+      "head": {
+        "tags": ["n8n"], "summary": "Read video library source asset headers", "operationId": "headN8nVideoLibraryAsset",
+        "parameters": [{ "name": "taskId", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" } }],
+        "responses": {
+          "200": { "description": "Complete video asset headers" }, "206": { "description": "Requested video byte-range headers" },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The indexed source asset changed" }, "416": { "description": "Invalid or unsatisfiable byte range" }
+        }
+      }
+    },
     "/api/n8n/trigger": {
       "post": {
         "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",
@@ -11500,8 +11544,40 @@
           "202": { "description": "The task was accepted by n8n, or an existing in-progress run was returned", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "duplicate": { "type": "boolean" }, "result": { "type": "object" } } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "description": "Workflow binding is disabled" }, "429": { "$ref": "#/components/responses/RateLimited" },
-          "502": { "description": "n8n webhook failed or timed out" }
+          "409": { "description": "Workflow binding is disabled, or the idempotency key already belongs to a failed or cancelled task" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "description": "n8n webhook failed or timed out" },
+          "503": { "description": "The shared n8n webhook secret is missing or an internal callback URL is not a safe loopback URL" }
+        }
+      }
+    },
+    "/api/n8n/claim": {
+      "post": {
+        "tags": ["n8n"], "summary": "Claim the persisted parent of the canonical video workflow", "operationId": "claimN8nVideoTaskRun",
+        "description": "Internal n8n callback that atomically claims the exact workspace-scoped video parent before media stages execute.",
+        "security": [{ "n8nWebhookSecret": [] }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["taskId", "idempotencyKey", "bindingId", "workspaceId", "tenantId"],
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "bindingId": { "type": "integer", "minimum": 1 },
+            "workspaceId": { "type": "integer", "minimum": 1 },
+            "tenantId": { "type": "integer", "minimum": 1 }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "The parent was claimed or the same workflow delivery already owns it", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["taskId", "status", "claimed", "duplicate"],
+            "properties": {
+              "taskId": { "type": "string" }, "status": { "type": "string", "const": "running" },
+              "claimed": { "type": "boolean" }, "duplicate": { "type": "boolean" }
+            }
+          } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Terminal task or identity, scope, binding, or task-type mismatch" }
         }
       }
     },
@@ -11583,6 +11659,29 @@
         "responses": {
           "200": { "description": "Workspace-scoped task runs", "content": { "application/json": { "schema": { "type": "object", "properties": { "runs": { "type": "array", "items": { "$ref": "#/components/schemas/N8nTaskRun" } } } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" }, "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/n8n/runs/reconcile": {
+      "post": {
+        "tags": ["n8n"], "summary": "Reconcile an active video parent against its server-side callback lease", "operationId": "reconcileN8nVideoTaskRun",
+        "description": "The server owns lease and child-run eligibility rules. Callers submit only the parent task identifier.",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false, "required": ["taskId"],
+          "properties": { "taskId": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" } }
+        } } } },
+        "responses": {
+          "200": { "description": "Current terminal/active state, including whether an expired orphan was reconciled", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["taskId", "status", "reconciled"],
+            "properties": {
+              "taskId": { "type": "string" }, "status": { "type": "string" },
+              "error": { "type": ["string", "null"] }, "reconciled": { "type": "boolean" },
+              "code": { "type": ["string", "null"], "description": "VIDEO_CALLBACK_LEASE_EXPIRED when reconciliation fails an orphaned parent." }
+            }
+          } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "The task is not a reconcilable video run" }, "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
     }

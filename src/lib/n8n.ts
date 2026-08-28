@@ -9,6 +9,7 @@ export { normalizeN8nBaseUrl } from '@/lib/n8n-base-url'
 export interface N8nRuntimeConfig {
   baseUrl: string
   apiKeyConfigured: boolean
+  webhookSecretConfigured: boolean
   defaultWebhookPath: string
 }
 
@@ -63,6 +64,7 @@ export function getN8nRuntimeConfig(): N8nRuntimeConfig {
   return {
     baseUrl: normalizeN8nBaseUrl(),
     apiKeyConfigured: Boolean(String(process.env.N8N_API_KEY || '').trim()),
+    webhookSecretConfigured: isN8nWebhookSecretConfigured(),
     defaultWebhookPath: normalizeN8nWebhookPath(
       process.env.N8N_DEFAULT_WEBHOOK_PATH || 'webhook/aiworker-task',
     ),
@@ -77,6 +79,10 @@ export function verifyN8nWebhookSecret(provided: string | null): boolean {
   const actualBuffer = Buffer.from(actual)
   return expectedBuffer.length === actualBuffer.length
     && timingSafeEqual(expectedBuffer, actualBuffer)
+}
+
+export function isN8nWebhookSecretConfigured(): boolean {
+  return Boolean(String(process.env.N8N_WEBHOOK_SECRET || '').trim())
 }
 
 async function parseResponseBody(response: Response): Promise<unknown> {
@@ -195,7 +201,8 @@ export async function triggerN8nWebhook(
   const idempotencyKey = String(options.idempotencyKey || '').trim()
   if (idempotencyKey) headers.set('X-AIWorker-Idempotency-Key', idempotencyKey)
   const secret = String(process.env.N8N_WEBHOOK_SECRET || '').trim()
-  if (secret) headers.set('X-AIWorker-Webhook-Secret', secret)
+  if (!secret) throw new Error('尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流')
+  headers.set('X-AIWorker-Webhook-Secret', secret)
 
   const { response, data, latencyMs } = await n8nFetch(path, {
     method: 'POST',

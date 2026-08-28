@@ -14,6 +14,8 @@ PID_FILE="${PID_FILE:-$PROJECT_ROOT/.next/standalone/server.pid}"
 SOURCE_DATA_DIR="$PROJECT_ROOT/.data"
 BUILD_DATA_DIR="$PROJECT_ROOT/.next/build-runtime"
 NODE_VERSION_FILE="$PROJECT_ROOT/.nvmrc"
+new_pid=""
+deployment_verified=0
 
 use_project_node() {
   if [[ ! -f "$NODE_VERSION_FILE" ]]; then
@@ -84,6 +86,24 @@ stop_pid() {
 
   echo "==> force stopping $label (pid=$pid)"
   kill -9 "$pid" 2>/dev/null || true
+}
+
+cleanup_failed_new_server() {
+  local exit_status=$?
+  local recorded_pid=""
+
+  if [[ "$deployment_verified" == "1" || -z "$new_pid" ]]; then
+    return "$exit_status"
+  fi
+
+  stop_pid "$new_pid" "failed standalone candidate"
+  if [[ -f "$PID_FILE" ]]; then
+    recorded_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    if [[ "$recorded_pid" == "$new_pid" ]]; then
+      rm -f "$PID_FILE"
+    fi
+  fi
+  return "$exit_status"
 }
 
 stop_existing_server() {
@@ -210,6 +230,7 @@ pnpm build
 echo "==> starting standalone server"
 load_env
 
+trap cleanup_failed_new_server EXIT
 PORT="$PORT" HOSTNAME="$LISTEN_HOST" nohup bash "$PROJECT_ROOT/scripts/start-standalone.sh" >"$LOG_PATH" 2>&1 &
 new_pid=$!
 echo "$new_pid" > "$PID_FILE"
@@ -238,6 +259,15 @@ if [[ "$n8n_probe_code" != 2?? ]]; then
   exit 1
 fi
 
+n8n_status_payload="$(curl -fsS "http://$VERIFY_HOST:$PORT/api/n8n/status")"
+if ! node -e '
+  const payload = JSON.parse(process.argv[1]);
+  if (payload?.config?.webhookSecretConfigured !== true) process.exit(1);
+' "$n8n_status_payload"; then
+  echo "error: N8N_WEBHOOK_SECRET is not loaded by the standalone runtime" >&2
+  exit 1
+fi
+
 listener_pid="$(list_listener_pids | head -n1)"
 if [[ -z "${listener_pid:-}" ]]; then
   echo "error: no listener detected on port $PORT after startup" >&2
@@ -260,5 +290,7 @@ if [[ "${content_type:-}" != text/css* ]]; then
   exit 1
 fi
 
+deployment_verified=1
+trap - EXIT
 echo "==> deployed commit $(git rev-parse --short HEAD)"
 echo "    pid=$new_pid port=$PORT css=$css_path"

@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, logAuditEvent } from '@/lib/db'
-import { requireN8nRole, triggerN8nWebhook } from '@/lib/n8n'
+import { isN8nWebhookSecretConfigured, requireN8nRole, triggerN8nWebhook } from '@/lib/n8n'
 import {
   createN8nTaskRun,
-  failN8nTaskRun,
+  failScopedUnclaimedN8nTaskRun,
   markN8nTaskAccepted,
   n8nTaskDeliverySchema,
   n8nTaskIdentitySchema,
@@ -58,6 +58,14 @@ export function resolveN8nMediaCallbackUrl(): string {
   )
 }
 
+export function resolveN8nClaimCallbackUrl(): string {
+  return resolveN8nLoopbackCallbackUrl(
+    String(process.env.AIWORKER_N8N_CLAIM_CALLBACK_URL || ''),
+    '/api/n8n/claim',
+    '父任务认领',
+  )
+}
+
 export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -72,6 +80,11 @@ export async function POST(request: NextRequest) {
   const input = body?.input
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return NextResponse.json({ error: 'input 必须是 JSON 对象' }, { status: 400 })
+  }
+  if (!isN8nWebhookSecretConfigured()) {
+    return NextResponse.json({
+      error: '尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流',
+    }, { status: 503 })
   }
 
   const db = getDatabase()
@@ -120,9 +133,11 @@ export async function POST(request: NextRequest) {
   const idempotencyKey = idempotencyResult.data
   let nodeCallbackUrl: string
   let mediaCallbackUrl: string
+  let claimCallbackUrl: string
   try {
     nodeCallbackUrl = resolveN8nNodeCallbackUrl()
     mediaCallbackUrl = resolveN8nMediaCallbackUrl()
+    claimCallbackUrl = resolveN8nClaimCallbackUrl()
   } catch (error) {
     return NextResponse.json({
       error: error instanceof Error ? error.message : 'n8n 节点回调地址无效',
@@ -138,6 +153,8 @@ export async function POST(request: NextRequest) {
     retryCount: binding.retryCount,
     nodeCallbackUrl,
     mediaCallbackUrl,
+    claimCallbackUrl,
+    claimScope: scope,
     config: binding.config,
     ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
     ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
@@ -155,7 +172,9 @@ export async function POST(request: NextRequest) {
   }, scope)
 
   if (!created.created) {
-    const status = created.run.status === 'succeeded' ? 200 : 202
+    const status = created.run.status === 'succeeded'
+      ? 200
+      : ['failed', 'cancelled'].includes(created.run.status) ? 409 : 202
     return NextResponse.json({
       taskId: created.run.taskId,
       duplicate: true,
@@ -190,8 +209,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ taskId, status: 'accepted', result }, { status: 202 })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'n8n 任务执行失败'
-    failN8nTaskRun(db, taskId, message)
-    updateN8nWorkflowRunStatus(db, binding.id, `failed: ${message}`, scope)
+    const resolution = failScopedUnclaimedN8nTaskRun(db, taskId, message, scope)
+    if (resolution.failed) {
+      updateN8nWorkflowRunStatus(db, binding.id, `failed: ${message}`, scope)
+      return NextResponse.json({ taskId, status: 'failed', error: message }, { status: 502 })
+    }
+    if (resolution.run?.status === 'running') {
+      updateN8nWorkflowRunStatus(db, binding.id, 'running', scope)
+      return NextResponse.json({
+        taskId,
+        status: 'running',
+        acceptedAfterAmbiguousResponse: true,
+      }, { status: 202 })
+    }
+    if (resolution.run?.status === 'succeeded') {
+      updateN8nWorkflowRunStatus(db, binding.id, 'success', scope)
+      return NextResponse.json({
+        taskId,
+        status: 'succeeded',
+        output: resolution.run.output,
+      })
+    }
+    if (resolution.run && ['failed', 'cancelled'].includes(resolution.run.status)) {
+      return NextResponse.json({
+        taskId,
+        status: resolution.run.status,
+        error: resolution.run.error || message,
+      }, { status: 409 })
+    }
     return NextResponse.json({ taskId, error: message }, { status: 502 })
   }
 }
