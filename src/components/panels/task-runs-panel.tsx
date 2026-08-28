@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { useFocusTrap } from '@/lib/use-focus-trap'
 import {
   formatTaskRunDuration,
   formatTaskRunProcessingDuration,
@@ -56,6 +57,8 @@ interface TaskRunListResponse {
 }
 
 const PAGE_SIZE = 50
+const TASK_SPLIT_MIN_REM = 56
+type TaskMasterView = 'queue' | 'history'
 
 const STATUS_OPTIONS = [
   { value: '', label: '全部状态' },
@@ -137,9 +140,37 @@ export function TaskRunsPanel() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [selectedRun, setSelectedRun] = useState<TaskRunListItem | null>(null)
+  const [masterView, setMasterView] = useState<TaskMasterView>('queue')
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  const [isSplitView, setIsSplitView] = useState(true)
   const [nowSeconds, setNowSeconds] = useState(() => Math.floor(Date.now() / 1_000))
   const requestSequence = useRef(0)
+  const panelRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const panel = panelRef.current
+    if (!panel) return undefined
+
+    const rootFontSize = Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16
+    const splitMinWidth = TASK_SPLIT_MIN_REM * rootFontSize
+    const updateSplitView = (width = panel.getBoundingClientRect().width) => {
+      setIsSplitView(width >= splitMinWidth)
+    }
+
+    updateSplitView()
+    if (typeof ResizeObserver === 'undefined') {
+      const updateOnWindowResize = () => updateSplitView()
+      window.addEventListener('resize', updateOnWindowResize)
+      return () => window.removeEventListener('resize', updateOnWindowResize)
+    }
+
+    const observer = new ResizeObserver(entries => {
+      const entry = entries[0]
+      if (entry) updateSplitView(entry.contentRect.width)
+    })
+    observer.observe(panel)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     const timer = window.setInterval(() => setNowSeconds(Math.floor(Date.now() / 1_000)), 1_000)
@@ -205,14 +236,35 @@ export function TaskRunsPanel() {
     const failed = runs.filter(run => run.status === 'failed').length
     return { completed, active, failed }
   }, [runs])
+  const selectedQueueItem = useMemo(
+    () => masterView === 'queue'
+      ? queue.find(item => item.taskId === selectedTaskId) || null
+      : null,
+    [masterView, queue, selectedTaskId],
+  )
+  const selectedRun = useMemo(
+    () => selectedQueueItem
+      || (masterView === 'history' ? runs.find(item => item.taskId === selectedTaskId) : null)
+      || null,
+    [masterView, runs, selectedQueueItem, selectedTaskId],
+  )
   const selectedFailure = useMemo(
     () => taskRunFailureInsight(selectedRun?.error || null),
     [selectedRun],
   )
 
+  useEffect(() => {
+    if (!selectedTaskId || !isSplitView) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSelectedTaskId(null)
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [isSplitView, selectedTaskId])
+
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-background">
-      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+    <div ref={panelRef} className="@container relative flex h-full min-h-[42rem] flex-col overflow-hidden bg-background xl:min-h-0">
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span className="rounded-md border border-border bg-card px-2 py-1">运行记录 {total} 条</span>
           <span>本页执行中 {visibleSummary.active}</span>
@@ -224,56 +276,26 @@ export function TaskRunsPanel() {
               onClick={() => {
                 setStatus('failed')
                 setOffset(0)
+                setMasterView('history')
               }}
             >
               失败 {visibleSummary.failed}，查看原因
             </button>
           )}
         </div>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <label className="relative min-w-0 sm:w-64">
-            <span className="sr-only">搜索任务链记录</span>
-            <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-              <circle cx="7" cy="7" r="4.5" />
-              <path d="m10.5 10.5 3 3" />
-            </svg>
-            <input
-              value={search}
-              onChange={event => setSearch(event.target.value)}
-              maxLength={120}
-              placeholder="按视频名、任务编号或任务链搜索"
-              className="h-9 w-full rounded-md border border-border bg-card pl-9 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
-            />
-          </label>
-          <label>
-            <span className="sr-only">按状态筛选</span>
-            <select
-              value={status}
-              onChange={event => {
-                setStatus(event.target.value)
-                setOffset(0)
-              }}
-              className="h-9 rounded-md border border-border bg-card px-3 text-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
-            >
-              {STATUS_OPTIONS.map(option => (
-                <option key={option.value || 'all'} value={option.value}>{option.label}</option>
-              ))}
-            </select>
-          </label>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => void fetchRuns(true)}
-            disabled={refreshing}
-            aria-label="刷新任务链列表"
-          >
-            <svg className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M1.5 8a6.5 6.5 0 0 1 11.25-4.5M14.5 8a6.5 6.5 0 0 1-11.25 4.5" />
-              <path d="M13.5 2v3h-3M2.5 14v-3h3" />
-            </svg>
-            刷新
-          </Button>
-        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void fetchRuns(true)}
+          disabled={refreshing}
+          aria-label="刷新任务链列表"
+        >
+          <svg className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M1.5 8a6.5 6.5 0 0 1 11.25-4.5M14.5 8a6.5 6.5 0 0 1-11.25 4.5" />
+            <path d="M13.5 2v3h-3M2.5 14v-3h3" />
+          </svg>
+          刷新
+        </Button>
       </div>
 
       {error && (
@@ -283,216 +305,381 @@ export function TaskRunsPanel() {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-        <section className="overflow-hidden rounded-lg border border-border bg-card" aria-labelledby="task-queue-title">
-          <div className="flex flex-col gap-2 border-b border-border px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 id="task-queue-title" className="text-sm font-semibold text-foreground">待执行队列</h3>
-                <span className="rounded border border-border bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                  {queue.length} 项
-                </span>
+      <div className="grid min-h-0 flex-1 grid-cols-1 @4xl:grid-cols-[360px_minmax(0,1fr)]">
+        <section className="flex min-h-0 min-w-0 flex-col border-border bg-card @4xl:border-r" aria-label="任务链列表">
+          <div className="border-b border-border p-3">
+            <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-secondary p-1" role="tablist" aria-label="任务链列表视图">
+              <MasterViewButton
+                active={masterView === 'queue'}
+                count={queue.length}
+                onClick={() => {
+                  setMasterView('queue')
+                  setSelectedTaskId(null)
+                }}
+              >
+                待执行
+              </MasterViewButton>
+              <MasterViewButton
+                active={masterView === 'history'}
+                count={total}
+                onClick={() => {
+                  setMasterView('history')
+                  setSelectedTaskId(null)
+                }}
+              >
+                运行记录
+              </MasterViewButton>
+            </div>
+
+            {masterView === 'history' && (
+              <div className="mt-3 grid gap-2">
+                <label className="relative min-w-0">
+                  <span className="sr-only">搜索任务链记录</span>
+                  <svg className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                    <circle cx="7" cy="7" r="4.5" />
+                    <path d="m10.5 10.5 3 3" />
+                  </svg>
+                  <input
+                    value={search}
+                    onChange={event => setSearch(event.target.value)}
+                    maxLength={120}
+                    placeholder="搜索视频、编号或任务链"
+                    className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+                  />
+                </label>
+                <label>
+                  <span className="sr-only">按状态筛选</span>
+                  <select
+                    value={status}
+                    onChange={event => {
+                      setStatus(event.target.value)
+                      setOffset(0)
+                    }}
+                    className="h-9 w-full rounded-md border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-primary/60 focus:ring-2 focus:ring-primary/15"
+                  >
+                    {STATUS_OPTIONS.map(option => (
+                      <option key={option.value || 'all'} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">包含已加入耐久队列和已提交给任务链、尚未完成的任务。</p>
-            </div>
-            <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-              <span>等待 {queueCounts.waiting}</span>
-              <span>执行中 {queueCounts.running}</span>
-              {queueCounts.attention > 0 && <span className="text-warning">需要处理 {queueCounts.attention}</span>}
-            </div>
+            )}
+
+            {masterView === 'queue' && (
+              <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                <span>等待 {queueCounts.waiting}</span>
+                <span>执行中 {queueCounts.running}</span>
+                {queueCounts.attention > 0 && <span className="text-warning">需处理 {queueCounts.attention}</span>}
+              </div>
+            )}
           </div>
-          {loading ? (
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 2 }).map((_, index) => (
-                <div key={index} className="h-10 animate-pulse rounded bg-secondary" />
-              ))}
-            </div>
-          ) : queue.length === 0 ? (
-            <div className="px-4 py-8 text-center">
-              <div className="text-sm font-medium text-foreground">当前没有待执行任务</div>
-              <div className="mt-1 text-xs text-muted-foreground">新加入的视频会在这里显示队列位置和等待时间。</div>
-            </div>
-          ) : (
-            <div className="max-h-72 overflow-auto">
-              <table className="w-full min-w-[760px] border-collapse text-left text-sm">
-                <thead className="sticky top-0 z-10 bg-surface-1 text-xs text-muted-foreground">
-                  <tr className="border-b border-border">
-                    <th className="w-20 px-4 py-2.5 font-medium">位置</th>
-                    <th className="px-3 py-2.5 font-medium">任务</th>
-                    <th className="px-3 py-2.5 font-medium">状态</th>
-                    <th className="px-3 py-2.5 font-medium">排队等待</th>
-                    <th className="px-3 py-2.5 font-medium">批次</th>
-                  </tr>
-                </thead>
-                <tbody>
+
+          <div className="min-h-0 max-h-[65dvh] flex-1 overflow-y-auto p-2.5 @4xl:max-h-none" data-task-master-scroll>
+            {loading ? (
+              <div className="space-y-2 p-1">
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <div key={index} className="h-20 animate-pulse rounded-md bg-secondary" />
+                ))}
+              </div>
+            ) : masterView === 'queue' ? (
+              queue.length === 0 ? (
+                <TaskRunEmpty title="当前没有待执行任务" detail="新加入的任务会显示在这里。" />
+              ) : (
+                <div className="space-y-2">
                   {queue.map(item => (
-                    <tr key={item.taskId} className="border-b border-border/60 last:border-b-0">
-                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">#{item.queuePosition}</td>
-                      <td className="max-w-md px-3 py-3">
-                        <div className="truncate font-medium text-foreground" title={item.title}>{item.title}</div>
-                        <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={item.taskId}>{item.taskId}</div>
-                      </td>
-                      <td className="px-3 py-3">
-                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${queueStatusClass(item)}`}>
-                          {queueStatusLabel(item)}
-                        </span>
-                      </td>
-                      <td className="px-3 py-3 text-xs text-muted-foreground">
-                        <div>{formatTaskRunQueueDuration(item, nowSeconds)}</div>
-                        {item.processingStartedAt && (
-                          <div className="mt-1 text-[11px]">处理中 {formatTaskRunProcessingDuration(item, nowSeconds)}</div>
-                        )}
-                      </td>
-                      <td className="max-w-52 px-3 py-3 text-xs text-muted-foreground">
-                        <div className="truncate" title={item.batchId || '单个任务'}>{item.batchId || '单个任务'}</div>
-                        {item.batchIndex && <div className="mt-1">第 {item.batchIndex} 项</div>}
-                      </td>
-                    </tr>
+                    <TaskRunRailItem
+                      key={item.taskId}
+                      run={item}
+                      queueItem={item}
+                      active={item.taskId === selectedTaskId}
+                      nowSeconds={nowSeconds}
+                      onSelect={() => setSelectedTaskId(item.taskId)}
+                    />
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )
+            ) : runs.length === 0 ? (
+              <TaskRunEmpty title="没有匹配的运行记录" detail="可以调整搜索词或状态。" />
+            ) : (
+              <div className="space-y-2">
+                {runs.map(run => (
+                  <TaskRunRailItem
+                    key={run.taskId}
+                    run={run}
+                    active={run.taskId === selectedTaskId}
+                    nowSeconds={nowSeconds}
+                    onSelect={() => setSelectedTaskId(run.taskId)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {masterView === 'history' && (
+            <div className="flex items-center justify-between border-t border-border px-3 py-2.5 text-xs text-muted-foreground">
+              <span>第 {page} / {pages} 页</span>
+              <div className="flex gap-2">
+                <Button variant="outline" size="xs" disabled={offset === 0 || loading} onClick={() => setOffset(current => Math.max(0, current - PAGE_SIZE))}>上一页</Button>
+                <Button variant="outline" size="xs" disabled={offset + PAGE_SIZE >= total || loading} onClick={() => setOffset(current => current + PAGE_SIZE)}>下一页</Button>
+              </div>
             </div>
           )}
         </section>
 
-        <section aria-labelledby="task-history-title">
-          <div className="mb-2 flex items-center justify-between">
-            <h3 id="task-history-title" className="text-sm font-semibold text-foreground">运行记录</h3>
-            <span className="text-xs text-muted-foreground">第 {page} / {pages} 页</span>
+        {selectedRun ? isSplitView ? (
+          <div className="h-full min-h-0 overflow-hidden">
+            <TaskRunDetailPane
+              run={selectedRun}
+              queueItem={selectedQueueItem}
+              failure={selectedFailure}
+              nowSeconds={nowSeconds}
+              onClose={() => setSelectedTaskId(null)}
+            />
           </div>
-          <div className="min-w-[880px] overflow-hidden rounded-lg border border-border bg-card">
-          <table className="w-full border-collapse text-left text-sm">
-            <thead className="sticky top-0 z-10 bg-surface-1 text-xs font-medium text-muted-foreground">
-              <tr className="border-b border-border">
-                <th className="px-4 py-3 font-medium">任务</th>
-                <th className="px-3 py-3 font-medium">状态</th>
-                <th className="px-3 py-3 font-medium">任务链</th>
-                <th className="px-3 py-3 font-medium">尝试</th>
-                <th className="px-3 py-3 font-medium">总耗时</th>
-                <th className="px-3 py-3 font-medium">最后更新</th>
-                <th className="w-14 px-3 py-3"><span className="sr-only">查看</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                Array.from({ length: 6 }).map((_, index) => (
-                  <tr key={index} className="border-b border-border/60 last:border-b-0">
-                    <td colSpan={7} className="px-4 py-4">
-                      <div className="h-4 w-full animate-pulse rounded bg-secondary" />
-                    </td>
-                  </tr>
-                ))
-              ) : runs.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-4 py-16 text-center">
-                    <div className="font-medium text-foreground">没有匹配的任务链记录</div>
-                    <div className="mt-1 text-xs text-muted-foreground">可以调整搜索词或状态筛选条件</div>
-                  </td>
-                </tr>
-              ) : runs.map(run => {
-                const failure = taskRunFailureInsight(run.error)
-                return (
-                <tr key={run.taskId} className="border-b border-border/60 transition-colors last:border-b-0 hover:bg-secondary/50">
-                  <td className="max-w-md px-4 py-3">
-                    <div className="truncate font-medium text-foreground" title={run.title}>{run.title}</div>
-                    <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={run.taskId}>{run.taskId}</div>
-                    {failure && (
-                      <div className="mt-1 truncate text-[11px] text-destructive" title={`${failure.stage}：${failure.detail}`}>
-                        {failure.stage} · {failure.title}
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-3 py-3">
-                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${statusClass(run.status)}`}>
-                      {STATUS_LABELS[run.status] || run.status}
-                    </span>
-                  </td>
-                  <td className="max-w-56 px-3 py-3">
-                    <div className="truncate text-foreground" title={run.workflowName}>{run.workflowName}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">{taskTypeLabel(run.taskType)} · {sourceLabel(run.source)}</div>
-                  </td>
-                  <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{run.attemptCount}/{run.maxAttempts}</td>
-                  <td className="px-3 py-3 text-xs text-muted-foreground">{formatTaskRunDuration(run, nowSeconds)}</td>
-                  <td className="whitespace-nowrap px-3 py-3 text-xs text-muted-foreground">{formatTimestamp(run.updatedAt)}</td>
-                  <td className="px-3 py-3 text-right">
-                    <Button variant="ghost" size="icon-xs" onClick={() => setSelectedRun(run)} aria-label={`查看 ${run.title} 的任务详情`}>
-                      <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M6 3.5 10.5 8 6 12.5" />
-                      </svg>
-                    </Button>
-                  </td>
-                </tr>
-                )
-              })}
-            </tbody>
-          </table>
+        ) : (
+          <TaskRunMobileDialog
+            run={selectedRun}
+            queueItem={selectedQueueItem}
+            failure={selectedFailure}
+            nowSeconds={nowSeconds}
+            onClose={() => setSelectedTaskId(null)}
+          />
+        ) : (
+          <div className="hidden min-h-0 min-w-0 items-center justify-center bg-background p-8 text-center @4xl:flex" data-task-detail-empty>
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">选择一条任务</h3>
+              <p className="mt-1 text-xs text-muted-foreground">左侧列表用于导航，任务详情会固定显示在这里。</p>
+            </div>
           </div>
-        </section>
+        )}
       </div>
+    </div>
+  )
+}
 
-      <div className="flex items-center justify-between border-t border-border px-4 py-3 text-xs text-muted-foreground">
-        <span>第 {page} / {pages} 页</span>
-        <div className="flex gap-2">
-          <Button variant="outline" size="xs" disabled={offset === 0 || loading} onClick={() => setOffset(current => Math.max(0, current - PAGE_SIZE))}>上一页</Button>
-          <Button variant="outline" size="xs" disabled={offset + PAGE_SIZE >= total || loading} onClick={() => setOffset(current => current + PAGE_SIZE)}>下一页</Button>
+function TaskRunMobileDialog({
+  run,
+  queueItem,
+  failure,
+  nowSeconds,
+  onClose,
+}: {
+  run: TaskRunListItem
+  queueItem: TaskQueueItem | null
+  failure: ReturnType<typeof taskRunFailureInsight>
+  nowSeconds: number
+  onClose: () => void
+}) {
+  const dialogRef = useFocusTrap(onClose)
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [])
+
+  return (
+    <div
+      className="fixed inset-0 z-[120] flex justify-end bg-background/65 backdrop-blur-[1px]"
+      role="presentation"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-run-detail-title"
+        className="h-full w-full max-w-md"
+      >
+        <TaskRunDetailPane
+          run={run}
+          queueItem={queueItem}
+          failure={failure}
+          nowSeconds={nowSeconds}
+          onClose={onClose}
+          titleId="task-run-detail-title"
+        />
+      </div>
+    </div>
+  )
+}
+
+function MasterViewButton({
+  active,
+  count,
+  onClick,
+  children,
+}: {
+  active: boolean
+  count: number
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`flex items-center justify-center gap-2 rounded px-2.5 py-1.5 text-sm font-medium transition-colors ${
+        active ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground'
+      }`}
+    >
+      <span>{children}</span>
+      <span className="text-[10px]">{count}</span>
+    </button>
+  )
+}
+
+function TaskRunRailItem({
+  run,
+  queueItem,
+  active,
+  nowSeconds,
+  onSelect,
+}: {
+  run: TaskRunListItem
+  queueItem?: TaskQueueItem
+  active: boolean
+  nowSeconds: number
+  onSelect: () => void
+}) {
+  const failure = taskRunFailureInsight(run.error)
+  const statusTone = queueItem ? queueStatusClass(queueItem) : statusClass(run.status)
+  const statusText = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[run.status] || run.status
+
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onSelect}
+      className={`w-full rounded-md border p-3 text-left transition-colors ${
+        active
+          ? 'border-primary/40 bg-primary/10'
+          : 'border-border bg-background/30 hover:border-primary/20 hover:bg-background/70'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-medium text-foreground" title={run.title}>{run.title}</div>
+          <div className="mt-1 truncate text-[11px] text-muted-foreground">
+            {queueItem ? `队列 #${queueItem.queuePosition}` : run.workflowName}
+          </div>
         </div>
+        <span className={`inline-flex flex-none rounded-full border px-2 py-0.5 text-[10px] font-medium ${statusTone}`}>
+          {statusText}
+        </span>
       </div>
-
-      {selectedRun && (
-        <div className="absolute inset-0 z-30 flex justify-end bg-background/65 backdrop-blur-[1px]" role="presentation" onMouseDown={event => {
-          if (event.target === event.currentTarget) setSelectedRun(null)
-        }}>
-          <aside className="flex h-full w-full max-w-md flex-col border-l border-border bg-card shadow-xl" role="dialog" aria-modal="true" aria-label="任务链详情">
-            <div className="flex items-start justify-between border-b border-border px-5 py-4">
-              <div className="min-w-0 pr-3">
-                <h3 className="truncate text-base font-semibold text-foreground">{selectedRun.title}</h3>
-                <p className="mt-1 text-xs text-muted-foreground">只读运行摘要</p>
-              </div>
-              <Button variant="ghost" size="icon-sm" onClick={() => setSelectedRun(null)} aria-label="关闭任务详情">×</Button>
-            </div>
-            <div className="flex-1 space-y-5 overflow-y-auto p-5 text-sm">
-              <DetailRow label="当前状态">
-                <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${statusClass(selectedRun.status)}`}>
-                  {STATUS_LABELS[selectedRun.status] || selectedRun.status}
-                </span>
-              </DetailRow>
-              <DetailRow label="任务编号"><code className="break-all text-xs text-foreground">{selectedRun.taskId}</code></DetailRow>
-              <DetailRow label="任务链"><span>{selectedRun.workflowName}</span></DetailRow>
-              <DetailRow label="任务类型"><span>{taskTypeLabel(selectedRun.taskType)}</span></DetailRow>
-              <DetailRow label="提交来源"><span>{sourceLabel(selectedRun.source)}</span></DetailRow>
-              {selectedRun.batchId && <DetailRow label="批次编号"><code className="break-all text-xs">{selectedRun.batchId}</code></DetailRow>}
-              {selectedRun.batchIndex && <DetailRow label="批次序号"><span>第 {selectedRun.batchIndex} 项</span></DetailRow>}
-              <DetailRow label="执行尝试"><span>{selectedRun.attemptCount} / {selectedRun.maxAttempts}</span></DetailRow>
-              <div className="grid grid-cols-2 gap-3">
-                <TimeCard label="创建" value={formatTimestamp(selectedRun.createdAt)} />
-                <TimeCard label="接收" value={formatTimestamp(selectedRun.acceptedAt)} />
-                <TimeCard label="处理开始" value={formatTimestamp(selectedRun.processingStartedAt)} />
-                <TimeCard label="完成" value={formatTimestamp(selectedRun.completedAt)} />
-              </div>
-              <DetailRow label="总耗时">
-                <span>{formatTaskRunDuration(selectedRun, nowSeconds)}</span>
-                <p className="mt-1 text-xs text-muted-foreground">{taskRunDurationBasis(selectedRun)}</p>
-              </DetailRow>
-              <div className="grid grid-cols-2 gap-3">
-                <TimeCard label="排队等待" value={formatTaskRunQueueDuration(selectedRun, nowSeconds)} />
-                <TimeCard label="实际处理" value={formatTaskRunProcessingDuration(selectedRun, nowSeconds)} />
-              </div>
-              <DetailRow label="结果状态"><span>{selectedRun.resultAvailable ? '分析结果已保存' : '暂无可用结果'}</span></DetailRow>
-              {selectedFailure && (
-                <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
-                  <div className="text-xs font-medium">{selectedFailure.stage}</div>
-                  <p className="mt-1 font-medium">{selectedFailure.title}</p>
-                  <p className="mt-1 break-words text-xs leading-5">{selectedFailure.detail}</p>
-                  <p className="mt-2 border-t border-destructive/15 pt-2 text-xs leading-5 text-foreground/75">
-                    {selectedFailure.suggestion}
-                  </p>
-                </div>
-              )}
-            </div>
-          </aside>
+      <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+        {queueItem ? (
+          <>
+            <span>等待 {formatTaskRunQueueDuration(queueItem, nowSeconds)}</span>
+            {queueItem.processingStartedAt && <span>处理 {formatTaskRunProcessingDuration(queueItem, nowSeconds)}</span>}
+            {queueItem.batchIndex && <span>批次第 {queueItem.batchIndex} 项</span>}
+          </>
+        ) : (
+          <>
+            <span>{taskTypeLabel(run.taskType)}</span>
+            <span>{formatTaskRunDuration(run, nowSeconds)}</span>
+            <span>{formatTimestamp(run.updatedAt)}</span>
+          </>
+        )}
+      </div>
+      {failure && (
+        <div className="mt-2 truncate text-[11px] text-destructive" title={`${failure.stage}：${failure.detail}`}>
+          {failure.stage} · {failure.title}
         </div>
       )}
+    </button>
+  )
+}
+
+function TaskRunEmpty({ title, detail }: { title: string; detail: string }) {
+  return (
+    <div className="px-4 py-10 text-center">
+      <div className="text-sm font-medium text-foreground">{title}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{detail}</div>
     </div>
+  )
+}
+
+function TaskRunDetailPane({
+  run,
+  queueItem,
+  failure,
+  nowSeconds,
+  onClose,
+  titleId,
+}: {
+  run: TaskRunListItem
+  queueItem: TaskQueueItem | null
+  failure: ReturnType<typeof taskRunFailureInsight>
+  nowSeconds: number
+  onClose: () => void
+  titleId?: string
+}) {
+  const detailStatusClass = queueItem ? queueStatusClass(queueItem) : statusClass(run.status)
+  const detailStatusLabel = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[run.status] || run.status
+
+  return (
+    <aside className="ml-auto flex h-full w-full max-w-md flex-col border-l border-border bg-card shadow-xl @4xl:max-w-none @4xl:shadow-none" aria-label="任务链详情" data-task-run-detail>
+      <div className="flex items-start justify-between border-b border-border px-5 py-4">
+        <div className="min-w-0 pr-3">
+          <h3 id={titleId} className="truncate text-base font-semibold text-foreground">{run.title}</h3>
+          <p className="mt-1 text-xs text-muted-foreground">只读运行摘要</p>
+        </div>
+        <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="关闭任务详情">×</Button>
+      </div>
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-5 text-sm">
+        <DetailRow label="当前状态">
+          <span className={`inline-flex rounded-full border px-2 py-0.5 text-xs font-medium ${detailStatusClass}`}>
+            {detailStatusLabel}
+          </span>
+        </DetailRow>
+        {queueItem && (
+          <>
+            <DetailRow label="队列位置"><span>第 {queueItem.queuePosition} 位</span></DetailRow>
+            <DetailRow label="队列来源"><span>{queueItem.queueOrigin}</span></DetailRow>
+          </>
+        )}
+        <DetailRow label="任务编号"><code className="break-all text-xs text-foreground">{run.taskId}</code></DetailRow>
+        <DetailRow label="任务链"><span>{run.workflowName}</span></DetailRow>
+        <DetailRow label="任务类型"><span>{taskTypeLabel(run.taskType)}</span></DetailRow>
+        <DetailRow label="提交来源"><span>{sourceLabel(run.source)}</span></DetailRow>
+        {run.batchId && <DetailRow label="批次编号"><code className="break-all text-xs">{run.batchId}</code></DetailRow>}
+        {run.batchIndex && <DetailRow label="批次序号"><span>第 {run.batchIndex} 项</span></DetailRow>}
+        <DetailRow label="执行尝试"><span>{run.attemptCount} / {run.maxAttempts}</span></DetailRow>
+        <div className="grid grid-cols-2 gap-3">
+          <TimeCard label="创建" value={formatTimestamp(run.createdAt)} />
+          <TimeCard label="接收" value={formatTimestamp(run.acceptedAt)} />
+          <TimeCard label="处理开始" value={formatTimestamp(run.processingStartedAt)} />
+          <TimeCard label="完成" value={formatTimestamp(run.completedAt)} />
+        </div>
+        <DetailRow label="总耗时">
+          <span>{formatTaskRunDuration(run, nowSeconds)}</span>
+          <p className="mt-1 text-xs text-muted-foreground">{taskRunDurationBasis(run)}</p>
+        </DetailRow>
+        <div className="grid grid-cols-2 gap-3">
+          <TimeCard label="排队等待" value={formatTaskRunQueueDuration(run, nowSeconds)} />
+          <TimeCard label="实际处理" value={formatTaskRunProcessingDuration(run, nowSeconds)} />
+        </div>
+        <DetailRow label="结果状态"><span>{run.resultAvailable ? '分析结果已保存' : '暂无可用结果'}</span></DetailRow>
+        {failure && (
+          <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
+            <div className="text-xs font-medium">{failure.stage}</div>
+            <p className="mt-1 font-medium">{failure.title}</p>
+            <p className="mt-1 break-words text-xs leading-5">{failure.detail}</p>
+            <p className="mt-2 border-t border-destructive/15 pt-2 text-xs leading-5 text-foreground/75">
+              {failure.suggestion}
+            </p>
+          </div>
+        )}
+      </div>
+    </aside>
   )
 }
 

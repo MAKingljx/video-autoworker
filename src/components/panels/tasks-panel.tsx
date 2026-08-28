@@ -3,6 +3,7 @@
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { TaskBoardPanel } from '@/components/panels/task-board-panel'
 import { TaskRunsPanel } from '@/components/panels/task-runs-panel'
+import { WorkspaceSplitLayout } from '@/components/ui/workspace-split-layout'
 
 type TaskView = 'runs' | 'collaboration'
 
@@ -25,38 +26,21 @@ export function TasksPanel() {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex flex-col gap-3 border-b border-border bg-card px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold text-foreground">任务中心</h2>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            任务链展示自动化运行记录；协作任务保留原有团队看板。
-          </p>
-        </div>
-        <div className="inline-flex w-fit rounded-md border border-border bg-secondary p-1" role="tablist" aria-label="任务视图">
-          <ViewTab active={view === 'runs'} onClick={() => selectView('runs')}>任务链</ViewTab>
-          <ViewTab active={view === 'collaboration'} onClick={() => selectView('collaboration')}>协作任务</ViewTab>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1">
+    <div className="p-3 md:p-4">
+      <WorkspaceSplitLayout
+        title="任务中心"
+        navigationLabel="任务视图"
+        items={[
+          { id: 'runs', label: '任务链' },
+          { id: 'collaboration', label: '协作任务' },
+        ]}
+        activeItem={view}
+        onSelect={selectView}
+        className="@4xl:h-[calc(100dvh-5.5rem)]"
+        contentClassName="@4xl:overflow-hidden"
+      >
         {view === 'runs' ? <TaskRunsPanel /> : <TaskBoardPanel />}
-      </div>
+      </WorkspaceSplitLayout>
     </div>
-  )
-}
-
-function ViewTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={`rounded px-3 py-1.5 text-sm font-medium transition-colors ${
-        active ? 'bg-card text-primary shadow-sm' : 'text-muted-foreground hover:text-foreground'
-      }`}
-    >
-      {children}
-    </button>
   )
 }

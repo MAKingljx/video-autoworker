@@ -332,9 +332,9 @@ export function VideoAnalysisResultsPanel({
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1
 
   return (
-    <div className="space-y-4">
+    <div className="@container space-y-4">
       <section className="rounded-lg border border-border bg-card p-3.5 md:p-4">
-        <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+        <div className="flex flex-col gap-3 @4xl:flex-row @4xl:items-end @4xl:justify-between">
           <div>
             <h2 className="text-base font-semibold text-foreground">学习内容库</h2>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -393,7 +393,7 @@ export function VideoAnalysisResultsPanel({
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+      <div className="grid gap-4 @4xl:grid-cols-[360px_minmax(0,1fr)]">
         <section className="overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-3.5 py-3">
             <div>
