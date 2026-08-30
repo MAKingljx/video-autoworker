@@ -1,6 +1,7 @@
 {
   "name": "video-autoworker",
   "version": "2.0.1",
+  "packageManager": "pnpm@10.33.0",
   "description": "Video AutoWorker - OpenClaw-powered video automation control center",
   "scripts": {
     "verify:node": "node scripts/check-node-version.mjs",
@@ -9,6 +10,7 @@
     "mc": "node scripts/mc-cli.cjs",
     "mc:mcp": "node scripts/mc-mcp-server.cjs",
     "mc:tui": "node scripts/mc-tui.cjs",
+    "director-brain": "node scripts/feishu-director-brain.mjs",
     "media:retention:audit": "node scripts/aiworker-media-retention.mjs --dry-run",
     "dev": "pnpm run verify:node && next dev --hostname 127.0.0.1 --port ${PORT:-3000}",
     "tauri": "tauri",
@@ -18,7 +20,8 @@
     "openclaw:profiles:server": "bash scripts/start-openclaw-profiles-server.sh",
     "openclaw:profiles:web": "bash scripts/start-openclaw-profiles-web.sh",
     "openclaw:profiles:desktop": "bash scripts/start-openclaw-profiles-desktop.sh",
-    "build": "pnpm run verify:node && next build",
+    "build": "pnpm run verify:node && next build && node scripts/check-standalone-artifact.mjs",
+    "audit:standalone": "node scripts/check-standalone-artifact.mjs",
     "start": "pnpm run verify:node && next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "pnpm run verify:node && bash scripts/start-standalone.sh",
     "deploy:standalone": "pnpm run verify:node && bash scripts/deploy-standalone.sh",

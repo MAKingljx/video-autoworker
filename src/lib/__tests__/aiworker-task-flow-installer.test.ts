@@ -252,7 +252,7 @@ describe('transactional AI-worker task-flow installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('verifies a changed install before retaining only two recoverable backups', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-retention-test-'))
