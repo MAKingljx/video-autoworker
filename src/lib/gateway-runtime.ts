@@ -28,6 +28,12 @@ function readOpenClawConfig(): OpenClawGatewayConfig | null {
 }
 
 export function registerMcAsDashboard(mcUrl: string): { registered: boolean; alreadySet: boolean } {
+  // Isolated smoke tests must never mutate the operator's real OpenClaw
+  // configuration, even when that file is discoverable on the test host.
+  if (process.env.MISSION_CONTROL_TEST_MODE === '1') {
+    return { registered: false, alreadySet: false }
+  }
+
   const configPath = config.openclawConfigPath
   if (!configPath || !fs.existsSync(configPath)) {
     return { registered: false, alreadySet: false }

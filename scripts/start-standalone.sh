@@ -2,21 +2,24 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 STANDALONE_ROOT="$PROJECT_ROOT/.next/standalone"
-SOURCE_STATIC_DIR="$PROJECT_ROOT/.next/static"
-SOURCE_PUBLIC_DIR="$PROJECT_ROOT/public"
 
 find_source_project_root() {
-  if [[ -n "${AIWORKER_SOURCE_APP_DIR:-}" && -f "${AIWORKER_SOURCE_APP_DIR}/.env.local" ]]; then
+  if [[ -n "${AIWORKER_SOURCE_APP_DIR:-}" ]]; then
+    if [[ "$AIWORKER_SOURCE_APP_DIR" != /* || ! -f "$AIWORKER_SOURCE_APP_DIR/package.json" ]]; then
+      printf 'AIWORKER_SOURCE_APP_DIR must be an absolute project directory containing package.json: %s\n' \
+        "$AIWORKER_SOURCE_APP_DIR" >&2
+      return 1
+    fi
     (cd "$AIWORKER_SOURCE_APP_DIR" && pwd -P)
     return 0
   fi
 
   local candidate="$PROJECT_ROOT"
   for _ in 1 2 3 4 5; do
-    if [[ -f "$candidate/.env.local" && -f "$candidate/package.json" ]]; then
+    if [[ -f "$candidate/package.json" && "$candidate" != "$STANDALONE_ROOT" ]]; then
       (cd "$candidate" && pwd -P)
       return 0
     fi
@@ -68,6 +71,48 @@ load_runtime_env() {
 
 load_runtime_env
 
+resolve_physical_path() {
+  local candidate="$1"
+
+  "${NODE_BIN:-node}" -e '
+    const fs = require("node:fs");
+    const path = require("node:path");
+    let cursor = path.resolve(process.argv[1]);
+    const suffix = [];
+    while (!fs.existsSync(cursor)) {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) process.exit(2);
+      suffix.unshift(path.basename(cursor));
+      cursor = parent;
+    }
+    process.stdout.write(path.resolve(fs.realpathSync.native(cursor), ...suffix));
+  ' "$candidate"
+}
+
+assert_runtime_path_outside_standalone() {
+  local label="$1"
+  local candidate="$2"
+  local physical_candidate
+
+  if [[ "$candidate" != /* ]]; then
+    printf '%s must be an absolute path: %s\n' "$label" "$candidate" >&2
+    exit 1
+  fi
+
+  physical_candidate="$(resolve_physical_path "$candidate")" || {
+    printf 'unable to resolve physical %s: %s\n' "$label" "$candidate" >&2
+    exit 1
+  }
+
+  case "$physical_candidate" in
+    "$PHYSICAL_STANDALONE_ROOT"|"$PHYSICAL_STANDALONE_ROOT"/*)
+      printf '%s must be outside the physical standalone root: %s -> %s\n' \
+        "$label" "$candidate" "$physical_candidate" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # The production console and all three OpenClaw gateways run on the same
 # managed Mac. Default its profile commands to the local binary so a stale
 # hostname or SSH route cannot turn a healthy gateway into a dashboard error.
@@ -108,22 +153,72 @@ if [[ -z "$STANDALONE_SERVER" || ! -f "$STANDALONE_SERVER" ]]; then
   exit 1
 fi
 
-STANDALONE_DIR="$(cd "$(dirname "$STANDALONE_SERVER")" && pwd)"
+STANDALONE_DIR="$(cd "$(dirname "$STANDALONE_SERVER")" && pwd -P)"
+PHYSICAL_STANDALONE_ROOT="$(cd "$STANDALONE_ROOT" && pwd -P)"
 STANDALONE_NEXT_DIR="$STANDALONE_DIR/.next"
 STANDALONE_STATIC_DIR="$STANDALONE_NEXT_DIR/static"
 STANDALONE_PUBLIC_DIR="$STANDALONE_DIR/public"
 
-mkdir -p "$STANDALONE_NEXT_DIR"
+required_files=(
+  "$STANDALONE_DIR/server.js"
+  "$STANDALONE_NEXT_DIR/BUILD_ID"
+  "$STANDALONE_DIR/runtime/schema.sql"
+  "$STANDALONE_DIR/package.json"
+)
+required_directories=(
+  "$STANDALONE_STATIC_DIR"
+  "$STANDALONE_PUBLIC_DIR"
+  "$STANDALONE_DIR/messages"
+)
 
-if [[ -d "$SOURCE_STATIC_DIR" ]]; then
-  rm -rf "$STANDALONE_STATIC_DIR"
-  cp -R "$SOURCE_STATIC_DIR" "$STANDALONE_STATIC_DIR"
+for required_file in "${required_files[@]}"; do
+  if [[ ! -f "$required_file" ]]; then
+    printf 'error: immutable standalone artifact is missing required file: %s\n' "$required_file" >&2
+    exit 1
+  fi
+done
+
+for required_directory in "${required_directories[@]}"; do
+  if [[ ! -d "$required_directory" ]]; then
+    printf 'error: immutable standalone artifact is missing required directory: %s\n' \
+      "$required_directory" >&2
+    exit 1
+  fi
+done
+
+ARTIFACT_AUDIT_SCRIPT="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
+if [[ ! -f "$ARTIFACT_AUDIT_SCRIPT" ]]; then
+  printf 'error: standalone artifact auditor is missing: %s\n' "$ARTIFACT_AUDIT_SCRIPT" >&2
+  exit 1
+fi
+if ! "${NODE_BIN:-node}" "$ARTIFACT_AUDIT_SCRIPT" "$STANDALONE_DIR" >/dev/null; then
+  echo 'error: standalone artifact integrity verification failed' >&2
+  exit 1
 fi
 
-if [[ -d "$SOURCE_PUBLIC_DIR" ]]; then
-  rm -rf "$STANDALONE_PUBLIC_DIR"
-  cp -R "$SOURCE_PUBLIC_DIR" "$STANDALONE_PUBLIC_DIR"
-fi
+export MISSION_CONTROL_DATA_DIR="${MISSION_CONTROL_DATA_DIR:-$SOURCE_PROJECT_ROOT/.data}"
+export MISSION_CONTROL_DB_PATH="${MISSION_CONTROL_DB_PATH:-$MISSION_CONTROL_DATA_DIR/mission-control.db}"
+export MISSION_CONTROL_TOKENS_PATH="${MISSION_CONTROL_TOKENS_PATH:-$MISSION_CONTROL_DATA_DIR/mission-control-tokens.json}"
+export AIWORKER_RUN_DIR="${AIWORKER_RUN_DIR:-$SOURCE_PROJECT_ROOT/.run}"
+export PID_FILE="${PID_FILE:-$AIWORKER_RUN_DIR/standalone.pid}"
+
+assert_runtime_path_outside_standalone "MISSION_CONTROL_DATA_DIR" "$MISSION_CONTROL_DATA_DIR"
+assert_runtime_path_outside_standalone "MISSION_CONTROL_DB_PATH" "$MISSION_CONTROL_DB_PATH"
+assert_runtime_path_outside_standalone "MISSION_CONTROL_TOKENS_PATH" "$MISSION_CONTROL_TOKENS_PATH"
+assert_runtime_path_outside_standalone "PID_FILE" "$PID_FILE"
+
+mkdir -p \
+  "$MISSION_CONTROL_DATA_DIR" \
+  "$(dirname "$MISSION_CONTROL_DB_PATH")" \
+  "$(dirname "$MISSION_CONTROL_TOKENS_PATH")" \
+  "$(dirname "$PID_FILE")"
+
+# Re-resolve after directory creation so an existing symlink can never route a
+# runtime write back into the immutable release.
+assert_runtime_path_outside_standalone "MISSION_CONTROL_DATA_DIR" "$MISSION_CONTROL_DATA_DIR"
+assert_runtime_path_outside_standalone "MISSION_CONTROL_DB_PATH" "$MISSION_CONTROL_DB_PATH"
+assert_runtime_path_outside_standalone "MISSION_CONTROL_TOKENS_PATH" "$MISSION_CONTROL_TOKENS_PATH"
+assert_runtime_path_outside_standalone "PID_FILE" "$PID_FILE"
 
 cd "$STANDALONE_DIR"
 # Next.js standalone server reads HOSTNAME to decide bind address.

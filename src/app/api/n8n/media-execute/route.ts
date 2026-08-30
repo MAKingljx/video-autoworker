@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
 import {
   analyzeN8nVideoFrames,
-  cleanupN8nMediaTask,
   mediaChildIdentity,
   mergeN8nMediaResults,
   prepareN8nMedia,
@@ -11,17 +10,20 @@ import {
   transcribeN8nMedia,
   type N8nMediaStage,
 } from '@/lib/n8n-media-execution'
+import { retryN8nMediaCleanupDebt } from '@/lib/n8n-media-cleanup'
 import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import {
   claimN8nTaskRun,
   completeN8nFinalizeRun,
   completeN8nTaskRun,
   createN8nMediaChildRunFromParent,
+  ensureN8nMediaCleanupDebt,
   failN8nTaskRun,
   getN8nTaskRunByTaskId,
   markN8nTaskAccepted,
   n8nTaskIdentitySchema,
 } from '@/lib/n8n-task-runs'
+import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 
 export const runtime = 'nodejs'
 
@@ -64,6 +66,40 @@ function exhaustedChildError(
   return `${stage}: ${error}（子任务重试次数已用尽 ${attemptCount}/${maxAttempts}）`.slice(0, 2_000)
 }
 
+async function retryableFinalizeCleanupResponse(input: {
+  db: ReturnType<typeof getDatabase>
+  taskId: string
+  childTaskId: string
+  output: Record<string, unknown> | null
+  cached: boolean
+}): Promise<NextResponse | null> {
+  try {
+    const scheduled = ensureN8nMediaCleanupDebt(input.db, input.taskId)
+    const attempt = scheduled.scheduled
+      ? await retryN8nMediaCleanupDebt(input.db, input.taskId, { force: true })
+      : { outcome: 'rejected' as const, error: '无法建立受控媒体清理债务' }
+    if (attempt.outcome === 'cleaned') return null
+  } catch {
+    // Parent and finalize child are already committed. Preserve their terminal
+    // state even if the best-effort retry bookkeeping itself is unavailable.
+  }
+
+  // The business result is already durable. A 5xx asks n8n to retry only the
+  // idempotent workspace cleanup; the durable debt also lets the janitor retry
+  // without downgrading the committed parent/child terminal state.
+  return NextResponse.json({
+    taskId: input.taskId,
+    nodeTaskId: input.childTaskId,
+    stage: 'finalize',
+    status: 'succeeded',
+    output: input.output,
+    cached: input.cached,
+    cleanupPending: true,
+    retryable: true,
+    error: '最终结果已提交，媒体临时目录清理待重试',
+  }, { status: 502 })
+}
+
 export async function POST(request: NextRequest) {
   if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
     return NextResponse.json({ error: 'n8n 媒体节点回调认证失败' }, { status: 401 })
@@ -88,6 +124,16 @@ export async function POST(request: NextRequest) {
     }, { status: 409 })
   }
   if (observedParent.status === 'succeeded') {
+    if (parsed.data.stage === 'finalize' && String(observedParent.routing.taskType || '') === 'video-analysis') {
+      const cleanupPending = await retryableFinalizeCleanupResponse({
+        db,
+        taskId: observedParent.taskId,
+        childTaskId: mediaChildIdentity('task', observedParent.taskId, 'finalize'),
+        output: observedParent.output,
+        cached: true,
+      })
+      if (cleanupPending) return cleanupPending
+    }
     return NextResponse.json({
       taskId: observedParent.taskId,
       status: observedParent.status,
@@ -146,6 +192,14 @@ export async function POST(request: NextRequest) {
           childTaskId: child.run.taskId,
         })
         if (finalized.outcome === 'completed' || finalized.outcome === 'cached') {
+          const cleanupPending = await retryableFinalizeCleanupResponse({
+            db,
+            taskId: parent.taskId,
+            childTaskId: child.run.taskId,
+            output: finalized.output,
+            cached: true,
+          })
+          if (cleanupPending) return cleanupPending
           return NextResponse.json({
             taskId: parent.taskId,
             nodeTaskId: child.run.taskId,
@@ -212,8 +266,13 @@ export async function POST(request: NextRequest) {
   try {
     let output: Record<string, unknown>
     if (stage === 'finalize') {
+      const prepareRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'prepare'))
       const audioRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'audio'))
       const visionRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'vision'))
+      const prepareFailure = mediaDependencyFailure('准备', prepareRun)
+      if (prepareFailure || !prepareRun || !prepareRun.output) {
+        throw new Error(prepareFailure || '准备节点尚未成功完成')
+      }
       const audioFailure = mediaDependencyFailure('音频', audioRun)
       if (audioFailure || !audioRun || !audioRun.output) {
         throw new Error(audioFailure || '音频分析节点尚未成功完成')
@@ -223,11 +282,33 @@ export async function POST(request: NextRequest) {
         throw new Error(visionFailure || '画面分析节点尚未成功完成')
       }
       const merged = mergeN8nMediaResults(audioRun.output, visionRun.output)
-      output = await synthesizeN8nMediaResults(parent.taskId, parent.routing, parent.input, merged)
+      const synthesized = await synthesizeN8nMediaResults(
+        parent.taskId,
+        parent.routing,
+        parent.input,
+        merged,
+      )
+      const rawMaterialId = parent.input.materialId
+      const materialIdResult = rawMaterialId === undefined
+        ? null
+        : n8nMaterialIdentitySchema.safeParse(rawMaterialId)
+      if (materialIdResult && !materialIdResult.success) {
+        throw new Error('父任务素材稳定标识无效')
+      }
+      const materialId = materialIdResult?.success ? materialIdResult.data : null
+      const mediaDurationSeconds = Number(prepareRun.output.durationSeconds)
+      if (!Number.isFinite(mediaDurationSeconds) || mediaDurationSeconds <= 0) {
+        throw new Error('准备节点缺少导演脑证据投影所需的媒体时长')
+      }
+      output = {
+        ...synthesized,
+        ...(materialId ? { materialId } : {}),
+        mediaDurationSeconds,
+        analysisVersion: 'video-analysis-v1',
+      }
     } else {
       output = await stageOutput(stage, parent.taskId, parent.routing, parent.input)
     }
-    if (stage === 'finalize') await cleanupN8nMediaTask(parent.taskId)
     let finalOutput = output
     if (stage === 'finalize') {
       const finalized = completeN8nFinalizeRun(db, {
@@ -243,6 +324,14 @@ export async function POST(request: NextRequest) {
         }, { status: 409 })
       }
       finalOutput = finalized.output || output
+      const cleanupPending = await retryableFinalizeCleanupResponse({
+        db,
+        taskId: parent.taskId,
+        childTaskId,
+        output: finalOutput,
+        cached: finalized.outcome === 'cached',
+      })
+      if (cleanupPending) return cleanupPending
     } else {
       completeN8nTaskRun(db, childTaskId, output)
     }

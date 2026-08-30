@@ -84,6 +84,9 @@ function canonicalDirectory(value) {
 
 function normalizeRequest(params) {
   if (!params || typeof params !== 'object' || Array.isArray(params)) return null
+  // materialId is intentionally forbidden at the model boundary, even when
+  // a caller bypasses JSON Schema validation and invokes execute directly.
+  if (Object.hasOwn(params, 'materialId')) return null
   const action = params.action
   if (!['submit_video', 'submit_directory', 'confirm_duplicate', 'status', 'result'].includes(action)) return null
   const keys = Object.keys(params)
@@ -195,9 +198,14 @@ async function executeRequest(request, {
           batchId: pending.id,
           confirmDuplicate: true,
         })
+        // A trusted caller may inject a pre-validated confirmation store. Its
+        // explicitly named identity field never originates in tool arguments.
         : await runner.dispatchVideo({
           videoPath: pending.path,
           taskId: pending.id,
+          ...(pending.trustedExistingMaterialId === undefined
+            ? {}
+            : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
           confirmDuplicate: true,
         })
       if (result.confirmationRequired) duplicateConfirmationStore.set(duplicateConfirmationScope, pending)

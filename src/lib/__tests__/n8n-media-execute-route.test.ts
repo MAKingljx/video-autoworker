@@ -21,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   mergeN8nMediaResults: vi.fn(),
   synthesizeN8nMediaResults: vi.fn(),
   cleanupN8nMediaTask: vi.fn(),
+  ensureN8nMediaCleanupDebt: vi.fn(),
+  retryN8nMediaCleanupDebt: vi.fn(),
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
@@ -48,8 +50,12 @@ vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
     completeN8nFinalizeRun: mocks.completeN8nFinalizeRun,
     completeN8nTaskRun: mocks.completeN8nTaskRun,
     failN8nTaskRun: mocks.failN8nTaskRun,
+    ensureN8nMediaCleanupDebt: mocks.ensureN8nMediaCleanupDebt,
   }
 })
+vi.mock('@/lib/n8n-media-cleanup', () => ({
+  retryN8nMediaCleanupDebt: mocks.retryN8nMediaCleanupDebt,
+}))
 
 import { POST } from '@/app/api/n8n/media-execute/route'
 
@@ -62,7 +68,11 @@ const parent = {
   source: 'openclaw',
   requestedBy: 'local-desktop',
   routing: { taskType: 'video-analysis', config: {} },
-  input: { prompt: '分析视频', videoKey: '123e4567-e89b-42d3-a456-426614174000.mp4' },
+  input: {
+    prompt: '分析视频',
+    videoKey: '123e4567-e89b-42d3-a456-426614174000.mp4',
+    materialId: 'MATERIAL-EXISTING-001',
+  },
   delivery: { mode: 'none' as const },
   output: null,
   error: null,
@@ -101,6 +111,7 @@ describe('n8n media node execution route', () => {
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => {
       if (taskId === parent.taskId) return parent
+      if (taskId.includes(':prepare:')) return { ...parent, taskId, status: 'succeeded', output: { durationSeconds: 4 } }
       if (taskId.includes(':audio:')) return { ...parent, taskId, status: 'succeeded', output: { transcript: '音频结果', model: 'large-v3-turbo' } }
       if (taskId.includes(':vision:')) return { ...parent, taskId, status: 'succeeded', output: { analysis: '画面结果', model: 'default_model' } }
       return null
@@ -137,6 +148,8 @@ describe('n8n media node execution route', () => {
     mocks.mergeN8nMediaResults.mockReturnValue({ combinedText: '合并结果', memoryMode: 'none' })
     mocks.synthesizeN8nMediaResults.mockResolvedValue({ combinedText: '最终汇总', memoryMode: 'none' })
     mocks.cleanupN8nMediaTask.mockResolvedValue(undefined)
+    mocks.ensureN8nMediaCleanupDebt.mockReturnValue({ scheduled: true, reason: 'finalize_succeeded' })
+    mocks.retryN8nMediaCleanupDebt.mockResolvedValue({ outcome: 'cleaned', debt: null, error: null })
   })
 
   it('rejects a callback without the shared secret', async () => {
@@ -267,10 +280,66 @@ describe('n8n media node execution route', () => {
     expect(mocks.completeN8nFinalizeRun).toHaveBeenCalledWith({}, expect.objectContaining({
       parentTaskId: parent.taskId,
       childTaskId: expect.stringContaining(':finalize:'),
-      output: { combinedText: '最终汇总', memoryMode: 'none' },
+      output: {
+        combinedText: '最终汇总',
+        memoryMode: 'none',
+        materialId: parent.input.materialId,
+        mediaDurationSeconds: 4,
+        analysisVersion: 'video-analysis-v1',
+      },
     }))
     expect(mocks.completeN8nTaskRun).not.toHaveBeenCalled()
-    expect(mocks.cleanupN8nMediaTask).toHaveBeenCalledWith(parent.taskId)
+    expect(mocks.ensureN8nMediaCleanupDebt).toHaveBeenCalledWith({}, parent.taskId)
+    expect(mocks.retryN8nMediaCleanupDebt).toHaveBeenCalledWith({}, parent.taskId, { force: true })
+    expect(mocks.completeN8nFinalizeRun.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.retryN8nMediaCleanupDebt.mock.invocationCallOrder[0])
+  })
+
+  it('never promotes a temporary inbox video key to a material ID', async () => {
+    const legacyParent = {
+      ...parent,
+      input: { prompt: parent.input.prompt, videoKey: parent.input.videoKey },
+    }
+    mocks.createN8nMediaChildRunFromParent.mockReturnValue({
+      outcome: 'created',
+      parent: legacyParent,
+      child: {
+        ...legacyParent,
+        taskId: 'media-task:video-parent-1:finalize:legacy',
+        idempotencyKey: 'media-idem:video-parent-1:finalize:legacy',
+        status: 'queued',
+      },
+    })
+
+    const response = await POST(request('finalize'))
+    expect(response.status).toBe(200)
+    expect(mocks.completeN8nFinalizeRun).toHaveBeenCalledWith({}, expect.objectContaining({
+      output: expect.not.objectContaining({ materialId: expect.anything() }),
+    }))
+  })
+
+  it('fails closed when a persisted optional material ID is malformed', async () => {
+    const invalidParent = {
+      ...parent,
+      input: { ...parent.input, materialId: '/private/source/video.mp4' },
+    }
+    mocks.createN8nMediaChildRunFromParent.mockReturnValue({
+      outcome: 'created',
+      parent: invalidParent,
+      child: {
+        ...invalidParent,
+        taskId: 'media-task:video-parent-1:finalize:invalid-material',
+        idempotencyKey: 'media-idem:video-parent-1:finalize:invalid-material',
+        status: 'queued',
+      },
+    })
+
+    const response = await POST(request('finalize'))
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({
+      error: expect.stringMatching(/素材稳定标识无效/u),
+    })
+    expect(mocks.completeN8nFinalizeRun).not.toHaveBeenCalled()
   })
 
   it('repairs the parent atomically when a cached finalize child already succeeded', async () => {
@@ -313,6 +382,43 @@ describe('n8n media node execution route', () => {
     })
     expect(mocks.synthesizeN8nMediaResults).not.toHaveBeenCalled()
     expect(mocks.claimN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.retryN8nMediaCleanupDebt).toHaveBeenCalledWith({}, parent.taskId, { force: true })
+  })
+
+  it('retries only cleanup when the parent was already committed before a process exit', async () => {
+    const persistedOutput = { combinedText: 'durable finalize result', memoryMode: 'none' }
+    mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => (
+      taskId === parent.taskId
+        ? { ...parent, status: 'succeeded', output: persistedOutput }
+        : null
+    ))
+    mocks.retryN8nMediaCleanupDebt
+      .mockResolvedValueOnce({ outcome: 'pending', debt: { attemptCount: 1 }, error: 'first cleanup attempt failed' })
+      .mockResolvedValueOnce({ outcome: 'cleaned', debt: null, error: null })
+
+    const pending = await POST(request('finalize'))
+    expect(pending.status).toBe(502)
+    expect(await pending.json()).toMatchObject({
+      taskId: parent.taskId,
+      status: 'succeeded',
+      output: persistedOutput,
+      cached: true,
+      cleanupPending: true,
+      retryable: true,
+    })
+    expect(mocks.createN8nMediaChildRunFromParent).not.toHaveBeenCalled()
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
+
+    const recovered = await POST(request('finalize'))
+    expect(recovered.status).toBe(200)
+    expect(await recovered.json()).toMatchObject({
+      taskId: parent.taskId,
+      status: 'succeeded',
+      output: persistedOutput,
+      cached: true,
+    })
+    expect(mocks.retryN8nMediaCleanupDebt).toHaveBeenCalledTimes(2)
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
   })
 
   it('fails only the child while the worker error remains retryable', async () => {
@@ -355,6 +461,12 @@ describe('n8n media node execution route', () => {
   it('surfaces persisted dependency failure details during finalize', async () => {
     mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => {
       if (taskId === parent.taskId) return parent
+      if (taskId.includes(':prepare:')) return {
+        ...parent,
+        taskId,
+        status: 'succeeded',
+        output: { durationSeconds: 4 },
+      }
       if (taskId.includes(':audio:')) return {
         ...parent,
         taskId,
@@ -383,12 +495,35 @@ describe('n8n media node execution route', () => {
     expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
   })
 
-  it('does not report final success when media cleanup fails', async () => {
-    mocks.cleanupN8nMediaTask.mockRejectedValue(new Error('媒体临时目录清理失败'))
+  it('keeps the committed result succeeded when media cleanup fails', async () => {
+    mocks.retryN8nMediaCleanupDebt.mockResolvedValue({
+      outcome: 'pending', debt: { attemptCount: 1 }, error: '媒体临时目录清理失败',
+    })
     const response = await POST(request('finalize'))
     expect(response.status).toBe(502)
-    expect(await response.json()).toMatchObject({ stage: 'finalize', status: 'failed', retryable: true })
+    expect(await response.json()).toMatchObject({
+      stage: 'finalize',
+      status: 'succeeded',
+      cleanupPending: true,
+      retryable: true,
+    })
+    expect(mocks.completeN8nFinalizeRun).toHaveBeenCalledTimes(1)
     expect(mocks.completeN8nTaskRun).not.toHaveBeenCalled()
-    expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('does not clean media when the atomic finalize commit is rejected', async () => {
+    mocks.completeN8nFinalizeRun.mockReturnValue({
+      outcome: 'rejected',
+      parent: { ...parent, status: 'accepted', error: null },
+      child: { ...parent, status: 'running', error: null },
+      output: null,
+    })
+
+    const response = await POST(request('finalize'))
+
+    expect(response.status).toBe(409)
+    expect(mocks.retryN8nMediaCleanupDebt).not.toHaveBeenCalled()
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
   })
 })

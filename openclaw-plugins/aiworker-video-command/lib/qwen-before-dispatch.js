@@ -10,6 +10,7 @@ import { schedulerRunner } from './scheduler-runner.js'
 import { validateVideoPath } from './video-path-policy.js'
 import {
   createDuplicateConfirmationStore,
+  duplicateConfirmationScopeKey,
   DUPLICATE_CONFIRMATION_TEXT,
   isDuplicateConfirmationText,
 } from './duplicate-confirmation-store.js'
@@ -474,8 +475,13 @@ export function createQwenBeforeDispatchHandler({
     }
   }
 
-  async function confirmAndRun(scopeKey) {
-    const pending = duplicateConfirmationStore.take(scopeKey)
+  async function confirmAndRun(scopeKey, fallbackScopeKey) {
+    let pendingScopeKey = scopeKey
+    let pending = duplicateConfirmationStore.take(scopeKey)
+    if (!pending && fallbackScopeKey && fallbackScopeKey !== scopeKey) {
+      pendingScopeKey = fallbackScopeKey
+      pending = duplicateConfirmationStore.take(fallbackScopeKey)
+    }
     if (!pending) return handled('当前没有等待确认的重复视频任务。')
     try {
       const result = pending.kind === 'batch'
@@ -487,9 +493,12 @@ export function createQwenBeforeDispatchHandler({
         : await runner.dispatchVideo({
           videoPath: pending.path,
           taskId: pending.id,
+          ...(pending.trustedExistingMaterialId === undefined
+            ? {}
+            : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
           confirmDuplicate: true,
         })
-      if (result.confirmationRequired) duplicateConfirmationStore.set(scopeKey, pending)
+      if (result.confirmationRequired) duplicateConfirmationStore.set(pendingScopeKey, pending)
       return handled(dispatchReceipt(result))
     } catch {
       const label = pending.kind === 'batch' ? '批次编号' : '任务编号'
@@ -522,7 +531,7 @@ export function createQwenBeforeDispatchHandler({
       const existing = operations.get(key)
       if (existing) return existing.promise
       const promise = (confirmsDuplicate
-        ? confirmAndRun(identity.scopeKey)
+        ? confirmAndRun(identity.scopeKey, duplicateConfirmationScopeKey(sessionKey))
         : classifyAndRun(event, context, identity.scopeKey)).catch(() => (
         handled('未执行：暂时无法理解这个视频请求。')
       ))

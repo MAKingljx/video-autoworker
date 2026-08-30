@@ -1,11 +1,15 @@
 import { createHash } from 'crypto'
-import { readFileSync } from 'fs'
+import { lstatSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
 
+type MigrationContext = {
+  rootPath: string
+}
+
 export type Migration = {
   id: string
-  up: (db: Database.Database) => void
+  up: (db: Database.Database, context?: MigrationContext) => void
 }
 
 // Plugin hook: extensions can register additional migrations without modifying this file.
@@ -14,18 +18,80 @@ export function registerMigrations(newMigrations: Migration[]): void {
   extraMigrations.push(...newMigrations)
 }
 
+type LoadedBaseSchema = {
+  path: string
+  sql: string
+}
+
+const REQUIRED_BASE_SCHEMA_COLUMNS = {
+  tasks: ['id', 'title', 'status'],
+  agents: ['id', 'name', 'status'],
+} as const
+
+function loadBaseSchema(rootPath = process.cwd()): LoadedBaseSchema {
+  const candidates = [
+    join(rootPath, 'src', 'lib', 'schema.sql'),
+    join(rootPath, 'runtime', 'schema.sql'),
+  ]
+
+  for (const candidate of candidates) {
+    let schemaStat
+    try {
+      schemaStat = lstatSync(candidate)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw new Error('mission_control_schema_unreadable', { cause: error })
+    }
+    if (schemaStat.isSymbolicLink() || !schemaStat.isFile()) {
+      throw new Error('mission_control_schema_unsafe_type')
+    }
+
+    let sql: string
+    try {
+      sql = readFileSync(candidate, 'utf8')
+    } catch (error) {
+      throw new Error('mission_control_schema_unreadable', { cause: error })
+    }
+    if (!sql.trim()) continue
+    return { path: candidate, sql }
+  }
+
+  throw new Error('mission_control_schema_missing')
+}
+
+export function resolveBaseSchemaPath(rootPath = process.cwd()): string {
+  return loadBaseSchema(rootPath).path
+}
+
+function assertRequiredBaseSchema(db: Database.Database): void {
+  for (const [table, requiredColumns] of Object.entries(REQUIRED_BASE_SCHEMA_COLUMNS)) {
+    const tableRecord = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+    ).get(table) as { name?: string } | undefined
+    if (tableRecord?.name !== table) {
+      throw new Error(`mission_control_schema_required_table_missing:${table}`)
+    }
+
+    const columns = new Set(
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+        .map(column => column.name),
+    )
+    const missingColumns = requiredColumns.filter(column => !columns.has(column))
+    if (missingColumns.length > 0) {
+      throw new Error(
+        `mission_control_schema_required_columns_missing:${table}:${missingColumns.join(',')}`,
+      )
+    }
+  }
+}
+
 const migrations: Migration[] = [
   {
     id: '001_init',
-    up: (db) => {
-      const schemaPath = join(process.cwd(), 'src', 'lib', 'schema.sql')
-      const schema = readFileSync(schemaPath, 'utf8')
-      const statements = schema.split(';').filter((stmt) => stmt.trim())
-      db.transaction(() => {
-        for (const statement of statements) {
-          db.exec(statement.trim())
-        }
-      })()
+    up: (db, context) => {
+      const schema = loadBaseSchema(context?.rootPath).sql
+      db.exec(schema)
+      assertRequiredBaseSchema(db)
     }
   },
   {
@@ -1478,10 +1544,37 @@ const migrations: Migration[] = [
           ON n8n_task_runs(binding_id, updated_at DESC);
       `)
     }
+  },
+  {
+    id: '051_n8n_media_cleanup_debts',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_media_cleanup_debts (
+          task_id TEXT PRIMARY KEY,
+          binding_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          tenant_id INTEGER NOT NULL,
+          workspace_digest TEXT NOT NULL
+            CHECK(length(workspace_digest) = 64 AND workspace_digest NOT GLOB '*[^0-9a-f]*'),
+          reason TEXT NOT NULL
+            CHECK(reason IN ('finalize_succeeded', 'finalize_lease_expired')),
+          attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+          last_error TEXT,
+          next_attempt_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_media_cleanup_debts_due
+          ON n8n_media_cleanup_debts(next_attempt_at, updated_at, task_id);
+        CREATE INDEX IF NOT EXISTS idx_n8n_media_cleanup_debts_scope
+          ON n8n_media_cleanup_debts(tenant_id, workspace_id, updated_at);
+      `)
+    }
   }
 ]
 
-export function runMigrations(db: Database.Database) {
+export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
@@ -1496,7 +1589,7 @@ export function runMigrations(db: Database.Database) {
   for (const migration of [...migrations, ...extraMigrations]) {
     if (applied.has(migration.id)) continue
     db.transaction(() => {
-      migration.up(db)
+      migration.up(db, { rootPath })
       db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(migration.id)
     })()
   }

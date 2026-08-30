@@ -1,18 +1,80 @@
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  access, chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile,
+} from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
-import { createSchedulerRunner } from '../lib/scheduler-runner.js'
+import { createMediaHandoff, createSchedulerRunner } from '../lib/scheduler-runner.js'
 
 const taskId = `video-natural-${'a'.repeat(64)}`
 const batchId = `video-batch-${'b'.repeat(64)}`
 
+function sourceIdentity(details) {
+  return {
+    dev: details.dev,
+    ino: details.ino,
+    size: details.size,
+    mtimeMs: details.mtimeMs,
+    ctimeMs: details.ctimeMs,
+  }
+}
+
+function singleStatePath(taskIdValue, root) {
+  const taskDigest = createHash('sha256').update(taskIdValue).digest('hex').slice(0, 32)
+  const stateDigest = createHash('sha256').update(`single:${taskDigest}`).digest('hex')
+  return join(root, `${stateDigest}.json`)
+}
+
+async function writeSingleStateProof({
+  stateRoot,
+  inboxRoot,
+  videoPath,
+  materialId,
+  identity,
+  stagingRecovery,
+}) {
+  const taskDigest = createHash('sha256').update(taskId).digest('hex').slice(0, 32)
+  const state = {
+    schemaVersion: 2,
+    batchId: `single:${taskDigest}`,
+    requestFingerprint: 'f'.repeat(64),
+    kind: 'single',
+    inboxRoot,
+    items: [{
+      taskId,
+      idempotencyKey: taskId,
+      sourcePath: videoPath,
+      trustedExistingMaterialId: materialId,
+      sourceIdentity: identity,
+      ...(stagingRecovery ? { stagingRecovery } : {}),
+    }],
+  }
+  await writeFile(singleStatePath(taskId, stateRoot), `${JSON.stringify(state)}\n`, { mode: 0o600 })
+}
+
 function fixture(stdoutValue) {
-  const execute = vi.fn(async () => ({ stdout: `${JSON.stringify(stdoutValue)}\n`, stderr: '' }))
+  const execute = vi.fn(async () => ({
+    stdout: `${JSON.stringify({ ...stdoutValue, materialHandoffPersisted: true })}\n`,
+    stderr: '',
+  }))
+  const cleanupHandoff = vi.fn(async () => undefined)
+  const createHandoff = vi.fn(async ({ videoPath }) => ({
+    path: '/private/media-handoff-00000000-0000-4000-8000-000000000000.json',
+    videoPath,
+    cleanup: cleanupHandoff,
+  }))
   return {
     execute,
+    createHandoff,
+    cleanupHandoff,
     runner: createSchedulerRunner({
       execute,
       scriptPath: '/installed/submit-task.mjs',
       nodePath: '/node',
+      createHandoff,
     }),
   }
 }
@@ -32,6 +94,375 @@ describe('0.5 scheduler runner', () => {
       '--wait-seconds', '0',
       '--no-trigger-recovery',
     ])
+    expect(execute.mock.calls[0][2]).toEqual({ timeout: 25_000 })
+  })
+
+  it('passes a valid existing material ID and rejects non-string or malformed values before spawning', async () => {
+    const trustedExistingMaterialId = 'MATERIAL-EXISTING-001'
+    const { execute, runner, createHandoff, cleanupHandoff } = fixture({ taskId, status: 'queued', duplicate: false })
+    await runner.dispatchVideo({ videoPath: '/data/test.mp4', taskId, trustedExistingMaterialId })
+    expect(execute.mock.calls[0][1]).toEqual([
+      '/installed/submit-task.mjs',
+      '--video-file', '/data/test.mp4',
+      '--task-id', taskId,
+      '--idempotency-key', taskId,
+      '--media-handoff', '/private/media-handoff-00000000-0000-4000-8000-000000000000.json',
+      '--delivery', 'none',
+      '--wait-seconds', '0',
+      '--no-trigger-recovery',
+    ])
+    expect(execute.mock.calls[0][2]).toEqual({ timeout: 25_000 })
+    expect(createHandoff).toHaveBeenCalledWith({
+      taskId,
+      videoPath: '/data/test.mp4',
+      materialId: trustedExistingMaterialId,
+    })
+    expect(cleanupHandoff).toHaveBeenCalledWith({ disposition: 'persisted_ack' })
+
+    for (const trustedExistingMaterialId of [null, 123, true, {}, [], ' MATERIAL-001 ', '']) {
+      const blocked = fixture({ taskId, status: 'queued', duplicate: false })
+      await expect(blocked.runner.dispatchVideo({
+        videoPath: '/data/test.mp4', taskId, trustedExistingMaterialId,
+      })).rejects.toThrow('invalid_material_id')
+      expect(blocked.execute).not.toHaveBeenCalled()
+    }
+    const legacyField = fixture({ taskId, status: 'queued', duplicate: false })
+    await expect(legacyField.runner.dispatchVideo({
+      videoPath: '/data/test.mp4', taskId, materialId: trustedExistingMaterialId,
+    })).rejects.toThrow('untrusted_material_id_field')
+    expect(legacyField.execute).not.toHaveBeenCalled()
+  })
+
+  it('retains a material handoff when CLI consumption is unknown', async () => {
+    const failed = fixture({ taskId, status: 'queued', duplicate: false })
+    failed.execute.mockRejectedValueOnce(new Error('dispatch_failed'))
+    await expect(failed.runner.dispatchVideo({
+      videoPath: '/data/test.mp4',
+      taskId,
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).rejects.toThrow('dispatch_failed')
+    expect(failed.cleanupHandoff).toHaveBeenCalledWith({ disposition: 'consumption_unknown' })
+  })
+
+  it('marks a confirmed spawn failure as not started while retaining the outbox', async () => {
+    const notStarted = fixture({ taskId, status: 'queued', duplicate: false })
+    notStarted.execute.mockRejectedValueOnce(Object.assign(new Error('spawn_failed'), { childStarted: false }))
+    await expect(notStarted.runner.dispatchVideo({
+      videoPath: '/data/test.mp4',
+      taskId,
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).rejects.toThrow('spawn_failed')
+    expect(notStarted.cleanupHandoff).toHaveBeenCalledWith({ disposition: 'not_started' })
+  })
+
+  it('requires an explicit durable-state ACK before removing a material handoff', async () => {
+    const missingAck = fixture({ taskId, status: 'queued', duplicate: false })
+    missingAck.execute.mockResolvedValueOnce({
+      stdout: `${JSON.stringify({ taskId, status: 'queued', duplicate: false })}\n`,
+      stderr: '',
+    })
+    await expect(missingAck.runner.dispatchVideo({
+      videoPath: '/data/test.mp4',
+      taskId,
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).rejects.toThrow('material_handoff_not_persisted')
+    expect(missingAck.cleanupHandoff).toHaveBeenCalledWith({ disposition: 'consumption_unknown' })
+  })
+
+  it('keeps a task-keyed outbox for not-started or unknown consumption and deletes it only after ACK', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-outbox-'))
+    const handoffRoot = join(root, 'handoffs')
+    const videoPath = join(root, 'video.mp4')
+    const materialId = 'MATERIAL-OUTBOX-001'
+    try {
+      await writeFile(videoPath, 'outbox-video')
+      const first = await createMediaHandoff({ taskId, videoPath, materialId, root: handoffRoot })
+      const firstPayload = JSON.parse(await readFile(first.path, 'utf8'))
+      await expect(first.cleanup({ disposition: 'not_started' })).resolves.toEqual({
+        retained: true,
+        disposition: 'not_started',
+      })
+      expect(await access(first.path).then(() => true)).toBe(true)
+
+      const second = await createMediaHandoff({ taskId, videoPath, materialId, root: handoffRoot })
+      expect(second.path).toBe(first.path)
+      expect(JSON.parse(await readFile(second.path, 'utf8')).nonce).toBe(firstPayload.nonce)
+      await expect(second.cleanup({ disposition: 'consumption_unknown' })).resolves.toEqual({
+        retained: true,
+        disposition: 'consumption_unknown',
+      })
+      await expect(createMediaHandoff({
+        taskId,
+        videoPath,
+        materialId: 'MATERIAL-OUTBOX-CONFLICT',
+        root: handoffRoot,
+      })).rejects.toThrow('media_handoff_outbox_conflict')
+
+      const acknowledged = await createMediaHandoff({ taskId, videoPath, materialId, root: handoffRoot })
+      await expect(acknowledged.cleanup({ disposition: 'persisted_ack' })).resolves.toEqual({
+        retained: false,
+        disposition: 'persisted_ack',
+      })
+      await expect(access(acknowledged.path)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await readdir(handoffRoot)).filter(name => name.includes('outbox'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts ctime drift only while a task-bound controlled hard-link anchor proves worker ownership', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-anchor-'))
+    const handoffRoot = join(root, 'handoffs')
+    const stateRoot = join(root, 'state')
+    const inboxRoot = join(root, 'inbox')
+    const videoPath = join(root, 'video.mp4')
+    const materialId = 'MATERIAL-ANCHOR-001'
+    const ownershipToken = '00000000-0000-4000-8000-000000000001'
+    const videoKey = '00000000-0000-4000-8000-000000000002.mp4'
+    const anchorName = `.source-anchor-${process.pid}-${ownershipToken}`
+    try {
+      await Promise.all([
+        mkdir(stateRoot, { mode: 0o700 }),
+        mkdir(inboxRoot, { mode: 0o700 }),
+        writeFile(videoPath, 'anchor-video'),
+      ])
+      const first = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      const firstPayload = JSON.parse(await readFile(first.path, 'utf8'))
+      const admittedIdentity = firstPayload.sourceIdentity
+      await first.cleanup({ disposition: 'consumption_unknown' })
+      await link(videoPath, join(inboxRoot, anchorName))
+      const anchoredIdentity = sourceIdentity(await stat(videoPath))
+      expect(anchoredIdentity.ctimeMs).not.toBe(admittedIdentity.ctimeMs)
+      const taskDigest = createHash('sha256').update(taskId).digest('hex').slice(0, 32)
+      await writeSingleStateProof({
+        stateRoot,
+        inboxRoot,
+        videoPath: await realpath(videoPath),
+        materialId,
+        identity: admittedIdentity,
+        stagingRecovery: {
+          schemaVersion: 1,
+          phase: 'anchor_observed',
+          sourceIdentity: admittedIdentity,
+          anchoredIdentity,
+          anchorName,
+          incomingName: `.incoming-${process.pid}-${videoKey}`,
+          videoKey,
+          materialId: null,
+          contentSha256: null,
+          incomingIdentity: null,
+          stagedIdentity: null,
+          ownershipToken,
+          taskId,
+          idempotencyKey: taskId,
+          batchId: `single:${taskDigest}`,
+        },
+      })
+
+      const retried = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      const retriedPayload = JSON.parse(await readFile(retried.path, 'utf8'))
+      expect(retriedPayload.nonce).toBe(firstPayload.nonce)
+      expect(retriedPayload.sourceIdentity).toEqual(anchoredIdentity)
+      await retried.cleanup({ disposition: 'persisted_ack' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects metadata ctime drift after the durable anchor checkpoint', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-anchor-chmod-'))
+    const handoffRoot = join(root, 'handoffs')
+    const stateRoot = join(root, 'state')
+    const inboxRoot = join(root, 'inbox')
+    const videoPath = join(root, 'video.mp4')
+    const materialId = 'MATERIAL-ANCHOR-CHMOD-001'
+    const ownershipToken = '00000000-0000-4000-8000-000000000003'
+    const videoKey = '00000000-0000-4000-8000-000000000004.mp4'
+    const anchorName = `.source-anchor-${process.pid}-${ownershipToken}`
+    try {
+      await Promise.all([
+        mkdir(stateRoot, { mode: 0o700 }),
+        mkdir(inboxRoot, { mode: 0o700 }),
+        writeFile(videoPath, 'anchor-chmod-video', { mode: 0o644 }),
+      ])
+      const first = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      const admittedIdentity = JSON.parse(await readFile(first.path, 'utf8')).sourceIdentity
+      await first.cleanup({ disposition: 'consumption_unknown' })
+      const taskDigest = createHash('sha256').update(taskId).digest('hex').slice(0, 32)
+      await writeSingleStateProof({
+        stateRoot,
+        inboxRoot,
+        videoPath: await realpath(videoPath),
+        materialId,
+        identity: admittedIdentity,
+        stagingRecovery: {
+          schemaVersion: 1,
+          phase: 'prepared',
+          sourceIdentity: admittedIdentity,
+          anchoredIdentity: null,
+          anchorName,
+          incomingName: `.incoming-${process.pid}-${videoKey}`,
+          videoKey,
+          materialId: null,
+          contentSha256: null,
+          incomingIdentity: null,
+          stagedIdentity: null,
+          ownershipToken,
+          taskId,
+          idempotencyKey: taskId,
+          batchId: `single:${taskDigest}`,
+        },
+      })
+      await link(videoPath, join(inboxRoot, anchorName))
+      await chmod(videoPath, 0o600)
+      expect((await stat(videoPath)).ctimeMs).not.toBe(admittedIdentity.ctimeMs)
+      await expect(createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })).rejects.toThrow('media_handoff_outbox_conflict')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers the same material and nonce after ACK loss when worker-finalized state proves ctime drift', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-finalized-'))
+    const handoffRoot = join(root, 'handoffs')
+    const stateRoot = join(root, 'state')
+    const inboxRoot = join(root, 'inbox')
+    const videoPath = join(root, 'video.mp4')
+    const anchorPath = join(inboxRoot, '.source-anchor-transient')
+    const materialId = 'MATERIAL-FINALIZED-001'
+    try {
+      await Promise.all([
+        mkdir(stateRoot, { mode: 0o700 }),
+        mkdir(inboxRoot, { mode: 0o700 }),
+        writeFile(videoPath, 'finalized-video'),
+      ])
+      const first = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      const firstPayload = JSON.parse(await readFile(first.path, 'utf8'))
+      await first.cleanup({ disposition: 'consumption_unknown' })
+
+      await link(videoPath, anchorPath)
+      await rm(anchorPath)
+      const finalizedIdentity = sourceIdentity(await stat(videoPath))
+      expect(finalizedIdentity.ctimeMs).not.toBe(firstPayload.sourceIdentity.ctimeMs)
+      await writeSingleStateProof({
+        stateRoot,
+        inboxRoot,
+        videoPath: await realpath(videoPath),
+        materialId,
+        identity: finalizedIdentity,
+      })
+      const primaryStatePath = singleStatePath(taskId, stateRoot)
+      await rename(primaryStatePath, `${primaryStatePath}.bak`)
+      await writeFile(primaryStatePath, '{damaged-primary\n', { mode: 0o600 })
+
+      const retried = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      const retriedPayload = JSON.parse(await readFile(retried.path, 'utf8'))
+      expect(retriedPayload.nonce).toBe(firstPayload.nonce)
+      expect(retriedPayload.materialId).toBe(materialId)
+      expect(retriedPayload.sourceIdentity).toEqual(finalizedIdentity)
+      await retried.cleanup({ disposition: 'persisted_ack' })
+      expect((await readdir(handoffRoot)).filter(name => name.endsWith('.json'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects chmod ctime drift without matching task-bound worker state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-chmod-'))
+    const handoffRoot = join(root, 'handoffs')
+    const stateRoot = join(root, 'state')
+    const videoPath = join(root, 'video.mp4')
+    const materialId = 'MATERIAL-CHMOD-001'
+    try {
+      await mkdir(stateRoot, { mode: 0o700 })
+      await writeFile(videoPath, 'chmod-video', { mode: 0o644 })
+      const first = await createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })
+      await first.cleanup({ disposition: 'consumption_unknown' })
+      await chmod(videoPath, 0o600)
+      await expect(createMediaHandoff({
+        taskId, videoPath, materialId, root: handoffRoot, batchRoot: stateRoot,
+      })).rejects.toThrow('media_handoff_outbox_conflict')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reuses the same outbox nonce after a child is killed before consumer WAL fsync', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-media-handoff-killed-child-'))
+    const handoffRoot = join(root, 'handoffs')
+    const videoPath = join(root, 'video.mp4')
+    const materialId = 'MATERIAL-KILLED-CHILD-001'
+    const createHandoff = input => createMediaHandoff({ ...input, root: handoffRoot })
+    try {
+      await writeFile(videoPath, 'killed-child-video')
+      const killedExecute = vi.fn(() => new Promise((_resolve, reject) => {
+        const child = spawn(process.execPath, ['-e', "process.kill(process.pid, 'SIGKILL')"], {
+          stdio: 'ignore',
+        })
+        child.once('error', reject)
+        child.once('exit', (code, signal) => reject(new Error(`consumer_child_killed:${signal || code}`)))
+      }))
+      const firstRunner = createSchedulerRunner({
+        execute: killedExecute,
+        scriptPath: '/installed/submit-task.mjs',
+        nodePath: process.execPath,
+        createHandoff,
+      })
+      await expect(firstRunner.dispatchVideo({
+        videoPath,
+        taskId,
+        trustedExistingMaterialId: materialId,
+      })).rejects.toThrow('consumer_child_killed')
+      const retainedCredential = (await readdir(handoffRoot))
+        .find(name => /^media-handoff-[0-9a-f-]{36}\.json$/u.test(name))
+      expect(retainedCredential).toBeTruthy()
+      const retainedPayload = JSON.parse(await readFile(join(handoffRoot, retainedCredential), 'utf8'))
+
+      let retriedPayload = null
+      const retryExecute = vi.fn(async (_file, args) => {
+        const handoffIndex = args.indexOf('--media-handoff')
+        retriedPayload = JSON.parse(await readFile(args[handoffIndex + 1], 'utf8'))
+        return {
+          stdout: `${JSON.stringify({
+            taskId,
+            status: 'queued',
+            duplicate: false,
+            materialHandoffPersisted: true,
+          })}\n`,
+          stderr: '',
+        }
+      })
+      const retryRunner = createSchedulerRunner({
+        execute: retryExecute,
+        scriptPath: '/installed/submit-task.mjs',
+        nodePath: process.execPath,
+        createHandoff,
+      })
+      await retryRunner.dispatchVideo({
+        videoPath,
+        taskId,
+        trustedExistingMaterialId: materialId,
+      })
+      expect(retriedPayload.nonce).toBe(retainedPayload.nonce)
+      expect(retriedPayload.materialId).toBe(materialId)
+      expect((await readdir(handoffRoot)).filter(name => name.endsWith('.json'))).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('rejects a fresh accepted result but accepts a duplicate running result', async () => {
@@ -79,6 +510,24 @@ describe('0.5 scheduler runner', () => {
       truncated: false,
     })
     expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it('retains a trusted handoff while duplicate confirmation is pending', async () => {
+    const pending = fixture({
+      taskId,
+      status: 'confirmation_required',
+      duplicate: false,
+      confirmationRequired: true,
+      duplicateCount: 1,
+      duplicateNames: ['S03E03.mp4'],
+      truncated: false,
+    })
+    await expect(pending.runner.dispatchVideo({
+      videoPath: '/data/S03E03.mp4',
+      taskId,
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).resolves.toMatchObject({ confirmationRequired: true })
+    expect(pending.cleanupHandoff).toHaveBeenCalledWith({ disposition: 'consumption_unknown' })
   })
 
   it('adds the duplicate confirmation flag only after the caller confirms', async () => {

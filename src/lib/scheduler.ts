@@ -12,6 +12,7 @@ import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
+import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
@@ -152,6 +153,30 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
     return { ok: true, message: `Cleaned ${totalDeleted} stale record${totalDeleted === 1 ? '' : 's'}` }
   } catch (err: any) {
     return { ok: false, message: `Cleanup failed: ${err.message}` }
+  }
+}
+
+/** Retry only durable, terminal-state-bound media cleanup obligations. */
+async function runMediaCleanupDebtJanitor(): Promise<{ ok: boolean; message: string }> {
+  try {
+    const result = await drainN8nMediaCleanupDebts(getDatabase(), { limit: 20 })
+    if (result.scanned > 0) {
+      try {
+        logAuditEvent({
+          action: 'n8n_media_cleanup_debt_retry',
+          actor: 'scheduler',
+          detail: result,
+        })
+      } catch {
+        // Cleanup results are already durable; audit failure does not retry them.
+      }
+    }
+    return {
+      ok: result.rejected === 0,
+      message: `Media cleanup debts: ${result.cleaned} cleared, ${result.pending} pending, ${result.rejected} rejected`,
+    }
+  } catch (err: any) {
+    return { ok: false, message: `Media cleanup debt janitor failed: ${err.message}` }
   }
 }
 
@@ -308,6 +333,15 @@ export function initScheduler() {
     running: false,
   })
 
+  tasks.set('media_cleanup_debt', {
+    name: 'Media Cleanup Debt Janitor',
+    intervalMs: FIVE_MINUTES_MS,
+    lastRun: null,
+    nextRun: now + FIVE_MINUTES_MS,
+    enabled: true,
+    running: false,
+  })
+
   tasks.set('agent_heartbeat', {
     name: 'Agent Heartbeat Check',
     intervalMs: FIVE_MINUTES_MS,
@@ -400,7 +434,7 @@ export function initScheduler() {
 
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
-  logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
+  logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, media cleanup debt and heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
 }
 
 /** Calculate ms until next occurrence of a given hour (UTC) */
@@ -424,6 +458,7 @@ async function tick() {
     // Check if this task is enabled in settings (heartbeat is always enabled)
     const settingKey = id === 'auto_backup' ? 'general.auto_backup'
       : id === 'auto_cleanup' ? 'general.auto_cleanup'
+      : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
       : id === 'webhook_retry' ? 'webhooks.retry_enabled'
       : id === 'claude_session_scan' ? 'general.claude_session_scan'
       : id === 'skill_sync' ? 'general.skill_sync'
@@ -434,12 +469,13 @@ async function tick() {
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
     task.running = true
     try {
       const result = id === 'auto_backup' ? await runBackup()
+        : id === 'media_cleanup_debt' ? await runMediaCleanupDebtJanitor()
         : id === 'agent_heartbeat' ? await runHeartbeatCheck()
         : id === 'webhook_retry' ? await processWebhookRetries()
         : id === 'claude_session_scan' ? await syncClaudeSessions()
@@ -484,6 +520,7 @@ export function getSchedulerStatus() {
   for (const [id, task] of tasks) {
     const settingKey = id === 'auto_backup' ? 'general.auto_backup'
       : id === 'auto_cleanup' ? 'general.auto_cleanup'
+      : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
       : id === 'webhook_retry' ? 'webhooks.retry_enabled'
       : id === 'claude_session_scan' ? 'general.claude_session_scan'
       : id === 'skill_sync' ? 'general.skill_sync'
@@ -494,7 +531,7 @@ export function getSchedulerStatus() {
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,
@@ -513,6 +550,7 @@ export function getSchedulerStatus() {
 export async function triggerTask(taskId: string): Promise<{ ok: boolean; message: string }> {
   if (taskId === 'auto_backup') return runBackup()
   if (taskId === 'auto_cleanup') return runCleanup()
+  if (taskId === 'media_cleanup_debt') return runMediaCleanupDebtJanitor()
   if (taskId === 'agent_heartbeat') return runHeartbeatCheck()
   if (taskId === 'webhook_retry') return processWebhookRetries()
   if (taskId === 'claude_session_scan') return syncClaudeSessions()

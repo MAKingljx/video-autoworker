@@ -43,8 +43,8 @@ function localizeLogMessage(message: string): string {
     ],
     [/Database migrations applied successfully/gi, '数据库迁移已成功应用'],
     [
-      /Scheduler initialized - backup at ~3AM, cleanup at ~4AM, heartbeat every 5m, webhook\/claude\/skill\/local-agent\/gateway-agent sync every 60s/gi,
-      '调度器已初始化：约 3 点备份，约 4 点清理，每 5 分钟心跳检查，每 60 秒同步 webhook / OpenClaw / 技能 / 本地智能体 / 网关智能体',
+      /Scheduler initialized - backup at ~3AM, cleanup at ~4AM, media cleanup debt and heartbeat every 5m, webhook\/claude\/skill\/local-agent\/gateway-agent sync every 60s/gi,
+      '调度器已初始化：约 3 点备份，约 4 点清理，每 5 分钟重试媒体清理债务并检查心跳，每 60 秒同步 webhook / OpenClaw / 技能 / 本地智能体 / 网关智能体',
     ],
     [/Agent sync complete/gi, '智能体同步完成'],
     [/Agent auto-sync failed/gi, '智能体自动同步失败'],

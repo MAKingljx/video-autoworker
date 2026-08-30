@@ -50,11 +50,14 @@ export interface N8nTaskScope {
 
 export const N8N_VIDEO_CALLBACK_LEASE_SECONDS = 15 * 60
 export const N8N_VIDEO_CALLBACK_LEASE_EXPIRED = 'VIDEO_CALLBACK_LEASE_EXPIRED'
+export const N8N_VIDEO_FINALIZE_LEASE_SECONDS = 24 * 60 * 60
+export const N8N_VIDEO_FINALIZE_LEASE_EXPIRED = 'VIDEO_FINALIZE_LEASE_EXPIRED'
 
 export type N8nVideoTaskClaimOutcome = 'claimed' | 'running' | 'terminal' | 'rejected' | 'not_found'
 export type N8nVideoTaskReconcileOutcome = 'reconciled' | 'active' | 'terminal' | 'ineligible' | 'not_found'
 export type N8nMediaChildCreateOutcome = 'created' | 'existing' | 'terminal' | 'rejected' | 'not_found'
 export type N8nFinalizeOutcome = 'completed' | 'cached' | 'terminal' | 'rejected' | 'not_found'
+export type N8nMediaCleanupReason = 'finalize_succeeded' | 'finalize_lease_expired'
 
 export interface N8nTaskRun {
   id: number
@@ -792,6 +795,75 @@ export function failScopedUnclaimedN8nTaskRun(
   }
 }
 
+function insertN8nMediaCleanupDebt(
+  db: Database.Database,
+  parent: N8nTaskRun,
+  reason: N8nMediaCleanupReason,
+): void {
+  const workspaceDigest = createHash('sha256').update(parent.taskId).digest('hex')
+  db.prepare(`
+    INSERT INTO n8n_media_cleanup_debts (
+      task_id, binding_id, workspace_id, tenant_id, workspace_digest, reason,
+      attempt_count, last_error, next_attempt_at, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, NULL, unixepoch(), unixepoch(), unixepoch())
+    ON CONFLICT(task_id) DO NOTHING
+  `).run(
+    parent.taskId,
+    parent.bindingId,
+    parent.workspaceId,
+    parent.tenantId,
+    workspaceDigest,
+    reason,
+  )
+}
+
+/**
+ * Backfill a durable cleanup obligation for a terminal video run created by an
+ * older runtime. The finalize child, binding, scope, terminal state, and reason
+ * must all agree; ambiguous or tampered rows fail closed.
+ */
+export function ensureN8nMediaCleanupDebt(
+  db: Database.Database,
+  taskId: string,
+  scope?: N8nTaskScope,
+): { scheduled: boolean; reason: N8nMediaCleanupReason | null } {
+  const parent = scope
+    ? getScopedN8nTaskRunByTaskId(db, taskId, scope)
+    : getN8nTaskRunByTaskId(db, taskId)
+  if (!parent) return { scheduled: false, reason: null }
+  const binding = db.prepare(`
+    SELECT 1
+    FROM n8n_workflow_bindings
+    WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND task_type = 'video-analysis'
+  `).get(parent.bindingId, parent.tenantId, parent.workspaceId)
+  if (!binding) return { scheduled: false, reason: null }
+
+  const child = getN8nTaskRunByTaskId(db, mediaChildTaskId(parent.taskId, 'finalize'))
+  if (
+    !child
+    || child.bindingId !== parent.bindingId
+    || child.tenantId !== parent.tenantId
+    || child.workspaceId !== parent.workspaceId
+  ) {
+    return { scheduled: false, reason: null }
+  }
+
+  let reason: N8nMediaCleanupReason | null = null
+  if (parent.status === 'succeeded' && child.status === 'succeeded' && parent.output && child.output) {
+    reason = 'finalize_succeeded'
+  } else if (
+    parent.status === 'failed'
+    && child.status === 'failed'
+    && String(parent.error || '').includes(`[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}]`)
+    && String(child.error || '').includes(`[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}]`)
+  ) {
+    reason = 'finalize_lease_expired'
+  }
+  if (!reason) return { scheduled: false, reason: null }
+  insertN8nMediaCleanupDebt(db, parent, reason)
+  return { scheduled: true, reason }
+}
+
 /**
  * Persist the finalize child and its parent in one transaction. Repeating the
  * call repairs an already-succeeded finalize child whose parent update was
@@ -846,6 +918,7 @@ export function completeN8nFinalizeRun(
     }
 
     if (parent.status === 'succeeded') {
+      insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
       return { outcome: 'cached' as const, parent, child, output: parent.output || output }
     }
     const completed = db.prepare(`
@@ -858,6 +931,7 @@ export function completeN8nFinalizeRun(
     if (completed.changes !== 1) {
       return { outcome: 'rejected' as const, parent, child, output: null }
     }
+    insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
     return { outcome: 'completed' as const, parent, child, output }
   })
   return execute.immediate()
@@ -867,12 +941,14 @@ export function completeN8nFinalizeRun(
  * Fail a video parent only when its callback lease expired before any
  * deterministic media child was created. A long-running prepare/audio/vision
  * child therefore protects its parent regardless of the video's duration.
+ * A finalize child is the bounded exception: after its separate hard lease it
+ * and the parent are failed in one transaction, fencing any late completion.
  */
 export function reconcileScopedN8nVideoTaskRun(
   db: Database.Database,
   taskId: string,
   scope: N8nTaskScope,
-  options: { nowSeconds?: number; leaseSeconds?: number } = {},
+  options: { nowSeconds?: number; leaseSeconds?: number; finalizeLeaseSeconds?: number } = {},
 ): { outcome: N8nVideoTaskReconcileOutcome; run: N8nTaskRun | null; code: string | null } {
   const nowSeconds = Number.isFinite(options.nowSeconds)
     ? Math.max(0, Math.floor(Number(options.nowSeconds)))
@@ -880,7 +956,11 @@ export function reconcileScopedN8nVideoTaskRun(
   const leaseSeconds = Number.isFinite(options.leaseSeconds)
     ? Math.max(1, Math.min(24 * 60 * 60, Math.floor(Number(options.leaseSeconds))))
     : N8N_VIDEO_CALLBACK_LEASE_SECONDS
+  const finalizeLeaseSeconds = Number.isFinite(options.finalizeLeaseSeconds)
+    ? Math.max(60, Math.min(7 * 24 * 60 * 60, Math.floor(Number(options.finalizeLeaseSeconds))))
+    : N8N_VIDEO_FINALIZE_LEASE_SECONDS
   const cutoff = nowSeconds - leaseSeconds
+  const finalizeCutoff = nowSeconds - finalizeLeaseSeconds
   const childTaskIds = (['prepare', 'audio', 'vision', 'finalize'] as const)
     .map(stage => mediaChildTaskId(taskId, stage))
   const error = `[${N8N_VIDEO_CALLBACK_LEASE_EXPIRED}] n8n 视频任务已受理，但在 ${leaseSeconds} 秒内未建立媒体处理阶段`
@@ -919,10 +999,75 @@ export function reconcileScopedN8nVideoTaskRun(
     ...childTaskIds,
   )
 
-  const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
   if (result.changes === 1) {
+    const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
     return { outcome: 'reconciled', run, code: N8N_VIDEO_CALLBACK_LEASE_EXPIRED }
   }
+
+  const finalizeChildTaskId = childTaskIds[3]
+  const finalizeError = `[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}] 视频最终合并节点运行超过 ${finalizeLeaseSeconds} 秒，已原子终止父子任务以避免永久占用队列`
+  const reconcileFinalize = db.transaction(() => {
+    const parent = getScopedN8nTaskRunByTaskId(db, taskId, scope)
+    if (!parent || !['accepted', 'running'].includes(parent.status)) return false
+    const videoBinding = db.prepare(`
+      SELECT 1
+      FROM n8n_workflow_bindings
+      WHERE id = ? AND tenant_id = ? AND workspace_id = ? AND task_type = 'video-analysis'
+    `).get(parent.bindingId, scope.tenantId, scope.workspaceId)
+    if (!videoBinding) return false
+
+    const childResult = db.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+      WHERE task_id = ?
+        AND binding_id = ?
+        AND tenant_id = ?
+        AND workspace_id = ?
+        AND status = 'running'
+        AND COALESCE(started_at, updated_at) <= ?
+    `).run(
+      finalizeError,
+      nowSeconds,
+      nowSeconds,
+      finalizeChildTaskId,
+      parent.bindingId,
+      scope.tenantId,
+      scope.workspaceId,
+      finalizeCutoff,
+    )
+    if (childResult.changes !== 1) return false
+
+    const parentResult = db.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+      WHERE task_id = ?
+        AND binding_id = ?
+        AND tenant_id = ?
+        AND workspace_id = ?
+        AND status IN ('accepted', 'running')
+    `).run(
+      finalizeError,
+      nowSeconds,
+      nowSeconds,
+      parent.taskId,
+      parent.bindingId,
+      scope.tenantId,
+      scope.workspaceId,
+    )
+    if (parentResult.changes !== 1) {
+      throw new Error('视频最终节点超时收敛未能原子更新父任务')
+    }
+    const terminalParent = getScopedN8nTaskRunByTaskId(db, parent.taskId, scope)
+    if (!terminalParent) throw new Error('视频最终节点超时收敛后无法读取父任务')
+    insertN8nMediaCleanupDebt(db, terminalParent, 'finalize_lease_expired')
+    return true
+  })
+  if (reconcileFinalize.immediate()) {
+    const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
+    return { outcome: 'reconciled', run, code: N8N_VIDEO_FINALIZE_LEASE_EXPIRED }
+  }
+
+  const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
   if (!run) return { outcome: 'not_found', run: null, code: null }
   if (['succeeded', 'failed', 'cancelled'].includes(run.status)) {
     return { outcome: 'terminal', run, code: null }

@@ -6,6 +6,11 @@ import {
   statusReceipt,
   validateDecision,
 } from '../lib/qwen-before-dispatch.js'
+import {
+  createDuplicateConfirmationStore,
+  duplicateConfirmationScopeKey,
+} from '../lib/duplicate-confirmation-store.js'
+import { createTaskChainTool } from '../lib/task-chain-tool.js'
 
 const senderId = 'telegram:123456'
 const sessionKey = 'agent:second-original:telegram:direct:123456'
@@ -30,13 +35,14 @@ const context = {
   conversationId: 'conversation',
 }
 
-function handler({ classifier, runner, releaseReady = true } = {}) {
+function handler({ classifier, runner, releaseReady = true, duplicateConfirmationStore } = {}) {
   return createQwenBeforeDispatchHandler({
     classifier: classifier ?? vi.fn(async () => ({
       action: 'dispatch_single', value: '/data/地球之极 第二集.mp4',
     })),
     runner: runner ?? {},
     releaseReady,
+    ...(duplicateConfirmationStore ? { duplicateConfirmationStore } : {}),
   })
 }
 
@@ -130,6 +136,52 @@ describe('hook-owned Qwen video scheduler', () => {
     }), context)).resolves.toEqual({
       handled: true,
       text: '当前没有等待确认的重复视频任务。',
+    })
+  })
+
+  it('keeps trusted material identity outside the model tool input boundary', async () => {
+    const trustedExistingMaterialId = 'MATERIAL-EXISTING-001'
+    const duplicateConfirmationStore = createDuplicateConfirmationStore()
+    const classifier = vi.fn()
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId }) => ({
+        kind: 'task', id: taskId, status: 'queued', duplicate: false,
+      })),
+    }
+    const taskTool = createTaskChainTool({
+      context: { agentId: 'second-original', sessionKey },
+      runner,
+      duplicateConfirmationStore,
+    })
+    const spoofed = await taskTool.execute('tool-first-turn', {
+      action: 'submit_video',
+      videoPath: '/data/S03E03.mp4',
+      materialId: trustedExistingMaterialId,
+    })
+    expect(spoofed.content[0].text).toContain('参数无效')
+    expect(runner.dispatchVideo).not.toHaveBeenCalled()
+
+    const taskId = `video-command-${'a'.repeat(64)}`
+    duplicateConfirmationStore.set(duplicateConfirmationScopeKey(sessionKey), {
+      kind: 'task',
+      id: taskId,
+      path: '/data/S03E03.mp4',
+      trustedExistingMaterialId,
+    })
+
+    const confirmed = await handler({ classifier, runner, duplicateConfirmationStore })(event({
+      content: '确认重新分析',
+      timestamp: event().timestamp + 10,
+    }), context)
+
+    expect(confirmed.text).toBe(`已提交，任务编号：${taskId}。结果请稍后查询。`)
+    expect(classifier).not.toHaveBeenCalled()
+    expect(runner.dispatchVideo).toHaveBeenCalledOnce()
+    expect(runner.dispatchVideo.mock.calls[0][0]).toEqual({
+      videoPath: '/data/S03E03.mp4',
+      taskId,
+      trustedExistingMaterialId,
+      confirmDuplicate: true,
     })
   })
 

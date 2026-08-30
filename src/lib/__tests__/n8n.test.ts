@@ -584,4 +584,76 @@ describe('n8n task run persistence', () => {
       db.close()
     }
   })
+
+  it('atomically terminates an expired running finalize child without racing a duplicate synthesis', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      const scope = { workspaceId: 2, tenantId: 3 }
+      const binding = createN8nWorkflowBinding(db, n8nWorkflowBindingInputSchema.parse({
+        name: '视频最终节点超时收敛',
+        webhookPath: 'webhook/video-finalize-timeout',
+        taskType: 'video-analysis',
+      }), 'tester', scope)
+      const parentTaskId = 'video-finalize-timeout'
+      const parentIdempotencyKey = `${parentTaskId}-idem`
+      createN8nTaskRun(db, {
+        taskId: parentTaskId,
+        idempotencyKey: parentIdempotencyKey,
+        bindingId: binding.id,
+        source: 'openclaw',
+        requestedBy: 'tester',
+        routing: { taskType: 'video-analysis' },
+        taskInput: {},
+        delivery: { mode: 'none' },
+        maxAttempts: 2,
+      }, scope)
+      markN8nTaskAccepted(db, parentTaskId)
+      const child = createN8nMediaChildRunFromParent(db, {
+        parentTaskId,
+        parentIdempotencyKey,
+        stage: 'finalize',
+        taskInput: {},
+      }).child!
+      markN8nTaskAccepted(db, child.taskId)
+      claimN8nTaskRun(db, child.taskId)
+      db.prepare(`UPDATE n8n_task_runs SET started_at = 100, updated_at = 100 WHERE task_id = ?`)
+        .run(child.taskId)
+
+      expect(reconcileScopedN8nVideoTaskRun(db, parentTaskId, scope, {
+        nowSeconds: 1_000,
+        finalizeLeaseSeconds: 901,
+      })).toMatchObject({ outcome: 'active', run: { status: 'accepted' }, code: null })
+
+      const reconciled = reconcileScopedN8nVideoTaskRun(db, parentTaskId, scope, {
+        nowSeconds: 1_000,
+        finalizeLeaseSeconds: 900,
+      })
+      expect(reconciled).toMatchObject({
+        outcome: 'reconciled',
+        code: 'VIDEO_FINALIZE_LEASE_EXPIRED',
+        run: {
+          status: 'failed',
+          completedAt: 1_000,
+          error: expect.stringContaining('VIDEO_FINALIZE_LEASE_EXPIRED'),
+        },
+      })
+      expect(getN8nTaskRunByTaskId(db, child.taskId)).toMatchObject({
+        status: 'failed',
+        completedAt: 1_000,
+        error: expect.stringContaining('VIDEO_FINALIZE_LEASE_EXPIRED'),
+      })
+      expect(completeN8nFinalizeRun(db, {
+        parentTaskId,
+        childTaskId: child.taskId,
+        output: { summary: 'late result must not win' },
+      })).toMatchObject({ outcome: 'terminal', parent: { status: 'failed' }, child: { status: 'failed' } })
+      expect(reconcileScopedN8nVideoTaskRun(db, parentTaskId, scope, {
+        nowSeconds: 9_999,
+        finalizeLeaseSeconds: 900,
+      })).toMatchObject({ outcome: 'terminal', code: null, run: { status: 'failed' } })
+    } finally {
+      db.close()
+    }
+  })
 })

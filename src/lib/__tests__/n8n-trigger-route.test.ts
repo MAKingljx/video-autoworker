@@ -115,7 +115,7 @@ describe('n8n trigger route', () => {
       bindingId: 7,
       taskId: 'task-7',
       idempotencyKey: 'idem-7',
-      input: { prompt: '分析视频' },
+      input: { prompt: '分析视频', materialId: 'MATERIAL-EXISTING-001' },
     }))
 
     expect(response.status).toBe(202)
@@ -141,7 +141,7 @@ describe('n8n trigger route', () => {
           config: { queue: 'heavy-model' },
           memoryMode: 'none',
         },
-        input: { prompt: '分析视频' },
+        input: { prompt: '分析视频', materialId: 'MATERIAL-EXISTING-001' },
         delivery: { mode: 'none' },
       },
       { timeoutMs: 120_000, idempotencyKey: 'idem-7' },
@@ -158,6 +158,19 @@ describe('n8n trigger route', () => {
     }), { workspaceId: 2, tenantId: 3 })
     expect(mocks.markN8nTaskAccepted).toHaveBeenCalledWith({}, 'task-7')
     expect(await response.json()).toMatchObject({ taskId: 'task-7', result: { ok: true } })
+  })
+
+  it('rejects an invalid optional material ID before creating the task', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-invalid-material',
+      input: { prompt: '分析视频', materialId: '/private/source/video.mp4' },
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: 'materialId 无效' })
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
   })
 
   it('fails before creating a parent task when the shared webhook secret is missing', async () => {
@@ -302,6 +315,51 @@ describe('n8n trigger route', () => {
       status: 'running',
     })
     expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('idempotently resumes an exact queued task created before webhook dispatch', async () => {
+    mocks.createN8nTaskRun.mockReturnValue({
+      created: false,
+      run: {
+        taskId: 'queued-task',
+        idempotencyKey: 'queued-key',
+        bindingId: 7,
+        status: 'queued',
+        source: 'openclaw',
+        requestedBy: 'local-desktop',
+        routing: { persisted: true },
+        input: { prompt: 'persisted', videoKey: '00000000-0000-4000-8000-000000000070.mp4' },
+        delivery: { mode: 'none' },
+        output: null,
+      },
+    })
+
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'queued-task',
+      idempotencyKey: 'queued-key',
+      source: 'openclaw',
+      input: { prompt: 'retry', videoKey: '00000000-0000-4000-8000-000000000070.mp4' },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
+      'webhook/aiworker-task',
+      expect.objectContaining({
+        taskId: 'queued-task',
+        idempotencyKey: 'queued-key',
+        routing: { persisted: true },
+        input: { prompt: 'persisted', videoKey: '00000000-0000-4000-8000-000000000070.mp4' },
+      }),
+      { timeoutMs: 120_000, idempotencyKey: 'queued-key' },
+    )
+    expect(mocks.markN8nTaskAccepted).toHaveBeenCalledWith({}, 'queued-task')
+    expect(await response.json()).toMatchObject({
+      taskId: 'queued-task',
+      status: 'accepted',
+      duplicate: true,
+      resumedQueued: true,
+    })
   })
 
   it.each(['failed', 'cancelled'])('returns 409 for an existing duplicate in %s state', async status => {

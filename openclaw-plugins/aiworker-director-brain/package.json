@@ -1,0 +1,23 @@
+{
+  "name": "@aiworker/openclaw-aiworker-director-brain",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Work-scoped OpenClaw bridge for the isolated Feishu director knowledge brain",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1-2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  }
+}

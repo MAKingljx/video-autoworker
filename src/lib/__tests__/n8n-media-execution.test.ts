@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -74,6 +74,7 @@ describe('n8n stateless media helpers', () => {
       timeRange: '00:00:00-00:01:00',
       transcript: '这是一段语音。',
       visualAnalysis: '画面中有人走进房间。',
+      confidence: 0,
     }])
   })
 
@@ -203,12 +204,36 @@ describe('n8n stateless media helpers', () => {
     const neighbor = mediaTaskWorkspace('video-parent-neighbor')
     await mkdir(target, { recursive: true })
     await mkdir(neighbor, { recursive: true })
-    await writeFile(join(target, 'metadata.json'), 'target')
+    await writeFile(join(target, 'metadata.json'), JSON.stringify({
+      taskId: 'video-parent-target', kind: 'prepared-video',
+    }))
     await writeFile(join(neighbor, 'metadata.json'), 'neighbor')
 
     await cleanupN8nMediaTask('video-parent-target')
 
     await expect(stat(target)).rejects.toThrow()
     await expect(readFile(join(neighbor, 'metadata.json'), 'utf8')).resolves.toBe('neighbor')
+  })
+
+  it('fails closed for invalid identities, symlink workspaces, and mismatched metadata', async () => {
+    await expect(cleanupN8nMediaTask('../../outside')).rejects.toThrow(/任务标识无效/)
+
+    const outside = join(root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'keep.txt'), 'keep')
+    const linkedTask = 'video-parent-linked'
+    await mkdir(process.env.AIWORKER_MEDIA_WORK_DIR!, { recursive: true })
+    await symlink(outside, mediaTaskWorkspace(linkedTask))
+    await expect(cleanupN8nMediaTask(linkedTask)).rejects.toThrow(/类型不安全/)
+    await expect(readFile(join(outside, 'keep.txt'), 'utf8')).resolves.toBe('keep')
+
+    const mismatchedTask = 'video-parent-mismatch'
+    const mismatchedWorkspace = mediaTaskWorkspace(mismatchedTask)
+    await mkdir(mismatchedWorkspace, { recursive: true })
+    await writeFile(join(mismatchedWorkspace, 'metadata.json'), JSON.stringify({
+      taskId: 'video-parent-other', kind: 'prepared-video',
+    }))
+    await expect(cleanupN8nMediaTask(mismatchedTask)).rejects.toThrow(/不匹配/)
+    await expect(stat(mismatchedWorkspace)).resolves.toBeTruthy()
   })
 })

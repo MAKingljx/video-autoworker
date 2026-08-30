@@ -35,6 +35,9 @@ describe('AI-worker direct task-chain tool', () => {
     expect(value.description).toContain('禁止模型在同一轮自行确认')
     expect(value.parameters.properties.query.description).toContain('如 S03E03')
     expect(value.parameters.properties.query.description).toContain('禁止追加旧上下文')
+    expect(value.parameters.properties).not.toHaveProperty('materialId')
+    expect(JSON.stringify(value.parameters)).not.toContain('materialId')
+    expect(value.description).not.toContain('materialId')
     const result = await value.execute('tool-call-1', {
       action: 'submit_video', videoPath: '/data/地球之极 第三集.mp4',
     })
@@ -80,6 +83,36 @@ describe('AI-worker direct task-chain tool', () => {
     await expect(value.execute('confirmed-again', { action: 'confirm_duplicate' })).resolves.toEqual({
       content: [{ type: 'text', text: '当前没有等待确认的重复视频任务。' }],
     })
+  })
+
+  it('fails closed when model tool arguments include any materialId value', async () => {
+    const runner = {
+      dispatchVideo: vi.fn(),
+    }
+    const value = tool({ runner })
+
+    for (const materialId of ['MATERIAL-EXISTING-001', null, 123, true, {}, [], '']) {
+      await expect(value.execute('spoofed-material', {
+        action: 'submit_video', videoPath: '/data/S03E03.mp4', materialId,
+      })).resolves.toEqual({
+        content: [{ type: 'text', text: expect.stringContaining('参数无效') }],
+      })
+    }
+    expect(runner.dispatchVideo).not.toHaveBeenCalled()
+  })
+
+  it('does not expose the trusted adapter material ID field to model arguments', async () => {
+    const runner = { dispatchVideo: vi.fn() }
+    const value = tool({ runner })
+
+    await expect(value.execute('spoofed-trusted-material', {
+      action: 'submit_video',
+      videoPath: '/data/S03E03.mp4',
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).resolves.toEqual({
+      content: [{ type: 'text', text: expect.stringContaining('参数无效') }],
+    })
+    expect(runner.dispatchVideo).not.toHaveBeenCalled()
   })
 
   it('submits a directory with a stable batch id and does not expose the tool to other agents', async () => {
@@ -261,6 +294,9 @@ describe('AI-worker direct task-chain tool', () => {
     expect(normalizeRequest({ action: 'submit_video', videoPath: '/data/a.mp4' })).toEqual({
       action: 'submit_video', videoPath: '/data/a.mp4',
     })
+    for (const materialId of ['MATERIAL-001', null, 123, true, {}, [], ' MATERIAL-001 ', '']) {
+      expect(normalizeRequest({ action: 'submit_video', videoPath: '/data/a.mp4', materialId })).toBeNull()
+    }
     expect(normalizeRequest({ action: 'submit_directory', videoDirectory: '/data/series' })).toEqual({
       action: 'submit_directory', videoDirectory: '/data/series',
     })

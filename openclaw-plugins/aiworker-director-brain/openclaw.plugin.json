@@ -1,0 +1,36 @@
+{
+  "id": "aiworker-director-brain",
+  "name": "AI-worker Director Brain",
+  "version": "0.3.0",
+  "description": "Exposes one work-scoped tool for reviewed director context, six-layer workflow guidance, and candidate proposals.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "tool"
+    ]
+  },
+  "contracts": {
+    "tools": [
+      "aiworker_director_brain"
+    ]
+  },
+  "toolMetadata": {
+    "aiworker_director_brain": {
+      "optional": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "releaseReady": {
+        "type": "boolean"
+      },
+      "targetAgentId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  }
+}

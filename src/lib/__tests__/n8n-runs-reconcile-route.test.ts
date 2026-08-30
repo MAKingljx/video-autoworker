@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   logAuditEvent: vi.fn(),
   reconcileScopedN8nVideoTaskRun: vi.fn(),
+  retryN8nMediaCleanupDebt: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n', () => ({ requireN8nRole: mocks.requireN8nRole }))
@@ -19,6 +20,9 @@ vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
   return { ...actual, reconcileScopedN8nVideoTaskRun: mocks.reconcileScopedN8nVideoTaskRun }
 })
+vi.mock('@/lib/n8n-media-cleanup', () => ({
+  retryN8nMediaCleanupDebt: mocks.retryN8nMediaCleanupDebt,
+}))
 
 import { POST } from '@/app/api/n8n/runs/reconcile/route'
 
@@ -43,6 +47,7 @@ describe('n8n video run reconciliation route', () => {
       code: 'VIDEO_CALLBACK_LEASE_EXPIRED',
       run: { id: 11, taskId: 'video-task-1', status: 'failed', error: '[VIDEO_CALLBACK_LEASE_EXPIRED] expired' },
     })
+    mocks.retryN8nMediaCleanupDebt.mockResolvedValue({ outcome: 'cleaned', debt: null, error: null })
   })
 
   it('requires operator access before reading or mutating a run', async () => {
@@ -77,6 +82,9 @@ describe('n8n video run reconciliation route', () => {
       target_id: 11,
       detail: expect.objectContaining({ task_id: 'video-task-1', code: 'VIDEO_CALLBACK_LEASE_EXPIRED' }),
     }))
+    expect(mocks.retryN8nMediaCleanupDebt).toHaveBeenCalledWith(
+      {}, 'video-task-1', { force: true },
+    )
   })
 
   it('does not audit an active run and rejects ineligible runs', async () => {
@@ -93,6 +101,31 @@ describe('n8n video run reconciliation route', () => {
     })
     const rejectedResponse = await POST(request())
     expect(rejectedResponse.status).toBe(409)
+  })
+
+  it('reports but does not roll back a hard-lease terminal state when cleanup remains pending', async () => {
+    mocks.reconcileScopedN8nVideoTaskRun.mockReturnValue({
+      outcome: 'reconciled',
+      code: 'VIDEO_FINALIZE_LEASE_EXPIRED',
+      run: { id: 14, taskId: 'video-task-1', status: 'failed', error: '[VIDEO_FINALIZE_LEASE_EXPIRED] expired' },
+    })
+    mocks.retryN8nMediaCleanupDebt.mockResolvedValue({
+      outcome: 'pending', debt: { taskId: 'video-task-1', attemptCount: 1 }, error: 'filesystem busy',
+    })
+
+    const response = await POST(request())
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      taskId: 'video-task-1',
+      status: 'failed',
+      reconciled: true,
+      code: 'VIDEO_FINALIZE_LEASE_EXPIRED',
+      cleanupPending: true,
+    })
+    expect(mocks.retryN8nMediaCleanupDebt).toHaveBeenCalledWith(
+      {}, 'video-task-1', { force: true },
+    )
   })
 
   it('returns a scoped not-found response without leaking another workspace run', async () => {

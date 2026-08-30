@@ -16,6 +16,7 @@ import {
 } from '@/lib/n8n-model-routing'
 import { getN8nWorkflowBinding, updateN8nWorkflowRunStatus } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
+import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 
 function resolveN8nLoopbackCallbackUrl(configuredValue: string, pathname: string, label: string): string {
   const configured = String(configuredValue || '').trim()
@@ -110,6 +111,17 @@ export async function POST(request: NextRequest) {
       error: '视频分析工作节点不进入 OpenClaw 会话；请由 OpenClaw 等待任务结果后在当前会话回复',
     }, { status: 400 })
   }
+  if (binding.taskType === 'video-analysis' && Object.hasOwn(input, 'materialId')) {
+    const materialIdResult = n8nMaterialIdentitySchema.safeParse(
+      (input as Record<string, unknown>).materialId,
+    )
+    if (!materialIdResult.success) {
+      return NextResponse.json({
+        error: 'materialId 无效',
+        issues: materialIdResult.error.issues,
+      }, { status: 400 })
+    }
+  }
   const source = body?.source === undefined ? 'video-autoworker' : String(body.source).trim()
   if (!['video-autoworker', 'openclaw'].includes(source)) {
     return NextResponse.json({ error: 'source 只能是 video-autoworker 或 openclaw' }, { status: 400 })
@@ -171,7 +183,7 @@ export async function POST(request: NextRequest) {
     maxAttempts: binding.retryCount + 1,
   }, scope)
 
-  if (!created.created) {
+  if (!created.created && created.run.status !== 'queued') {
     const status = created.run.status === 'succeeded'
       ? 200
       : ['failed', 'cancelled'].includes(created.run.status) ? 409 : 202
@@ -183,41 +195,72 @@ export async function POST(request: NextRequest) {
     }, { status })
   }
 
-  const payload = {
-    taskId,
-    idempotencyKey,
-    source,
-    requestedBy: auth.user.username,
-    routing,
-    input: input as Record<string, unknown>,
-    delivery: deliveryResult.data,
+  if (!created.created && (
+    created.run.taskId !== taskId
+    || created.run.idempotencyKey !== idempotencyKey
+    || created.run.bindingId !== binding.id
+  )) {
+    return NextResponse.json({
+      taskId: created.run.taskId,
+      duplicate: true,
+      status: created.run.status,
+      error: 'queued 幂等任务身份与当前请求不匹配，未重新派发',
+    }, { status: 409 })
   }
+
+  const dispatchRun = created.run
+  const dispatchTaskId = created.created ? taskId : dispatchRun.taskId
+  const dispatchIdempotencyKey = created.created ? idempotencyKey : dispatchRun.idempotencyKey
+  const payload = created.created
+    ? {
+        taskId,
+        idempotencyKey,
+        source,
+        requestedBy: auth.user.username,
+        routing,
+        input: input as Record<string, unknown>,
+        delivery: deliveryResult.data,
+      }
+    : {
+        taskId: dispatchRun.taskId,
+        idempotencyKey: dispatchRun.idempotencyKey,
+        source: dispatchRun.source,
+        requestedBy: dispatchRun.requestedBy,
+        routing: dispatchRun.routing,
+        input: dispatchRun.input,
+        delivery: dispatchRun.delivery,
+      }
 
   try {
     const result = await triggerN8nWebhook(binding.webhookPath, payload, {
       timeoutMs: Math.min(binding.timeoutSeconds * 1_000, 120_000),
-      idempotencyKey,
+      idempotencyKey: dispatchIdempotencyKey,
     })
     const runStatus = result.statusCode === 202 ? 'accepted' : 'success'
-    markN8nTaskAccepted(db, taskId)
+    markN8nTaskAccepted(db, dispatchTaskId)
     updateN8nWorkflowRunStatus(db, binding.id, runStatus, scope)
     try {
-      logAuditEvent({ action: 'n8n_workflow_trigger', actor: auth.user.username, actor_id: auth.user.id, target_type: 'n8n_workflow_binding', target_id: binding.id, detail: { taskId, statusCode: result.statusCode, latencyMs: result.latencyMs } })
+      logAuditEvent({ action: 'n8n_workflow_trigger', actor: auth.user.username, actor_id: auth.user.id, target_type: 'n8n_workflow_binding', target_id: binding.id, detail: { taskId: dispatchTaskId, statusCode: result.statusCode, latencyMs: result.latencyMs, resumedQueued: !created.created } })
     } catch {
       // n8n already accepted the task; audit failure must not return a retryable 502.
     }
-    return NextResponse.json({ taskId, status: 'accepted', result }, { status: 202 })
+    return NextResponse.json({
+      taskId: dispatchTaskId,
+      status: 'accepted',
+      result,
+      ...(!created.created ? { duplicate: true, resumedQueued: true } : {}),
+    }, { status: 202 })
   } catch (error) {
     const message = error instanceof Error ? error.message : 'n8n 任务执行失败'
-    const resolution = failScopedUnclaimedN8nTaskRun(db, taskId, message, scope)
+    const resolution = failScopedUnclaimedN8nTaskRun(db, dispatchTaskId, message, scope)
     if (resolution.failed) {
       updateN8nWorkflowRunStatus(db, binding.id, `failed: ${message}`, scope)
-      return NextResponse.json({ taskId, status: 'failed', error: message }, { status: 502 })
+      return NextResponse.json({ taskId: dispatchTaskId, status: 'failed', error: message }, { status: 502 })
     }
     if (resolution.run?.status === 'running') {
       updateN8nWorkflowRunStatus(db, binding.id, 'running', scope)
       return NextResponse.json({
-        taskId,
+        taskId: dispatchTaskId,
         status: 'running',
         acceptedAfterAmbiguousResponse: true,
       }, { status: 202 })
@@ -225,18 +268,18 @@ export async function POST(request: NextRequest) {
     if (resolution.run?.status === 'succeeded') {
       updateN8nWorkflowRunStatus(db, binding.id, 'success', scope)
       return NextResponse.json({
-        taskId,
+        taskId: dispatchTaskId,
         status: 'succeeded',
         output: resolution.run.output,
       })
     }
     if (resolution.run && ['failed', 'cancelled'].includes(resolution.run.status)) {
       return NextResponse.json({
-        taskId,
+        taskId: dispatchTaskId,
         status: resolution.run.status,
         error: resolution.run.error || message,
       }, { status: 409 })
     }
-    return NextResponse.json({ taskId, error: message }, { status: 502 })
+    return NextResponse.json({ taskId: dispatchTaskId, error: message }, { status: 502 })
   }
 }

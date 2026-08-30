@@ -2,11 +2,12 @@
 
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { mkdir, open, readFile, rm, stat } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { constants } from 'node:fs'
+import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createPlatformClient, isRetryablePlatformError } from '../lib/platform-client.mjs'
-import { defaultMediaInboxRoot } from '../lib/media-ingest.mjs'
+import { defaultMediaInboxRoot, normalizeMaterialId, sameSourceIdentity } from '../lib/media-ingest.mjs'
 import {
   resolveAuthoritativeTaskRecord,
   toPublicDurableTaskStatus,
@@ -18,15 +19,20 @@ import {
 } from '../lib/video-result-page.mjs'
 import {
   batchStatePath,
+  clearMaterialHandoffJournal,
   createBatchState,
   createSingleVideoState,
   defaultBatchRoot,
   markBatchQueued,
+  prepareMaterialHandoffJournalContext,
   readBatchState,
+  readMaterialHandoffJournal,
   readSingleVideoTaskState,
   searchVideoTaskStates,
   summarizeBatchState,
   validateBatchId,
+  withMaterialHandoffJournalLock,
+  writeMaterialHandoffJournal,
 } from '../lib/video-batch-state.mjs'
 
 const args = process.argv.slice(2)
@@ -35,13 +41,14 @@ const VIDEO_SUBJECT = /(?:视频|影片|录像|video|\/[^\r\n\0]*\.(?:3gp|avi|fl
 const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
   '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
-  '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
+  '--media-handoff', '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
   '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--confirm-duplicate', '--no-trigger-recovery', '--resume-pending'])
 const DIRECT_VIDEO_TASK_ID = /^(?:video-command|video-natural)-[a-f0-9]{64}$/u
 const BATCH_VIDEO_TASK_ID = /^video-batch-[a-f0-9]{64}:video:\d{3}:[a-f0-9]{12}$/u
 const VIDEO_BATCH_ID = /^video-batch-[a-f0-9]{64}$/u
+const MEDIA_HANDOFF_SCHEMA_VERSION = 1
 
 function option(name) {
   const index = args.indexOf(name)
@@ -102,7 +109,7 @@ function validateCliArguments() {
     '--video-file': new Set([
       '--video-file', '--base-url', '--binding-id', '--prompt', '--prompt-file', '--vision-route',
       '--delivery', '--session-key', '--channel', '--target', '--account-id', '--task-id',
-      '--idempotency-key', '--wait-seconds', '--no-trigger-recovery', '--confirm-duplicate',
+      '--idempotency-key', '--media-handoff', '--wait-seconds', '--no-trigger-recovery', '--confirm-duplicate',
     ]),
     generic: new Set([
       '--base-url', '--binding-id', '--prompt', '--prompt-file', '--planner-route',
@@ -112,6 +119,106 @@ function validateCliArguments() {
   }
   const disallowed = [...present].filter(name => !allowedByMode[mode].has(name))
   if (disallowed.length) throw new Error(`${mode} 模式不支持参数：${disallowed.join('、')}`)
+}
+
+async function destroyOpenedMediaHandoff(handoffPath, expectedStat) {
+  const claimedPath = `${handoffPath}.consumed-${process.pid}-${randomUUID()}`
+  await rename(handoffPath, claimedPath)
+  const claimedStat = await lstat(claimedPath)
+  if (
+    !claimedStat.isFile()
+    || claimedStat.isSymbolicLink()
+    || claimedStat.dev !== expectedStat.dev
+    || claimedStat.ino !== expectedStat.ino
+    || claimedStat.nlink !== 1
+    || (claimedStat.mode & 0o777) !== 0o600
+    || (typeof process.getuid === 'function' && claimedStat.uid !== process.getuid())
+  ) throw new Error('媒体身份交接凭证发生变化')
+  await rm(claimedPath)
+}
+
+async function consumeMediaHandoff(handoffPath, { taskId, videoFile, journalContext }) {
+  if (
+    typeof handoffPath !== 'string'
+    || !isAbsolute(handoffPath)
+    || !/^media-handoff-[0-9a-f-]{36}\.json$/u.test(basename(handoffPath))
+  ) throw new Error('媒体身份交接凭证无效')
+
+  const parent = dirname(handoffPath)
+  const parentStat = await lstat(parent)
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink() || (parentStat.mode & 0o777) !== 0o700) {
+    throw new Error('媒体身份交接目录不安全')
+  }
+  if (typeof process.getuid === 'function' && parentStat.uid !== process.getuid()) {
+    throw new Error('媒体身份交接目录不安全')
+  }
+
+  let handle
+  let handoffStat
+  let credentialValidated = false
+  try {
+    // Validate the still-named inode first. The task-scoped recovery journal is
+    // made durable before this credential is renamed and unlinked, closing the
+    // crash window where an existing material ID could otherwise be forgotten.
+    handoffStat = await lstat(handoffPath)
+    if (
+      !handoffStat.isFile()
+      || handoffStat.isSymbolicLink()
+      || handoffStat.nlink !== 1
+      || (handoffStat.mode & 0o777) !== 0o600
+      || handoffStat.size < 2
+      || handoffStat.size > 4_096
+      || (typeof process.getuid === 'function' && handoffStat.uid !== process.getuid())
+    ) throw new Error('媒体身份交接凭证权限无效')
+    handle = await open(handoffPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const handleStat = await handle.stat()
+    if (handleStat.dev !== handoffStat.dev || handleStat.ino !== handoffStat.ino) {
+      throw new Error('媒体身份交接凭证发生变化')
+    }
+    const raw = await handle.readFile({ encoding: 'utf8' })
+    let payload
+    try {
+      payload = JSON.parse(raw)
+    } catch (error) {
+      throw new Error('媒体身份交接凭证无效', { cause: error })
+    }
+    if (
+      !payload
+      || typeof payload !== 'object'
+      || Array.isArray(payload)
+      || Object.keys(payload).sort().join(',') !== 'materialId,nonce,schemaVersion,sourceIdentity,taskId,videoPath'
+      || payload.schemaVersion !== MEDIA_HANDOFF_SCHEMA_VERSION
+      || payload.taskId !== taskId
+      || typeof payload.nonce !== 'string'
+      || !/^[0-9a-f-]{36}$/u.test(payload.nonce)
+      || payload.videoPath !== await realpath(resolve(videoFile))
+      || payload.videoPath !== journalContext.sourcePath
+    ) throw new Error('媒体身份交接凭证与任务或视频不匹配')
+    const currentSource = await stat(payload.videoPath)
+    if (!sameSourceIdentity(payload.sourceIdentity, currentSource)) {
+      throw new Error('媒体身份交接凭证对应的视频已变化')
+    }
+    credentialValidated = true
+    const journal = await writeMaterialHandoffJournal(journalContext, {
+      materialId: payload.materialId,
+      nonce: payload.nonce,
+    })
+    await destroyOpenedMediaHandoff(handoffPath, handoffStat)
+    return {
+      materialId: normalizeMaterialId(payload.materialId),
+      sourceIdentity: payload.sourceIdentity,
+      journal,
+    }
+  } catch (error) {
+    // Invalid but safely opened credentials remain single-use. If journal
+    // persistence itself failed, preserve the valid credential for retry.
+    if (handoffStat && !credentialValidated) {
+      await destroyOpenedMediaHandoff(handoffPath, handoffStat).catch(() => undefined)
+    }
+    throw error
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
 }
 
 function fail(message, code = 1) {
@@ -560,16 +667,56 @@ async function main() {
   ]))
 
   if (videoFile) {
-    const created = await createSingleVideoState({
-      taskId,
-      idempotencyKey,
-      baseUrl: client.baseUrl,
-      bindingId: binding.id,
-      prompt,
-      videoFile,
-      visionRoute: option('--vision-route'),
-      inboxRoot: defaultMediaInboxRoot(),
-      confirmDuplicate: flag('--confirm-duplicate'),
+    const mediaHandoff = option('--media-handoff')
+    const batchRoot = defaultBatchRoot()
+    const inboxRoot = defaultMediaInboxRoot()
+    const visionRoute = option('--vision-route')
+    const created = await withMaterialHandoffJournalLock(taskId, batchRoot, async () => {
+      const journalContext = await prepareMaterialHandoffJournalContext({
+        taskId,
+        idempotencyKey,
+        baseUrl: client.baseUrl,
+        bindingId: binding.id,
+        prompt,
+        videoFile,
+        visionRoute,
+        inboxRoot,
+        batchRoot,
+      })
+      const recoveredJournal = await readMaterialHandoffJournal(journalContext)
+      const trustedHandoff = mediaHandoff === null
+        ? recoveredJournal && {
+            materialId: recoveredJournal.materialId,
+            sourceIdentity: recoveredJournal.sourceIdentity,
+            journal: recoveredJournal,
+          }
+        : await consumeMediaHandoff(mediaHandoff, { taskId, videoFile, journalContext })
+      const result = await createSingleVideoState({
+        taskId,
+        idempotencyKey,
+        baseUrl: client.baseUrl,
+        bindingId: binding.id,
+        prompt,
+        videoFile,
+        // The scheduler capability is single-use and bound to this exact task and
+        // canonical source path. Same-OS-user filesystem control is still not a
+        // cryptographic boundary, but ordinary CLI argv cannot inject an ID.
+        trustedExistingMaterialId: trustedHandoff?.materialId,
+        expectedSourceIdentity: trustedHandoff?.sourceIdentity,
+        visionRoute,
+        inboxRoot,
+        batchRoot,
+        confirmDuplicate: flag('--confirm-duplicate'),
+      })
+      if (!result.confirmationRequired && trustedHandoff) {
+        const item = result.state?.items?.[0]
+        if (item?.trustedExistingMaterialId !== trustedHandoff.materialId) {
+          throw new Error('单视频任务状态未持久化交接素材身份')
+        }
+        await clearMaterialHandoffJournal(journalContext, trustedHandoff.journal)
+        result.materialHandoffPersisted = true
+      }
+      return result
     })
     if (created.confirmationRequired) {
       output({
@@ -590,6 +737,7 @@ async function main() {
       status: item.status,
       duplicate: created.duplicate,
       bindingId: binding.id,
+      ...(created.materialHandoffPersisted === true ? { materialHandoffPersisted: true } : {}),
     })
     return
   }

@@ -1,14 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
-import { SUPPORTED_VIDEO_EXTENSIONS, inspectVideoFile } from './media-ingest.mjs'
+import {
+  SUPPORTED_VIDEO_EXTENSIONS,
+  inspectVideoFile,
+  normalizeMaterialId,
+  sameSourceIdentity,
+  sha256FileHandle,
+  sourceIdentity,
+} from './media-ingest.mjs'
 
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]+$/
 const MAX_BATCH_ITEMS = 100
 const MAX_STATUS_SEARCH_QUERY = 512
 const MAX_STATUS_SEARCH_MATCHES = 32
 const MAX_DUPLICATE_MATCHES = 32
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+const MATERIAL_HANDOFF_JOURNAL_SCHEMA_VERSION = 1
 
 const SEARCH_STOPWORDS = new Set([
   '请', '帮我', '帮', '查', '查询', '看', '一下', '下', '视频', '影片', '录像',
@@ -63,6 +73,7 @@ function singleRequestIdentity({
   visionRoute,
   sourcePath,
   inboxRoot,
+  trustedExistingMaterialId,
 }) {
   return {
     taskId: String(taskId || ''),
@@ -73,18 +84,20 @@ function singleRequestIdentity({
     visionRoute: visionRoute || null,
     sourcePath: resolve(sourcePath),
     inboxRoot: resolve(inboxRoot),
+    ...(trustedExistingMaterialId === undefined
+      ? {}
+      : { trustedExistingMaterialId: normalizeMaterialId(trustedExistingMaterialId) }),
   }
 }
 
-async function sourceFingerprint(sourcePath) {
-  const sourceStat = await stat(sourcePath)
+export function sourceFingerprintFromIdentity(sourcePath, identity) {
   return stableFingerprint({
     path: sourcePath,
-    bytes: sourceStat.size,
-    modifiedMs: sourceStat.mtimeMs,
-    changedMs: sourceStat.ctimeMs,
-    device: sourceStat.dev,
-    inode: sourceStat.ino,
+    bytes: identity.size,
+    modifiedMs: identity.mtimeMs,
+    changedMs: identity.ctimeMs,
+    device: identity.dev,
+    inode: identity.ino,
   })
 }
 
@@ -426,7 +439,12 @@ export async function discoverBatchVideos(videoDir, { inboxRoot } = {}) {
     const inspected = await inspectVideoFile(join(directory, name), {
       capacityRoot: inboxRoot,
     })
-    videos.push({ name, path: inspected.sourcePath, bytes: inspected.sourceBytes })
+    videos.push({
+      name,
+      path: inspected.sourcePath,
+      bytes: inspected.sourceBytes,
+      sourceIdentity: inspected.sourceIdentity,
+    })
   }
   return { directory, videos }
 }
@@ -436,6 +454,100 @@ function invalidBatchStateError(message = '批次状态文件无效', cause) {
   error.code = 'EBADSTATE'
   if (cause) error.cause = cause
   return error
+}
+
+function trustedMaterialStateValid(items) {
+  return items.every(item => {
+    if (!item || typeof item !== 'object' || Object.hasOwn(item, 'materialId')) return false
+    if (!Object.hasOwn(item, 'trustedExistingMaterialId')) return true
+    try {
+      return item.trustedExistingMaterialId === normalizeMaterialId(item.trustedExistingMaterialId)
+    } catch {
+      return false
+    }
+  })
+}
+
+function sourceIdentityValid(value) {
+  return value === undefined || (
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'ctimeMs,dev,ino,mtimeMs,size'
+    && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(key => Number.isFinite(value[key]))
+    && value.size > 0
+  )
+}
+
+function artifactIdentityValid(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'ctimeMs,dev,ino,mtimeMs,size'
+    && ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(key => Number.isFinite(value[key]))
+    && value.size >= 0
+  )
+}
+
+function stagingRecoveryValid(value) {
+  if (value === undefined) return true
+  const keys = value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.keys(value).sort().join(',')
+    : ''
+  const legacyKeys = 'anchorName,batchId,contentSha256,idempotencyKey,incomingIdentity,incomingName,materialId,ownershipToken,phase,schemaVersion,sourceIdentity,stagedIdentity,taskId,videoKey'
+  const checkpointKeys = 'anchorName,anchoredIdentity,batchId,contentSha256,idempotencyKey,incomingIdentity,incomingName,materialId,ownershipToken,phase,schemaVersion,sourceIdentity,stagedIdentity,taskId,videoKey'
+  if (
+    !value
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || ![legacyKeys, checkpointKeys].includes(keys)
+    || value.schemaVersion !== 1
+    || ![
+      'prepared', 'anchor_observed', 'copy_observed', 'source_finalized', 'staged', 'triggering',
+      'discarding_prepared', 'discarding',
+    ].includes(value.phase)
+    || value.sourceIdentity === undefined
+    || !sourceIdentityValid(value.sourceIdentity)
+    || ![value.taskId, value.idempotencyKey, value.batchId].every(field => (
+      typeof field === 'string'
+      && field.length > 0
+      && field.length <= 240
+      && !/[\u0000-\u001f\u007f]/u.test(field)
+    ))
+    || typeof value.ownershipToken !== 'string'
+    || !UUID_PATTERN.test(value.ownershipToken)
+  ) return false
+  const anchor = /^\.source-anchor-(\d+)-([0-9a-f-]{36})$/u.exec(value.anchorName)
+  const videoKeyParts = /^([0-9a-f-]{36})\.(?:mp4|mov|mkv|webm|m4v)$/u.exec(value.videoKey)
+  const videoKeyValid = Boolean(videoKeyParts && UUID_PATTERN.test(videoKeyParts[1]))
+  const materialIdValid = ['staged', 'triggering', 'discarding'].includes(value.phase)
+    ? (() => {
+        try {
+          return value.materialId === normalizeMaterialId(value.materialId)
+        } catch {
+          return false
+        }
+      })()
+    : value.materialId === null
+  const completed = ['staged', 'triggering', 'discarding'].includes(value.phase)
+  const artifactIdentitiesValid = (value.incomingIdentity === null || artifactIdentityValid(value.incomingIdentity))
+    && (value.stagedIdentity === null || sourceIdentityValid(value.stagedIdentity))
+    && (value.anchoredIdentity === undefined
+      || value.anchoredIdentity === null
+      || sourceIdentityValid(value.anchoredIdentity))
+    && (completed
+      ? value.stagedIdentity !== null && value.contentSha256 !== null
+      : value.stagedIdentity === null && value.contentSha256 === null)
+    && (value.contentSha256 === null || /^[a-f0-9]{64}$/u.test(value.contentSha256))
+  return Boolean(
+    anchor
+    && anchor[2] === value.ownershipToken
+    && videoKeyValid
+    && value.incomingName === `.incoming-${anchor[1]}-${value.videoKey}`
+    && materialIdValid
+    && artifactIdentitiesValid
+  )
 }
 
 function parseBatchStateText(text) {
@@ -450,6 +562,9 @@ function parseBatchStateText(text) {
     && typeof parsed.requestFingerprint === 'string'
     && /^[a-f0-9]{64}$/u.test(parsed.requestFingerprint)
     && Array.isArray(parsed.items)
+    && trustedMaterialStateValid(parsed.items)
+    && parsed.items.every(item => sourceIdentityValid(item?.sourceIdentity))
+    && parsed.items.every(item => stagingRecoveryValid(item?.stagingRecovery))
   if (!validV1 && !validV2) {
     throw invalidBatchStateError()
   }
@@ -518,6 +633,279 @@ async function writeDurableText(target, text) {
     await rm(temp, { force: true }).catch(() => undefined)
     throw error
   }
+}
+
+function materialHandoffJournalPath(taskId, root = defaultBatchRoot()) {
+  const safeTaskId = String(taskId || '')
+  if (
+    !safeTaskId
+    || safeTaskId.length > 240
+    || /[\u0000-\u001f\u007f]/u.test(safeTaskId)
+  ) throw new Error('媒体身份恢复任务编号无效')
+  return `${singleVideoStatePath(safeTaskId, root)}.material-handoff.json`
+}
+
+async function ensurePrivateStateRoot(root) {
+  const requestedRoot = resolve(root)
+  try {
+    await mkdir(requestedRoot, { recursive: true, mode: 0o700 })
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error
+  }
+  const requestedStat = await lstat(requestedRoot)
+  if (
+    !requestedStat.isDirectory()
+    || requestedStat.isSymbolicLink()
+    || (requestedStat.mode & 0o777) !== 0o700
+    || (typeof process.getuid === 'function' && requestedStat.uid !== process.getuid())
+  ) throw new Error('媒体身份恢复状态目录不安全')
+  const physicalRoot = await realpath(requestedRoot)
+  const physicalStat = await lstat(physicalRoot)
+  if (
+    !physicalStat.isDirectory()
+    || physicalStat.isSymbolicLink()
+    || physicalStat.dev !== requestedStat.dev
+    || physicalStat.ino !== requestedStat.ino
+    || (physicalStat.mode & 0o777) !== 0o700
+    || (typeof process.getuid === 'function' && physicalStat.uid !== process.getuid())
+  ) throw new Error('媒体身份恢复状态目录不安全')
+  return physicalRoot
+}
+
+function assertJournalContext(context) {
+  if (
+    !context
+    || typeof context !== 'object'
+    || Array.isArray(context)
+    || typeof context.taskId !== 'string'
+    || !context.taskId
+    || context.taskId.length > 240
+    || /[\u0000-\u001f\u007f]/u.test(context.taskId)
+    || typeof context.idempotencyKey !== 'string'
+    || !context.idempotencyKey
+    || context.idempotencyKey.length > 240
+    || /[\u0000-\u001f\u007f]/u.test(context.idempotencyKey)
+    || typeof context.requestFingerprint !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(context.requestFingerprint)
+    || typeof context.sourcePath !== 'string'
+    || context.sourceIdentity === undefined
+    || !sourceIdentityValid(context.sourceIdentity)
+    || typeof context.journalPath !== 'string'
+    || !/^[a-f0-9]{64}\.json\.material-handoff\.json$/u.test(basename(context.journalPath))
+  ) throw new Error('媒体身份恢复上下文无效')
+}
+
+function parseMaterialHandoffJournal(text) {
+  let journal
+  try {
+    journal = JSON.parse(text)
+  } catch (error) {
+    throw new Error('媒体身份恢复记录损坏', { cause: error })
+  }
+  if (
+    !journal
+    || typeof journal !== 'object'
+    || Array.isArray(journal)
+    || Object.keys(journal).sort().join(',') !== 'createdAt,idempotencyKey,materialId,nonce,requestFingerprint,schemaVersion,sourceIdentity,sourcePath,taskId'
+    || journal.schemaVersion !== MATERIAL_HANDOFF_JOURNAL_SCHEMA_VERSION
+    || typeof journal.taskId !== 'string'
+    || !journal.taskId
+    || journal.taskId.length > 240
+    || /[\u0000-\u001f\u007f]/u.test(journal.taskId)
+    || typeof journal.idempotencyKey !== 'string'
+    || !journal.idempotencyKey
+    || journal.idempotencyKey.length > 240
+    || /[\u0000-\u001f\u007f]/u.test(journal.idempotencyKey)
+    || typeof journal.requestFingerprint !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(journal.requestFingerprint)
+    || typeof journal.sourcePath !== 'string'
+    || journal.sourceIdentity === undefined
+    || !sourceIdentityValid(journal.sourceIdentity)
+    || typeof journal.nonce !== 'string'
+    || !UUID_PATTERN.test(journal.nonce)
+    || typeof journal.createdAt !== 'string'
+    || !Number.isFinite(Date.parse(journal.createdAt))
+  ) throw new Error('媒体身份恢复记录损坏')
+  try {
+    if (journal.materialId !== normalizeMaterialId(journal.materialId)) {
+      throw new Error('material_id_not_canonical')
+    }
+  } catch (error) {
+    throw new Error('媒体身份恢复记录损坏', { cause: error })
+  }
+  return journal
+}
+
+async function readPrivateMaterialHandoffJournal(path, { optional = false } = {}) {
+  let details
+  try {
+    details = await lstat(path)
+  } catch (error) {
+    if (optional && error?.code === 'ENOENT') return null
+    throw error
+  }
+  if (
+    !details.isFile()
+    || details.isSymbolicLink()
+    || details.nlink !== 1
+    || (details.mode & 0o777) !== 0o600
+    || details.size < 2
+    || details.size > 4_096
+    || (typeof process.getuid === 'function' && details.uid !== process.getuid())
+  ) throw new Error('媒体身份恢复记录权限无效')
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const opened = await handle.stat()
+    if (opened.dev !== details.dev || opened.ino !== details.ino) {
+      throw new Error('媒体身份恢复记录发生变化')
+    }
+    return parseMaterialHandoffJournal(await handle.readFile({ encoding: 'utf8' }))
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+function assertJournalMatchesContext(journal, context) {
+  assertJournalContext(context)
+  if (
+    journal.taskId !== context.taskId
+    || journal.idempotencyKey !== context.idempotencyKey
+    || journal.requestFingerprint !== context.requestFingerprint
+    || journal.sourcePath !== context.sourcePath
+    || !sameSourceIdentity(journal.sourceIdentity, {
+      ...context.sourceIdentity,
+      isFile: () => true,
+    })
+  ) throw new Error('媒体身份恢复记录与任务、来源或请求不匹配')
+}
+
+export async function prepareMaterialHandoffJournalContext({
+  taskId,
+  idempotencyKey,
+  baseUrl,
+  bindingId,
+  prompt,
+  visionRoute,
+  videoFile,
+  inboxRoot,
+  batchRoot = defaultBatchRoot(),
+}) {
+  const physicalRoot = await ensurePrivateStateRoot(batchRoot)
+  const inspected = await inspectVideoFile(videoFile, { capacityRoot: inboxRoot })
+  const requestIdentity = singleRequestIdentity({
+    taskId,
+    idempotencyKey,
+    baseUrl,
+    bindingId,
+    prompt,
+    visionRoute,
+    sourcePath: inspected.sourcePath,
+    inboxRoot,
+  })
+  const context = {
+    taskId: String(taskId || ''),
+    idempotencyKey: String(idempotencyKey || ''),
+    requestFingerprint: stableFingerprint(requestIdentity),
+    sourcePath: inspected.sourcePath,
+    sourceIdentity: inspected.sourceIdentity,
+    journalPath: materialHandoffJournalPath(taskId, physicalRoot),
+  }
+  assertJournalContext(context)
+  return context
+}
+
+export async function withMaterialHandoffJournalLock(taskId, batchRoot, callback) {
+  if (typeof callback !== 'function') throw new TypeError('媒体身份恢复锁回调无效')
+  const physicalRoot = await ensurePrivateStateRoot(batchRoot || defaultBatchRoot())
+  const lockPath = `${materialHandoffJournalPath(taskId, physicalRoot)}.lock`
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const existing = await lstat(lockPath).catch(error => {
+      if (error?.code === 'ENOENT') return null
+      throw error
+    })
+    if (existing && (
+      !existing.isFile()
+      || existing.isSymbolicLink()
+      || existing.nlink !== 1
+      || (existing.mode & 0o777) !== 0o600
+      || (typeof process.getuid === 'function' && existing.uid !== process.getuid())
+    )) throw new Error('媒体身份恢复锁权限无效')
+    const lock = await acquireFileLock(lockPath)
+    if (lock.acquired) {
+      try {
+        return await callback()
+      } finally {
+        await lock.release()
+      }
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50))
+  }
+  throw new Error('同一视频任务正在恢复媒体身份，请稍后重试')
+}
+
+export async function readMaterialHandoffJournal(context) {
+  assertJournalContext(context)
+  const journal = await readPrivateMaterialHandoffJournal(context.journalPath, { optional: true })
+  if (!journal) return null
+  assertJournalMatchesContext(journal, context)
+  const currentSource = await stat(context.sourcePath)
+  if (!sameSourceIdentity(journal.sourceIdentity, currentSource)) {
+    throw new Error('媒体身份恢复记录对应的视频已变化')
+  }
+  return journal
+}
+
+export async function writeMaterialHandoffJournal(context, { materialId, nonce }) {
+  assertJournalContext(context)
+  const normalizedMaterialId = normalizeMaterialId(materialId)
+  if (typeof nonce !== 'string' || !UUID_PATTERN.test(nonce)) {
+    throw new Error('媒体身份交接凭证 nonce 无效')
+  }
+  const existing = await readPrivateMaterialHandoffJournal(context.journalPath, { optional: true })
+  if (existing) {
+    assertJournalMatchesContext(existing, context)
+    // A producer may have lost the ACK after the consumer journal became
+    // durable and legitimately recreated its delivery credential. The
+    // material identity is authoritative; a new nonce is only a transport
+    // attempt and must not permanently wedge the same task.
+    if (existing.materialId !== normalizedMaterialId) {
+      throw new Error('同一任务存在冲突的媒体身份恢复记录')
+    }
+    return existing
+  }
+  const journal = {
+    schemaVersion: MATERIAL_HANDOFF_JOURNAL_SCHEMA_VERSION,
+    taskId: context.taskId,
+    idempotencyKey: context.idempotencyKey,
+    requestFingerprint: context.requestFingerprint,
+    sourcePath: context.sourcePath,
+    sourceIdentity: context.sourceIdentity,
+    materialId: normalizedMaterialId,
+    nonce,
+    createdAt: new Date().toISOString(),
+  }
+  await writeDurableText(context.journalPath, `${JSON.stringify(journal)}\n`)
+  const persisted = await readPrivateMaterialHandoffJournal(context.journalPath)
+  assertJournalMatchesContext(persisted, context)
+  if (persisted.materialId !== normalizedMaterialId || persisted.nonce !== nonce) {
+    throw new Error('媒体身份恢复记录写后校验失败')
+  }
+  return persisted
+}
+
+export async function clearMaterialHandoffJournal(context, expectedJournal) {
+  assertJournalContext(context)
+  const current = await readPrivateMaterialHandoffJournal(context.journalPath, { optional: true })
+  if (!current) return false
+  assertJournalMatchesContext(current, context)
+  if (expectedJournal && (
+    current.materialId !== expectedJournal.materialId
+    || current.nonce !== expectedJournal.nonce
+  )) throw new Error('媒体身份恢复记录清理冲突')
+  await rm(context.journalPath)
+  await syncDirectory(dirname(context.journalPath))
+  return true
 }
 
 export async function writeBatchState(path, state) {
@@ -650,7 +1038,8 @@ export async function createBatchState({
             name: video.name,
             sourcePath: video.path,
             sourceBytes: video.bytes,
-            sourceFingerprint: await sourceFingerprint(video.path),
+            sourceFingerprint: sourceFingerprintFromIdentity(video.path, video.sourceIdentity),
+            sourceIdentity: video.sourceIdentity,
             taskId,
             idempotencyKey: taskId,
             status: 'queued',
@@ -683,20 +1072,57 @@ export function assertBatchInput(state, requestFingerprint) {
   }
 }
 
-export async function createSingleVideoState({
-  taskId,
-  idempotencyKey,
-  baseUrl,
-  bindingId,
-  prompt,
-  visionRoute,
-  videoFile,
-  inboxRoot,
-  batchRoot,
-  confirmDuplicate = false,
-}) {
+function assertSingleVideoInput(
+  state,
+  requestIdentityInput,
+  requestFingerprint,
+  trustedExistingMaterialId,
+) {
+  const persistedMaterialId = state.items?.[0]?.trustedExistingMaterialId
+  const expectedFingerprint = trustedExistingMaterialId === undefined && persistedMaterialId !== undefined
+    ? stableFingerprint(singleRequestIdentity({
+        ...requestIdentityInput,
+        trustedExistingMaterialId: persistedMaterialId,
+      }))
+    : requestFingerprint
+  if (state.requestFingerprint !== expectedFingerprint) {
+    throw new Error('同一任务 ID 已绑定其他视频、提示词或执行配置')
+  }
+  if (trustedExistingMaterialId === undefined) return
+  if (
+    persistedMaterialId === undefined
+    || persistedMaterialId !== normalizeMaterialId(trustedExistingMaterialId)
+  ) throw new Error('同一任务 ID 已绑定其他视频、提示词或执行配置')
+}
+
+export async function createSingleVideoState(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('single_video_request_invalid')
+  }
+  if (Object.hasOwn(request, 'materialId')) throw new Error('untrusted_material_id_field')
+  const {
+    taskId,
+    idempotencyKey,
+    baseUrl,
+    bindingId,
+    prompt,
+    visionRoute,
+    videoFile,
+    expectedSourceIdentity,
+    trustedExistingMaterialId,
+    inboxRoot,
+    batchRoot,
+    confirmDuplicate = false,
+  } = request
+  const normalizedTrustedExistingMaterialId = trustedExistingMaterialId === undefined
+    ? undefined
+    : normalizeMaterialId(trustedExistingMaterialId)
   const inspected = await inspectVideoFile(videoFile, { capacityRoot: inboxRoot })
-  const requestIdentity = singleRequestIdentity({
+  if (expectedSourceIdentity !== undefined && !sameSourceIdentity(expectedSourceIdentity, {
+    ...inspected.sourceIdentity,
+    isFile: () => true,
+  })) throw new Error('视频源文件在入队期间发生变化')
+  const requestIdentityInput = {
     taskId,
     idempotencyKey,
     baseUrl,
@@ -705,15 +1131,22 @@ export async function createSingleVideoState({
     prompt,
     visionRoute,
     inboxRoot,
+  }
+  const requestIdentity = singleRequestIdentity({
+    ...requestIdentityInput,
+    trustedExistingMaterialId: normalizedTrustedExistingMaterialId,
   })
   const requestFingerprint = stableFingerprint(requestIdentity)
   const statePath = singleVideoStatePath(taskId, batchRoot)
   const batchId = `single:${stableFingerprint(String(taskId || '')).slice(0, 32)}`
   try {
     const state = await readBatchState(statePath)
-    if (state.requestFingerprint !== requestFingerprint) {
-      throw new Error('同一任务 ID 已绑定其他视频、提示词或执行配置')
-    }
+    assertSingleVideoInput(
+      state,
+      requestIdentityInput,
+      requestFingerprint,
+      normalizedTrustedExistingMaterialId,
+    )
     return { statePath, state, duplicate: true }
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error
@@ -723,9 +1156,12 @@ export async function createSingleVideoState({
   try {
     try {
       const state = await readBatchState(statePath)
-      if (state.requestFingerprint !== requestFingerprint) {
-        throw new Error('同一任务 ID 已绑定其他视频、提示词或执行配置')
-      }
+      assertSingleVideoInput(
+        state,
+        requestIdentityInput,
+        requestFingerprint,
+        normalizedTrustedExistingMaterialId,
+      )
       return { statePath, state, duplicate: true }
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
@@ -766,9 +1202,13 @@ export async function createSingleVideoState({
           name: basename(inspected.sourcePath),
           sourcePath: inspected.sourcePath,
           sourceBytes: inspected.sourceBytes,
-          sourceFingerprint: await sourceFingerprint(inspected.sourcePath),
+          sourceFingerprint: sourceFingerprintFromIdentity(inspected.sourcePath, inspected.sourceIdentity),
+          sourceIdentity: inspected.sourceIdentity,
           taskId,
           idempotencyKey,
+          ...(normalizedTrustedExistingMaterialId === undefined
+            ? {}
+            : { trustedExistingMaterialId: normalizedTrustedExistingMaterialId }),
           status: 'queued',
           error: null,
           submittedAt: null,
@@ -792,10 +1232,413 @@ export async function createSingleVideoState({
 export async function verifyBatchItemSource(item, { inboxRoot } = {}) {
   const inspected = await inspectVideoFile(item.sourcePath, { capacityRoot: inboxRoot })
   if (inspected.sourceBytes !== item.sourceBytes
-    || await sourceFingerprint(inspected.sourcePath) !== item.sourceFingerprint) {
+    || (item.sourceIdentity !== undefined && !sameSourceIdentity(item.sourceIdentity, {
+      ...inspected.sourceIdentity,
+      isFile: () => true,
+    }))
+    || sourceFingerprintFromIdentity(inspected.sourcePath, inspected.sourceIdentity) !== item.sourceFingerprint) {
     throw new Error('视频源文件在入队后发生变化')
   }
   return inspected
+}
+
+function sameStableSourceIdentity(expected, current) {
+  return current.isFile()
+    && current.dev === expected.dev
+    && current.ino === expected.ino
+    && current.size === expected.size
+    && current.mtimeMs === expected.mtimeMs
+}
+
+function sameArtifactInode(expected, current) {
+  return current.isFile()
+    && current.dev === expected.dev
+    && current.ino === expected.ino
+}
+
+async function optionalLstat(path) {
+  try {
+    return await lstat(path)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function assertRecoveryBinding(item, recovery, binding) {
+  if (
+    !binding
+    || recovery.taskId !== item.taskId
+    || recovery.idempotencyKey !== item.idempotencyKey
+    || recovery.taskId !== binding.taskId
+    || recovery.idempotencyKey !== binding.idempotencyKey
+    || recovery.batchId !== binding.batchId
+  ) throw new Error('视频暂存恢复记录与任务绑定不匹配')
+}
+
+function cleanupClaimPath(inbox, ownershipToken, claimSlot) {
+  return join(inbox, `.cleanup-claim-${ownershipToken}-${claimSlot}`)
+}
+
+function selectRecoveryArtifact(originalStat, claimStat) {
+  if (originalStat && claimStat) throw new Error('视频暂存清理认领冲突')
+  return claimStat || originalStat
+}
+
+async function claimAndRemoveArtifact(path, {
+  inbox,
+  ownershipToken,
+  claimSlot,
+  expectedIdentity = null,
+  expectedContentSha256 = null,
+  validateIdentity = null,
+} = {}) {
+  if (!['incoming', 'final', 'anchor'].includes(claimSlot)) {
+    throw new Error('视频暂存清理认领类型无效')
+  }
+  const claimPath = cleanupClaimPath(inbox, ownershipToken, claimSlot)
+  const originalStat = await optionalLstat(path)
+  const existingClaimStat = await optionalLstat(claimPath)
+  if (originalStat && existingClaimStat) throw new Error('视频暂存清理认领冲突')
+  if (!originalStat && !existingClaimStat) return false
+  const selectedStat = originalStat || existingClaimStat
+  if (!selectedStat.isFile() || selectedStat.isSymbolicLink()) {
+    throw new Error('视频暂存清理对象无效')
+  }
+  if (expectedIdentity && !sameStableSourceIdentity(expectedIdentity, selectedStat)) {
+    throw new Error('视频暂存清理对象身份不匹配')
+  }
+  if (validateIdentity && !validateIdentity(selectedStat)) {
+    throw new Error('视频暂存清理对象身份不匹配')
+  }
+  if (originalStat) {
+    try {
+      await rename(path, claimPath)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false
+      throw error
+    }
+  }
+  let handle
+  try {
+    const claimedStat = await lstat(claimPath)
+    if (!claimedStat.isFile() || claimedStat.isSymbolicLink()) {
+      throw new Error('视频暂存清理对象无效')
+    }
+    handle = await open(claimPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const handleStat = await handle.stat()
+    if (
+      claimedStat.dev !== selectedStat.dev
+      || claimedStat.ino !== selectedStat.ino
+      || handleStat.dev !== selectedStat.dev
+      || handleStat.ino !== selectedStat.ino
+      || handleStat.size !== selectedStat.size
+      || handleStat.mtimeMs !== selectedStat.mtimeMs
+    ) {
+      throw new Error('视频暂存清理对象在认领后发生变化')
+    }
+    if (validateIdentity && !validateIdentity(handleStat)) {
+      throw new Error('视频暂存清理对象身份不匹配')
+    }
+    if (expectedContentSha256 && await sha256FileHandle(handle) !== expectedContentSha256) {
+      throw new Error('视频暂存清理对象内容不匹配')
+    }
+    const afterValidation = await handle.stat()
+    if (
+      afterValidation.dev !== handleStat.dev
+      || afterValidation.ino !== handleStat.ino
+      || afterValidation.size !== handleStat.size
+      || afterValidation.mtimeMs !== handleStat.mtimeMs
+    ) throw new Error('视频暂存清理对象在校验期间发生变化')
+    await handle.close()
+    handle = null
+    await rm(claimPath)
+    return true
+  } catch (error) {
+    await handle?.close().catch(() => undefined)
+    if (!await optionalLstat(path)) {
+      await rename(claimPath, path).catch(() => undefined)
+    }
+    throw error
+  }
+}
+
+export async function recoverBatchItemStaging(item, {
+  inboxRoot,
+  binding,
+  onCheckpoint = null,
+} = {}) {
+  const initialRecovery = item?.stagingRecovery
+  if (initialRecovery === undefined) return null
+  if (!stagingRecoveryValid(initialRecovery)) throw new Error('视频暂存恢复记录无效')
+  assertRecoveryBinding(item, initialRecovery, binding)
+  if (onCheckpoint !== null && typeof onCheckpoint !== 'function') {
+    throw new TypeError('staging_recovery_checkpoint_invalid')
+  }
+  if (!item.sourceIdentity || !sameSourceIdentity(item.sourceIdentity, {
+    ...initialRecovery.sourceIdentity,
+    isFile: () => true,
+  })) throw new Error('视频暂存恢复记录与任务身份不匹配')
+
+  const inbox = resolve(inboxRoot)
+  const anchorPath = join(inbox, initialRecovery.anchorName)
+  const incomingPath = join(inbox, initialRecovery.incomingName)
+  const stagedPath = join(inbox, initialRecovery.videoKey)
+  const anchorClaimPath = cleanupClaimPath(inbox, initialRecovery.ownershipToken, 'anchor')
+  const incomingClaimPath = cleanupClaimPath(inbox, initialRecovery.ownershipToken, 'incoming')
+  const stagedClaimPath = cleanupClaimPath(inbox, initialRecovery.ownershipToken, 'final')
+  let recovery = initialRecovery
+  let currentSource = await stat(item.sourcePath)
+  if (!sameStableSourceIdentity(initialRecovery.sourceIdentity, currentSource)) {
+    throw new Error('视频源文件在暂存恢复前发生变化')
+  }
+
+  const [
+    anchorOriginalStat,
+    anchorClaimStat,
+    incomingOriginalStat,
+    incomingClaimStat,
+    stagedOriginalStat,
+    stagedClaimStat,
+  ] = await Promise.all([
+    optionalLstat(anchorPath),
+    optionalLstat(anchorClaimPath),
+    optionalLstat(incomingPath),
+    optionalLstat(incomingClaimPath),
+    optionalLstat(stagedPath),
+    optionalLstat(stagedClaimPath),
+  ])
+  // A deterministic claim is the journal-bound continuation of its original
+  // artifact after rename. Inspect every pair before removing anything so a
+  // conflicting original+claim or a drifted claim fails closed.
+  const anchorStat = selectRecoveryArtifact(anchorOriginalStat, anchorClaimStat)
+  const incomingStat = selectRecoveryArtifact(incomingOriginalStat, incomingClaimStat)
+  const stagedStat = selectRecoveryArtifact(stagedOriginalStat, stagedClaimStat)
+  if (anchorStat && (
+    !anchorStat.isFile()
+    || anchorStat.isSymbolicLink()
+    || anchorStat.nlink < 2
+    || !sameStableSourceIdentity(initialRecovery.sourceIdentity, anchorStat)
+  )) throw new Error('视频暂存恢复锚点无效')
+  if (incomingStat && (
+    !incomingStat.isFile()
+    || incomingStat.isSymbolicLink()
+    || incomingStat.size > initialRecovery.sourceIdentity.size
+  )) throw new Error('视频暂存恢复副本无效')
+  if (stagedStat && (
+    !stagedStat.isFile()
+    || stagedStat.isSymbolicLink()
+    || stagedStat.size !== initialRecovery.sourceIdentity.size
+  )) throw new Error('视频暂存恢复成品无效')
+  if (['staged', 'triggering', 'discarding'].includes(recovery.phase)) {
+    throw new Error('已完成的视频暂存必须通过平台交接恢复')
+  }
+  if (stagedStat && !['source_finalized', 'copy_observed'].includes(recovery.phase)) {
+    throw new Error('视频暂存恢复阶段与成品不匹配')
+  }
+
+  let observedPhase = null
+  if (anchorStat) observedPhase = 'anchor_observed'
+  else if (incomingStat) observedPhase = 'copy_observed'
+  if (observedPhase && recovery.phase === 'prepared') {
+    recovery = Object.freeze({ ...recovery, phase: observedPhase })
+    await onCheckpoint?.(recovery)
+  }
+  if (!anchorStat && !incomingStat && !stagedStat
+    && recovery.phase === 'prepared'
+    && !sameSourceIdentity(initialRecovery.sourceIdentity, currentSource)) {
+    throw new Error('视频源文件在暂存恢复前发生变化')
+  }
+
+  // Remove the copy first. Removing the hard-link anchor is the only cleanup
+  // step that changes source ctime; the observed phase is already durable.
+  if (incomingStat && recovery.incomingIdentity === null) {
+    throw new Error('视频暂存恢复副本身份未持久化')
+  }
+  if (incomingStat && !sameArtifactInode(recovery.incomingIdentity, incomingStat)) {
+    throw new Error('视频暂存恢复副本身份不匹配')
+  }
+  if (stagedStat && recovery.stagedIdentity !== null
+    && !sameStableSourceIdentity(recovery.stagedIdentity, stagedStat)) {
+    throw new Error('视频暂存恢复成品身份不匹配')
+  }
+  if (incomingStat) {
+    await claimAndRemoveArtifact(incomingPath, {
+      inbox,
+      ownershipToken: recovery.ownershipToken,
+      claimSlot: 'incoming',
+      validateIdentity: details => sameArtifactInode(recovery.incomingIdentity, details)
+        && details.size <= recovery.sourceIdentity.size,
+    })
+  }
+  if (stagedStat && recovery.stagedIdentity === null && recovery.incomingIdentity === null) {
+    throw new Error('视频暂存恢复成品身份未持久化')
+  }
+  if (stagedStat && recovery.stagedIdentity === null
+    && !sameArtifactInode(recovery.incomingIdentity, stagedStat)) {
+    throw new Error('视频暂存恢复成品身份不匹配')
+  }
+  if (stagedStat) {
+    await claimAndRemoveArtifact(stagedPath, {
+      inbox,
+      ownershipToken: recovery.ownershipToken,
+      claimSlot: 'final',
+      expectedIdentity: recovery.stagedIdentity,
+      expectedContentSha256: recovery.stagedIdentity === null ? null : recovery.contentSha256,
+      validateIdentity: recovery.stagedIdentity === null
+        ? details => sameArtifactInode(recovery.incomingIdentity, details)
+          && details.size <= recovery.sourceIdentity.size
+        : null,
+    })
+  }
+  if (anchorStat) {
+    await claimAndRemoveArtifact(anchorPath, {
+      inbox,
+      ownershipToken: recovery.ownershipToken,
+      claimSlot: 'anchor',
+      validateIdentity: details => details.nlink >= 2
+        && sameStableSourceIdentity(recovery.sourceIdentity, details),
+    })
+  }
+
+  currentSource = await stat(item.sourcePath)
+  if (!sameStableSourceIdentity(initialRecovery.sourceIdentity, currentSource)) {
+    throw new Error('视频源文件在暂存恢复期间发生变化')
+  }
+  return {
+    sourceIdentity: sourceIdentity(currentSource),
+    recovery,
+  }
+}
+
+export async function loadBatchItemStagedMedia(item, { inboxRoot, binding } = {}) {
+  const recovery = item?.stagingRecovery
+  if (!stagingRecoveryValid(recovery) || !['staged', 'triggering'].includes(recovery.phase)) {
+    throw new Error('视频平台交接恢复记录无效')
+  }
+  assertRecoveryBinding(item, recovery, binding)
+  if (!item.sourceIdentity || !sameSourceIdentity(item.sourceIdentity, {
+    ...recovery.sourceIdentity,
+    isFile: () => true,
+  })) throw new Error('视频平台交接恢复记录与任务身份不匹配')
+  const inbox = resolve(inboxRoot)
+  const stagedPath = join(inbox, recovery.videoKey)
+  const [stagedStat, anchorStat, incomingStat] = await Promise.all([
+    optionalLstat(stagedPath),
+    optionalLstat(join(inbox, recovery.anchorName)),
+    optionalLstat(join(inbox, recovery.incomingName)),
+  ])
+  if (
+    !stagedStat
+    || !stagedStat.isFile()
+    || stagedStat.isSymbolicLink()
+    || stagedStat.size !== item.sourceBytes
+    || anchorStat
+    || incomingStat
+  ) throw new Error('视频平台交接暂存文件无效')
+  let handle
+  try {
+    handle = await open(stagedPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const handleStat = await handle.stat()
+    if (
+      handleStat.dev !== stagedStat.dev
+      || handleStat.ino !== stagedStat.ino
+      || !sameSourceIdentity(recovery.stagedIdentity, handleStat)
+    ) throw new Error('视频平台交接暂存文件身份不匹配')
+    const contentSha256 = await sha256FileHandle(handle)
+    const afterHash = await handle.stat()
+    if (!sameSourceIdentity(recovery.stagedIdentity, afterHash)) {
+      throw new Error('视频平台交接暂存文件在校验期间发生变化')
+    }
+    if (contentSha256 !== recovery.contentSha256) {
+      throw new Error('视频平台交接暂存文件已变化')
+    }
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+  return {
+    sourcePath: item.sourcePath,
+    sourceBytes: item.sourceBytes,
+    extension: extname(recovery.videoKey),
+    inbox,
+    videoKey: recovery.videoKey,
+    materialId: recovery.materialId,
+    stagedPath,
+    sourceIdentity: recovery.sourceIdentity,
+    stagedIdentity: recovery.stagedIdentity,
+    contentSha256: recovery.contentSha256,
+    ownershipToken: recovery.ownershipToken,
+    taskId: recovery.taskId,
+    idempotencyKey: recovery.idempotencyKey,
+    batchId: recovery.batchId,
+  }
+}
+
+export async function cleanupBatchItemStagedMedia(item, { inboxRoot, binding } = {}) {
+  const recovery = item?.stagingRecovery
+  if (!stagingRecoveryValid(recovery) || !['discarding_prepared', 'discarding'].includes(recovery.phase)) {
+    throw new Error('视频本地暂存清理记录无效')
+  }
+  assertRecoveryBinding(item, recovery, binding)
+  const inbox = resolve(inboxRoot)
+  const artifacts = [
+    {
+      path: join(inbox, recovery.incomingName),
+      claimSlot: 'incoming',
+      expectedIdentity: null,
+      expectedContentSha256: null,
+      removable: recovery.incomingIdentity !== null,
+      validateIdentity: recovery.incomingIdentity === null
+        ? null
+        : details => sameArtifactInode(recovery.incomingIdentity, details)
+          && details.size <= recovery.sourceIdentity.size,
+    },
+    {
+      path: join(inbox, recovery.videoKey),
+      claimSlot: 'final',
+      expectedIdentity: recovery.stagedIdentity,
+      expectedContentSha256: recovery.contentSha256,
+      removable: (recovery.stagedIdentity !== null && recovery.contentSha256 !== null)
+        || recovery.incomingIdentity !== null,
+      validateIdentity: recovery.stagedIdentity === null && recovery.incomingIdentity !== null
+        ? details => sameArtifactInode(recovery.incomingIdentity, details)
+          && details.size <= recovery.sourceIdentity.size
+        : null,
+    },
+    {
+      path: join(inbox, recovery.anchorName),
+      claimSlot: 'anchor',
+      expectedIdentity: null,
+      expectedContentSha256: null,
+      removable: true,
+      validateIdentity: details => details.nlink >= 2
+        && sameStableSourceIdentity(recovery.sourceIdentity, details),
+    },
+  ]
+  for (const artifact of artifacts) {
+    if (!artifact.removable && (
+      await optionalLstat(artifact.path)
+      || await optionalLstat(join(inbox, `.cleanup-claim-${recovery.ownershipToken}-${artifact.claimSlot}`))
+    )) throw new Error('视频暂存清理对象身份未持久化')
+    if (!artifact.removable) continue
+    await claimAndRemoveArtifact(artifact.path, {
+      inbox,
+      ownershipToken: recovery.ownershipToken,
+      claimSlot: artifact.claimSlot,
+      expectedIdentity: artifact.expectedIdentity,
+      expectedContentSha256: artifact.expectedContentSha256,
+      validateIdentity: artifact.validateIdentity,
+    })
+  }
+  const currentSource = await stat(item.sourcePath).catch(error => {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  })
+  return {
+    sourceIdentity: currentSource && sameStableSourceIdentity(recovery.sourceIdentity, currentSource)
+      ? sourceIdentity(currentSource)
+      : recovery.sourceIdentity,
+  }
 }
 
 function isBatchTerminal(status) {
@@ -824,7 +1667,8 @@ export async function prepareBatchStateForExecution(path) {
         ...item,
         sourcePath: inspected.sourcePath,
         sourceBytes: inspected.sourceBytes,
-        sourceFingerprint: await sourceFingerprint(inspected.sourcePath),
+        sourceFingerprint: sourceFingerprintFromIdentity(inspected.sourcePath, inspected.sourceIdentity),
+        sourceIdentity: inspected.sourceIdentity,
       })
     }
     const migratedStatus = state.status === 'paused' ? 'paused' : state.status

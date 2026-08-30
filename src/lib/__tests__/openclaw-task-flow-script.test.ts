@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -380,9 +381,12 @@ globalThis.fetch = async (input, init = {}) => {
     const mediaIngest = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/lib/media-ingest.mjs'), 'utf8')
     expect(script).toContain("from '../lib/media-ingest.mjs'")
     expect(mediaIngest).toContain('COPYFILE_FICLONE_FORCE')
-    expect(mediaIngest).toContain("execFileAsync('/bin/cp', ['-c', '-n', inspected.sourcePath, stagedPath])")
+    expect(mediaIngest).toContain("spawnImpl('/bin/cp', ['-c', '-n', sourceAnchorPath, stagedPath]")
+    expect(mediaIngest).toContain('await link(sourcePath, anchorPath)')
+    expect(mediaIngest).toContain('await assertHandleIdentity(sourceHandle, sourceAnchor.anchoredIdentity)')
     expect(mediaIngest).toContain("['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)")
-    expect(mediaIngest).toContain('await utimes(stagedPath, ingestedAt, ingestedAt)')
+    expect(mediaIngest).toContain('await utimes(incomingPath, ingestedAt, ingestedAt)')
+    expect(mediaIngest).toContain('await rename(incomingPath, stagedPath)')
     expect(mediaIngest).toContain("from './media-policy.mjs'")
     expect(mediaIngest).not.toContain('10 * 1024 ** 3')
     expect(script).toContain('waitSeconds > 14_400')
@@ -931,6 +935,436 @@ globalThis.fetch = async (input, init = {}) => {
     }
   })
 
+  it('accepts an existing material ID only through a one-time task-and-path-bound handoff', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-single-material-cli-test-'))
+    const stateRoot = resolve(root, 'state')
+    const video = resolve(root, 'single.mp4')
+    const fakePlatform = resolve(root, 'fake-material-cli-platform.mjs')
+    const materialId = 'MATERIAL-EXISTING-CLI-001'
+    let laneLock: { release: () => Promise<void> } | null = null
+    try {
+      await mkdir(stateRoot)
+      const handoffRoot = resolve(root, 'handoffs')
+      await mkdir(handoffRoot)
+      await chmod(handoffRoot, 0o700)
+      await writeFile(video, 'single-material-cli-video')
+      await writeFile(fakePlatform, `
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  if (method === 'GET' && url.pathname === '/api/n8n/workflows') {
+    return json({ bindings: [{ id: 'video-binding', taskType: 'video-analysis', enabled: true }] })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        acquireGlobalBatchLock: (path: string) => Promise<{
+          acquired: boolean
+          release: () => Promise<void>
+        }>
+        readSingleVideoTaskState: (taskId: string, root: string) => Promise<{
+          item: Record<string, unknown>
+        }>
+      }
+      const acquired = await batch.acquireGlobalBatchLock(resolve(stateRoot, 'test-anchor.json'))
+      expect(acquired.acquired).toBe(true)
+      laneLock = acquired
+
+      const taskId = `video-command-${'f'.repeat(64)}`
+      const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+      const legacy = await new Promise<{ error: Error | null; stderr: string }>(resolvePromise => {
+        execFile(process.execPath, [
+          script,
+          '--video-file', video,
+          '--task-id', taskId,
+          '--idempotency-key', taskId,
+          '--material-id', materialId,
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+        ], { encoding: 'utf8' }, (error, _stdout, stderr) => resolvePromise({ error, stderr }))
+      })
+      expect(legacy.error).not.toBeNull()
+      expect(legacy.stderr).toContain('未知参数：--material-id')
+
+      const untrustedInternal = await new Promise<{ error: Error | null; stderr: string }>(resolvePromise => {
+        execFile(process.execPath, [
+          script,
+          '--video-file', video,
+          '--task-id', taskId,
+          '--idempotency-key', taskId,
+          '--trusted-existing-material-id', materialId,
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+        ], {
+          env: { ...process.env, AIWORKER_TRUSTED_MEDIA_ADAPTER: 'scheduler-runner-v1' },
+          encoding: 'utf8',
+        }, (error, _stdout, stderr) => resolvePromise({ error, stderr }))
+      })
+      expect(untrustedInternal.error).not.toBeNull()
+      expect(untrustedInternal.stderr).toContain('未知参数：--trusted-existing-material-id')
+
+      const runnerUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js',
+      )).href
+      const scheduler = await import(/* @vite-ignore */ runnerUrl) as {
+        createMediaHandoff: (input: Record<string, unknown>) => Promise<{
+          path: string
+          cleanup: (input: { disposition: string }) => Promise<unknown>
+        }>
+      }
+      const handoff = await scheduler.createMediaHandoff({
+        taskId,
+        videoPath: video,
+        materialId,
+        root: handoffRoot,
+      })
+      expect((await stat(handoff.path)).mode & 0o777).toBe(0o600)
+      expect(JSON.parse(await readFile(handoff.path, 'utf8'))).toMatchObject({
+        schemaVersion: 1,
+        taskId,
+        videoPath: await realpath(video),
+        materialId,
+      })
+
+      const result = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--video-file', video,
+          '--task-id', taskId,
+          '--idempotency-key', taskId,
+          '--media-handoff', handoff.path,
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+        ], {
+          env: {
+            ...process.env,
+            AIWORKER_MEDIA_INGEST_DIR: resolve(root, 'inbox'),
+            AIWORKER_VIDEO_BATCH_DIR: stateRoot,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise({ stdout, stderr }))
+      })
+
+      expect(result.stderr).toBe('')
+      await expect(access(handoff.path)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(JSON.parse(result.stdout)).toMatchObject({ taskId, status: 'queued' })
+      const durable = await batch.readSingleVideoTaskState(taskId, stateRoot)
+      expect(durable.item.trustedExistingMaterialId).toBe(materialId)
+      expect(durable.item).not.toHaveProperty('materialId')
+      await handoff.cleanup({ disposition: 'persisted_ack' })
+
+      const replay = await new Promise<{ error: Error | null; stderr: string }>(resolvePromise => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--video-file', video,
+          '--task-id', taskId,
+          '--idempotency-key', taskId,
+          '--media-handoff', handoff.path,
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+        ], {
+          env: {
+            ...process.env,
+            AIWORKER_MEDIA_INGEST_DIR: resolve(root, 'inbox'),
+            AIWORKER_VIDEO_BATCH_DIR: stateRoot,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+          encoding: 'utf8',
+        }, (error, _stdout, stderr) => resolvePromise({ error, stderr }))
+      })
+      expect(replay.error).not.toBeNull()
+      expect(replay.stderr).toMatch(/ENOENT|no such file/iu)
+
+      const runRejectedHandoff = async (handoffPath: string, requestedTaskId: string, requestedVideo: string) => (
+        new Promise<{ error: Error | null; stderr: string }>(resolvePromise => {
+          execFile(process.execPath, [
+            script,
+            '--base-url', 'http://127.0.0.1:3017',
+            '--video-file', requestedVideo,
+            '--task-id', requestedTaskId,
+            '--idempotency-key', requestedTaskId,
+            '--media-handoff', handoffPath,
+            '--delivery', 'none',
+            '--wait-seconds', '0',
+            '--no-trigger-recovery',
+          ], {
+            env: {
+              ...process.env,
+              AIWORKER_MEDIA_INGEST_DIR: resolve(root, 'inbox'),
+              AIWORKER_VIDEO_BATCH_DIR: stateRoot,
+              NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+                .filter(Boolean).join(' '),
+            },
+            encoding: 'utf8',
+          }, (error, _stdout, stderr) => resolvePromise({ error, stderr }))
+        })
+      )
+      const otherVideo = resolve(root, 'other.mp4')
+      await writeFile(otherVideo, 'other-video')
+      const wrongPathHandoff = await scheduler.createMediaHandoff({
+        taskId,
+        videoPath: otherVideo,
+        materialId,
+        root: handoffRoot,
+      })
+      const wrongPath = await runRejectedHandoff(wrongPathHandoff.path, taskId, video)
+      expect(wrongPath.error).not.toBeNull()
+      expect(wrongPath.stderr).toContain('媒体身份交接凭证与任务或视频不匹配')
+      await expect(access(wrongPathHandoff.path)).rejects.toMatchObject({ code: 'ENOENT' })
+
+      const otherTaskId = `video-command-${'e'.repeat(64)}`
+      const wrongTaskHandoff = await scheduler.createMediaHandoff({
+        taskId: otherTaskId,
+        videoPath: video,
+        materialId,
+        root: handoffRoot,
+      })
+      const wrongTask = await runRejectedHandoff(wrongTaskHandoff.path, taskId, video)
+      expect(wrongTask.error).not.toBeNull()
+      expect(wrongTask.stderr).toContain('媒体身份交接凭证与任务或视频不匹配')
+      await expect(access(wrongTaskHandoff.path)).rejects.toMatchObject({ code: 'ENOENT' })
+
+      const replacedTaskId = `video-command-${'d'.repeat(64)}`
+      const replacementHandoff = await scheduler.createMediaHandoff({
+        taskId: replacedTaskId,
+        videoPath: video,
+        materialId,
+        root: handoffRoot,
+      })
+      const originalVideo = resolve(root, 'original-before-replacement.mp4')
+      const replacementVideo = resolve(root, 'atomic-replacement.mp4')
+      await writeFile(replacementVideo, Buffer.alloc((await stat(video)).size, 0x78))
+      await rename(video, originalVideo)
+      await rename(replacementVideo, video)
+      const replaced = await runRejectedHandoff(replacementHandoff.path, replacedTaskId, video)
+      expect(replaced.error).not.toBeNull()
+      expect(replaced.stderr).toContain('媒体身份交接凭证对应的视频已变化')
+      await expect(access(replacementHandoff.path)).rejects.toMatchObject({ code: 'ENOENT' })
+      await rm(video)
+      await rename(originalVideo, video)
+    } finally {
+      await laneLock?.release().catch(() => undefined)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers a consumed material handoff from a private task journal and fails closed on unsafe recovery data', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-material-handoff-journal-test-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const video = resolve(root, 'journal.mp4')
+    const fakePlatform = resolve(root, 'fake-journal-platform.mjs')
+    let laneLock: { release: () => Promise<void> } | null = null
+    try {
+      await mkdir(stateRoot, { mode: 0o700 })
+      await writeFile(video, 'journal-video')
+      await writeFile(fakePlatform, `
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/workflows') {
+    return json({ bindings: [{ id: 'video-binding', taskType: 'video-analysis', enabled: true }] })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        acquireGlobalBatchLock: (path: string) => Promise<{
+          acquired: boolean
+          release: () => Promise<void>
+        }>
+        prepareMaterialHandoffJournalContext: (input: Record<string, unknown>) => Promise<Record<string, unknown> & {
+          journalPath: string
+          sourceIdentity: Record<string, number>
+        }>
+        readMaterialHandoffJournal: (context: Record<string, unknown>) => Promise<Record<string, unknown> | null>
+        writeMaterialHandoffJournal: (
+          context: Record<string, unknown>,
+          handoff: { materialId: string; nonce: string },
+        ) => Promise<Record<string, unknown>>
+        withMaterialHandoffJournalLock: <T>(
+          taskId: string,
+          root: string,
+          callback: () => Promise<T>,
+        ) => Promise<T>
+        readSingleVideoTaskState: (taskId: string, root: string) => Promise<{
+          item: Record<string, unknown>
+        }>
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<unknown>
+      }
+      const taskId = `video-command-${'c'.repeat(64)}`
+      const contextInput = {
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频中的语音内容和画面信息，分别给出结果后合并。',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot,
+        batchRoot: stateRoot,
+      }
+      const context = await batch.prepareMaterialHandoffJournalContext(contextInput)
+      const nonce = '00000000-0000-4000-8000-000000000001'
+      const materialId = 'MATERIAL-EXISTING-JOURNAL-001'
+      const historicalTaskId = `video-command-${'a'.repeat(64)}`
+      await batch.createSingleVideoState({
+        ...contextInput,
+        taskId: historicalTaskId,
+        idempotencyKey: historicalTaskId,
+      })
+      const handoffRoot = resolve(root, 'handoffs')
+      await mkdir(handoffRoot, { mode: 0o700 })
+      const runnerUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js',
+      )).href
+      const scheduler = await import(/* @vite-ignore */ runnerUrl) as {
+        createMediaHandoff: (input: Record<string, unknown>) => Promise<{
+          path: string
+          nonce: string
+          cleanup: (input: { disposition: string }) => Promise<unknown>
+        }>
+      }
+      const handoff = await scheduler.createMediaHandoff({
+        taskId,
+        videoPath: video,
+        materialId,
+        root: handoffRoot,
+      })
+
+      const acquired = await batch.acquireGlobalBatchLock(resolve(stateRoot, 'journal-anchor.json'))
+      expect(acquired.acquired).toBe(true)
+      laneLock = acquired
+      const script = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs')
+      const run = (extraArguments: string[] = []) => new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [
+          script,
+          '--base-url', 'http://127.0.0.1:3017',
+          '--video-file', video,
+          '--task-id', taskId,
+          '--idempotency-key', taskId,
+          '--delivery', 'none',
+          '--wait-seconds', '0',
+          '--no-trigger-recovery',
+          ...extraArguments,
+        ], {
+          env: {
+            ...process.env,
+            AIWORKER_MEDIA_INGEST_DIR: inboxRoot,
+            AIWORKER_VIDEO_BATCH_DIR: stateRoot,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+          encoding: 'utf8',
+        }, (error, stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise({ stdout, stderr }))
+      })
+      const blocked = await run(['--media-handoff', handoff.path])
+      expect(JSON.parse(blocked.stdout)).toMatchObject({
+        taskId,
+        status: 'confirmation_required',
+        confirmationRequired: true,
+      })
+      await expect(access(handoff.path)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await stat(context.journalPath)).mode & 0o777).toBe(0o600)
+
+      // Simulate a producer that lost the consumer ACK and rebuilt a delivery
+      // credential with a fresh transport nonce while the original WAL exists.
+      await handoff.cleanup({ disposition: 'persisted_ack' })
+      const replacementHandoff = await scheduler.createMediaHandoff({
+        taskId,
+        videoPath: video,
+        materialId,
+        root: handoffRoot,
+      })
+      expect(replacementHandoff.nonce).not.toBe(handoff.nonce)
+      const concurrent = await Promise.all([
+        run(['--confirm-duplicate']),
+        run(['--media-handoff', replacementHandoff.path, '--confirm-duplicate']),
+      ])
+      expect(concurrent.map(result => JSON.parse(result.stdout).duplicate).sort()).toEqual([false, true])
+      expect(concurrent.every(result => result.stderr === '')).toBe(true)
+      expect(JSON.parse(concurrent[1].stdout).materialHandoffPersisted).toBe(true)
+      await replacementHandoff.cleanup({ disposition: 'persisted_ack' })
+      await expect(access(context.journalPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      const durable = await batch.readSingleVideoTaskState(taskId, stateRoot)
+      expect(durable.item.trustedExistingMaterialId).toBe(materialId)
+
+      const unsafeTaskId = `video-command-${'b'.repeat(64)}`
+      const unsafeContext = await batch.prepareMaterialHandoffJournalContext({
+        ...contextInput,
+        taskId: unsafeTaskId,
+        idempotencyKey: unsafeTaskId,
+      })
+      await batch.writeMaterialHandoffJournal(unsafeContext, { materialId, nonce })
+      const mismatched = await batch.prepareMaterialHandoffJournalContext({
+        ...contextInput,
+        taskId: unsafeTaskId,
+        idempotencyKey: unsafeTaskId,
+        prompt: '不同请求',
+      })
+      await expect(batch.readMaterialHandoffJournal(mismatched)).rejects.toThrow('请求不匹配')
+
+      await chmod(unsafeContext.journalPath, 0o644)
+      await expect(batch.readMaterialHandoffJournal(unsafeContext)).rejects.toThrow('权限无效')
+      await chmod(unsafeContext.journalPath, 0o600)
+      await writeFile(unsafeContext.journalPath, '{broken-json')
+      await expect(batch.readMaterialHandoffJournal(unsafeContext)).rejects.toThrow('记录损坏')
+
+      await rm(unsafeContext.journalPath)
+      const symlinkTarget = resolve(root, 'journal-target.json')
+      await writeFile(symlinkTarget, '{}', { mode: 0o600 })
+      await symlink(symlinkTarget, unsafeContext.journalPath)
+      await expect(batch.readMaterialHandoffJournal(unsafeContext)).rejects.toThrow('权限无效')
+      await rm(unsafeContext.journalPath)
+
+      await batch.writeMaterialHandoffJournal(unsafeContext, { materialId, nonce })
+      await expect(batch.writeMaterialHandoffJournal(unsafeContext, {
+        materialId,
+        nonce: '00000000-0000-4000-8000-000000000002',
+      })).resolves.toMatchObject({ materialId, nonce })
+      await expect(batch.writeMaterialHandoffJournal(unsafeContext, {
+        materialId: 'MATERIAL-CONFLICT',
+        nonce: '00000000-0000-4000-8000-000000000003',
+      })).rejects.toThrow('冲突')
+      await writeFile(video, 'journal-video-changed')
+      await expect(batch.readMaterialHandoffJournal(unsafeContext)).rejects.toThrow('视频已变化')
+    } finally {
+      await laneLock?.release().catch(() => undefined)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('isolates invalid state files, skips terminal v1, and safely migrates runnable v1', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-video-v1-migration-test-'))
     const stateRoot = resolve(root, 'state')
@@ -1100,9 +1534,357 @@ globalThis.fetch = async (input, init = {}) => {
     expect(worker).toContain("option('--serve-root')")
     expect(worker).toContain("['queued', 'running', 'recovering']")
     expect(worker).toContain("failedState.status = isRetryablePlatformError(error) ? 'recovering' : 'paused'")
-    expect(worker).toContain("if (batchTerminal(state.status) || !recoveryRunnable(state.status)) continue")
+    expect(worker).toContain("const journalPending = state.items.some(item => item?.stagingRecovery && item.status !== 'attention')")
+    expect(worker).toContain("if ((batchTerminal(state.status) || !recoveryRunnable(state.status)) && !journalPending) continue")
     expect(worker).toContain('Number.isFinite(configuredReconcileInterval)')
     expect(worker).toMatch(/\? configuredReconcileInterval\s+: 60_000/)
+  })
+
+  it('carries an existing material ID from single state through the worker trigger', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-existing-material-worker-test-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'request.json')
+    const fakePlatform = resolve(root, 'fake-material-platform.mjs')
+    const video = resolve(root, 'existing-material.mp4')
+    const materialId = 'MATERIAL-EXISTING-WORKER-001'
+    try {
+      await writeFile(video, 'video-content-with-a-different-sha256-identity')
+      await writeFile(fakePlatform, `
+import { writeFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  const body = init.body ? JSON.parse(String(init.body)) : null
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') return json({ runs: [] })
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    writeFileSync(process.env.FAKE_MATERIAL_REQUEST_LOG, JSON.stringify(body))
+    return json({ taskId: body.taskId, status: 'succeeded', duplicate: false })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{
+          statePath: string
+        }>
+      }
+      const taskId = `video-natural-${'d'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        trustedExistingMaterialId: materialId,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            FAKE_MATERIAL_REQUEST_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const payload = JSON.parse(await readFile(requestLog, 'utf8'))
+      expect(payload).toMatchObject({
+        taskId,
+        input: { materialId },
+      })
+      expect(payload.input.materialId).not.toMatch(/^MATERIAL-SHA256-/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves the same material ID after a retryable trigger failure and durable recovery', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-material-recovery-test-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const triggerCount = resolve(root, 'trigger-count.txt')
+    const fakePlatform = resolve(root, 'fake-material-recovery-platform.mjs')
+    const video = resolve(root, 'recovery-material.mp4')
+    const materialId = 'MATERIAL-EXISTING-RECOVERY-001'
+    try {
+      await writeFile(video, 'video-content-for-retryable-material-recovery')
+      await writeFile(triggerCount, '0')
+      await writeFile(fakePlatform, `
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+const json = (body, status = 200) => new Response(JSON.stringify(body), {
+  status,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  const body = init.body ? JSON.parse(String(init.body)) : null
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') return json({ runs: [] })
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    const count = Number(readFileSync(process.env.FAKE_MATERIAL_TRIGGER_COUNT, 'utf8')) + 1
+    writeFileSync(process.env.FAKE_MATERIAL_TRIGGER_COUNT, String(count))
+    appendFileSync(process.env.FAKE_MATERIAL_REQUEST_LOG, JSON.stringify(body) + '\\n')
+    if (count === 1) return json({ error: 'temporary trigger failure' }, 503)
+    return json({ taskId: body.taskId, status: 'succeeded', duplicate: false })
+  }
+  return json({ error: 'unexpected request' }, 404)
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<{ status: string }>
+      }
+      const taskId = `video-natural-${'c'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        trustedExistingMaterialId: materialId,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      const runWorker = () => new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            FAKE_MATERIAL_REQUEST_LOG: requestLog,
+            FAKE_MATERIAL_TRIGGER_COUNT: triggerCount,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      await runWorker()
+      expect((await batch.readBatchState(created.statePath)).status).toBe('recovering')
+      await runWorker()
+      expect((await batch.readBatchState(created.statePath)).status).toBe('succeeded')
+
+      const payloads = (await readFile(requestLog, 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+      expect(payloads).toHaveLength(2)
+      expect(payloads.map(payload => payload.input.materialId)).toEqual([materialId, materialId])
+      expect(payloads.map(payload => payload.taskId)).toEqual([taskId, taskId])
+      expect(payloads.map(payload => payload.idempotencyKey)).toEqual([taskId, taskId])
+      expect(payloads[1].input.videoKey).toBe(payloads[0].input.videoKey)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('resumes a same-key queued run in the current worker turn after an empty trigger response', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-current-turn-queued-resume-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.jsonl')
+    const fakePlatform = resolve(root, 'fake-current-turn-queued-platform.mjs')
+    const video = resolve(root, 'queued-resume.mp4')
+    try {
+      await writeFile(video, 'queued-resume-current-turn')
+      await writeFile(requestLog, '')
+      await writeFile(fakePlatform, `
+import { appendFileSync, readFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+const payloads = () => readFileSync(process.env.FAKE_QUEUED_REQUEST_LOG, 'utf8')
+  .trim().split('\\n').filter(Boolean).map(line => JSON.parse(line))
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    const body = JSON.parse(String(init.body))
+    appendFileSync(process.env.FAKE_QUEUED_REQUEST_LOG, JSON.stringify(body) + '\\n')
+    return payloads().length === 1
+      ? new Response('', { status: 200 })
+      : json({ taskId: body.taskId, status: 'succeeded' })
+  }
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const [first] = payloads()
+    return json({ runs: first ? [{
+      taskId: first.taskId,
+      status: 'queued',
+      input: { videoKey: first.input.videoKey },
+    }] : [] })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<Record<string, any>>
+      }
+      const taskId = `video-natural-${'9'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            FAKE_QUEUED_REQUEST_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const completed = await batch.readBatchState(created.statePath)
+      expect(completed.status).toBe('succeeded')
+      expect(completed.items[0]).not.toHaveProperty('stagingRecovery')
+      const payloads = (await readFile(requestLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      expect(payloads).toHaveLength(2)
+      expect(payloads[1].taskId).toBe(payloads[0].taskId)
+      expect(payloads[1].idempotencyKey).toBe(payloads[0].idempotencyKey)
+      expect(payloads[1].input.videoKey).toBe(payloads[0].input.videoKey)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps journal-bound media when a crashed trigger is already owned by the platform', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-platform-owned-crash-recovery-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const fakePlatform = resolve(root, 'fake-platform-owned-recovery.mjs')
+    const video = resolve(root, 'platform-owned.mp4')
+    const videoKey = '00000000-0000-4000-8000-000000000020.mp4'
+    try {
+      await writeFile(video, 'platform-owned-after-trigger-crash')
+      await mkdir(inboxRoot, { recursive: true })
+      await writeFile(resolve(inboxRoot, videoKey), 'platform-owned-after-trigger-crash')
+      await writeFile(fakePlatform, `
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
+    return json({ runs: [{
+      taskId,
+      status: 'succeeded',
+      input: { videoKey: '${videoKey}' },
+      output: { summary: 'done' },
+    }] })
+  }
+  throw new Error('unexpected_platform_request')
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<Record<string, any>>
+        writeBatchState: (path: string, state: Record<string, any>) => Promise<Record<string, any>>
+      }
+      const taskId = `video-natural-${'d'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        trustedExistingMaterialId: 'MATERIAL-EXISTING-020',
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const state = await batch.readBatchState(created.statePath)
+      const stagedStat = await stat(resolve(inboxRoot, videoKey))
+      state.items[0].stagingRecovery = {
+        schemaVersion: 1,
+        phase: 'triggering',
+        sourceIdentity: state.items[0].sourceIdentity,
+        anchorName: '.source-anchor-2147483646-00000000-0000-4000-8000-000000000021',
+        incomingName: `.incoming-2147483646-${videoKey}`,
+        videoKey,
+        materialId: 'MATERIAL-EXISTING-020',
+        contentSha256: createHash('sha256').update('platform-owned-after-trigger-crash').digest('hex'),
+        incomingIdentity: null,
+        stagedIdentity: {
+          dev: stagedStat.dev,
+          ino: stagedStat.ino,
+          size: stagedStat.size,
+          mtimeMs: stagedStat.mtimeMs,
+          ctimeMs: stagedStat.ctimeMs,
+        },
+        ownershipToken: '00000000-0000-4000-8000-000000000021',
+        taskId,
+        idempotencyKey: taskId,
+        batchId: state.batchId,
+      }
+      await batch.writeBatchState(created.statePath, state)
+
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const recovered = await batch.readBatchState(created.statePath)
+      expect(recovered.status).toBe('succeeded')
+      expect(recovered.items[0]).not.toHaveProperty('stagingRecovery')
+      await expect(access(resolve(inboxRoot, videoKey))).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('reconciles an active parent periodically and advances the same lane as soon as it fails', async () => {
@@ -1369,7 +2151,35 @@ globalThis.fetch = async (input, init = {}) => {
         batchRoot: stateRoot,
       }
       const paused = await batch.createBatchState({ ...common, batchId: 'paused-first', videoDir: pausedDir })
-      await batch.writeBatchState(paused.statePath, { ...paused.state, status: 'paused', error: 'manual' })
+      await mkdir(inboxRoot, { recursive: true })
+      const pausedVideoKey = '00000000-0000-4000-8000-000000000060.mp4'
+      const pausedStagedPath = resolve(inboxRoot, pausedVideoKey)
+      await writeFile(pausedStagedPath, 'paused')
+      const pausedStagedStat = await stat(pausedStagedPath)
+      const pausedState = { ...paused.state, status: 'paused', error: 'manual' } as Record<string, any>
+      pausedState.items[0].stagingRecovery = {
+        schemaVersion: 1,
+        phase: 'discarding',
+        sourceIdentity: pausedState.items[0].sourceIdentity,
+        anchorName: '.source-anchor-2147483646-00000000-0000-4000-8000-000000000061',
+        incomingName: `.incoming-2147483646-${pausedVideoKey}`,
+        videoKey: pausedVideoKey,
+        materialId: 'MATERIAL-PAUSED-CLEANUP',
+        contentSha256: createHash('sha256').update('paused').digest('hex'),
+        incomingIdentity: null,
+        stagedIdentity: {
+          dev: pausedStagedStat.dev,
+          ino: pausedStagedStat.ino,
+          size: pausedStagedStat.size,
+          mtimeMs: pausedStagedStat.mtimeMs,
+          ctimeMs: pausedStagedStat.ctimeMs,
+        },
+        ownershipToken: '00000000-0000-4000-8000-000000000061',
+        taskId: pausedState.items[0].taskId,
+        idempotencyKey: pausedState.items[0].idempotencyKey,
+        batchId: pausedState.batchId,
+      }
+      await batch.writeBatchState(paused.statePath, pausedState)
       const queued = await batch.createBatchState({ ...common, batchId: 'queued-second', videoDir: queuedDir })
       const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
       await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -1384,7 +2194,10 @@ globalThis.fetch = async (input, init = {}) => {
           ? rejectPromise(new Error(stderr || error.message))
           : resolvePromise())
       })
-      expect((await batch.readBatchState(paused.statePath)).status).toBe('paused')
+      const reconciledPaused = await batch.readBatchState(paused.statePath) as Record<string, any>
+      expect(reconciledPaused.status).toBe('paused')
+      expect(reconciledPaused.items[0]).not.toHaveProperty('stagingRecovery')
+      await expect(access(pausedStagedPath)).rejects.toMatchObject({ code: 'ENOENT' })
       expect((await batch.readBatchState(queued.statePath)).status).toBe('succeeded')
       expect(await readFile(requestLog, 'utf8')).toContain('queued-second:video:001:')
       expect(await readFile(requestLog, 'utf8')).not.toContain('paused-first:video:001:')
@@ -1486,4 +2299,330 @@ globalThis.fetch = async (input, init = {}) => {
       await rm(root, { recursive: true, force: true })
     }
   }, 10_000)
+
+  it('finishes journal-bound discarding before accepting an existing platform record', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-discard-existing-run-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const fakePlatform = resolve(root, 'fake-discard-existing-platform.mjs')
+    const video = resolve(root, 'discard-existing.mp4')
+    const videoKey = '00000000-0000-4000-8000-000000000030.mp4'
+    try {
+      const content = 'discard-existing-media'
+      await writeFile(video, content)
+      await mkdir(inboxRoot, { recursive: true })
+      const stagedPath = resolve(inboxRoot, videoKey)
+      await writeFile(stagedPath, content)
+      await writeFile(fakePlatform, `
+const json = body => new Response(JSON.stringify(body), {
+  status: 200,
+  headers: { 'content-type': 'application/json' },
+})
+globalThis.fetch = async input => {
+  const url = new URL(String(input))
+  const taskId = url.searchParams.get('taskId')
+  if (url.pathname === '/api/n8n/runs') return json({ runs: [{
+    taskId,
+    status: 'succeeded',
+    input: { videoKey: '00000000-0000-4000-8000-000000000099.mp4' },
+  }] })
+  throw new Error('unexpected_platform_request')
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<Record<string, any>>
+        writeBatchState: (path: string, state: Record<string, any>) => Promise<Record<string, any>>
+      }
+      const taskId = `video-natural-${'e'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const state = await batch.readBatchState(created.statePath)
+      const stagedStat = await stat(stagedPath)
+      state.status = 'recovering'
+      state.items[0].status = 'running'
+      state.items[0].stagingRecovery = {
+        schemaVersion: 1,
+        phase: 'discarding',
+        sourceIdentity: state.items[0].sourceIdentity,
+        anchorName: '.source-anchor-2147483646-00000000-0000-4000-8000-000000000031',
+        incomingName: `.incoming-2147483646-${videoKey}`,
+        videoKey,
+        materialId: 'MATERIAL-EXISTING-030',
+        contentSha256: createHash('sha256').update(content).digest('hex'),
+        incomingIdentity: null,
+        stagedIdentity: {
+          dev: stagedStat.dev,
+          ino: stagedStat.ino,
+          size: stagedStat.size,
+          mtimeMs: stagedStat.mtimeMs,
+          ctimeMs: stagedStat.ctimeMs,
+        },
+        ownershipToken: '00000000-0000-4000-8000-000000000031',
+        taskId,
+        idempotencyKey: taskId,
+        batchId: state.batchId,
+      }
+      await batch.writeBatchState(created.statePath, state)
+
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+      const recovered = await batch.readBatchState(created.statePath)
+      expect(recovered.status).toBe('succeeded')
+      expect(recovered.items[0]).not.toHaveProperty('stagingRecovery')
+      await expect(access(stagedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('quarantines an unverifiable item without blocking later items in the same batch', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-unknown-video-key-attention-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const requestLog = resolve(root, 'requests.log')
+    const fakePlatform = resolve(root, 'fake-unknown-video-key-platform.mjs')
+    const videoDir = resolve(root, 'videos')
+    const stagedVideoKey = '00000000-0000-4000-8000-000000000071.mp4'
+    try {
+      await mkdir(videoDir)
+      await writeFile(resolve(videoDir, '01-first.mp4'), 'unknown-key-media')
+      await writeFile(resolve(videoDir, '02-second.mp4'), 'next-batch-media')
+      await mkdir(inboxRoot, { recursive: true })
+      const stagedPath = resolve(inboxRoot, stagedVideoKey)
+      await writeFile(stagedPath, 'unknown-key-media')
+      await writeFile(fakePlatform, `
+import { appendFileSync } from 'node:fs'
+const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+globalThis.fetch = async (input, init = {}) => {
+  const url = new URL(String(input))
+  const method = init.method || 'GET'
+  if (method === 'GET' && url.pathname === '/api/n8n/runs') {
+    const taskId = url.searchParams.get('taskId')
+    return json({ runs: taskId === process.env.FAKE_ATTENTION_TASK_ID
+      ? [{ taskId, status: 'running', input: {} }]
+      : [] })
+  }
+  if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
+    const body = JSON.parse(String(init.body))
+    appendFileSync(process.env.FAKE_PLATFORM_LOG, body.taskId + '\\n')
+    return json({ taskId: body.taskId, status: 'succeeded' })
+  }
+  return json({ error: 'unexpected request' })
+}
+`)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createBatchState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<Record<string, any>>
+        writeBatchState: (path: string, state: Record<string, any>) => Promise<Record<string, any>>
+      }
+      const common = {
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        inboxRoot,
+        batchRoot: stateRoot,
+      }
+      const created = await batch.createBatchState({
+        ...common,
+        batchId: 'attention-same-batch',
+        videoDir,
+      })
+      const firstState = await batch.readBatchState(created.statePath)
+      const firstTaskId = firstState.items[0].taskId
+      const stagedStat = await stat(stagedPath)
+      firstState.status = 'recovering'
+      firstState.items[0].status = 'running'
+      firstState.items[0].stagingRecovery = {
+        schemaVersion: 1,
+        phase: 'triggering',
+        sourceIdentity: firstState.items[0].sourceIdentity,
+        anchorName: '.source-anchor-2147483646-00000000-0000-4000-8000-000000000072',
+        incomingName: `.incoming-2147483646-${stagedVideoKey}`,
+        videoKey: stagedVideoKey,
+        materialId: 'MATERIAL-UNKNOWN-VIDEO-KEY',
+        contentSha256: createHash('sha256').update('unknown-key-media').digest('hex'),
+        incomingIdentity: null,
+        stagedIdentity: {
+          dev: stagedStat.dev,
+          ino: stagedStat.ino,
+          size: stagedStat.size,
+          mtimeMs: stagedStat.mtimeMs,
+          ctimeMs: stagedStat.ctimeMs,
+        },
+        ownershipToken: '00000000-0000-4000-8000-000000000072',
+        taskId: firstTaskId,
+        idempotencyKey: firstTaskId,
+        batchId: firstState.batchId,
+      }
+      await batch.writeBatchState(created.statePath, firstState)
+      const secondTaskId = firstState.items[1].taskId
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            FAKE_ATTENTION_TASK_ID: firstTaskId,
+            FAKE_PLATFORM_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+
+      const quarantined = await batch.readBatchState(created.statePath)
+      expect(quarantined.status).toBe('completed_with_errors')
+      expect(quarantined.items[0].status).toBe('attention')
+      expect(quarantined.items[0].stagingRecovery.phase).toBe('triggering')
+      expect(await readFile(stagedPath, 'utf8')).toBe('unknown-key-media')
+      expect(quarantined.items[1].status).toBe('succeeded')
+      const attentionJournal = structuredClone(quarantined.items[0].stagingRecovery)
+      const firstRequests = (await readFile(requestLog, 'utf8')).trim().split('\n').filter(Boolean)
+      expect(firstRequests).toEqual([secondTaskId])
+
+      // An explicit recovery invocation must keep the quarantined ownership
+      // journal untouched and must not replay either the attention item or a
+      // later item that already succeeded in this same batch.
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], {
+          env: {
+            ...process.env,
+            FAKE_ATTENTION_TASK_ID: firstTaskId,
+            FAKE_PLATFORM_LOG: requestLog,
+            NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`]
+              .filter(Boolean).join(' '),
+          },
+        }, (error, _stdout, stderr) => error
+          ? rejectPromise(new Error(stderr || error.message))
+          : resolvePromise())
+      })
+      const recoveredAgain = await batch.readBatchState(created.statePath)
+      expect(recoveredAgain.status).toBe('completed_with_errors')
+      expect(recoveredAgain.items[0].status).toBe('attention')
+      expect(recoveredAgain.items[0].stagingRecovery).toEqual(attentionJournal)
+      expect(recoveredAgain.items[1].status).toBe('succeeded')
+      expect(await readFile(stagedPath, 'utf8')).toBe('unknown-key-media')
+      expect((await readFile(requestLog, 'utf8')).trim().split('\n').filter(Boolean)).toEqual(firstRequests)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('retries terminal-item journal cleanup instead of permanently skipping it', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-terminal-cleanup-retry-'))
+    const stateRoot = resolve(root, 'state')
+    const inboxRoot = resolve(root, 'inbox')
+    const video = resolve(root, 'terminal-cleanup.mp4')
+    const videoKey = '00000000-0000-4000-8000-000000000040.mp4'
+    try {
+      const content = 'terminal-cleanup-media'
+      await writeFile(video, content)
+      await mkdir(inboxRoot, { recursive: true })
+      const stagedPath = resolve(inboxRoot, videoKey)
+      await writeFile(stagedPath, content)
+      const moduleUrl = pathToFileURL(resolve(
+        process.cwd(),
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      const batch = await import(/* @vite-ignore */ moduleUrl) as {
+        createSingleVideoState: (input: Record<string, unknown>) => Promise<{ statePath: string }>
+        readBatchState: (path: string) => Promise<Record<string, any>>
+        writeBatchState: (path: string, state: Record<string, any>) => Promise<Record<string, any>>
+      }
+      const taskId = `video-natural-${'f'.repeat(64)}`
+      const created = await batch.createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl: 'http://127.0.0.1:3017',
+        bindingId: 'video-binding',
+        prompt: '分析视频',
+        visionRoute: null,
+        videoFile: video,
+        inboxRoot,
+        batchRoot: stateRoot,
+      })
+      const state = await batch.readBatchState(created.statePath)
+      const stagedStat = await stat(stagedPath)
+      state.status = 'succeeded'
+      state.items[0].status = 'succeeded'
+      state.items[0].completedAt = new Date().toISOString()
+      state.items[0].stagingRecovery = {
+        schemaVersion: 1,
+        phase: 'discarding',
+        sourceIdentity: state.items[0].sourceIdentity,
+        anchorName: '.source-anchor-2147483646-00000000-0000-4000-8000-000000000041',
+        incomingName: `.incoming-2147483646-${videoKey}`,
+        videoKey,
+        materialId: 'MATERIAL-TERMINAL-CLEANUP',
+        contentSha256: createHash('sha256').update(content).digest('hex'),
+        incomingIdentity: null,
+        stagedIdentity: {
+          dev: stagedStat.dev,
+          ino: stagedStat.ino,
+          size: stagedStat.size,
+          mtimeMs: stagedStat.mtimeMs,
+          ctimeMs: stagedStat.ctimeMs,
+        },
+        ownershipToken: '00000000-0000-4000-8000-000000000041',
+        taskId,
+        idempotencyKey: taskId,
+        batchId: state.batchId,
+      }
+      await batch.writeBatchState(created.statePath, state)
+      const claimPath = resolve(inboxRoot, '.cleanup-claim-00000000-0000-4000-8000-000000000041-final')
+      await writeFile(claimPath, 'conflicting-claim')
+      const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
+      const runWorker = () => new Promise<void>((resolvePromise, rejectPromise) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], (error, _stdout, stderr) => {
+          if (error) return rejectPromise(new Error(stderr || error.message))
+          resolvePromise()
+        })
+      })
+
+      await runWorker()
+      const failedCleanup = await batch.readBatchState(created.statePath)
+      expect(failedCleanup.status).toBe('recovering')
+      expect(failedCleanup.items[0].status).toBe('succeeded')
+      expect(failedCleanup.items[0].stagingRecovery.phase).toBe('discarding')
+
+      await rm(claimPath)
+      await runWorker()
+      const recovered = await batch.readBatchState(created.statePath)
+      expect(recovered.status).toBe('succeeded')
+      expect(recovered.items[0]).not.toHaveProperty('stagingRecovery')
+      await expect(access(stagedPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })

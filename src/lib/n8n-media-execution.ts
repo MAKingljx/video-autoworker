@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { access, chmod, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -827,11 +827,18 @@ export function mergeN8nMediaResults(
   const timeline = [...segmentIndexes].sort((a, b) => a - b).map(index => {
     const audioSegment = objectValue(audioSegments.find(item => Number(objectValue(item).index) === index))
     const visionSegment = objectValue(visionSegments.find(item => Number(objectValue(item).index) === index))
+    const suppliedConfidence = [audioSegment.confidence, visionSegment.confidence]
+      .map(Number)
+      .filter(value => Number.isFinite(value) && value >= 0 && value <= 1)
     return {
       index,
       timeRange: String(audioSegment.timeRange || visionSegment.timeRange || ''),
       transcript: String(audioSegment.transcript || ''),
       visualAnalysis: String(visionSegment.analysis || ''),
+      // Existing Whisper and visual routes do not expose calibrated
+      // probabilities. Persist 0 (unknown) instead of inventing certainty;
+      // future calibrated routes may supply a bounded value per segment.
+      confidence: suppliedConfidence.length ? Math.min(...suppliedConfidence) : 0,
     }
   })
   const timelineText = timeline.map(segment => [
@@ -922,10 +929,29 @@ export async function synthesizeN8nMediaResults(
         startTime: String(group[0]?.timeRange || '').split('-')[0],
         endTime: String(group.at(-1)?.timeRange || '').split('-')[1],
         summary: summary.slice(0, 8_000),
+        confidence: group.reduce((lowest, segment) => {
+          const value = Number(segment.confidence)
+          return Number.isFinite(value) && value >= 0 && value <= 1
+            ? Math.min(lowest, value)
+            : 0
+        }, 1),
       }
       await writeCheckpoint(workspace, checkpointName, chapter)
     }
-    chapters.push(chapter)
+    const storedConfidence = Number(chapter.confidence)
+    chapters.push({
+      ...chapter,
+      confidence: Number.isFinite(storedConfidence)
+        && storedConfidence >= 0
+        && storedConfidence <= 1
+        ? storedConfidence
+        : group.reduce((lowest, segment) => {
+          const value = Number(segment.confidence)
+          return Number.isFinite(value) && value >= 0 && value <= 1
+            ? Math.min(lowest, value)
+            : 0
+        }, 1),
+    })
   }
 
   let finalSummary = await readCheckpoint(workspace, 'final-summary.json', value => typeof value.summary === 'string')
@@ -969,5 +995,73 @@ export async function synthesizeN8nMediaResults(
 }
 
 export async function cleanupN8nMediaTask(taskId: string): Promise<void> {
-  await rm(mediaTaskWorkspace(taskId), { recursive: true, force: true })
+  if (
+    typeof taskId !== 'string'
+    || taskId.length < 1
+    || taskId.length > 120
+    || !/^[A-Za-z0-9._:-]+$/.test(taskId)
+  ) {
+    throw new Error('媒体清理任务标识无效')
+  }
+
+  const configuredRoot = mediaWorkRoot()
+  let rootStat: Awaited<ReturnType<typeof lstat>>
+  try {
+    rootStat = await lstat(configuredRoot)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw new Error('媒体工作区根目录类型不安全')
+  }
+  const controlledRoot = await realpath(configuredRoot)
+  const digest = createHash('sha256').update(taskId).digest('hex')
+  const workspace = join(controlledRoot, digest)
+  if (dirname(workspace) !== controlledRoot || basename(workspace) !== digest) {
+    throw new Error('媒体工作区清理路径越界')
+  }
+
+  let workspaceStat: Awaited<ReturnType<typeof lstat>>
+  try {
+    workspaceStat = await lstat(workspace)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  if (workspaceStat.isSymbolicLink() || !workspaceStat.isDirectory()) {
+    throw new Error('媒体任务工作区类型不安全')
+  }
+  if (await realpath(workspace) !== workspace) {
+    throw new Error('媒体任务工作区路径不受控')
+  }
+
+  const metadataPath = join(workspace, 'metadata.json')
+  const metadataStat = await lstat(metadataPath)
+  if (metadataStat.isSymbolicLink() || !metadataStat.isFile() || metadataStat.size > 2 * 1024 * 1024) {
+    throw new Error('媒体任务工作区元数据无效')
+  }
+  let metadata: unknown
+  try {
+    metadata = JSON.parse(await readFile(metadataPath, 'utf8'))
+  } catch {
+    throw new Error('媒体任务工作区元数据不可解析')
+  }
+  if (
+    !metadata
+    || typeof metadata !== 'object'
+    || Array.isArray(metadata)
+    || (metadata as { taskId?: unknown }).taskId !== taskId
+    || (metadata as { kind?: unknown }).kind !== 'prepared-video'
+  ) {
+    throw new Error('媒体任务工作区与清理任务不匹配')
+  }
+
+  await rm(workspace, { recursive: true, force: false })
+  try {
+    await lstat(workspace)
+    throw new Error('媒体任务工作区清理后仍然存在')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
 }

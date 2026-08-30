@@ -33,6 +33,28 @@ describe('duplicate confirmation store', () => {
     expect(statSync(pathname).mode & 0o777).toBe(0o600)
   })
 
+  it('persists only the explicitly trusted task material identity field', () => {
+    const pathname = storagePath()
+    const scopeKey = duplicateConfirmationScopeKey('agent:second-original:explicit:material-id')
+    const operation = {
+      kind: 'task', id: 'video-command-test', path: '/data/video.mov',
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    }
+    const store = createDuplicateConfirmationStore({ storagePath: pathname })
+    store.set(scopeKey, operation)
+    expect(createDuplicateConfirmationStore({ storagePath: pathname }).take(scopeKey)).toEqual(operation)
+
+    for (const trustedExistingMaterialId of [null, 123, true, {}, [], ' MATERIAL-001 ']) {
+      expect(() => store.set(scopeKey, {
+        kind: 'task', id: 'video-command-test', path: '/data/video.mov', trustedExistingMaterialId,
+      })).toThrow('valid confirmation scope and operation are required')
+    }
+    expect(() => store.set(scopeKey, {
+      kind: 'task', id: 'video-command-test', path: '/data/video.mov',
+      materialId: 'MATERIAL-MODEL-VISIBLE-001',
+    })).toThrow('valid confirmation scope and operation are required')
+  })
+
   it('expires persisted operations without returning them', () => {
     let clock = 1_000
     const pathname = storagePath()

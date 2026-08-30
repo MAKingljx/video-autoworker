@@ -12,6 +12,7 @@ const runAegisReviews = vi.fn()
 const requeueStaleTasks = vi.fn()
 const autoRouteInboxTasks = vi.fn()
 const spawnRecurringTasks = vi.fn()
+const drainN8nMediaCleanupDebts = vi.fn()
 const pruneGatewaySessionsOlderThan = vi.fn()
 const getAgentLiveStatuses = vi.fn()
 const logger = { info: vi.fn(), warn: vi.fn() }
@@ -43,6 +44,7 @@ vi.mock('@/lib/skill-sync', () => ({ syncSkillsFromDisk }))
 vi.mock('@/lib/local-agent-sync', () => ({ syncLocalAgents }))
 vi.mock('@/lib/task-dispatch', () => ({ dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks }))
 vi.mock('@/lib/recurring-tasks', () => ({ spawnRecurringTasks }))
+vi.mock('@/lib/n8n-media-cleanup', () => ({ drainN8nMediaCleanupDebts }))
 
 describe('scheduler gateway live-status boundary', () => {
   beforeEach(() => {
@@ -64,6 +66,7 @@ describe('scheduler gateway live-status boundary', () => {
     runAegisReviews.mockResolvedValue({ ok: true, message: 'No reviews' })
     requeueStaleTasks.mockResolvedValue({ ok: true, message: 'No stale tasks' })
     spawnRecurringTasks.mockResolvedValue({ ok: true, message: 'No recurring tasks' })
+    drainN8nMediaCleanupDebts.mockResolvedValue({ scanned: 1, cleaned: 1, pending: 0, rejected: 0 })
     pruneGatewaySessionsOlderThan.mockReturnValue({ deleted: 0, filesTouched: 0 })
 
     getDatabase.mockReturnValue({
@@ -99,6 +102,24 @@ describe('scheduler gateway live-status boundary', () => {
     expect(result).toEqual({
       ok: true,
       message: 'Gateway sync: 0 created, 0 updated, 1 total | Live status: 1 refreshed',
+    })
+  })
+
+  it('runs the durable media cleanup debt janitor independently of retention cleanup', async () => {
+    const { triggerTask } = await import('@/lib/scheduler')
+
+    const result = await triggerTask('media_cleanup_debt')
+
+    expect(drainN8nMediaCleanupDebts).toHaveBeenCalledWith(
+      expect.anything(), { limit: 20 },
+    )
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'n8n_media_cleanup_debt_retry',
+      actor: 'scheduler',
+    }))
+    expect(result).toEqual({
+      ok: true,
+      message: 'Media cleanup debts: 1 cleared, 0 pending, 0 rejected',
     })
   })
 })

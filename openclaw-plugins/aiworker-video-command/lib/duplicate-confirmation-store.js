@@ -14,6 +14,7 @@ const DEFAULT_TTL_MS = 15 * 60 * 1_000
 const DEFAULT_MAX_ENTRIES = 256
 const SCOPE_DOMAIN = 'aiworker-video-command:duplicate-confirmation:v1\0'
 const STORAGE_VERSION = 1
+const MATERIAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 
 export function duplicateConfirmationScopeKey(value) {
   if (typeof value !== 'string' || !value.trim()) return null
@@ -54,12 +55,22 @@ export function createDuplicateConfirmationStore({
   }
 
   function validOperation(operation) {
+    // Only trusted adapters may seed an existing material identity. Reject the
+    // old generic field name so it cannot blur into a model-originated value.
+    const legacyMaterialIdAbsent = !Object.hasOwn(operation || {}, 'materialId')
+    const trustedExistingMaterialIdValid = !Object.hasOwn(operation || {}, 'trustedExistingMaterialId')
+      || (operation.kind === 'task'
+        && typeof operation.trustedExistingMaterialId === 'string'
+        && operation.trustedExistingMaterialId === operation.trustedExistingMaterialId.trim()
+        && MATERIAL_ID_PATTERN.test(operation.trustedExistingMaterialId))
     return operation
       && ['task', 'batch'].includes(operation.kind)
       && typeof operation.id === 'string'
       && operation.id.length > 0
       && typeof operation.path === 'string'
       && operation.path.length > 0
+      && legacyMaterialIdAbsent
+      && trustedExistingMaterialIdValid
   }
 
   function load() {

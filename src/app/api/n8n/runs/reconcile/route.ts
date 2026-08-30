@@ -3,9 +3,11 @@ import { z } from 'zod'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import { requireN8nRole } from '@/lib/n8n'
 import {
+  N8N_VIDEO_FINALIZE_LEASE_EXPIRED,
   n8nTaskIdentitySchema,
   reconcileScopedN8nVideoTaskRun,
 } from '@/lib/n8n-task-runs'
+import { retryN8nMediaCleanupDebt } from '@/lib/n8n-media-cleanup'
 import { mutationLimiter } from '@/lib/rate-limit'
 
 const reconcileRequestSchema = z.object({
@@ -25,7 +27,8 @@ export async function POST(request: NextRequest) {
   }
 
   const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
-  const result = reconcileScopedN8nVideoTaskRun(getDatabase(), parsed.data.taskId, scope)
+  const db = getDatabase()
+  const result = reconcileScopedN8nVideoTaskRun(db, parsed.data.taskId, scope)
   if (result.outcome === 'not_found') {
     return NextResponse.json({ error: '未找到任务运行记录' }, { status: 404 })
   }
@@ -51,11 +54,24 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  let cleanupPending = false
+  if (['reconciled', 'terminal'].includes(result.outcome)) {
+    try {
+      const cleanup = await retryN8nMediaCleanupDebt(db, parsed.data.taskId, { force: true })
+      cleanupPending = !['cleaned', 'not_found'].includes(cleanup.outcome)
+    } catch {
+      // Reconciliation is already committed; cleanup bookkeeping must not
+      // revert or disguise the terminal database state.
+      cleanupPending = result.code === N8N_VIDEO_FINALIZE_LEASE_EXPIRED
+    }
+  }
+
   return NextResponse.json({
     taskId: parsed.data.taskId,
     status: result.run?.status,
     error: result.run?.error,
     reconciled: result.outcome === 'reconciled',
     code: result.code,
+    ...(cleanupPending ? { cleanupPending: true } : {}),
   }, { headers: { 'Cache-Control': 'no-store' } })
 }

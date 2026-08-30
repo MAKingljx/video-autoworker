@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "brainName": "导演脑",
   "projectId": "PROJ-VIDEO-AUTOWORKER",
   "environment": "test",
@@ -23,6 +23,25 @@
       ]
     },
     {
+      "key": "works",
+      "name": "作品",
+      "stableId": "作品 ID",
+      "fields": [
+        { "name": "作品名称", "type": 1, "primary": true },
+        { "name": "作品 ID", "type": 1 },
+        { "name": "项目 ID", "type": 1 },
+        { "name": "别名", "type": 1 },
+        { "name": "作品类型", "type": 1 },
+        { "name": "状态", "type": 3, "options": ["草稿", "生效", "归档"] },
+        { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
+        { "name": "来源", "type": 1 },
+        { "name": "更新时间", "type": 5 }
+      ]
+    },
+    {
       "key": "director_intents",
       "name": "导演意图",
       "stableId": "意图版本 ID",
@@ -41,6 +60,9 @@
         { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["草稿", "待审核", "生效", "废弃"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -53,6 +75,7 @@
         { "name": "证据名称", "type": 1, "primary": true },
         { "name": "证据 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "任务 ID", "type": 1 },
         { "name": "批次 ID", "type": 1 },
         { "name": "素材 ID", "type": 1 },
@@ -71,8 +94,13 @@
         { "name": "证据摘要", "type": 1 },
         { "name": "校验摘要", "type": 1 },
         { "name": "分析版本", "type": 1 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "置信度", "type": 2 },
         { "name": "状态", "type": 3, "options": ["候选", "已核验", "失效"] },
+        { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -104,6 +132,9 @@
         { "name": "生效时间", "type": 5 },
         { "name": "状态", "type": 3, "options": ["候选", "待审核", "已确认", "已合并", "失效"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -116,6 +147,7 @@
         { "name": "节点名称", "type": 1, "primary": true },
         { "name": "节点 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "节点类型", "type": 3, "options": ["事件", "冲突", "转折", "悬念", "人物变化", "未解决问题"] },
         { "name": "人物 ID", "type": 1 },
         { "name": "发生时间", "type": 1 },
@@ -123,8 +155,12 @@
         { "name": "变化", "type": 1 },
         { "name": "证据 ID", "type": 1 },
         { "name": "置信度", "type": 2 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["候选", "待审核", "已确认", "已解决", "失效"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -137,14 +173,19 @@
         { "name": "关系名称", "type": 1, "primary": true },
         { "name": "关系 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "源节点 ID", "type": 1 },
         { "name": "目标节点 ID", "type": 1 },
         { "name": "关系类型", "type": 3, "options": ["因果", "时间", "对照", "升级", "呼应", "解决"] },
         { "name": "判断理由", "type": 1 },
         { "name": "证据 ID", "type": 1 },
         { "name": "置信度", "type": 2 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["候选", "待审核", "已确认", "失效"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -157,6 +198,7 @@
         { "name": "判断名称", "type": 1, "primary": true },
         { "name": "判断 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "证据 ID", "type": 1 },
         { "name": "意图版本 ID", "type": 1 },
         { "name": "故事价值", "type": 2 },
@@ -172,8 +214,12 @@
         { "name": "置信度", "type": 2 },
         { "name": "人工结论", "type": 3, "options": ["未审核", "接受", "修改", "拒绝"] },
         { "name": "导演备注", "type": 1 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["候选", "待审核", "已确认", "失效"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -186,6 +232,7 @@
         { "name": "方案名称", "type": 1, "primary": true },
         { "name": "方案 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "意图版本 ID", "type": 1 },
         { "name": "节点 ID", "type": 1 },
         { "name": "证据 ID", "type": 1 },
@@ -199,8 +246,12 @@
         { "name": "结构说明", "type": 1 },
         { "name": "故事脚本", "type": 1 },
         { "name": "剪辑方案 ID", "type": 1 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["草稿", "待审核", "已批准", "废弃"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -213,6 +264,7 @@
         { "name": "案例名称", "type": 1, "primary": true },
         { "name": "案例 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "判断 ID", "type": 1 },
         { "name": "上下文", "type": 1 },
         { "name": "导演动作", "type": 3, "options": ["采用", "修改", "拒绝", "调序", "待定"] },
@@ -222,8 +274,12 @@
         { "name": "最终效果", "type": 1 },
         { "name": "时间线版本", "type": 1 },
         { "name": "证据 ID", "type": 1 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "复核状态", "type": 3, "options": ["待复核", "已确认", "有争议", "失效"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]
@@ -236,6 +292,7 @@
         { "name": "知识名称", "type": 1, "primary": true },
         { "name": "知识 ID", "type": 1 },
         { "name": "项目 ID", "type": 1 },
+        { "name": "作品 ID", "type": 1 },
         { "name": "知识类型", "type": 3, "options": ["技能", "技法"] },
         { "name": "知识分类", "type": 1 },
         { "name": "适用条件", "type": 1 },
@@ -245,8 +302,12 @@
         { "name": "案例 ID", "type": 1 },
         { "name": "验证次数", "type": 2 },
         { "name": "置信度", "type": 2 },
+        { "name": "上一版本 ID", "type": 1 },
         { "name": "状态", "type": 3, "options": ["候选", "待审核", "已验证", "废弃"] },
         { "name": "版本", "type": 1 },
+        { "name": "审核人", "type": 1 },
+        { "name": "审核时间", "type": 5 },
+        { "name": "审核原因", "type": 1 },
         { "name": "来源", "type": 1 },
         { "name": "更新时间", "type": 5 }
       ]

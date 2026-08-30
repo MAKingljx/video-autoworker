@@ -98,6 +98,33 @@ Call the tool once with exactly one of these parameter shapes:
 
 ## Runtime boundary
 
+### Director-brain evidence projection
+
+The versioned integration point from this task chain to the director brain is
+strictly one-way and is not a user-facing tool action. After the authoritative
+platform result is `succeeded`, trusted orchestration may pass the formal task
+result and an already resolved director-brain `workId` through
+`lib/director-brain-evidence.mjs` or
+`scripts/project-director-evidence.mjs`. The transformer accepts only the
+registered project, video-analysis task type, and formal result authority; it
+validates material identity, media duration, timeline or chapter ranges,
+analysis version, and confidence, then emits deterministic work-scoped
+material-evidence items.
+
+The transformer never opens Feishu or changes a task. Its output may only be
+handed to the director-brain maintenance `project-evidence` entry, which owns
+stable evidence IDs, idempotent creation, verification, and conflict failure.
+The projection must never update, retry, cancel, resubmit, or infer the state
+of the source task, queue, or n8n execution, and director-brain data must never
+flow back into this task state machine.
+
+Normal `status` and `result` conversations remain read-only. Do not use `exec`
+or call either projection script from a chat response, do not ask the user for
+a work ID, and do not treat the presence of these source files as proof that
+the remote production completion event is wired. Production orchestration must
+resolve and authorize the work binding outside the model before invoking this
+entry.
+
 The native `before_dispatch` hook can still complete qualifying Telegram
 private-chat requests before the agent runs. The tool is the direct OpenClaw
 entry for calls that reach `second-original` itself. Both routes call the same

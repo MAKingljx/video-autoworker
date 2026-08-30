@@ -4,7 +4,8 @@ const MAX_OUTPUT_BYTES = 64 * 1_024
 
 export function executeFile(file, args, options) {
   return new Promise((resolvePromise, rejectPromise) => {
-    execFile(file, args, {
+    let childStarted = false
+    const child = execFile(file, args, {
       ...options,
       encoding: 'utf8',
       maxBuffer: MAX_OUTPUT_BYTES,
@@ -13,11 +14,13 @@ export function executeFile(file, args, options) {
       if (error) {
         error.stdout = stdout
         error.stderr = stderr
+        error.childStarted = childStarted
         rejectPromise(error)
         return
       }
       resolvePromise({ stdout, stderr })
     })
+    child.once('spawn', () => { childStarted = true })
   })
 }
 

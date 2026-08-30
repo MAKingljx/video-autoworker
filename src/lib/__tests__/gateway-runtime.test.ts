@@ -72,4 +72,23 @@ describe('registerMcAsDashboard', () => {
     expect(result).toEqual({ registered: false, alreadySet: true })
     expect(after).toBe(before)
   })
+
+  it('does not mutate OpenClaw config in isolated test mode', async () => {
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        controlUi: {
+          allowedOrigins: ['https://existing.example.com'],
+        },
+      },
+    }, null, 2) + '\n', 'utf-8')
+    process.env.MISSION_CONTROL_TEST_MODE = '1'
+
+    const before = readFileSync(configPath, 'utf-8')
+    const { registerMcAsDashboard } = await import('@/lib/gateway-runtime')
+    const result = registerMcAsDashboard('http://127.0.0.1:3917')
+    const after = readFileSync(configPath, 'utf-8')
+
+    expect(result).toEqual({ registered: false, alreadySet: false })
+    expect(after).toBe(before)
+  })
 })
