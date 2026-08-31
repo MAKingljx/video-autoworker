@@ -2,17 +2,19 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -369,7 +371,7 @@ afterEach(() => {
 })
 
 describe('managed legacy media orphan reconciliation', () => {
-  it('makes the backup-family directory entry durable before copying members', () => {
+  it('durably stages an incomplete backup before copying and exclusively publishes it', () => {
     const source = readFileSync(script, 'utf8')
     const start = source.indexOf('async function createRollbackBackup')
     const end = source.indexOf('\nfunction manifestInput', start)
@@ -381,6 +383,15 @@ describe('managed legacy media orphan reconciliation', () => {
       .toBeGreaterThan(implementation.indexOf('mkdirSync(backupDir)'))
     expect(implementation.indexOf('fsyncDirectory(backupRoot)'))
       .toBeLessThan(implementation.indexOf('copyFileSync('))
+    const prepareStart = source.indexOf('async function createPrepare')
+    const prepareEnd = source.indexOf('\nfunction validateBackupManifest', prepareStart)
+    const prepareImplementation = source.slice(prepareStart, prepareEnd)
+    expect(prepareImplementation.indexOf('loadPreparedArtifact(Database, preparePath, true)'))
+      .toBeLessThan(prepareImplementation.indexOf('renameDirectoryExclusive('))
+    expect(prepareImplementation.indexOf('renameDirectoryExclusive('))
+      .toBeLessThan(prepareImplementation.indexOf('loadPreparedArtifact(Database, finalPreparePath)'))
+    expect(prepareImplementation.indexOf('loadPreparedArtifact(Database, finalPreparePath)'))
+      .toBeLessThan(prepareImplementation.indexOf('confirmationToken('))
     const fsyncStart = source.indexOf('function fsyncDirectory')
     const fsyncEnd = source.indexOf('\nfunction writeImmutableJson', fsyncStart)
     const fsyncImplementation = source.slice(fsyncStart, fsyncEnd)
@@ -416,6 +427,9 @@ describe('managed legacy media orphan reconciliation', () => {
     try {
       const output = prepare(fixture)
       const directory = dirname(output.prepareManifest)
+      expect(basename(directory)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u)
+      expect(output.prepareManifest).not.toContain('.pending-')
+      expect(readdirSync(fixture.backupRoot)).toEqual([basename(directory)])
       expect(statSync(directory).mode & 0o777).toBe(0o500)
       expect(statSync(output.prepareManifest).mode & 0o777).toBe(0o400)
       const manifest = JSON.parse(readFileSync(join(directory, 'backup-manifest.json'), 'utf8'))
@@ -429,6 +443,123 @@ describe('managed legacy media orphan reconciliation', () => {
         expect(sha256(source)).toBe(member.sha256)
         expect(statSync(join(directory, member.name)).mode & 0o777).toBe(0o400)
       }
+      const expectedMembers = [
+        'backup-manifest.json',
+        'consistent-snapshot.db',
+        'mission-control.db',
+        'mission-control.db-shm',
+        'mission-control.db-wal',
+        'prepare-manifest.json',
+      ].sort()
+      expect(readdirSync(directory).sort()).toEqual(expectedMembers)
+      const snapshot = new Database(join(directory, 'consistent-snapshot.db'), {
+        readonly: true,
+        fileMustExist: true,
+      })
+      expect(snapshot.pragma('journal_mode', { simple: true })).toBe('delete')
+      expect(snapshot.pragma('quick_check', { simple: true })).toBe('ok')
+      snapshot.close()
+      expect(readdirSync(directory).sort()).toEqual(expectedMembers)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('leaves an ordinary pre-publish failure only in the incomplete pending namespace', () => {
+    const fixture = createFixture()
+    try {
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        { AIWORKER_TEST_LEGACY_ORPHAN_PREPARE_FAILPOINT: 'raw-copies-created' },
+      )
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toContain('test prepare failpoint reached')
+      const entries = readdirSync(fixture.backupRoot)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatch(/^\.pending-/u)
+      expect(statSync(join(fixture.backupRoot, entries[0])).mode & 0o777).toBe(0o700)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    'pending-created',
+    'raw-copies-created',
+    'snapshot-created',
+    'backup-manifest-created',
+    'before-publish',
+  ])('never publishes an incomplete prepare when SIGKILL occurs at %s', failpoint => {
+    const fixture = createFixture()
+    try {
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        {
+          AIWORKER_TEST_LEGACY_ORPHAN_PREPARE_FAILPOINT: failpoint,
+          AIWORKER_TEST_LEGACY_ORPHAN_FAILPOINT_ACTION: 'sigkill',
+        },
+      )
+      expect(result.status).toBeNull()
+      expect(result.signal).toBe('SIGKILL')
+      expect(result.stdout).toBe('')
+      const entries = readdirSync(fixture.backupRoot)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatch(/^\.pending-/u)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('leaves a fully verifiable final backup if SIGKILL occurs after exclusive publish', () => {
+    const fixture = createFixture()
+    try {
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        {
+          AIWORKER_TEST_LEGACY_ORPHAN_PREPARE_FAILPOINT: 'after-publish',
+          AIWORKER_TEST_LEGACY_ORPHAN_FAILPOINT_ACTION: 'sigkill',
+        },
+      )
+      expect(result.status).toBeNull()
+      expect(result.signal).toBe('SIGKILL')
+      expect(result.stdout).toBe('')
+      const entries = readdirSync(fixture.backupRoot)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).not.toMatch(/^\.pending-/u)
+      const directory = join(fixture.backupRoot, entries[0])
+      expect(readdirSync(directory).sort()).toEqual([
+        'backup-manifest.json',
+        'consistent-snapshot.db',
+        'mission-control.db',
+        'mission-control.db-shm',
+        'mission-control.db-wal',
+        'prepare-manifest.json',
+      ])
+      const snapshot = new Database(join(directory, 'consistent-snapshot.db'), {
+        readonly: true,
+        fileMustExist: true,
+      })
+      expect(snapshot.pragma('journal_mode', { simple: true })).toBe('delete')
+      expect(snapshot.pragma('quick_check', { simple: true })).toBe('ok')
+      snapshot.close()
+      expect(readdirSync(directory)).not.toContain('consistent-snapshot.db-journal')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('does not overwrite or nest into a final destination created after the absence check', () => {
+    const fixture = createFixture()
+    try {
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        { AIWORKER_TEST_LEGACY_ORPHAN_OCCUPY_FINAL: '1' },
+      )
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).toBe('')
+      const entries = readdirSync(fixture.backupRoot).sort()
+      expect(entries).toHaveLength(2)
+      const pending = entries.find(name => name.startsWith('.pending-'))
+      const occupied = entries.find(name => !name.startsWith('.pending-'))
+      expect(pending).toBeTruthy()
+      expect(occupied).toBeTruthy()
+      expect(readdirSync(join(fixture.backupRoot, occupied!))).toEqual(['do-not-overwrite'])
+      expect(readFileSync(join(fixture.backupRoot, occupied!, 'do-not-overwrite'), 'utf8'))
+        .toBe('occupied\n')
+      expect(readdirSync(join(fixture.backupRoot, occupied!))).not.toContain(pending!)
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
@@ -506,6 +637,61 @@ describe('managed legacy media orphan reconciliation', () => {
       const result = apply(fixture, output)
       expect(result.status).not.toBe(0)
       expect(result.stderr).toContain(expected)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects every unmanifested prepare-directory member before apply', () => {
+    const fixture = createFixture()
+    try {
+      const output = prepare(fixture)
+      const directory = dirname(output.prepareManifest)
+      for (const name of [
+        'consistent-snapshot.db-wal',
+        'consistent-snapshot.db-shm',
+        'consistent-snapshot.db-journal',
+        '.hidden-temporary-member',
+        'unexpected-directory',
+      ]) {
+        const pathname = join(directory, name)
+        chmodSync(directory, 0o700)
+        if (name === 'unexpected-directory') mkdirSync(pathname, { mode: 0o700 })
+        else writeFileSync(pathname, Buffer.alloc(0), { mode: 0o400 })
+        chmodSync(directory, 0o500)
+        const result = apply(fixture, output)
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain('prepare directory member set is invalid')
+        chmodSync(directory, 0o700)
+        rmSync(pathname, { recursive: true })
+        chmodSync(directory, 0o500)
+      }
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects a complete prepare that remains in the incomplete pending namespace', () => {
+    const fixture = createFixture()
+    try {
+      const output = prepare(fixture)
+      const finalDirectory = dirname(output.prepareManifest)
+      const pendingDirectory = join(fixture.backupRoot, `.pending-${basename(finalDirectory)}`)
+      renameSync(finalDirectory, pendingDirectory)
+      const result = apply(fixture, {
+        ...output,
+        prepareManifest: join(pendingDirectory, 'prepare-manifest.json'),
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('not in a managed backup directory')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects a manifested backup member with an unsafe hard-link count', () => {
+    const fixture = createFixture()
+    try {
+      const output = prepare(fixture)
+      const pathname = join(dirname(output.prepareManifest), 'consistent-snapshot.db')
+      linkSync(pathname, join(fixture.root, 'unexpected-snapshot-hardlink'))
+      const result = apply(fixture, output)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('link count is unsafe')
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 

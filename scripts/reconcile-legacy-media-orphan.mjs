@@ -12,6 +12,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  opendirSync,
   readFileSync,
   readSync,
   realpathSync,
@@ -42,6 +43,53 @@ const TEST_MODE = process.env.NODE_ENV === 'test'
 const MAX_JSON_BYTES = 16 * 1024 * 1024
 const MAX_DATABASE_BYTES = 64 * 1024 * 1024 * 1024
 const PREPARE_TTL_SECONDS = 10 * 60
+const BACKUP_MEMBER_NAMES = [
+  'mission-control.db',
+  'mission-control.db-wal',
+  'mission-control.db-shm',
+  'consistent-snapshot.db',
+]
+const PREPARE_DIRECTORY_MEMBERS = [
+  ...BACKUP_MEMBER_NAMES,
+  'backup-manifest.json',
+  'prepare-manifest.json',
+]
+const FINAL_BACKUP_DIRECTORY = /^\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
+const PENDING_BACKUP_DIRECTORY = /^\.pending-\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
+const EXCLUSIVE_RENAME_HELPER = `
+import ctypes
+import os
+import sys
+
+root, source, destination = sys.argv[1:]
+if '/' in source or '/' in destination or source in ('.', '..') or destination in ('.', '..'):
+    raise SystemExit(80)
+descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == 'darwin':
+        operation = libc.renameatx_np
+        flags = 0x00000004  # RENAME_EXCL
+    elif sys.platform.startswith('linux'):
+        operation = libc.renameat2
+        flags = 0x00000001  # RENAME_NOREPLACE
+    else:
+        raise SystemExit(81)
+    operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    operation.restype = ctypes.c_int
+    result = operation(
+        descriptor,
+        os.fsencode(source),
+        descriptor,
+        os.fsencode(destination),
+        flags,
+    )
+    if result != 0:
+        raise SystemExit(82)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+`.trim()
 
 function fail(message) {
   throw new Error(`legacy media orphan reconciliation failed: ${message}`)
@@ -209,6 +257,61 @@ function safeEntry(pathname, label, kind, requiredMode = null) {
 function identity(pathname, label, kind = 'file') {
   const entry = safeEntry(pathname, label, kind)
   return { path: pathname, dev: entry.dev.toString(), ino: entry.ino.toString() }
+}
+
+function optionalEntry(pathname, label) {
+  try { return lstatSync(pathname, { bigint: true }) } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    fail(`${label} state is unreadable`)
+  }
+}
+
+function directoryMemberNames(pathname, label) {
+  safeEntry(pathname, label, 'directory')
+  const names = []
+  const handle = opendirSync(pathname)
+  try {
+    for (;;) {
+      const entry = handle.readSync()
+      if (!entry) break
+      names.push(entry.name)
+    }
+  } finally { handle.closeSync() }
+  return names.sort()
+}
+
+function assertExactDirectoryMembers(pathname, expected, label) {
+  const names = directoryMemberNames(pathname, label)
+  if (canonicalJson(names) !== canonicalJson([...expected].sort())) {
+    fail(`${label} member set is invalid`)
+  }
+  for (const name of expected) safeEntry(join(pathname, name), `${label} member ${name}`, 'file', 0o400)
+}
+
+function assertNoSnapshotSidecars(pathname) {
+  for (const suffix of ['-wal', '-shm', '-journal']) {
+    if (optionalEntry(`${pathname}${suffix}`, 'authoritative snapshot sidecar')) {
+      fail('authoritative snapshot retained an unmanaged SQLite sidecar')
+    }
+  }
+}
+
+function triggerPrepareFailpoint(name) {
+  if (!TEST_MODE || process.env.AIWORKER_TEST_LEGACY_ORPHAN_PREPARE_FAILPOINT !== name) return
+  if (process.env.AIWORKER_TEST_LEGACY_ORPHAN_FAILPOINT_ACTION === 'sigkill') {
+    process.kill(process.pid, 'SIGKILL')
+  }
+  fail(`test prepare failpoint reached: ${name}`)
+}
+
+function occupyFinalDestinationForTest(pathname) {
+  if (!TEST_MODE || process.env.AIWORKER_TEST_LEGACY_ORPHAN_OCCUPY_FINAL !== '1') return
+  mkdirSync(pathname, { mode: 0o700 })
+  const sentinel = join(pathname, 'do-not-overwrite')
+  writeFileSync(sentinel, 'occupied\n', { mode: 0o400, flag: 'wx' })
+  fsyncFile(sentinel)
+  fsyncDirectory(pathname)
+  fsyncDirectory(dirname(pathname))
 }
 
 function parseArguments(argv) {
@@ -601,6 +704,20 @@ function closeDatabase(handle) {
   }
 }
 
+function normalizeAuthoritativeSnapshot(Database, pathname) {
+  const handle = openDatabase(Database, pathname, false)
+  try {
+    const journalMode = String(handle.db.pragma('journal_mode = DELETE', { simple: true })).toLowerCase()
+    if (journalMode !== 'delete') fail('authoritative snapshot journal mode is not self-contained')
+    if (handle.db.pragma('quick_check', { simple: true }) !== 'ok') {
+      fail('authoritative snapshot quick_check failed after journal normalization')
+    }
+  } finally { closeDatabase(handle) }
+  assertNoSnapshotSidecars(pathname)
+  fsyncFile(pathname)
+  fsyncDirectory(dirname(pathname))
+}
+
 function tableColumns(db, table, required) {
   const columns = new Set(db.pragma(`table_info(${table})`).map(row => row.name))
   if (required.some(name => !columns.has(name))) fail(`${table} schema is unavailable`)
@@ -931,6 +1048,19 @@ function fsyncDirectory(pathname) {
   }
 }
 
+function renameDirectoryExclusive(root, source, destination) {
+  const sourceName = basename(source)
+  const destinationName = basename(destination)
+  if (dirname(source) !== root || dirname(destination) !== root
+    || !PENDING_BACKUP_DIRECTORY.test(sourceName)
+    || !FINAL_BACKUP_DIRECTORY.test(destinationName)) {
+    fail('exclusive directory rename arguments are invalid')
+  }
+  run('/usr/bin/python3', [
+    '-I', '-S', '-c', EXCLUSIVE_RENAME_HELPER, root, sourceName, destinationName,
+  ], 'exclusive directory rename')
+}
+
 function writeImmutableJson(pathname, value, mode = 0o400) {
   const temporary = join(dirname(pathname), `.${basename(pathname)}.${randomBytes(8).toString('hex')}.tmp`)
   writeFileSync(temporary, `${canonicalJson(value)}\n`, { mode: 0o600, flag: 'wx' })
@@ -1003,13 +1133,20 @@ async function createRollbackBackup(Database, evidence, input) {
   }
   const stamp = new Date().toISOString().replaceAll(/[:.]/gu, '')
   const backupNonce = randomBytes(32).toString('hex')
-  const backupDir = join(backupRoot, `${stamp}-${backupNonce.slice(0, 12)}`)
+  const finalName = `${stamp}-${backupNonce.slice(0, 12)}`
+  const finalDir = join(backupRoot, finalName)
+  const backupDir = join(backupRoot, `.pending-${finalName}`)
+  if (optionalEntry(finalDir, 'final backup destination')
+    || optionalEntry(backupDir, 'pending backup destination')) {
+    fail('backup destination already exists')
+  }
   mkdirSync(backupDir, { mode: 0o700 })
-  safeEntry(backupDir, 'backup directory', 'directory', 0o700)
-  // Persist the new backup-family member before any database bytes are copied.
-  // A power loss must not leave a fully written child directory whose parent
-  // entry was never made durable.
+  safeEntry(backupDir, 'pending backup directory', 'directory', 0o700)
+  // Persist an explicitly incomplete, private staging entry before copying any
+  // database bytes. Only a completely sealed prepare may enter the final
+  // backup-family namespace.
   fsyncDirectory(backupRoot)
+  triggerPrepareFailpoint('pending-created')
   const missionPath = evidence.mission.database.path
   const sources = [missionPath, `${missionPath}-wal`, `${missionPath}-shm`]
   for (const pathname of sources) {
@@ -1024,6 +1161,7 @@ async function createRollbackBackup(Database, evidence, input) {
     chmodSync(copies[index], 0o400)
     fsyncFile(copies[index])
   }
+  triggerPrepareFailpoint('raw-copies-created')
   const after = sources.map((pathname, index) => fileFingerprint(pathname, `source backup member ${index}`))
   if (canonicalJson(before) !== canonicalJson(after)) fail('SQLite source changed while creating rollback backup')
   const rawCopied = copies.map((pathname, index) => fileFingerprint(pathname, `copied backup member ${index}`))
@@ -1037,6 +1175,7 @@ async function createRollbackBackup(Database, evidence, input) {
   const snapshotPath = join(backupDir, 'consistent-snapshot.db')
   const sourceDb = openDatabase(Database, missionPath, true)
   try { await sourceDb.db.backup(snapshotPath) } finally { closeDatabase(sourceDb) }
+  normalizeAuthoritativeSnapshot(Database, snapshotPath)
   chmodSync(snapshotPath, 0o400)
   fsyncFile(snapshotPath)
   const backupDb = openDatabase(Database, snapshotPath, true)
@@ -1048,7 +1187,10 @@ async function createRollbackBackup(Database, evidence, input) {
       fail('authoritative rollback snapshot does not match prepared state')
     }
   } finally { closeDatabase(backupDb) }
+  assertNoSnapshotSidecars(snapshotPath)
+  triggerPrepareFailpoint('snapshot-created')
   const memberPaths = [...copies, snapshotPath]
+  assertExactDirectoryMembers(backupDir, BACKUP_MEMBER_NAMES, 'backup directory')
   const copied = [...rawCopied, fileFingerprint(snapshotPath, 'consistent backup snapshot')]
   const manifest = {
     schema: BACKUP_SCHEMA,
@@ -1074,6 +1216,9 @@ async function createRollbackBackup(Database, evidence, input) {
   }
   const manifestPath = join(backupDir, 'backup-manifest.json')
   const writtenManifest = writeImmutableJson(manifestPath, manifest)
+  assertExactDirectoryMembers(
+    backupDir, [...BACKUP_MEMBER_NAMES, 'backup-manifest.json'], 'backup directory',
+  )
   const directoryFd = openSync(backupDir, constants.O_RDONLY)
   try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
   const verified = readJsonFile(manifestPath, 'backup manifest', 0o400).value
@@ -1081,7 +1226,15 @@ async function createRollbackBackup(Database, evidence, input) {
     || verified.members.some((item, index) => fileFingerprint(memberPaths[index], `verified member ${index}`).sha256 !== item.sha256)) {
     fail('rollback backup manifest verification failed')
   }
-  return { backupDir, manifestPath, manifest, manifestSha256: writtenManifest.sha256 }
+  triggerPrepareFailpoint('backup-manifest-created')
+  return {
+    backupRoot,
+    backupDir,
+    finalDir,
+    manifestPath,
+    manifest,
+    manifestSha256: writtenManifest.sha256,
+  }
 }
 
 function manifestInput(input) {
@@ -1159,18 +1312,59 @@ async function createPrepare(Database, input, evidence) {
   const preparePath = join(backup.backupDir, 'prepare-manifest.json')
   const written = writeImmutableJson(preparePath, manifest)
   chmodSync(backup.backupDir, 0o500)
-  const directoryFd = openSync(backup.backupDir, constants.O_RDONLY)
-  try { fsyncSync(directoryFd) } finally { closeSync(directoryFd) }
+  fsyncDirectory(backup.backupDir)
+  assertExactDirectoryMembers(backup.backupDir, PREPARE_DIRECTORY_MEMBERS, 'prepare directory')
+  const staged = loadPreparedArtifact(Database, preparePath, true)
+  if (staged.prepareSha256 !== written.sha256
+    || staged.backup.sha256 !== backup.manifestSha256
+    || canonicalJson(staged.manifest) !== canonicalJson(manifest)) {
+    fail('sealed pending prepare verification failed')
+  }
+  triggerPrepareFailpoint('before-publish')
+
+  const pendingIdentity = safeEntry(backup.backupDir, 'pending prepare directory', 'directory', 0o500)
+  if (optionalEntry(backup.finalDir, 'final backup destination')) {
+    fail('final backup destination appeared before publish')
+  }
+  occupyFinalDestinationForTest(backup.finalDir)
+  renameDirectoryExclusive(backup.backupRoot, backup.backupDir, backup.finalDir)
+  const finalIdentity = safeEntry(backup.finalDir, 'published prepare directory', 'directory', 0o500)
+  if (finalIdentity.dev !== pendingIdentity.dev || finalIdentity.ino !== pendingIdentity.ino
+    || finalIdentity.nlink !== pendingIdentity.nlink) {
+    fail('published prepare directory identity changed during rename')
+  }
+  if (optionalEntry(backup.backupDir, 'pending backup destination')) {
+    fail('pending backup directory remained after publish')
+  }
+  fsyncDirectory(backup.finalDir)
+  fsyncDirectory(backup.backupRoot)
+  triggerPrepareFailpoint('after-publish')
+
+  const finalPreparePath = join(backup.finalDir, 'prepare-manifest.json')
+  const published = loadPreparedArtifact(Database, finalPreparePath)
+  if (published.prepareSha256 !== written.sha256
+    || published.backup.sha256 !== backup.manifestSha256
+    || canonicalJson(published.manifest) !== canonicalJson(manifest)) {
+    fail('published prepare verification failed')
+  }
+  fsyncDirectory(backup.finalDir)
+  fsyncDirectory(backup.backupRoot)
+  const token = confirmationToken(published.prepareSha256, published.backup.sha256, published.manifest)
   return {
-    path: preparePath,
+    path: finalPreparePath,
     sha256: written.sha256,
-    token: confirmationToken(written.sha256, backup.manifestSha256, manifest),
+    token,
     manifest,
-    backup,
+    backup: {
+      ...backup,
+      backupDir: backup.finalDir,
+      manifestPath: join(backup.finalDir, 'backup-manifest.json'),
+    },
   }
 }
 
 function validateBackupManifest(Database, directory, prepared, backupReference, input) {
+  assertExactDirectoryMembers(directory, PREPARE_DIRECTORY_MEMBERS, 'prepare directory')
   exactKeys(backupReference, ['name', 'sha256'], 'backup manifest reference')
   if (backupReference.name !== 'backup-manifest.json' || !SHA256.test(backupReference.sha256)) {
     fail('backup manifest reference is invalid')
@@ -1196,9 +1390,7 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
     updatedAt: input.expectedUpdatedAt,
   })) fail('backup target does not match prepare input')
   if (!Array.isArray(manifest.members) || manifest.members.length !== 4) fail('backup members are invalid')
-  const expectedNames = new Set([
-    'mission-control.db', 'mission-control.db-wal', 'mission-control.db-shm', 'consistent-snapshot.db',
-  ])
+  const expectedNames = new Set(BACKUP_MEMBER_NAMES)
   let authoritative = null
   for (const member of manifest.members) {
     exactKeys(member, ['bytes', 'name', 'role', 'sha256', 'sourceDev', 'sourceIno'], 'backup member')
@@ -1220,6 +1412,9 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
   if (expectedNames.size !== 0 || !authoritative) fail('backup member set is incomplete')
   const snapshot = openDatabase(Database, authoritative, true)
   try {
+    if (String(snapshot.db.pragma('journal_mode', { simple: true })).toLowerCase() !== 'delete') {
+      fail('authoritative rollback snapshot journal mode is not self-contained')
+    }
     const target = validateMissionTarget(snapshot.db, input, prepared.createdAt)
     if (rowDigest(target.child) !== rowDigest(prepared.target.child)
       || target.parentDigest !== prepared.target.parentDigest
@@ -1227,12 +1422,19 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
       fail('authoritative rollback snapshot state changed')
     }
   } finally { closeDatabase(snapshot) }
+  assertNoSnapshotSidecars(authoritative)
+  assertExactDirectoryMembers(directory, PREPARE_DIRECTORY_MEMBERS, 'prepare directory')
   return { manifest, pathname, sha256: backupReference.sha256 }
 }
 
-function loadPreparedApply(Database, pathname, suppliedToken) {
+function loadPreparedArtifact(Database, pathname, allowPending = false) {
   if (basename(pathname) !== 'prepare-manifest.json') fail('prepare manifest filename is invalid')
   const directory = dirname(pathname)
+  const directoryName = basename(directory)
+  if (!FINAL_BACKUP_DIRECTORY.test(directoryName)
+    && !(allowPending && PENDING_BACKUP_DIRECTORY.test(directoryName))) {
+    fail('prepare manifest is not in a managed backup directory')
+  }
   safeEntry(directory, 'prepare directory', 'directory', 0o500)
   const loaded = readJsonFile(pathname, 'prepare manifest', 0o400)
   const manifest = loaded.value
@@ -1253,9 +1455,18 @@ function loadPreparedApply(Database, pathname, suppliedToken) {
   const input = validateManifestInput(manifest.input)
   const backup = validateBackupManifest(Database, directory, manifest, manifest.backupManifest, input)
   const prepareSha256 = sha256(loaded.source)
-  const expectedToken = confirmationToken(prepareSha256, backup.sha256, manifest)
+  return { manifest, input, backup, prepareSha256 }
+}
+
+function loadPreparedApply(Database, pathname, suppliedToken) {
+  const prepared = loadPreparedArtifact(Database, pathname)
+  const expectedToken = confirmationToken(
+    prepared.prepareSha256,
+    prepared.backup.sha256,
+    prepared.manifest,
+  )
   if (suppliedToken !== expectedToken) fail('confirmation token does not match immutable prepare evidence')
-  return { manifest, input, backup, prepareSha256, expectedToken }
+  return { ...prepared, expectedToken }
 }
 
 function reconcileInsideImmediate(Database, evidence, input) {
