@@ -902,6 +902,32 @@ function fsyncFile(pathname) {
   try { fsyncSync(descriptor) } finally { closeSync(descriptor) }
 }
 
+function fsyncDirectory(pathname) {
+  const expected = safeEntry(pathname, 'directory fsync target', 'directory')
+  const descriptor = openSync(
+    pathname,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  )
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (opened.dev !== expected.dev || opened.ino !== expected.ino
+      || opened.uid !== expected.uid || opened.mode !== expected.mode) {
+      fail('directory fsync target changed before open')
+    }
+    fsyncSync(descriptor)
+    const closed = fstatSync(descriptor, { bigint: true })
+    if (closed.dev !== opened.dev || closed.ino !== opened.ino
+      || closed.uid !== opened.uid || closed.mode !== opened.mode) {
+      fail('directory fsync target changed during fsync')
+    }
+  } finally { closeSync(descriptor) }
+  const current = safeEntry(pathname, 'directory fsync target', 'directory')
+  if (current.dev !== expected.dev || current.ino !== expected.ino
+    || current.uid !== expected.uid || current.mode !== expected.mode) {
+    fail('directory fsync target changed after fsync')
+  }
+}
+
 function writeImmutableJson(pathname, value, mode = 0o400) {
   const temporary = join(dirname(pathname), `.${basename(pathname)}.${randomBytes(8).toString('hex')}.tmp`)
   writeFileSync(temporary, `${canonicalJson(value)}\n`, { mode: 0o600, flag: 'wx' })
@@ -977,6 +1003,10 @@ async function createRollbackBackup(Database, evidence, input) {
   const backupDir = join(backupRoot, `${stamp}-${backupNonce.slice(0, 12)}`)
   mkdirSync(backupDir, { mode: 0o700 })
   safeEntry(backupDir, 'backup directory', 'directory', 0o700)
+  // Persist the new backup-family member before any database bytes are copied.
+  // A power loss must not leave a fully written child directory whose parent
+  // entry was never made durable.
+  fsyncDirectory(backupRoot)
   const missionPath = evidence.mission.database.path
   const sources = [missionPath, `${missionPath}-wal`, `${missionPath}-shm`]
   for (const pathname of sources) {

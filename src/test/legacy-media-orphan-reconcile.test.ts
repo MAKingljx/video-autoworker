@@ -365,6 +365,26 @@ afterEach(() => {
 })
 
 describe('managed legacy media orphan reconciliation', () => {
+  it('makes the backup-family directory entry durable before copying members', () => {
+    const source = readFileSync(script, 'utf8')
+    const start = source.indexOf('async function createRollbackBackup')
+    const end = source.indexOf('\nfunction manifestInput', start)
+    const implementation = source.slice(start, end)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    expect(implementation.indexOf('mkdirSync(backupDir')).toBeGreaterThan(-1)
+    expect(implementation.indexOf('fsyncDirectory(backupRoot)'))
+      .toBeGreaterThan(implementation.indexOf('mkdirSync(backupDir)'))
+    expect(implementation.indexOf('fsyncDirectory(backupRoot)'))
+      .toBeLessThan(implementation.indexOf('copyFileSync('))
+    const fsyncStart = source.indexOf('function fsyncDirectory')
+    const fsyncEnd = source.indexOf('\nfunction writeImmutableJson', fsyncStart)
+    const fsyncImplementation = source.slice(fsyncStart, fsyncEnd)
+    expect(fsyncImplementation).toContain('constants.O_DIRECTORY')
+    expect(fsyncImplementation).toContain('constants.O_NOFOLLOW')
+    expect(fsyncImplementation).toContain('fstatSync(descriptor, { bigint: true })')
+  })
+
   it('keeps default dry-run read-only and emits no token or backup', () => {
     const fixture = createFixture()
     try {

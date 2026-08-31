@@ -22,6 +22,37 @@ dry-run、prepare 和 apply 都会按各自阶段重新验证：
 
 JSON、manifest 和数据库成员均有尺寸上限；重复 JSON key、异常 `pgrep`、非 `ENOENT` 的路径检查失败、符号链接、路径双向重叠、身份漂移、附加活跃记录、备份变化或写前竞态都会失败关闭。工具不依赖尚未部署的签名冻结标记；`BEGIN IMMEDIATE` 是本次单行写入的线性化点。
 
+## 受管暂停与工作目录隔离
+
+`scripts/legacy-media-orphan-runtime-guard.mjs` 是 orphan 对账前的窄 preparatory guard。它不修改任务、execution 或数据库，不创建第二条队列，也不删除媒体。当前实现仍是本地候选；只有随完整提交通过发布门并在真实生产仓库纯快进后，才能从该生产 checkout 调用，不能把本地同名脚本复制到服务器执行。
+
+guard 的 `prepare` 自动从 3017 打开的权威 Mission Control SQLite 识别唯一 orphan、终态父任务和严格绑定的终态 n8n execution，不从命令行接收业务 ID。调用方只提供两个已存在、当前用户所有、物理无符号链接且 mode `0700` 的根，以及显式陈旧阈值：
+
+```text
+node scripts/legacy-media-orphan-runtime-guard.mjs prepare \
+  --run-root /绝对路径/受控运行根 \
+  --quarantine-root /绝对路径/同卷隔离根 \
+  --minimum-age-seconds <900-2592000>
+```
+
+执行前它连续两次绑定 3017/5678 listener、进程 incarnation、open-FD 权威库、受保护 listener、现役 LaunchAgent plist、唯一 serve-root worker 和全局锁，并要求持久批次没有 runnable item、staging recovery 或 material-handoff journal，n8n active 与正式 waiting/running 均为零。工作目录必须是 mode `0700` 的物理目录，整棵树无 symlink、无关联 open FD 或进程命令引用，且两次树摘要一致。
+
+guard 先以独占 `.worker-launch.lock` guardian 阻断绕过 LaunchAgent 的 detached worker，并持续刷新、复核该 guardian 的 inode 与 token；随后持久化不可变 intent，再精确 `disable` 和 `bootout` 现役 video-lane。它不发送 `SIGKILL`、不覆盖 installed skill，也不调用 supervisor installer。由于现役 worker 在默认 `SIGTERM` 下不会执行 JavaScript `finally`，guard 只在旧 PID 已消失且未复用、无任何进程打开全局锁、锁的 dev/inode/完整内容/token 均未漂移时，才把死亡 owner lock 同卷原子移动为 attempt 内的只读证据，绝不 `unlink` 该锁或删除证据。
+
+锁静默门通过后，guard 只允许对遗留工作目录执行同一 device 上的一次 `rename(2)`，核对前后 dev/inode 与完整树摘要，并依次 fsync 隔离父目录和原工作目录父目录。最终 receipt 与独立 anchor 均为 mode `0400`、nlink `1`，绑定 intent、工具摘要、launch guardian、死亡锁证据、前后运行身份、源/目标 inode 和树摘要；attempt 目录随后收紧到 mode `0500`。
+
+任一步普通失败都会在身份仍精确匹配时反向 rename，并在安全释放本进程的 launch guardian 后按原 plist 执行 `enable + bootstrap`；新 worker 创建新锁，已隔离的死亡锁只作为证据保留，不移回活动路径。任何 guardian、PID、锁或目录证据漂移都会保留现场并失败关闭。进程在停 lane 后或目录 rename 后遭 `SIGKILL` 时，只能使用同一不可变 intent 接管原 guardian 并恢复判定：旧锁必须保持原位或已成为精确证据，目录的源/目标只能命中一个精确状态；双边同时存在、同时不存在或 inode/内容/树漂移均拒绝续作。
+
+```text
+node scripts/legacy-media-orphan-runtime-guard.mjs recover --intent /受控运行目录/intent.json
+node scripts/legacy-media-orphan-runtime-guard.mjs status --receipt /受控运行目录/receipt.json
+node scripts/legacy-media-orphan-runtime-guard.mjs restore --receipt /受控运行目录/receipt.json
+```
+
+`status` 和 `restore` 只消费 receipt 并回读 anchor、intent、dev/inode、哈希和实时运行态。`restore` 原子移回同一棵工作目录并恢复原 lane；成功后写独立 restore receipt/anchor，重复调用只验证并返回已恢复，不重复移动或启动。guard 永不删除隔离根、attempt、intent、receipt、anchor 或媒体数据。
+
+guard `prepare` 成功只解除现有 orphan 工具的外部运行门，不产生数据库备份。随后仍须运行下文的 orphan dry-run 与 prepare；数据库四字段 apply 继续要求用户看过该次权威备份和 prepare manifest 后作出新的当次确认。
+
 ## 三阶段操作
 
 ### 1. dry-run
