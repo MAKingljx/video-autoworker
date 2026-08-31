@@ -492,7 +492,10 @@ function supervisorState() {
     'print-disabled', `gui/${uid}`,
   ], 'video-lane disabled-state query')
   const escaped = LABEL.replaceAll('.', '\\.')
-  const disabled = new RegExp(`"?${escaped}"?\\s*=>\\s*true`, 'u').test(disabledSource)
+  const disabled = new RegExp(
+    `"?${escaped}"?\\s*=>\\s*(?:true|disabled)`,
+    'u',
+  ).test(disabledSource)
   const batchRoot = join(process.env.HOME, 'ai-worker/state/video-autoworker/video-batches')
   const lockPath = join(batchRoot, '.global-video-worker.lock')
   let lockAbsent = false

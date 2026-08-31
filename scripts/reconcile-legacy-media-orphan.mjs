@@ -467,7 +467,10 @@ function supervisorState() {
     'print-disabled', `gui/${process.getuid()}`,
   ], 'video-lane disabled-state query')
   const escaped = VIDEO_LANE_LABEL.replaceAll('.', '\\.')
-  const disabled = new RegExp(`"?${escaped}"?\\s*=>\\s*true`, 'u').test(disabledSource)
+  const disabled = new RegExp(
+    `"?${escaped}"?\\s*=>\\s*(?:true|disabled)`,
+    'u',
+  ).test(disabledSource)
   const batchRoot = testPath(
     'AIWORKER_TEST_LEGACY_ORPHAN_BATCH_ROOT',
     join(process.env.HOME, 'ai-worker/state/video-autoworker/video-batches'),

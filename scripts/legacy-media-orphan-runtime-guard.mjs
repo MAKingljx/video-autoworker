@@ -8,7 +8,7 @@ import {
   constants,
   fsyncSync,
   fstatSync,
-  ftruncateSync,
+  futimesSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -17,7 +17,6 @@ import {
   realpathSync,
   renameSync,
   unlinkSync,
-  writeSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -33,7 +32,16 @@ const LABEL = 'ai.aiworker.video-lane-supervisor'
 const N8N_LABEL = 'com.video-autoworker.n8n'
 const INTENT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-intent/v1'
 const RECEIPT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-receipt/v1'
+const RESTORE_INTENT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-restore-intent/v1'
 const RESTORE_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-restore/v1'
+const GUARDIAN_SCHEMA = 'video-autoworker-worker-launch-guardian/v2'
+const GUARDIAN_OWNER_SCHEMA = 'video-autoworker-worker-launch-guardian-owner/v1'
+// This exact predecessor can leave an intent after correctly stopping the lane
+// while misreading newer macOS `print-disabled` wording. Newer code may consume
+// that immutable pre-rename intent, but no receipt or arbitrary tool is accepted.
+const RECOVERABLE_PREDECESSOR_TOOL_SHA256 = new Set([
+  '95a873283b6f0c7c473354791eb9d57807735556de81fe27c1abb1aa035b6384',
+])
 const SHA256 = /^[a-f0-9]{64}$/u
 const TASK_ID = /^[A-Za-z0-9._:-]{1,120}$/u
 const ACTIVE_MEDIA = new Set(['queued', 'accepted', 'running'])
@@ -44,10 +52,14 @@ const ACTIVE_ITEM = new Set(['queued', 'staging', 'submitted', 'accepted', 'runn
 const TEST_MODE = process.env.NODE_ENV === 'test'
   && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD === '1'
 const MAX_JSON_BYTES = 16 * 1024 * 1024
+const MAX_DATABASE_BYTES = 64 * 1024 * 1024 * 1024
 const MAX_TREE_ENTRIES = 20_000
 const MAX_TREE_BYTES = 2 * 1024 * 1024 * 1024
 const WAIT_ATTEMPTS = TEST_MODE ? 8 : 150
 const WAIT_MILLISECONDS = TEST_MODE ? 5 : 200
+const HANDOFF_WAIT_ATTEMPTS = TEST_MODE ? 200 : 50
+const HANDOFF_WAIT_MILLISECONDS = TEST_MODE ? 10 : 200
+const GUARDIAN_REFRESH_MILLISECONDS = TEST_MODE ? 250 : 5_000
 
 function fail(message) {
   throw new Error(`legacy media orphan runtime guard failed: ${message}`)
@@ -73,7 +85,7 @@ function parseArguments(argv) {
   const command = argv[0]
   if (!['prepare', 'status', 'restore', 'recover'].includes(command)) fail('unknown command')
   const allowed = command === 'prepare'
-    ? new Set(['--run-root', '--quarantine-root', '--minimum-age-seconds'])
+    ? new Set(['--run-root', '--quarantine-root', '--minimum-age-seconds', '--hold-guardian'])
     : new Set([command === 'recover' ? '--intent' : '--receipt'])
   const values = {}
   for (let index = 1; index < argv.length; index += 2) {
@@ -81,8 +93,14 @@ function parseArguments(argv) {
     if (!allowed.has(name) || Object.hasOwn(values, name) || index + 1 >= argv.length) fail('arguments are invalid')
     values[name] = argv[index + 1]
   }
-  if (argv.length % 2 !== 1 || Object.keys(values).length !== allowed.size) fail('required arguments are missing')
+  if (argv.length % 2 !== 1) fail('required arguments are missing')
   if (command === 'prepare') {
+    if (!['--run-root', '--quarantine-root', '--minimum-age-seconds'].every(name => Object.hasOwn(values, name))) {
+      fail('required arguments are missing')
+    }
+    if (Object.hasOwn(values, '--hold-guardian') && values['--hold-guardian'] !== 'yes') {
+      fail('hold guardian must be yes when supplied')
+    }
     const minimumAgeSeconds = Number(values['--minimum-age-seconds'])
     if (!Number.isSafeInteger(minimumAgeSeconds) || minimumAgeSeconds < 900
       || minimumAgeSeconds > 30 * 24 * 60 * 60) fail('minimum age is invalid')
@@ -91,8 +109,10 @@ function parseArguments(argv) {
       runRoot: normalizedAbsolute(values['--run-root'], 'run root'),
       quarantineRoot: normalizedAbsolute(values['--quarantine-root'], 'quarantine root'),
       minimumAgeSeconds,
+      holdGuardian: values['--hold-guardian'] === 'yes',
     }
   }
+  if (Object.keys(values).length !== 1) fail('required arguments are missing')
   const key = command === 'recover' ? '--intent' : '--receipt'
   return { command, pathname: normalizedAbsolute(values[key], key.slice(2)) }
 }
@@ -325,6 +345,84 @@ function findOpenPath(records, expression, label, kind = 'file') {
   return result
 }
 
+function numericDatabaseRecords(records) {
+  return records.filter(record => /^\d+[A-Za-z]*$/u.test(record.descriptor || '')
+    && record.dev !== undefined && record.ino !== undefined)
+}
+
+function findDatabase(records, expression, label) {
+  const paths = [...new Set(numericDatabaseRecords(records)
+    .filter(item => expression.test(item.path || '')).map(item => item.path))]
+  if (paths.length !== 1) fail(`${label} is not uniquely open on a numeric file descriptor`)
+  const result = identity(paths[0], label)
+  const matches = numericDatabaseRecords(records).filter(item => item.path === result.path
+    && item.dev === result.dev && item.ino === result.ino)
+  if (matches.length < 1) fail(`${label} open identity differs`)
+  return result
+}
+
+function validateNewDatabaseConnection(expected, beforeRecords, afterRecords, label) {
+  const current = identity(expected.path, label)
+  if (!sameIdentity(current, expected)) fail(`${label} does not match the precaptured identity`)
+  const occupied = new Set(numericDatabaseRecords(beforeRecords).map(record => record.descriptor))
+  const added = numericDatabaseRecords(afterRecords).filter(record => !occupied.has(record.descriptor))
+  const matches = added.filter(record => record.path === expected.path
+    && record.dev === expected.dev && record.ino === expected.ino)
+  if (matches.length !== 1 || added.some(record => record.path === expected.path
+    && (record.dev !== expected.dev || record.ino !== expected.ino))) {
+    fail(`${label} newly opened SQLite FD does not match the precaptured identity`)
+  }
+  return matches[0].descriptor
+}
+
+function revalidateDatabaseConnection(handle, label) {
+  const current = identity(handle.expected.path, label)
+  const verifier = fstatSync(handle.verifierFd, { bigint: true })
+  const matches = numericDatabaseRecords(openRecords(process.pid))
+    .filter(record => record.descriptor === handle.connectionDescriptor
+      && record.path === handle.expected.path && record.dev === handle.expected.dev
+      && record.ino === handle.expected.ino)
+  if (!sameIdentity(current, handle.expected)
+    || verifier.dev.toString() !== handle.expected.dev || verifier.ino.toString() !== handle.expected.ino
+    || matches.length !== 1) fail(`${label} SQLite connection identity changed`)
+}
+
+function openBoundReadonlyDatabase(expected, label) {
+  const entry = safeEntry(expected.path, label, 'file')
+  if (entry.size > BigInt(MAX_DATABASE_BYTES)) fail(`${label} is too large`)
+  if (!sameIdentity(identity(expected.path, label), expected)) fail(`${label} does not match the precaptured identity`)
+  const verifierFd = openSync(expected.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const verifier = fstatSync(verifierFd, { bigint: true })
+  if (verifier.dev.toString() !== expected.dev || verifier.ino.toString() !== expected.ino
+    || verifier.size !== entry.size) {
+    closeSync(verifierFd)
+    fail(`${label} changed before verifier open`)
+  }
+  const before = openRecords(process.pid)
+  let db
+  try {
+    db = new Database(expected.path, { readonly: true, fileMustExist: true })
+    const connectionDescriptor = validateNewDatabaseConnection(
+      expected, before, openRecords(process.pid), label,
+    )
+    const handle = { db, verifierFd, expected, connectionDescriptor }
+    db.pragma('query_only = ON')
+    quickCheck(db, label)
+    revalidateDatabaseConnection(handle, label)
+    return handle
+  } catch (error) {
+    try { db?.close() } catch { /* Preserve the binding failure. */ }
+    closeSync(verifierFd)
+    throw error
+  }
+}
+
+function closeBoundReadonlyDatabase(handle, label) {
+  try { revalidateDatabaseConnection(handle, label) } finally {
+    try { handle.db.close() } finally { closeSync(handle.verifierFd) }
+  }
+}
+
 function processIdentity(pid, records, label) {
   const uid = Number(run(command('PS', '/bin/ps'), ['-p', String(pid), '-o', 'uid='], `${label} uid`).trim())
   const ppid = Number(run(command('PS', '/bin/ps'), ['-p', String(pid), '-o', 'ppid='], `${label} parent`).trim())
@@ -351,7 +449,7 @@ function launchState(label = LABEL) {
 function disabledState() {
   const source = run(command('LAUNCHCTL', '/bin/launchctl'), ['print-disabled', `gui/${process.getuid()}`], 'video-lane disabled-state query')
   const escaped = LABEL.replaceAll('.', '\\.')
-  return new RegExp(`"?${escaped}"?\\s*=>\\s*true`, 'u').test(source)
+  return new RegExp(`"?${escaped}"?\\s*=>\\s*(?:true|disabled)`, 'u').test(source)
 }
 
 function workerPids() {
@@ -412,7 +510,8 @@ function batchProjection(batchRoot, lockPath) {
   const handle = opendirSync(batchRoot)
   try { for (;;) { const item = handle.readSync(); if (!item) break; names.push(item.name) } } finally { handle.closeSync() }
   for (const name of names.sort()) {
-    if (join(batchRoot, name) === lockPath || name === '.worker-launch.lock') continue
+    if (join(batchRoot, name) === lockPath
+      || name === '.worker-launch.lock' || name === '.worker-launch.lock.owner') continue
     if (/\.material-handoff\.json$/u.test(name)) fail('video batch root still contains a material handoff journal')
     const pathname = join(batchRoot, name)
     const candidate = lstatSync(pathname, { bigint: true })
@@ -524,12 +623,13 @@ function mediaChildTaskId(parentTaskId, stage) {
   return `media-task:${parentTaskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
 }
 
-function locateOrphan(missionPath, n8nPath, minimumAgeSeconds) {
-  const mission = new Database(missionPath, { readonly: true, fileMustExist: true })
-  const n8n = new Database(n8nPath, { readonly: true, fileMustExist: true })
+function locateOrphan(missionIdentity, n8nIdentity, minimumAgeSeconds) {
+  const missionHandle = openBoundReadonlyDatabase(missionIdentity, 'Mission Control database')
+  let n8nHandle
   try {
-    quickCheck(mission, 'Mission Control database')
-    quickCheck(n8n, 'n8n database')
+    n8nHandle = openBoundReadonlyDatabase(n8nIdentity, 'n8n database')
+    const mission = missionHandle.db
+    const n8n = n8nHandle.db
     const active = mission.prepare("SELECT * FROM n8n_task_runs WHERE source = 'n8n-media-node' AND status IN ('queued','accepted','running') ORDER BY id").all()
     if (active.length !== 1) fail('Mission Control does not have exactly one active media child')
     const child = active[0]
@@ -558,14 +658,20 @@ function locateOrphan(missionPath, n8nPath, minimumAgeSeconds) {
     if (executions.length !== 1) fail('terminal n8n execution is not uniquely bound to the orphan parent')
     const n8nActive = Number(n8n.prepare("SELECT COUNT(*) count FROM execution_entity WHERE status IN ('new','running','waiting') AND stoppedAt IS NULL").get().count)
     if (n8nActive !== 0) fail('n8n still has active executions')
-    const workspace = join(dirname(missionPath), 'media-tasks', sha256(parent.task_id))
-    return {
+    const workspace = join(dirname(missionIdentity.path), 'media-tasks', sha256(parent.task_id))
+    const result = {
       child: { id: child.id, taskId: child.task_id, status: child.status, updatedAt: child.updated_at, stage },
       parent: { id: parent.id, taskId: parent.task_id, status: parent.status, digest: sha256(canonicalJson(parent)) },
       execution: { id: executions[0].id, status: executions[0].status, digest: sha256(executions[0].data) },
       workspace,
     }
-  } finally { mission.close(); n8n.close() }
+    revalidateDatabaseConnection(missionHandle, 'Mission Control database')
+    revalidateDatabaseConnection(n8nHandle, 'n8n database')
+    return result
+  } finally {
+    if (n8nHandle) closeBoundReadonlyDatabase(n8nHandle, 'n8n database')
+    closeBoundReadonlyDatabase(missionHandle, 'Mission Control database')
+  }
 }
 
 function executionOwnsParent(source, parentTaskId) {
@@ -674,11 +780,11 @@ async function productionSnapshot(minimumAgeSeconds, phase) {
   const n8nRecords = openRecords(n8nPid)
   const legacy = processIdentity(legacyPid, legacyRecords, 'legacy 3017')
   const n8n = processIdentity(n8nPid, n8nRecords, 'n8n')
-  const mission = findOpenPath(legacyRecords, /\/mission-control\.db$/u, 'Mission Control database')
-  const n8nDatabase = findOpenPath(n8nRecords, /\/database\.sqlite$/u, 'n8n database')
+  const mission = findDatabase(legacyRecords, /\/mission-control\.db$/u, 'Mission Control database')
+  const n8nDatabase = findDatabase(n8nRecords, /\/database\.sqlite$/u, 'n8n database')
   const n8nLaunch = launchState(N8N_LABEL)
   if (!n8nLaunch.loaded || n8n.ppid !== n8nLaunch.pid) fail('n8n is not the direct child of its LaunchAgent')
-  const orphan = locateOrphan(mission.path, n8nDatabase.path, minimumAgeSeconds)
+  const orphan = locateOrphan(mission, n8nDatabase, minimumAgeSeconds)
   assertWorkspaceUnreferenced(orphan)
   const queue = await queueState()
   const batchRoot = testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_BATCH_ROOT', join(homedir(), 'ai-worker/state/video-autoworker/video-batches'))
@@ -840,24 +946,260 @@ function launchGuardianPath(batchRoot) {
   return join(batchRoot, '.worker-launch.lock')
 }
 
-function guardianPayload(token, createdAt) {
-  return `${canonicalJson({ pid: process.pid, createdAt, token, updatedAt: new Date().toISOString() })}\n`
+function launchGuardianOwnerPath(batchRoot) {
+  return join(batchRoot, '.worker-launch.lock.owner')
 }
 
-function openLaunchGuardian(batchRoot, plan, takeover = false) {
+function launchGuardianPendingOwnerPath(transactionRoot) {
+  return join(transactionRoot, '.worker-launch.lock.owner.pending')
+}
+
+function guardianPayload(token, createdAt) {
+  // The marker body is a permanent identity record. Liveness is represented
+  // only by its monotonically increasing mtime and the separately replaceable
+  // owner record, so refresh and takeover never truncate this unique inode.
+  return `${canonicalJson({ schema: GUARDIAN_SCHEMA, pid: process.pid, createdAt, token })}\n`
+}
+
+function readSmallFileDescriptor(descriptor, size, label) {
+  if (size <= 0n || size > BigInt(MAX_JSON_BYTES)) fail(`${label} size is invalid`)
+  const buffer = Buffer.alloc(Number(size))
+  let offset = 0
+  while (offset < buffer.length) {
+    const count = readFileChunk(descriptor, buffer.subarray(offset), offset)
+    if (count <= 0) fail(`${label} changed during read`)
+    offset += count
+  }
+  return buffer.toString('utf8')
+}
+
+function readGuardianRecord(pathname, label, requiredMode = 0o600) {
+  const entry = safeEntry(pathname, label, 'file', requiredMode)
+  const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size) {
+      fail(`${label} changed before read`)
+    }
+    const source = readSmallFileDescriptor(descriptor, opened.size, label)
+    const after = fstatSync(descriptor, { bigint: true })
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) {
+      fail(`${label} changed during read`)
+    }
+    let value
+    try { value = JSON.parse(source) } catch { fail(`${label} is invalid JSON`) }
+    return {
+      value,
+      source,
+      sha256: sha256(source),
+      identity: identity(pathname, label, 'file', requiredMode),
+      mtimeNs: after.mtimeNs,
+    }
+  } finally { closeSync(descriptor) }
+}
+
+function ownerRecordValue(marker, tokenSha256, createdAt) {
+  return {
+    schema: GUARDIAN_OWNER_SCHEMA,
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    marker: {
+      path: marker.path,
+      dev: marker.dev,
+      ino: marker.ino,
+      tokenSha256,
+      createdAt,
+      sourceSha256: marker.sourceSha256,
+    },
+  }
+}
+
+function validateGuardianOwner(loaded, marker, tokenSha256, createdAt) {
+  const value = loaded.value
+  if (value?.schema !== GUARDIAN_OWNER_SCHEMA || !Number.isSafeInteger(value.pid) || value.pid <= 0
+    || !Number.isFinite(Date.parse(value.createdAt)) || value.marker?.path !== marker.path
+    || value.marker.dev !== marker.dev || value.marker.ino !== marker.ino
+    || value.marker.tokenSha256 !== tokenSha256 || value.marker.createdAt !== createdAt
+    || value.marker.sourceSha256 !== marker.sourceSha256) {
+    fail('video worker launch guardian owner record is invalid')
+  }
+  return loaded
+}
+
+function sameRecord(left, right) {
+  return sameIdentity(left.identity, right.identity) && left.sha256 === right.sha256
+}
+
+function ownerMarker(value) {
+  return {
+    path: value.marker.path,
+    dev: value.marker.dev,
+    ino: value.marker.ino,
+    sourceSha256: value.marker.sourceSha256,
+  }
+}
+
+function removeDeadPendingGuardianOwner(transactionRoot, marker, tokenSha256, createdAt) {
+  const pathname = launchGuardianPendingOwnerPath(transactionRoot)
+  if (!optionalEntry(pathname)) return
+  const pending = validateGuardianOwner(
+    readGuardianRecord(pathname, 'pending video worker launch guardian owner record'),
+    marker, tokenSha256, createdAt,
+  )
+  if (pidExists(pending.value.pid, 'pending guardian owner')) {
+    fail('pending video worker launch guardian owner is still live')
+  }
+  const current = validateGuardianOwner(
+    readGuardianRecord(pathname, 'pending video worker launch guardian owner record'),
+    marker, tokenSha256, createdAt,
+  )
+  if (!sameRecord(current, pending)) fail('pending video worker launch guardian owner changed before cleanup')
+  unlinkSync(pathname)
+  fsyncDirectory(transactionRoot)
+}
+
+function publishGuardianOwner(batchRoot, transactionRoot, marker, tokenSha256, createdAt, expected = null) {
+  const pathname = launchGuardianOwnerPath(batchRoot)
+  const temporary = launchGuardianPendingOwnerPath(transactionRoot)
+  assertNoSymlink(pathname, 'video worker launch guardian owner record', true)
+  assertNoSymlink(temporary, 'pending video worker launch guardian owner record', true)
+  const transaction = identity(transactionRoot, 'guardian owner transaction root', 'directory', 0o700)
+  const parent = identity(batchRoot, 'video batch root', 'directory', 0o700)
+  if (transaction.dev !== parent.dev) fail('guardian owner transaction root is not on the marker device')
+  removeDeadPendingGuardianOwner(transactionRoot, marker, tokenSha256, createdAt)
+  const existing = optionalEntry(pathname)
+  if (expected) {
+    if (!existing) fail('video worker launch guardian owner record disappeared before takeover')
+    const current = validateGuardianOwner(
+      readGuardianRecord(pathname, 'video worker launch guardian owner record'),
+      marker, tokenSha256, createdAt,
+    )
+    if (!sameRecord(current, expected)) fail('video worker launch guardian owner record changed before takeover')
+  } else if (existing) {
+    fail('video worker launch guardian owner record already exists')
+  }
+  const value = ownerRecordValue(marker, tokenSha256, createdAt)
+  const source = `${canonicalJson(value)}\n`
+  let descriptor
+  try {
+    descriptor = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+    writeFileSync(descriptor, source)
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    fsyncFile(temporary)
+    fsyncDirectory(transaction.path)
+    testKillAfter('OWNER_TEMP_BEFORE_RENAME')
+    if (expected) {
+      const current = validateGuardianOwner(
+        readGuardianRecord(pathname, 'video worker launch guardian owner record'),
+        marker, tokenSha256, createdAt,
+      )
+      if (!sameRecord(current, expected)) fail('video worker launch guardian owner record changed before publish')
+    } else if (optionalEntry(pathname)) {
+      fail('video worker launch guardian owner record appeared before publish')
+    }
+    renameSync(temporary, pathname)
+    fsyncFile(pathname)
+    fsyncDirectory(transaction.path)
+    fsyncDirectory(parent.path)
+    testKillAfter('OWNER_TEMP_AFTER_RENAME')
+    const written = validateGuardianOwner(
+      readGuardianRecord(pathname, 'video worker launch guardian owner record'),
+      marker, tokenSha256, createdAt,
+    )
+    if (written.source !== source) fail('video worker launch guardian owner record verification failed')
+    return written
+  } catch (error) {
+    if (descriptor !== undefined) closeSync(descriptor)
+    // Leave any partially published candidate inside the private attempt.
+    // A later retry removes it only after full schema/identity/PID validation;
+    // never unlink a pathname that may have been replaced after an error.
+    throw error
+  }
+}
+
+function removeGuardianOwner(batchRoot, expected, marker, tokenSha256, createdAt) {
+  const pathname = launchGuardianOwnerPath(batchRoot)
+  const current = validateGuardianOwner(
+    readGuardianRecord(pathname, 'video worker launch guardian owner record'),
+    marker, tokenSha256, createdAt,
+  )
+  if (!sameRecord(current, expected)) fail('video worker launch guardian owner record changed before release')
+  unlinkSync(pathname)
+  fsyncDirectory(batchRoot)
+}
+
+function removeDetachedGuardianOwner(batchRoot, plan) {
+  const markerPath = launchGuardianPath(batchRoot)
+  if (optionalEntry(markerPath)) fail('detached guardian owner cleanup found a live marker path')
+  const pathname = launchGuardianOwnerPath(batchRoot)
+  const loaded = readGuardianRecord(pathname, 'detached video worker launch guardian owner record')
+  const marker = ownerMarker(loaded.value)
+  const tokenSha256 = sha256(String(plan.token || ''))
+  validateGuardianOwner(loaded, marker, tokenSha256, plan.createdAt)
+  if (marker.path !== markerPath
+    || (plan.dev !== undefined && marker.dev !== plan.dev)
+    || (plan.ino !== undefined && marker.ino !== plan.ino)
+    || (plan.sourceSha256 !== undefined && marker.sourceSha256 !== plan.sourceSha256)
+    || pidExists(loaded.value.pid, 'detached guardian owner')) {
+    fail('detached video worker launch guardian owner cannot be safely removed')
+  }
+  const current = validateGuardianOwner(
+    readGuardianRecord(pathname, 'detached video worker launch guardian owner record'),
+    marker, tokenSha256, plan.createdAt,
+  )
+  if (!sameRecord(current, loaded)) fail('detached video worker launch guardian owner changed before cleanup')
+  unlinkSync(pathname)
+  fsyncDirectory(batchRoot)
+}
+
+function openLaunchGuardian(batchRoot, transactionRoot, plan, takeover = false) {
   const pathname = launchGuardianPath(batchRoot)
-  const createdAt = plan.createdAt
-  if (typeof plan?.token !== 'string' || !/^[a-f0-9]{64}$/u.test(plan.token)
+  let takeoverMode = takeover
+  let effectivePlan = plan
+  if (!takeoverMode && optionalEntry(pathname)) {
+    const abandoned = readGuardianRecord(pathname, 'abandoned video worker launch guardian')
+    const value = abandoned.value
+    if (value?.schema !== GUARDIAN_SCHEMA || !/^[a-f0-9]{64}$/u.test(String(value.token || ''))
+      || !Number.isSafeInteger(value.pid) || value.pid <= 0
+      || typeof value.createdAt !== 'string' || !Number.isFinite(Date.parse(value.createdAt))) {
+      fail('existing video worker launch guardian cannot be adopted')
+    }
+    if (pidExists(value.pid, 'abandoned guardian marker owner')) {
+      fail('existing video worker launch guardian creator is still live')
+    }
+    effectivePlan = {
+      path: pathname,
+      dev: abandoned.identity.dev,
+      ino: abandoned.identity.ino,
+      uid: abandoned.identity.uid,
+      mode: abandoned.identity.mode,
+      token: value.token,
+      tokenSha256: sha256(value.token),
+      createdAt: value.createdAt,
+      sourceSha256: abandoned.sha256,
+      markerPid: value.pid,
+    }
+    takeoverMode = true
+  }
+  const createdAt = effectivePlan.createdAt
+  if (typeof effectivePlan?.token !== 'string' || !/^[a-f0-9]{64}$/u.test(effectivePlan.token)
     || typeof createdAt !== 'string' || !Number.isFinite(Date.parse(createdAt))) {
     fail('video worker launch guardian plan is invalid')
   }
-  if (takeover && (plan.path !== pathname || !plan.dev || !plan.ino
-    || plan.uid !== process.getuid() || plan.mode !== 0o600
-    || plan.tokenSha256 !== sha256(plan.token))) {
+  if (takeoverMode && (effectivePlan.path !== pathname
+    || (effectivePlan.uid !== undefined && effectivePlan.uid !== process.getuid())
+    || (effectivePlan.mode !== undefined && effectivePlan.mode !== 0o600)
+    || (effectivePlan.tokenSha256 !== undefined
+      && effectivePlan.tokenSha256 !== sha256(effectivePlan.token)))) {
     fail('video worker launch guardian takeover plan is invalid')
   }
   let descriptor
-  if (takeover) {
+  let immutableSource
+  let markerValue
+  let previousOwner = null
+  if (takeoverMode) {
     const entry = safeEntry(pathname, 'video worker launch guardian', 'file', 0o600)
     descriptor = openSync(pathname, constants.O_RDWR | constants.O_NOFOLLOW)
     const opened = fstatSync(descriptor, { bigint: true })
@@ -865,43 +1207,47 @@ function openLaunchGuardian(batchRoot, plan, takeover = false) {
       closeSync(descriptor)
       fail('video worker launch guardian changed before takeover')
     }
-    const source = readFileSync(descriptor, 'utf8')
-    let value
-    try { value = JSON.parse(source) } catch { fail('video worker launch guardian is invalid JSON') }
-    if (entry.dev.toString() !== plan.dev || entry.ino.toString() !== plan.ino
-      || sha256(String(value?.token || '')) !== plan.tokenSha256
-      || value?.createdAt !== plan.createdAt
-      || !Number.isFinite(Date.parse(value?.updatedAt))
-      || !Number.isSafeInteger(value?.pid) || value.pid <= 0) {
+    immutableSource = readSmallFileDescriptor(descriptor, opened.size, 'video worker launch guardian')
+    try { markerValue = JSON.parse(immutableSource) } catch { fail('video worker launch guardian is invalid JSON') }
+    if ((effectivePlan.dev !== undefined && entry.dev.toString() !== effectivePlan.dev)
+      || (effectivePlan.ino !== undefined && entry.ino.toString() !== effectivePlan.ino)
+      || sha256(String(markerValue?.token || '')) !== sha256(effectivePlan.token)
+      || markerValue?.createdAt !== effectivePlan.createdAt
+      || !Number.isSafeInteger(markerValue?.pid) || markerValue.pid <= 0
+      || ![undefined, GUARDIAN_SCHEMA].includes(markerValue.schema)) {
       closeSync(descriptor)
       fail('video worker launch guardian cannot be taken over')
     }
-    const old = runStatus(command('PS', '/bin/ps'), ['-p', String(value.pid), '-o', 'pid='])
+    const preliminaryMarker = {
+      path: pathname,
+      dev: entry.dev.toString(),
+      ino: entry.ino.toString(),
+      sourceSha256: sha256(immutableSource),
+    }
+    const ownerPath = launchGuardianOwnerPath(batchRoot)
+    if (optionalEntry(ownerPath)) {
+      previousOwner = validateGuardianOwner(
+        readGuardianRecord(ownerPath, 'video worker launch guardian owner record'),
+        preliminaryMarker, sha256(effectivePlan.token), createdAt,
+      )
+    }
+    const previousPid = previousOwner?.value?.pid || markerValue.pid
+    const old = runStatus(command('PS', '/bin/ps'), ['-p', String(previousPid), '-o', 'pid='])
     if (old.error || old.signal || ![0, 1].includes(old.status) || old.status === 0 || old.stdout.trim()) {
       closeSync(descriptor)
       fail('previous video worker launch guardian PID still exists or was reused')
     }
   } else {
     if (optionalEntry(pathname)) fail('video worker launch lock already exists')
+    if (optionalEntry(launchGuardianOwnerPath(batchRoot))) fail('video worker launch guardian owner record already exists')
     descriptor = openSync(pathname, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
-  }
-  recordTestEvent(takeover ? 'guardian:takeover' : 'guardian:create')
-  const token = plan.token
-  const refresh = () => {
-    const entry = fstatSync(descriptor, { bigint: true })
-    const current = optionalEntry(pathname)
-    if (!current || current.dev !== entry.dev || current.ino !== entry.ino) {
-      fail('video worker launch guardian path was replaced')
-    }
-    const source = guardianPayload(token, createdAt)
-    ftruncateSync(descriptor, 0)
-    writeSync(descriptor, source, 0, 'utf8')
+    immutableSource = guardianPayload(effectivePlan.token, createdAt)
+    writeFileSync(descriptor, immutableSource)
     fsyncSync(descriptor)
-    const verified = readFileSync(pathname, 'utf8')
-    if (verified !== source) fail('video worker launch guardian refresh failed')
-    recordTestEvent('guardian:refresh')
+    markerValue = JSON.parse(immutableSource)
   }
-  refresh()
+  recordTestEvent(takeoverMode ? 'guardian:takeover' : 'guardian:create')
+  const token = effectivePlan.token
   const opened = fstatSync(descriptor, { bigint: true })
   const identityValue = {
     path: pathname,
@@ -911,25 +1257,126 @@ function openLaunchGuardian(batchRoot, plan, takeover = false) {
     mode: Number(opened.mode & 0o7777n),
   }
   if (identityValue.uid !== process.getuid() || identityValue.mode !== 0o600) fail('video worker launch guardian identity is unsafe')
-  if (takeover && (identityValue.dev !== plan.dev || identityValue.ino !== plan.ino)) {
+  if (takeoverMode && ((effectivePlan.dev !== undefined && identityValue.dev !== effectivePlan.dev)
+    || (effectivePlan.ino !== undefined && identityValue.ino !== effectivePlan.ino))) {
     fail('video worker launch guardian takeover identity changed')
   }
-  if (!takeover) fsyncDirectory(batchRoot)
+  const marker = {
+    ...identityValue,
+    sourceSha256: sha256(immutableSource),
+    markerPid: markerValue.pid,
+  }
+  if (effectivePlan.sourceSha256 !== undefined
+    && effectivePlan.sourceSha256 !== marker.sourceSha256) {
+    fail('video worker launch guardian body changed before takeover')
+  }
+  const owner = publishGuardianOwner(
+    batchRoot, transactionRoot, marker, sha256(token), createdAt, previousOwner,
+  )
+  if (!takeoverMode) fsyncDirectory(batchRoot)
+  const verifyOwner = () => {
+    const current = validateGuardianOwner(
+      readGuardianRecord(launchGuardianOwnerPath(batchRoot), 'video worker launch guardian owner record'),
+      marker, sha256(token), createdAt,
+    )
+    if (!sameRecord(current, owner)) fail('video worker launch guardian owner record changed')
+  }
+  const refresh = () => {
+    const before = fstatSync(descriptor, { bigint: true })
+    const current = optionalEntry(pathname)
+    if (!current || current.dev !== before.dev || current.ino !== before.ino
+      || before.dev.toString() !== marker.dev || before.ino.toString() !== marker.ino
+      || readSmallFileDescriptor(descriptor, before.size, 'video worker launch guardian') !== immutableSource) {
+      fail('video worker launch guardian path or body changed before refresh')
+    }
+    verifyOwner()
+    const nextMtimeMilliseconds = Math.max(
+      Date.now(), Number(before.mtimeNs / 1_000_000n) + 1,
+    )
+    futimesSync(
+      descriptor,
+      Number(before.atimeNs) / 1_000_000_000,
+      nextMtimeMilliseconds / 1_000,
+    )
+    fsyncSync(descriptor)
+    const after = fstatSync(descriptor, { bigint: true })
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeNs <= before.mtimeNs
+      || readSmallFileDescriptor(descriptor, after.size, 'video worker launch guardian') !== immutableSource) {
+      fail('video worker launch guardian mtime refresh was not durable and monotonic')
+    }
+    verifyOwner()
+    recordTestEvent('guardian:refresh')
+    return after.mtimeNs
+  }
+  refresh()
   const timer = setInterval(() => {
     try { refresh() } catch { /* The foreground verifier will fail closed. */ }
-  }, 5_000)
+  }, GUARDIAN_REFRESH_MILLISECONDS)
   timer.unref()
   let released = false
+  const verify = () => {
+    if (released) fail('video worker launch guardian was already released')
+    refresh()
+    const current = identity(pathname, 'video worker launch guardian', 'file', 0o600)
+    if (!sameIdentity(current, identityValue)) fail('video worker launch guardian identity drifted')
+  }
+  const handoff = () => {
+    if (released) fail('video worker launch guardian was already released')
+    clearInterval(timer)
+    verify()
+    closeSync(descriptor)
+    released = true
+    recordTestEvent('guardian:handoff')
+    let cleaned = false
+    return () => {
+      if (cleaned) return
+      if (optionalEntry(pathname)) fail('video worker did not consume the launch handoff marker')
+      removeGuardianOwner(batchRoot, owner, marker, sha256(token), createdAt)
+      if (optionalEntry(launchGuardianOwnerPath(batchRoot))) {
+        fail('video worker launch guardian owner record remains after handoff cleanup')
+      }
+      cleaned = true
+      recordTestEvent('guardian:handoff-cleanup')
+    }
+  }
   return {
     ...identityValue,
     tokenSha256: sha256(token),
+    token,
     createdAt,
-    verify() {
-      if (released) fail('video worker launch guardian was already released')
-      refresh()
-      const current = identity(pathname, 'video worker launch guardian', 'file', 0o600)
-      if (!sameIdentity(current, identityValue)) fail('video worker launch guardian identity drifted')
+    sourceSha256: marker.sourceSha256,
+    markerPid: marker.markerPid,
+    verify,
+    hold() {
+      verify()
+      return new Promise((resolvePromise, rejectPromise) => {
+        const cleanup = () => {
+          clearInterval(monitor)
+          process.off('SIGUSR2', onHandoff)
+        }
+        const onHandoff = () => {
+          try {
+            handoff()
+            cleanup()
+            resolvePromise()
+          } catch (error) {
+            cleanup()
+            rejectPromise(error)
+          }
+        }
+        const monitor = setInterval(() => {
+          try { verify() } catch (error) {
+            cleanup()
+            rejectPromise(error)
+          }
+        }, GUARDIAN_REFRESH_MILLISECONDS)
+        process.once('SIGUSR2', onHandoff)
+        // This timer deliberately remains referenced: it is the live safety
+        // barrier preventing submit-task from expiring and replacing the lock.
+      })
     },
+    handoff,
     release() {
       if (released) return
       clearInterval(timer)
@@ -941,9 +1388,19 @@ function openLaunchGuardian(batchRoot, plan, takeover = false) {
       if (!sameIdentity(current, identityValue) || sha256(String(value.token || '')) !== sha256(token)) {
         fail('video worker launch guardian ownership changed before release')
       }
+      verifyOwner()
+      if (TEST_MODE
+        && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_OWNER_REMOVED_BEFORE_MARKER_UNLINK === '1') {
+        // Exercise recovery from the predecessor's unsafe deletion order. The
+        // production path below is marker-first and cannot create this state.
+        removeGuardianOwner(batchRoot, owner, marker, sha256(token), createdAt)
+        process.kill(process.pid, 'SIGKILL')
+      }
       unlinkSync(pathname)
-      recordTestEvent('guardian:release')
       fsyncDirectory(batchRoot)
+      testKillAfter('MARKER_REMOVED_BEFORE_OWNER_CLEANUP')
+      removeGuardianOwner(batchRoot, owner, marker, sha256(token), createdAt)
+      recordTestEvent('guardian:release')
       closeSync(descriptor)
       released = true
     },
@@ -1007,12 +1464,18 @@ function recoverLockEvidence(intentValue, attemptDirectory, required) {
   return recovered
 }
 
-async function enableAndStart(minimumAgeSeconds, before) {
+async function enableAndStart(minimumAgeSeconds, before, handoffCleanup = null) {
   const domain = `gui/${process.getuid()}`
   action(['enable', `${domain}/${LABEL}`], 'video-lane enable')
   if (!launchState().loaded) action(['bootstrap', domain, before.plistPath], 'video-lane bootstrap')
   const active = await waitForSnapshot(minimumAgeSeconds, 'active')
   assertStable(before.protectedPids, active.protectedPids, 'protected listener PID set')
+  assertStable(stableComparable(before), stableComparable(active), 'active runtime identity')
+  if (optionalEntry(launchGuardianPath(before.batchRoot))) {
+    fail('video worker did not consume the launch handoff marker')
+  }
+  if (handoffCleanup) testKillAfter('MARKER_CONSUMED_BEFORE_OWNER_CLEANUP')
+  if (handoffCleanup) handoffCleanup()
   return active
 }
 
@@ -1074,6 +1537,107 @@ function toolSha256() {
   return sha256(readFileSync(SCRIPT_PATH))
 }
 
+function supportedToolSha256(value) {
+  return value === toolSha256() || RECOVERABLE_PREDECESSOR_TOOL_SHA256.has(value)
+}
+
+function heldGuardianSample(plan, requireLive, allowMissingOwner = false) {
+  const marker = readGuardianRecord(plan.path, 'held video worker launch guardian')
+  const current = marker.identity
+  if ((plan.dev !== undefined && current.dev !== plan.dev)
+    || (plan.ino !== undefined && current.ino !== plan.ino)
+    || (plan.uid !== undefined && current.uid !== plan.uid)
+    || (plan.mode !== undefined && current.mode !== plan.mode)
+    || (plan.sourceSha256 !== undefined && marker.sha256 !== plan.sourceSha256)) {
+    fail('held video worker launch guardian identity changed')
+  }
+  const value = marker.value
+  const tokenSha256 = plan.tokenSha256 || sha256(String(plan.token || ''))
+  if (!Number.isSafeInteger(value?.pid) || value.pid <= 0
+    || value.createdAt !== plan.createdAt || sha256(String(value.token || '')) !== tokenSha256
+    || ![undefined, GUARDIAN_SCHEMA].includes(value.schema)
+    || (plan.markerPid !== undefined && value.pid !== plan.markerPid)) {
+    fail('held video worker launch guardian is not live')
+  }
+  const ownerPath = launchGuardianOwnerPath(dirname(plan.path))
+  const ownerEntry = optionalEntry(ownerPath)
+  if (!ownerEntry) {
+    if (!allowMissingOwner) fail('held video worker launch guardian owner record is missing')
+    return { value, identity: current, source: marker.source, mtimeNs: marker.mtimeNs, owner: null }
+  }
+  const owner = validateGuardianOwner(
+    readGuardianRecord(ownerPath, 'video worker launch guardian owner record'),
+    { ...current, sourceSha256: marker.sha256 }, tokenSha256, plan.createdAt,
+  )
+  const mtimeMilliseconds = Number(marker.mtimeNs / 1_000_000n)
+  if (requireLive && (!pidExists(owner.value.pid, 'guardian owner')
+    || Date.now() - mtimeMilliseconds > 15_000
+    || mtimeMilliseconds - Date.now() > 15_000)) {
+    fail('held video worker launch guardian is not live')
+  }
+  return { value, identity: current, source: marker.source, mtimeNs: marker.mtimeNs, owner }
+}
+
+function validateHeldGuardian(plan) {
+  const first = heldGuardianSample(plan, true)
+  Atomics.wait(
+    new Int32Array(new SharedArrayBuffer(4)), 0, 0,
+    GUARDIAN_REFRESH_MILLISECONDS + (TEST_MODE ? 100 : 500),
+  )
+  const second = heldGuardianSample(plan, true)
+  if (!sameIdentity(first.identity, second.identity)
+    || first.source !== second.source || first.value.pid !== second.value.pid
+    || first.value.createdAt !== second.value.createdAt || first.value.token !== second.value.token
+    || !sameRecord(first.owner, second.owner) || first.owner.value.pid !== second.owner.value.pid
+    || first.owner.value.createdAt !== second.owner.value.createdAt
+    || second.mtimeNs <= first.mtimeNs) {
+    fail('held video worker launch guardian did not refresh across samples')
+  }
+  return second.owner.value.pid
+}
+
+function requestHeldGuardianHandoff(plan) {
+  const pid = validateHeldGuardian(plan)
+  try { process.kill(pid, 'SIGUSR2') } catch { fail('held video worker launch guardian handoff signal failed') }
+  let alive = true
+  for (let attempt = 0; attempt < HANDOFF_WAIT_ATTEMPTS && alive; attempt += 1) {
+    alive = pidExists(pid, 'guardian owner')
+    if (alive) Atomics.wait(
+      new Int32Array(new SharedArrayBuffer(4)), 0, 0, HANDOFF_WAIT_MILLISECONDS,
+    )
+  }
+  if (alive) fail('held video worker launch guardian did not exit for handoff')
+  const final = heldGuardianSample(plan, false)
+  if (final.owner.value.pid !== pid || final.source === ''
+    || final.value.createdAt !== plan.createdAt || pidExists(final.owner.value.pid, 'guardian owner')) {
+    fail('held video worker launch guardian owner changed during handoff')
+  }
+  if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_AFTER_HOLDER_EXIT_COMMAND) {
+    run(
+      testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_AFTER_HOLDER_EXIT_COMMAND', ''),
+      [plan.path],
+      'test holder-exit interlock probe',
+    )
+  }
+}
+
+function workspacePlacement(sourceTree, targetPath) {
+  const sourceEntry = optionalEntry(sourceTree.root.path)
+  const targetEntry = optionalEntry(targetPath)
+  if (Boolean(sourceEntry) === Boolean(targetEntry)) fail('workspace source and quarantine target are ambiguous')
+  const pathname = sourceEntry ? sourceTree.root.path : targetPath
+  const label = sourceEntry ? 'orphan workspace' : 'quarantined workspace'
+  const current = identity(pathname, label, 'directory', 0o700)
+  if (current.dev !== sourceTree.root.dev || current.ino !== sourceTree.root.ino
+    || current.uid !== sourceTree.root.uid || current.mode !== sourceTree.root.mode) {
+    fail(`${label} identity changed`)
+  }
+  const tree = treeSnapshot(pathname, label)
+  if (tree.digest !== sourceTree.digest || tree.entries !== sourceTree.entries
+    || tree.bytes !== sourceTree.bytes) fail(`${label} tree changed`)
+  return { mode: sourceEntry ? 'source' : 'target', current, tree }
+}
+
 function writeAnchor(pathname, label, reference, intentSha256) {
   return immutableJson(pathname, {
     schema: `video-autoworker-legacy-media-orphan-${label}-anchor/v1`,
@@ -1127,8 +1691,10 @@ async function prepare(values) {
   let laneChanged = false
   let deadLock = null
   let moved = null
+  let renameAttempted = false
+  let committed = false
   try {
-    launchGuardian = openLaunchGuardian(first.batchRoot, {
+    launchGuardian = openLaunchGuardian(first.batchRoot, attemptDirectory, {
       token: guardianToken,
       createdAt: guardianCreatedAt,
     })
@@ -1137,6 +1703,7 @@ async function prepare(values) {
       createdAt: Math.floor(Date.now() / 1000),
       nonce,
       minimumAgeSeconds: values.minimumAgeSeconds,
+      holdGuardian: values.holdGuardian,
       toolSha256: toolSha256(),
       roots,
       source: workspaceTree,
@@ -1150,7 +1717,9 @@ async function prepare(values) {
         mode: launchGuardian.mode,
         tokenSha256: launchGuardian.tokenSha256,
         createdAt: launchGuardian.createdAt,
-        token: guardianToken,
+        sourceSha256: launchGuardian.sourceSha256,
+        markerPid: launchGuardian.markerPid,
+        token: launchGuardian.token,
       },
     }
     intentWritten = immutableJson(intentPath, intent)
@@ -1173,6 +1742,7 @@ async function prepare(values) {
     const quiesced = await waitForSnapshot(values.minimumAgeSeconds, 'quiesced')
     launchGuardian.verify()
     assertStable(stableComparable(first), stableComparable(quiesced), 'runtime identity')
+    renameAttempted = true
     moved = renameWorkspace(first.orphan.workspace, target, workspaceTree)
     launchGuardian.verify()
     if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_RENAME === '1') {
@@ -1183,6 +1753,7 @@ async function prepare(values) {
       createdAt: Math.floor(Date.now() / 1000),
       nonce,
       toolSha256: intent.toolSha256,
+      holdGuardian: values.holdGuardian,
       intent: { path: intentPath, sha256: intentWritten.sha256, ...intentWritten.identity },
       minimumAgeSeconds: values.minimumAgeSeconds,
       runtimeBefore: first,
@@ -1196,6 +1767,8 @@ async function prepare(values) {
         mode: launchGuardian.mode,
         tokenSha256: launchGuardian.tokenSha256,
         createdAt: launchGuardian.createdAt,
+        sourceSha256: launchGuardian.sourceSha256,
+        markerPid: launchGuardian.markerPid,
       },
       source: moved.source,
       target: moved.target,
@@ -1204,18 +1777,34 @@ async function prepare(values) {
     const receiptPath = join(attemptDirectory, 'receipt.json')
     const receipt = immutableJson(receiptPath, receiptValue)
     writeAnchor(join(attemptDirectory, 'receipt.anchor.json'), 'receipt', receipt, intentWritten.sha256)
+    committed = true
     chmodSync(attemptDirectory, 0o500)
     fsyncDirectory(attemptDirectory)
     fsyncDirectory(values.runRoot)
-    launchGuardian.release()
-    process.stdout.write(`${JSON.stringify({ mode: 'prepared', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+    if (values.holdGuardian) {
+      const holdPromise = launchGuardian.hold()
+      process.stdout.write(`${JSON.stringify({ mode: 'prepared-held', receipt: receiptPath, receiptSha256: receipt.sha256, guardianPid: process.pid })}\n`)
+      await holdPromise
+    } else {
+      launchGuardian.release()
+      process.stdout.write(`${JSON.stringify({ mode: 'prepared', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+    }
   } catch (error) {
     const failures = [error instanceof Error ? error.message : String(error)]
-    if (moved) {
-      try { reverseRename(first.orphan.workspace, target, moved.target, moved.tree) } catch (rollbackError) { failures.push(`workspace rollback failed: ${rollbackError.message}`) }
-    }
     let mayResume = true
-    if (laneChanged) {
+    if (renameAttempted || committed) {
+      try {
+        const placement = workspacePlacement(workspaceTree, target)
+        if (placement.mode === 'target' || committed) {
+          mayResume = false
+          failures.push('workspace quarantine is durable or may have committed; use recover with the immutable intent')
+        }
+      } catch (rollbackError) {
+        mayResume = false
+        failures.push(`workspace commit-state check failed: ${rollbackError.message}`)
+      }
+    }
+    if (laneChanged && mayResume) {
       try {
         const serviceLoaded = launchState().loaded
         const oldWorkerAlive = pidExists(first.lane.worker.pid, 'old video worker')
@@ -1237,7 +1826,7 @@ async function prepare(values) {
   }
 }
 
-function validateReceipt(pathname, allowReplacementLock = false) {
+function validateReceipt(pathname, allowReplacementLock = false, requireAnchor = true) {
   const loaded = readImmutableJson(pathname, 'runtime guard receipt')
   const value = loaded.value
   if (value?.schema !== RECEIPT_SCHEMA || !SHA256.test(value.toolSha256) || !value.intent?.path
@@ -1254,8 +1843,10 @@ function validateReceipt(pathname, allowReplacementLock = false) {
   if (!guardian || guardian.path !== value.launchGuardian.path || guardian.dev !== value.launchGuardian.dev
     || guardian.ino !== value.launchGuardian.ino || guardian.uid !== value.launchGuardian.uid
     || guardian.mode !== value.launchGuardian.mode || guardian.tokenSha256 !== value.launchGuardian.tokenSha256
-    || guardian.createdAt !== value.launchGuardian.createdAt) fail('runtime guard launch guardian binding is invalid')
-  validateAnchor(join(dirname(pathname), 'receipt.anchor.json'), 'receipt', loaded, intent.sha256)
+    || guardian.createdAt !== value.launchGuardian.createdAt
+    || guardian.sourceSha256 !== value.launchGuardian.sourceSha256
+    || guardian.markerPid !== value.launchGuardian.markerPid) fail('runtime guard launch guardian binding is invalid')
+  if (requireAnchor) validateAnchor(join(dirname(pathname), 'receipt.anchor.json'), 'receipt', loaded, intent.sha256)
   validateLockEvidence(value.deadLock, dirname(pathname), allowReplacementLock)
   return { loaded, value, intent }
 }
@@ -1264,10 +1855,17 @@ function restoreReceiptPath(receiptPath) {
   return join(dirname(receiptPath), 'restore.json')
 }
 
+function restoreIntentPath(receiptPath) {
+  return join(dirname(receiptPath), 'restore-intent.json')
+}
+
 async function validatePrepared(receiptPath, chain, activeGuardian = null) {
   const { value } = chain
   if (activeGuardian) activeGuardian.verify()
-  else if (optionalEntry(value.launchGuardian.path)) fail('video worker launch guardian was not released')
+  else if (optionalEntry(value.launchGuardian.path)) {
+    if (!value.holdGuardian) fail('video worker launch guardian was not released')
+    validateHeldGuardian(value.launchGuardian)
+  } else if (value.holdGuardian) fail('held video worker launch guardian is missing')
   if (optionalEntry(value.source.path)) fail('prepared workspace source unexpectedly exists')
   const target = identity(value.target.path, 'quarantined workspace', 'directory', 0o700)
   if (!sameIdentity(target, value.target)) fail('quarantined workspace identity changed')
@@ -1279,81 +1877,240 @@ async function validatePrepared(receiptPath, chain, activeGuardian = null) {
   return { target, tree, snapshot }
 }
 
-function validateRestoreReceipt(pathname, chain) {
+function validateRestoreIntent(pathname, chain) {
+  const loaded = readImmutableJson(pathname, 'runtime guard restore intent')
+  const value = loaded.value
+  if (value?.schema !== RESTORE_INTENT_SCHEMA || value.nonce !== chain.value.nonce
+    || value.toolSha256 !== toolSha256() || value.preparedReceiptSha256 !== chain.loaded.sha256
+    || value.preparedReceiptPath !== chain.loaded.identity.path
+    || value.launchGuardian?.path !== launchGuardianPath(chain.value.runtimeBefore.batchRoot)
+    || typeof value.launchGuardian?.token !== 'string' || !/^[a-f0-9]{64}$/u.test(value.launchGuardian.token)
+    || !Number.isFinite(Date.parse(value.launchGuardian.createdAt))) fail('restore intent contract is invalid')
+  return loaded
+}
+
+function validateRestoreReceipt(pathname, chain, requireAnchor = true) {
   const loaded = readImmutableJson(pathname, 'runtime guard restore receipt')
   const value = loaded.value
   if (value?.schema !== RESTORE_SCHEMA || value.nonce !== chain.value.nonce
-    || value.preparedReceiptSha256 !== chain.loaded.sha256 || value.source?.path !== chain.value.source.path) fail('restore receipt contract is invalid')
-  validateAnchor(join(dirname(pathname), 'restore.anchor.json'), 'restore', loaded, chain.intent.sha256)
+    || value.toolSha256 !== toolSha256() || value.preparedReceiptSha256 !== chain.loaded.sha256
+    || value.source?.path !== chain.value.source.path || value.source.dev !== chain.value.source.dev
+    || value.source.ino !== chain.value.source.ino || value.source.uid !== chain.value.source.uid
+    || value.source.mode !== chain.value.source.mode || !value.restoreIntent?.path
+    || !value.runtimeActive) fail('restore receipt contract is invalid')
+  assertStable(
+    stableComparable(chain.value.runtimeBefore), stableComparable(value.runtimeActive),
+    'restore receipt runtime identity',
+  )
+  const restoreIntent = validateRestoreIntent(value.restoreIntent.path, chain)
+  if (restoreIntent.sha256 !== value.restoreIntent.sha256
+    || !sameIdentity(restoreIntent.identity, value.restoreIntent)) fail('restore receipt intent binding is invalid')
+  if (requireAnchor) validateAnchor(join(dirname(pathname), 'restore.anchor.json'), 'restore', loaded, chain.intent.sha256)
   return loaded
+}
+
+function restoredWorkspacePlacement(value) {
+  const sourceEntry = optionalEntry(value.source.path)
+  const targetEntry = optionalEntry(value.target.path)
+  if (Boolean(sourceEntry) === Boolean(targetEntry)) fail('restore workspace placement is ambiguous')
+  if (targetEntry) {
+    const target = identity(value.target.path, 'quarantined workspace', 'directory', 0o700)
+    if (!sameIdentity(target, value.target)) fail('quarantined workspace identity changed')
+    const tree = treeSnapshot(target.path, 'quarantined workspace')
+    if (tree.digest !== value.tree.digest || tree.entries !== value.tree.entries
+      || tree.bytes !== value.tree.bytes) fail('quarantined workspace tree changed')
+    return { mode: 'target', identity: target, tree }
+  }
+  const source = identity(value.source.path, 'restored workspace', 'directory', 0o700)
+  if (source.dev !== value.source.dev || source.ino !== value.source.ino
+    || source.uid !== value.source.uid || source.mode !== value.source.mode) {
+    fail('restored workspace identity changed')
+  }
+  const tree = treeSnapshot(source.path, 'restored workspace')
+  if (tree.digest !== value.tree.digest || tree.entries !== value.tree.entries
+    || tree.bytes !== value.tree.bytes) fail('restored workspace tree changed')
+  return { mode: 'source', identity: source, tree }
+}
+
+async function restoredRuntimeState(value) {
+  let quiescedError
+  try { return { mode: 'quiesced', snapshot: await captureSnapshot(value.minimumAgeSeconds, 'quiesced') } } catch (error) {
+    quiescedError = error
+  }
+  try { return { mode: 'active', snapshot: await captureSnapshot(value.minimumAgeSeconds, 'active') } } catch (activeError) {
+    fail(`restore runtime is neither quiesced nor active: ${quiescedError?.message}; ${activeError?.message}`)
+  }
+}
+
+function testKillAfter(name) {
+  if (TEST_MODE && process.env[`AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_${name}`] === '1') {
+    process.kill(process.pid, 'SIGKILL')
+  }
 }
 
 async function status(values) {
   const restorePath = restoreReceiptPath(values.pathname)
-  const restored = Boolean(optionalEntry(restorePath))
-  const chain = validateReceipt(values.pathname, restored)
-  if (!restored) {
+  const intentPath = restoreIntentPath(values.pathname)
+  const anchorPath = join(dirname(values.pathname), 'restore.anchor.json')
+  const hasIntent = Boolean(optionalEntry(intentPath))
+  const hasReceipt = Boolean(optionalEntry(restorePath))
+  const hasAnchor = Boolean(optionalEntry(anchorPath))
+  if (hasAnchor && !hasReceipt) fail('restore commit marker exists without its receipt')
+  const chain = validateReceipt(values.pathname, hasIntent || hasReceipt || hasAnchor)
+  if (!hasIntent && !hasReceipt && !hasAnchor) {
     await validatePrepared(values.pathname, chain)
-    process.stdout.write(`${JSON.stringify({ mode: 'prepared', receipt: values.pathname })}\n`)
+    process.stdout.write(`${JSON.stringify({ mode: chain.value.holdGuardian ? 'prepared-held' : 'prepared', receipt: values.pathname })}\n`)
     return
   }
-  validateRestoreReceipt(restorePath, chain)
+  if (!hasIntent) fail('restore artifacts exist without a restore intent')
+  validateRestoreIntent(intentPath, chain)
+  if (!hasAnchor) {
+    if (hasReceipt) validateRestoreReceipt(restorePath, chain, false)
+    process.stdout.write(`${JSON.stringify({ mode: 'restore-incomplete', receipt: values.pathname })}\n`)
+    return
+  }
+  const restoreReceipt = validateRestoreReceipt(restorePath, chain, true)
   if (optionalEntry(chain.value.target.path)) fail('restored quarantine target still exists')
   const source = identity(chain.value.source.path, 'restored workspace', 'directory', 0o700)
   if (source.dev !== chain.value.source.dev || source.ino !== chain.value.source.ino) fail('restored workspace identity changed')
   const tree = treeSnapshot(source.path, 'restored workspace')
   if (tree.digest !== chain.value.tree.digest || tree.entries !== chain.value.tree.entries || tree.bytes !== chain.value.tree.bytes) fail('restored workspace tree changed')
   const active = await captureSnapshot(chain.value.minimumAgeSeconds, 'active')
-  assertStable(chain.value.runtimeBefore.protectedPids, active.protectedPids, 'restored protected listener PID set')
+  assertStable(restoreReceipt.value.runtimeActive, active, 'restored active runtime snapshot')
   process.stdout.write(`${JSON.stringify({ mode: 'restored', receipt: values.pathname })}\n`)
 }
 
 async function restore(values) {
   const restorePath = restoreReceiptPath(values.pathname)
-  if (optionalEntry(restorePath)) return status(values)
-  const chain = validateReceipt(values.pathname)
-  let launchGuardian = openLaunchGuardian(chain.value.runtimeBefore.batchRoot, {
-    token: randomBytes(32).toString('hex'),
-    createdAt: new Date().toISOString(),
-  })
-  let restored = false
-  let laneActive = false
-  try {
-    const prepared = await validatePrepared(values.pathname, chain, launchGuardian)
-    launchGuardian.verify()
-    reverseRename(chain.value.source.path, chain.value.target.path, prepared.target, prepared.tree)
-    restored = true
-    launchGuardian.verify()
-    launchGuardian.release()
-    launchGuardian = null
-    const active = await enableAndStart(chain.value.minimumAgeSeconds, chain.value.runtimeBefore)
-    laneActive = true
-    chmodSync(dirname(values.pathname), 0o700)
-    const receipt = immutableJson(restorePath, {
-      schema: RESTORE_SCHEMA,
-      createdAt: Math.floor(Date.now() / 1000),
-      nonce: chain.value.nonce,
-      preparedReceiptSha256: chain.loaded.sha256,
-      source: identity(chain.value.source.path, 'restored workspace', 'directory', 0o700),
-      runtimeActive: active,
-    })
-    writeAnchor(join(dirname(values.pathname), 'restore.anchor.json'), 'restore', receipt, chain.intent.sha256)
+  const intentPath = restoreIntentPath(values.pathname)
+  const anchorPath = join(dirname(values.pathname), 'restore.anchor.json')
+  if (optionalEntry(anchorPath)) {
+    const chain = validateReceipt(values.pathname, true)
+    validateRestoreReceipt(restorePath, chain)
     chmodSync(dirname(values.pathname), 0o500)
     fsyncDirectory(dirname(values.pathname))
     fsyncDirectory(dirname(dirname(values.pathname)))
+    return status(values)
+  }
+  const chain = validateReceipt(values.pathname, Boolean(optionalEntry(intentPath)))
+  const attemptDirectory = dirname(values.pathname)
+  chmodSync(attemptDirectory, 0o700)
+  fsyncDirectory(attemptDirectory)
+  const preparedMarkerPath = chain.value.launchGuardian.path
+  const preparedOwnerPath = launchGuardianOwnerPath(chain.value.runtimeBefore.batchRoot)
+  if (!optionalEntry(intentPath) && !optionalEntry(preparedMarkerPath)
+    && optionalEntry(preparedOwnerPath)) {
+    // A non-held prepare may have been killed after marker-first release. The
+    // immutable prepare intent is the exact authority for this one sidecar.
+    removeDetachedGuardianOwner(
+      chain.value.runtimeBefore.batchRoot, chain.intent.value.launchGuardian,
+    )
+  }
+  let restoreIntent
+  if (optionalEntry(intentPath)) restoreIntent = validateRestoreIntent(intentPath, chain)
+  else {
+    const held = optionalEntry(chain.value.launchGuardian.path)
+    const heldOwner = optionalEntry(preparedOwnerPath)
+    if (held && heldOwner && !chain.value.holdGuardian) fail('unexpected live launch guardian blocks restore')
+    const launchGuardian = held ? chain.intent.value.launchGuardian : {
+      path: launchGuardianPath(chain.value.runtimeBefore.batchRoot),
+      token: randomBytes(32).toString('hex'),
+      createdAt: new Date().toISOString(),
+    }
+    restoreIntent = immutableJson(intentPath, {
+      schema: RESTORE_INTENT_SCHEMA,
+      createdAt: Math.floor(Date.now() / 1000),
+      nonce: chain.value.nonce,
+      toolSha256: toolSha256(),
+      preparedReceiptPath: chain.loaded.identity.path,
+      preparedReceiptSha256: chain.loaded.sha256,
+      launchGuardian,
+    })
+  }
+  const plan = restoreIntent.value.launchGuardian
+  let existingGuardian = optionalEntry(plan.path)
+  const existingOwnerPath = launchGuardianOwnerPath(chain.value.runtimeBefore.batchRoot)
+  if (!existingGuardian && optionalEntry(existingOwnerPath)) {
+    const runtime = await restoredRuntimeState(chain.value)
+    if (runtime.mode !== 'active') {
+      fail('detached launch guardian owner exists without the restored active worker')
+    }
+    assertStable(
+      stableComparable(chain.value.runtimeBefore), stableComparable(runtime.snapshot),
+      'detached-owner active runtime identity',
+    )
+    removeDetachedGuardianOwner(chain.value.runtimeBefore.batchRoot, plan)
+    existingGuardian = null
+  }
+  if (existingGuardian && optionalEntry(existingOwnerPath)) {
+    const sample = heldGuardianSample(plan, false)
+    if (pidExists(sample.owner.value.pid, 'guardian owner')) {
+      const preparedPlan = chain.intent.value.launchGuardian
+      if (!chain.value.holdGuardian || plan.token !== preparedPlan.token
+        || plan.createdAt !== preparedPlan.createdAt || plan.path !== preparedPlan.path) {
+        fail('another live launch guardian blocks restore')
+      }
+      requestHeldGuardianHandoff(chain.value.launchGuardian)
+    }
+  }
+  let launchGuardian = existingGuardian
+    ? openLaunchGuardian(chain.value.runtimeBefore.batchRoot, attemptDirectory, plan, true)
+    : openLaunchGuardian(chain.value.runtimeBefore.batchRoot, attemptDirectory, plan)
+  try {
+    let placement = restoredWorkspacePlacement(chain.value)
+    if (placement.mode === 'target') {
+      const prepared = await validatePrepared(values.pathname, chain, launchGuardian)
+      launchGuardian.verify()
+      reverseRename(chain.value.source.path, chain.value.target.path, prepared.target, prepared.tree)
+      testKillAfter('RESTORE_RENAME')
+      placement = restoredWorkspacePlacement(chain.value)
+    }
+    if (placement.mode !== 'source') fail('restore did not produce the source workspace')
+    const runtime = await restoredRuntimeState(chain.value)
+    let active
+    if (runtime.mode === 'quiesced') {
+      assertStable(stableComparable(chain.value.runtimeBefore), stableComparable(runtime.snapshot), 'restore quiesced runtime identity')
+      launchGuardian.verify()
+      const handoffCleanup = launchGuardian.handoff()
+      launchGuardian = null
+      testKillAfter('RESTORE_GUARDIAN_HANDOFF')
+      active = await enableAndStart(
+        chain.value.minimumAgeSeconds, chain.value.runtimeBefore, handoffCleanup,
+      )
+    } else {
+      active = runtime.snapshot
+      assertStable(stableComparable(chain.value.runtimeBefore), stableComparable(active), 'restored runtime identity')
+      launchGuardian.verify()
+      launchGuardian.release()
+      launchGuardian = null
+    }
+    testKillAfter('RESTORE_ACTIVE')
+    let receipt
+    if (optionalEntry(restorePath)) {
+      receipt = validateRestoreReceipt(restorePath, chain, false)
+    } else {
+      receipt = immutableJson(restorePath, {
+        schema: RESTORE_SCHEMA,
+        createdAt: Math.floor(Date.now() / 1000),
+        nonce: chain.value.nonce,
+        toolSha256: toolSha256(),
+        preparedReceiptSha256: chain.loaded.sha256,
+        restoreIntent: { path: intentPath, sha256: restoreIntent.sha256, ...restoreIntent.identity },
+        source: identity(chain.value.source.path, 'restored workspace', 'directory', 0o700),
+        runtimeActive: active,
+      })
+    }
+    testKillAfter('RESTORE_RECEIPT')
+    if (!optionalEntry(anchorPath)) writeAnchor(anchorPath, 'restore', receipt, chain.intent.sha256)
+    testKillAfter('RESTORE_ANCHOR')
+    chmodSync(attemptDirectory, 0o500)
+    fsyncDirectory(attemptDirectory)
+    fsyncDirectory(dirname(attemptDirectory))
     process.stdout.write(`${JSON.stringify({ mode: 'restored', receipt: values.pathname, restoreReceiptSha256: receipt.sha256 })}\n`)
   } catch (error) {
-    const failures = [error instanceof Error ? error.message : String(error)]
-    if (launchGuardian) {
-      try { launchGuardian.release() } catch (rollbackError) { failures.push(`launch guardian release failed: ${rollbackError.message}`) }
-    }
-    if (laneActive) {
-      try { disableAndStop(chain.value.runtimeBefore.plistPath); await waitForSnapshot(chain.value.minimumAgeSeconds, 'quiesced') } catch (rollbackError) { failures.push(`lane re-quiesce failed: ${rollbackError.message}`) }
-    }
-    if (restored && !optionalEntry(chain.value.target.path)) {
-      try { renameWorkspace(chain.value.source.path, chain.value.target.path, { ...chain.value.tree, root: chain.value.source }) } catch (rollbackError) { failures.push(`workspace re-quarantine failed: ${rollbackError.message}`) }
-    }
-    fail(failures.join('; '))
+    // Restore is append-only. Leave the exact placement and guardian marker in
+    // place so a retry can converge from its immutable restore intent.
+    throw error
   }
 }
 
@@ -1361,13 +2118,26 @@ async function recover(values) {
   const intent = readImmutableJson(values.pathname, 'runtime guard intent')
   const value = intent.value
   if (value?.schema !== INTENT_SCHEMA || !value.source?.root?.path || !value.target || !value.runtime
-    || value.toolSha256 !== toolSha256() || !value.launchGuardian?.token) fail('runtime guard intent contract is invalid')
+    || !supportedToolSha256(value.toolSha256) || !value.launchGuardian?.token) fail('runtime guard intent contract is invalid')
   const attemptDirectory = dirname(values.pathname)
-  const launchGuardian = openLaunchGuardian(value.runtime.batchRoot, value.launchGuardian, true)
+  chmodSync(attemptDirectory, 0o700)
+  fsyncDirectory(attemptDirectory)
+  const guardianMarker = optionalEntry(value.launchGuardian.path)
+  const guardianOwnerPath = launchGuardianOwnerPath(value.runtime.batchRoot)
+  if (!guardianMarker && optionalEntry(guardianOwnerPath)) {
+    removeDetachedGuardianOwner(value.runtime.batchRoot, value.launchGuardian)
+  }
+  const launchGuardian = openLaunchGuardian(
+    value.runtime.batchRoot, attemptDirectory, value.launchGuardian, Boolean(guardianMarker),
+  )
   try {
     const source = optionalEntry(value.source.root.path)
     const target = optionalEntry(value.target)
     if (source && !target) {
+      if (optionalEntry(join(attemptDirectory, 'receipt.json'))
+        || optionalEntry(join(attemptDirectory, 'receipt.anchor.json'))) {
+        fail('pre-rename recovery has a conflicting committed receipt')
+      }
       const sourceIdentity = identity(value.source.root.path, 'orphan workspace', 'directory', 0o700)
       if (!sameIdentity(sourceIdentity, value.source.root)) fail('pre-rename workspace identity changed')
       const tree = treeSnapshot(value.source.root.path, 'orphan workspace')
@@ -1392,6 +2162,9 @@ async function recover(values) {
       return
     }
     if (!source && target) {
+      if (value.toolSha256 !== toolSha256()) {
+        fail('the predecessor tool is recoverable only before the workspace rename')
+      }
       const deadLock = recoverLockEvidence(value, attemptDirectory, true)
       const targetIdentity = identity(value.target, 'quarantined workspace', 'directory', 0o700)
       if (targetIdentity.dev !== value.source.root.dev || targetIdentity.ino !== value.source.root.ino) fail('post-SIGKILL target identity differs')
@@ -1401,40 +2174,62 @@ async function recover(values) {
       const quiesced = await waitForSnapshot(value.minimumAgeSeconds, 'quiesced')
       assertStable(stableComparable(value.runtime), stableComparable(quiesced), 'recovered runtime identity')
       const receiptPath = join(attemptDirectory, 'receipt.json')
-      const receipt = immutableJson(receiptPath, {
-        schema: RECEIPT_SCHEMA,
-        createdAt: Math.floor(Date.now() / 1000),
-        nonce: value.nonce,
-        toolSha256: value.toolSha256,
-        intent: { path: values.pathname, sha256: intent.sha256, ...intent.identity },
-        minimumAgeSeconds: value.minimumAgeSeconds,
-        runtimeBefore: value.runtime,
-        runtimeQuiesced: quiesced,
-        deadLock,
-        launchGuardian: {
-          path: value.launchGuardian.path,
-          dev: value.launchGuardian.dev,
-          ino: value.launchGuardian.ino,
-          uid: value.launchGuardian.uid,
-          mode: value.launchGuardian.mode,
-          tokenSha256: value.launchGuardian.tokenSha256,
-          createdAt: value.launchGuardian.createdAt,
-        },
-        source: value.source.root,
-        target: targetIdentity,
-        tree,
-      })
-      writeAnchor(join(attemptDirectory, 'receipt.anchor.json'), 'receipt', receipt, intent.sha256)
+      const anchorPath = join(attemptDirectory, 'receipt.anchor.json')
+      if (optionalEntry(anchorPath) && !optionalEntry(receiptPath)) {
+        fail('receipt commit marker exists without its receipt')
+      }
+      let receipt
+      if (optionalEntry(receiptPath)) {
+        const chain = validateReceipt(receiptPath, false, Boolean(optionalEntry(anchorPath)))
+        receipt = chain.loaded
+        if (!sameIdentity(chain.value.target, targetIdentity)
+          || chain.value.tree.digest !== tree.digest || chain.value.runtimeQuiesced?.lane?.projection?.digest !== quiesced.lane.projection.digest) {
+          fail('recovered receipt does not match the quarantined workspace')
+        }
+      } else {
+        receipt = immutableJson(receiptPath, {
+          schema: RECEIPT_SCHEMA,
+          createdAt: Math.floor(Date.now() / 1000),
+          nonce: value.nonce,
+          toolSha256: value.toolSha256,
+          holdGuardian: Boolean(value.holdGuardian),
+          intent: { path: values.pathname, sha256: intent.sha256, ...intent.identity },
+          minimumAgeSeconds: value.minimumAgeSeconds,
+          runtimeBefore: value.runtime,
+          runtimeQuiesced: quiesced,
+          deadLock,
+          launchGuardian: {
+            path: value.launchGuardian.path,
+            dev: value.launchGuardian.dev,
+            ino: value.launchGuardian.ino,
+            uid: value.launchGuardian.uid,
+            mode: value.launchGuardian.mode,
+            tokenSha256: value.launchGuardian.tokenSha256,
+            createdAt: value.launchGuardian.createdAt,
+            sourceSha256: launchGuardian.sourceSha256,
+            markerPid: launchGuardian.markerPid,
+          },
+          source: value.source.root,
+          target: targetIdentity,
+          tree,
+        })
+      }
+      if (!optionalEntry(anchorPath)) writeAnchor(anchorPath, 'receipt', receipt, intent.sha256)
       chmodSync(attemptDirectory, 0o500)
       fsyncDirectory(attemptDirectory)
       fsyncDirectory(dirname(attemptDirectory))
-      launchGuardian.release()
-      process.stdout.write(`${JSON.stringify({ mode: 'recovered-after-rename', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+      if (value.holdGuardian) {
+        const holdPromise = launchGuardian.hold()
+        process.stdout.write(`${JSON.stringify({ mode: 'recovered-after-rename-held', receipt: receiptPath, receiptSha256: receipt.sha256, guardianPid: process.pid })}\n`)
+        await holdPromise
+      } else {
+        launchGuardian.release()
+        process.stdout.write(`${JSON.stringify({ mode: 'recovered-after-rename', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+      }
       return
     }
     fail('SIGKILL recovery state is ambiguous')
   } catch (error) {
-    try { launchGuardian.release() } catch { /* Preserve the primary recovery failure. */ }
     throw error
   }
 }
@@ -1446,6 +2241,10 @@ export async function main(argv = process.argv.slice(2)) {
   if (values.command === 'restore') return restore(values)
   return recover(values)
 }
+
+// Exported for the real-FD regression harness; the CLI remains the only
+// production entry point.
+export { closeBoundReadonlyDatabase, openBoundReadonlyDatabase }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   main().catch(error => {

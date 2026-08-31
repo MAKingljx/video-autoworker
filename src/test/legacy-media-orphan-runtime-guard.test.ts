@@ -16,6 +16,8 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 
 const repositoryRoot = resolve(__dirname, '../..')
@@ -145,7 +147,10 @@ const p=process.env.GUARD_STATE
 const s=JSON.parse(fs.readFileSync(p,'utf8'))
 const a=process.argv.slice(2)
 const save=()=>fs.writeFileSync(p,JSON.stringify(s),{mode:0o600})
-if(a[0]==='print-disabled'){process.stdout.write('disabled services = { "ai.aiworker.video-lane-supervisor" => '+s.disabled+' }\\n');process.exit(0)}
+if(a[0]==='print-disabled'){
+  const value=process.env.GUARD_DISABLED_STYLE==='boolean'?String(s.disabled):(s.disabled?'disabled':'enabled')
+  process.stdout.write('disabled services = { "ai.aiworker.video-lane-supervisor" => '+value+' }\\n');process.exit(0)
+}
 if(a[0]==='print'){
   if(s.loaded){process.stdout.write('state = running\\npid = 3000\\n');process.exit(0)}
   process.exit(1)
@@ -173,6 +178,8 @@ if(a[0]==='bootout'){
 if(a[0]==='enable'){s.disabled=false;save();process.exit(0)}
 if(a[0]==='bootstrap'){
   if(fs.existsSync(s.lockPath))process.exit(3)
+  const handoff=require('node:path').join(require('node:path').dirname(s.lockPath),'.worker-launch.lock')
+  if(fs.existsSync(handoff))fs.unlinkSync(handoff)
   fs.writeFileSync(s.lockPath,JSON.stringify({pid:3000,token:'87654321-4321-4321-8321-cba987654321',createdAt:new Date().toISOString()})+'\\n',{mode:0o600})
   s.loaded=true;s.workers=[3000];save();process.exit(0)
 }
@@ -269,6 +276,64 @@ afterEach(() => {
 })
 
 describe('legacy media orphan runtime guard', () => {
+  it('binds its readonly SQLite connection to the precaptured numeric FD identity', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'orphan-runtime-db-bind-')))
+    roots.push(root)
+    chmodSync(root, 0o700)
+    const databasePath = join(root, 'mission-control.db')
+    const database = new Database(databasePath)
+    database.exec('CREATE TABLE probe (value INTEGER NOT NULL); INSERT INTO probe VALUES (7)')
+    database.close()
+    chmodSync(databasePath, 0o600)
+    const fakeLsof = join(root, 'lsof')
+    executable(fakeLsof, `#!${process.execPath}
+const result=require('node:child_process').spawnSync('/usr/sbin/lsof',process.argv.slice(2),{encoding:'utf8'})
+process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');process.exit(result.status===null?1:result.status)
+`)
+    const entry = statSync(databasePath, { bigint: true })
+    const expected = {
+      path: databasePath,
+      dev: String(entry.dev),
+      ino: String(entry.ino),
+      uid: Number(entry.uid),
+      mode: Number(entry.mode) & 0o7777,
+    }
+    const source = `
+const module=await import(${JSON.stringify(pathToFileURL(script).href)})
+const handle=module.openBoundReadonlyDatabase(${JSON.stringify(expected)},'test database')
+if(handle.db.prepare('SELECT value FROM probe').get().value!==7)throw new Error('probe mismatch')
+module.closeBoundReadonlyDatabase(handle,'test database')
+`
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        AIWORKER_TEST_ORPHAN_RUNTIME_GUARD: '1',
+        AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_LSOF: fakeLsof,
+      },
+    })
+    expect(result.status, result.stderr).toBe(0)
+
+    const captured = `${databasePath}.captured`
+    renameSync(databasePath, captured)
+    const replacement = new Database(databasePath)
+    replacement.exec('CREATE TABLE replacement (value INTEGER NOT NULL)')
+    replacement.close()
+    chmodSync(databasePath, 0o600)
+    const rejected = spawnSync(process.execPath, ['--input-type=module', '--eval', source], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        AIWORKER_TEST_ORPHAN_RUNTIME_GUARD: '1',
+        AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_LSOF: fakeLsof,
+      },
+    })
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('does not match the precaptured identity')
+  })
+
   it('accepts and binds one physical directory of paired terminal batch states', () => {
     const fixture = createFixture()
     const directory = writeTerminalBatchPair(fixture.batchRoot)
@@ -301,6 +366,12 @@ describe('legacy media orphan runtime guard', () => {
     }
     writeFileSync(backup, `${JSON.stringify(historical)}\n`, { mode: 0o600 })
     const prepared = parseOutput(fixture.prepare())
+    expect(prepared.mode).toBe('prepared')
+  })
+
+  it('accepts the historical true/false launchctl disabled-state wording', () => {
+    const fixture = createFixture()
+    const prepared = parseOutput(fixture.prepare({ GUARD_DISABLED_STYLE: 'boolean' }))
     expect(prepared.mode).toBe('prepared')
   })
 
@@ -341,6 +412,28 @@ describe('legacy media orphan runtime guard', () => {
     expect(existsSync(fixture.workspace)).toBe(true)
     expect(parseOutput(fixture.run(['restore', '--receipt', prepared.receipt])).mode).toBe('restored')
   })
+
+  it.each([
+    'RESTORE_RENAME',
+    'RESTORE_GUARDIAN_HANDOFF',
+    'MARKER_CONSUMED_BEFORE_OWNER_CLEANUP',
+    'RESTORE_ACTIVE',
+    'RESTORE_RECEIPT',
+    'RESTORE_ANCHOR',
+  ])(
+    'continues the append-only restore after SIGKILL at %s', checkpoint => {
+      const fixture = createFixture()
+      const prepared = parseOutput(fixture.prepare())
+      const killed = fixture.run(['restore', '--receipt', prepared.receipt], {
+        [`AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_${checkpoint}`]: '1',
+      })
+      expect(killed.signal).toBe('SIGKILL')
+      const restored = parseOutput(fixture.run(['restore', '--receipt', prepared.receipt]))
+      expect(restored.mode).toBe('restored')
+      expect(parseOutput(fixture.run(['status', '--receipt', prepared.receipt])).mode).toBe('restored')
+      expect(existsSync(fixture.workspace)).toBe(true)
+    },
+  )
 
   it.each([
     ['disable failure', { failDisable: true }],
@@ -396,14 +489,15 @@ describe('legacy media orphan runtime guard', () => {
     expect(existsSync(fixture.lockPath)).toBe(true)
   })
 
-  it('fails closed when the workspace drifts and restores the lane', () => {
+  it('fails closed without restarting the lane when the workspace drifts', () => {
     const fixture = createFixture()
     fixture.writeState({ mutateWorkspace: true })
     const result = fixture.prepare()
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('workspace tree changed')
     expect(existsSync(fixture.workspace)).toBe(true)
-    expect(fixture.readState().loaded).toBe(true)
+    expect(fixture.readState()).toMatchObject({ loaded: false, disabled: true, workers: [] })
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
   })
 
   it('fails closed on a quarantine target conflict without moving the workspace', () => {
@@ -416,15 +510,16 @@ describe('legacy media orphan runtime guard', () => {
     expect(existsSync(fixture.workspace)).toBe(true)
   })
 
-  it('automatically reverses the rename when receipt publication fails', () => {
+  it('preserves the quarantined commit candidate when receipt publication fails', () => {
     const fixture = createFixture()
     const result = fixture.prepare({
       AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_FAIL_OUTPUT_BASENAME: 'receipt.json',
     })
     expect(result.status).not.toBe(0)
-    expect(existsSync(fixture.workspace)).toBe(true)
-    expect(fixture.readState()).toMatchObject({ loaded: true, disabled: false, workers: [3000] })
-    expect(existsSync(fixture.lockPath)).toBe(true)
+    expect(existsSync(fixture.workspace)).toBe(false)
+    expect(fixture.readState()).toMatchObject({ loaded: false, disabled: true, workers: [] })
+    expect(existsSync(fixture.lockPath)).toBe(false)
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
     expect(existsSync(join(onlyChild(fixture.runRoot), 'dead-video-worker.lock'))).toBe(true)
   })
 
@@ -534,6 +629,22 @@ describe('legacy media orphan runtime guard', () => {
     const recovered = parseOutput(fixture.run(['recover', '--intent', join(attempt, 'intent.json')]))
     expect(recovered.mode).toBe('recovered-before-rename')
     expect(existsSync(join(attempt, 'dead-video-worker.lock'))).toBe(true)
+    expect(fixture.readState()).toMatchObject({ loaded: true, disabled: false, workers: [3000] })
+  })
+
+  it('recovers the one allowlisted predecessor intent after macOS disabled-state wording changed', () => {
+    const fixture = createFixture()
+    const killed = fixture.prepare({ AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_STOP: '1' })
+    expect(killed.signal).toBe('SIGKILL')
+    const attempt = onlyChild(fixture.runRoot)
+    const intentPath = join(attempt, 'intent.json')
+    chmodSync(intentPath, 0o600)
+    const intent = JSON.parse(readFileSync(intentPath, 'utf8')) as { toolSha256: string }
+    intent.toolSha256 = '95a873283b6f0c7c473354791eb9d57807735556de81fe27c1abb1aa035b6384'
+    writeFileSync(intentPath, `${JSON.stringify(intent)}\n`, { mode: 0o600 })
+    chmodSync(intentPath, 0o400)
+    const recovered = parseOutput(fixture.run(['recover', '--intent', intentPath]))
+    expect(recovered.mode).toBe('recovered-before-rename')
     expect(fixture.readState()).toMatchObject({ loaded: true, disabled: false, workers: [3000] })
   })
 })

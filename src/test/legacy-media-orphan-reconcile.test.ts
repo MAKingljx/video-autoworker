@@ -202,6 +202,7 @@ function createFixture() {
     swapMissionOnSelfLsof: false,
     swappedMission: false,
     missionReplacementPath,
+    disabledStyle: 'words',
     supervisorLoaded: false,
     workers: [] as number[],
     pgrepStatus: 1,
@@ -248,7 +249,10 @@ process.stdout.write(output)
 const fs = require('node:fs')
 const state = JSON.parse(fs.readFileSync(process.env.FAKE_STATE, 'utf8'))
 const args = process.argv.slice(2)
-if (args[0] === 'print-disabled') { process.stdout.write('disabled services = { "ai.aiworker.video-lane-supervisor" => true }\\n'); process.exit(0) }
+if (args[0] === 'print-disabled') {
+  const value = state.disabledStyle === 'boolean' ? 'true' : 'disabled'
+  process.stdout.write('disabled services = { "ai.aiworker.video-lane-supervisor" => ' + value + ' }\\n'); process.exit(0)
+}
 const service = args[1] || ''
 if (service.endsWith('/com.video-autoworker.n8n')) { process.stdout.write('state = running\\npid = 2000\\n'); process.exit(0) }
 if (service.endsWith('/ai.aiworker.video-lane-supervisor') && state.supervisorLoaded) {
@@ -394,6 +398,16 @@ describe('managed legacy media orphan reconciliation', () => {
       expect(output).toMatchObject({ mode: 'dry-run', eligible: true, prepareRequired: true })
       expect(output).not.toHaveProperty('confirmationToken')
       expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('accepts historical boolean launchctl disabled-state output', () => {
+    const fixture = createFixture()
+    try {
+      fixture.writeState({ disabledStyle: 'boolean' })
+      const result = fixture.run()
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({ mode: 'dry-run', eligible: true })
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 

@@ -11,7 +11,7 @@
 dry-run、prepare 和 apply 都会按各自阶段重新验证：
 
 - 3017 与 5678 唯一监听进程的 PID、UID、启动时间、argv SHA-256、物理 cwd、Node executable、release ID；
-- 3017 打开的 `mission-control.db` 以及 5678 打开的 `database.sqlite` 路径、device/inode，并在 SQLite 打开期间用验证器自身 FD 再次绑定；
+- 3017 打开的 `mission-control.db` 以及 5678 打开的 `database.sqlite` 必须来自各自进程的数字 FD；guard 再用自身 verifier FD 和 better-sqlite3 新增的数字 FD 同时绑定预捕获 path/device/inode，并在查询结束及关闭前复核；
 - 5678 listener 与 n8n LaunchAgent 的直接父子关系；
 - video-lane supervisor 已 disabled、unloaded，且无 worker、无全局锁；
 - n8n 活跃 execution 为零，正式持久队列 `waiting/running` 均为零；
@@ -26,13 +26,14 @@ JSON、manifest 和数据库成员均有尺寸上限；重复 JSON key、异常 
 
 `scripts/legacy-media-orphan-runtime-guard.mjs` 是 orphan 对账前的窄 preparatory guard。它不修改任务、execution 或数据库，不创建第二条队列，也不删除媒体。当前实现仍是本地候选；只有随完整提交通过发布门并在真实生产仓库纯快进后，才能从该生产 checkout 调用，不能把本地同名脚本复制到服务器执行。
 
-guard 的 `prepare` 自动从 3017 打开的权威 Mission Control SQLite 识别唯一 orphan、终态父任务和严格绑定的终态 n8n execution，不从命令行接收业务 ID。调用方只提供两个已存在、当前用户所有、物理无符号链接且 mode `0700` 的根，以及显式陈旧阈值：
+guard 的 `prepare` 自动从 3017 打开的权威 Mission Control SQLite 识别唯一 orphan、终态父任务和严格绑定的终态 n8n execution，不从命令行接收业务 ID。调用方只提供两个已存在、当前用户所有、物理无符号链接且 mode `0700` 的根，以及显式陈旧阈值。生产 prepare 必须增加 `--hold-guardian yes`，使同一进程在输出 `prepared-held` 后继续刷新 guardian，直至后续 dry-run、备份 prepare 与人工决策完成：
 
 ```text
 node scripts/legacy-media-orphan-runtime-guard.mjs prepare \
   --run-root /绝对路径/受控运行根 \
   --quarantine-root /绝对路径/同卷隔离根 \
-  --minimum-age-seconds <900-2592000>
+  --minimum-age-seconds <900-2592000> \
+  --hold-guardian yes
 ```
 
 执行前它连续两次绑定 3017/5678 listener、进程 incarnation、open-FD 权威库、受保护 listener、现役 LaunchAgent plist、唯一 serve-root worker 和全局锁，并要求持久批次没有 runnable item、staging recovery 或 material-handoff journal，n8n active 与正式 waiting/running 均为零。工作目录必须是 mode `0700` 的物理目录，整棵树无 symlink、无关联 open FD 或进程命令引用，且两次树摘要一致。
@@ -41,9 +42,11 @@ node scripts/legacy-media-orphan-runtime-guard.mjs prepare \
 
 guard 先以独占 `.worker-launch.lock` guardian 阻断绕过 LaunchAgent 的 detached worker，并持续刷新、复核该 guardian 的 inode 与 token；随后持久化不可变 intent，再精确 `disable` 和 `bootout` 现役 video-lane。它不发送 `SIGKILL`、不覆盖 installed skill，也不调用 supervisor installer。由于现役 worker 在默认 `SIGTERM` 下不会执行 JavaScript `finally`，guard 只在旧 PID 已消失且未复用、无任何进程打开全局锁、锁的 dev/inode/完整内容/token 均未漂移时，才把死亡 owner lock 同卷原子移动为 attempt 内的只读证据，绝不 `unlink` 该锁或删除证据。
 
-锁静默门通过后，guard 只允许对遗留工作目录执行同一 device 上的一次 `rename(2)`，核对前后 dev/inode 与完整树摘要，并依次 fsync 隔离父目录和原工作目录父目录。最终 receipt 与独立 anchor 均为 mode `0400`、nlink `1`，绑定 intent、工具摘要、launch guardian、死亡锁证据、前后运行身份、源/目标 inode 和树摘要；attempt 目录随后收紧到 mode `0500`。
+锁静默门通过后，guard 只允许对遗留工作目录执行同一 device 上的一次 `rename(2)`，核对前后 dev/inode 与完整树摘要，并依次 fsync 隔离父目录和原工作目录父目录。最终 receipt 与独立 anchor 均为 mode `0400`、nlink `1`，绑定 intent、工具摘要、launch guardian、死亡锁证据、前后运行身份、源/目标 inode 和树摘要；anchor 的 durable publish 是唯一提交点，attempt 目录随后收紧到 mode `0500`。
 
-任一步普通失败都会在身份仍精确匹配时反向 rename，并在安全释放本进程的 launch guardian 后按原 plist 执行 `enable + bootstrap`；新 worker 创建新锁，已隔离的死亡锁只作为证据保留，不移回活动路径。任何 guardian、PID、锁或目录证据漂移都会保留现场并失败关闭。进程在停 lane 后或目录 rename 后遭 `SIGKILL` 时，只能使用同一不可变 intent 接管原 guardian 并恢复判定：旧锁必须保持原位或已成为精确证据，目录的源/目标只能命中一个精确状态；双边同时存在、同时不存在或 inode/内容/树漂移均拒绝续作。
+只有在 rename 明确尚未发生、源目录仍与 intent 完全一致且目标不存在时，普通失败才允许安全释放 guardian 并按原 plist 恢复 lane。rename 一旦已经发生或可能发生，任何 receipt/anchor/chmod/fsync 后续失败都保留隔离目录、静默 lane 和 guardian，不做反向移动，也不把已提交状态回滚成冲突状态。此时只能使用同一不可变 intent 接管原 guardian：缺 receipt 时补 receipt，缺 anchor 时严格回读候选 receipt 后补 anchor，已提交时只完成 mode/fsync；源/目标双有、双无或 inode/内容/树漂移均拒绝续作。唯一允许的旧工具摘要只适用于本次已知的 rename 前中断 intent，receipt/status 仍必须匹配当前工具摘要。
+
+`--hold-guardian yes` 的 holder 必须作为活进程保留。每 5 秒刷新同一 inode/token，使现役提交脚本看到小于 30 秒的 handoff lock 并拒绝启动 detached worker；不得用陈旧静态文件、`touch` 循环或“尽快执行”替代。`status` 对持锁 receipt 返回 `prepared-held`，同时核对 holder PID、token、inode 与刷新时间。holder 被 `SIGKILL` 后文件会保留，但不再构成持续门禁，必须先按 intent 接管或恢复，不能继续 dry-run/prepare。
 
 ```text
 node scripts/legacy-media-orphan-runtime-guard.mjs recover --intent /受控运行目录/intent.json
@@ -51,7 +54,7 @@ node scripts/legacy-media-orphan-runtime-guard.mjs status --receipt /受控运�
 node scripts/legacy-media-orphan-runtime-guard.mjs restore --receipt /受控运行目录/receipt.json
 ```
 
-`status` 和 `restore` 只消费 receipt 并回读 anchor、intent、dev/inode、哈希和实时运行态。`restore` 原子移回同一棵工作目录并恢复原 lane；成功后写独立 restore receipt/anchor，重复调用只验证并返回已恢复，不重复移动或启动。guard 永不删除隔离根、attempt、intent、receipt、anchor 或媒体数据。
+`status` 和 `restore` 只消费 receipt 并回读 anchor、intent、dev/inode、哈希和实时运行态。`restore` 先写不可变 `restore-intent.json`，再以单向追加方式原子移回同一棵工作目录、恢复原 lane并发布 restore receipt/anchor；任一 SIGKILL 后根据“仍隔离且 lane 静默”“已移回且 lane 静默”“已移回且 lane 精确 active”三种唯一现场续作，其他组合失败关闭。restore anchor 是恢复提交点；提交后只补目录 seal/fsync，绝不重新隔离。重复调用只验证并返回已恢复，不重复移动或启动。guard 永不删除隔离根、attempt、intent、receipt、anchor 或媒体数据。
 
 guard `prepare` 成功只解除现有 orphan 工具的外部运行门，不产生数据库备份。随后仍须运行下文的 orphan dry-run 与 prepare；数据库四字段 apply 继续要求用户看过该次权威备份和 prepare manifest 后作出新的当次确认。
 
@@ -99,6 +102,8 @@ apply 不创建第二份备份。它从不可变 prepare manifest 恢复目标�
 ## 备份、写入与回滚
 
 prepare 创建独占备份目录。Mission Control SQLite、WAL、SHM 的逐字节副本仅标记为 `forensic`，用于调查，不能直接宣称为可恢复数据库；哈希使用固定小块流式读取，并在同一 FD 上比较读前、读后身份和尺寸。工具另用 SQLite backup API 生成 `authoritative` 一致性快照，执行 `quick_check` 并回读目标、父任务和其他记录摘要。该 snapshot 才是唯一权威回滚数据库。
+
+同一 orphan 修复备份家族最多保留最近两份经 manifest、成员 SHA-256、权限与 `consistent-snapshot.db` `quick_check` 全部验证通过的恢复点。生成新恢复点后，先验证新旧两份均有效，再对更早成员执行可恢复归档或受控清理；不得在新备份尚未完整验证时删除旧恢复点，也不得把 forensic 三件套误当权威恢复库。
 
 apply 先取得两次一致的实时快照并与 prepare 逐字段比较，再取得 Mission Control `BEGIN IMMEDIATE` writer lock，在同一事务中重新读取全局活跃媒体、目标、父任务、lease、工作目录/进程、其他记录投影和 n8n execution。任何先到的新任务都会在锁内复核时使操作失败；后到写入必须等待本事务结束。工具只用完整旧值做 CAS，把该 child 改为 `failed` 并写入固定错误码。事务内确认父任务与其他记录未变、仅四个受控字段变化并再次执行 `quick_check`，提交后立即重新绑定两库、复核 n8n/正式队列/媒体节点归零并回读目标。
 
