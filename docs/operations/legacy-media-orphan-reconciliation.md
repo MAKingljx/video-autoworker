@@ -37,7 +37,7 @@ node scripts/legacy-media-orphan-runtime-guard.mjs prepare \
 
 执行前它连续两次绑定 3017/5678 listener、进程 incarnation、open-FD 权威库、受保护 listener、现役 LaunchAgent plist、唯一 serve-root worker 和全局锁，并要求持久批次没有 runnable item、staging recovery 或 material-handoff journal，n8n active 与正式 waiting/running 均为零。工作目录必须是 mode `0700` 的物理目录，整棵树无 symlink、无关联 open FD 或进程命令引用，且两次树摘要一致。
 
-历史隔离测试可能在 batch root 留下一层终态目录。guard 只接受 owner 当前用户、mode `0700`、物理无 symlink、非空且仅含严格成对的 `64hex.json/.bak` 普通文件的一层目录；主备两份都必须符合批次 schema，且 batch/item 全部非 active、无 staging recovery。目录、成员 dev/inode/mode/bytes/SHA 与状态进入 projection 摘要；未知成员、更深目录、软链、缺失主备或任一活跃状态仍失败关闭。guard 只读绑定这种终态目录，不移动或删除它。
+历史隔离测试可能在 batch root 留下一层终态目录。guard 只接受 owner 当前用户、mode `0700`、物理无 symlink、非空且仅含严格成对的 `64hex.json/.bak` 普通文件的一层目录；主备两份都必须符合批次 schema，实际调度所读取的 primary batch/item 必须全部非 active、无 staging recovery。`.bak` 只作为上一个历史快照绑定身份和摘要，即使保留旧 active 字样也不等于当前可运行任务。目录、成员 dev/inode/mode/bytes/SHA、主备角色与状态进入 projection 摘要；未知成员、更深目录、软链、缺失主备或 primary 任一活跃状态仍失败关闭。guard 只读绑定这种终态目录，不移动或删除它。
 
 guard 先以独占 `.worker-launch.lock` guardian 阻断绕过 LaunchAgent 的 detached worker，并持续刷新、复核该 guardian 的 inode 与 token；随后持久化不可变 intent，再精确 `disable` 和 `bootout` 现役 video-lane。它不发送 `SIGKILL`、不覆盖 installed skill，也不调用 supervisor installer。由于现役 worker 在默认 `SIGTERM` 下不会执行 JavaScript `finally`，guard 只在旧 PID 已消失且未复用、无任何进程打开全局锁、锁的 dev/inode/完整内容/token 均未漂移时，才把死亡 owner lock 同卷原子移动为 attempt 内的只读证据，绝不 `unlink` 该锁或删除证据。
 

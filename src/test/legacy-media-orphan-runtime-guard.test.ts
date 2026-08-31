@@ -289,6 +289,21 @@ describe('legacy media orphan runtime guard', () => {
     expect(fixture.run(['status', '--receipt', prepared.receipt]).status).not.toBe(0)
   })
 
+  it('binds but does not schedule a historical active state from a paired backup', () => {
+    const fixture = createFixture()
+    const directory = writeTerminalBatchPair(fixture.batchRoot)
+    const backup = join(directory, `${'b'.repeat(64)}.json.bak`)
+    const historical = {
+      schemaVersion: 2,
+      batchId: 'batch-retest',
+      status: 'running',
+      items: [{ taskId: 'task-retest', status: 'running' }],
+    }
+    writeFileSync(backup, `${JSON.stringify(historical)}\n`, { mode: 0o600 })
+    const prepared = parseOutput(fixture.prepare())
+    expect(prepared.mode).toBe('prepared')
+  })
+
   it('rejects active state inside a retained terminal directory', () => {
     const fixture = createFixture()
     writeTerminalBatchPair(fixture.batchRoot, '2026-08-27-retest', 'running')

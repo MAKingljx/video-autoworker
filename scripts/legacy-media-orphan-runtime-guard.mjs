@@ -365,7 +365,7 @@ function batchProjection(batchRoot, lockPath) {
   const active = []
   let journals = 0
   const members = []
-  const projectState = (pathname, memberPath) => {
+  const projectState = (pathname, memberPath, backup = false) => {
     const entry = safeEntry(pathname, 'video batch state', 'file')
     if (entry.size > 8n * 1024n * 1024n) fail('video batch state is too large')
     const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -388,11 +388,11 @@ function batchProjection(batchRoot, lockPath) {
     const itemStates = []
     for (const item of value.items) {
       if (!item || typeof item !== 'object' || typeof item.status !== 'string') fail('video batch item contract is invalid')
-      if (item.stagingRecovery && item.status !== 'attention') journals += 1
-      if (ACTIVE_ITEM.has(item.status)) active.push({ status: item.status, taskHash: sha256(String(item.taskId || '')) })
+      if (!backup && item.stagingRecovery && item.status !== 'attention') journals += 1
+      if (!backup && ACTIVE_ITEM.has(item.status)) active.push({ status: item.status, taskHash: sha256(String(item.taskId || '')) })
       itemStates.push({ status: item.status, taskHash: sha256(String(item.taskId || '')), stagingRecovery: Boolean(item.stagingRecovery) })
     }
-    if (RUNNABLE_BATCH.has(value.status) && !value.items.some(item => ACTIVE_ITEM.has(item?.status))) {
+    if (!backup && RUNNABLE_BATCH.has(value.status) && !value.items.some(item => ACTIVE_ITEM.has(item?.status))) {
       active.push({ status: value.status, taskHash: sha256(String(value.batchId || '')) })
     }
     members.push({
@@ -403,6 +403,7 @@ function batchProjection(batchRoot, lockPath) {
       mode: Number(entry.mode & 0o7777n),
       bytes: Number(entry.size),
       sha256: sha256(source),
+      role: backup ? 'backup' : 'primary',
       batchStatus: value.status,
       itemStates,
     })
@@ -431,12 +432,14 @@ function batchProjection(batchRoot, lockPath) {
         } else if (!nestedNames.includes(`${nestedName}.bak`)) fail('video batch terminal primary has no backup')
       }
       members.push({ ...directory, path: `${name}/`, type: 'directory' })
-      for (const nestedName of nestedNames.sort()) projectState(join(pathname, nestedName), `${name}/${nestedName}`)
+      for (const nestedName of nestedNames.sort()) {
+        projectState(join(pathname, nestedName), `${name}/${nestedName}`, nestedName.endsWith('.bak'))
+      }
       continue
     }
     if (!/^[a-f0-9]{64}\.json(?:\.bak)?$/u.test(name)) fail('video batch root contains an unknown member')
     if (name.endsWith('.bak') && !names.includes(name.slice(0, -4))) fail('video batch backup has no primary')
-    projectState(pathname, name)
+    projectState(pathname, name, name.endsWith('.bak'))
   }
   members.sort((left, right) => left.path.localeCompare(right.path, 'en'))
   return { runnable: active.length, journals, digest: sha256(canonicalJson({ active, journals, members })) }
