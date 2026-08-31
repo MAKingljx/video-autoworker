@@ -13,6 +13,15 @@ import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
 import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
+import {
+  acquireOrRenewSchedulerLeadership,
+  createSchedulerHolderId,
+  getSchedulerRuntimeEligibility,
+  isMultiInstanceSchedulerRuntime,
+  relinquishSchedulerLeadership,
+  renewSchedulerLeadership,
+  type SchedulerLeadershipResult,
+} from './scheduler-leader'
 
 const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
@@ -27,7 +36,213 @@ interface ScheduledTask {
 }
 
 const tasks: Map<string, ScheduledTask> = new Map()
+const SCHEDULER_TASK_IDS = new Set([
+  'auto_backup',
+  'auto_cleanup',
+  'media_cleanup_debt',
+  'agent_heartbeat',
+  'webhook_retry',
+  'claude_session_scan',
+  'skill_sync',
+  'local_agent_sync',
+  'gateway_agent_sync',
+  'task_dispatch',
+  'aegis_review',
+  'recurring_task_spawn',
+  'stale_task_requeue',
+])
 let tickInterval: ReturnType<typeof setInterval> | null = null
+let leadershipHeartbeatInterval: ReturnType<typeof setInterval> | null = null
+const schedulerHolderId = createSchedulerHolderId()
+const runningJobIds = new Set<string>()
+let tickRunning = false
+let schedulerStopping = false
+let heldLeaseRevision: number | null = null
+
+export type SchedulerLeadershipStatus = {
+  state: 'unknown' | 'leader' | 'follower' | 'inactive' | 'unavailable'
+  leaseExpiresAt: number | null
+  leaseExpired: boolean
+  observedAt: number
+  reason: string
+  routerGeneration: number | null
+  activeJobs: number
+}
+
+let leadershipStatus: SchedulerLeadershipStatus = {
+  state: 'unknown',
+  leaseExpiresAt: null,
+  leaseExpired: false,
+  observedAt: Math.floor(Date.now() / 1000),
+  reason: 'not_initialized',
+  routerGeneration: null,
+  activeJobs: 0,
+}
+
+const LEADERSHIP_HEARTBEAT_MS = 5_000
+
+function publishLeadershipStatus(
+  next: Omit<SchedulerLeadershipStatus, 'leaseExpired' | 'observedAt' | 'activeJobs'>,
+): void {
+  const observedAt = Math.floor(Date.now() / 1000)
+  const previousState = leadershipStatus.state
+  leadershipStatus = {
+    ...next,
+    leaseExpired: next.leaseExpiresAt !== null && next.leaseExpiresAt <= observedAt,
+    observedAt,
+    activeJobs: runningJobIds.size,
+  }
+  if (next.state !== previousState) {
+    if (next.state === 'leader') {
+      logger.info('Built-in scheduler leadership acquired')
+    } else if (next.state === 'follower') {
+      logger.info('Built-in scheduler is standing by behind another process')
+    } else if (next.state === 'inactive') {
+      logger.info('Built-in scheduler is passive because this router slot is inactive')
+    }
+  }
+}
+
+function recordLeaseResult(
+  result: SchedulerLeadershipResult,
+  reason: string,
+  routerGeneration: number | null,
+): boolean {
+  heldLeaseRevision = result.isLeader && result.mode === 'lease' ? result.revision : null
+  publishLeadershipStatus({
+    state: result.isLeader ? 'leader' : 'follower',
+    leaseExpiresAt: result.leaseExpiresAt,
+    reason,
+    routerGeneration,
+  })
+  return result.isLeader
+}
+
+function releaseHeldLeadership(reason: string, routerGeneration: number | null): boolean {
+  try {
+    if (heldLeaseRevision !== null) {
+      relinquishSchedulerLeadership(getDatabase(), {
+        holderId: schedulerHolderId,
+        revision: heldLeaseRevision,
+      })
+    }
+    heldLeaseRevision = null
+    publishLeadershipStatus({
+      state: 'inactive',
+      leaseExpiresAt: null,
+      reason,
+      routerGeneration,
+    })
+    return true
+  } catch (err) {
+    logger.warn({ err }, 'Built-in scheduler lease release failed; heartbeat will retry')
+    publishLeadershipStatus({
+      state: 'unavailable',
+      leaseExpiresAt: leadershipStatus.leaseExpiresAt,
+      reason: 'lease_release_unavailable',
+      routerGeneration,
+    })
+    return false
+  }
+}
+
+/**
+ * Reconcile router eligibility and the SQLite lease. While a job is running,
+ * the old slot keeps renewing even after an atomic router switch. It releases
+ * only after its final local job settles, preventing planned handoff overlap.
+ */
+function reconcileSchedulerLeadership(): boolean {
+  const eligibility = getSchedulerRuntimeEligibility()
+  try {
+    if (heldLeaseRevision !== null) {
+      if (!eligibility.eligible && runningJobIds.size === 0) {
+        releaseHeldLeadership(eligibility.reason, eligibility.generation)
+        return false
+      }
+
+      const renewed = renewSchedulerLeadership(getDatabase(), {
+        holderId: schedulerHolderId,
+        revision: heldLeaseRevision,
+      })
+      return recordLeaseResult(
+        renewed,
+        eligibility.eligible ? eligibility.reason : 'draining_running_jobs',
+        eligibility.generation,
+      )
+    }
+
+    if (!eligibility.eligible) {
+      publishLeadershipStatus({
+        state: 'inactive',
+        leaseExpiresAt: null,
+        reason: eligibility.reason,
+        routerGeneration: eligibility.generation,
+      })
+      return false
+    }
+
+    const result = acquireOrRenewSchedulerLeadership(getDatabase(), {
+      holderId: schedulerHolderId,
+      allowMissingTableForSingleInstance: !isMultiInstanceSchedulerRuntime(),
+    })
+    return recordLeaseResult(result, eligibility.reason, eligibility.generation)
+  } catch (err) {
+    if (leadershipStatus.state !== 'unavailable') {
+      logger.warn({ err }, 'Built-in scheduler leadership unavailable; scheduler work is disabled')
+    }
+    publishLeadershipStatus({
+      state: 'unavailable',
+      leaseExpiresAt: leadershipStatus.leaseExpiresAt,
+      reason: 'lease_unavailable',
+      routerGeneration: eligibility.generation,
+    })
+    return false
+  }
+}
+
+export function getSchedulerLeadershipStatus(): SchedulerLeadershipStatus {
+  const now = Math.floor(Date.now() / 1000)
+  return {
+    ...leadershipStatus,
+    leaseExpired: leadershipStatus.leaseExpiresAt !== null
+      && leadershipStatus.leaseExpiresAt <= now,
+    activeJobs: runningJobIds.size,
+  }
+}
+
+function finishSchedulerStopIfIdle(): void {
+  if (!schedulerStopping || runningJobIds.size > 0) return
+  if (!releaseHeldLeadership('scheduler_stopped', leadershipStatus.routerGeneration)) return
+  if (leadershipHeartbeatInterval) {
+    clearInterval(leadershipHeartbeatInterval)
+    leadershipHeartbeatInterval = null
+  }
+}
+
+function heartbeatSchedulerLeadership(): void {
+  if (schedulerStopping && runningJobIds.size === 0) {
+    finishSchedulerStopIfIdle()
+    return
+  }
+  reconcileSchedulerLeadership()
+}
+
+async function runTrackedSchedulerJob(
+  taskId: string,
+  work: () => Promise<{ ok: boolean; message: string }>,
+): Promise<{ ok: boolean; message: string }> {
+  if (runningJobIds.has(taskId)) {
+    return { ok: false, message: `Scheduler task already running: ${taskId}` }
+  }
+  runningJobIds.add(taskId)
+  try {
+    return await work()
+  } finally {
+    runningJobIds.delete(taskId)
+    if (schedulerStopping) finishSchedulerStopIfIdle()
+    else reconcileSchedulerLeadership()
+  }
+}
 
 /** Check if a setting is enabled (reads from settings table, falls back to default) */
 function isSettingEnabled(key: string, defaultValue: boolean): boolean {
@@ -296,18 +511,52 @@ async function syncAgentLiveStatuses(): Promise<number> {
   return refreshed
 }
 
+async function executeScheduledTask(
+  taskId: string,
+  source: 'manual' | 'scheduled' = 'scheduled',
+): Promise<{ ok: boolean; message: string }> {
+  if (taskId === 'auto_backup') return runBackup()
+  if (taskId === 'auto_cleanup') return runCleanup()
+  if (taskId === 'media_cleanup_debt') return runMediaCleanupDebtJanitor()
+  if (taskId === 'agent_heartbeat') return runHeartbeatCheck()
+  if (taskId === 'webhook_retry') return processWebhookRetries()
+  if (taskId === 'claude_session_scan') return syncClaudeSessions()
+  if (taskId === 'skill_sync') return syncSkillsFromDisk()
+  if (taskId === 'local_agent_sync') return syncLocalAgents()
+  if (taskId === 'gateway_agent_sync') {
+    return syncAgentsFromConfig(source).then(async (result) => {
+      const refreshed = await syncAgentLiveStatuses()
+      return {
+        ok: true,
+        message: `Gateway sync: ${result.created} created, ${result.updated} updated, ${result.synced} total | Live status: ${refreshed} refreshed`,
+      }
+    })
+  }
+  if (taskId === 'task_dispatch') {
+    return autoRouteInboxTasks().then(async (routeResult) => {
+      const dispatchResult = await dispatchAssignedTasks()
+      const parts = [routeResult.message, dispatchResult.message]
+        .filter(message => message && !message.includes('No '))
+      return {
+        ok: routeResult.ok && dispatchResult.ok,
+        message: parts.join(' | ') || 'No tasks to route or dispatch',
+      }
+    })
+  }
+  if (taskId === 'aegis_review') return runAegisReviews()
+  if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
+  if (taskId === 'stale_task_requeue') return requeueStaleTasks()
+  return { ok: false, message: `Unknown task: ${taskId}` }
+}
+
 const DAILY_MS = 24 * 60 * 60 * 1000
 const FIVE_MINUTES_MS = 5 * 60 * 1000
 const TICK_MS = 60 * 1000 // Check every minute
 
 /** Initialize the scheduler */
 export function initScheduler() {
-  if (tickInterval) return // Already running
-
-  // Auto-sync agents from openclaw.json on startup
-  syncAgentsFromConfig('startup').catch(err => {
-    logger.warn({ err }, 'Agent auto-sync failed')
-  })
+  if (tickInterval || leadershipHeartbeatInterval) return // Already running or draining
+  schedulerStopping = false
 
   // Register tasks
   const now = Date.now()
@@ -432,6 +681,29 @@ export function initScheduler() {
     running: false,
   })
 
+  // Heartbeat is independent from the 60-second scheduling tick so a long
+  // asynchronous job keeps its lease during a planned router handoff.
+  leadershipHeartbeatInterval = setInterval(
+    heartbeatSchedulerLeadership,
+    LEADERSHIP_HEARTBEAT_MS,
+  )
+
+  // Startup work is subject to the same cross-process lease as periodic work.
+  if (reconcileSchedulerLeadership()) {
+    void runTrackedSchedulerJob('startup_agent_sync', async () => {
+      try {
+        const result = await syncAgentsFromConfig('startup')
+        return {
+          ok: true,
+          message: `Startup agent sync: ${result.created} created, ${result.updated} updated`,
+        }
+      } catch (err) {
+        logger.warn({ err }, 'Agent auto-sync failed')
+        return { ok: false, message: 'Agent auto-sync failed' }
+      }
+    })
+  }
+
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
   logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, media cleanup debt and heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
@@ -450,58 +722,51 @@ function getNextDailyMs(hour: number): number {
 
 /** Check and run due tasks */
 async function tick() {
-  const now = Date.now()
+  if (tickRunning || schedulerStopping) return
+  tickRunning = true
 
-  for (const [id, task] of tasks) {
-    if (task.running || now < task.nextRun) continue
+  try {
+    if (!reconcileSchedulerLeadership()) return
+    const now = Date.now()
 
-    // Check if this task is enabled in settings (heartbeat is always enabled)
-    const settingKey = id === 'auto_backup' ? 'general.auto_backup'
-      : id === 'auto_cleanup' ? 'general.auto_cleanup'
-      : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
-      : id === 'webhook_retry' ? 'webhooks.retry_enabled'
-      : id === 'claude_session_scan' ? 'general.claude_session_scan'
-      : id === 'skill_sync' ? 'general.skill_sync'
-      : id === 'local_agent_sync' ? 'general.local_agent_sync'
-      : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
-      : id === 'task_dispatch' ? 'general.task_dispatch'
-      : id === 'aegis_review' ? 'general.aegis_review'
-      : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
-      : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
-      : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
-    if (!isSettingEnabled(settingKey, defaultEnabled)) continue
+    for (const [id, task] of tasks) {
+      if (task.running || runningJobIds.has(id) || now < task.nextRun) continue
 
-    task.running = true
-    try {
-      const result = id === 'auto_backup' ? await runBackup()
-        : id === 'media_cleanup_debt' ? await runMediaCleanupDebtJanitor()
-        : id === 'agent_heartbeat' ? await runHeartbeatCheck()
-        : id === 'webhook_retry' ? await processWebhookRetries()
-        : id === 'claude_session_scan' ? await syncClaudeSessions()
-        : id === 'skill_sync' ? await syncSkillsFromDisk()
-        : id === 'local_agent_sync' ? await syncLocalAgents()
-        : id === 'gateway_agent_sync' ? await syncAgentsFromConfig('scheduled').then(async r => {
-            const refreshed = await syncAgentLiveStatuses()
-            return { ok: true, message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed` }
-          })
-        : id === 'task_dispatch' ? await autoRouteInboxTasks().then(async (routeResult) => {
-            const dispatchResult = await dispatchAssignedTasks()
-            const parts = [routeResult.message, dispatchResult.message].filter(m => m && !m.includes('No '))
-            return { ok: routeResult.ok && dispatchResult.ok, message: parts.join(' | ') || 'No tasks to route or dispatch' }
-          })
-        : id === 'aegis_review' ? await runAegisReviews()
-        : id === 'recurring_task_spawn' ? await spawnRecurringTasks()
-        : id === 'stale_task_requeue' ? await requeueStaleTasks()
-        : await runCleanup()
-      task.lastResult = { ...result, timestamp: now }
-    } catch (err: any) {
-      task.lastResult = { ok: false, message: err.message, timestamp: now }
-    } finally {
-      task.running = false
-      task.lastRun = now
-      task.nextRun = now + task.intervalMs
+      // Check if this task is enabled in settings (heartbeat is always enabled)
+      const settingKey = id === 'auto_backup' ? 'general.auto_backup'
+        : id === 'auto_cleanup' ? 'general.auto_cleanup'
+        : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
+        : id === 'webhook_retry' ? 'webhooks.retry_enabled'
+        : id === 'claude_session_scan' ? 'general.claude_session_scan'
+        : id === 'skill_sync' ? 'general.skill_sync'
+        : id === 'local_agent_sync' ? 'general.local_agent_sync'
+        : id === 'gateway_agent_sync' ? 'general.gateway_agent_sync'
+        : id === 'task_dispatch' ? 'general.task_dispatch'
+        : id === 'aegis_review' ? 'general.aegis_review'
+        : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
+        : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
+        : 'general.agent_heartbeat'
+      const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+      if (!isSettingEnabled(settingKey, defaultEnabled)) continue
+
+      // Re-read router state and renew between every job. An old slot never
+      // begins another job after it observes that the router selected its peer.
+      if (!reconcileSchedulerLeadership()) break
+
+      task.running = true
+      try {
+        const result = await runTrackedSchedulerJob(id, () => executeScheduledTask(id))
+        task.lastResult = { ...result, timestamp: now }
+      } catch (err: any) {
+        task.lastResult = { ok: false, message: err.message, timestamp: now }
+      } finally {
+        task.running = false
+        task.lastRun = now
+        task.nextRun = now + task.intervalMs
+      }
     }
+  } finally {
+    tickRunning = false
   }
 }
 
@@ -548,34 +813,19 @@ export function getSchedulerStatus() {
 
 /** Manually trigger a scheduled task */
 export async function triggerTask(taskId: string): Promise<{ ok: boolean; message: string }> {
-  if (taskId === 'auto_backup') return runBackup()
-  if (taskId === 'auto_cleanup') return runCleanup()
-  if (taskId === 'media_cleanup_debt') return runMediaCleanupDebtJanitor()
-  if (taskId === 'agent_heartbeat') return runHeartbeatCheck()
-  if (taskId === 'webhook_retry') return processWebhookRetries()
-  if (taskId === 'claude_session_scan') return syncClaudeSessions()
-  if (taskId === 'skill_sync') return syncSkillsFromDisk()
-  if (taskId === 'local_agent_sync') return syncLocalAgents()
-  if (taskId === 'gateway_agent_sync') {
-    return syncAgentsFromConfig('manual').then(async (r) => {
-      const refreshed = await syncAgentLiveStatuses()
-      return {
-        ok: true,
-        message: `Gateway sync: ${r.created} created, ${r.updated} updated, ${r.synced} total | Live status: ${refreshed} refreshed`,
-      }
-    })
+  if (!SCHEDULER_TASK_IDS.has(taskId)) return { ok: false, message: `Unknown task: ${taskId}` }
+  if (schedulerStopping || !reconcileSchedulerLeadership()) {
+    return { ok: false, message: 'Built-in scheduler is passive on this application instance' }
   }
-  if (taskId === 'task_dispatch') return autoRouteInboxTasks().then(async (r) => { const d = await dispatchAssignedTasks(); return { ok: r.ok && d.ok, message: [r.message, d.message].filter(m => m && !m.includes('No ')).join(' | ') || 'No tasks' } })
-  if (taskId === 'aegis_review') return runAegisReviews()
-  if (taskId === 'recurring_task_spawn') return spawnRecurringTasks()
-  if (taskId === 'stale_task_requeue') return requeueStaleTasks()
-  return { ok: false, message: `Unknown task: ${taskId}` }
+  return runTrackedSchedulerJob(taskId, () => executeScheduledTask(taskId, 'manual'))
 }
 
 /** Stop the scheduler */
 export function stopScheduler() {
+  schedulerStopping = true
   if (tickInterval) {
     clearInterval(tickInterval)
     tickInterval = null
   }
+  finishSchedulerStopIfIdle()
 }

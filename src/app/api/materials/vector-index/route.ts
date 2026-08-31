@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMaterialsRequest } from '../route'
 import { indexMaterialVectors } from '@/lib/openclaw-materials'
+import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 
 export async function POST(request: NextRequest) {
   const auth = authorizeMaterialsRequest(request, 'admin')
@@ -23,8 +24,8 @@ export async function POST(request: NextRequest) {
       headers: { 'Cache-Control': 'no-store' },
     })
   } catch (error) {
-    return NextResponse.json({
-      error: error instanceof Error ? error.message : '向量索引失败',
-    }, { status: 502 })
+    const failure = projectSafeOperationError(error, 'MATERIALS_VECTOR_INDEX_FAILED')
+    logSafeOperationError('materials_vector_index', error, failure)
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 502 })
   }
 }

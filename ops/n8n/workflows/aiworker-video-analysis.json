@@ -37,7 +37,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, bindingId: $('AI-worker Video Webhook').item.json.body.routing.id, workspaceId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.workspaceId, tenantId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.tenantId }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, bindingId: $('AI-worker Video Webhook').item.json.body.routing.id, workspaceId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.workspaceId, tenantId: $('AI-worker Video Webhook').item.json.body.routing.claimScope.tenantId, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id }) }}",
         "options": { "timeout": 30000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000f",
@@ -48,6 +48,37 @@
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000010",
+              "leftValue": "={{ $json.claimed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000011",
+      "name": "Continue Only If Claimed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-380, 0]
     },
     {
       "parameters": {
@@ -85,7 +116,7 @@
       "name": "Build Video Accepted Result",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [-380, 0]
+      "position": [-180, -100]
     },
     {
       "parameters": {
@@ -107,7 +138,67 @@
       "name": "Return Video Accepted",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.4,
-      "position": [-140, 0]
+      "position": [20, -100]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000012",
+              "name": "accepted",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000013",
+              "name": "duplicate",
+              "value": true,
+              "type": "boolean"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000014",
+              "name": "taskId",
+              "value": "={{ $('AI-worker Video Webhook').item.json.body.taskId }}",
+              "type": "string"
+            },
+            {
+              "id": "019fb12d-8000-7a10-9000-000000000015",
+              "name": "status",
+              "value": "running",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000016",
+      "name": "Build Duplicate Claim Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-180, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-AIWorker-Workflow",
+                "value": "video-analysis-v2-duplicate"
+              }
+            ]
+          }
+        }
+      },
+      "id": "019fb12d-8000-7a10-9000-000000000017",
+      "name": "Return Duplicate Claim",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [20, 120]
     },
     {
       "parameters": {
@@ -129,7 +220,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'prepare', input: $('AI-worker Video Webhook').item.json.body.input }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, stage: 'prepare', input: $('AI-worker Video Webhook').item.json.body.input }) }}",
         "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-000000000009",
@@ -138,8 +229,8 @@
       "typeVersion": 4.2,
       "position": [100, 0],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -161,7 +252,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'audio', input: { prepared: $json.output } }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, stage: 'audio', input: { prepared: $json.output } }) }}",
         "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000a",
@@ -170,8 +261,8 @@
       "typeVersion": 4.2,
       "position": [360, -140],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -193,7 +284,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'vision', input: { prepared: $json.output } }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, stage: 'vision', input: { prepared: $json.output } }) }}",
         "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000b",
@@ -202,8 +293,8 @@
       "typeVersion": 4.2,
       "position": [360, 140],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -237,7 +328,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, stage: 'finalize', input: {} }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Video Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Video Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, stage: 'finalize', input: {} }) }}",
         "options": { "timeout": 14400000 }
       },
       "id": "019fb12d-8000-7a10-9000-00000000000d",
@@ -246,8 +337,8 @@
       "typeVersion": 4.2,
       "position": [880, 0],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     }
   ],
   "connections": {
@@ -255,13 +346,22 @@
       "main": [[{ "node": "Claim Video Task", "type": "main", "index": 0 }]]
     },
     "Claim Video Task": {
-      "main": [[{ "node": "Build Video Accepted Result", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Continue Only If Claimed", "type": "main", "index": 0 }]]
+    },
+    "Continue Only If Claimed": {
+      "main": [
+        [{ "node": "Build Video Accepted Result", "type": "main", "index": 0 }],
+        [{ "node": "Build Duplicate Claim Result", "type": "main", "index": 0 }]
+      ]
     },
     "Build Video Accepted Result": {
       "main": [[{ "node": "Return Video Accepted", "type": "main", "index": 0 }]]
     },
     "Return Video Accepted": {
       "main": [[{ "node": "Prepare Video", "type": "main", "index": 0 }]]
+    },
+    "Build Duplicate Claim Result": {
+      "main": [[{ "node": "Return Duplicate Claim", "type": "main", "index": 0 }]]
     },
     "Prepare Video": {
       "main": [[

@@ -35,6 +35,7 @@ const COMBINED_AUDIO_VISUAL_SCOPE = /(?:音画|视听)/u
 const OTHER_PARTIAL_SCOPE = /(?:字幕|文字轨|音轨)/u
 const MAX_PENDING_OPERATIONS = 256
 const OPERATION_TTL_MS = 15 * 60 * 1_000
+export const INTAKE_MAINTENANCE_MESSAGE = '视频学习服务正在发布维护，暂时停止接收新任务，请稍后再试。'
 
 function handled(text) {
   return { handled: true, text }
@@ -246,6 +247,9 @@ function operationKey(event, context) {
 }
 
 export function dispatchReceipt(result) {
+  if (result.intakePaused === true && result.status === 'maintenance') {
+    return INTAKE_MAINTENANCE_MESSAGE
+  }
   if (result.confirmationRequired) {
     const names = result.duplicateNames.map(searchName)
     if (result.kind === 'batch') {
@@ -498,6 +502,7 @@ export function createQwenBeforeDispatchHandler({
             : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
           confirmDuplicate: true,
         })
+      if (result.intakePaused === true) duplicateConfirmationStore.set(pendingScopeKey, pending)
       if (result.confirmationRequired) duplicateConfirmationStore.set(pendingScopeKey, pending)
       return handled(dispatchReceipt(result))
     } catch {

@@ -4,7 +4,9 @@ import { NextRequest } from 'next/server'
 const mocks = vi.hoisted(() => ({
   verifyN8nWebhookSecret: vi.fn(),
   getDatabase: vi.fn(),
-  claimScopedN8nVideoTaskRun: vi.fn(),
+  getN8nTaskRunByTaskId: vi.fn(),
+  claimScopedN8nTaskRun: vi.fn(),
+  checkN8nCallbackAdmission: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n', () => ({
@@ -15,11 +17,16 @@ vi.mock('@/lib/db', () => ({
   getDatabase: mocks.getDatabase,
 }))
 
+vi.mock('@/lib/n8n-runtime-affinity', () => ({
+  checkN8nCallbackAdmission: mocks.checkN8nCallbackAdmission,
+}))
+
 vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
   return {
     ...actual,
-    claimScopedN8nVideoTaskRun: mocks.claimScopedN8nVideoTaskRun,
+    getN8nTaskRunByTaskId: mocks.getN8nTaskRunByTaskId,
+    claimScopedN8nTaskRun: mocks.claimScopedN8nTaskRun,
   }
 })
 
@@ -31,6 +38,7 @@ const payload = {
   bindingId: 7,
   workspaceId: 2,
   tenantId: 3,
+  executionOwner: 'n8n-execution:12345',
 }
 
 function request(body: unknown, secret = 'shared-secret') {
@@ -49,7 +57,9 @@ describe('n8n video parent claim route', () => {
     vi.clearAllMocks()
     mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
-    mocks.claimScopedN8nVideoTaskRun.mockReturnValue({
+    mocks.getN8nTaskRunByTaskId.mockReturnValue({ taskId: payload.taskId, routing: {} })
+    mocks.checkN8nCallbackAdmission.mockReturnValue({ allowed: true, mode: 'legacy' })
+    mocks.claimScopedN8nTaskRun.mockReturnValue({
       outcome: 'claimed',
       run: { taskId: payload.taskId, status: 'running' },
     })
@@ -60,17 +70,32 @@ describe('n8n video parent claim route', () => {
 
     expect(response.status).toBe(200)
     expect(mocks.verifyN8nWebhookSecret).toHaveBeenCalledWith('shared-secret')
-    expect(mocks.claimScopedN8nVideoTaskRun).toHaveBeenCalledWith(
+    expect(mocks.claimScopedN8nTaskRun).toHaveBeenCalledWith(
       {},
-      { taskId: payload.taskId, idempotencyKey: payload.idempotencyKey, bindingId: 7 },
+      { taskId: payload.taskId, idempotencyKey: payload.idempotencyKey, bindingId: 7, executionOwner: payload.executionOwner },
       { workspaceId: 2, tenantId: 3 },
     )
     expect(await response.json()).toEqual({
       taskId: payload.taskId,
       status: 'running',
       claimed: true,
+      resumed: false,
       duplicate: false,
     })
+  })
+
+  it('rejects a callback owned by another release before claiming', async () => {
+    mocks.checkN8nCallbackAdmission.mockReturnValue({
+      allowed: false,
+      code: 'runtime_affinity_mismatch',
+      error: '父任务回调属于其他运行版本',
+    })
+
+    const response = await POST(request(payload))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'runtime_affinity_mismatch' })
+    expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
   })
 
   it('rejects an invalid secret before reading the database', async () => {
@@ -80,7 +105,8 @@ describe('n8n video parent claim route', () => {
 
     expect(response.status).toBe(401)
     expect(mocks.getDatabase).not.toHaveBeenCalled()
-    expect(mocks.claimScopedN8nVideoTaskRun).not.toHaveBeenCalled()
+    expect(mocks.getN8nTaskRunByTaskId).not.toHaveBeenCalled()
+    expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
   })
 
   it('rejects malformed identities and scope values', async () => {
@@ -88,11 +114,19 @@ describe('n8n video parent claim route', () => {
 
     expect(response.status).toBe(400)
     expect(mocks.getDatabase).not.toHaveBeenCalled()
-    expect(mocks.claimScopedN8nVideoTaskRun).not.toHaveBeenCalled()
+    expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('rejects a missing or malformed n8n execution owner before database access', async () => {
+    const response = await POST(request({ ...payload, executionOwner: 'other-delivery/1' }))
+
+    expect(response.status).toBe(400)
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
   })
 
   it('treats a concurrently claimed running task as an idempotent duplicate', async () => {
-    mocks.claimScopedN8nVideoTaskRun.mockReturnValue({
+    mocks.claimScopedN8nTaskRun.mockReturnValue({
       outcome: 'running',
       run: { taskId: payload.taskId, status: 'running' },
     })
@@ -100,7 +134,24 @@ describe('n8n video parent claim route', () => {
     const response = await POST(request(payload))
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toMatchObject({ claimed: false, duplicate: true, status: 'running' })
+    expect(await response.json()).toMatchObject({ claimed: false, resumed: false, duplicate: true, status: 'running' })
+  })
+
+  it('lets the same n8n execution resume after its first claim response is lost', async () => {
+    mocks.claimScopedN8nTaskRun.mockReturnValue({
+      outcome: 'owned',
+      run: { taskId: payload.taskId, status: 'running' },
+    })
+
+    const response = await POST(request(payload))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      claimed: true,
+      resumed: true,
+      duplicate: false,
+      status: 'running',
+    })
   })
 
   it.each([
@@ -108,7 +159,7 @@ describe('n8n video parent claim route', () => {
     ['rejected', 409],
     ['terminal', 409],
   ] as const)('maps %s outcomes to HTTP %s without claiming', async (outcome, status) => {
-    mocks.claimScopedN8nVideoTaskRun.mockReturnValue({
+    mocks.claimScopedN8nTaskRun.mockReturnValue({
       outcome,
       run: outcome === 'terminal'
         ? { taskId: payload.taskId, status: 'failed', error: 'already failed' }

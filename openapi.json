@@ -5557,26 +5557,41 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": ["leadership", "tasks"],
                   "properties": {
-                    "running": {
-                      "type": "boolean"
-                    },
+                    "leadership": { "$ref": "#/components/schemas/SchedulerLeadershipStatus" },
                     "tasks": {
                       "type": "array",
                       "items": {
                         "type": "object",
+                        "required": ["id", "name", "enabled", "lastRun", "nextRun", "running"],
                         "properties": {
+                          "id": {
+                            "type": "string"
+                          },
                           "name": {
                             "type": "string"
                           },
-                          "interval": {
-                            "type": "string"
+                          "enabled": {
+                            "type": "boolean"
                           },
-                          "last_run": {
+                          "lastRun": {
+                            "type": ["integer", "null"]
+                          },
+                          "nextRun": {
                             "type": "integer"
                           },
-                          "next_run": {
-                            "type": "integer"
+                          "running": {
+                            "type": "boolean"
+                          },
+                          "lastResult": {
+                            "type": "object",
+                            "required": ["ok", "message", "timestamp"],
+                            "properties": {
+                              "ok": { "type": "boolean" },
+                              "message": { "type": "string" },
+                              "timestamp": { "type": "integer" }
+                            }
                           }
                         }
                       }
@@ -11414,6 +11429,83 @@
         }
       }
     },
+    "/api/n8n/intake-control": {
+      "get": {
+        "tags": ["n8n"],
+        "summary": "Read the global task-intake gate with administrator-only operational detail",
+        "operationId": "getN8nIntakeControl",
+        "responses": {
+          "200": { "description": "Current intake state", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["control"],
+            "properties": { "control": { "oneOf": [
+              { "$ref": "#/components/schemas/N8nIntakeControlSummary" },
+              { "$ref": "#/components/schemas/N8nIntakeControl" }
+            ] } }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "tags": ["n8n"],
+        "summary": "Pause or resume new task intake without interrupting existing executions",
+        "operationId": "setN8nIntakeControl",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "reason", "expectedRevision"],
+          "properties": {
+            "action": { "type": "string", "enum": ["drain", "resume"] },
+            "reason": { "type": "string", "minLength": 8, "maxLength": 300 },
+            "expectedRevision": { "type": "integer", "minimum": 0 }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "Intake state updated", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["control"],
+            "properties": { "control": { "$ref": "#/components/schemas/N8nIntakeControl" } }
+          } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "The expected intake revision is stale" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/api/n8n/drain-status": {
+      "get": {
+        "tags": ["n8n"],
+        "summary": "Read the administrator-only, process-wide release retirement gate",
+        "operationId": "getN8nRuntimeDrainStatus",
+        "responses": {
+          "200": { "description": "Current release retirement summary", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["drain"],
+            "properties": { "drain": { "$ref": "#/components/schemas/N8nRuntimeDrainStatus" } }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "The current process is not an attributable blue/green runtime" },
+          "503": { "description": "Runtime identity or the retirement aggregate is unavailable" }
+        }
+      }
+    },
+    "/api/n8n/release-readiness": {
+      "get": {
+        "tags": ["n8n"],
+        "summary": "Verify that the global intake gate is closed before an attributed blue/green switch",
+        "operationId": "getN8nReleaseReadiness",
+        "responses": {
+          "200": { "description": "The global intake gate is closed; existing active work may continue on its owning release", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["readiness"],
+            "properties": { "readiness": { "$ref": "#/components/schemas/N8nReleaseReadiness" } }
+          } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "The global intake gate is active or this process has no attributable slot/release identity" },
+          "503": { "description": "Runtime identity or global intake state is unavailable" }
+        }
+      }
+    },
     "/api/n8n/workflows": {
       "get": {
         "tags": ["n8n"], "summary": "List n8n workflow bindings", "operationId": "listN8nWorkflowBindings",
@@ -11541,43 +11633,54 @@
         } } } },
         "responses": {
           "200": { "description": "The idempotency key already completed; returns the cached task output", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "duplicate": { "type": "boolean" }, "status": { "type": "string" }, "output": { "type": ["object", "null"] } } } } } },
-          "202": { "description": "The task was accepted by n8n, or an existing in-progress run was returned", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "duplicate": { "type": "boolean" }, "result": { "type": "object" } } } } } },
+          "202": { "description": "The task was accepted, an existing run was returned, or delivery outcome is unknown and remains safely queued", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "duplicate": { "type": "boolean" }, "dispatchInProgress": { "type": "boolean" }, "code": { "type": "string", "enum": ["N8N_DISPATCH_OUTCOME_UNKNOWN"] }, "dispatchOutcome": { "type": "string", "enum": ["outcome_unknown"] }, "retryable": { "type": "boolean" }, "result": { "type": "object" } } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "description": "Workflow binding is disabled, or the idempotency key already belongs to a failed or cancelled task" },
+          "423": { "description": "New task intake is paused; existing executions and callbacks remain available", "content": { "application/json": { "schema": {
+            "type": "object", "required": ["code", "error", "retryable", "retryAfterSeconds"], "additionalProperties": false,
+            "properties": {
+              "code": { "type": "string", "enum": ["N8N_INTAKE_DRAINING"] },
+              "error": { "type": "string" },
+              "retryable": { "type": "boolean", "enum": [true] },
+              "retryAfterSeconds": { "type": "integer", "minimum": 1 }
+            }
+          } } } },
           "429": { "$ref": "#/components/responses/RateLimited" },
-          "502": { "description": "n8n webhook failed or timed out" },
+          "500": { "description": "n8n accepted the webhook but durable local dispatch settlement failed; retry with the same task identity" },
+          "502": { "description": "n8n returned an explicit non-retryable 4xx rejection" },
           "503": { "description": "The shared n8n webhook secret is missing or an internal callback URL is not a safe loopback URL" }
         }
       }
     },
     "/api/n8n/claim": {
       "post": {
-        "tags": ["n8n"], "summary": "Claim the persisted parent of the canonical video workflow", "operationId": "claimN8nVideoTaskRun",
-        "description": "Internal n8n callback that atomically claims the exact workspace-scoped video parent before media stages execute.",
+        "tags": ["n8n"], "summary": "Claim a persisted top-level n8n task", "operationId": "claimN8nTaskRun",
+        "description": "Internal n8n callback that atomically binds an exact workspace-scoped top-level task to one stable n8n execution owner before any child nodes execute. A lost response may be retried only by that same execution owner.",
         "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "additionalProperties": false,
-          "required": ["taskId", "idempotencyKey", "bindingId", "workspaceId", "tenantId"],
+          "required": ["taskId", "idempotencyKey", "bindingId", "workspaceId", "tenantId", "executionOwner"],
           "properties": {
             "taskId": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
             "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
             "bindingId": { "type": "integer", "minimum": 1 },
             "workspaceId": { "type": "integer", "minimum": 1 },
-            "tenantId": { "type": "integer", "minimum": 1 }
+            "tenantId": { "type": "integer", "minimum": 1 },
+            "executionOwner": { "type": "string", "minLength": 15, "maxLength": 120, "pattern": "^n8n-execution:[A-Za-z0-9._:-]{1,100}$" }
           }
         } } } },
         "responses": {
           "200": { "description": "The parent was claimed or the same workflow delivery already owns it", "content": { "application/json": { "schema": {
-            "type": "object", "required": ["taskId", "status", "claimed", "duplicate"],
+            "type": "object", "required": ["taskId", "status", "claimed", "resumed", "duplicate"],
             "properties": {
               "taskId": { "type": "string" }, "status": { "type": "string", "const": "running" },
-              "claimed": { "type": "boolean" }, "duplicate": { "type": "boolean" }
+              "claimed": { "type": "boolean" }, "resumed": { "type": "boolean" }, "duplicate": { "type": "boolean" }
             }
           } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "description": "Terminal task or identity, scope, binding, or task-type mismatch" }
+          "409": { "description": "Terminal task or identity, scope, binding, execution ownership, or top-level source mismatch" }
         }
       }
     },
@@ -11587,21 +11690,22 @@
         "description": "Internal loopback callback used by the bundled multi-model workflow. The selected route is resolved from the external registry and persisted task routing.",
         "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["taskId", "idempotencyKey", "nodeKey", "input"], "additionalProperties": false,
+          "type": "object", "required": ["taskId", "idempotencyKey", "executionOwner", "nodeKey", "input"], "additionalProperties": false,
           "properties": {
             "taskId": { "type": "string", "minLength": 1, "maxLength": 120 },
             "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "executionOwner": { "type": "string", "minLength": 15, "maxLength": 120, "pattern": "^n8n-execution:[A-Za-z0-9._:-]{1,100}$" },
             "nodeKey": { "type": "string", "minLength": 1, "maxLength": 60, "pattern": "^[A-Za-z0-9._:-]+$" },
             "input": { "type": "object" },
-            "finalizeParent": { "type": "boolean", "default": false }
+            "finalizeParent": { "type": "boolean", "default": false, "description": "May be true only when nodeKey is the controlled reviewer node." }
           }
         } } } },
         "responses": {
           "200": { "description": "The node succeeded or a persisted node/parent result was returned" },
-          "202": { "description": "The same node is already running" },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }, "409": { "description": "Invalid parent state, idempotency mismatch, or unavailable route" },
-          "502": { "description": "Model execution failed and will not be replayed automatically" }
+          "502": { "description": "Model execution failed and will not be replayed automatically" },
+          "503": { "description": "The child is still running; retry until a cached terminal result is returned" }
         }
       }
     },
@@ -11611,27 +11715,28 @@
         "description": "Internal loopback callback used by the bundled video workflow. Prepare, audio, vision, and finalize stages persist operational task results but never receive an OpenClaw session or memory context.",
         "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
-          "type": "object", "required": ["taskId", "idempotencyKey", "stage"], "additionalProperties": false,
+          "type": "object", "required": ["taskId", "idempotencyKey", "executionOwner", "stage"], "additionalProperties": false,
           "properties": {
             "taskId": { "type": "string", "minLength": 1, "maxLength": 120 },
             "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "executionOwner": { "type": "string", "minLength": 15, "maxLength": 120, "pattern": "^n8n-execution:[A-Za-z0-9._:-]{1,100}$" },
             "stage": { "type": "string", "enum": ["prepare", "audio", "vision", "finalize"] },
             "input": { "type": "object", "default": {} }
           }
         } } } },
         "responses": {
           "200": { "description": "The stage succeeded, a cached stage was returned, or the parent was finalized" },
-          "202": { "description": "The same stage is already running" },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "404": { "$ref": "#/components/responses/NotFound" }, "409": { "description": "Invalid parent state, idempotency mismatch, or unavailable worker" },
-          "502": { "description": "Media preparation or stateless model execution failed" }
+          "502": { "description": "Media preparation or stateless model execution failed" },
+          "503": { "description": "The media child is still running; retry until a cached terminal result is returned" }
         }
       }
     },
     "/api/n8n/execute": {
       "post": {
-        "tags": ["n8n"], "summary": "Execute a persisted n8n task through local OpenClaw", "operationId": "executeN8nTaskRun",
-        "description": "Internal loopback callback used by the bundled n8n workflow. It requires the external shared webhook secret and is idempotent per persisted task run.",
+        "tags": ["n8n"], "summary": "Execute an explicitly legacy-v1 persisted task through local OpenClaw", "operationId": "executeN8nTaskRun", "deprecated": true,
+        "description": "Legacy compatibility callback. It requires the external shared webhook secret and fails closed unless the persisted task explicitly declares callbackProtocol=legacy-v1 and the current process is a non-slot legacy runtime. Blue-green slot-v1 tasks must use claim plus node-execute/media-execute ownership and fencing.",
         "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "required": ["taskId", "idempotencyKey"],
@@ -11705,6 +11810,168 @@
       }
     },
     "schemas": {
+      "SchedulerLeadershipStatus": {
+        "type": "object",
+        "required": ["state", "leaseExpiresAt", "leaseExpired", "observedAt", "reason", "routerGeneration", "activeJobs"],
+        "properties": {
+          "state": { "type": "string", "enum": ["unknown", "leader", "follower", "inactive", "unavailable"] },
+          "leaseExpiresAt": { "type": ["integer", "null"] },
+          "leaseExpired": { "type": "boolean" },
+          "observedAt": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string" },
+          "routerGeneration": { "type": ["integer", "null"] },
+          "activeJobs": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "N8nReleaseSchedulerLeadershipStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["state", "leaseExpiresAt", "leaseExpired", "observedAt", "reason", "routerGeneration", "activeJobs"],
+        "properties": {
+          "state": { "type": "string", "enum": ["leader", "follower", "inactive"] },
+          "leaseExpiresAt": { "type": ["integer", "null"], "minimum": 0 },
+          "leaseExpired": { "type": "boolean" },
+          "observedAt": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "routerGeneration": { "type": "integer", "minimum": 1 },
+          "activeJobs": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "N8nIntakeControlSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["accepting", "canManage"],
+        "properties": {
+          "accepting": { "type": "boolean" },
+          "canManage": { "type": "boolean", "enum": [false] }
+        }
+      },
+      "N8nIntakeControl": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema", "globalScope", "mode", "accepting", "revision", "reason", "changedBy", "changedAt", "counts", "canManage"],
+        "properties": {
+          "schema": { "type": "string", "enum": ["video-autoworker-intake-control/v1"] },
+          "globalScope": { "type": "boolean", "enum": [true] },
+          "mode": { "type": "string", "enum": ["active", "draining", "paused"] },
+          "accepting": { "type": "boolean" },
+          "revision": { "type": "integer", "minimum": 0 },
+          "reason": { "type": ["string", "null"] },
+          "changedBy": {
+            "oneOf": [
+              { "type": "object", "required": ["id", "name"], "properties": { "id": { "type": "integer" }, "name": { "type": "string" } } },
+              { "type": "null" }
+            ]
+          },
+          "changedAt": { "type": ["integer", "null"] },
+          "counts": {
+            "type": "object", "required": ["queued", "accepted", "running", "waiting", "active"],
+            "properties": {
+              "queued": { "type": "integer", "minimum": 0 },
+              "accepted": { "type": "integer", "minimum": 0 },
+              "running": { "type": "integer", "minimum": 0 },
+              "waiting": { "type": "integer", "minimum": 0 },
+              "active": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "canManage": { "type": "boolean", "enum": [true] }
+        }
+      },
+      "N8nRuntimeDrainStatus": {
+        "type": "object",
+        "required": ["schema", "globalScope", "runtime", "counts", "lastActivityAt", "quietSince", "quietSeconds", "requiredQuietSeconds", "safeToRetire", "observedAt"],
+        "properties": {
+          "schema": { "type": "string", "enum": ["video-autoworker-runtime-drain/v1"] },
+          "globalScope": { "type": "boolean", "enum": [true] },
+          "runtime": {
+            "type": "object",
+            "required": ["callbackProtocol", "runtimeSlot", "runtimeReleaseId", "port", "startedAt"],
+            "properties": {
+              "callbackProtocol": { "type": "string", "enum": ["slot-v1"] },
+              "runtimeSlot": { "type": "string", "enum": ["blue", "green"] },
+              "runtimeReleaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "startedAt": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "counts": {
+            "type": "object",
+            "required": ["tracked", "active", "queued", "accepted", "running", "topLevel", "mediaNodes", "modelNodes", "childExecutionLeases", "untrackedCallbacks", "otherReleaseActive"],
+            "properties": {
+              "tracked": { "type": "integer", "minimum": 0 },
+              "active": { "type": "integer", "minimum": 0 },
+              "queued": { "type": "integer", "minimum": 0 },
+              "accepted": { "type": "integer", "minimum": 0 },
+              "running": { "type": "integer", "minimum": 0 },
+              "topLevel": { "type": "integer", "minimum": 0 },
+              "mediaNodes": { "type": "integer", "minimum": 0 },
+              "modelNodes": { "type": "integer", "minimum": 0 },
+              "childExecutionLeases": { "type": "integer", "minimum": 0 },
+              "untrackedCallbacks": { "type": "integer", "minimum": 0 },
+              "otherReleaseActive": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "lastActivityAt": { "type": ["integer", "null"] },
+          "quietSince": { "type": "integer", "minimum": 0 },
+          "quietSeconds": { "type": "integer", "minimum": 0 },
+          "requiredQuietSeconds": { "type": "integer", "minimum": 30, "maximum": 900 },
+          "safeToRetire": { "type": "boolean" },
+          "observedAt": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "N8nReleaseReadiness": {
+        "type": "object",
+        "required": ["schema", "globalScope", "observedAt", "intake", "runtime", "database", "retirement", "scheduler"],
+        "properties": {
+          "schema": { "type": "string", "enum": ["video-autoworker-release-readiness/v1"] },
+          "globalScope": { "type": "boolean", "enum": [true] },
+          "observedAt": { "type": "integer", "minimum": 0 },
+          "intake": {
+            "type": "object",
+            "required": ["schema", "accepting", "mode", "revision", "counts"],
+            "properties": {
+              "schema": { "type": "string", "enum": ["video-autoworker-intake-control/v1"] },
+              "accepting": { "type": "boolean", "enum": [false] },
+              "mode": { "type": "string", "enum": ["draining", "paused"] },
+              "revision": { "type": "integer", "minimum": 1 },
+              "counts": {
+                "type": "object",
+                "required": ["queued", "accepted", "running", "waiting", "active"],
+                "properties": {
+                  "queued": { "type": "integer", "minimum": 0 },
+                  "accepted": { "type": "integer", "minimum": 0 },
+                  "running": { "type": "integer", "minimum": 0 },
+                  "waiting": { "type": "integer", "minimum": 0 },
+                  "active": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          },
+          "runtime": {
+            "type": "object",
+            "required": ["callbackProtocol", "runtimeSlot", "runtimeReleaseId", "port", "startedAt"],
+            "properties": {
+              "callbackProtocol": { "type": "string", "enum": ["slot-v1"] },
+              "runtimeSlot": { "type": "string", "enum": ["blue", "green"] },
+              "runtimeReleaseId": { "type": "string", "minLength": 1, "maxLength": 160 },
+              "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+              "startedAt": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "database": {
+            "type": "object",
+            "required": ["schemaEpoch", "rollingSafeFrom", "latestMigration"],
+            "additionalProperties": false,
+            "properties": {
+              "schemaEpoch": { "type": "integer", "enum": [1] },
+              "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
+              "latestMigration": { "type": "string", "enum": ["056_n8n_parent_execution_claims"] }
+            }
+          },
+          "retirement": { "$ref": "#/components/schemas/N8nRuntimeDrainStatus" },
+          "scheduler": { "$ref": "#/components/schemas/N8nReleaseSchedulerLeadershipStatus" }
+        }
+      },
       "OpenClawProfileFileId": {
         "type": "string",
         "enum": [

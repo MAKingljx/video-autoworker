@@ -6,7 +6,11 @@ import { constants } from 'node:fs'
 import { lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createPlatformClient, isRetryablePlatformError } from '../lib/platform-client.mjs'
+import {
+  createPlatformClient,
+  isN8nIntakeDrainingError,
+  isRetryablePlatformError,
+} from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot, normalizeMaterialId, sameSourceIdentity } from '../lib/media-ingest.mjs'
 import {
   resolveAuthoritativeTaskRecord,
@@ -228,6 +232,22 @@ function fail(message, code = 1) {
 
 function output(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`)
+}
+
+async function preflightVideoIntake(client, kind, id) {
+  try {
+    await client.assertIntakeAccepting()
+    return true
+  } catch (error) {
+    if (!isN8nIntakeDrainingError(error)) throw error
+    output({
+      [kind === 'batch' ? 'batchId' : 'taskId']: id,
+      status: 'maintenance',
+      duplicate: false,
+      intakePaused: true,
+    })
+    return false
+  }
 }
 
 function compactStatusOutput(value) {
@@ -503,6 +523,7 @@ async function handleBatchCreate(client, videoDir) {
   const prompt = await resolvePrompt({ video: true })
   const deliveryMode = option('--delivery') || 'none'
   if (deliveryMode !== 'none') throw new Error('批量视频工作节点不进入 OpenClaw 会话；请用批次状态查询结果')
+  if (!await preflightVideoIntake(client, 'batch', batchId)) return
   const bindings = await client.listBindings()
   const binding = chooseBinding(bindings, option('--binding-id'), true)
   const created = await createBatchState({
@@ -615,12 +636,6 @@ async function main() {
     promptInput,
   })
   if (!videoFile) rejectGenericVideoPrompt(prompt)
-  const bindings = await client.listBindings()
-  const binding = chooseBinding(
-    bindings,
-    option('--binding-id'),
-    Boolean(videoFile),
-  )
   const deliveryMode = option('--delivery') || 'none'
   if (!['none', 'reply'].includes(deliveryMode)) throw new Error('--delivery 只能是 none 或 reply')
   const sessionKey = option('--session-key')
@@ -656,6 +671,13 @@ async function main() {
     taskId = requestedTaskId || randomUUID()
     idempotencyKey = requestedIdempotencyKey || taskId
   }
+  if (videoFile && !await preflightVideoIntake(client, 'task', taskId)) return
+  const bindings = await client.listBindings()
+  const binding = chooseBinding(
+    bindings,
+    option('--binding-id'),
+    Boolean(videoFile),
+  )
   const routingNodes = Object.fromEntries([
     ['planner', option('--planner-route')],
     ['executor', option('--executor-route')],

@@ -166,7 +166,7 @@ describe('n8n HTTP integration', () => {
     expect(JSON.parse(String(init.body))).toEqual({ taskId: 'task-1' })
   })
 
-  it('turns a non-success webhook response into a useful error', async () => {
+  it('classifies an explicit 4xx webhook rejection as terminally rejected', async () => {
     process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ message: 'workflow inactive' }),
@@ -174,7 +174,45 @@ describe('n8n HTTP integration', () => {
     )))
 
     await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-2' }))
-      .rejects.toThrow(/HTTP 404.*workflow inactive/)
+      .rejects.toMatchObject({
+        name: 'N8nWebhookDispatchError',
+        outcome: 'rejected',
+        statusCode: 404,
+        message: '[N8N_WEBHOOK_REJECTED] n8n 拒绝了任务请求',
+        diagnostic: expect.stringMatching(/statusCode.*404.*workflow inactive/),
+      })
+  })
+
+  it.each([408, 425, 429, 503])(
+    'classifies HTTP %s as an outcome-unknown webhook delivery',
+    async statusCode => {
+      process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+        JSON.stringify({ message: 'retry later' }),
+        { status: statusCode, headers: { 'Content-Type': 'application/json' } },
+      )))
+
+      await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-unknown' }))
+        .rejects.toMatchObject({
+          name: 'N8nWebhookDispatchError',
+          outcome: 'outcome_unknown',
+          statusCode,
+        })
+    },
+  )
+
+  it('classifies a timeout or connection loss as outcome unknown', async () => {
+    process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')))
+
+    await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-reset' }))
+      .rejects.toMatchObject({
+        name: 'N8nWebhookDispatchError',
+        outcome: 'outcome_unknown',
+        statusCode: null,
+        message: '[N8N_DISPATCH_FAILED] n8n 任务派发失败',
+        diagnostic: expect.stringContaining('connection reset'),
+      })
   })
 
   it('refuses to call n8n when the webhook secret is missing', async () => {

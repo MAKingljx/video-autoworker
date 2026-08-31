@@ -9,6 +9,7 @@ import {
   StagedMediaCleanupError,
   stageVideoFile,
 } from './media-ingest.mjs'
+import { isN8nIntakeDrainingError } from './platform-client.mjs'
 
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const VIDEO_KEY_PATTERN = new RegExp(`^${UUID_PATTERN}\\.(?:mp4|mov|mkv|webm|m4v)$`, 'u')
@@ -26,6 +27,7 @@ function isDefinitiveTriggerRejection(error) {
     && error.status >= 400
     && error.status < 500
     && ![401, 403, 408, 425, 429].includes(error.status)
+    && !isN8nIntakeDrainingError(error)
 }
 
 function runVideoKey(run) {
@@ -158,6 +160,13 @@ async function triggerStagedVideoTask(request, staged) {
         visionRoute,
       }))
     } catch (error) {
+      if (isN8nIntakeDrainingError(error)) {
+        // The platform rejected this top-level dispatch before creating a run.
+        // Preserve the exact staged artifact and stable identity so the
+        // persistent worker can resume it after intake reopens.
+        ownershipTransferred = true
+        throw error
+      }
       if (!recoverAfterTriggerError) {
         // The trigger may have accepted the task before the connection failed.
         // Preserve its staged media, return control to the caller, and let a

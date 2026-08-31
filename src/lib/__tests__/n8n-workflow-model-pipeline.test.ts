@@ -33,6 +33,9 @@ describe('bundled n8n model pipeline', () => {
     for (const node of modelNodes) {
       expect(JSON.stringify(node.parameters)).toContain('body.routing.nodeCallbackUrl')
       expect(JSON.stringify(node.parameters)).not.toContain('127.0.0.1:3017')
+      expect(JSON.stringify(node.parameters))
+        .toContain("executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id")
+      expect(node).toMatchObject({ retryOnFail: true, maxTries: 5, waitBetweenTries: 5000 })
     }
     expect(JSON.stringify(modelNodes[2].parameters)).toContain('finalizeParent: true')
   })
@@ -42,6 +45,30 @@ describe('bundled n8n model pipeline', () => {
     expect(serialized).toContain("headers['x-aiworker-webhook-secret']")
     expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{12,}/)
     expect(serialized).not.toContain('DASHSCOPE_API_KEY')
+  })
+
+  it('claims the parent before responding and terminates duplicate deliveries before Planner', () => {
+    const names = workflow.nodes.map(node => node.name)
+    expect(names).toEqual(expect.arrayContaining([
+      'Claim Task',
+      'Continue Only If Claimed',
+      'Build Duplicate Claim Result',
+      'Return Duplicate Claim',
+    ]))
+    expect(workflow.connections['AI-worker Webhook']).toEqual({
+      main: [[{ node: 'Claim Task', type: 'main', index: 0 }]],
+    })
+    expect(workflow.connections['Continue Only If Claimed']).toEqual({
+      main: [
+        [{ node: 'Build Observable Result', type: 'main', index: 0 }],
+        [{ node: 'Build Duplicate Claim Result', type: 'main', index: 0 }],
+      ],
+    })
+    expect(workflow.connections['Return Duplicate Claim']).toBeUndefined()
+    expect(JSON.stringify(workflow.nodes.find(node => node.name === 'Claim Task')?.parameters))
+      .toContain("executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id")
+    expect(JSON.stringify(workflow.nodes.find(node => node.name === 'Build Observable Result')?.parameters))
+      .toContain("$('AI-worker Webhook').item.json.body")
   })
 })
 
@@ -60,6 +87,9 @@ describe('bundled stateless video pipeline', () => {
     const names = workflow.nodes.map(node => node.name)
     expect(names).toEqual(expect.arrayContaining([
       'Claim Video Task',
+      'Continue Only If Claimed',
+      'Build Duplicate Claim Result',
+      'Return Duplicate Claim',
       'Prepare Video',
       'Analyze Audio Stateless',
       'Analyze Frames Stateless',
@@ -74,16 +104,37 @@ describe('bundled stateless video pipeline', () => {
     expect(workflow.connections['Analyze Frames Stateless'].main[0][0].index).toBe(1)
     const claimNode = workflow.nodes.find(node => node.name === 'Claim Video Task')
     expect(JSON.stringify(claimNode?.parameters)).toContain('30000')
+    expect(JSON.stringify(claimNode?.parameters)).toContain("executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id")
     expect(claimNode).not.toHaveProperty('continueOnFail')
     expect(claimNode).not.toHaveProperty('onError')
     expect(workflow.connections['AI-worker Video Webhook'].main[0][0].node).toBe('Claim Video Task')
     expect(workflow.connections['Claim Video Task']).toEqual({
-      main: [[{ node: 'Build Video Accepted Result', type: 'main', index: 0 }]],
+      main: [[{ node: 'Continue Only If Claimed', type: 'main', index: 0 }]],
+    })
+    expect(workflow.connections['Continue Only If Claimed']).toEqual({
+      main: [
+        [{ node: 'Build Video Accepted Result', type: 'main', index: 0 }],
+        [{ node: 'Build Duplicate Claim Result', type: 'main', index: 0 }],
+      ],
     })
     expect(workflow.connections['Build Video Accepted Result'].main[0][0].node).toBe('Return Video Accepted')
-    for (const node of workflow.nodes.filter(node =>
-      node.type === 'n8n-nodes-base.httpRequest' && node.name !== 'Claim Video Task')) {
+    expect(workflow.connections['Build Duplicate Claim Result'].main[0][0].node).toBe('Return Duplicate Claim')
+    expect(workflow.connections['Return Duplicate Claim']).toBeUndefined()
+    const claimGuard = workflow.nodes.find(node => node.name === 'Continue Only If Claimed')
+    expect(JSON.stringify(claimGuard?.parameters)).toContain('$json.claimed')
+    const mediaNodes = workflow.nodes.filter(node =>
+      node.type === 'n8n-nodes-base.httpRequest' && node.name !== 'Claim Video Task')
+    expect(mediaNodes.map(node => node.name)).toEqual([
+      'Prepare Video',
+      'Analyze Audio Stateless',
+      'Analyze Frames Stateless',
+      'Merge Video Result',
+    ])
+    for (const node of mediaNodes) {
       expect(JSON.stringify(node.parameters)).toContain('14400000')
+      expect(JSON.stringify(node.parameters))
+        .toContain("executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id")
+      expect(node).toMatchObject({ retryOnFail: true, maxTries: 5, waitBetweenTries: 5000 })
     }
   })
 

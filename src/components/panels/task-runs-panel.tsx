@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { IntakeControlCard } from '@/components/n8n/intake-control-card'
 import { useFocusTrap } from '@/lib/use-focus-trap'
 import {
   formatTaskRunDuration,
@@ -297,6 +298,11 @@ export function TaskRunsPanel() {
           刷新
         </Button>
       </div>
+
+      <IntakeControlCard
+        queueCounts={queueCounts}
+        onChanged={() => void fetchRuns(true)}
+      />
 
       {error && (
         <div role="alert" className="mx-4 mt-4 flex items-center justify-between rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">

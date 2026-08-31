@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
 import { verifyN8nWebhookSecret } from '@/lib/n8n'
+import { checkN8nCallbackAdmission } from '@/lib/n8n-runtime-affinity'
 import {
-  claimScopedN8nVideoTaskRun,
+  claimScopedN8nTaskRun,
+  getN8nTaskRunByTaskId,
+  n8nExecutionOwnerSchema,
   n8nTaskIdentitySchema,
 } from '@/lib/n8n-task-runs'
 
@@ -15,6 +18,7 @@ const claimRequestSchema = z.object({
   bindingId: z.number().int().positive(),
   workspaceId: z.number().int().positive(),
   tenantId: z.number().int().positive(),
+  executionOwner: n8nExecutionOwnerSchema,
 }).strict()
 
 export async function POST(request: NextRequest) {
@@ -28,19 +32,28 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: '父任务认领请求无效', issues: parsed.error.issues }, { status: 400 })
   }
 
-  const { taskId, idempotencyKey, bindingId, workspaceId, tenantId } = parsed.data
-  const result = claimScopedN8nVideoTaskRun(
-    getDatabase(),
-    { taskId, idempotencyKey, bindingId },
+  const { taskId, idempotencyKey, bindingId, workspaceId, tenantId, executionOwner } = parsed.data
+  const db = getDatabase()
+  const parent = getN8nTaskRunByTaskId(db, taskId)
+  if (!parent) return NextResponse.json({ error: '未找到可认领的父任务' }, { status: 404 })
+  const admission = checkN8nCallbackAdmission(parent.routing)
+  if (!admission.allowed) {
+    return NextResponse.json({ taskId, error: admission.error, code: admission.code }, { status: 409 })
+  }
+  const result = claimScopedN8nTaskRun(
+    db,
+    { taskId, idempotencyKey, bindingId, executionOwner },
     { workspaceId, tenantId },
   )
 
-  if (result.outcome === 'claimed' || result.outcome === 'running') {
+  if (result.outcome === 'claimed' || result.outcome === 'owned' || result.outcome === 'running') {
+    const ownsDelivery = result.outcome === 'claimed' || result.outcome === 'owned'
     return NextResponse.json({
       taskId,
       status: 'running',
-      claimed: result.outcome === 'claimed',
-      duplicate: result.outcome === 'running',
+      claimed: ownsDelivery,
+      resumed: result.outcome === 'owned',
+      duplicate: !ownsDelivery,
     }, { headers: { 'Cache-Control': 'no-store' } })
   }
   if (result.outcome === 'not_found') {

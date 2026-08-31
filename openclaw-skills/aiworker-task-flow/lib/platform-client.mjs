@@ -7,11 +7,20 @@ export class PlatformRequestError extends Error {
   }
 }
 
-export function isRetryablePlatformError(error) {
+export const N8N_INTAKE_DRAINING_CODE = 'N8N_INTAKE_DRAINING'
+
+export function isN8nIntakeDrainingError(error) {
   return error instanceof PlatformRequestError
-    && (error.status === 0
+    && error.status === 423
+    && error.body?.code === N8N_INTAKE_DRAINING_CODE
+}
+
+export function isRetryablePlatformError(error) {
+  return isN8nIntakeDrainingError(error)
+    || (error instanceof PlatformRequestError
+      && (error.status === 0
       || [401, 403, 408, 425, 429].includes(error.status)
-      || error.status >= 500)
+      || error.status >= 500))
 }
 
 export function normalizeLoopbackBaseUrl(raw) {
@@ -69,10 +78,38 @@ export function createPlatformClient(rawBaseUrl) {
       : null
   }
 
+  async function getIntakeControl() {
+    const body = await request('/api/n8n/intake-control')
+    const control = body?.control
+    if (
+      !body
+      || typeof body !== 'object'
+      || Array.isArray(body)
+      || !control
+      || typeof control !== 'object'
+      || Array.isArray(control)
+      || typeof control.accepting !== 'boolean'
+    ) {
+      throw new PlatformRequestError('AI-worker 接收状态无效', { status: 502, body })
+    }
+    return { accepting: control.accepting }
+  }
+
   return {
     baseUrl,
     request,
     getRun,
+    getIntakeControl,
+    assertIntakeAccepting: async () => {
+      const control = await getIntakeControl()
+      if (!control.accepting) {
+        throw new PlatformRequestError('视频学习服务正在发布维护，请稍后再试。', {
+          status: 423,
+          body: { code: N8N_INTAKE_DRAINING_CODE },
+        })
+      }
+      return control
+    },
     listBindings: async () => {
       const body = await request('/api/n8n/workflows')
       return Array.isArray(body?.bindings) ? body.bindings : []

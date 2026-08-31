@@ -97,6 +97,38 @@ describe('0.5 scheduler runner', () => {
     expect(execute.mock.calls[0][2]).toEqual({ timeout: 25_000 })
   })
 
+  it('maps the exact intake pause result without treating submission as ambiguous', async () => {
+    const paused = fixture({
+      taskId,
+      status: 'maintenance',
+      duplicate: false,
+      intakePaused: true,
+    })
+    await expect(paused.runner.dispatchVideo({
+      videoPath: '/data/test.mp4',
+      taskId,
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    })).resolves.toEqual({
+      kind: 'task',
+      id: taskId,
+      status: 'maintenance',
+      duplicate: false,
+      intakePaused: true,
+    })
+    expect(paused.cleanupHandoff).toHaveBeenCalledWith({ disposition: 'not_started' })
+
+    const malformed = fixture({
+      taskId,
+      status: 'maintenance',
+      duplicate: false,
+      intakePaused: true,
+      extra: true,
+    })
+    await expect(malformed.runner.dispatchVideo({
+      videoPath: '/data/test.mp4', taskId,
+    })).rejects.toThrow('invalid_intake_pause_result')
+  })
+
   it('passes a valid existing material ID and rejects non-string or malformed values before spawning', async () => {
     const trustedExistingMaterialId = 'MATERIAL-EXISTING-001'
     const { execute, runner, createHandoff, cleanupHandoff } = fixture({ taskId, status: 'queued', duplicate: false })

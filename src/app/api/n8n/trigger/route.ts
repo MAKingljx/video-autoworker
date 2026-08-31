@@ -1,14 +1,24 @@
 import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, logAuditEvent } from '@/lib/db'
-import { isN8nWebhookSecretConfigured, requireN8nRole, triggerN8nWebhook } from '@/lib/n8n'
 import {
-  createN8nTaskRun,
-  failScopedUnclaimedN8nTaskRun,
-  markN8nTaskAccepted,
+  isN8nWebhookDispatchError,
+  isN8nWebhookSecretConfigured,
+  requireN8nRole,
+  triggerN8nWebhook,
+  validateN8nWebhookDispatchConfiguration,
+} from '@/lib/n8n'
+import {
   n8nTaskDeliverySchema,
   n8nTaskIdentitySchema,
+  type N8nTaskRun,
 } from '@/lib/n8n-task-runs'
+import { createN8nTaskRunWithIntakeGate } from '@/lib/n8n-intake-control'
+import {
+  acquireN8nTaskDispatchOwnership,
+  settleN8nTaskDispatchFailure,
+  settleN8nTaskDispatchSuccess,
+} from '@/lib/n8n-task-dispatch'
 import {
   loadN8nModelRegistry,
   n8nTaskRoutingOverrideSchema,
@@ -17,6 +27,8 @@ import {
 import { getN8nWorkflowBinding, updateN8nWorkflowRunStatus } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
+import { resolveN8nRuntimeAffinity } from '@/lib/n8n-runtime-affinity'
+import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 
 function resolveN8nLoopbackCallbackUrl(configuredValue: string, pathname: string, label: string): string {
   const configured = String(configuredValue || '').trim()
@@ -67,6 +79,48 @@ export function resolveN8nClaimCallbackUrl(): string {
   )
 }
 
+function existingDispatchResponse(
+  run: N8nTaskRun | null,
+  error?: string,
+  duplicate = true,
+): NextResponse {
+  if (!run) {
+    const failure = projectSafeOperationError(error, 'N8N_DISPATCH_FAILED')
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 502 })
+  }
+  if (run.status === 'queued') {
+    return NextResponse.json({
+      taskId: run.taskId,
+      ...(duplicate ? { duplicate: true } : {}),
+      status: 'queued',
+      dispatchInProgress: true,
+    }, { status: 202, headers: { 'Cache-Control': 'no-store' } })
+  }
+  if (['accepted', 'running'].includes(run.status)) {
+    return NextResponse.json({
+      taskId: run.taskId,
+      ...(duplicate ? { duplicate: true } : {}),
+      status: run.status,
+    }, { status: 202 })
+  }
+  if (run.status === 'succeeded') {
+    return NextResponse.json({
+      taskId: run.taskId,
+      ...(duplicate ? { duplicate: true } : {}),
+      status: run.status,
+      output: run.output,
+    })
+  }
+  const failure = projectSafeOperationError(run.error || error, 'N8N_DISPATCH_FAILED')
+  return NextResponse.json({
+    taskId: run.taskId,
+    ...(duplicate ? { duplicate: true } : {}),
+    status: run.status,
+    code: failure.code,
+    error: failure.summary,
+  }, { status: 409 })
+}
+
 export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -93,6 +147,13 @@ export async function POST(request: NextRequest) {
   const binding = getN8nWorkflowBinding(db, bindingId, scope)
   if (!binding) return NextResponse.json({ error: '未找到任务链' }, { status: 404 })
   if (!binding.enabled) return NextResponse.json({ error: '任务链当前已停用' }, { status: 409 })
+  try {
+    validateN8nWebhookDispatchConfiguration(binding.webhookPath)
+  } catch (error) {
+    const failure = projectSafeOperationError(error, 'N8N_WEBHOOK_CONFIG_INVALID')
+    logSafeOperationError('n8n_webhook_configuration', error, failure)
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 503 })
+  }
 
   const taskIdResult = n8nTaskIdentitySchema.safeParse(body?.taskId || randomUUID())
   if (!taskIdResult.success) {
@@ -146,14 +207,16 @@ export async function POST(request: NextRequest) {
   let nodeCallbackUrl: string
   let mediaCallbackUrl: string
   let claimCallbackUrl: string
+  let runtimeAffinity: ReturnType<typeof resolveN8nRuntimeAffinity>
   try {
     nodeCallbackUrl = resolveN8nNodeCallbackUrl()
     mediaCallbackUrl = resolveN8nMediaCallbackUrl()
     claimCallbackUrl = resolveN8nClaimCallbackUrl()
+    runtimeAffinity = resolveN8nRuntimeAffinity()
   } catch (error) {
-    return NextResponse.json({
-      error: error instanceof Error ? error.message : 'n8n 节点回调地址无效',
-    }, { status: 503 })
+    const failure = projectSafeOperationError(error, 'N8N_CALLBACK_CONFIG_INVALID')
+    logSafeOperationError('n8n_callback_configuration', error, failure)
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 503 })
   }
   const routing = {
     id: binding.id,
@@ -168,10 +231,11 @@ export async function POST(request: NextRequest) {
     claimCallbackUrl,
     claimScope: scope,
     config: binding.config,
+    ...(runtimeAffinity || {}),
     ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
     ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
   }
-  const created = createN8nTaskRun(db, {
+  const admission = createN8nTaskRunWithIntakeGate(db, {
     taskId,
     idempotencyKey,
     bindingId: binding.id,
@@ -182,6 +246,15 @@ export async function POST(request: NextRequest) {
     delivery: deliveryResult.data,
     maxAttempts: binding.retryCount + 1,
   }, scope)
+  if (admission.outcome === 'blocked') {
+    return NextResponse.json({
+      code: 'N8N_INTAKE_DRAINING',
+      error: '系统正在维护，当前未接收新任务；已运行任务不受影响',
+      retryable: true,
+      retryAfterSeconds: 30,
+    }, { status: 423, headers: { 'Cache-Control': 'no-store' } })
+  }
+  const created = { created: admission.outcome === 'created', run: admission.run }
 
   if (!created.created && created.run.status !== 'queued') {
     const status = created.run.status === 'succeeded'
@@ -211,6 +284,11 @@ export async function POST(request: NextRequest) {
   const dispatchRun = created.run
   const dispatchTaskId = created.created ? taskId : dispatchRun.taskId
   const dispatchIdempotencyKey = created.created ? idempotencyKey : dispatchRun.idempotencyKey
+  const ownership = acquireN8nTaskDispatchOwnership(db, dispatchTaskId, scope)
+  if (ownership.outcome !== 'acquired') {
+    return existingDispatchResponse(ownership.run)
+  }
+  const dispatchToken = ownership.token
   const payload = created.created
     ? {
         taskId,
@@ -231,13 +309,27 @@ export async function POST(request: NextRequest) {
         delivery: dispatchRun.delivery,
       }
 
+  let webhookAccepted = false
   try {
     const result = await triggerN8nWebhook(binding.webhookPath, payload, {
       timeoutMs: Math.min(binding.timeoutSeconds * 1_000, 120_000),
       idempotencyKey: dispatchIdempotencyKey,
     })
+    webhookAccepted = true
     const runStatus = result.statusCode === 202 ? 'accepted' : 'success'
-    markN8nTaskAccepted(db, dispatchTaskId)
+    const resolution = settleN8nTaskDispatchSuccess(
+      db, dispatchTaskId, dispatchToken, scope,
+    )
+    if (resolution.outcome !== 'accepted') {
+      if (resolution.outcome === 'claimed') {
+        updateN8nWorkflowRunStatus(db, binding.id, 'running', scope)
+      }
+      return existingDispatchResponse(
+        resolution.run,
+        undefined,
+        resolution.outcome === 'stale' || !created.created,
+      )
+    }
     updateN8nWorkflowRunStatus(db, binding.id, runStatus, scope)
     try {
       logAuditEvent({ action: 'n8n_workflow_trigger', actor: auth.user.username, actor_id: auth.user.id, target_type: 'n8n_workflow_binding', target_id: binding.id, detail: { taskId: dispatchTaskId, statusCode: result.statusCode, latencyMs: result.latencyMs, resumedQueued: !created.created } })
@@ -251,13 +343,48 @@ export async function POST(request: NextRequest) {
       ...(!created.created ? { duplicate: true, resumedQueued: true } : {}),
     }, { status: 202 })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'n8n 任务执行失败'
-    const resolution = failScopedUnclaimedN8nTaskRun(db, dispatchTaskId, message, scope)
-    if (resolution.failed) {
-      updateN8nWorkflowRunStatus(db, binding.id, `failed: ${message}`, scope)
-      return NextResponse.json({ taskId: dispatchTaskId, status: 'failed', error: message }, { status: 502 })
+    const rejected = isN8nWebhookDispatchError(error) && error.outcome === 'rejected'
+    const failure = projectSafeOperationError(
+      error,
+      rejected ? 'N8N_WEBHOOK_REJECTED' : 'N8N_DISPATCH_FAILED',
+    )
+    logSafeOperationError('n8n_task_dispatch', error, failure)
+    if (webhookAccepted) {
+      // The remote acceptance is known. Never reinterpret a later local DB or
+      // workflow-status error as a webhook rejection and fail the queued run.
+      return NextResponse.json({
+        code: 'N8N_DISPATCH_SETTLEMENT_FAILED',
+        taskId: dispatchTaskId,
+        error: 'n8n 已接受任务，但本地派发状态确认失败；请使用原任务标识继续查询',
+      }, { status: 500, headers: { 'Cache-Control': 'no-store' } })
     }
-    if (resolution.run?.status === 'running') {
+    if (!rejected) {
+      // n8n may have durably accepted the webhook before the response timed
+      // out or was lost. Keep both the queued parent and its dispatch lease;
+      // the claim callback may still advance the parent, and an exact retry
+      // may safely reuse the same idempotency key after the lease expires.
+      return NextResponse.json({
+        code: 'N8N_DISPATCH_OUTCOME_UNKNOWN',
+        taskId: dispatchTaskId,
+        status: 'queued',
+        dispatchOutcome: 'outcome_unknown',
+        retryable: true,
+        ...(!created.created ? { duplicate: true } : {}),
+      }, { status: 202, headers: { 'Cache-Control': 'no-store' } })
+    }
+    const resolution = settleN8nTaskDispatchFailure(
+      db, dispatchTaskId, dispatchToken, failure.persistedMessage, scope,
+    )
+    if (resolution.outcome === 'failed') {
+      updateN8nWorkflowRunStatus(db, binding.id, `failed: ${failure.persistedMessage}`, scope)
+      return NextResponse.json({
+        taskId: dispatchTaskId,
+        status: 'failed',
+        code: failure.code,
+        error: failure.summary,
+      }, { status: 502 })
+    }
+    if (resolution.outcome === 'claimed') {
       updateN8nWorkflowRunStatus(db, binding.id, 'running', scope)
       return NextResponse.json({
         taskId: dispatchTaskId,
@@ -273,13 +400,10 @@ export async function POST(request: NextRequest) {
         output: resolution.run.output,
       })
     }
-    if (resolution.run && ['failed', 'cancelled'].includes(resolution.run.status)) {
-      return NextResponse.json({
-        taskId: dispatchTaskId,
-        status: resolution.run.status,
-        error: resolution.run.error || message,
-      }, { status: 409 })
-    }
-    return NextResponse.json({ taskId: dispatchTaskId, error: message }, { status: 502 })
+    return existingDispatchResponse(
+      resolution.run,
+      failure.persistedMessage,
+      resolution.outcome === 'stale',
+    )
   }
 }

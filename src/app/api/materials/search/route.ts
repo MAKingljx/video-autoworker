@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMaterialsRequest } from '../route'
 import { searchMaterials, type MaterialSearchMode } from '@/lib/openclaw-materials'
+import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 
 export async function GET(request: NextRequest) {
   const auth = authorizeMaterialsRequest(request, 'viewer')
@@ -17,9 +18,9 @@ export async function GET(request: NextRequest) {
       headers: { 'Cache-Control': 'no-store' },
     })
   } catch (error) {
-    return NextResponse.json({
-      error: error instanceof Error ? error.message : '素材搜索失败',
-    }, { status: 502 })
+    const failure = projectSafeOperationError(error, 'MATERIALS_SEARCH_FAILED')
+    logSafeOperationError('materials_search', error, failure)
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 502 })
   }
 }
 

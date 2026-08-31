@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
 
@@ -7,6 +7,12 @@ export const n8nTaskIdentitySchema = z.string()
   .min(1)
   .max(120)
   .regex(/^[A-Za-z0-9._:-]+$/, '任务标识只能包含字母、数字、点、下划线、冒号和连字符')
+
+export const n8nExecutionOwnerSchema = z.string()
+  .trim()
+  .min(15)
+  .max(120)
+  .regex(/^n8n-execution:[A-Za-z0-9._:-]{1,100}$/u, 'n8n execution owner 格式无效')
 
 const deliveryChannelSchema = z.enum([
   'last', 'telegram', 'whatsapp', 'discord', 'irc', 'googlechat', 'slack',
@@ -52,12 +58,74 @@ export const N8N_VIDEO_CALLBACK_LEASE_SECONDS = 15 * 60
 export const N8N_VIDEO_CALLBACK_LEASE_EXPIRED = 'VIDEO_CALLBACK_LEASE_EXPIRED'
 export const N8N_VIDEO_FINALIZE_LEASE_SECONDS = 24 * 60 * 60
 export const N8N_VIDEO_FINALIZE_LEASE_EXPIRED = 'VIDEO_FINALIZE_LEASE_EXPIRED'
+export const N8N_CHILD_EXECUTION_LEASE_SECONDS = 15 * 60
+export const N8N_CHILD_EXECUTION_HEARTBEAT_SECONDS = 60
 
 export type N8nVideoTaskClaimOutcome = 'claimed' | 'running' | 'terminal' | 'rejected' | 'not_found'
+export type N8nParentTaskClaimOutcome = 'claimed' | 'owned' | 'running' | 'terminal' | 'rejected' | 'not_found'
 export type N8nVideoTaskReconcileOutcome = 'reconciled' | 'active' | 'terminal' | 'ineligible' | 'not_found'
 export type N8nMediaChildCreateOutcome = 'created' | 'existing' | 'terminal' | 'rejected' | 'not_found'
 export type N8nFinalizeOutcome = 'completed' | 'cached' | 'terminal' | 'rejected' | 'not_found'
 export type N8nMediaCleanupReason = 'finalize_succeeded' | 'finalize_lease_expired'
+export type N8nChildExecutionOutcome =
+  | 'claimed'
+  | 'running'
+  | 'succeeded'
+  | 'terminal'
+  | 'exhausted'
+  | 'rejected'
+  | 'not_found'
+
+export interface N8nChildExecutionLease {
+  taskId: string
+  ownerInstanceId: string
+  leaseToken: string
+  leaseExpiresAt: number
+  revision: number
+}
+
+export type N8nChildExecutionResult = {
+  outcome: N8nChildExecutionOutcome
+  parent: N8nTaskRun | null
+  child: N8nTaskRun | null
+  lease: N8nChildExecutionLease | null
+}
+
+/**
+ * Keep one callback request open while another request owns the child. This
+ * turns an n8n HTTP retry into a durable poll: only a cached success or a newly
+ * acquired lease returns to the execution path; a still-running result remains
+ * non-2xx after the bounded wait.
+ */
+export async function pollN8nChildExecutionResult(
+  attempt: () => N8nChildExecutionResult,
+  initial: N8nChildExecutionResult,
+  options: { waitSeconds: number; pollMilliseconds?: number },
+): Promise<N8nChildExecutionResult> {
+  if (!Number.isSafeInteger(options.waitSeconds) || options.waitSeconds < 1 || options.waitSeconds > 4 * 60 * 60) {
+    throw new TypeError('n8n 子任务轮询时长无效')
+  }
+  const pollMilliseconds = options.pollMilliseconds ?? 1_000
+  if (!Number.isSafeInteger(pollMilliseconds) || pollMilliseconds < 10 || pollMilliseconds > 10_000) {
+    throw new TypeError('n8n 子任务轮询周期无效')
+  }
+  const deadline = Date.now() + options.waitSeconds * 1_000
+  let current = initial
+  while (current.outcome === 'running') {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) break
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollMilliseconds, remaining)))
+    current = attempt()
+  }
+  return current
+}
+
+export class N8nChildExecutionLeaseLostError extends Error {
+  constructor() {
+    super('n8n 子任务执行租约已失效')
+    this.name = 'N8nChildExecutionLeaseLostError'
+  }
+}
 
 export interface N8nTaskRun {
   id: number
@@ -105,6 +173,13 @@ interface N8nTaskRunRow {
   started_at: number | null
   completed_at: number | null
   updated_at: number
+}
+
+interface N8nChildExecutionLeaseRow {
+  owner_instance_id: string
+  lease_token: string
+  lease_expires_at: number
+  revision: number
 }
 
 interface N8nTaskRunSummaryRow {
@@ -686,6 +761,471 @@ export function claimScopedN8nVideoTaskRun(
   return { outcome: 'rejected', run }
 }
 
+/** Claim any registered top-level n8n run and retire its outbound dispatch lease atomically. */
+export function claimScopedN8nTaskRun(
+  db: Database.Database,
+  input: { taskId: string; idempotencyKey: string; bindingId: number; executionOwner: string },
+  scope: N8nTaskScope,
+): { outcome: N8nParentTaskClaimOutcome; run: N8nTaskRun | null } {
+  const executionOwner = n8nExecutionOwnerSchema.parse(input.executionOwner)
+  const claim = db.transaction((): { outcome: N8nParentTaskClaimOutcome; run: N8nTaskRun | null } => {
+    const run = getScopedN8nTaskRunByTaskId(db, input.taskId, scope)
+    if (!run) return { outcome: 'not_found', run: null }
+    if (run.idempotencyKey !== input.idempotencyKey || run.bindingId !== input.bindingId
+      || !TOP_LEVEL_TASK_SOURCES.includes(run.source as typeof TOP_LEVEL_TASK_SOURCES[number])) {
+      return { outcome: 'rejected', run }
+    }
+    const binding = db.prepare(`
+      SELECT 1 FROM n8n_workflow_bindings
+      WHERE id = ? AND tenant_id = ? AND workspace_id = ?
+    `).get(run.bindingId, scope.tenantId, scope.workspaceId)
+    if (!binding) return { outcome: 'rejected', run }
+    if (['succeeded', 'failed', 'cancelled'].includes(run.status)) {
+      return { outcome: 'terminal', run }
+    }
+    const ownership = db.prepare(`
+      SELECT execution_owner
+      FROM n8n_parent_execution_claims
+      WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+    `).get(input.taskId, scope.tenantId, scope.workspaceId) as { execution_owner: string } | undefined
+    if (run.status === 'running') {
+      if (!ownership) return { outcome: 'rejected', run }
+      return { outcome: ownership.execution_owner === executionOwner ? 'owned' : 'running', run }
+    }
+    if (!['queued', 'accepted'].includes(run.status) || ownership) {
+      return { outcome: 'rejected', run }
+    }
+
+    const result = db.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'running',
+          accepted_at = COALESCE(accepted_at, unixepoch()),
+          started_at = COALESCE(started_at, unixepoch()),
+          completed_at = NULL,
+          attempt_count = attempt_count + 1,
+          updated_at = unixepoch(),
+          error = NULL
+      WHERE task_id = ?
+        AND idempotency_key = ?
+        AND binding_id = ?
+        AND tenant_id = ?
+        AND workspace_id = ?
+        AND source IN ('video-autoworker', 'openclaw')
+        AND status IN ('queued', 'accepted')
+        AND attempt_count < max_attempts
+        AND EXISTS (
+          SELECT 1 FROM n8n_workflow_bindings binding
+          WHERE binding.id = n8n_task_runs.binding_id
+            AND binding.tenant_id = n8n_task_runs.tenant_id
+            AND binding.workspace_id = n8n_task_runs.workspace_id
+        )
+    `).run(
+      input.taskId,
+      input.idempotencyKey,
+      input.bindingId,
+      scope.tenantId,
+      scope.workspaceId,
+    )
+    if (result.changes !== 1) return { outcome: 'rejected', run }
+    db.prepare(`
+      INSERT INTO n8n_parent_execution_claims (
+        task_id, tenant_id, workspace_id, execution_owner, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, unixepoch(), unixepoch())
+    `).run(input.taskId, scope.tenantId, scope.workspaceId, executionOwner)
+    db.prepare(`
+      DELETE FROM n8n_task_dispatch_leases
+      WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+    `).run(input.taskId, scope.tenantId, scope.workspaceId)
+    return {
+      outcome: 'claimed',
+      run: getScopedN8nTaskRunByTaskId(db, input.taskId, scope),
+    }
+  })
+  return claim.immediate()
+}
+
+export function isScopedN8nParentExecutionOwner(
+  db: Database.Database,
+  taskId: string,
+  executionOwner: string,
+  scope: N8nTaskScope,
+): boolean {
+  const owner = n8nExecutionOwnerSchema.parse(executionOwner)
+  const row = db.prepare(`
+    SELECT 1
+    FROM n8n_parent_execution_claims claim
+    JOIN n8n_task_runs run ON run.task_id = claim.task_id
+    WHERE claim.task_id = ?
+      AND claim.tenant_id = ? AND claim.workspace_id = ?
+      AND claim.execution_owner = ?
+      AND run.tenant_id = claim.tenant_id
+      AND run.workspace_id = claim.workspace_id
+      AND run.source IN ('video-autoworker', 'openclaw')
+  `).get(taskId, scope.tenantId, scope.workspaceId, owner)
+  return Boolean(row)
+}
+
+function assertChildLeaseIdentity(ownerInstanceId: string, leaseToken?: string): void {
+  if (!/^[0-9a-f]{64}$/u.test(ownerInstanceId)
+    || (leaseToken !== undefined && !/^[0-9a-f]{64}$/u.test(leaseToken))) {
+    throw new TypeError('n8n 子任务执行租约身份无效')
+  }
+}
+
+function childLeaseClock(nowSeconds?: number): number {
+  const now = nowSeconds ?? Math.floor(Date.now() / 1_000)
+  if (!Number.isSafeInteger(now) || now < 0) throw new TypeError('n8n 子任务执行租约时钟无效')
+  return now
+}
+
+function childLeaseFromRow(taskId: string, row: N8nChildExecutionLeaseRow): N8nChildExecutionLease {
+  return {
+    taskId,
+    ownerInstanceId: row.owner_instance_id,
+    leaseToken: row.lease_token,
+    leaseExpiresAt: row.lease_expires_at,
+    revision: row.revision,
+  }
+}
+
+/**
+ * Create and claim a deterministic n8n child in one IMMEDIATE transaction.
+ * A different process instance may fence a running owner only after the
+ * durable lease expires. Same-instance duplicates can never self-takeover,
+ * even after expiry.
+ */
+export function createAndClaimN8nChildRunFromParent(
+  db: Database.Database,
+  input: {
+    parentTaskId: string
+    parentIdempotencyKey: string
+    bindingId: number
+    childTaskId: string
+    childIdempotencyKey: string
+    source: 'n8n-node' | 'n8n-media-node'
+    routing: Record<string, unknown>
+    taskInput: Record<string, unknown>
+    delivery: N8nTaskDelivery
+    maxAttempts: number
+    ownerInstanceId: string
+    executionOwner: string
+  },
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number; leaseSeconds?: number; leaseToken?: string } = {},
+): N8nChildExecutionResult {
+  assertChildLeaseIdentity(input.ownerInstanceId, options.leaseToken)
+  const executionOwner = n8nExecutionOwnerSchema.parse(input.executionOwner)
+  const now = childLeaseClock(options.nowSeconds)
+  const leaseSeconds = options.leaseSeconds ?? N8N_CHILD_EXECUTION_LEASE_SECONDS
+  if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 5 || leaseSeconds > 60 * 60) {
+    throw new TypeError('n8n 子任务执行租约时长无效')
+  }
+  const token = options.leaseToken ?? randomBytes(32).toString('hex')
+  const leaseExpiresAt = now + leaseSeconds
+
+  const execute = db.transaction((): N8nChildExecutionResult => {
+    const parent = getScopedN8nTaskRunByTaskId(db, input.parentTaskId, scope)
+    if (!parent) return { outcome: 'not_found', parent: null, child: null, lease: null }
+    if (parent.idempotencyKey !== input.parentIdempotencyKey
+      || parent.bindingId !== input.bindingId
+      || parent.status !== 'running') {
+      const outcome = ['succeeded', 'failed', 'cancelled'].includes(parent.status) ? 'terminal' : 'rejected'
+      return { outcome, parent, child: null, lease: null }
+    }
+    if (!isScopedN8nParentExecutionOwner(db, parent.taskId, executionOwner, scope)) {
+      return { outcome: 'rejected', parent, child: null, lease: null }
+    }
+
+    let child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)
+    if (!child) {
+      const idempotent = getN8nTaskRunByIdempotencyKey(db, input.childIdempotencyKey, scope)
+      if (idempotent) return { outcome: 'rejected', parent, child: idempotent, lease: null }
+      db.prepare(`
+        INSERT INTO n8n_task_runs (
+          task_id, idempotency_key, binding_id, status, source, requested_by,
+          routing, input, delivery, attempt_count, max_attempts,
+          workspace_id, tenant_id, accepted_at, started_at, updated_at
+        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.childTaskId,
+        input.childIdempotencyKey,
+        input.bindingId,
+        input.source,
+        parent.requestedBy,
+        JSON.stringify(input.routing),
+        JSON.stringify(input.taskInput),
+        JSON.stringify(input.delivery),
+        Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
+        scope.workspaceId,
+        scope.tenantId,
+        now,
+        now,
+        now,
+      )
+      db.prepare(`
+        INSERT INTO n8n_child_execution_leases (
+          task_id, tenant_id, workspace_id, owner_instance_id, lease_token,
+          lease_expires_at, heartbeat_at, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(
+        input.childTaskId, scope.tenantId, scope.workspaceId,
+        input.ownerInstanceId, token, leaseExpiresAt, now, now, now,
+      )
+      child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)!
+      return {
+        outcome: 'claimed', parent, child,
+        lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: 1 },
+      }
+    }
+
+    if (child.idempotencyKey !== input.childIdempotencyKey
+      || child.bindingId !== input.bindingId
+      || child.source !== input.source) {
+      return { outcome: 'rejected', parent, child, lease: null }
+    }
+    if (child.status === 'succeeded') return { outcome: 'succeeded', parent, child, lease: null }
+    if (child.status === 'cancelled') return { outcome: 'terminal', parent, child, lease: null }
+    if (child.attemptCount >= child.maxAttempts && child.status !== 'running') {
+      return { outcome: 'exhausted', parent, child, lease: null }
+    }
+
+    const current = db.prepare(`
+      SELECT owner_instance_id, lease_token, lease_expires_at, revision
+      FROM n8n_child_execution_leases
+      WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+    `).get(child.taskId, scope.tenantId, scope.workspaceId) as N8nChildExecutionLeaseRow | undefined
+
+    if (child.status === 'running') {
+      if (!current) return { outcome: 'rejected', parent, child, lease: null }
+      if (current.owner_instance_id === input.ownerInstanceId) {
+        return { outcome: 'running', parent, child, lease: childLeaseFromRow(child.taskId, current) }
+      }
+      if (current.lease_expires_at > now) {
+        return { outcome: 'running', parent, child, lease: childLeaseFromRow(child.taskId, current) }
+      }
+      if (child.attemptCount >= child.maxAttempts) {
+        return { outcome: 'exhausted', parent, child, lease: null }
+      }
+      const takeover = db.prepare(`
+        UPDATE n8n_child_execution_leases
+        SET owner_instance_id = ?, lease_token = ?, lease_expires_at = ?, heartbeat_at = ?,
+            revision = revision + 1, updated_at = ?
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+          AND owner_instance_id = ? AND lease_token = ? AND revision = ?
+          AND lease_expires_at <= ?
+      `).run(
+        input.ownerInstanceId, token, leaseExpiresAt, now, now,
+        child.taskId, scope.tenantId, scope.workspaceId,
+        current.owner_instance_id, current.lease_token, current.revision, now,
+      )
+      if (takeover.changes !== 1) return { outcome: 'running', parent, child, lease: null }
+      db.prepare(`
+        UPDATE n8n_task_runs
+        SET attempt_count = attempt_count + 1, started_at = ?, completed_at = NULL,
+            error = NULL, updated_at = ?
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+      `).run(now, now, child.taskId, scope.tenantId, scope.workspaceId)
+      child = getScopedN8nTaskRunByTaskId(db, child.taskId, scope)!
+      return {
+        outcome: 'claimed', parent, child,
+        lease: {
+          taskId: child.taskId,
+          ownerInstanceId: input.ownerInstanceId,
+          leaseToken: token,
+          leaseExpiresAt,
+          revision: current.revision + 1,
+        },
+      }
+    }
+
+    if (child.status !== 'failed' || current) {
+      return { outcome: 'terminal', parent, child, lease: null }
+    }
+    const retry = db.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'running', attempt_count = attempt_count + 1, started_at = ?,
+          completed_at = NULL, error = NULL, updated_at = ?
+      WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+        AND status = 'failed' AND attempt_count < max_attempts
+    `).run(now, now, child.taskId, scope.tenantId, scope.workspaceId)
+    if (retry.changes !== 1) return { outcome: 'exhausted', parent, child, lease: null }
+    db.prepare(`
+      INSERT INTO n8n_child_execution_leases (
+        task_id, tenant_id, workspace_id, owner_instance_id, lease_token,
+        lease_expires_at, heartbeat_at, revision, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(
+      child.taskId, scope.tenantId, scope.workspaceId,
+      input.ownerInstanceId, token, leaseExpiresAt, now, now, now,
+    )
+    child = getScopedN8nTaskRunByTaskId(db, child.taskId, scope)!
+    return {
+      outcome: 'claimed', parent, child,
+      lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: 1 },
+    }
+  })
+  return execute.immediate()
+}
+
+export function renewN8nChildExecutionLease(
+  db: Database.Database,
+  lease: N8nChildExecutionLease,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number; leaseSeconds?: number } = {},
+): N8nChildExecutionLease | null {
+  assertChildLeaseIdentity(lease.ownerInstanceId, lease.leaseToken)
+  const now = childLeaseClock(options.nowSeconds)
+  const leaseSeconds = options.leaseSeconds ?? N8N_CHILD_EXECUTION_LEASE_SECONDS
+  if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 5 || leaseSeconds > 60 * 60) {
+    throw new TypeError('n8n 子任务执行租约时长无效')
+  }
+  const leaseExpiresAt = now + leaseSeconds
+  const renewed = db.prepare(`
+    UPDATE n8n_child_execution_leases
+    SET lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
+    WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+      AND owner_instance_id = ? AND lease_token = ? AND revision = ?
+      AND lease_expires_at > ?
+      AND EXISTS (
+        SELECT 1 FROM n8n_task_runs
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+      )
+  `).run(
+    leaseExpiresAt, now, now,
+    lease.taskId, scope.tenantId, scope.workspaceId,
+    lease.ownerInstanceId, lease.leaseToken, lease.revision, now,
+    lease.taskId, scope.tenantId, scope.workspaceId,
+  )
+  return renewed.changes === 1 ? { ...lease, leaseExpiresAt } : null
+}
+
+export async function runWithN8nChildExecutionHeartbeat<T>(
+  db: Database.Database,
+  lease: N8nChildExecutionLease,
+  scope: N8nTaskScope,
+  operation: () => Promise<T>,
+  options: { heartbeatSeconds?: number; leaseSeconds?: number } = {},
+): Promise<T> {
+  const heartbeatSeconds = options.heartbeatSeconds ?? N8N_CHILD_EXECUTION_HEARTBEAT_SECONDS
+  if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 1) {
+    throw new TypeError('n8n 子任务执行心跳周期无效')
+  }
+  let lost = false
+  const timer = setInterval(() => {
+    try {
+      if (!renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) lost = true
+    } catch {
+      lost = true
+    }
+  }, heartbeatSeconds * 1_000)
+  timer.unref()
+  try {
+    const result = await operation()
+    if (lost || !renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) {
+      throw new N8nChildExecutionLeaseLostError()
+    }
+    return result
+  } finally {
+    clearInterval(timer)
+  }
+}
+
+function settleN8nChildExecution(
+  db: Database.Database,
+  lease: N8nChildExecutionLease,
+  scope: N8nTaskScope,
+  kind: 'complete' | 'fail',
+  value: Record<string, unknown> | string,
+  options: { nowSeconds?: number; parentTaskId?: string } = {},
+): { settled: boolean; run: N8nTaskRun | null; parent: N8nTaskRun | null } {
+  assertChildLeaseIdentity(lease.ownerInstanceId, lease.leaseToken)
+  const now = childLeaseClock(options.nowSeconds)
+  const settle = db.transaction(() => {
+    const serialized = kind === 'complete' ? JSON.stringify(value) : String(value).slice(0, 2_000)
+    const result = kind === 'complete'
+      ? db.prepare(`
+          UPDATE n8n_task_runs
+          SET status = 'succeeded', output = ?, error = NULL, completed_at = ?, updated_at = ?
+          WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+            AND EXISTS (
+              SELECT 1 FROM n8n_child_execution_leases lease
+              WHERE lease.task_id = n8n_task_runs.task_id
+                AND lease.owner_instance_id = ? AND lease.lease_token = ?
+                AND lease.revision = ? AND lease.lease_expires_at > ?
+            )
+        `).run(
+          serialized, now, now, lease.taskId, scope.tenantId, scope.workspaceId,
+          lease.ownerInstanceId, lease.leaseToken, lease.revision, now,
+        )
+      : db.prepare(`
+          UPDATE n8n_task_runs
+          SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+          WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+            AND EXISTS (
+              SELECT 1 FROM n8n_child_execution_leases lease
+              WHERE lease.task_id = n8n_task_runs.task_id
+                AND lease.owner_instance_id = ? AND lease.lease_token = ?
+                AND lease.revision = ? AND lease.lease_expires_at > ?
+            )
+        `).run(
+          serialized, now, now, lease.taskId, scope.tenantId, scope.workspaceId,
+          lease.ownerInstanceId, lease.leaseToken, lease.revision, now,
+        )
+    if (result.changes !== 1) {
+      return {
+        settled: false,
+        run: getScopedN8nTaskRunByTaskId(db, lease.taskId, scope),
+        parent: options.parentTaskId ? getScopedN8nTaskRunByTaskId(db, options.parentTaskId, scope) : null,
+      }
+    }
+    if (kind === 'complete' && options.parentTaskId) {
+      const parentResult = db.prepare(`
+        UPDATE n8n_task_runs
+        SET status = 'succeeded', output = ?, error = NULL, completed_at = ?, updated_at = ?
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+      `).run(serialized, now, now, options.parentTaskId, scope.tenantId, scope.workspaceId)
+      const parent = getScopedN8nTaskRunByTaskId(db, options.parentTaskId, scope)
+      if (parentResult.changes !== 1 && parent?.status !== 'succeeded') {
+        throw new Error('最终节点完成，但父任务状态无法提交')
+      }
+    }
+    db.prepare(`
+      DELETE FROM n8n_child_execution_leases
+      WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+        AND owner_instance_id = ? AND lease_token = ? AND revision = ?
+    `).run(
+      lease.taskId, scope.tenantId, scope.workspaceId,
+      lease.ownerInstanceId, lease.leaseToken, lease.revision,
+    )
+    return {
+      settled: true,
+      run: getScopedN8nTaskRunByTaskId(db, lease.taskId, scope),
+      parent: options.parentTaskId ? getScopedN8nTaskRunByTaskId(db, options.parentTaskId, scope) : null,
+    }
+  })
+  return settle.immediate()
+}
+
+export function completeN8nChildExecution(
+  db: Database.Database,
+  lease: N8nChildExecutionLease,
+  output: Record<string, unknown>,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number; parentTaskId?: string } = {},
+) {
+  return settleN8nChildExecution(db, lease, scope, 'complete', output, options)
+}
+
+export function failN8nChildExecution(
+  db: Database.Database,
+  lease: N8nChildExecutionLease,
+  error: string,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number } = {},
+) {
+  return settleN8nChildExecution(db, lease, scope, 'fail', error, options)
+}
+
 /**
  * Re-read a video parent and persist a deterministic media child while holding
  * an IMMEDIATE SQLite transaction. This closes the race with orphan
@@ -875,6 +1415,8 @@ export function completeN8nFinalizeRun(
     parentTaskId: string
     childTaskId: string
     output?: Record<string, unknown> | null
+    executionLease?: N8nChildExecutionLease
+    nowSeconds?: number
   },
 ): {
   outcome: N8nFinalizeOutcome
@@ -883,6 +1425,7 @@ export function completeN8nFinalizeRun(
   output: Record<string, unknown> | null
 } {
   const execute = db.transaction(() => {
+    const now = childLeaseClock(input.nowSeconds)
     let parent = getN8nTaskRunByTaskId(db, input.parentTaskId)
     let child = getN8nTaskRunByTaskId(db, input.childTaskId)
     if (!parent || !child) {
@@ -904,12 +1447,34 @@ export function completeN8nFinalizeRun(
     let output = input.output || child.output
     if (!output) return { outcome: 'rejected' as const, parent, child, output: null }
     if (child.status === 'running') {
-      db.prepare(`
+      if (input.executionLease) {
+        assertChildLeaseIdentity(input.executionLease.ownerInstanceId, input.executionLease.leaseToken)
+        if (input.executionLease.taskId !== child.taskId) {
+          return { outcome: 'rejected' as const, parent, child, output: null }
+        }
+      }
+      const childUpdate = db.prepare(`
         UPDATE n8n_task_runs
         SET status = 'succeeded', output = ?, error = NULL,
-            completed_at = unixepoch(), updated_at = unixepoch()
+            completed_at = ?, updated_at = ?
         WHERE task_id = ? AND status = 'running'
-      `).run(JSON.stringify(output), child.taskId)
+          AND (? = 0 OR EXISTS (
+            SELECT 1 FROM n8n_child_execution_leases lease
+            WHERE lease.task_id = n8n_task_runs.task_id
+              AND lease.owner_instance_id = ? AND lease.lease_token = ?
+              AND lease.revision = ? AND lease.lease_expires_at > ?
+          ))
+      `).run(
+        JSON.stringify(output), now, now, child.taskId,
+        input.executionLease ? 1 : 0,
+        input.executionLease?.ownerInstanceId || '',
+        input.executionLease?.leaseToken || '',
+        input.executionLease?.revision || 0,
+        now,
+      )
+      if (childUpdate.changes !== 1) {
+        return { outcome: 'rejected' as const, parent, child, output: null }
+      }
       child = getN8nTaskRunByTaskId(db, child.taskId)!
     } else if (child.status === 'succeeded' && child.output) {
       output = child.output
@@ -918,6 +1483,10 @@ export function completeN8nFinalizeRun(
     }
 
     if (parent.status === 'succeeded') {
+      if (input.executionLease) {
+        db.prepare(`DELETE FROM n8n_child_execution_leases WHERE task_id = ? AND lease_token = ?`)
+          .run(child.taskId, input.executionLease.leaseToken)
+      }
       insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
       return { outcome: 'cached' as const, parent, child, output: parent.output || output }
     }
@@ -930,6 +1499,19 @@ export function completeN8nFinalizeRun(
     parent = getN8nTaskRunByTaskId(db, parent.taskId)!
     if (completed.changes !== 1) {
       return { outcome: 'rejected' as const, parent, child, output: null }
+    }
+    if (input.executionLease) {
+      const released = db.prepare(`
+        DELETE FROM n8n_child_execution_leases
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+          AND owner_instance_id = ? AND lease_token = ? AND revision = ?
+      `).run(
+        child.taskId, child.tenantId, child.workspaceId,
+        input.executionLease.ownerInstanceId,
+        input.executionLease.leaseToken,
+        input.executionLease.revision,
+      )
+      if (released.changes !== 1) throw new Error('最终媒体节点执行租约无法原子释放')
     }
     insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
     return { outcome: 'completed' as const, parent, child, output }

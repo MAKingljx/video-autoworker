@@ -1,0 +1,1864 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+RUN_DIR="${AIWORKER_BG_RUN_DIR:-$PROJECT_ROOT/.run/blue-green}"
+RELEASES_DIR="${AIWORKER_BG_RELEASES_DIR:-$PROJECT_ROOT/.runtime/releases}"
+STATE_FILE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
+LOCK_DIR="$RUN_DIR/.deployment.lock"
+AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
+NODE_BIN="${NODE_BIN:-node}"
+ROUTER_HOST="${AIWORKER_BG_ROUTER_HOST:-127.0.0.1}"
+ROUTER_PORT="${AIWORKER_BG_ROUTER_PORT:-3017}"
+BLUE_PORT="${AIWORKER_BG_BLUE_PORT:-3317}"
+GREEN_PORT="${AIWORKER_BG_GREEN_PORT:-3417}"
+PROBE_PATH="${AIWORKER_BG_PROBE_PATH:-/login}"
+READINESS_PATH="${AIWORKER_BG_READINESS_PATH:-/api/n8n/release-readiness}"
+DRAIN_PATH="${AIWORKER_BG_DRAIN_PATH:-/api/n8n/drain-status}"
+SCHEDULER_PATH="${AIWORKER_BG_SCHEDULER_PATH:-/api/scheduler}"
+LIVE_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
+N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
+CONTROL_TOKEN_FILE="${AIWORKER_BG_CONTROL_TOKEN_FILE:-}"
+CONTROL_TOKEN="${AIWORKER_BG_CONTROL_TOKEN:-${API_KEY:-}}"
+HTTP_TIMEOUT_MS="${AIWORKER_BG_HTTP_TIMEOUT_MS:-8000}"
+BOOTSTRAP_EVIDENCE_MAX_AGE="${AIWORKER_BG_BOOTSTRAP_EVIDENCE_MAX_AGE:-300}"
+LEADER_TIMEOUT_SECONDS="${AIWORKER_BG_LEADER_TIMEOUT_SECONDS:-90}"
+RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
+STAGING_WORK_ROOT=""
+BOOTSTRAP_MAINTENANCE=0
+
+cleanup_operation() {
+  if [[ -n "$STAGING_WORK_ROOT" ]]; then
+    local physical_releases=""
+    physical_releases="$(physical_path "$RELEASES_DIR" 2>/dev/null || true)"
+    case "$STAGING_WORK_ROOT" in
+      "$physical_releases"/.staging-*) rm -rf -- "$STAGING_WORK_ROOT" ;;
+    esac
+  fi
+  rm -f -- "$LOCK_DIR/pid" 2>/dev/null || true
+  rmdir -- "$LOCK_DIR" 2>/dev/null || true
+  if (( BOOTSTRAP_MAINTENANCE == 1 )); then
+    printf 'error: bootstrap remains in externally frozen maintenance mode; do not reopen ingress\n' >&2
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  deploy-blue-green.sh init [blue|green]
+  deploy-blue-green.sh bootstrap <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json>
+  deploy-blue-green.sh stage <release-id> <absolute-source-standalone-root>
+  deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
+  deploy-blue-green.sh probe <blue|green>
+  deploy-blue-green.sh retire <blue|green>
+  deploy-blue-green.sh switch <blue|green>
+  deploy-blue-green.sh rollback
+  deploy-blue-green.sh status
+
+The router remains on port 3017. Backends default to blue=3317 and green=3417.
+`stage` copies an already built and audited standalone artifact into a new,
+non-overwritable release directory, regenerates its manifest, re-audits it, and
+atomically publishes it under .runtime/releases.
+`retire` records a one-use retirement proof only after the previous active
+release reports that its release-owned callbacks are drained. Rebinding a slot
+that has carried production traffic requires that proof and a stopped old PID.
+`switch` and `rollback` require AIWORKER_BG_LIVE_DB_PATH, an `active` runtime
+attestation for the same canonical SQLite database, and a paused intake gate.
+They verify the selected release through port 3017 and automatically roll back
+if the routed read-only checks fail. They do not stop either backend or mutate
+application data. Set AIWORKER_BG_CONTROL_TOKEN_FILE to a mode-0600 file that
+contains the viewer/admin API token (or inject AIWORKER_BG_CONTROL_TOKEN).
+`bootstrap` is the only supported migration from a legacy single-process 3017.
+Its mode-0600 external evidence must attest a frozen ingress and zero media,
+n8n execution, waiting and running counts. The evidence must also bind the live
+Mission Control and n8n SQLite files and their exact listener PIDs. Bootstrap
+rechecks both databases read-only before and after stopping only the evidenced
+3017 PID, then writes the permanent gate-aware baseline; it never restarts the
+legacy PID.
+EOF
+}
+
+fail() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_slot() {
+  case "${1:-}" in
+    blue|green) printf '%s\n' "$1" ;;
+    *) fail "slot must be blue or green" ;;
+  esac
+}
+
+slot_port() {
+  case "$1" in
+    blue) printf '%s\n' "$BLUE_PORT" ;;
+    green) printf '%s\n' "$GREEN_PORT" ;;
+  esac
+}
+
+assert_absolute() {
+  [[ "$2" == /* ]] || fail "$1 must be an absolute path: $2"
+}
+
+assert_safe_integer() {
+  [[ "$2" =~ ^[1-9][0-9]*$ ]] || fail "$1 must be a positive integer"
+  (( 10#$2 <= 65535 )) || fail "$1 exceeds 65535"
+}
+
+prepare_run_dir() {
+  assert_absolute "AIWORKER_BG_RUN_DIR" "$RUN_DIR"
+  assert_absolute "AIWORKER_BG_RELEASES_DIR" "$RELEASES_DIR"
+  mkdir -p "$RUN_DIR/slots" "$RELEASES_DIR"
+  chmod 700 "$RUN_DIR" "$RUN_DIR/slots"
+  [[ "$PROBE_PATH" == /* && "$PROBE_PATH" != *[$'\r\n ']* ]] \
+    || fail "AIWORKER_BG_PROBE_PATH must be one local absolute HTTP path"
+  [[ "$READINESS_PATH" == /* && "$READINESS_PATH" != *[$'\r\n ']* ]] \
+    || fail "AIWORKER_BG_READINESS_PATH must be one local absolute HTTP path"
+  [[ "$DRAIN_PATH" == /* && "$DRAIN_PATH" != *[$'\r\n ']* ]] \
+    || fail "AIWORKER_BG_DRAIN_PATH must be one local absolute HTTP path"
+  [[ "$SCHEDULER_PATH" == /* && "$SCHEDULER_PATH" != *[$'\r\n ']* ]] \
+    || fail "AIWORKER_BG_SCHEDULER_PATH must be one local absolute HTTP path"
+  [[ "$HTTP_TIMEOUT_MS" =~ ^[1-9][0-9]*$ ]] && (( 10#$HTTP_TIMEOUT_MS <= 30000 )) \
+    || fail "AIWORKER_BG_HTTP_TIMEOUT_MS must be between 1 and 30000"
+  [[ "$BOOTSTRAP_EVIDENCE_MAX_AGE" =~ ^[1-9][0-9]*$ ]] \
+    && (( 10#$BOOTSTRAP_EVIDENCE_MAX_AGE >= 30 && 10#$BOOTSTRAP_EVIDENCE_MAX_AGE <= 1800 )) \
+    || fail "AIWORKER_BG_BOOTSTRAP_EVIDENCE_MAX_AGE must be between 30 and 1800"
+  [[ "$LEADER_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    && (( 10#$LEADER_TIMEOUT_SECONDS >= 15 && 10#$LEADER_TIMEOUT_SECONDS <= 300 )) \
+    || fail "AIWORKER_BG_LEADER_TIMEOUT_SECONDS must be between 15 and 300"
+  [[ "$RETIRE_QUIESCE_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+    && (( 10#$RETIRE_QUIESCE_WAIT_SECONDS >= 30 && 10#$RETIRE_QUIESCE_WAIT_SECONDS <= 14400 )) \
+    || fail "AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS must be between 30 and 14400"
+}
+
+acquire_lock() {
+  prepare_run_dir
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    fail "another blue-green operation holds $LOCK_DIR"
+  fi
+  chmod 700 "$LOCK_DIR"
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  chmod 600 "$LOCK_DIR/pid"
+  trap cleanup_operation EXIT
+}
+
+validate_release_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$ ]] \
+    || fail "release id must use 1-160 letters, numbers, dot, underscore or dash"
+}
+
+physical_path() {
+  "$NODE_BIN" -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$1"
+}
+
+release_manifest_sha() {
+  shasum -a 256 "$1/release-manifest.json" | awk '{print $1}'
+}
+
+assert_release() {
+  local release_id="$1"
+  local standalone_root="$2"
+  local physical_releases physical_expected physical_root
+  validate_release_id "$release_id"
+  assert_absolute "standalone release root" "$standalone_root"
+  [[ -d "$standalone_root" && ! -L "$standalone_root" ]] || fail "standalone release root is not a physical directory"
+  physical_releases="$(physical_path "$RELEASES_DIR")"
+  physical_expected="$physical_releases/$release_id/standalone"
+  physical_root="$(physical_path "$standalone_root")"
+  [[ "$physical_root" == "$physical_expected" ]] \
+    || fail "release root must resolve to $physical_expected"
+  [[ -f "$AUDITOR" ]] || fail "standalone artifact auditor is missing"
+  "$NODE_BIN" "$AUDITOR" "$physical_root" >/dev/null \
+    || fail "standalone release failed artifact verification"
+  printf '%s\n' "$physical_root"
+}
+
+stage_release() {
+  local release_id="${1:-}"
+  local source_root="${2:-}"
+  local physical_releases physical_source target_root staged_root source_manifest staged_manifest
+  [[ -n "$release_id" && -n "$source_root" ]] || { usage >&2; exit 2; }
+  acquire_lock
+  validate_release_id "$release_id"
+  assert_absolute "source standalone root" "$source_root"
+  [[ -d "$source_root" && ! -L "$source_root" ]] || fail "source standalone root is not a physical directory"
+  physical_releases="$(physical_path "$RELEASES_DIR")"
+  physical_source="$(physical_path "$source_root")"
+  case "$physical_releases" in
+    "$physical_source"|"$physical_source"/*)
+      fail "release directory must not be the source artifact or one of its descendants"
+      ;;
+  esac
+  target_root="$physical_releases/$release_id"
+  [[ ! -e "$target_root" && ! -L "$target_root" ]] || fail "release already exists: $target_root"
+  [[ -f "$AUDITOR" ]] || fail "standalone artifact auditor is missing"
+  "$NODE_BIN" "$AUDITOR" "$physical_source" >/dev/null \
+    || fail "source standalone artifact failed verification"
+  source_manifest="$(release_manifest_sha "$physical_source")"
+
+  STAGING_WORK_ROOT="$(mktemp -d "$physical_releases/.staging-$release_id.XXXXXX")"
+  chmod 700 "$STAGING_WORK_ROOT"
+  staged_root="$STAGING_WORK_ROOT/standalone"
+  mkdir "$staged_root"
+  cp -pR "$physical_source/." "$staged_root/"
+  "$NODE_BIN" "$AUDITOR" --write-manifest "$staged_root" >/dev/null \
+    || fail "unable to regenerate staged release manifest"
+  "$NODE_BIN" "$AUDITOR" "$staged_root" >/dev/null \
+    || fail "staged standalone artifact failed verification"
+  staged_manifest="$(release_manifest_sha "$staged_root")"
+  [[ "$staged_manifest" == "$source_manifest" ]] \
+    || fail "staged release does not reproduce the audited source manifest"
+  [[ ! -e "$target_root" && ! -L "$target_root" ]] || fail "release target appeared during staging"
+  mv "$STAGING_WORK_ROOT" "$target_root"
+  STAGING_WORK_ROOT=""
+  "$NODE_BIN" "$AUDITOR" "$target_root/standalone" >/dev/null \
+    || fail "published immutable release failed final verification"
+  printf 'Staged immutable release: %s manifest=%s\n' "$release_id" "$staged_manifest"
+}
+
+binding_file() {
+  printf '%s/slots/%s.json\n' "$RUN_DIR" "$1"
+}
+
+runtime_attestation_file() {
+  printf '%s/slots/%s.runtime.json\n' "$RUN_DIR" "$1"
+}
+
+router_attestation_file() {
+  printf '%s/router.runtime.json\n' "$RUN_DIR"
+}
+
+retirement_file() {
+  printf '%s/slots/%s.retired.json\n' "$RUN_DIR" "$1"
+}
+
+callback_freeze_file() {
+  printf '%s/slots/%s.callbacks-frozen.json\n' "$RUN_DIR" "$1"
+}
+
+baseline_file() {
+  printf '%s/baseline.json\n' "$RUN_DIR"
+}
+
+bootstrap_pending_file() {
+  printf '%s/bootstrap.pending.json\n' "$RUN_DIR"
+}
+
+write_json_atomic() {
+  local destination="$1"
+  local payload="$2"
+  local temporary="$destination.tmp.$$"
+  (umask 077; printf '%s\n' "$payload" > "$temporary")
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$destination"
+}
+
+write_router_state_atomic() {
+  local payload="$1"
+  "$NODE_BIN" --input-type=module -e '
+    const { pathToFileURL } = await import("node:url")
+    const { writeRouterStateAtomic } = await import(pathToFileURL(process.argv[2]).href)
+    writeRouterStateAtomic(process.argv[1], JSON.parse(process.argv[3]))
+  ' "$STATE_FILE" "$SCRIPT_DIR/standalone-router.mjs" "$payload"
+}
+
+read_state_field() {
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const field = process.argv[2]
+    const result = value[field]
+    if (typeof result !== "string" && typeof result !== "number" && result !== null) process.exit(2)
+    process.stdout.write(result === null ? "" : String(result))
+  ' "$STATE_FILE" "$1"
+}
+
+read_state_slot_release() {
+  "$NODE_BIN" -e '
+    const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
+    const slot = process.argv[2]
+    if (!value.slots || !value.slots[slot] || typeof value.slots[slot].releaseId !== "string") process.exit(2)
+    process.stdout.write(value.slots[slot].releaseId)
+  ' "$STATE_FILE" "$1"
+}
+
+validate_state() {
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || fail "router state is missing or unsafe: $STATE_FILE"
+  "$NODE_BIN" --input-type=module -e '
+    const { pathToFileURL } = await import("node:url")
+    const { readRouterState } = await import(pathToFileURL(process.argv[2]).href)
+    readRouterState(process.argv[1])
+  ' "$STATE_FILE" "$SCRIPT_DIR/standalone-router.mjs"
+}
+
+assert_secure_file() {
+  local label="$1"
+  local pathname="$2"
+  [[ -f "$pathname" && ! -L "$pathname" && -O "$pathname" ]] || fail "$label is missing or unsafe"
+  local mode group_digit other_digit
+  mode="$(stat -f '%Lp' "$pathname" 2>/dev/null || stat -c '%a' "$pathname")"
+  group_digit="${mode: -2:1}"
+  other_digit="${mode: -1}"
+  (( (10#$group_digit & 2) == 0 && (10#$other_digit & 2) == 0 )) \
+    || fail "$label must not be writable by group or others"
+}
+
+assert_private_file() {
+  local label="$1"
+  local pathname="$2"
+  assert_secure_file "$label" "$pathname"
+  local mode
+  mode="$(stat -f '%Lp' "$pathname" 2>/dev/null || stat -c '%a' "$pathname")"
+  [[ "$mode" == 600 ]] || fail "$label must have mode 0600"
+}
+
+read_control_token() {
+  local token
+  if [[ -n "$CONTROL_TOKEN_FILE" ]]; then
+    assert_absolute "AIWORKER_BG_CONTROL_TOKEN_FILE" "$CONTROL_TOKEN_FILE"
+    assert_private_file "blue-green control token file" "$CONTROL_TOKEN_FILE"
+    token="$($NODE_BIN -e '
+      const raw = require("node:fs").readFileSync(process.argv[1], "utf8")
+      const token = raw.trim()
+      if (!token || /[\r\n]/u.test(token)) process.exit(2)
+      process.stdout.write(token)
+    ' "$CONTROL_TOKEN_FILE")" || fail "blue-green control token file is invalid"
+  else
+    token="$CONTROL_TOKEN"
+    [[ -n "$token" && "$token" != *[$'\r\n']* ]] \
+      || fail "AIWORKER_BG_CONTROL_TOKEN_FILE or AIWORKER_BG_CONTROL_TOKEN is required"
+  fi
+  printf '%s' "$token"
+}
+
+check_json_endpoint() {
+  local mode="$1"
+  local url="$2"
+  shift 2
+  local token=""
+  if [[ "$mode" != router && "$mode" != retire-router && "$mode" != health ]]; then
+    token="$(read_control_token)"
+  fi
+  AIWORKER_BG_REQUEST_TOKEN="$token" AIWORKER_BG_REQUEST_TIMEOUT_MS="$HTTP_TIMEOUT_MS" \
+    "$NODE_BIN" - "$mode" "$url" "$@" <<'NODE'
+const [mode, url, ...expected] = process.argv.slice(2)
+const timeoutMs = Number(process.env.AIWORKER_BG_REQUEST_TIMEOUT_MS)
+const token = process.env.AIWORKER_BG_REQUEST_TOKEN || ''
+const fail = message => {
+  process.stderr.write(`blue-green ${mode} verification failed: ${message}\n`)
+  process.exit(1)
+}
+
+let response
+try {
+  response = await fetch(url, {
+    cache: 'no-store',
+    headers: token ? { authorization: `Bearer ${token}`, accept: 'application/json' } : { accept: 'application/json' },
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+} catch {
+  fail('endpoint unavailable')
+}
+if (!response.ok) fail(`HTTP ${response.status}`)
+let payload
+try { payload = await response.json() } catch { fail('response is not JSON') }
+
+const nonNegativeInteger = value => Number.isSafeInteger(value) && value >= 0
+const validRuntime = (runtime, slot, releaseId, rawPort) => runtime
+  && runtime.callbackProtocol === 'slot-v1'
+  && runtime.runtimeSlot === slot
+  && runtime.runtimeReleaseId === releaseId
+  && runtime.port === Number(rawPort)
+
+if (mode === 'router') {
+  const [slot, releaseId, rawGeneration] = expected
+  if (payload?.schema !== 'video-autoworker-standalone-router-health/v1'
+    || payload?.ok !== true || !Number.isSafeInteger(payload?.pid) || payload.pid <= 0
+    || payload?.active !== slot || payload?.releaseId !== releaseId
+    || payload?.generation !== Number(rawGeneration)) fail('router identity mismatch')
+  process.stdout.write(String(payload.pid))
+} else if (mode === 'retire-router') {
+  const [activeSlot, releaseId, rawGeneration, retiringSlot] = expected
+  const counters = payload?.counters?.[retiringSlot]
+  if (payload?.schema !== 'video-autoworker-standalone-router-health/v1'
+    || payload?.ok !== true || !Number.isSafeInteger(payload?.pid) || payload.pid <= 0
+    || payload?.active !== activeSlot || payload?.releaseId !== releaseId
+    || payload?.generation !== Number(rawGeneration) || !counters
+    || !nonNegativeInteger(counters.activeRequests) || !nonNegativeInteger(counters.upgradedSockets)
+    || counters.activeRequests !== 0 || counters.upgradedSockets !== 0) {
+    fail('old slot still owns routed HTTP/SSE/WebSocket connections')
+  }
+  process.stdout.write(`${payload.pid}\n${JSON.stringify({
+    routerActiveRequests: counters.activeRequests,
+    routerUpgradedSockets: counters.upgradedSockets,
+  })}`)
+} else if (mode === 'readiness') {
+  const [slot, releaseId, rawPort, expectedRevision, expectedEpoch, expectedGeneration] = expected
+  const specified = value => value !== undefined && value !== ''
+  const readiness = payload?.readiness
+  if (!readiness || readiness.schema !== 'video-autoworker-release-readiness/v1'
+    || readiness.globalScope !== true || !nonNegativeInteger(readiness.observedAt)) {
+    fail('global readiness envelope is invalid')
+  }
+  const intake = readiness.intake
+  if (!intake || intake.schema !== 'video-autoworker-intake-control/v1'
+    || intake.accepting !== false || !['draining', 'paused'].includes(intake.mode)
+    || !Number.isSafeInteger(intake.revision) || intake.revision < 1
+    || (specified(expectedRevision) && intake.revision !== Number(expectedRevision))) {
+    fail('global intake is not explicitly paused at the expected revision')
+  }
+  const intakeCounts = intake.counts
+  if (!intakeCounts || !['queued', 'accepted', 'running', 'waiting', 'active']
+    .every(key => nonNegativeInteger(intakeCounts[key]))) fail('global intake counts are invalid')
+  if (intakeCounts.waiting !== intakeCounts.queued + intakeCounts.accepted
+    || intakeCounts.active !== intakeCounts.waiting + intakeCounts.running
+    || (intake.mode === 'paused' && intakeCounts.active !== 0)
+    || (intake.mode === 'draining' && intakeCounts.active === 0)) fail('global intake mode/counts mismatch')
+  if (!validRuntime(readiness.runtime, slot, releaseId, rawPort)) fail('runtime identity mismatch')
+  const database = readiness.database
+  if (!database || !Number.isSafeInteger(database.schemaEpoch) || database.schemaEpoch < 1
+    || typeof database.rollingSafeFrom !== 'string' || !database.rollingSafeFrom
+    || typeof database.latestMigration !== 'string' || !database.latestMigration
+    || (specified(expectedEpoch) && database.schemaEpoch !== Number(expectedEpoch))) {
+    fail('database rolling compatibility is invalid')
+  }
+  const drain = readiness.retirement
+  const counts = drain?.counts
+  if (!counts || !['tracked', 'active', 'queued', 'accepted', 'running', 'topLevel',
+    'mediaNodes', 'modelNodes', 'childExecutionLeases', 'untrackedCallbacks', 'otherReleaseActive']
+    .every(key => nonNegativeInteger(counts[key]))) fail('drain counts are invalid')
+  const leadership = readiness.scheduler
+  if (!leadership || !['leader', 'follower', 'inactive'].includes(leadership.state)
+    || !nonNegativeInteger(leadership.activeJobs) || !nonNegativeInteger(leadership.observedAt)
+    || !Number.isSafeInteger(leadership.routerGeneration) || leadership.routerGeneration < 1
+    || (specified(expectedGeneration)
+      && leadership.routerGeneration !== Number(expectedGeneration))
+    || typeof leadership.reason !== 'string' || leadership.reason.length < 1
+    || leadership.reason.length > 120 || typeof leadership.leaseExpired !== 'boolean') {
+    fail('scheduler readiness is invalid')
+  }
+  if (leadership.state === 'inactive') {
+    if (leadership.leaseExpiresAt !== null || leadership.leaseExpired !== false
+      || leadership.activeJobs !== 0) fail('inactive scheduler readiness is inconsistent')
+  } else if (!Number.isSafeInteger(leadership.leaseExpiresAt)
+    || leadership.leaseExpiresAt < 0
+    || (leadership.state === 'leader'
+      && (leadership.leaseExpired || leadership.leaseExpiresAt <= readiness.observedAt))) {
+    fail('scheduler lease readiness is inconsistent')
+  }
+  process.stdout.write(`${intake.revision}\n${database.schemaEpoch}\n`)
+} else if (mode === 'drain') {
+  const [slot, releaseId, rawPort] = expected
+  const drain = payload?.drain
+  if (!drain || drain.schema !== 'video-autoworker-runtime-drain/v1'
+    || drain.globalScope !== true || !validRuntime(drain.runtime, slot, releaseId, rawPort)) {
+    fail('global drain envelope or runtime identity is invalid')
+  }
+  const counts = drain.counts
+  if (!counts || !['tracked', 'active', 'queued', 'accepted', 'running', 'topLevel',
+    'mediaNodes', 'modelNodes', 'childExecutionLeases', 'untrackedCallbacks', 'otherReleaseActive']
+    .every(key => nonNegativeInteger(counts[key]))) fail('drain counts are invalid')
+  if (drain.safeToRetire !== true || counts.active !== 0 || counts.untrackedCallbacks !== 0
+    || counts.otherReleaseActive !== 0 || counts.childExecutionLeases !== 0
+    || !nonNegativeInteger(drain.quietSeconds)
+    || !nonNegativeInteger(drain.requiredQuietSeconds)
+    || drain.quietSeconds < drain.requiredQuietSeconds
+    || !nonNegativeInteger(drain.observedAt)
+    || (drain.lastActivityAt !== null && !nonNegativeInteger(drain.lastActivityAt))) {
+    fail('release is not safe to retire')
+  }
+  process.stdout.write(JSON.stringify({
+    tracked: counts.tracked,
+    active: counts.active,
+    untrackedCallbacks: counts.untrackedCallbacks,
+    otherReleaseActive: counts.otherReleaseActive,
+    childExecutionLeases: counts.childExecutionLeases,
+    lastActivityAt: drain.lastActivityAt,
+    quietSeconds: drain.quietSeconds,
+    requiredQuietSeconds: drain.requiredQuietSeconds,
+    observedAt: drain.observedAt,
+  }))
+} else if (mode === 'health') {
+  const database = Array.isArray(payload?.checks)
+    ? payload.checks.find(check => check?.name === 'Database')
+    : null
+  if (!['healthy', 'warning', 'degraded'].includes(payload?.status)
+    || !database || !['healthy', 'warning'].includes(database.status)
+    || typeof payload?.version !== 'string' || !payload.version) fail('application health is not acceptable')
+} else if (mode === 'scheduler') {
+  const [rawGeneration] = expected
+  const leadership = payload?.leadership
+  if (!leadership || leadership.state !== 'inactive' || leadership.activeJobs !== 0
+    || leadership.leaseExpiresAt !== null || leadership.routerGeneration !== Number(rawGeneration)
+    || !nonNegativeInteger(leadership.observedAt)) fail('old scheduler is not fully relinquished')
+  process.stdout.write(JSON.stringify({
+    schedulerState: leadership.state,
+    schedulerObservedAt: leadership.observedAt,
+    schedulerRouterGeneration: leadership.routerGeneration,
+  }))
+} else if (mode === 'leader') {
+  const [rawGeneration] = expected
+  const leadership = payload?.leadership
+  const now = Math.floor(Date.now() / 1000)
+  if (!leadership || leadership.state !== 'leader' || leadership.reason !== 'slot_active'
+    || leadership.leaseExpired !== false || !Number.isSafeInteger(leadership.leaseExpiresAt)
+    || leadership.leaseExpiresAt <= now || !nonNegativeInteger(leadership.activeJobs)
+    || !nonNegativeInteger(leadership.observedAt) || leadership.observedAt > now
+    || leadership.routerGeneration !== Number(rawGeneration)) {
+    fail('new active slot has not acquired valid scheduler leadership')
+  }
+  process.stdout.write(JSON.stringify({
+    schedulerState: leadership.state,
+    schedulerObservedAt: leadership.observedAt,
+    schedulerRouterGeneration: leadership.routerGeneration,
+    leaseExpiresAt: leadership.leaseExpiresAt,
+  }))
+} else {
+  fail('unknown verification mode')
+}
+NODE
+}
+
+check_database_retirement() {
+  local db_path="$1" slot="$2" release_id="$3" port="$4"
+  local runtime_started_at="$5" required_quiet_seconds="$6"
+  "$NODE_BIN" - "$PROJECT_ROOT" "$db_path" "$slot" "$release_id" "$port" \
+    "$runtime_started_at" "$required_quiet_seconds" <<'NODE'
+const [projectRoot, dbPath, slot, releaseId, rawPort, rawStartedAt, rawRequiredQuiet] = process.argv.slice(2)
+const fail = message => { process.stderr.write(`blue-green direct database retirement check failed: ${message}\n`); process.exit(1) }
+let Database
+try { Database = require(require.resolve('better-sqlite3', { paths: [projectRoot] })) }
+catch { fail('better-sqlite3 is unavailable') }
+const port = Number(rawPort)
+const runtimeStartedAt = Number(rawStartedAt)
+const requiredQuietSeconds = Number(rawRequiredQuiet)
+if (!['blue', 'green'].includes(slot)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(releaseId)
+  || !Number.isInteger(port) || port < 1 || port > 65535
+  || !Number.isSafeInteger(runtimeStartedAt) || runtimeStartedAt < 0
+  || !Number.isSafeInteger(requiredQuietSeconds)
+  || requiredQuietSeconds < 30 || requiredQuietSeconds > 900) fail('arguments are invalid')
+let db
+try {
+  db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  db.pragma('query_only = ON')
+  const aggregate = db.prepare(`
+    SELECT COUNT(*) AS tracked,
+      SUM(CASE WHEN status IN ('queued', 'accepted', 'running') THEN 1 ELSE 0 END) AS active,
+      MAX(updated_at) AS last_activity_at
+    FROM n8n_task_runs
+    WHERE json_valid(routing)
+      AND json_extract(routing, '$.callbackProtocol') = 'slot-v1'
+      AND json_extract(routing, '$.runtimeSlot') = ?
+      AND json_extract(routing, '$.runtimeReleaseId') = ?
+  `).get(slot, releaseId)
+  const urls = pathname => [
+    `http://127.0.0.1:${port}${pathname}`,
+    `http://localhost:${port}${pathname}`,
+    `http://[::1]:${port}${pathname}`,
+  ]
+  const untracked = db.prepare(`
+    SELECT SUM(CASE WHEN status IN ('queued', 'accepted', 'running') THEN 1 ELSE 0 END) AS count,
+      MAX(updated_at) AS last_activity_at
+    FROM n8n_task_runs
+    WHERE json_valid(routing)
+      AND (json_extract(routing, '$.claimCallbackUrl') IN (?, ?, ?)
+        OR json_extract(routing, '$.mediaCallbackUrl') IN (?, ?, ?)
+        OR json_extract(routing, '$.nodeCallbackUrl') IN (?, ?, ?))
+      AND NOT (COALESCE(json_extract(routing, '$.callbackProtocol'), '') = 'slot-v1'
+        AND COALESCE(json_extract(routing, '$.runtimeSlot'), '') = ?
+        AND COALESCE(json_extract(routing, '$.runtimeReleaseId'), '') = ?)
+  `).get(...urls('/api/n8n/claim'), ...urls('/api/n8n/media-execute'),
+    ...urls('/api/n8n/node-execute'), slot, releaseId)
+  const otherRelease = db.prepare(`
+    SELECT SUM(CASE WHEN status IN ('queued', 'accepted', 'running') THEN 1 ELSE 0 END) AS count,
+      MAX(updated_at) AS last_activity_at
+    FROM n8n_task_runs
+    WHERE json_valid(routing)
+      AND json_extract(routing, '$.callbackProtocol') = 'slot-v1'
+      AND json_extract(routing, '$.runtimeSlot') = ?
+      AND COALESCE(json_extract(routing, '$.runtimeReleaseId'), '') <> ?
+  `).get(slot, releaseId)
+  const childExecutionLeases = db.prepare(`
+    SELECT COUNT(*) AS count, MAX(lease.updated_at) AS last_activity_at
+    FROM n8n_child_execution_leases lease
+    JOIN n8n_task_runs run ON run.task_id = lease.task_id
+    WHERE json_valid(run.routing)
+      AND json_extract(run.routing, '$.callbackProtocol') = 'slot-v1'
+      AND json_extract(run.routing, '$.runtimeSlot') = ?
+      AND json_extract(run.routing, '$.runtimeReleaseId') = ?
+  `).get(slot, releaseId)
+  const number = value => Number(value || 0)
+  const activity = [aggregate.last_activity_at, untracked.last_activity_at,
+    otherRelease.last_activity_at, childExecutionLeases.last_activity_at]
+    .filter(value => value !== null)
+  const lastActivityAt = activity.length ? Math.max(...activity) : null
+  const observedAt = Math.floor(Date.now() / 1000)
+  const quietSeconds = Math.max(0, observedAt - Math.max(runtimeStartedAt, lastActivityAt || 0))
+  const summary = {
+    tracked: number(aggregate.tracked), active: number(aggregate.active),
+    untrackedCallbacks: number(untracked.count), otherReleaseActive: number(otherRelease.count),
+    childExecutionLeases: number(childExecutionLeases.count),
+    lastActivityAt, quietSeconds, requiredQuietSeconds, observedAt,
+  }
+  if (summary.active !== 0 || summary.untrackedCallbacks !== 0
+    || summary.otherReleaseActive !== 0 || summary.childExecutionLeases !== 0
+    || quietSeconds < requiredQuietSeconds) {
+    fail('release is not quiescent after callback freeze and listener shutdown')
+  }
+  process.stdout.write(JSON.stringify(summary))
+} catch (error) {
+  fail(error instanceof Error ? error.message : 'database query failed')
+} finally { try { db?.close() } catch {} }
+NODE
+}
+
+slot_established_connection_count() {
+  local pid="$1" port="$2"
+  command -v lsof >/dev/null 2>&1 || fail "retirement connection verification requires lsof"
+  (lsof -a -p "$pid" -nP -iTCP:"$port" -sTCP:ESTABLISHED -t 2>/dev/null || true) \
+    | sort -u | awk 'NF { count += 1 } END { print count + 0 }'
+}
+
+# The first online drain check can race with a callback that connected directly
+# to the old slot and passed admission just before the freeze marker appeared.
+# Once frozen, no new callback can enter its business path. Keep the listener
+# alive while boundedly rechecking durable work, direct connections, scheduler
+# state, router transports and the quiet window; only then may stop be invoked.
+wait_for_frozen_retirement_quiescence() {
+  local slot="$1" release_id="$2" host="$3" port="$4" pid="$5" active="$6" generation="$7"
+  local deadline drain scheduler router connections
+  deadline=$(( $(date +%s) + RETIRE_QUIESCE_WAIT_SECONDS ))
+  while (( $(date +%s) <= deadline )); do
+    [[ "$(read_state_field active)" == "$active" \
+      && "$(read_state_field previous)" == "$slot" \
+      && "$(read_state_field generation)" == "$generation" ]] || return 1
+    drain="$(check_json_endpoint drain "http://$host:$port$DRAIN_PATH" \
+      "$slot" "$release_id" "$port" 2>/dev/null)" || drain=""
+    scheduler="$(check_json_endpoint scheduler "http://$host:$port$SCHEDULER_PATH" \
+      "$generation" 2>/dev/null)" || scheduler=""
+    router="$(assert_router_identity "$active" "$(read_state_slot_release "$active")" \
+      "$generation" "$slot" 2>/dev/null)" || router=""
+    connections="$(slot_established_connection_count "$pid" "$port")"
+    if [[ -n "$drain" && -n "$scheduler" && -n "$router" && "$connections" == 0 ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+check_legacy_databases_quiescent() {
+  local mission_db="$1" n8n_db="$2"
+  "$NODE_BIN" - "$PROJECT_ROOT" "$mission_db" "$n8n_db" <<'NODE'
+const [projectRoot, missionPath, n8nPath] = process.argv.slice(2)
+const fail = message => {
+  process.stderr.write(`blue-green direct legacy database check failed: ${message}\n`)
+  process.exit(1)
+}
+let Database
+try { Database = require(require.resolve('better-sqlite3', { paths: [projectRoot] })) }
+catch { fail('better-sqlite3 is unavailable') }
+const open = pathname => {
+  const db = new Database(pathname, { readonly: true, fileMustExist: true })
+  db.pragma('query_only = ON')
+  const quick = db.pragma('quick_check', { simple: true })
+  if (quick !== 'ok') fail('SQLite quick_check did not return ok')
+  return db
+}
+let mission
+let n8n
+try {
+  mission = open(missionPath)
+  const missionColumns = new Set(mission.pragma('table_info(n8n_task_runs)').map(row => row.name))
+  if (!['source', 'status', 'updated_at'].every(name => missionColumns.has(name))) {
+    fail('Mission Control n8n_task_runs schema is unavailable')
+  }
+  const now = Math.floor(Date.now() / 1000)
+  const missionCounts = mission.prepare(`
+    SELECT
+      SUM(CASE WHEN source = 'n8n-media-node'
+        AND status IN ('queued', 'accepted', 'running') THEN 1 ELSE 0 END) AS media_nodes,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN status IN ('queued', 'accepted')
+        AND updated_at > ? THEN 1 ELSE 0 END) AS fresh_waiting
+    FROM n8n_task_runs
+  `).get(now - 86400)
+  n8n = open(n8nPath)
+  const executionColumns = new Set(n8n.pragma('table_info(execution_entity)').map(row => row.name))
+  if (!['status', 'stoppedAt'].every(name => executionColumns.has(name))) {
+    fail('n8n execution_entity schema is unavailable')
+  }
+  const n8nActive = n8n.prepare(`
+    SELECT COUNT(*) AS count
+    FROM execution_entity
+    WHERE status IN ('new', 'running', 'waiting') AND "stoppedAt" IS NULL
+  `).get().count
+  const summary = {
+    mediaNodes: Number(missionCounts.media_nodes || 0),
+    running: Number(missionCounts.running || 0),
+    freshWaiting: Number(missionCounts.fresh_waiting || 0),
+    n8nActiveExecutions: Number(n8nActive || 0),
+  }
+  if (Object.values(summary).some(value => !Number.isSafeInteger(value) || value !== 0)) {
+    fail('active or recently waiting work is still present')
+  }
+  process.stdout.write(JSON.stringify(summary))
+} catch (error) {
+  fail(error instanceof Error ? error.message : 'database query failed')
+} finally {
+  try { mission?.close() } catch {}
+  try { n8n?.close() } catch {}
+}
+NODE
+}
+
+assert_router_identity() {
+  local active_slot="$1"
+  local release_id="$2"
+  local generation="$3"
+  local retiring_slot="${4:-}"
+  local result pid transport_summary="" attestation attested_pid listener canonical_state
+  if [[ -n "$retiring_slot" ]]; then
+    result="$(check_json_endpoint retire-router "http://$ROUTER_HOST:$ROUTER_PORT/__router/health" \
+      "$active_slot" "$release_id" "$generation" "$retiring_slot")" || return 1
+    pid="$(printf '%s\n' "$result" | sed -n '1p')"
+    transport_summary="$(printf '%s\n' "$result" | sed -n '2p')"
+  else
+    pid="$(check_json_endpoint router "http://$ROUTER_HOST:$ROUTER_PORT/__router/health" \
+      "$active_slot" "$release_id" "$generation")" || return 1
+  fi
+  attestation="$(router_attestation_file)"
+  assert_private_file "standalone router runtime attestation" "$attestation"
+  canonical_state="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  attested_pid="$($NODE_BIN -e '
+    const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
+    const [host, rawPort, stateFile] = process.argv.slice(2)
+    const keys = ["host", "pid", "port", "schema", "startedAt", "stateFile"]
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(keys)
+      || value.schema !== "video-autoworker-standalone-router-runtime/v1"
+      || !Number.isSafeInteger(value.pid) || value.pid <= 0 || value.host !== host
+      || value.port !== Number(rawPort) || value.stateFile !== stateFile
+      || !Number.isSafeInteger(value.startedAt) || value.startedAt <= 0) process.exit(2)
+    process.stdout.write(String(value.pid))
+  ' "$attestation" "$ROUTER_HOST" "$ROUTER_PORT" "$canonical_state")" \
+    || fail "standalone router runtime attestation is invalid"
+  [[ "$attested_pid" == "$pid" ]] || fail "router health PID does not match its runtime attestation"
+  kill -0 "$pid" 2>/dev/null || fail "attested standalone router PID is not running"
+  command -v lsof >/dev/null 2>&1 || fail "router identity verification requires lsof"
+  listener="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+  [[ "$listener" == "$pid" ]] || fail "port $ROUTER_PORT listener does not match the attested router PID"
+  [[ -z "$transport_summary" ]] || printf '%s' "$transport_summary"
+}
+
+check_routed_readonly_endpoint() {
+  local pathname="$1"
+  local kind="$2"
+  local token
+  token="$(read_control_token)"
+  AIWORKER_BG_REQUEST_TOKEN="$token" AIWORKER_BG_REQUEST_TIMEOUT_MS="$HTTP_TIMEOUT_MS" \
+    "$NODE_BIN" - "$ROUTER_HOST" "$ROUTER_PORT" "$pathname" "$kind" <<'NODE'
+const [host, rawPort, pathname, kind] = process.argv.slice(2)
+const token = process.env.AIWORKER_BG_REQUEST_TOKEN || ''
+const fail = message => {
+  process.stderr.write(`blue-green routed ${kind} verification failed for ${pathname}: ${message}\n`)
+  process.exit(1)
+}
+let response
+try {
+  response = await fetch(`http://${host}:${rawPort}${pathname}`, {
+    cache: 'no-store',
+    redirect: 'manual',
+    headers: { authorization: `Bearer ${token}`, accept: kind === 'api' ? 'application/json' : 'text/html' },
+    signal: AbortSignal.timeout(Number(process.env.AIWORKER_BG_REQUEST_TIMEOUT_MS)),
+  })
+} catch {
+  fail('endpoint unavailable')
+}
+if (response.status < 200 || response.status >= 300) fail(`HTTP ${response.status}`)
+const contentType = response.headers.get('content-type') || ''
+const body = await response.text()
+if (!body) fail('empty response')
+if (kind === 'page' && !contentType.toLowerCase().includes('text/html')) fail('response is not HTML')
+if (kind === 'api') {
+  if (!contentType.toLowerCase().includes('json')) fail('response is not JSON')
+  try { JSON.parse(body) } catch { fail('response JSON is invalid') }
+}
+NODE
+}
+
+ensure_bootstrap_intake_paused() {
+  local host="$1"
+  local port="$2"
+  local token
+  token="$(read_control_token)"
+  AIWORKER_BG_REQUEST_TOKEN="$token" AIWORKER_BG_REQUEST_TIMEOUT_MS="$HTTP_TIMEOUT_MS" \
+    "$NODE_BIN" - "$host" "$port" <<'NODE'
+const [host, port] = process.argv.slice(2)
+const base = `http://${host}:${port}`
+const headers = {
+  authorization: `Bearer ${process.env.AIWORKER_BG_REQUEST_TOKEN || ''}`,
+  accept: 'application/json',
+}
+const request = async (path, init = {}) => {
+  const response = await fetch(`${base}${path}`, {
+    ...init,
+    headers: { ...headers, ...(init.headers || {}) },
+    cache: 'no-store',
+    signal: AbortSignal.timeout(Number(process.env.AIWORKER_BG_REQUEST_TIMEOUT_MS)),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) throw new Error(`bootstrap intake HTTP ${response.status}`)
+  return payload
+}
+const first = (await request('/api/n8n/intake-control'))?.control
+if (!first || first.schema !== 'video-autoworker-intake-control/v1' || first.globalScope !== true
+  || !Number.isSafeInteger(first.revision)) throw new Error('bootstrap intake control is invalid')
+let control = first
+if (control.accepting) {
+  control = (await request('/api/n8n/intake-control', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      action: 'drain',
+      reason: '首次蓝绿基线引导期间冻结入口',
+      expectedRevision: control.revision,
+    }),
+  }))?.control
+}
+if (!control || control.accepting !== false || control.mode !== 'paused'
+  || control.counts?.active !== 0 || !Number.isSafeInteger(control.revision) || control.revision < 1) {
+  throw new Error('bootstrap intake did not reach a zero-work paused state')
+}
+process.stdout.write(String(control.revision))
+NODE
+}
+
+init_state() {
+  local active
+  active="$(require_slot "${1:-blue}")"
+  acquire_lock
+  assert_safe_integer "router port" "$ROUTER_PORT"
+  assert_safe_integer "blue port" "$BLUE_PORT"
+  assert_safe_integer "green port" "$GREEN_PORT"
+  [[ "$BLUE_PORT" != "$GREEN_PORT" && "$ROUTER_PORT" != "$BLUE_PORT" && "$ROUTER_PORT" != "$GREEN_PORT" ]] \
+    || fail "router, blue and green ports must be distinct"
+  if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
+    validate_state
+    printf 'Router state already initialized: %s\n' "$STATE_FILE"
+    return
+  fi
+  local payload
+  payload="$($NODE_BIN -e '
+    const [active, bluePort, greenPort] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({
+      schema: "video-autoworker-standalone-router/v1",
+      generation: 1,
+      active,
+      previous: null,
+      updatedAt: new Date().toISOString(),
+      slots: {
+        blue: { host: "127.0.0.1", port: Number(bluePort), releaseId: "unbound-blue" },
+        green: { host: "127.0.0.1", port: Number(greenPort), releaseId: "unbound-green" },
+      },
+    }))
+  ' "$active" "$BLUE_PORT" "$GREEN_PORT")"
+  write_router_state_atomic "$payload"
+  validate_state
+  printf 'Initialized router state: active=%s generation=1\n' "$active"
+}
+
+assert_baseline() {
+  local pathname live_db canonical_router_state values baseline_release baseline_root baseline_manifest
+  pathname="$(baseline_file)"
+  assert_private_file "blue-green baseline" "$pathname"
+  [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for blue-green lifecycle operations"
+  assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
+  [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  canonical_router_state="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  values="$("$NODE_BIN" - "$pathname" "$live_db" "$canonical_router_state" "$ROUTER_PORT" <<'NODE'
+const value = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))
+const [dbPath, routerStatePath, rawPort] = process.argv.slice(3)
+  const expectedKeys = ['baselineManifestSha256', 'baselineReleaseId', 'baselineReleaseRoot',
+   'baselineSlot', 'completedAt', 'dbPath', 'evidenceSha256', 'legacyPid', 'legacyReleaseId',
+   'n8nDbPath', 'n8nPid', 'routerPort', 'routerStatePath', 'schema']
+if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
+if (value.schema !== 'video-autoworker-blue-green-baseline/v2'
+  || !['blue', 'green'].includes(value.baselineSlot)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.baselineReleaseId)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.legacyReleaseId)
+  || value.baselineReleaseId === value.legacyReleaseId
+  || !/^[a-f0-9]{64}$/u.test(value.baselineManifestSha256)
+  || !/^[a-f0-9]{64}$/u.test(value.evidenceSha256)
+  || !Number.isSafeInteger(value.legacyPid) || value.legacyPid <= 0
+  || !Number.isSafeInteger(value.n8nPid) || value.n8nPid <= 0
+  || typeof value.n8nDbPath !== 'string' || !value.n8nDbPath.startsWith('/')
+  || /[\r\n]/u.test(value.n8nDbPath)
+  || !Number.isSafeInteger(value.completedAt) || value.completedAt <= 0
+  || value.dbPath !== dbPath || value.routerStatePath !== routerStatePath
+  || typeof value.baselineReleaseRoot !== 'string' || !value.baselineReleaseRoot.startsWith('/')
+  || /[\r\n]/u.test(value.baselineReleaseRoot) || value.routerPort !== Number(rawPort)) process.exit(3)
+process.stdout.write(`${value.legacyReleaseId}\n${value.baselineReleaseId}\n${value.baselineReleaseRoot}\n${value.baselineManifestSha256}\n`)
+NODE
+  )" || fail "blue-green baseline is invalid"
+  baseline_release="$(printf '%s\n' "$values" | sed -n '2p')"
+  baseline_root="$(printf '%s\n' "$values" | sed -n '3p')"
+  baseline_manifest="$(printf '%s\n' "$values" | sed -n '4p')"
+  baseline_root="$(assert_release "$baseline_release" "$baseline_root")"
+  [[ "$(release_manifest_sha "$baseline_root")" == "$baseline_manifest" ]] \
+    || fail "blue-green baseline release manifest changed"
+  printf '%s\n' "$values"
+}
+
+bootstrap_baseline() {
+  local slot release_id standalone_root evidence_file physical_root manifest live_db canonical_router_state
+  local evidence_values legacy_release legacy_pid legacy_cwd n8n_pid n8n_db evidence_observed evidence_sha now
+  local pending pending_payload binding_payload state_payload baseline_payload other_slot listeners deadline
+  local evidence_max_age evidence_age pending_exists=0 manager installer intake_revision baseline_readiness baseline_epoch
+  slot="$(require_slot "${1:-}")"
+  release_id="${2:-}"
+  standalone_root="${3:-}"
+  evidence_file="${4:-}"
+  [[ -n "$release_id" && -n "$standalone_root" && -n "$evidence_file" ]] || { usage >&2; exit 2; }
+  acquire_lock
+  if [[ -e "$(baseline_file)" || -L "$(baseline_file)" ]]; then
+    validate_state
+    assert_baseline >/dev/null
+    local existing_active existing_release existing_generation
+    existing_active="$(read_state_field active)"
+    existing_release="$(read_state_slot_release "$existing_active")"
+    existing_generation="$(read_state_field generation)"
+    assert_router_identity "$existing_active" "$existing_release" "$existing_generation" >/dev/null
+    [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
+      && "$SCRIPT_DIR/manage-blue-green-services.sh" status router >/dev/null \
+      && "$SCRIPT_DIR/manage-blue-green-services.sh" status "$existing_active" >/dev/null \
+      || fail "completed baseline is not under the expected service manager"
+    printf 'Blue-green baseline already completed; refusing to repeat legacy shutdown\n'
+    return
+  fi
+  assert_absolute "bootstrap evidence" "$evidence_file"
+  assert_private_file "bootstrap evidence" "$evidence_file"
+  [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for bootstrap"
+  assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
+  [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  [[ -n "$N8N_DB_PATH" ]] || fail "AIWORKER_BG_N8N_DB_PATH is required for bootstrap"
+  assert_absolute "AIWORKER_BG_N8N_DB_PATH" "$N8N_DB_PATH"
+  [[ -f "$N8N_DB_PATH" && ! -L "$N8N_DB_PATH" ]] \
+    || fail "AIWORKER_BG_N8N_DB_PATH must identify the existing physical n8n SQLite database"
+  n8n_db="$(physical_path "$N8N_DB_PATH")" || fail "unable to resolve AIWORKER_BG_N8N_DB_PATH"
+  physical_root="$(assert_release "$release_id" "$standalone_root")"
+  manifest="$(release_manifest_sha "$physical_root")"
+  manager="$SCRIPT_DIR/manage-blue-green-services.sh"
+  installer="$SCRIPT_DIR/install-blue-green-launch-agents.sh"
+  [[ -x "$manager" && -x "$installer" ]] \
+    || fail "managed blue-green service scripts are required before legacy shutdown"
+  "$installer" --dry-run >/dev/null \
+    || fail "blue-green LaunchAgent installation preflight failed before legacy shutdown"
+  "$manager" preflight all >/dev/null \
+    || fail "installed blue-green service manager is not ready before legacy shutdown"
+  now="$(date +%s)"
+  pending="$(bootstrap_pending_file)"
+  evidence_max_age="$BOOTSTRAP_EVIDENCE_MAX_AGE"
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    assert_private_file "bootstrap pending marker" "$pending"
+    pending_exists=1
+    # A completed legacy shutdown may need operator recovery after the normal
+    # evidence window. Parse the original signed-off evidence first, then below
+    # require fresh evidence again whenever the legacy PID is still alive.
+    evidence_max_age=315360000
+  fi
+  evidence_values="$($NODE_BIN - "$evidence_file" "$ROUTER_PORT" "$now" "$evidence_max_age" <<'NODE'
+const value = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))
+const [rawPort, rawNow, rawMaxAge] = process.argv.slice(3)
+const expectedKeys = ['counts', 'frozen', 'legacy', 'observedAt', 'schema', 'supervisorQuiesced']
+if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
+  const legacyKeys = ['cwd', 'n8nDbPath', 'n8nPid', 'pid', 'releaseId', 'routerPort']
+const countKeys = ['mediaNodes', 'n8nActiveExecutions', 'queueRunning', 'queueWaiting']
+if (value.schema !== 'video-autoworker-legacy-freeze-evidence/v2' || value.frozen !== true
+  || value.supervisorQuiesced !== true
+  || !value.legacy || JSON.stringify(Object.keys(value.legacy).sort()) !== JSON.stringify(legacyKeys)
+  || !value.counts || JSON.stringify(Object.keys(value.counts).sort()) !== JSON.stringify(countKeys)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.legacy.releaseId)
+  || !Number.isSafeInteger(value.legacy.pid) || value.legacy.pid <= 0
+  || !Number.isSafeInteger(value.legacy.n8nPid) || value.legacy.n8nPid <= 0
+  || typeof value.legacy.n8nDbPath !== 'string' || !value.legacy.n8nDbPath.startsWith('/')
+  || /[\r\n]/u.test(value.legacy.n8nDbPath)
+  || typeof value.legacy.cwd !== 'string' || !value.legacy.cwd.startsWith('/') || /[\r\n]/u.test(value.legacy.cwd)
+  || value.legacy.routerPort !== Number(rawPort)
+  || !countKeys.every(key => value.counts[key] === 0)
+  || !Number.isSafeInteger(value.observedAt)) process.exit(3)
+const age = Number(rawNow) - value.observedAt
+if (age < 0 || age > Number(rawMaxAge)) process.exit(4)
+process.stdout.write(`${value.legacy.releaseId}\n${value.legacy.pid}\n${value.legacy.cwd}\n${value.legacy.n8nPid}\n${value.legacy.n8nDbPath}\n${value.observedAt}\n`)
+NODE
+  )" || fail "bootstrap evidence is invalid, stale, not frozen, or not fully zero"
+  legacy_release="$(printf '%s\n' "$evidence_values" | sed -n '1p')"
+  legacy_pid="$(printf '%s\n' "$evidence_values" | sed -n '2p')"
+  legacy_cwd="$(printf '%s\n' "$evidence_values" | sed -n '3p')"
+  n8n_pid="$(printf '%s\n' "$evidence_values" | sed -n '4p')"
+  [[ "$(printf '%s\n' "$evidence_values" | sed -n '5p')" == "$n8n_db" ]] \
+    || fail "bootstrap evidence does not bind AIWORKER_BG_N8N_DB_PATH"
+  evidence_observed="$(printf '%s\n' "$evidence_values" | sed -n '6p')"
+  legacy_cwd="$(physical_path "$legacy_cwd")" || fail "unable to resolve legacy cwd"
+  "$NODE_BIN" - "$legacy_cwd" "$legacy_release" <<'NODE' \
+    || fail "legacy release ID is not bound to its physical cwd"
+const path = require('node:path')
+const [cwd, releaseId] = process.argv.slice(2)
+const candidate = path.basename(cwd) === 'standalone' ? path.basename(path.dirname(cwd)) : path.basename(cwd)
+if (candidate !== releaseId) process.exit(1)
+NODE
+  if (( pending_exists == 1 )) && kill -0 "$legacy_pid" 2>/dev/null; then
+    evidence_age=$(( now - evidence_observed ))
+    (( evidence_age >= 0 && evidence_age <= BOOTSTRAP_EVIDENCE_MAX_AGE )) \
+      || fail "bootstrap retry requires fresh zero-work evidence while the legacy PID is still alive"
+  fi
+  [[ "$legacy_release" != "$release_id" ]] || fail "baseline release must differ from the legacy release"
+  evidence_sha="$(shasum -a 256 "$evidence_file" | awk '{print $1}')"
+  canonical_router_state="$STATE_FILE"
+  other_slot="$([[ "$slot" == blue ]] && printf green || printf blue)"
+  pending_payload="$($NODE_BIN -e '
+    const [slot, releaseId, releaseRoot, manifest, legacyRelease, rawLegacyPid, legacyCwd,
+      evidenceSha, rawObserved, dbPath, routerStatePath, rawRouterPort] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({
+      schema: "video-autoworker-blue-green-bootstrap-pending/v2", slot, releaseId, releaseRoot,
+      manifestSha256: manifest, legacyReleaseId: legacyRelease, legacyPid: Number(rawLegacyPid),
+      legacyCwd, evidenceSha256: evidenceSha, evidenceObservedAt: Number(rawObserved), dbPath,
+      routerStatePath, routerPort: Number(rawRouterPort), n8nPid: Number(process.argv[13]), n8nDbPath: process.argv[14],
+    }))
+  ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
+    "$evidence_sha" "$evidence_observed" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db")"
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    assert_private_file "bootstrap pending marker" "$pending"
+    if kill -0 "$legacy_pid" 2>/dev/null; then
+      "$NODE_BIN" -e '
+        const fs = require("node:fs")
+        const actual = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+        const expected = JSON.parse(process.argv[2])
+        for (const field of ["evidenceSha256", "evidenceObservedAt"]) {
+          delete actual[field]
+          delete expected[field]
+        }
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(2)
+      ' "$pending" "$pending_payload" \
+        || fail "bootstrap retry does not match its pending runtime identity"
+      # Refresh only the evidence digest/time after every other immutable
+      # bootstrap field has matched the existing marker.
+      write_json_atomic "$pending" "$pending_payload"
+    else
+      "$NODE_BIN" -e '
+        const fs = require("node:fs")
+        const actual = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+        const expected = JSON.parse(process.argv[2])
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(2)
+      ' "$pending" "$pending_payload" || fail "bootstrap retry does not match its pending marker"
+    fi
+  else
+    [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]] \
+      || fail "ordinary init cannot be promoted into a legacy bootstrap; use a clean run directory"
+    [[ ! -e "$(binding_file blue)" && ! -L "$(binding_file blue)" \
+      && ! -e "$(binding_file green)" && ! -L "$(binding_file green)" ]] \
+      || fail "legacy bootstrap requires unused slot bindings"
+    write_json_atomic "$pending" "$pending_payload"
+  fi
+  BOOTSTRAP_MAINTENANCE=1
+
+  command -v lsof >/dev/null 2>&1 || fail "bootstrap requires lsof for exact legacy process verification"
+  kill -0 "$n8n_pid" 2>/dev/null || fail "evidenced n8n PID is not running"
+  lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
+    || fail "evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH"
+  check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
+    || fail "legacy databases are not quiescent before shutdown"
+  if kill -0 "$legacy_pid" 2>/dev/null; then
+    listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+    [[ "$listeners" == "$legacy_pid" ]] || fail "legacy PID is not the sole listener on router port $ROUTER_PORT"
+    lsof -a -p "$legacy_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$legacy_cwd" \
+      || fail "legacy PID cwd does not match the external freeze evidence"
+    lsof -a -p "$legacy_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$live_db" \
+      || fail "legacy PID is not using AIWORKER_BG_LIVE_DB_PATH as its authoritative SQLite database"
+    kill -TERM "$legacy_pid"
+    deadline=$(( $(date +%s) + 30 ))
+    while kill -0 "$legacy_pid" 2>/dev/null && (( $(date +%s) < deadline )); do sleep 1; done
+  fi
+  ! kill -0 "$legacy_pid" 2>/dev/null || fail "legacy PID did not exit after SIGTERM; no force kill was attempted"
+  for _ in 1 2 3 4 5; do
+    listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+    [[ -z "$listeners" ]] || fail "router port $ROUTER_PORT was reclaimed after legacy shutdown; supervisor is not quiesced"
+    sleep 1
+  done
+  [[ "$(shasum -a 256 "$evidence_file" | awk '{print $1}')" == "$evidence_sha" ]] \
+    || fail "bootstrap evidence changed during legacy shutdown"
+  kill -0 "$n8n_pid" 2>/dev/null || fail "n8n PID changed or stopped during bootstrap"
+  lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
+    || fail "n8n database identity changed during bootstrap"
+  check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
+    || fail "legacy databases changed after ingress shutdown"
+
+  binding_payload="$($NODE_BIN -e '
+    const [slot, releaseId, releaseRoot, manifestSha, port] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({ schema: "video-autoworker-standalone-slot/v1", slot,
+      releaseId, releaseRoot, manifestSha256: manifestSha, host: "127.0.0.1", port: Number(port),
+      boundAt: new Date().toISOString() }))
+  ' "$slot" "$release_id" "$physical_root" "$manifest" "$(slot_port "$slot")")"
+  write_json_atomic "$(binding_file "$slot")" "$binding_payload"
+  state_payload="$($NODE_BIN -e '
+    const [active, other, activePort, otherPort, releaseId] = process.argv.slice(1)
+    const slots = {}
+    slots[active] = { host: "127.0.0.1", port: Number(activePort), releaseId }
+    slots[other] = { host: "127.0.0.1", port: Number(otherPort), releaseId: `unbound-${other}` }
+    process.stdout.write(JSON.stringify({ schema: "video-autoworker-standalone-router/v1", generation: 1,
+      active, previous: null, updatedAt: new Date().toISOString(), slots }))
+  ' "$slot" "$other_slot" "$(slot_port "$slot")" "$(slot_port "$other_slot")" "$release_id")"
+  if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
+    validate_state
+    [[ "$(read_state_field generation)" == 1 && "$(read_state_field active)" == "$slot" \
+      && "$(read_state_field previous)" == "" && "$(read_state_slot_release "$slot")" == "$release_id" ]] \
+      || fail "bootstrap recovery found a non-baseline router state"
+  else
+    write_router_state_atomic "$state_payload"
+    validate_state
+  fi
+  canonical_router_state="$(physical_path "$STATE_FILE")"
+  "$manager" start "$slot" || fail "managed baseline slot failed to start"
+  deadline=$(( $(date +%s) + 30 ))
+  while ! curl -fsS --max-time 2 "http://127.0.0.1:$(slot_port "$slot")$PROBE_PATH" >/dev/null 2>&1; do
+    (( $(date +%s) < deadline )) || fail "managed baseline slot did not become ready"
+    sleep 1
+  done
+  probe_slot "$slot" active
+  intake_revision="$(ensure_bootstrap_intake_paused 127.0.0.1 "$(slot_port "$slot")")" \
+    || fail "unable to establish the baseline global intake pause"
+  "$manager" start router || fail "managed standalone router failed to start"
+  deadline=$(( $(date +%s) + 30 ))
+  while ! curl -fsS --max-time 2 "http://$ROUTER_HOST:$ROUTER_PORT/__router/health" >/dev/null 2>&1; do
+    (( $(date +%s) < deadline )) || fail "managed standalone router did not become ready"
+    sleep 1
+  done
+  assert_router_identity "$slot" "$release_id" 1 >/dev/null
+  baseline_readiness="$(check_json_endpoint readiness \
+    "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" "$slot" "$release_id" "$(slot_port "$slot")" \
+    "$intake_revision" "" 1)" || fail "baseline release readiness verification failed"
+  baseline_epoch="$(printf '%s\n' "$baseline_readiness" | sed -n '2p')"
+  verify_routed_release "$slot" "$release_id" 1 "$intake_revision" "$baseline_epoch" \
+    || fail "baseline routed health, page, or read-only API verification failed"
+  "$manager" status "$slot" >/dev/null \
+    && "$manager" status router >/dev/null \
+    || fail "baseline processes are healthy but not under the expected service manager"
+  baseline_payload="$($NODE_BIN -e '
+    const [baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
+      legacyReleaseId, rawLegacyPid, evidenceSha256, dbPath, routerStatePath, rawRouterPort] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({ schema: "video-autoworker-blue-green-baseline/v2",
+      baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
+      legacyReleaseId, legacyPid: Number(rawLegacyPid), evidenceSha256, dbPath, routerStatePath,
+      n8nPid: Number(process.argv[11]), n8nDbPath: process.argv[12],
+      routerPort: Number(rawRouterPort), completedAt: Math.floor(Date.now() / 1000) }))
+  ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" \
+    "$evidence_sha" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db")"
+  write_json_atomic "$(baseline_file)" "$baseline_payload"
+  assert_baseline >/dev/null
+  rm -f -- "$pending"
+  BOOTSTRAP_MAINTENANCE=0
+  printf 'Established managed blue-green baseline: slot=%s release=%s; legacy release %s is fenced\n' \
+    "$slot" "$release_id" "$legacy_release"
+}
+
+bind_slot() {
+  local slot release_id standalone_root physical_root manifest_sha port payload
+  slot="$(require_slot "${1:-}")"
+  release_id="${2:-}"
+  standalone_root="${3:-}"
+  [[ -n "$release_id" && -n "$standalone_root" ]] || { usage >&2; exit 2; }
+  acquire_lock
+  validate_state
+  local active current_release pid_path running_pid proof_required=0 baseline_values legacy_release
+  if [[ -e "$(baseline_file)" || -L "$(baseline_file)" ]]; then
+    baseline_values="$(assert_baseline)"
+    legacy_release="$(printf '%s\n' "$baseline_values" | sed -n '1p')"
+    [[ "$release_id" != "$legacy_release" ]] \
+      || fail "the pre-baseline legacy release is permanently fenced from blue-green slots"
+  fi
+  active="$(read_state_field active)"
+  current_release="$(read_state_slot_release "$slot")"
+  pid_path="$RUN_DIR/slots/$slot.pid"
+  if [[ -f "$pid_path" && ! -L "$pid_path" ]]; then
+    running_pid="$(tr -d '[:space:]' < "$pid_path")"
+    if [[ "$running_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$running_pid" 2>/dev/null; then
+      fail "refusing to rebind a running $slot slot"
+    fi
+  fi
+  if [[ "$active" == "$slot" && "$current_release" != unbound-* ]]; then
+    fail "refusing to rebind the active $slot slot"
+  fi
+  if [[ "$current_release" != unbound-* ]]; then
+    proof_required=1
+    assert_retirement_proof "$slot" "$current_release"
+  elif [[ -e "$(binding_file "$slot")" || -L "$(binding_file "$slot")" ]]; then
+    fail "refusing to replace an unactivated $slot binding; no production retirement proof can exist"
+  fi
+  physical_root="$(assert_release "$release_id" "$standalone_root")"
+  manifest_sha="$(release_manifest_sha "$physical_root")"
+  port="$(slot_port "$slot")"
+  payload="$($NODE_BIN -e '
+    const [slot, releaseId, releaseRoot, manifestSha, port] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({
+      schema: "video-autoworker-standalone-slot/v1",
+      slot,
+      releaseId,
+      releaseRoot,
+      manifestSha256: manifestSha,
+      host: "127.0.0.1",
+      port: Number(port),
+      boundAt: new Date().toISOString(),
+    }))
+  ' "$slot" "$release_id" "$physical_root" "$manifest_sha" "$port")"
+  write_json_atomic "$(binding_file "$slot")" "$payload"
+  if [[ "$active" == "$slot" && "$current_release" == unbound-* ]]; then
+    payload="$($NODE_BIN -e '
+      const fs = require("node:fs")
+      const [path, slot, releaseId] = process.argv.slice(1)
+      const value = JSON.parse(fs.readFileSync(path, "utf8"))
+      value.slots[slot].releaseId = releaseId
+      value.updatedAt = new Date().toISOString()
+      process.stdout.write(JSON.stringify(value))
+    ' "$STATE_FILE" "$slot" "$release_id")"
+    write_router_state_atomic "$payload"
+    validate_state
+  fi
+  if (( proof_required == 1 )); then
+    rm -f -- "$(retirement_file "$slot")" "$(callback_freeze_file "$slot")"
+  fi
+  printf 'Bound %s to immutable release %s on port %s\n' "$slot" "$release_id" "$port"
+}
+
+binding_values() {
+  local slot="$1"
+  local pathname
+  pathname="$(binding_file "$slot")"
+  assert_secure_file "$slot binding" "$pathname"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const slot = process.argv[2]
+    if (value.schema !== "video-autoworker-standalone-slot/v1" || value.slot !== slot) process.exit(2)
+    for (const field of ["releaseId", "releaseRoot", "manifestSha256", "host", "port"]) {
+      const item = value[field]
+      if (item === undefined || String(item).includes("\n")) process.exit(3)
+      process.stdout.write(`${item}\n`)
+    }
+  ' "$pathname" "$slot"
+}
+
+runtime_attestation_values() {
+  local slot="$1"
+  local pathname
+  pathname="$(runtime_attestation_file "$slot")"
+  assert_private_file "$slot runtime attestation" "$pathname"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const path = require("node:path")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const slot = process.argv[2]
+    const expectedKeys = [
+      "createdAt", "dbPath", "host", "manifestSha256", "pid", "port",
+      "releaseId", "role", "routerStatePath", "schema", "slot",
+    ]
+    if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
+    if (value.schema !== "video-autoworker-standalone-runtime/v1" || value.slot !== slot) process.exit(3)
+    if (!Number.isSafeInteger(value.pid) || value.pid <= 0) process.exit(4)
+    if (!["active", "probe", "drain"].includes(value.role)) process.exit(5)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.releaseId)) process.exit(6)
+    if (!/^[a-f0-9]{64}$/u.test(value.manifestSha256)) process.exit(7)
+    if (value.host !== "127.0.0.1" || !Number.isInteger(value.port)) process.exit(8)
+    if (typeof value.dbPath !== "string" || !path.isAbsolute(value.dbPath) || /[\r\n]/u.test(value.dbPath)) process.exit(9)
+    if (typeof value.routerStatePath !== "string" || !path.isAbsolute(value.routerStatePath)
+      || /[\r\n]/u.test(value.routerStatePath)) process.exit(10)
+    if (typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))) process.exit(11)
+    for (const field of ["pid", "slot", "role", "releaseId", "manifestSha256", "host", "port", "dbPath", "routerStatePath"]) {
+      process.stdout.write(`${value[field]}\n`)
+    }
+  ' "$pathname" "$slot"
+}
+
+read_callback_freeze_values() {
+  local slot="$1" release_id="$2" manifest="$3" pid="$4" db="$5" router="$6" generation="$7" active="$8"
+  local marker
+  marker="$(callback_freeze_file "$slot")"
+  assert_private_file "$slot callback freeze marker" "$marker"
+  "$NODE_BIN" - "$marker" "$slot" "$release_id" "$manifest" "$pid" "$db" "$router" \
+    "$generation" "$active" <<'NODE'
+const value = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))
+const [slot, releaseId, manifest, rawPid, db, router, rawGeneration, active] = process.argv.slice(3)
+const expectedKeys = ['activeSlot', 'dbPath', 'freezeId', 'frozenAt', 'manifestSha256', 'pid',
+  'quiesceId', 'quiescedAt', 'releaseId', 'requiredQuietSeconds', 'routerActiveRequests',
+  'routerGeneration', 'routerStatePath', 'routerUpgradedSockets', 'runtimeStartedAt',
+  'schedulerObservedAt', 'schema', 'slot']
+if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)
+  || value.schema !== 'video-autoworker-callback-freeze/v1' || value.slot !== slot
+  || value.releaseId !== releaseId || value.manifestSha256 !== manifest
+  || value.pid !== Number(rawPid) || value.dbPath !== db || value.routerStatePath !== router
+  || value.routerGeneration !== Number(rawGeneration) || value.activeSlot !== active
+  || !/^[a-f0-9]{64}$/u.test(value.freezeId) || !Number.isSafeInteger(value.frozenAt)
+  || !Number.isSafeInteger(value.requiredQuietSeconds) || value.requiredQuietSeconds < 30
+  || value.requiredQuietSeconds > 900 || !Number.isSafeInteger(value.runtimeStartedAt)
+  || !Number.isSafeInteger(value.schedulerObservedAt) || value.schedulerObservedAt < 0
+  || value.routerActiveRequests !== 0 || value.routerUpgradedSockets !== 0
+  || !((value.quiesceId === null && value.quiescedAt === null)
+    || (/^[a-f0-9]{64}$/u.test(value.quiesceId) && Number.isSafeInteger(value.quiescedAt)
+      && value.quiescedAt >= value.frozenAt))) process.exit(2)
+for (const field of ['freezeId', 'frozenAt', 'quiesceId', 'quiescedAt', 'requiredQuietSeconds',
+  'runtimeStartedAt', 'schedulerObservedAt', 'routerActiveRequests', 'routerUpgradedSockets']) {
+  process.stdout.write(`${value[field] === null ? '' : value[field]}\n`)
+}
+NODE
+}
+
+assert_retirement_proof() {
+  local slot="$1" release_id="$2"
+  local proof freeze binding attestation manifest pid role attested_release attested_manifest
+  local attested_db attested_router pid_file recorded_pid active previous generation state_updated_at
+  local live_db canonical_router_state port
+  proof="$(retirement_file "$slot")"
+  freeze="$(callback_freeze_file "$slot")"
+  assert_private_file "$slot retirement proof" "$proof"
+  assert_private_file "$slot callback freeze marker" "$freeze"
+  active="$(read_state_field active)"
+  previous="$(read_state_field previous)"
+  generation="$(read_state_field generation)"
+  state_updated_at="$(read_state_field updatedAt)"
+  [[ "$active" != "$slot" && "$previous" == "$slot" ]] \
+    || fail "$slot retirement proof is not for the current previous slot"
+  binding="$(binding_values "$slot")" || fail "$slot binding is invalid"
+  [[ "$(printf '%s\n' "$binding" | sed -n '1p')" == "$release_id" ]] \
+    || fail "$slot binding release changed before rebind"
+  manifest="$(printf '%s\n' "$binding" | sed -n '3p')"
+  port="$(printf '%s\n' "$binding" | sed -n '5p')"
+  attestation="$(runtime_attestation_values "$slot")" || fail "$slot runtime attestation is invalid"
+  pid="$(printf '%s\n' "$attestation" | sed -n '1p')"
+  role="$(printf '%s\n' "$attestation" | sed -n '3p')"
+  attested_release="$(printf '%s\n' "$attestation" | sed -n '4p')"
+  attested_manifest="$(printf '%s\n' "$attestation" | sed -n '5p')"
+  attested_db="$(printf '%s\n' "$attestation" | sed -n '8p')"
+  attested_router="$(printf '%s\n' "$attestation" | sed -n '9p')"
+  [[ "$role" == active && "$attested_release" == "$release_id" && "$attested_manifest" == "$manifest" ]] \
+    || fail "$slot retirement proof does not belong to an active production runtime"
+  [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required to consume a retirement proof"
+  assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
+  [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  canonical_router_state="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  [[ "$attested_db" == "$live_db" && "$attested_router" == "$canonical_router_state" ]] \
+    || fail "$slot retirement proof runtime identity changed"
+  read_callback_freeze_values "$slot" "$release_id" "$manifest" "$pid" "$live_db" \
+    "$canonical_router_state" "$generation" "$active" >/dev/null \
+    || fail "$slot callback freeze marker is invalid or stale"
+  pid_file="$RUN_DIR/slots/$slot.pid"
+  assert_private_file "$slot PID file" "$pid_file"
+  recorded_pid="$(tr -d '[:space:]' < "$pid_file")"
+  [[ "$recorded_pid" == "$pid" ]] || fail "$slot PID changed after retirement was certified"
+  ! kill -0 "$pid" 2>/dev/null || fail "retired $slot PID is still running"
+  [[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ]] \
+    || fail "retired $slot port is still listening"
+  [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
+    || fail "blue-green service manager is required before rebind"
+  ! "$SCRIPT_DIR/manage-blue-green-services.sh" status "$slot" >/dev/null 2>&1 \
+    || fail "retired $slot is still enabled or loaded in the service manager"
+  "$NODE_BIN" - "$proof" "$freeze" "$slot" "$release_id" "$manifest" "$pid" "$live_db" \
+    "$canonical_router_state" "$generation" "$active" "$state_updated_at" <<'NODE' \
+    || fail "$slot retirement proof is invalid or stale"
+const fs = require('node:fs')
+const [proofPath, freezePath, slot, releaseId, manifestSha256, rawPid, dbPath, routerStatePath,
+  rawGeneration, activeSlot, stateUpdatedAt] = process.argv.slice(2)
+const value = JSON.parse(fs.readFileSync(proofPath, 'utf8'))
+const marker = JSON.parse(fs.readFileSync(freezePath, 'utf8'))
+const expectedKeys = ['activeSlot', 'dbPath', 'drain', 'freeze', 'manifestSha256', 'observedAt',
+  'pid', 'releaseId', 'routerGeneration', 'routerStatePath', 'schema', 'slot']
+if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
+if (value.schema !== 'video-autoworker-retirement-proof/v2' || value.slot !== slot
+  || value.releaseId !== releaseId || value.manifestSha256 !== manifestSha256
+  || value.pid !== Number(rawPid) || value.dbPath !== dbPath || value.routerStatePath !== routerStatePath
+  || value.routerGeneration !== Number(rawGeneration) || value.activeSlot !== activeSlot
+  || !Number.isSafeInteger(value.observedAt)) process.exit(3)
+const updatedAt = Math.floor(Date.parse(stateUpdatedAt) / 1000)
+if (!Number.isSafeInteger(updatedAt) || value.observedAt < updatedAt) process.exit(4)
+const freezeKeys = ['freezeId', 'frozenAt', 'quiesceId', 'quiescedAt']
+if (!value.freeze || JSON.stringify(Object.keys(value.freeze).sort()) !== JSON.stringify(freezeKeys)
+  || value.freeze.freezeId !== marker.freezeId || value.freeze.frozenAt !== marker.frozenAt
+  || value.freeze.quiesceId !== marker.quiesceId || value.freeze.quiescedAt !== marker.quiescedAt
+  || !/^[a-f0-9]{64}$/u.test(value.freeze.quiesceId)
+  || !Number.isSafeInteger(value.freeze.quiescedAt)) process.exit(5)
+const drain = value.drain
+const drainKeys = ['active', 'childExecutionLeases', 'lastActivityAt', 'otherReleaseActive', 'quietSeconds',
+  'requiredQuietSeconds', 'routerActiveRequests', 'routerUpgradedSockets',
+  'schedulerObservedAt', 'schedulerRouterGeneration', 'schedulerState', 'tracked',
+  'untrackedCallbacks']
+if (!drain || JSON.stringify(Object.keys(drain).sort()) !== JSON.stringify(drainKeys)) process.exit(6)
+for (const key of ['tracked', 'active', 'childExecutionLeases', 'untrackedCallbacks', 'otherReleaseActive',
+  'quietSeconds', 'requiredQuietSeconds']) {
+  if (!Number.isSafeInteger(drain[key]) || drain[key] < 0) process.exit(7)
+}
+if (drain.active !== 0 || drain.childExecutionLeases !== 0
+  || drain.untrackedCallbacks !== 0 || drain.otherReleaseActive !== 0
+  || drain.quietSeconds < drain.requiredQuietSeconds || drain.schedulerState !== 'inactive'
+  || drain.routerActiveRequests !== 0 || drain.routerUpgradedSockets !== 0
+  || !Number.isSafeInteger(drain.schedulerObservedAt) || drain.schedulerObservedAt < 0
+  || drain.schedulerRouterGeneration !== Number(rawGeneration)
+  || (drain.lastActivityAt !== null
+    && (!Number.isSafeInteger(drain.lastActivityAt) || drain.lastActivityAt < 0))) process.exit(8)
+NODE
+}
+
+retire_slot() {
+  local slot active previous generation release_id state_release binding manifest host port manager
+  local attestation pid role attested_release attested_manifest attested_db attested_router live_db canonical_router_state
+  local drain_summary scheduler_summary router_summary marker_values payload runtime_started_at required_quiet_seconds
+  local scheduler_observed_at router_active_requests router_upgraded_sockets freeze_id frozen_at quiesce_id quiesced_at
+  local final_db_summary pid_file recorded_pid
+  slot="$(require_slot "${1:-}")"
+  acquire_lock
+  validate_state
+  assert_baseline >/dev/null
+  active="$(read_state_field active)"
+  previous="$(read_state_field previous)"
+  generation="$(read_state_field generation)"
+  [[ "$active" != "$slot" && "$previous" == "$slot" ]] \
+    || fail "only the immediately previous active slot can be retired"
+  state_release="$(read_state_slot_release "$slot")"
+  [[ "$state_release" != unbound-* ]] || fail "an unbound slot has no production release to retire"
+  binding="$(binding_values "$slot")" || fail "$slot binding is invalid"
+  release_id="$(printf '%s\n' "$binding" | sed -n '1p')"
+  manifest="$(printf '%s\n' "$binding" | sed -n '3p')"
+  host="$(printf '%s\n' "$binding" | sed -n '4p')"
+  port="$(printf '%s\n' "$binding" | sed -n '5p')"
+  [[ "$state_release" == "$release_id" ]] || fail "$slot router release does not match its binding"
+  if [[ -e "$(retirement_file "$slot")" || -L "$(retirement_file "$slot")" ]]; then
+    assert_retirement_proof "$slot" "$release_id"
+    printf 'Retirement already certified: slot=%s release=%s generation=%s\n' "$slot" "$release_id" "$generation"
+    return
+  fi
+  attestation="$(runtime_attestation_values "$slot")" || fail "$slot runtime attestation is invalid"
+  pid="$(printf '%s\n' "$attestation" | sed -n '1p')"
+  role="$(printf '%s\n' "$attestation" | sed -n '3p')"
+  attested_release="$(printf '%s\n' "$attestation" | sed -n '4p')"
+  attested_manifest="$(printf '%s\n' "$attestation" | sed -n '5p')"
+  attested_db="$(printf '%s\n' "$attestation" | sed -n '8p')"
+  attested_router="$(printf '%s\n' "$attestation" | sed -n '9p')"
+  [[ "$role" == active && "$attested_release" == "$release_id" && "$attested_manifest" == "$manifest" ]] \
+    || fail "probe or drain runtimes cannot issue a production retirement proof"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  canonical_router_state="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  [[ "$attested_db" == "$live_db" && "$attested_router" == "$canonical_router_state" ]] \
+    || fail "$slot retirement runtime does not match the live database or router state"
+  pid_file="$RUN_DIR/slots/$slot.pid"
+  assert_private_file "$slot PID file" "$pid_file"
+  recorded_pid="$(tr -d '[:space:]' < "$pid_file")"
+  [[ "$recorded_pid" == "$pid" ]] || fail "$slot PID file does not match its runtime attestation"
+  manager="$SCRIPT_DIR/manage-blue-green-services.sh"
+  [[ -x "$manager" ]] || fail "blue-green service manager is required for retirement"
+
+  if [[ ! -e "$(callback_freeze_file "$slot")" && ! -L "$(callback_freeze_file "$slot")" ]]; then
+    probe_slot "$slot" active
+    "$manager" status "$slot" >/dev/null || fail "$slot is not controlled by the service manager"
+    router_summary="$(assert_router_identity "$active" "$(read_state_slot_release "$active")" \
+      "$generation" "$slot")" || fail "router identity changed before retirement freeze"
+    drain_summary="$(check_json_endpoint drain "http://$host:$port$DRAIN_PATH" \
+      "$slot" "$release_id" "$port")" || fail "$slot is not globally safe to freeze"
+    scheduler_summary="$(check_json_endpoint scheduler "http://$host:$port$SCHEDULER_PATH" \
+      "$generation")" || fail "$slot scheduler has not fully relinquished leadership"
+    [[ "$(read_state_field active)" == "$active" && "$(read_state_field previous)" == "$slot" \
+      && "$(read_state_field generation)" == "$generation" ]] \
+      || fail "router state changed before callback freeze"
+    payload="$($NODE_BIN -e '
+      const fs = require("node:fs")
+      const crypto = require("node:crypto")
+      const [attestationPath, slot, releaseId, manifestSha256, rawPid, dbPath, routerStatePath,
+        rawGeneration, activeSlot, rawDrain, rawScheduler, rawRouter] = process.argv.slice(1)
+      const runtime = JSON.parse(fs.readFileSync(attestationPath, "utf8"))
+      const drain = JSON.parse(rawDrain)
+      const scheduler = JSON.parse(rawScheduler)
+      const router = JSON.parse(rawRouter)
+      const runtimeStartedAt = Math.floor(Date.parse(runtime.createdAt) / 1000)
+      if (!Number.isSafeInteger(runtimeStartedAt)) process.exit(2)
+      process.stdout.write(JSON.stringify({
+        schema: "video-autoworker-callback-freeze/v1", slot, releaseId, manifestSha256,
+        pid: Number(rawPid), dbPath, routerStatePath, routerGeneration: Number(rawGeneration),
+        activeSlot, requiredQuietSeconds: drain.requiredQuietSeconds, runtimeStartedAt,
+        schedulerObservedAt: scheduler.schedulerObservedAt,
+        routerActiveRequests: router.routerActiveRequests,
+        routerUpgradedSockets: router.routerUpgradedSockets,
+        freezeId: crypto.randomBytes(32).toString("hex"), frozenAt: Math.floor(Date.now() / 1000),
+        quiesceId: null, quiescedAt: null,
+      }))
+    ' "$(runtime_attestation_file "$slot")" "$slot" "$release_id" "$manifest" "$pid" \
+      "$attested_db" "$attested_router" "$generation" "$active" "$drain_summary" \
+      "$scheduler_summary" "$router_summary")"
+    write_json_atomic "$(callback_freeze_file "$slot")" "$payload"
+  fi
+
+  marker_values="$(read_callback_freeze_values "$slot" "$release_id" "$manifest" "$pid" \
+    "$attested_db" "$attested_router" "$generation" "$active")" \
+    || fail "$slot callback freeze marker is invalid"
+  freeze_id="$(printf '%s\n' "$marker_values" | sed -n '1p')"
+  frozen_at="$(printf '%s\n' "$marker_values" | sed -n '2p')"
+  quiesce_id="$(printf '%s\n' "$marker_values" | sed -n '3p')"
+  quiesced_at="$(printf '%s\n' "$marker_values" | sed -n '4p')"
+  required_quiet_seconds="$(printf '%s\n' "$marker_values" | sed -n '5p')"
+  runtime_started_at="$(printf '%s\n' "$marker_values" | sed -n '6p')"
+  scheduler_observed_at="$(printf '%s\n' "$marker_values" | sed -n '7p')"
+  router_active_requests="$(printf '%s\n' "$marker_values" | sed -n '8p')"
+  router_upgraded_sockets="$(printf '%s\n' "$marker_values" | sed -n '9p')"
+
+  if ! wait_for_frozen_retirement_quiescence \
+    "$slot" "$release_id" "$host" "$port" "$pid" "$active" "$generation"; then
+    rm -f -- "$(callback_freeze_file "$slot")"
+    kill -0 "$pid" 2>/dev/null \
+      || fail "$slot became unavailable while waiting for frozen callback quiescence"
+    fail "$slot changed after its initial drain check; callback admission was reopened and the old slot remains running"
+  fi
+  [[ "$(read_state_field active)" == "$active" && "$(read_state_field previous)" == "$slot" \
+    && "$(read_state_field generation)" == "$generation" ]] \
+    || fail "$slot router state changed after frozen callback quiescence"
+
+  "$manager" stop "$slot" >/dev/null || fail "$slot callback is frozen, but the managed listener did not stop"
+  ! kill -0 "$pid" 2>/dev/null || fail "$slot callback is frozen, but PID $pid is still running"
+  [[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ]] \
+    || fail "$slot callback is frozen, but port $port is still listening"
+  ! "$manager" status "$slot" >/dev/null 2>&1 \
+    || fail "$slot callback is frozen, but the service manager can still restart it"
+
+  if [[ -z "$quiesce_id" || -z "$quiesced_at" ]]; then
+    payload="$($NODE_BIN -e '
+      const fs = require("node:fs")
+      const crypto = require("node:crypto")
+      const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+      value.quiesceId = crypto.randomBytes(32).toString("hex")
+      value.quiescedAt = Math.floor(Date.now() / 1000)
+      process.stdout.write(JSON.stringify(value))
+    ' "$(callback_freeze_file "$slot")")"
+    write_json_atomic "$(callback_freeze_file "$slot")" "$payload"
+    marker_values="$(read_callback_freeze_values "$slot" "$release_id" "$manifest" "$pid" \
+      "$attested_db" "$attested_router" "$generation" "$active")"
+    quiesce_id="$(printf '%s\n' "$marker_values" | sed -n '3p')"
+    quiesced_at="$(printf '%s\n' "$marker_values" | sed -n '4p')"
+  fi
+  final_db_summary="$(check_database_retirement "$attested_db" "$slot" "$release_id" "$port" \
+    "$runtime_started_at" "$required_quiet_seconds")" \
+    || fail "$slot remains callback-frozen and stopped; retry retire after the database becomes quiescent"
+  [[ "$(read_state_field active)" == "$active" && "$(read_state_field previous)" == "$slot" \
+    && "$(read_state_field generation)" == "$generation" ]] \
+    || fail "$slot remains callback-frozen and stopped because router state changed before final proof"
+  payload="$($NODE_BIN -e '
+    const [slot, releaseId, manifestSha256, rawPid, dbPath, routerStatePath, rawGeneration,
+      activeSlot, rawSummary, freezeId, rawFrozenAt, quiesceId, rawQuiescedAt,
+      rawSchedulerObservedAt, rawRouterActiveRequests, rawRouterUpgradedSockets] = process.argv.slice(1)
+    const summary = JSON.parse(rawSummary)
+    const observedAt = summary.observedAt
+    delete summary.observedAt
+    Object.assign(summary, {
+      schedulerState: "inactive", schedulerObservedAt: Number(rawSchedulerObservedAt),
+      schedulerRouterGeneration: Number(rawGeneration),
+      routerActiveRequests: Number(rawRouterActiveRequests),
+      routerUpgradedSockets: Number(rawRouterUpgradedSockets),
+    })
+    process.stdout.write(JSON.stringify({
+      schema: "video-autoworker-retirement-proof/v2", slot, releaseId, manifestSha256,
+      pid: Number(rawPid), dbPath, routerStatePath, routerGeneration: Number(rawGeneration),
+      activeSlot, observedAt, drain: summary,
+      freeze: { freezeId, frozenAt: Number(rawFrozenAt), quiesceId, quiescedAt: Number(rawQuiescedAt) },
+    }))
+  ' "$slot" "$release_id" "$manifest" "$pid" "$attested_db" "$attested_router" \
+    "$generation" "$active" "$final_db_summary" "$freeze_id" "$frozen_at" "$quiesce_id" \
+    "$quiesced_at" "$scheduler_observed_at" "$router_active_requests" "$router_upgraded_sockets")"
+  write_json_atomic "$(retirement_file "$slot")" "$payload"
+  assert_retirement_proof "$slot" "$release_id"
+  printf 'Certified stopped retirement: slot=%s release=%s generation=%s pid=%s\n' \
+    "$slot" "$release_id" "$generation" "$pid"
+}
+
+probe_slot() {
+  local slot required_role values release_id release_root expected_manifest host port
+  local attestation attested_pid attested_slot attested_role attested_release attested_manifest
+  local attested_host attested_port attested_db attested_router_state live_db canonical_router_state
+  local actual_manifest http_code pid_file pid listener
+  slot="$(require_slot "${1:-}")"
+  required_role="${2:-any}"
+  [[ "$required_role" == any || "$required_role" == active ]] || fail "invalid required runtime role"
+  prepare_run_dir
+  values="$(binding_values "$slot")" || fail "$slot binding is invalid"
+  release_id="$(printf '%s\n' "$values" | sed -n '1p')"
+  release_root="$(printf '%s\n' "$values" | sed -n '2p')"
+  expected_manifest="$(printf '%s\n' "$values" | sed -n '3p')"
+  host="$(printf '%s\n' "$values" | sed -n '4p')"
+  port="$(printf '%s\n' "$values" | sed -n '5p')"
+  [[ "$host" == "127.0.0.1" && "$port" == "$(slot_port "$slot")" ]] || fail "$slot binding endpoint changed"
+
+  attestation="$(runtime_attestation_values "$slot")" || fail "$slot runtime attestation is invalid"
+  attested_pid="$(printf '%s\n' "$attestation" | sed -n '1p')"
+  attested_slot="$(printf '%s\n' "$attestation" | sed -n '2p')"
+  attested_role="$(printf '%s\n' "$attestation" | sed -n '3p')"
+  attested_release="$(printf '%s\n' "$attestation" | sed -n '4p')"
+  attested_manifest="$(printf '%s\n' "$attestation" | sed -n '5p')"
+  attested_host="$(printf '%s\n' "$attestation" | sed -n '6p')"
+  attested_port="$(printf '%s\n' "$attestation" | sed -n '7p')"
+  attested_db="$(printf '%s\n' "$attestation" | sed -n '8p')"
+  attested_router_state="$(printf '%s\n' "$attestation" | sed -n '9p')"
+  [[ "$attested_slot" == "$slot" && "$attested_release" == "$release_id" \
+    && "$attested_manifest" == "$expected_manifest" && "$attested_host" == "$host" \
+    && "$attested_port" == "$port" ]] || fail "$slot runtime attestation does not match its binding"
+  canonical_router_state="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  [[ "$attested_router_state" == "$canonical_router_state" ]] \
+    || fail "$slot runtime attestation does not match the router state path"
+  if [[ "$required_role" == active ]]; then
+    [[ "$attested_role" == active ]] || fail "$slot runtime role is $attested_role; switch and rollback require active"
+    [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for switch and rollback"
+    assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
+    [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
+    live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+    [[ "$attested_db" == "$live_db" ]] || fail "$slot runtime database does not match AIWORKER_BG_LIVE_DB_PATH"
+  fi
+
+  release_root="$(assert_release "$release_id" "$release_root")"
+  actual_manifest="$(release_manifest_sha "$release_root")"
+  [[ "$actual_manifest" == "$expected_manifest" ]] || fail "$slot release manifest digest changed"
+
+  pid_file="$RUN_DIR/slots/$slot.pid"
+  assert_private_file "$slot PID file" "$pid_file"
+  pid="$(tr -d '[:space:]' < "$pid_file")"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null || fail "$slot PID is not running"
+  [[ "$attested_pid" == "$pid" ]] || fail "$slot runtime attestation PID does not match its PID file"
+  if command -v lsof >/dev/null 2>&1; then
+    listener="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u)"
+    [[ "$listener" == "$pid" ]] || fail "$slot listener PID does not match $pid"
+    lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$release_root" \
+      || fail "$slot process cwd does not match its immutable release"
+    local expected_node
+    expected_node="$(physical_path "$(command -v "$NODE_BIN")")"
+    lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$expected_node" \
+      || fail "$slot process executable is not the configured Node runtime"
+  fi
+  http_code="$(curl -sS -o /dev/null -w '%{http_code}' "http://$host:$port$PROBE_PATH" || true)"
+  [[ "$http_code" == 2?? || "$http_code" == 3?? ]] || fail "$slot probe returned HTTP $http_code"
+  printf 'Probe passed: slot=%s role=%s release=%s pid=%s port=%s\n' \
+    "$slot" "$attested_role" "$release_id" "$pid" "$port"
+}
+
+assert_existing_candidate_runtime_compatible() {
+  local slot="$1" pathname attestation role attested_db live_db
+  pathname="$(runtime_attestation_file "$slot")"
+  [[ -e "$pathname" || -L "$pathname" ]] || return 0
+  attestation="$(runtime_attestation_values "$slot")" || fail "$slot runtime attestation is invalid"
+  role="$(printf '%s\n' "$attestation" | sed -n '3p')"
+  [[ "$role" == active ]] || fail "$slot runtime role is $role; switch and rollback require active"
+  [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for switch and rollback"
+  assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
+  [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  attested_db="$(printf '%s\n' "$attestation" | sed -n '8p')"
+  [[ "$attested_db" == "$live_db" ]] \
+    || fail "$slot runtime database does not match AIWORKER_BG_LIVE_DB_PATH"
+}
+
+update_state() {
+  local target="$1"
+  local mode="$2"
+  local binding release_id payload
+  binding="$(binding_values "$target")" || fail "$target binding is invalid"
+  release_id="$(printf '%s\n' "$binding" | sed -n '1p')"
+  payload="$($NODE_BIN -e '
+    const fs = require("node:fs")
+    const [path, target, releaseId, mode] = process.argv.slice(1)
+    const value = JSON.parse(fs.readFileSync(path, "utf8"))
+    const oldActive = value.active
+    if (mode === "switch" && target === oldActive) process.exit(4)
+    if (mode === "rollback" && value.previous !== target) process.exit(5)
+    value.generation += 1
+    value.active = target
+    value.previous = oldActive
+    value.updatedAt = new Date().toISOString()
+    value.slots[target].releaseId = releaseId
+    process.stdout.write(JSON.stringify(value))
+  ' "$STATE_FILE" "$target" "$release_id" "$mode")" || fail "$mode transition is not allowed"
+  write_router_state_atomic "$payload"
+  validate_state
+}
+
+wait_for_scheduler_leader() {
+  local generation="$1"
+  local deadline
+  deadline=$(( $(date +%s) + LEADER_TIMEOUT_SECONDS ))
+  while (( $(date +%s) < deadline )); do
+    if check_json_endpoint leader "http://$ROUTER_HOST:$ROUTER_PORT$SCHEDULER_PATH" \
+      "$generation" >/dev/null 2>&1; then
+      return 0
+    fi
+    # The newly active slot may remain a follower while an old slot finishes
+    # an already-running local scheduler job and relinquishes its lease.
+    sleep 1
+  done
+  check_json_endpoint leader "http://$ROUTER_HOST:$ROUTER_PORT$SCHEDULER_PATH" \
+    "$generation" >/dev/null
+}
+
+verify_routed_release() {
+  local slot="$1"
+  local release_id="$2"
+  local generation="$3"
+  local expected_revision="${4:-}"
+  local expected_epoch="${5:-}"
+  local port
+  port="$(slot_port "$slot")"
+  assert_router_identity "$slot" "$release_id" "$generation" >/dev/null || return 1
+  wait_for_scheduler_leader "$generation" || return 1
+  check_json_endpoint health "http://$ROUTER_HOST:$ROUTER_PORT/api/status?action=health" \
+    >/dev/null || return 1
+  check_json_endpoint readiness "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" \
+    "$slot" "$release_id" "$port" "$expected_revision" "$expected_epoch" "$generation" \
+    >/dev/null || return 1
+  check_routed_readonly_endpoint /materials page || return 1
+  check_routed_readonly_endpoint /tasks page || return 1
+  check_routed_readonly_endpoint /api/materials api || return 1
+  check_routed_readonly_endpoint /api/tasks api || return 1
+}
+
+preflight_transition() {
+  local source="$1"
+  local target="$2"
+  local generation="$3"
+  local source_release source_binding_release source_port baseline_values legacy_release
+  [[ "$source" != "$target" ]] || fail "target slot is already active"
+  assert_existing_candidate_runtime_compatible "$target"
+  baseline_values="$(assert_baseline)"
+  legacy_release="$(printf '%s\n' "$baseline_values" | sed -n '1p')"
+  [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
+    || fail "blue-green service manager is required for switch and rollback"
+  "$SCRIPT_DIR/manage-blue-green-services.sh" status router >/dev/null \
+    && "$SCRIPT_DIR/manage-blue-green-services.sh" status "$source" >/dev/null \
+    || fail "router and source slot must remain under the service manager"
+  "$SCRIPT_DIR/manage-blue-green-services.sh" start "$target" >/dev/null \
+    || fail "candidate slot could not be started under the service manager"
+  probe_slot "$target" active
+  source_release="$(read_state_slot_release "$source")"
+  [[ "$source_release" != unbound-* ]] \
+    || fail "legacy/unbound active runtimes cannot be hot-switched; establish a gate-aware baseline first"
+  source_binding_release="$(binding_values "$source" | sed -n '1p')" \
+    || fail "$source binding is missing; legacy runtimes cannot enter the hot-switch path"
+  [[ "$source_binding_release" == "$source_release" ]] \
+    || fail "$source router release does not match its binding"
+  [[ "$source_release" != "$legacy_release" \
+    && "$(binding_values "$target" | sed -n '1p')" != "$legacy_release" ]] \
+    || fail "the pre-baseline legacy release is permanently fenced from switch and rollback"
+  source_port="$(slot_port "$source")"
+  probe_slot "$source" active
+  assert_router_identity "$source" "$source_release" "$generation" >/dev/null \
+    || fail "port 3017 is not the attested blue-green router for the current source release"
+  check_json_endpoint readiness "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" \
+    "$source" "$source_release" "$source_port" "" "" "$generation" >/dev/null \
+    || fail "global intake is not paused or the source runtime lacks the release-readiness protocol"
+}
+
+transition_with_verification() {
+  local target="$1"
+  local mode="$2"
+  local source source_release target_release generation switched_generation rollback_generation
+  local source_readiness target_readiness intake_revision source_epoch target_revision target_epoch
+  source="$(read_state_field active)"
+  generation="$(read_state_field generation)"
+  if [[ "$mode" == rollback ]]; then
+    [[ "$(read_state_field previous)" == "$target" ]] || fail "rollback transition is not allowed"
+  fi
+  preflight_transition "$source" "$target" "$generation"
+  source_release="$(read_state_slot_release "$source")"
+  target_release="$(binding_values "$target" | sed -n '1p')" || fail "$target binding is invalid"
+  source_readiness="$(check_json_endpoint readiness \
+    "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" "$source" "$source_release" \
+    "$(slot_port "$source")" "" "" "$generation")" \
+    || fail "global release readiness changed immediately before router commit"
+  intake_revision="$(printf '%s\n' "$source_readiness" | sed -n '1p')"
+  source_epoch="$(printf '%s\n' "$source_readiness" | sed -n '2p')"
+  target_readiness="$(check_json_endpoint readiness \
+    "http://127.0.0.1:$(slot_port "$target")$READINESS_PATH" "$target" "$target_release" \
+    "$(slot_port "$target")" "$intake_revision" "$source_epoch" "$generation")" \
+    || fail "target release readiness or database epoch is incompatible immediately before router commit"
+  target_revision="$(printf '%s\n' "$target_readiness" | sed -n '1p')"
+  target_epoch="$(printf '%s\n' "$target_readiness" | sed -n '2p')"
+  [[ "$target_revision" == "$intake_revision" && "$target_epoch" == "$source_epoch" ]] \
+    || fail "source and target readiness snapshots are not from the same gate revision/database epoch"
+  update_state "$target" "$mode"
+  switched_generation="$(read_state_field generation)"
+  if ( verify_routed_release "$target" "$target_release" "$switched_generation" \
+    "$intake_revision" "$source_epoch" ); then
+    printf '%s router atomically: active=%s generation=%s\n' \
+      "$([[ "$mode" == switch ]] && printf 'Switched' || printf 'Rolled back')" \
+      "$target" "$switched_generation"
+    return
+  fi
+
+  printf 'error: post-%s verification failed; attempting automatic rollback to %s\n' "$mode" "$source" >&2
+  probe_slot "$source" active
+  update_state "$source" rollback
+  rollback_generation="$(read_state_field generation)"
+  ( verify_routed_release "$source" "$source_release" "$rollback_generation" \
+    "$intake_revision" "$source_epoch" ) \
+    || fail "automatic rollback selected $source but routed verification also failed"
+  fail "post-$mode verification failed; router automatically returned to $source generation $rollback_generation"
+}
+
+switch_slot() {
+  local target
+  target="$(require_slot "${1:-}")"
+  acquire_lock
+  validate_state
+  transition_with_verification "$target" switch
+}
+
+rollback_state() {
+  acquire_lock
+  validate_state
+  local target
+  target="$(read_state_field previous)"
+  [[ -n "$target" ]] || fail "router state has no rollback target"
+  target="$(require_slot "$target")"
+  transition_with_verification "$target" rollback
+}
+
+show_status() {
+  prepare_run_dir
+  validate_state
+  local active release_id generation
+  active="$(read_state_field active)"
+  release_id="$(read_state_slot_release "$active")"
+  generation="$(read_state_field generation)"
+  [[ "$release_id" != unbound-* ]] || fail "router status is not operational: active slot is unbound"
+  assert_router_identity "$active" "$release_id" "$generation" >/dev/null \
+    || fail "port 3017 is not the attested standalone router"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    process.stdout.write(`active=${value.active} previous=${value.previous ?? "none"} generation=${value.generation}\n`)
+    for (const slot of ["blue", "green"]) {
+      const item = value.slots[slot]
+      process.stdout.write(`${slot}: ${item.host}:${item.port} release=${item.releaseId}\n`)
+    }
+  ' "$STATE_FILE"
+  curl -fsS "http://$ROUTER_HOST:$ROUTER_PORT/__router/health"
+}
+
+command="${1:-}"
+shift || true
+case "$command" in
+  init) init_state "$@" ;;
+  bootstrap) bootstrap_baseline "$@" ;;
+  stage) stage_release "$@" ;;
+  bind) bind_slot "$@" ;;
+  probe) probe_slot "$@" ;;
+  retire) retire_slot "$@" ;;
+  switch) switch_slot "$@" ;;
+  rollback) rollback_state "$@" ;;
+  status) show_status "$@" ;;
+  -h|--help|help|'') usage ;;
+  *) usage >&2; exit 2 ;;
+esac

@@ -22,6 +22,54 @@
     },
     {
       "parameters": {
+        "method": "POST",
+        "url": "={{ $('AI-worker Webhook').item.json.body.routing.claimCallbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-AIWorker-Webhook-Secret", "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, bindingId: $('AI-worker Webhook').item.json.body.routing.id, workspaceId: $('AI-worker Webhook').item.json.body.routing.claimScope.workspaceId, tenantId: $('AI-worker Webhook').item.json.body.routing.claimScope.tenantId, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id }) }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf014",
+      "name": "Claim Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-350, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            {
+              "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf015",
+              "leftValue": "={{ $json.claimed }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf016",
+      "name": "Continue Only If Claimed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [-260, 0]
+    },
+    {
+      "parameters": {
         "assignments": {
           "assignments": [
             {
@@ -33,19 +81,19 @@
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf004",
               "name": "taskId",
-              "value": "={{ $json.body.taskId }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.taskId }}",
               "type": "string"
             },
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf005",
               "name": "idempotencyKey",
-              "value": "={{ $json.body.idempotencyKey || $json.headers['x-aiworker-idempotency-key'] }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.idempotencyKey || $('AI-worker Webhook').item.json.headers['x-aiworker-idempotency-key'] }}",
               "type": "string"
             },
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf006",
               "name": "source",
-              "value": "={{ $json.body.source }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.source }}",
               "type": "string"
             },
             {
@@ -57,25 +105,25 @@
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf008",
               "name": "taskType",
-              "value": "={{ $json.body.routing.taskType }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.routing.taskType }}",
               "type": "string"
             },
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf009",
               "name": "agentRole",
-              "value": "={{ $json.body.routing.agentRole }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.routing.agentRole }}",
               "type": "string"
             },
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00a",
               "name": "model",
-              "value": "={{ $json.body.routing.model }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.routing.model }}",
               "type": "string"
             },
             {
               "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf00b",
               "name": "input",
-              "value": "={{ $json.body.input }}",
+              "value": "={{ $('AI-worker Webhook').item.json.body.input }}",
               "type": "object"
             },
             {
@@ -142,7 +190,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'planner', input: { task: $('AI-worker Webhook').item.json.body.input, requirement: '拆解目标、约束、执行步骤和验收标准。' }, finalizeParent: false }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, nodeKey: 'planner', input: { task: $('AI-worker Webhook').item.json.body.input, requirement: '拆解目标、约束、执行步骤和验收标准。' }, finalizeParent: false }) }}",
         "options": {
           "timeout": 600000
         }
@@ -156,8 +204,8 @@
         0
       ],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -179,7 +227,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'executor', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $json.output, requirement: '按照规划完成任务，产出可审核的完整结果。' }, finalizeParent: false }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, nodeKey: 'executor', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $json.output, requirement: '按照规划完成任务，产出可审核的完整结果。' }, finalizeParent: false }) }}",
         "options": {
           "timeout": 600000
         }
@@ -193,8 +241,8 @@
         0
       ],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -216,7 +264,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, nodeKey: 'reviewer', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $('Planner Model Node').item.json.output, execution: $json.output, requirement: '检查准确性、完整性和安全边界；修正问题后只输出最终交付结果。' }, finalizeParent: true }) }}",
+        "body": "={{ JSON.stringify({ taskId: $('AI-worker Webhook').item.json.body.taskId, idempotencyKey: $('AI-worker Webhook').item.json.body.idempotencyKey, executionOwner: 'n8n-execution:' + $workflow.id + ':' + $execution.id, nodeKey: 'reviewer', input: { task: $('AI-worker Webhook').item.json.body.input, plan: $('Planner Model Node').item.json.output, execution: $json.output, requirement: '检查准确性、完整性和安全边界；修正问题后只输出最终交付结果。' }, finalizeParent: true }) }}",
         "options": {
           "timeout": 600000
         }
@@ -230,8 +278,41 @@
         0
       ],
       "retryOnFail": true,
-      "maxTries": 2,
-      "waitBetweenTries": 2000
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf017", "name": "accepted", "value": true, "type": "boolean" },
+            { "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf018", "name": "duplicate", "value": true, "type": "boolean" },
+            { "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf019", "name": "taskId", "value": "={{ $('AI-worker Webhook').item.json.body.taskId }}", "type": "string" },
+            { "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf01a", "name": "status", "value": "running", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf01b",
+      "name": "Build Duplicate Claim Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-100, 140]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 202,
+          "responseHeaders": { "entries": [{ "name": "X-AIWorker-Workflow", "value": "task-intake-v1-duplicate" }] }
+        }
+      },
+      "id": "019fa8c8-25b0-7d23-8ba8-2fa33bcaf01c",
+      "name": "Return Duplicate Claim",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [100, 140]
     }
   ],
   "connections": {
@@ -239,11 +320,20 @@
       "main": [
         [
           {
-            "node": "Build Observable Result",
+            "node": "Claim Task",
             "type": "main",
             "index": 0
           }
         ]
+      ]
+    },
+    "Claim Task": {
+      "main": [[{ "node": "Continue Only If Claimed", "type": "main", "index": 0 }]]
+    },
+    "Continue Only If Claimed": {
+      "main": [
+        [{ "node": "Build Observable Result", "type": "main", "index": 0 }],
+        [{ "node": "Build Duplicate Claim Result", "type": "main", "index": 0 }]
       ]
     },
     "Build Observable Result": {
@@ -289,6 +379,9 @@
           }
         ]
       ]
+    },
+    "Build Duplicate Claim Result": {
+      "main": [[{ "node": "Return Duplicate Claim", "type": "main", "index": 0 }]]
     }
   },
   "settings": {

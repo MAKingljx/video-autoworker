@@ -17,6 +17,26 @@ const pruneGatewaySessionsOlderThan = vi.fn()
 const getAgentLiveStatuses = vi.fn()
 const logger = { info: vi.fn(), warn: vi.fn() }
 const eventBus = { broadcast: vi.fn() }
+const acquireOrRenewSchedulerLeadership = vi.fn(() => ({
+  isLeader: true,
+  mode: 'lease',
+  leaseExpiresAt: 1,
+  revision: 1,
+}))
+const renewSchedulerLeadership = vi.fn(() => ({
+  isLeader: true,
+  mode: 'lease',
+  leaseExpiresAt: 2,
+  revision: 2,
+}))
+const relinquishSchedulerLeadership = vi.fn(() => true)
+const getSchedulerRuntimeEligibility = vi.fn(() => ({
+  eligible: true,
+  mode: 'single-instance',
+  reason: 'single_instance',
+  activeSlot: null as 'blue' | 'green' | null,
+  generation: null as number | null,
+}))
 
 vi.mock('@/lib/db', () => ({ getDatabase, logAuditEvent }))
 vi.mock('@/lib/agent-sync', () => ({ syncAgentsFromConfig }))
@@ -45,6 +65,14 @@ vi.mock('@/lib/local-agent-sync', () => ({ syncLocalAgents }))
 vi.mock('@/lib/task-dispatch', () => ({ dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks }))
 vi.mock('@/lib/recurring-tasks', () => ({ spawnRecurringTasks }))
 vi.mock('@/lib/n8n-media-cleanup', () => ({ drainN8nMediaCleanupDebts }))
+vi.mock('@/lib/scheduler-leader', () => ({
+  acquireOrRenewSchedulerLeadership,
+  createSchedulerHolderId: () => '00000000000000000000000000000000',
+  getSchedulerRuntimeEligibility,
+  isMultiInstanceSchedulerRuntime: () => false,
+  relinquishSchedulerLeadership,
+  renewSchedulerLeadership,
+}))
 
 describe('scheduler gateway live-status boundary', () => {
   beforeEach(() => {
@@ -52,6 +80,27 @@ describe('scheduler gateway live-status boundary', () => {
     vi.setSystemTime(new Date('2026-03-27T03:00:00.000Z'))
     vi.resetModules()
     vi.clearAllMocks()
+
+    acquireOrRenewSchedulerLeadership.mockReset().mockReturnValue({
+      isLeader: true,
+      mode: 'lease',
+      leaseExpiresAt: 1,
+      revision: 1,
+    })
+    renewSchedulerLeadership.mockReset().mockReturnValue({
+      isLeader: true,
+      mode: 'lease',
+      leaseExpiresAt: 2,
+      revision: 2,
+    })
+    relinquishSchedulerLeadership.mockReset().mockReturnValue(true)
+    getSchedulerRuntimeEligibility.mockReset().mockReturnValue({
+      eligible: true,
+      mode: 'single-instance',
+      reason: 'single_instance',
+      activeSlot: null,
+      generation: null,
+    })
 
     getAgentLiveStatuses.mockReturnValue(new Map([
       ['main', { status: 'active', lastActivity: Date.parse('2026-03-27T02:59:00.000Z'), channel: 'cli' }],
@@ -121,5 +170,93 @@ describe('scheduler gateway live-status boundary', () => {
       ok: true,
       message: 'Media cleanup debts: 1 cleared, 0 pending, 0 rejected',
     })
+  })
+
+  it('keeps a follower passive and begins scheduled work after lease takeover', async () => {
+    acquireOrRenewSchedulerLeadership
+      .mockReturnValueOnce({ isLeader: false, mode: 'lease', leaseExpiresAt: 1, revision: 1 })
+      .mockReturnValue({ isLeader: true, mode: 'lease', leaseExpiresAt: 2, revision: 2 })
+    const { getSchedulerLeadershipStatus, initScheduler, stopScheduler } = await import('@/lib/scheduler')
+
+    initScheduler()
+    expect(syncAgentsFromConfig).not.toHaveBeenCalled()
+    expect(getSchedulerLeadershipStatus()).toMatchObject({
+      state: 'follower',
+      leaseExpiresAt: 1,
+      leaseExpired: true,
+      activeJobs: 0,
+    })
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(processWebhookRetries).toHaveBeenCalledTimes(1)
+    expect(syncAgentsFromConfig).toHaveBeenCalledWith('scheduled')
+    expect(getSchedulerLeadershipStatus()).toMatchObject({ state: 'leader' })
+    stopScheduler()
+  })
+
+  it('does not let an inactive router slot compete for the lease', async () => {
+    getSchedulerRuntimeEligibility.mockReturnValue({
+      eligible: false,
+      mode: 'blue-green',
+      reason: 'slot_inactive',
+      activeSlot: 'blue',
+      generation: 4,
+    })
+    const { getSchedulerLeadershipStatus, initScheduler, stopScheduler } = await import('@/lib/scheduler')
+
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(15_000)
+    expect(acquireOrRenewSchedulerLeadership).not.toHaveBeenCalled()
+    expect(renewSchedulerLeadership).not.toHaveBeenCalled()
+    expect(syncAgentsFromConfig).not.toHaveBeenCalled()
+    expect(getSchedulerLeadershipStatus()).toMatchObject({
+      state: 'inactive',
+      reason: 'slot_inactive',
+      routerGeneration: 4,
+    })
+    stopScheduler()
+  })
+
+  it('renews through an in-flight job, prevents same-job re-entry, then releases after router handoff', async () => {
+    let finishRetry: ((value: { ok: boolean; message: string }) => void) | undefined
+    processWebhookRetries.mockImplementationOnce(() => new Promise(resolve => {
+      finishRetry = resolve
+    }))
+    const { getSchedulerLeadershipStatus, initScheduler, stopScheduler, triggerTask } = await import('@/lib/scheduler')
+    initScheduler()
+    await Promise.resolve()
+
+    const running = triggerTask('webhook_retry')
+    await Promise.resolve()
+    await expect(triggerTask('webhook_retry')).resolves.toEqual({
+      ok: false,
+      message: 'Scheduler task already running: webhook_retry',
+    })
+
+    getSchedulerRuntimeEligibility.mockReturnValue({
+      eligible: false,
+      mode: 'blue-green',
+      reason: 'slot_inactive',
+      activeSlot: 'green',
+      generation: 2,
+    })
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(renewSchedulerLeadership).toHaveBeenCalled()
+    expect(relinquishSchedulerLeadership).not.toHaveBeenCalled()
+    expect(getSchedulerLeadershipStatus()).toMatchObject({
+      state: 'leader',
+      reason: 'draining_running_jobs',
+      activeJobs: 1,
+    })
+
+    finishRetry?.({ ok: true, message: 'retry completed' })
+    await expect(running).resolves.toEqual({ ok: true, message: 'retry completed' })
+    expect(relinquishSchedulerLeadership).toHaveBeenCalledTimes(1)
+    expect(getSchedulerLeadershipStatus()).toMatchObject({
+      state: 'inactive',
+      reason: 'slot_inactive',
+      activeJobs: 0,
+    })
+    stopScheduler()
   })
 })

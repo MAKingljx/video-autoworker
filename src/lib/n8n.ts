@@ -1,5 +1,6 @@
 import { getLocalDesktopUserFromRequest, requireRole } from '@/lib/auth'
 import { normalizeN8nBaseUrl } from '@/lib/n8n-base-url'
+import { SafeOperationError, type SafeOperationErrorCode } from '@/lib/operational-errors'
 import { timingSafeEqual } from 'node:crypto'
 
 const DEFAULT_TIMEOUT_MS = 8_000
@@ -48,6 +49,36 @@ export interface N8nTriggerResult {
   latencyMs: number
 }
 
+export type N8nWebhookDispatchOutcome = 'rejected' | 'outcome_unknown'
+
+/**
+ * Separates a response that proves n8n rejected the request from a transport
+ * result where n8n may already have accepted it. Callers must not turn an
+ * `outcome_unknown` delivery into a terminal task failure.
+ */
+export class N8nWebhookDispatchError extends SafeOperationError {
+  readonly outcome: N8nWebhookDispatchOutcome
+  readonly statusCode: number | null
+
+  constructor(
+    outcome: N8nWebhookDispatchOutcome,
+    statusCode: number | null = null,
+    diagnostic?: unknown,
+  ) {
+    const code: SafeOperationErrorCode = outcome === 'rejected'
+      ? 'N8N_WEBHOOK_REJECTED'
+      : 'N8N_DISPATCH_FAILED'
+    super(code, diagnostic)
+    this.name = 'N8nWebhookDispatchError'
+    this.outcome = outcome
+    this.statusCode = statusCode
+  }
+}
+
+export function isN8nWebhookDispatchError(error: unknown): error is N8nWebhookDispatchError {
+  return error instanceof N8nWebhookDispatchError
+}
+
 export function normalizeN8nWebhookPath(raw: string): string {
   const value = String(raw || '').trim().replace(/^\/+/, '')
   if (!value) throw new Error('n8n Webhook 路径不能为空')
@@ -83,6 +114,15 @@ export function verifyN8nWebhookSecret(provided: string | null): boolean {
 
 export function isN8nWebhookSecretConfigured(): boolean {
   return Boolean(String(process.env.N8N_WEBHOOK_SECRET || '').trim())
+}
+
+/** Validate every local precondition before a durable parent task is created. */
+export function validateN8nWebhookDispatchConfiguration(webhookPath: string): void {
+  normalizeN8nWebhookPath(webhookPath)
+  normalizeN8nBaseUrl()
+  if (!isN8nWebhookSecretConfigured()) {
+    throw new Error('尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流')
+  }
 }
 
 async function parseResponseBody(response: Response): Promise<unknown> {
@@ -196,23 +236,42 @@ export async function triggerN8nWebhook(
   payload: Record<string, unknown>,
   options: { timeoutMs?: number; idempotencyKey?: string } = {},
 ): Promise<N8nTriggerResult> {
+  validateN8nWebhookDispatchConfiguration(webhookPath)
   const path = normalizeN8nWebhookPath(webhookPath)
   const headers = new Headers({ 'Content-Type': 'application/json' })
   const idempotencyKey = String(options.idempotencyKey || '').trim()
   if (idempotencyKey) headers.set('X-AIWorker-Idempotency-Key', idempotencyKey)
   const secret = String(process.env.N8N_WEBHOOK_SECRET || '').trim()
-  if (!secret) throw new Error('尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流')
   headers.set('X-AIWorker-Webhook-Secret', secret)
 
-  const { response, data, latencyMs } = await n8nFetch(path, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(payload),
-  }, { timeoutMs: options.timeoutMs ?? 30_000 })
+  let result: Awaited<ReturnType<typeof n8nFetch>>
+  try {
+    result = await n8nFetch(path, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    }, { timeoutMs: options.timeoutMs ?? 30_000 })
+  } catch (error) {
+    throw new N8nWebhookDispatchError(
+      'outcome_unknown',
+      null,
+      error,
+    )
+  }
+
+  const { response, data, latencyMs } = result
 
   if (!response.ok) {
     const detail = typeof data === 'string' ? data : JSON.stringify(data)
-    throw new Error(`n8n Webhook 执行失败：HTTP ${response.status}${detail ? ` - ${detail}` : ''}`)
+    const outcome: N8nWebhookDispatchOutcome = response.status >= 400
+      && response.status < 500
+      && ![408, 425, 429].includes(response.status)
+      ? 'rejected'
+      : 'outcome_unknown'
+    throw new N8nWebhookDispatchError(outcome, response.status, {
+      statusCode: response.status,
+      detail,
+    })
   }
   return { ok: true, statusCode: response.status, data, latencyMs }
 }

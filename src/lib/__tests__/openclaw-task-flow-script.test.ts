@@ -37,6 +37,13 @@ globalThis.fetch = async (input, init = {}) => {
   const body = init.body ? JSON.parse(String(init.body)) : undefined
   const requestUrl = url.pathname + url.search
   appendFileSync(process.env.FAKE_PLATFORM_LOG, JSON.stringify({ method, url: requestUrl, body }) + '\\n')
+  if (method === 'GET' && url.pathname === '/api/n8n/intake-control') {
+    return json({ control: {
+      schema: 'video-autoworker-intake-control/v1',
+      globalScope: true,
+      accepting: true,
+    } })
+  }
   if (method === 'GET' && url.pathname === '/api/n8n/workflows') {
     return json({ bindings: [
       { id: 'generic-binding', taskType: 'general', enabled: true },
@@ -956,6 +963,13 @@ const json = body => new Response(JSON.stringify(body), {
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
   const method = init.method || 'GET'
+  if (method === 'GET' && url.pathname === '/api/n8n/intake-control') {
+    return json({ control: {
+      schema: 'video-autoworker-intake-control/v1',
+      globalScope: true,
+      accepting: true,
+    } })
+  }
   if (method === 'GET' && url.pathname === '/api/n8n/workflows') {
     return json({ bindings: [{ id: 'video-binding', taskType: 'video-analysis', enabled: true }] })
   }
@@ -1186,7 +1200,15 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
-  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/workflows') {
+  const method = init.method || 'GET'
+  if (method === 'GET' && url.pathname === '/api/n8n/intake-control') {
+    return json({ control: {
+      schema: 'video-autoworker-intake-control/v1',
+      globalScope: true,
+      accepting: true,
+    } })
+  }
+  if (method === 'GET' && url.pathname === '/api/n8n/workflows') {
     return json({ bindings: [{ id: 'video-binding', taskType: 'video-analysis', enabled: true }] })
   }
   return json({ error: 'unexpected request' })

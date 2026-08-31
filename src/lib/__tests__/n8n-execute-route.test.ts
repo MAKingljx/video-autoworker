@@ -10,11 +10,19 @@ const mocks = vi.hoisted(() => ({
   claimN8nTaskRun: vi.fn(),
   completeN8nTaskRun: vi.fn(),
   failN8nTaskRun: vi.fn(),
+  checkN8nCallbackAdmission: vi.fn(),
 }))
 
 vi.mock('@/lib/command', () => ({ runOpenClaw: mocks.runOpenClaw }))
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
 vi.mock('@/lib/n8n', () => ({ verifyN8nWebhookSecret: mocks.verifyN8nWebhookSecret }))
+vi.mock('@/lib/n8n-runtime-affinity', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/n8n-runtime-affinity')>()
+  return {
+    ...actual,
+    checkN8nCallbackAdmission: mocks.checkN8nCallbackAdmission,
+  }
+})
 vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
   return {
@@ -37,6 +45,7 @@ const run = {
   source: 'video-autoworker',
   requestedBy: 'local-desktop',
   routing: {
+    callbackProtocol: 'legacy-v1',
     model: 'qwen36-tools-local/default_model',
     timeoutSeconds: 120,
     config: { profile: 'qwen-current', agentId: 'second-original' },
@@ -73,6 +82,7 @@ describe('n8n local execution route', () => {
     mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockReturnValue(run)
+    mocks.checkN8nCallbackAdmission.mockReturnValue({ allowed: true, mode: 'legacy' })
     mocks.claimN8nTaskRun.mockReturnValue({
       claimed: true,
       run: { ...run, status: 'running', attemptCount: 1 },
@@ -131,6 +141,36 @@ describe('n8n local execution route', () => {
       '--thinking', 'off',
     ]), { timeoutMs: 135_000 })
     expect(mocks.completeN8nTaskRun).toHaveBeenCalledWith({}, 'task-1', expect.objectContaining({ text: '闭环成功' }))
+  })
+
+  it.each([
+    ['missing', { ...run.routing, callbackProtocol: undefined }],
+    ['slot', { ...run.routing, callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: 'release-a' }],
+  ])('rejects %s callback ownership before claiming the legacy task', async (_label, routing) => {
+    mocks.getN8nTaskRunByTaskId.mockReturnValue({ ...run, routing })
+
+    const response = await POST(request())
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'N8N_LEGACY_EXECUTION_REQUIRED' })
+    expect(mocks.checkN8nCallbackAdmission).not.toHaveBeenCalled()
+    expect(mocks.claimN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.runOpenClaw).not.toHaveBeenCalled()
+  })
+
+  it('rejects explicit legacy work when the current runtime is a blue-green slot', async () => {
+    mocks.checkN8nCallbackAdmission.mockReturnValue({
+      allowed: false,
+      code: 'runtime_affinity_mismatch',
+      error: '父任务回调属于其他运行版本',
+    })
+
+    const response = await POST(request())
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'runtime_affinity_mismatch' })
+    expect(mocks.claimN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.runOpenClaw).not.toHaveBeenCalled()
   })
 
   it('returns a cached result without invoking the model twice', async () => {

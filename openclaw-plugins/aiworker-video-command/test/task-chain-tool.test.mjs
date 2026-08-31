@@ -49,6 +49,29 @@ describe('AI-worker direct task-chain tool', () => {
     expect(result.content[0].text).toMatch(/^已提交，任务编号：video-command-[a-f0-9]{64}。/u)
   })
 
+  it('shows the shared maintenance message when intake is paused', async () => {
+    const runner = {
+      dispatchDirectory: vi.fn(async ({ batchId }) => ({
+        kind: 'batch',
+        id: batchId,
+        status: 'maintenance',
+        duplicate: false,
+        intakePaused: true,
+      })),
+    }
+    const value = tool({ runner })
+    const result = await value.execute('paused-directory', {
+      action: 'submit_directory', videoDirectory: '/data/series',
+    })
+    expect(result).toEqual({
+      content: [{
+        type: 'text',
+        text: '视频学习服务正在发布维护，暂时停止接收新任务，请稍后再试。',
+      }],
+    })
+    expect(runner.dispatchDirectory).toHaveBeenCalledOnce()
+  })
+
   it('requires a second user-confirmed tool action before re-analyzing an exact duplicate', async () => {
     const runner = {
       dispatchVideo: vi.fn(async ({ taskId, confirmDuplicate = false }) => (

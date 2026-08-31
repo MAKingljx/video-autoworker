@@ -3,16 +3,23 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
 import { verifyN8nWebhookSecret } from '@/lib/n8n'
-import { executeN8nModelRoute, n8nModelExecutionError } from '@/lib/n8n-model-execution'
+import { checkN8nCallbackAdmission, resolveN8nRuntimeInstanceId } from '@/lib/n8n-runtime-affinity'
+import { executeN8nModelRoute } from '@/lib/n8n-model-execution'
 import { resolveN8nNodeRoute } from '@/lib/n8n-model-routing'
+import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 import {
-  claimN8nTaskRun,
+  completeN8nChildExecution,
   completeN8nTaskRun,
-  createN8nTaskRun,
+  createAndClaimN8nChildRunFromParent,
+  failN8nChildExecution,
   failN8nTaskRun,
   getN8nTaskRunByTaskId,
-  markN8nTaskAccepted,
+  isScopedN8nParentExecutionOwner,
+  N8nChildExecutionLeaseLostError,
+  n8nExecutionOwnerSchema,
   n8nTaskIdentitySchema,
+  pollN8nChildExecutionResult,
+  runWithN8nChildExecutionHeartbeat,
 } from '@/lib/n8n-task-runs'
 
 export const runtime = 'nodejs'
@@ -20,6 +27,7 @@ export const runtime = 'nodejs'
 const nodeRequestSchema = z.object({
   taskId: n8nTaskIdentitySchema,
   idempotencyKey: n8nTaskIdentitySchema,
+  executionOwner: n8nExecutionOwnerSchema,
   nodeKey: z.string().trim().min(1).max(60).regex(/^[A-Za-z0-9._:-]+$/),
   input: z.record(z.string(), z.unknown()),
   finalizeParent: z.boolean().default(false),
@@ -58,32 +66,77 @@ export async function POST(request: NextRequest) {
   if (parent.idempotencyKey !== parsed.data.idempotencyKey) {
     return NextResponse.json({ error: '幂等键与父任务不匹配' }, { status: 409 })
   }
-  if (parent.status === 'failed') {
-    return NextResponse.json({ taskId: parent.taskId, status: parent.status, error: parent.error || '父任务已失败' }, { status: 409 })
+  const admission = checkN8nCallbackAdmission(parent.routing)
+  if (!admission.allowed) {
+    return NextResponse.json({ taskId: parent.taskId, error: admission.error, code: admission.code }, { status: 409 })
   }
-  if (parent.status === 'succeeded') {
-    return NextResponse.json({ taskId: parent.taskId, status: parent.status, output: parent.output, cached: true })
+
+  const scope = { workspaceId: parent.workspaceId, tenantId: parent.tenantId }
+  if (!isScopedN8nParentExecutionOwner(db, parent.taskId, parsed.data.executionOwner, scope)) {
+    return NextResponse.json({ taskId: parent.taskId, error: 'n8n execution 不拥有该父任务' }, { status: 409 })
+  }
+  if (parsed.data.finalizeParent && parsed.data.nodeKey !== 'reviewer') {
+    return NextResponse.json({
+      taskId: parent.taskId,
+      error: '只有受控 reviewer 节点可以完成父任务',
+    }, { status: 409 })
+  }
+  const childTaskId = scopedId('node', parent.taskId, parsed.data.nodeKey)
+  const childIdempotencyKey = scopedId('node-idem', parent.idempotencyKey, parsed.data.nodeKey)
+  if (['succeeded', 'failed', 'cancelled'].includes(parent.status)) {
+    if (parent.status === 'succeeded' && parsed.data.finalizeParent) {
+      const child = getN8nTaskRunByTaskId(db, childTaskId)
+      if (child?.status === 'succeeded'
+        && child.idempotencyKey === childIdempotencyKey
+        && child.bindingId === parent.bindingId
+        && child.workspaceId === parent.workspaceId
+        && child.tenantId === parent.tenantId
+        && child.source === 'n8n-node'
+        && child.output) {
+        return NextResponse.json({
+          taskId: parent.taskId,
+          nodeTaskId: child.taskId,
+          nodeKey: parsed.data.nodeKey,
+          status: 'succeeded',
+          output: parent.output || child.output,
+          cached: true,
+        })
+      }
+    }
+    const terminalFailure = parent.error
+      ? projectSafeOperationError(parent.error, 'N8N_MODEL_EXECUTION_FAILED')
+      : null
+    return NextResponse.json({
+      taskId: parent.taskId,
+      status: parent.status,
+      ...(terminalFailure ? { code: terminalFailure.code } : {}),
+      error: terminalFailure?.summary || '父任务已结束，拒绝迟到的模型节点回调',
+    }, { status: 409 })
   }
 
   let resolved: ReturnType<typeof resolveN8nNodeRoute>
   try {
     resolved = resolveN8nNodeRoute(parent.routing, parsed.data.nodeKey)
   } catch (error) {
-    const message = n8nModelExecutionError(error)
-    failN8nTaskRun(db, parent.taskId, message)
-    return NextResponse.json({ taskId: parent.taskId, status: 'failed', error: message }, { status: 409 })
+    const failure = projectSafeOperationError(error, 'N8N_MODEL_ROUTE_INVALID')
+    logSafeOperationError('n8n_node_route_resolution', error, failure)
+    failN8nTaskRun(db, parent.taskId, failure.persistedMessage)
+    return NextResponse.json({
+      taskId: parent.taskId,
+      status: 'failed',
+      code: failure.code,
+      error: failure.summary,
+    }, { status: 409 })
   }
 
-  const scope = { workspaceId: parent.workspaceId, tenantId: parent.tenantId }
-  const childTaskId = scopedId('node', parent.taskId, parsed.data.nodeKey)
-  const childIdempotencyKey = scopedId('node-idem', parent.idempotencyKey, parsed.data.nodeKey)
   const delivery = parsed.data.finalizeParent ? parent.delivery : { mode: 'none' as const }
-  const child = createN8nTaskRun(db, {
-    taskId: childTaskId,
-    idempotencyKey: childIdempotencyKey,
+  const childClaimInput = {
+    parentTaskId: parent.taskId,
+    parentIdempotencyKey: parent.idempotencyKey,
     bindingId: parent.bindingId,
+    childTaskId,
+    childIdempotencyKey,
     source: 'n8n-node',
-    requestedBy: parent.requestedBy,
     routing: {
       ...parent.routing,
       nodeKey: parsed.data.nodeKey,
@@ -97,63 +150,73 @@ export async function POST(request: NextRequest) {
     },
     taskInput: parsed.data.input,
     delivery,
-    // A node is never replayed after an execution error. n8n may safely repeat
-    // the HTTP request only to retrieve a result that was already persisted.
-    maxAttempts: 1,
-  }, scope)
+    // One extra attempt is reserved for a replacement process taking over an
+    // execution whose previous process died before persisting its result.
+    maxAttempts: 2,
+    ownerInstanceId: resolveN8nRuntimeInstanceId(),
+    executionOwner: parsed.data.executionOwner,
+  } as const
+  let owned = createAndClaimN8nChildRunFromParent(db, childClaimInput, scope)
+  if (owned.outcome === 'running') {
+    owned = await pollN8nChildExecutionResult(
+      () => createAndClaimN8nChildRunFromParent(db, childClaimInput, scope),
+      owned,
+      { waitSeconds: 570 },
+    )
+  }
 
-  if (!child.created) {
-    if (child.run.status === 'succeeded') {
+  if (owned.outcome !== 'claimed' || !owned.child || !owned.lease) {
+    if (owned.outcome === 'succeeded' && owned.child) {
+      if (parsed.data.finalizeParent) {
+        const currentParent = getN8nTaskRunByTaskId(db, parent.taskId)
+        if (currentParent?.status === 'running') completeN8nTaskRun(db, parent.taskId, owned.child.output || {})
+      }
       return NextResponse.json({
         taskId: parent.taskId,
-        nodeTaskId: child.run.taskId,
+        nodeTaskId: owned.child.taskId,
         nodeKey: parsed.data.nodeKey,
-        status: child.run.status,
-        output: child.run.output,
+        status: owned.child.status,
+        output: owned.child.output,
         cached: true,
       })
     }
+    const childFailure = owned.child?.error && owned.outcome !== 'running'
+      ? projectSafeOperationError(owned.child.error, 'N8N_MODEL_EXECUTION_FAILED')
+      : null
     return NextResponse.json({
       taskId: parent.taskId,
-      nodeTaskId: child.run.taskId,
+      nodeTaskId: owned.child?.taskId || childTaskId,
       nodeKey: parsed.data.nodeKey,
-      status: child.run.status,
-      error: child.run.error || '节点正在执行或已失败',
-    }, { status: child.run.status === 'running' ? 202 : 409 })
-  }
-
-  markN8nTaskAccepted(db, childTaskId)
-  const claimed = claimN8nTaskRun(db, childTaskId)
-  if (!claimed.claimed || !claimed.run) {
-    return NextResponse.json({ error: '模型节点状态不可执行' }, { status: 409 })
+      status: owned.child?.status || owned.outcome,
+      code: owned.outcome === 'running' ? 'N8N_CHILD_STILL_RUNNING' : childFailure?.code,
+      retryable: owned.outcome === 'running',
+      error: childFailure?.summary || (owned.outcome === 'running' ? '节点正在执行，请轮询持久化结果' : '模型节点状态不可执行'),
+    }, {
+      status: owned.outcome === 'running' ? 503 : 409,
+      headers: owned.outcome === 'running' ? { 'Retry-After': '5', 'Cache-Control': 'no-store' } : undefined,
+    })
   }
 
   try {
-    const output = await executeN8nModelRoute(resolved.route, {
-      nodeKey: parsed.data.nodeKey,
-      instruction: resolved.instruction,
-      input: parsed.data.input,
-      sessionKey: parsed.data.finalizeParent && parent.delivery.sessionKey
-        ? parent.delivery.sessionKey
-        : nodeSessionKey(parent.taskId, parsed.data.nodeKey, resolved.route),
-      delivery,
-      // The binding timeout only covers the initial webhook acknowledgement.
-      // Each asynchronous model node uses its own registered execution limit.
-      timeoutSeconds: Math.max(5, Math.min(600, resolved.route.timeoutSeconds)),
+    const output = await runWithN8nChildExecutionHeartbeat(db, owned.lease, scope, () => (
+      executeN8nModelRoute(resolved.route, {
+        nodeKey: parsed.data.nodeKey,
+        instruction: resolved.instruction,
+        input: parsed.data.input,
+        sessionKey: parsed.data.finalizeParent && parent.delivery.sessionKey
+          ? parent.delivery.sessionKey
+          : nodeSessionKey(parent.taskId, parsed.data.nodeKey, resolved.route),
+        delivery,
+        // The binding timeout only covers the initial webhook acknowledgement.
+        // Each asynchronous model node uses its own registered execution limit.
+        timeoutSeconds: Math.max(5, Math.min(600, resolved.route.timeoutSeconds)),
+      })
+    ))
+    const completed = completeN8nChildExecution(db, owned.lease, output, scope, {
+      parentTaskId: parsed.data.finalizeParent ? parent.taskId : undefined,
     })
-    completeN8nTaskRun(db, childTaskId, output)
-
-    if (parsed.data.finalizeParent) {
-      const currentParent = getN8nTaskRunByTaskId(db, parent.taskId)
-      if (currentParent?.status !== 'succeeded') {
-        const parentClaim = currentParent?.status === 'running'
-          ? { claimed: true, run: currentParent }
-          : claimN8nTaskRun(db, parent.taskId)
-        if (!parentClaim.claimed || !parentClaim.run) {
-          throw new Error('最终节点完成，但父任务状态无法提交')
-        }
-        completeN8nTaskRun(db, parent.taskId, output)
-      }
+    if (!completed.settled) {
+      throw new N8nChildExecutionLeaseLostError()
     }
 
     return NextResponse.json({
@@ -171,16 +234,34 @@ export async function POST(request: NextRequest) {
       output,
     })
   } catch (error) {
-    const message = n8nModelExecutionError(error)
-    failN8nTaskRun(db, childTaskId, message)
-    failN8nTaskRun(db, parent.taskId, `${parsed.data.nodeKey}: ${message}`)
+    const failure = projectSafeOperationError(
+      error,
+      error instanceof N8nChildExecutionLeaseLostError
+        ? 'N8N_CHILD_LEASE_LOST'
+        : 'N8N_MODEL_EXECUTION_FAILED',
+    )
+    logSafeOperationError('n8n_node_execution', error, failure)
+    if (error instanceof N8nChildExecutionLeaseLostError) {
+      return NextResponse.json({
+        taskId: parent.taskId,
+        nodeTaskId: childTaskId,
+        nodeKey: parsed.data.nodeKey,
+        status: 'running',
+        code: failure.code,
+        error: failure.summary,
+        retryable: true,
+      }, { status: 409 })
+    }
+    const failed = failN8nChildExecution(db, owned.lease, failure.persistedMessage, scope)
+    if (failed.settled) failN8nTaskRun(db, parent.taskId, failure.persistedMessage)
     return NextResponse.json({
       taskId: parent.taskId,
       nodeTaskId: childTaskId,
       nodeKey: parsed.data.nodeKey,
       status: 'failed',
-      error: message,
-      retryable: false,
-    }, { status: 502 })
+      code: failure.code,
+      error: failure.summary,
+      retryable: !failed.settled,
+    }, { status: failed.settled ? 502 : 409 })
   }
 }

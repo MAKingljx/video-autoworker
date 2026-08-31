@@ -1571,6 +1571,137 @@ const migrations: Migration[] = [
           ON n8n_media_cleanup_debts(tenant_id, workspace_id, updated_at);
       `)
     }
+  },
+  {
+    id: '052_n8n_intake_controls',
+    up(db: Database.Database) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_intake_controls (
+          control_id INTEGER PRIMARY KEY CHECK(control_id = 1),
+          accepting INTEGER NOT NULL DEFAULT 1 CHECK(accepting IN (0, 1)),
+          reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 300),
+          changed_by_id INTEGER NOT NULL,
+          changed_by_name TEXT NOT NULL CHECK(length(changed_by_name) BETWEEN 1 AND 120),
+          changed_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          revision INTEGER NOT NULL CHECK(revision >= 1)
+        );
+        CREATE TABLE IF NOT EXISTS n8n_intake_control_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          action TEXT NOT NULL CHECK(action IN ('drain', 'resume')),
+          before_accepting INTEGER NOT NULL CHECK(before_accepting IN (0, 1)),
+          after_accepting INTEGER NOT NULL CHECK(after_accepting IN (0, 1)),
+          reason TEXT NOT NULL CHECK(length(reason) BETWEEN 8 AND 300),
+          actor_id INTEGER NOT NULL,
+          actor_name TEXT NOT NULL CHECK(length(actor_name) BETWEEN 1 AND 120),
+          control_revision INTEGER NOT NULL CHECK(control_revision >= 1),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          UNIQUE (control_revision)
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_intake_control_events_time
+          ON n8n_intake_control_events(created_at DESC, id DESC);
+      `)
+    }
+  },
+  {
+    id: '053_scheduler_leader_lease',
+    up(db: Database.Database) {
+      // A single well-known row coordinates the built-in scheduler across
+      // blue/green application processes. This is intentionally additive so
+      // an older release can continue reading the same database during a
+      // rolling transition.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS scheduler_leader_leases (
+          lease_name TEXT PRIMARY KEY
+            CHECK(lease_name = 'builtin_scheduler'),
+          holder_id TEXT NOT NULL
+            CHECK(length(holder_id) = 32 AND holder_id NOT GLOB '*[^0-9a-f]*'),
+          lease_expires_at INTEGER NOT NULL CHECK(lease_expires_at >= 0),
+          revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_scheduler_leader_leases_expiry
+          ON scheduler_leader_leases(lease_expires_at);
+      `)
+    }
+  },
+  {
+    id: '054_n8n_task_dispatch_leases',
+    up(db: Database.Database) {
+      // Keep webhook delivery ownership separate from n8n_task_runs so an
+      // older release can continue reading task rows during a rolling update.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_task_dispatch_leases (
+          task_id TEXT PRIMARY KEY,
+          tenant_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          owner_token TEXT NOT NULL
+            CHECK(length(owner_token) = 64 AND owner_token NOT GLOB '*[^0-9a-f]*'),
+          lease_expires_at INTEGER NOT NULL CHECK(lease_expires_at >= 0),
+          revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_task_dispatch_leases_expiry
+          ON n8n_task_dispatch_leases(lease_expires_at, task_id);
+        CREATE INDEX IF NOT EXISTS idx_n8n_task_dispatch_leases_scope
+          ON n8n_task_dispatch_leases(tenant_id, workspace_id, updated_at DESC);
+      `)
+    }
+  },
+  {
+    id: '055_n8n_child_execution_leases',
+    up(db: Database.Database) {
+      // Child execution ownership is kept in an additive side table so the
+      // previous release can continue reading n8n_task_runs during a rolling
+      // transition. The opaque instance owner plus fencing token permits only
+      // a different process instance to take over an expired running child.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_child_execution_leases (
+          task_id TEXT PRIMARY KEY,
+          tenant_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          owner_instance_id TEXT NOT NULL
+            CHECK(length(owner_instance_id) = 64 AND owner_instance_id NOT GLOB '*[^0-9a-f]*'),
+          lease_token TEXT NOT NULL
+            CHECK(length(lease_token) = 64 AND lease_token NOT GLOB '*[^0-9a-f]*'),
+          lease_expires_at INTEGER NOT NULL CHECK(lease_expires_at >= 0),
+          heartbeat_at INTEGER NOT NULL CHECK(heartbeat_at >= 0),
+          revision INTEGER NOT NULL DEFAULT 1 CHECK(revision >= 1),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_child_execution_leases_expiry
+          ON n8n_child_execution_leases(lease_expires_at, task_id);
+        CREATE INDEX IF NOT EXISTS idx_n8n_child_execution_leases_owner
+          ON n8n_child_execution_leases(owner_instance_id, lease_expires_at);
+      `)
+    }
+  },
+  {
+    id: '056_n8n_parent_execution_claims',
+    up(db: Database.Database) {
+      // Parent delivery ownership makes a lost claim response replayable only
+      // by the same n8n execution. A different execution observes a duplicate
+      // and must terminate before invoking any child nodes.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_parent_execution_claims (
+          task_id TEXT PRIMARY KEY,
+          tenant_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          execution_owner TEXT NOT NULL
+            CHECK(length(execution_owner) BETWEEN 15 AND 120
+              AND execution_owner GLOB 'n8n-execution:*'
+              AND execution_owner NOT GLOB '*[^A-Za-z0-9._:-]*'),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_parent_execution_claims_owner
+          ON n8n_parent_execution_claims(tenant_id, workspace_id, execution_owner, updated_at DESC);
+      `)
+    }
   }
 ]
 

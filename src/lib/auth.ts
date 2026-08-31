@@ -147,7 +147,7 @@ export function getLocalDesktopUserFromRequest(request: Request): User | null {
   }
 }
 
-function getDefaultWorkspaceContext(): { workspaceId: number; tenantId: number } {
+export function getDefaultWorkspaceContext(): { workspaceId: number; tenantId: number } {
   try {
     const db = getDatabase()
     const row = db.prepare(`

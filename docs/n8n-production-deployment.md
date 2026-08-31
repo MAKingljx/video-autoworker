@@ -127,7 +127,7 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 
 工作流先响应 HTTP `202`，再让三个 HTTP Request 节点依次回调回环地址 `/api/n8n/node-execute`。回调 URL 由 Video AutoWorker 服务端按自身 `PORT` 生成并强制校验为回环 HTTP；工作流不写死 3017，因此隔离环境不会误调生产控制台。需要显式覆盖时只能在外部环境设置完整的 `AIWORKER_N8N_NODE_CALLBACK_URL`，路径仍必须是 `/api/n8n/node-execute`。接口从 SQLite 读取父任务、节点配置和回投目标，按“本次任务覆盖 → 任务链节点配置 → 旧版兼容模型”的顺序解析路由。规划结果传给执行节点，规划和执行结果再交给审核节点；仅最终审核节点完成父任务并按需回投手机会话。
 
-每个节点会建立独立、可幂等查询的子任务记录，记录实际 `routeId`、本地/云端位置、传输方式和模型名。模型执行一旦产生错误不会自动重放，以免工具或外部 API 产生重复副作用；n8n 重复同一个节点 HTTP 请求只会读取已经持久化的结果。旧版 `/api/n8n/execute` 继续保留，供历史单模型工作流回退使用。
+每个节点会建立独立、可幂等查询的子任务记录，记录实际 `routeId`、本地/云端位置、传输方式和模型名。模型执行一旦产生错误不会自动重放，以免工具或外部 API 产生重复副作用；n8n 重复同一个节点 HTTP 请求只会读取已经持久化的结果。旧版 `/api/n8n/execute` 仅供显式 `legacy-v1` 任务在非 slot 旧运行时兼容使用；它拒绝 `slot-v1` 任务，不能作为蓝绿发布期间的回退入口。
 
 两条样例只使用 Webhook、Edit Fields、Respond to Webhook、HTTP Request 和 Merge 内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这两条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
 

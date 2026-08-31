@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { runOpenClaw } from '@/lib/command'
 import type { N8nTaskDelivery } from '@/lib/n8n-task-runs'
 import type { N8nModelRoute } from '@/lib/n8n-model-routing'
+import { SafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'])
 
@@ -84,7 +85,12 @@ async function executeOpenClaw(
       if (options.delivery.target) args.push('--reply-to', options.delivery.target)
       if (options.delivery.accountId) args.push('--reply-account', options.delivery.accountId)
     }
-    const result = await runOpenClaw(args, { timeoutMs: (timeoutSeconds + 15) * 1_000 })
+    let result: Awaited<ReturnType<typeof runOpenClaw>>
+    try {
+      result = await runOpenClaw(args, { timeoutMs: (timeoutSeconds + 15) * 1_000 })
+    } catch (error) {
+      throw new SafeOperationError('N8N_OPENCLAW_EXECUTION_FAILED', error)
+    }
     return {
       ...parseOpenClawOutput(result.stdout),
       routeId: route.id,
@@ -135,7 +141,10 @@ async function executeCompatibleApi(
   }
   if (!response.ok) {
     const detail = String(parsed?.error?.message || raw || `HTTP ${response.status}`).slice(0, 2_000)
-    throw new Error(`模型 API 调用失败：${detail}`)
+    throw new SafeOperationError('N8N_MODEL_HTTP_FAILED', {
+      statusCode: response.status,
+      detail,
+    })
   }
   const text = parsed?.choices?.[0]?.message?.content
   if (typeof text !== 'string' || !text.trim()) throw new Error('模型 API 返回空结果')
@@ -170,10 +179,5 @@ export async function executeN8nModelRoute(
 }
 
 export function n8nModelExecutionError(error: unknown): string {
-  const value = error as { stderr?: string; stdout?: string }
-  const detail = String(value?.stderr || value?.stdout || '').trim()
-  if (detail) return detail.slice(0, 2_000)
-  return error instanceof Error && !error.message.startsWith('Command failed (')
-    ? error.message.slice(0, 2_000)
-    : '模型节点执行失败'
+  return projectSafeOperationError(error, 'N8N_MODEL_EXECUTION_FAILED').persistedMessage
 }

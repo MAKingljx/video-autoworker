@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getMaterialsOverview } from '@/lib/openclaw-materials'
+import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 
 export async function GET(request: NextRequest) {
   const auth = authorizeMaterialsRequest(request, 'viewer')
@@ -12,9 +13,9 @@ export async function GET(request: NextRequest) {
       headers: { 'Cache-Control': 'no-store' },
     })
   } catch (error) {
-    return NextResponse.json({
-      error: error instanceof Error ? error.message : '无法读取素材库',
-    }, { status: 502 })
+    const failure = projectSafeOperationError(error, 'MATERIALS_OVERVIEW_FAILED')
+    logSafeOperationError('materials_overview', error, failure)
+    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 502 })
   }
 }
 

@@ -13,6 +13,12 @@ import {
   type AuxiliaryModelResource,
   type N8nModelRoute,
 } from '@/lib/n8n-model-routing'
+import {
+  logSafeOperationError,
+  projectSafeOperationError,
+  SafeOperationError,
+  sanitizeOperationalDiagnostic,
+} from '@/lib/operational-errors'
 import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/lib/media-policy.mjs'
 
 const videoKeySchema = z.string().trim().regex(
@@ -220,9 +226,10 @@ function runCommand(
 }
 
 function commandFailure(error: unknown, fallback: string): Error {
-  const candidate = error as { stderr?: string; stdout?: string; message?: string }
-  const detail = String(candidate?.stderr || candidate?.stdout || candidate?.message || fallback).trim()
-  return new Error(detail.slice(0, 2_000) || fallback)
+  return new SafeOperationError('N8N_MEDIA_COMMAND_FAILED', {
+    operation: fallback,
+    failure: sanitizeOperationalDiagnostic(error),
+  })
 }
 
 function ffmpegCommand(): string {
@@ -637,7 +644,11 @@ async function callCompatibleModel(
   }
   if (!response.ok) {
     const detail = String(parsed?.error?.message || raw || `HTTP ${response.status}`).slice(0, 2_000)
-    throw new Error(`${failurePrefix}：${detail}`)
+    throw new SafeOperationError('N8N_MEDIA_MODEL_HTTP_FAILED', {
+      operation: failurePrefix,
+      statusCode: response.status,
+      detail,
+    })
   }
   return parsed
 }
@@ -696,12 +707,17 @@ async function callCompatibleModelWithFallback(
       const payload = await callCompatibleModel(route, apiKey, content, failurePrefix, options)
       return { payload, route, routeIndex }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
-      errors.push(`${route.id}: ${detail.slice(0, 600)}`)
+      const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
+      logSafeOperationError('media_model_route_attempt', error, projection)
+      errors.push(`${route.id}: ${sanitizeOperationalDiagnostic(error, 600)}`)
     }
   }
   const configured = resolved.candidates.length ? resolved.candidates.join('、') : resolved.route.id
-  throw new Error(`${failurePrefix}（已尝试 ${configured}）：${errors.join('；')}`.slice(0, 2_000))
+  throw new SafeOperationError('N8N_MEDIA_MODEL_HTTP_FAILED', {
+    operation: failurePrefix,
+    configuredRoutes: configured,
+    attempts: errors,
+  })
 }
 
 /**

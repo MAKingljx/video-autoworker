@@ -638,6 +638,23 @@ function normalizeResultOffset(value) {
 
 function normalizeDispatchResult(value, expectedId, kind) {
   const idKey = kind === 'batch' ? 'batchId' : 'taskId'
+  if (value?.intakePaused === true) {
+    const allowedKeys = new Set([idKey, 'duplicate', 'intakePaused', 'status', 'materialHandoffPersisted'])
+    if (
+      value[idKey] !== expectedId
+      || value.status !== 'maintenance'
+      || value.duplicate !== false
+      || Object.keys(value).some(key => !allowedKeys.has(key))
+      || (Object.hasOwn(value, 'materialHandoffPersisted') && value.materialHandoffPersisted !== true)
+    ) throw new Error('invalid_intake_pause_result')
+    return {
+      kind,
+      id: expectedId,
+      status: 'maintenance',
+      duplicate: false,
+      intakePaused: true,
+    }
+  }
   if (value?.confirmationRequired === true) {
     if (
       value[idKey] !== expectedId
@@ -1027,6 +1044,10 @@ export function createSchedulerRunner({
         }
         const normalized = normalizeDispatchResult(value, taskId, 'task')
         if (handoff) {
+          if (normalized.intakePaused === true) {
+            cleanupDisposition = 'not_started'
+            return normalized
+          }
           if (normalized.confirmationRequired === true) return normalized
           if (value.materialHandoffPersisted !== true) {
             throw new Error('material_handoff_not_persisted')

@@ -208,6 +208,7 @@ async function executeRequest(request, {
             : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
           confirmDuplicate: true,
         })
+      if (result.intakePaused === true) duplicateConfirmationStore.set(duplicateConfirmationScope, pending)
       if (result.confirmationRequired) duplicateConfirmationStore.set(duplicateConfirmationScope, pending)
       return textResult(dispatchReceipt(result))
     } catch {

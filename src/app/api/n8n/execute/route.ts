@@ -6,6 +6,10 @@ import { runOpenClaw } from '@/lib/command'
 import { getDatabase } from '@/lib/db'
 import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import {
+  checkN8nCallbackAdmission,
+  N8N_LEGACY_CALLBACK_PROTOCOL,
+} from '@/lib/n8n-runtime-affinity'
+import {
   claimN8nTaskRun,
   completeN8nTaskRun,
   failN8nTaskRun,
@@ -152,6 +156,21 @@ export async function POST(request: NextRequest) {
   if (!existing) return NextResponse.json({ error: '未找到任务运行记录' }, { status: 404 })
   if (existing.idempotencyKey !== idempotencyResult.data) {
     return NextResponse.json({ error: '幂等键与任务记录不匹配' }, { status: 409 })
+  }
+  if (existing.routing.callbackProtocol !== N8N_LEGACY_CALLBACK_PROTOCOL) {
+    return NextResponse.json({
+      taskId: existing.taskId,
+      code: 'N8N_LEGACY_EXECUTION_REQUIRED',
+      error: '旧执行接口只允许显式 legacy-v1 任务',
+    }, { status: 409 })
+  }
+  const admission = checkN8nCallbackAdmission(existing.routing)
+  if (!admission.allowed || admission.mode !== 'legacy') {
+    return NextResponse.json({
+      taskId: existing.taskId,
+      code: admission.allowed ? 'N8N_LEGACY_RUNTIME_REQUIRED' : admission.code,
+      error: admission.allowed ? '旧执行接口不能在蓝绿 slot 运行时执行' : admission.error,
+    }, { status: 409 })
   }
   if (existing.status === 'succeeded') {
     return NextResponse.json({ taskId: existing.taskId, status: existing.status, output: existing.output, cached: true })

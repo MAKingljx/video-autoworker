@@ -91,6 +91,23 @@ describe('hook-owned Qwen video scheduler', () => {
     })
   })
 
+  it('reports an intake pause as maintenance instead of an ambiguous submission', async () => {
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId }) => ({
+        kind: 'task',
+        id: taskId,
+        status: 'maintenance',
+        duplicate: false,
+        intakePaused: true,
+      })),
+    }
+    await expect(handler({ runner })(event(), context)).resolves.toEqual({
+      handled: true,
+      text: '视频学习服务正在发布维护，暂时停止接收新任务，请稍后再试。',
+    })
+    expect(runner.dispatchVideo).toHaveBeenCalledOnce()
+  })
+
   it('does not create a duplicate task until the user sends the exact follow-up confirmation', async () => {
     const classifier = vi.fn(async () => ({
       action: 'dispatch_single', value: '/data/S03E03.mp4',

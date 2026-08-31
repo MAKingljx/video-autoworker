@@ -2,7 +2,11 @@
 
 import { rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { createPlatformClient, isRetryablePlatformError } from '../lib/platform-client.mjs'
+import {
+  createPlatformClient,
+  isN8nIntakeDrainingError,
+  isRetryablePlatformError,
+} from '../lib/platform-client.mjs'
 import { isTerminalTaskStatus } from '../lib/task-status-authority.mjs'
 import { submitStagedVideoTask, submitVideoTask } from '../lib/video-task.mjs'
 import {
@@ -398,6 +402,14 @@ async function runBatch(statePath) {
         return state
       }
     } catch (error) {
+      if (isN8nIntakeDrainingError(error)) {
+        // Intake can close after the submit-side preflight. Park the batch
+        // without changing item order/identity or discarding staged media;
+        // the persistent worker will retry this exact handoff after reopen.
+        state.status = 'recovering'
+        state.error = `${batchItemDisplayName(item)}：${error.message}`.slice(0, 2_000)
+        return persist(statePath, state)
+      }
       if (isRetryablePlatformError(error)) throw error
       if (item.stagingRecovery) {
         item.status = 'recovering'
