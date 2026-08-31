@@ -951,7 +951,20 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(deployScript).toContain("leadership.state !== 'inactive'")
     expect(deployScript).toContain('counters.activeRequests !== 0')
     expect(deployScript).toContain('counters.upgradedSockets !== 0')
-    expect(deployScript).toContain('video-autoworker-blue-green-baseline/v2')
+    expect(deployScript).toContain('video-autoworker-blue-green-baseline/v3')
+    expect(deployScript).toContain('video-autoworker-blue-green-bootstrap-pending/v3')
+    expect(deployScript).toContain('slot-v1-execution-owner-v1')
+    expect(deployScript).toContain('check_n8n_workflow_compatibility')
+    const bootstrapBody = deployScript.slice(
+      deployScript.indexOf('bootstrap_baseline()'),
+      deployScript.indexOf('bind_slot()'),
+    )
+    const finalWorkflowCheck = bootstrapBody.lastIndexOf('check_n8n_workflow_compatibility')
+    expect(finalWorkflowCheck).toBeGreaterThan(bootstrapBody.indexOf('"$manager" status router'))
+    expect(finalWorkflowCheck).toBeLessThan(bootstrapBody.indexOf('baseline_payload='))
+    expect(bootstrapBody).toContain('"$workflow_compatibility_final" == "$workflow_compatibility_after"')
+    expect(bootstrapBody.indexOf('workflow_digest="$($NODE_BIN', finalWorkflowCheck))
+      .toBeLessThan(bootstrapBody.indexOf('baseline_payload='))
     expect(deployScript).toContain('video-autoworker-legacy-freeze-evidence/v2')
     expect(deployScript).toContain('supervisorQuiesced !== true')
     expect(deployScript).toContain('bootstrap retry requires fresh zero-work evidence while the legacy PID is still alive')

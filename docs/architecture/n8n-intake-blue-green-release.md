@@ -9,8 +9,10 @@
 不被取消或强停，继续回调创建该任务的旧 release。新 release 验收并切换后即可恢复新任务
 准入；旧 release 在后台排空后再退役。
 
-本方案不会重启或修改 n8n、Gateway、模型服务、video worker、正式任务和业务数据，也不会
-自动重提失败任务。
+完成首次协议迁移后的常规 3017 发布不会重启或修改 n8n、Gateway、模型服务、video worker、
+正式任务和业务数据，也不会自动重提失败任务。当前旧 n8n 工作流尚未携带完整的 slot-v1
+execution owner，因此首次迁移是一次明确的例外维护窗：必须先停 n8n，离线导入并发布兼容
+工作流，再恢复 n8n；这一步不属于日常蓝绿切换，也不能由 3017 部署脚本隐式执行。
 
 ## 稳定入口与运行槽
 
@@ -137,11 +139,39 @@ switch/rollback 同时核对 binding、attestation、PID、监听进程 cwd、re
 ## 首次引导与后续发布
 
 既有单进程 `542eebd-runtime` 没有 callback affinity，所以首次迁入蓝绿结构仍需一次完整归零。
-引导证据必须同时证明：入口外部冻结、活跃媒体节点为零、n8n 活跃 execution 为零、正式队列
-waiting/running 为零，并且证据新鲜、Mission Control/n8n 数据库与两个真实 PID 绑定正确。
-部署器在停止 legacy 3017 前后分别以只读方式对两个权威 SQLite 执行 `quick_check` 和零活动
-复核，并验证 n8n PID 始终打开同一个数据库；证据中的 legacy release ID 还必须与进程物理 cwd
-一致。任一检查失败都保持冻结维护态，不启动新基线。
+仓库合同对比也已证明旧通用工作流缺少 claim，旧视频工作流的 claim/media 回调缺少
+`executionOwner`；如果直接切换，新 API 会按严格 schema 拒绝这些回调。因此首次迁移顺序固定为：
+
+1. 在外部冻结所有顶层入口，并证明活跃媒体节点、n8n 活跃 execution、正式队列
+   waiting/running 全部为零；
+2. 备份当前 3017、n8n 状态、配套环境和工作流回滚点；
+3. 优雅停止 n8n，使用受管离线导入器按固定 ID 导入并发布当前 Git HEAD 的两条工作流；
+4. 恢复 n8n，验证健康、真实 PID/SQLite 绑定、固定工作流唯一且 active/published，并核对
+   imported current/active/published version 一致、published nodes/connections/settings/nodeGroups
+   摘要与 slot-v1 execution-owner 协议；n8n 2.31.6 导入时会生成新的 versionId，不能错误要求
+   数据库 versionId 等于仓库 JSON 中的 source versionId；
+5. 使用新的 n8n PID 重新签发新鲜的零活动证据；旧 PID 的证据不得沿用；
+6. 执行 legacy bootstrap。部署器在停止 legacy 3017 前后再次只读核对两个权威 SQLite、
+   n8n 完整运行身份和已发布工作流摘要，完全一致后才建立蓝绿基线。完整身份同时绑定
+   `com.video-autoworker.n8n` LaunchAgent job、5678 唯一 listener、精确 Node + release 内 n8n CLI
+   `start` argv、父子 PID、物理 cwd、数据库 open FD 的 device/inode、40 位 commit release 根、
+   `SOURCE_COMMIT`、`SOURCE_MANIFEST`、`RUNTIME_SOURCE_SHA256SUMS` 和 n8n `2.31.6` 包版本。
+
+生产 argv 允许使用受控的 n8n 与 Node `current` 软链接；验证器逐组件绑定其 owner、mode、
+device/inode、链接目标与最终物理文件，n8n CLI 最终必须落到本次 40 位 commit release，Node
+最终文件必须与 n8n 进程的 executable FD 一致。数据库、cwd 和物理 release 自身仍禁止软链接。
+验证器在查询 SQLite 前后各捕获一次上述身份，并在 SQLite handle 保持打开期间用自身数字 FD
+再次绑定数据库 device/inode，阻断路径换 inode 后再恢复的 ABA 窗口。任一原子替换、越界链接、
+运行身份或工作流摘要漂移都会失败关闭；启动基线并通过 manager 检查后、写 baseline 前还会做
+第三次紧邻复核。测试专用命令替身只有显式 test 环境才可用，部署器调用前会清除全部测试覆盖
+变量，生产验证固定调用系统 `launchctl`、`lsof` 和 `ps`。
+
+首次迁移中，n8n 工作流升级发生在 bootstrap 之前的独立维护步骤；`deploy-blue-green.sh`
+本身只读验证，不导入工作流、不停止或启动 n8n。任一检查失败都保持外部冻结维护态，不能
+启动新基线或开放入口。基线 application release ID 必须由当前 Git HEAD 的 7 至 40 位提交前缀
+加可选 `-runtime` 组成；部署器把它解析为精确 40 位提交，并要求受管 n8n release 的
+`SOURCE_COMMIT`、两条 release 内工作流和数据库已发布内容全部绑定同一提交，不能仅依赖后来
+可能前移的 checkout 工作树。
 
 首次引导完成后，常规发布顺序为：
 
@@ -200,6 +230,11 @@ rebind 只有在一次性消费有效 proof 后才清理旧 binding、freeze mar
 直接复核两个 SQLite；停止后再次复核，随后启动新基线。任何后置失败都保持明确的冻结维护态，
 不能猜测恢复未知旧环境。
 
+如果首次工作流升级在 legacy bootstrap 开始前失败，必须保持入口冻结，并从已验证备份恢复
+上一版 n8n 工作流/运行态，确认旧 3017 与旧工作流重新兼容后才允许开放。bootstrap 已停止
+legacy 3017 后则不得自动把共享数据库或 n8n 工作流猜测性回滚；只按维护手册恢复明确的完整
+回滚点，或保留冻结态处理。
+
 ## OpenClaw 兼容组
 
 入口暂停协议要求 3017、`aiworker-task-flow` 和 `aiworker-video-command` 同时理解 423、稳定任务
@@ -212,4 +247,5 @@ Git 提交校验实际文件。
 ## 当前状态
 
 以上均为本地候选，尚未部署生产。首次迁移硬门仍有一个活跃媒体节点，因此生产 3017 继续运行
-旧 release；当前只允许测试、Git 交付和只读复核。
+旧 release；当前只允许测试、Git 交付和只读复核。新增 bootstrap 硬门会拒绝旧生产工作流、
+未发布工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走 legacy 3017。

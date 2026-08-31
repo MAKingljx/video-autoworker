@@ -74,10 +74,12 @@ contains the viewer/admin API token (or inject AIWORKER_BG_CONTROL_TOKEN).
 `bootstrap` is the only supported migration from a legacy single-process 3017.
 Its mode-0600 external evidence must attest a frozen ingress and zero media,
 n8n execution, waiting and running counts. The evidence must also bind the live
-Mission Control and n8n SQLite files and their exact listener PIDs. Bootstrap
-rechecks both databases read-only before and after stopping only the evidenced
-3017 PID, then writes the permanent gate-aware baseline; it never restarts the
-legacy PID.
+Mission Control and n8n SQLite files and their exact listener PIDs. The two
+fixed n8n workflows must already be active, published from the workflow files
+in this Git HEAD, and implement the slot-v1 execution-owner callback protocol.
+Bootstrap verifies that contract and both databases read-only before and after
+stopping only the evidenced 3017 PID, then writes the permanent gate-aware
+baseline; it never imports workflows, restarts n8n, or restarts the legacy PID.
 EOF
 }
 
@@ -717,6 +719,62 @@ try {
 NODE
 }
 
+resolve_baseline_source_commit() {
+  local release_id="$1" candidate resolved head
+  candidate="${release_id%-runtime}"
+  [[ "$candidate" =~ ^[a-f0-9]{7,40}$ ]] \
+    || fail "bootstrap release ID must be a 7-40 character Git commit prefix with optional -runtime suffix"
+  resolved="$(git -C "$PROJECT_ROOT" rev-parse --verify "${candidate}^{commit}" 2>/dev/null)" \
+    || fail "bootstrap release ID does not resolve to a Git commit"
+  head="$(git -C "$PROJECT_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+    || fail "bootstrap requires a full Git HEAD"
+  [[ "$resolved" == "$head" ]] \
+    || fail "bootstrap release ID is not bound to the checked-out Git HEAD"
+  printf '%s\n' "$resolved"
+}
+
+check_n8n_workflow_compatibility() {
+  local n8n_pid="$1" n8n_db="$2" expected_commit="$3" verifier canonical_db relative
+  verifier="$PROJECT_ROOT/scripts/verify-n8n-blue-green-workflows.mjs"
+  [[ "$n8n_pid" =~ ^[1-9][0-9]*$ ]] || fail "n8n workflow verification PID is invalid"
+  [[ "$expected_commit" =~ ^[a-f0-9]{40}$ ]] || fail "n8n workflow verification commit is invalid"
+  kill -0 "$n8n_pid" 2>/dev/null || fail "n8n workflow verification requires the evidenced live PID"
+  assert_absolute "n8n workflow database" "$n8n_db"
+  [[ -f "$n8n_db" && ! -L "$n8n_db" ]] \
+    || fail "n8n workflow verification requires the physical n8n SQLite database"
+  canonical_db="$(physical_path "$n8n_db")" \
+    || fail "unable to resolve n8n workflow database"
+  command -v lsof >/dev/null 2>&1 \
+    || fail "n8n workflow verification requires lsof for PID/database binding"
+  lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$canonical_db" \
+    || fail "evidenced n8n PID is not using the workflow database being verified"
+  [[ -f "$verifier" && ! -L "$verifier" ]] \
+    || fail "n8n workflow compatibility verifier is unavailable"
+  for relative in \
+    ops/n8n/workflows/aiworker-task-intake.json \
+    ops/n8n/workflows/aiworker-video-analysis.json; do
+    git -C "$PROJECT_ROOT" ls-files --error-unmatch "$relative" >/dev/null 2>&1 \
+      || fail "n8n workflow compatibility source is not tracked: $relative"
+    git -C "$PROJECT_ROOT" diff --quiet HEAD -- "$relative" \
+      || fail "n8n workflow compatibility source differs from Git HEAD: $relative"
+  done
+  env -u NODE_ENV \
+    -u AIWORKER_TEST_N8N_IDENTITY \
+    -u AIWORKER_TEST_N8N_LAUNCHCTL \
+    -u AIWORKER_TEST_N8N_LSOF \
+    -u AIWORKER_TEST_N8N_PS \
+    -u AIWORKER_TEST_N8N_BEFORE_DATABASE_OPEN \
+    -u AIWORKER_TEST_N8N_AFTER_DATABASE_OPEN \
+    -u AIWORKER_TEST_N8N_AFTER_QUERY \
+    "$NODE_BIN" "$verifier" \
+    --database "$canonical_db" \
+    --repository "$PROJECT_ROOT" \
+    --expected-commit "$expected_commit" \
+    --module-root "$PROJECT_ROOT" \
+    --pid "$n8n_pid" \
+    --port 5678
+}
+
 assert_router_identity() {
   local active_slot="$1"
   local release_id="$2"
@@ -884,14 +942,21 @@ assert_baseline() {
   values="$("$NODE_BIN" - "$pathname" "$live_db" "$canonical_router_state" "$ROUTER_PORT" <<'NODE'
 const value = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))
 const [dbPath, routerStatePath, rawPort] = process.argv.slice(3)
+const baselineCommitPrefix = value.baselineReleaseId?.endsWith('-runtime')
+  ? value.baselineReleaseId.slice(0, -'-runtime'.length)
+  : value.baselineReleaseId
   const expectedKeys = ['baselineManifestSha256', 'baselineReleaseId', 'baselineReleaseRoot',
-   'baselineSlot', 'completedAt', 'dbPath', 'evidenceSha256', 'legacyPid', 'legacyReleaseId',
-   'n8nDbPath', 'n8nPid', 'routerPort', 'routerStatePath', 'schema']
+   'baselineSlot', 'baselineSourceCommit', 'completedAt', 'dbPath', 'evidenceSha256', 'legacyPid', 'legacyReleaseId',
+   'n8nDbPath', 'n8nPid', 'n8nWorkflowDigest', 'n8nWorkflowProtocol',
+   'n8nWorkflowSourceCommit', 'routerPort', 'routerStatePath', 'schema']
 if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
-if (value.schema !== 'video-autoworker-blue-green-baseline/v2'
+if (value.schema !== 'video-autoworker-blue-green-baseline/v3'
   || !['blue', 'green'].includes(value.baselineSlot)
   || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.baselineReleaseId)
   || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.legacyReleaseId)
+  || !/^[a-f0-9]{40}$/u.test(value.baselineSourceCommit)
+  || !/^[a-f0-9]{7,40}$/u.test(baselineCommitPrefix)
+  || !value.baselineSourceCommit.startsWith(baselineCommitPrefix)
   || value.baselineReleaseId === value.legacyReleaseId
   || !/^[a-f0-9]{64}$/u.test(value.baselineManifestSha256)
   || !/^[a-f0-9]{64}$/u.test(value.evidenceSha256)
@@ -899,6 +964,9 @@ if (value.schema !== 'video-autoworker-blue-green-baseline/v2'
   || !Number.isSafeInteger(value.n8nPid) || value.n8nPid <= 0
   || typeof value.n8nDbPath !== 'string' || !value.n8nDbPath.startsWith('/')
   || /[\r\n]/u.test(value.n8nDbPath)
+  || value.n8nWorkflowProtocol !== 'slot-v1-execution-owner-v1'
+  || value.n8nWorkflowSourceCommit !== value.baselineSourceCommit
+  || !/^[a-f0-9]{64}$/u.test(value.n8nWorkflowDigest)
   || !Number.isSafeInteger(value.completedAt) || value.completedAt <= 0
   || value.dbPath !== dbPath || value.routerStatePath !== routerStatePath
   || typeof value.baselineReleaseRoot !== 'string' || !value.baselineReleaseRoot.startsWith('/')
@@ -915,11 +983,59 @@ NODE
   printf '%s\n' "$values"
 }
 
+assert_bootstrap_pending_identity() {
+  local pathname="$1" expected_payload="$2" allow_evidence_refresh="$3"
+  assert_private_file "bootstrap pending marker" "$pathname"
+  [[ "$allow_evidence_refresh" == 0 || "$allow_evidence_refresh" == 1 ]] \
+    || fail "invalid bootstrap pending comparison mode"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const [pathname, rawExpected, rawAllowRefresh] = process.argv.slice(1)
+    const actual = JSON.parse(fs.readFileSync(pathname, "utf8"))
+    const expected = JSON.parse(rawExpected)
+    const expectedKeys = ["baselineSourceCommit", "dbPath", "evidenceObservedAt", "evidenceSha256",
+      "legacyCwd", "legacyPid", "legacyReleaseId", "manifestSha256", "n8nDbPath", "n8nPid",
+      "n8nWorkflowDigest", "n8nWorkflowProtocol", "n8nWorkflowSourceCommit", "releaseId",
+      "releaseRoot", "routerPort", "routerStatePath", "schema", "slot"]
+    const releasePrefix = actual.releaseId?.endsWith("-runtime")
+      ? actual.releaseId.slice(0, -"-runtime".length) : actual.releaseId
+    if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(expectedKeys)
+      || actual.schema !== "video-autoworker-blue-green-bootstrap-pending/v3"
+      || !["blue", "green"].includes(actual.slot)
+      || !/^[a-f0-9]{7,40}$/u.test(releasePrefix)
+      || !/^[a-f0-9]{40}$/u.test(actual.baselineSourceCommit)
+      || !actual.baselineSourceCommit.startsWith(releasePrefix)
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(actual.legacyReleaseId)
+      || actual.releaseId === actual.legacyReleaseId
+      || !/^[a-f0-9]{64}$/u.test(actual.manifestSha256)
+      || !/^[a-f0-9]{64}$/u.test(actual.evidenceSha256)
+      || !/^[a-f0-9]{64}$/u.test(actual.n8nWorkflowDigest)
+      || !Number.isSafeInteger(actual.evidenceObservedAt) || actual.evidenceObservedAt <= 0
+      || !Number.isSafeInteger(actual.legacyPid) || actual.legacyPid <= 0
+      || !Number.isSafeInteger(actual.n8nPid) || actual.n8nPid <= 0
+      || !Number.isSafeInteger(actual.routerPort) || actual.routerPort <= 0
+      || actual.n8nWorkflowProtocol !== "slot-v1-execution-owner-v1"
+      || actual.n8nWorkflowSourceCommit !== actual.baselineSourceCommit
+      || !["legacyCwd", "releaseRoot", "dbPath", "routerStatePath", "n8nDbPath"]
+        .every(key => typeof actual[key] === "string" && actual[key].startsWith("/")
+          && !/[\r\n]/u.test(actual[key]))) process.exit(2)
+    if (rawAllowRefresh === "1") {
+      for (const field of ["evidenceSha256", "evidenceObservedAt"]) {
+        delete actual[field]
+        delete expected[field]
+      }
+    }
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(3)
+  ' "$pathname" "$expected_payload" "$allow_evidence_refresh" \
+    || fail "bootstrap retry does not match its pending runtime identity"
+}
+
 bootstrap_baseline() {
   local slot release_id standalone_root evidence_file physical_root manifest live_db canonical_router_state
   local evidence_values legacy_release legacy_pid legacy_cwd n8n_pid n8n_db evidence_observed evidence_sha now
   local pending pending_payload binding_payload state_payload baseline_payload other_slot listeners deadline
   local evidence_max_age evidence_age pending_exists=0 manager installer intake_revision baseline_readiness baseline_epoch
+  local workflow_compatibility workflow_compatibility_after workflow_compatibility_final workflow_digest source_commit
   slot="$(require_slot "${1:-}")"
   release_id="${2:-}"
   standalone_root="${3:-}"
@@ -954,6 +1070,7 @@ bootstrap_baseline() {
   n8n_db="$(physical_path "$N8N_DB_PATH")" || fail "unable to resolve AIWORKER_BG_N8N_DB_PATH"
   physical_root="$(assert_release "$release_id" "$standalone_root")"
   manifest="$(release_manifest_sha "$physical_root")"
+  source_commit="$(resolve_baseline_source_commit "$release_id")"
   manager="$SCRIPT_DIR/manage-blue-green-services.sh"
   installer="$SCRIPT_DIR/install-blue-green-launch-agents.sh"
   [[ -x "$manager" && -x "$installer" ]] \
@@ -1013,6 +1130,29 @@ const [cwd, releaseId] = process.argv.slice(2)
 const candidate = path.basename(cwd) === 'standalone' ? path.basename(path.dirname(cwd)) : path.basename(cwd)
 if (candidate !== releaseId) process.exit(1)
 NODE
+  BOOTSTRAP_MAINTENANCE=1
+  command -v lsof >/dev/null 2>&1 || fail "bootstrap requires lsof for exact process verification"
+  kill -0 "$n8n_pid" 2>/dev/null || fail "evidenced n8n PID is not running"
+  lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
+    || fail "evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH"
+  check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
+    || fail "legacy databases are not quiescent before workflow verification"
+  workflow_compatibility="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+    || fail "published n8n workflows are not compatible with slot-v1"
+  workflow_digest="$($NODE_BIN -e '
+    const value = JSON.parse(process.argv[1])
+    const databasePath = process.argv[2]
+    const sourceCommit = process.argv[3]
+    if (value.schema !== "video-autoworker-n8n-workflow-compatibility/v2"
+      || value.protocol !== "slot-v1-execution-owner-v1"
+      || value.sourceCommit !== sourceCommit
+      || value.databasePath !== databasePath
+      || !/^[a-f0-9]{64}$/u.test(value.runtimeIdentitySha256)
+      || !/^[a-f0-9]{64}$/u.test(value.combinedSha256)
+      || !Array.isArray(value.workflows) || value.workflows.length !== 2) process.exit(2)
+    process.stdout.write(value.combinedSha256)
+  ' "$workflow_compatibility" "$n8n_db" "$source_commit")" \
+    || fail "published n8n workflow compatibility result is invalid"
   if (( pending_exists == 1 )) && kill -0 "$legacy_pid" 2>/dev/null; then
     evidence_age=$(( now - evidence_observed ))
     (( evidence_age >= 0 && evidence_age <= BOOTSTRAP_EVIDENCE_MAX_AGE )) \
@@ -1024,39 +1164,27 @@ NODE
   other_slot="$([[ "$slot" == blue ]] && printf green || printf blue)"
   pending_payload="$($NODE_BIN -e '
     const [slot, releaseId, releaseRoot, manifest, legacyRelease, rawLegacyPid, legacyCwd,
-      evidenceSha, rawObserved, dbPath, routerStatePath, rawRouterPort] = process.argv.slice(1)
+      evidenceSha, rawObserved, dbPath, routerStatePath, rawRouterPort, rawN8nPid, n8nDbPath,
+      sourceCommit, n8nWorkflowDigest] = process.argv.slice(1)
     process.stdout.write(JSON.stringify({
-      schema: "video-autoworker-blue-green-bootstrap-pending/v2", slot, releaseId, releaseRoot,
+      schema: "video-autoworker-blue-green-bootstrap-pending/v3", slot, releaseId, releaseRoot,
       manifestSha256: manifest, legacyReleaseId: legacyRelease, legacyPid: Number(rawLegacyPid),
       legacyCwd, evidenceSha256: evidenceSha, evidenceObservedAt: Number(rawObserved), dbPath,
-      routerStatePath, routerPort: Number(rawRouterPort), n8nPid: Number(process.argv[13]), n8nDbPath: process.argv[14],
+      routerStatePath, routerPort: Number(rawRouterPort), n8nPid: Number(rawN8nPid), n8nDbPath,
+      baselineSourceCommit: sourceCommit, n8nWorkflowProtocol: "slot-v1-execution-owner-v1",
+      n8nWorkflowSourceCommit: sourceCommit, n8nWorkflowDigest,
     }))
   ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
-    "$evidence_sha" "$evidence_observed" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db")"
+    "$evidence_sha" "$evidence_observed" "$live_db" "$canonical_router_state" "$ROUTER_PORT" \
+    "$n8n_pid" "$n8n_db" "$source_commit" "$workflow_digest")"
   if [[ -e "$pending" || -L "$pending" ]]; then
-    assert_private_file "bootstrap pending marker" "$pending"
     if kill -0 "$legacy_pid" 2>/dev/null; then
-      "$NODE_BIN" -e '
-        const fs = require("node:fs")
-        const actual = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-        const expected = JSON.parse(process.argv[2])
-        for (const field of ["evidenceSha256", "evidenceObservedAt"]) {
-          delete actual[field]
-          delete expected[field]
-        }
-        if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(2)
-      ' "$pending" "$pending_payload" \
-        || fail "bootstrap retry does not match its pending runtime identity"
+      assert_bootstrap_pending_identity "$pending" "$pending_payload" 1
       # Refresh only the evidence digest/time after every other immutable
       # bootstrap field has matched the existing marker.
       write_json_atomic "$pending" "$pending_payload"
     else
-      "$NODE_BIN" -e '
-        const fs = require("node:fs")
-        const actual = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
-        const expected = JSON.parse(process.argv[2])
-        if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(2)
-      ' "$pending" "$pending_payload" || fail "bootstrap retry does not match its pending marker"
+      assert_bootstrap_pending_identity "$pending" "$pending_payload" 0
     fi
   else
     [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]] \
@@ -1066,14 +1194,6 @@ NODE
       || fail "legacy bootstrap requires unused slot bindings"
     write_json_atomic "$pending" "$pending_payload"
   fi
-  BOOTSTRAP_MAINTENANCE=1
-
-  command -v lsof >/dev/null 2>&1 || fail "bootstrap requires lsof for exact legacy process verification"
-  kill -0 "$n8n_pid" 2>/dev/null || fail "evidenced n8n PID is not running"
-  lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
-    || fail "evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH"
-  check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
-    || fail "legacy databases are not quiescent before shutdown"
   if kill -0 "$legacy_pid" 2>/dev/null; then
     listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
     [[ "$listeners" == "$legacy_pid" ]] || fail "legacy PID is not the sole listener on router port $ROUTER_PORT"
@@ -1098,6 +1218,10 @@ NODE
     || fail "n8n database identity changed during bootstrap"
   check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
     || fail "legacy databases changed after ingress shutdown"
+  workflow_compatibility_after="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+    || fail "published n8n workflow compatibility changed during legacy shutdown"
+  [[ "$workflow_compatibility_after" == "$workflow_compatibility" ]] \
+    || fail "published n8n workflow digest changed during legacy shutdown"
 
   binding_payload="$($NODE_BIN -e '
     const [slot, releaseId, releaseRoot, manifestSha, port] = process.argv.slice(1)
@@ -1149,16 +1273,32 @@ NODE
   "$manager" status "$slot" >/dev/null \
     && "$manager" status router >/dev/null \
     || fail "baseline processes are healthy but not under the expected service manager"
+  workflow_compatibility_final="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+    || fail "published n8n workflow compatibility changed before baseline commit"
+  [[ "$workflow_compatibility_final" == "$workflow_compatibility_after" ]] \
+    || fail "published n8n workflow digest changed before baseline commit"
+  workflow_digest="$($NODE_BIN -e '
+    const value = JSON.parse(process.argv[1])
+    if (value.schema !== "video-autoworker-n8n-workflow-compatibility/v2"
+      || value.protocol !== "slot-v1-execution-owner-v1"
+      || !/^[a-f0-9]{64}$/u.test(value.combinedSha256)) process.exit(2)
+    process.stdout.write(value.combinedSha256)
+  ' "$workflow_compatibility_final")" \
+    || fail "final published n8n workflow compatibility result is invalid"
   baseline_payload="$($NODE_BIN -e '
     const [baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
-      legacyReleaseId, rawLegacyPid, evidenceSha256, dbPath, routerStatePath, rawRouterPort] = process.argv.slice(1)
-    process.stdout.write(JSON.stringify({ schema: "video-autoworker-blue-green-baseline/v2",
+      legacyReleaseId, rawLegacyPid, evidenceSha256, dbPath, routerStatePath, rawRouterPort,
+      rawN8nPid, n8nDbPath, sourceCommit, n8nWorkflowDigest] = process.argv.slice(1)
+    process.stdout.write(JSON.stringify({ schema: "video-autoworker-blue-green-baseline/v3",
       baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
       legacyReleaseId, legacyPid: Number(rawLegacyPid), evidenceSha256, dbPath, routerStatePath,
-      n8nPid: Number(process.argv[11]), n8nDbPath: process.argv[12],
+      n8nPid: Number(rawN8nPid), n8nDbPath,
+      baselineSourceCommit: sourceCommit, n8nWorkflowProtocol: "slot-v1-execution-owner-v1",
+      n8nWorkflowSourceCommit: sourceCommit, n8nWorkflowDigest,
       routerPort: Number(rawRouterPort), completedAt: Math.floor(Date.now() / 1000) }))
   ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" \
-    "$evidence_sha" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db")"
+    "$evidence_sha" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db" \
+    "$source_commit" "$workflow_digest")"
   write_json_atomic "$(baseline_file)" "$baseline_payload"
   assert_baseline >/dev/null
   rm -f -- "$pending"

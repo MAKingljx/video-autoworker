@@ -84,6 +84,33 @@ runtime="$HOME/ai-worker/services/video-autoworker-n8n/current"
 bash "$runtime/scripts/n8n-import-workflows.sh" --no-activate
 ```
 
+### 首次迁入 3017 蓝绿协议
+
+从旧单进程 3017 首次迁入 slot-v1 时，两条工作流也必须完成一次协议升级。该窗口必须先在
+外部停止新任务准入，并确认媒体节点、n8n 活跃 execution 和正式队列 waiting/running 全部
+归零；随后备份 n8n 状态，停止 n8n，使用上述离线导入器发布当前 Git HEAD 的固定 ID 工作流，
+再启动 n8n。启动后必须用 `scripts/verify-n8n-blue-green-workflows.mjs` 核对真实 n8n PID 打开的
+SQLite 中 current/active/published version 的一致性和内容摘要，并用新 PID 重新生成引导证据，
+最后才可执行 `deploy-blue-green.sh bootstrap`。n8n 2.31.6 在 `import:workflow` 时会生成新的
+versionId，因此验证器不把数据库 versionId 与 JSON 中的 source versionId 强行相等；它要求
+数据库三个版本引用同一已发布 history，并比较规范化后的 nodes、connections、settings 和
+nodeGroups。应用基线 release、受管 n8n release 的 `SOURCE_COMMIT` 和工作流内容还必须来自
+同一个精确 Git 提交。
+
+验证器还要求 `com.video-autoworker.n8n` LaunchAgent job PID 是 n8n Node PID 的直接父进程，
+5678 只有该 Node PID 监听，argv 精确为 Node、当前 40 位 commit release 内的 n8n CLI 和
+`start`。argv 可经过受控的 Node/n8n `current` 软链接，但会逐组件绑定权限与身份；CLI 最终目标
+必须是当前物理 release，Node 最终目标必须匹配进程 executable FD。数据库、cwd、release 根及
+其他受管运行文件不得经过符号链接；数据库和 cwd 的路径 device/inode 必须与 n8n 实际打开的
+FD 一致，验证器自己的 SQLite 数字 FD 也会在查询期间与同一 inode 绑定。`SOURCE_COMMIT`、`SOURCE_MANIFEST`、
+`RUNTIME_SOURCE_SHA256SUMS`、受管源码文件、n8n `2.31.6` 包版本和两条工作流摘要会在查询前后
+重新捕获并比较，防止检查期间发生原子替换、ABA 恢复或运行身份漂移；baseline 原子写入前还会
+在服务管理器验收之后执行一次紧邻复核并使用该最终摘要。
+
+蓝绿部署器不会代替这一维护步骤操作 n8n，只会在停止旧 3017 前后只读复核工作流契约没有
+漂移。首次迁移完成后，普通 3017 发版不再导入工作流或重启 n8n；只暂停新的顶层任务，旧
+execution 按持久化 release affinity 继续回调原槽。
+
 首次打开 `http://127.0.0.1:5678` 仍需完成 n8n 所有者账号初始化，以便创建供 Video AutoWorker 使用的管理 API Key；工作流的导入和发布本身不依赖 UI 操作。若人在另一台电脑上操作远端 Mac，可使用经过身份校验的 SSH 本地端口转发访问，仍不要直接暴露 5678：
 
 ```bash
