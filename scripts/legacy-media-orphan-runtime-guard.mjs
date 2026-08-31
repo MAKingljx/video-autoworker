@@ -364,33 +364,82 @@ function batchProjection(batchRoot, lockPath) {
   safeEntry(batchRoot, 'video batch root', 'directory', 0o700)
   const active = []
   let journals = 0
+  const members = []
+  const projectState = (pathname, memberPath) => {
+    const entry = safeEntry(pathname, 'video batch state', 'file')
+    if (entry.size > 8n * 1024n * 1024n) fail('video batch state is too large')
+    const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+    let source
+    try {
+      const opened = fstatSync(descriptor, { bigint: true })
+      if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size) {
+        fail('video batch state changed before open')
+      }
+      source = readFileSync(descriptor, 'utf8')
+      const closed = fstatSync(descriptor, { bigint: true })
+      if (closed.dev !== opened.dev || closed.ino !== opened.ino || closed.size !== opened.size
+        || Buffer.byteLength(source) !== Number(opened.size)) {
+        fail('video batch state changed during read')
+      }
+    } finally { closeSync(descriptor) }
+    let value
+    try { value = JSON.parse(source) } catch { fail('video batch state is invalid JSON') }
+    if (![1, 2].includes(value?.schemaVersion) || !Array.isArray(value.items) || typeof value.status !== 'string') fail('video batch state contract is invalid')
+    const itemStates = []
+    for (const item of value.items) {
+      if (!item || typeof item !== 'object' || typeof item.status !== 'string') fail('video batch item contract is invalid')
+      if (item.stagingRecovery && item.status !== 'attention') journals += 1
+      if (ACTIVE_ITEM.has(item.status)) active.push({ status: item.status, taskHash: sha256(String(item.taskId || '')) })
+      itemStates.push({ status: item.status, taskHash: sha256(String(item.taskId || '')), stagingRecovery: Boolean(item.stagingRecovery) })
+    }
+    if (RUNNABLE_BATCH.has(value.status) && !value.items.some(item => ACTIVE_ITEM.has(item?.status))) {
+      active.push({ status: value.status, taskHash: sha256(String(value.batchId || '')) })
+    }
+    members.push({
+      path: memberPath,
+      type: 'file',
+      dev: entry.dev.toString(),
+      ino: entry.ino.toString(),
+      mode: Number(entry.mode & 0o7777n),
+      bytes: Number(entry.size),
+      sha256: sha256(source),
+      batchStatus: value.status,
+      itemStates,
+    })
+  }
   const names = []
   const handle = opendirSync(batchRoot)
   try { for (;;) { const item = handle.readSync(); if (!item) break; names.push(item.name) } } finally { handle.closeSync() }
   for (const name of names.sort()) {
     if (join(batchRoot, name) === lockPath || name === '.worker-launch.lock') continue
     if (/\.material-handoff\.json$/u.test(name)) fail('video batch root still contains a material handoff journal')
-    if (!/^[a-f0-9]{64}\.json(?:\.bak)?$/u.test(name)) fail('video batch root contains an unknown member')
-    if (name.endsWith('.bak')) {
-      if (!names.includes(name.slice(0, -4))) fail('video batch backup has no primary')
+    const pathname = join(batchRoot, name)
+    const candidate = lstatSync(pathname, { bigint: true })
+    if (candidate.isDirectory()) {
+      const directory = identity(pathname, 'video batch terminal directory', 'directory', 0o700)
+      if (realpathSync(pathname) !== pathname) fail('video batch terminal directory is not physical')
+      const nestedNames = []
+      const nested = opendirSync(pathname)
+      try { for (;;) { const item = nested.readSync(); if (!item) break; nestedNames.push(item.name) } } finally { nested.closeSync() }
+      if (nestedNames.length === 0) fail('video batch terminal directory is empty')
+      for (const nestedName of nestedNames) {
+        if (!/^[a-f0-9]{64}\.json(?:\.bak)?$/u.test(nestedName)) fail('video batch terminal directory contains an unknown member')
+        const nestedPath = join(pathname, nestedName)
+        if (!lstatSync(nestedPath).isFile()) fail('video batch terminal directory contains a non-file member')
+        if (nestedName.endsWith('.bak')) {
+          if (!nestedNames.includes(nestedName.slice(0, -4))) fail('video batch terminal backup has no primary')
+        } else if (!nestedNames.includes(`${nestedName}.bak`)) fail('video batch terminal primary has no backup')
+      }
+      members.push({ ...directory, path: `${name}/`, type: 'directory' })
+      for (const nestedName of nestedNames.sort()) projectState(join(pathname, nestedName), `${name}/${nestedName}`)
       continue
     }
-    const pathname = join(batchRoot, name)
-    const entry = safeEntry(pathname, 'video batch state', 'file')
-    if (entry.size > 8n * 1024n * 1024n) fail('video batch state is too large')
-    let value
-    try { value = JSON.parse(readFileSync(pathname, 'utf8')) } catch { fail('video batch state is invalid JSON') }
-    if (![1, 2].includes(value?.schemaVersion) || !Array.isArray(value.items) || typeof value.status !== 'string') fail('video batch state contract is invalid')
-    for (const item of value.items) {
-      if (!item || typeof item !== 'object' || typeof item.status !== 'string') fail('video batch item contract is invalid')
-      if (item.stagingRecovery && item.status !== 'attention') journals += 1
-      if (ACTIVE_ITEM.has(item.status)) active.push({ status: item.status, taskHash: sha256(String(item.taskId || '')) })
-    }
-    if (RUNNABLE_BATCH.has(value.status) && !value.items.some(item => ACTIVE_ITEM.has(item?.status))) {
-      active.push({ status: value.status, taskHash: sha256(String(value.batchId || '')) })
-    }
+    if (!/^[a-f0-9]{64}\.json(?:\.bak)?$/u.test(name)) fail('video batch root contains an unknown member')
+    if (name.endsWith('.bak') && !names.includes(name.slice(0, -4))) fail('video batch backup has no primary')
+    projectState(pathname, name)
   }
-  return { runnable: active.length, journals, digest: sha256(canonicalJson(active)) }
+  members.sort((left, right) => left.path.localeCompare(right.path, 'en'))
+  return { runnable: active.length, journals, digest: sha256(canonicalJson({ active, journals, members })) }
 }
 
 function lockState(batchRoot, expectedPid = null) {
@@ -640,6 +689,9 @@ async function captureSnapshot(minimumAgeSeconds, phase) {
     const source = run(testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_SNAPSHOT_COMMAND', ''), [phase, String(minimumAgeSeconds)], 'test snapshot')
     let value
     try { value = JSON.parse(source) } catch { fail('test snapshot is not JSON') }
+    if (process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_REAL_BATCH_PROJECTION === '1') {
+      value.lane.projection = batchProjection(value.batchRoot, value.lane.lock.path)
+    }
     validateSnapshotShape(value, phase)
     return value
   }
@@ -672,7 +724,10 @@ function validateSnapshotShape(value, phase) {
 
 function stableComparable(snapshot) {
   const clone = structuredClone(snapshot)
-  delete clone.lane
+  clone.lane = {
+    plist: clone.lane?.plist,
+    projection: clone.lane?.projection,
+  }
   return clone
 }
 

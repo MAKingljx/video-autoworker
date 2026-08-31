@@ -11,6 +11,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -216,6 +217,7 @@ fs.renameSync(replacement,intent.launchGuardian.path)
     AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_PS: ps,
     AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_LSOF: lsof,
     AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_EVENT_LOG: eventLog,
+    AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_REAL_BATCH_PROJECTION: '1',
     AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_QUEUE_FILE: queueFile,
     GUARD_STATE: statePath,
   }
@@ -229,7 +231,7 @@ fs.renameSync(replacement,intent.launchGuardian.path)
     '--minimum-age-seconds', '900',
   ], extra)
   return {
-    root, runRoot, quarantineRoot, workspace, state, writeState, readState, run, prepare,
+    root, runRoot, quarantineRoot, batchRoot, workspace, state, writeState, readState, run, prepare,
     env, eventLog, conflict, replaceGuardian, lockPath,
   }
 }
@@ -245,6 +247,20 @@ function onlyChild(pathname: string): string {
   return join(pathname, names[0])
 }
 
+function writeTerminalBatchPair(
+  batchRoot: string,
+  directoryName = '2026-08-27-retest',
+  status = 'succeeded',
+): string {
+  const directory = join(batchRoot, directoryName)
+  mkdirSync(directory, { mode: 0o700 })
+  const name = `${'b'.repeat(64)}.json`
+  const value = { schemaVersion: 2, batchId: 'batch-retest', status, items: [{ taskId: 'task-retest', status }] }
+  writeFileSync(join(directory, name), `${JSON.stringify(value)}\n`, { mode: 0o600 })
+  writeFileSync(join(directory, `${name}.bak`), `${JSON.stringify(value)}\n`, { mode: 0o600 })
+  return directory
+}
+
 afterEach(() => {
   for (const root of roots.splice(0)) {
     makeWritable(root)
@@ -253,6 +269,46 @@ afterEach(() => {
 })
 
 describe('legacy media orphan runtime guard', () => {
+  it('accepts and binds one physical directory of paired terminal batch states', () => {
+    const fixture = createFixture()
+    const directory = writeTerminalBatchPair(fixture.batchRoot)
+    const prepared = parseOutput(fixture.prepare())
+    expect(prepared.mode).toBe('prepared')
+    const receipt = JSON.parse(readFileSync(prepared.receipt, 'utf8')) as {
+      runtimeBefore: { lane: { projection: { digest: string } } }
+      runtimeQuiesced: { lane: { projection: { digest: string } } }
+    }
+    expect(receipt.runtimeBefore.lane.projection.digest).toMatch(/^[a-f0-9]{64}$/u)
+    expect(receipt.runtimeQuiesced.lane.projection.digest).toBe(receipt.runtimeBefore.lane.projection.digest)
+
+    const primary = join(directory, `${'b'.repeat(64)}.json`)
+    chmodSync(primary, 0o600)
+    const value = JSON.parse(readFileSync(primary, 'utf8')) as { items: Array<{ status: string }> }
+    value.items[0].status = 'attention'
+    writeFileSync(primary, `${JSON.stringify(value)}\n`, { mode: 0o600 })
+    expect(fixture.run(['status', '--receipt', prepared.receipt]).status).not.toBe(0)
+  })
+
+  it('rejects active state inside a retained terminal directory', () => {
+    const fixture = createFixture()
+    writeTerminalBatchPair(fixture.batchRoot, '2026-08-27-retest', 'running')
+    const result = fixture.prepare()
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('active snapshot lane is invalid')
+    expect(existsSync(fixture.workspace)).toBe(true)
+  })
+
+  it.each(['unknown', 'symlink'])('rejects a %s member inside a retained terminal directory', kind => {
+    const fixture = createFixture()
+    const directory = writeTerminalBatchPair(fixture.batchRoot)
+    if (kind === 'unknown') writeFileSync(join(directory, 'notes.txt'), 'not controlled\n', { mode: 0o600 })
+    else symlinkSync(join(directory, `${'b'.repeat(64)}.json`), join(directory, `${'c'.repeat(64)}.json`))
+    const result = fixture.prepare()
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/unknown member|non-file member/u)
+    expect(existsSync(fixture.workspace)).toBe(true)
+  })
+
   it('prepares, reports, restores, and restores idempotently', () => {
     const fixture = createFixture()
     const prepared = parseOutput(fixture.prepare())
