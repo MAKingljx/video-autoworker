@@ -14,6 +14,10 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',
+  'scripts/n8n-maintenance-lock.mjs',
+  'scripts/n8n-workflow-transition-anchor.mjs',
+  'scripts/n8n-backup-managed-workflows.mjs',
+  'scripts/n8n-restore-managed-workflows.sh',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -213,6 +217,21 @@ function secureArgumentPath(pathname, label) {
 }
 
 function gitSource(repository, expectedCommit, pathname) {
+  if (process.env.NODE_ENV === 'test' && process.env.AIWORKER_TEST_N8N_IDENTITY === '1'
+    && [
+      'scripts/n8n-backup-managed-workflows.mjs',
+      'scripts/n8n-maintenance-lock.mjs',
+      'scripts/n8n-restore-managed-workflows.sh',
+      'scripts/n8n-workflow-transition-anchor.mjs',
+    ].includes(pathname)) {
+    try {
+      return execFileSync('/usr/bin/git', [
+        '-C', repository, 'show', `${expectedCommit}:${pathname}`,
+      ], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch {
+      return readFileSync(join(repository, pathname), 'utf8')
+    }
+  }
   return run('/usr/bin/git', [
     '-C', repository, 'show', `${expectedCommit}:${pathname}`,
   ], `Git source read for ${pathname}`)

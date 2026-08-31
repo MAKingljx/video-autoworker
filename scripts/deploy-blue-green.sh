@@ -49,7 +49,7 @@ usage() {
   cat <<'EOF'
 Usage:
   deploy-blue-green.sh init [blue|green]
-  deploy-blue-green.sh bootstrap <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json>
+  deploy-blue-green.sh bootstrap <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir>
   deploy-blue-green.sh stage <release-id> <absolute-source-standalone-root>
   deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh probe <blue|green>
@@ -72,9 +72,12 @@ if the routed read-only checks fail. They do not stop either backend or mutate
 application data. Set AIWORKER_BG_CONTROL_TOKEN_FILE to a mode-0600 file that
 contains the viewer/admin API token (or inject AIWORKER_BG_CONTROL_TOKEN).
 `bootstrap` is the only supported migration from a legacy single-process 3017.
-Its mode-0600 external evidence must attest a frozen ingress and zero media,
-n8n execution, waiting and running counts. The evidence must also bind the live
-Mission Control and n8n SQLite files and their exact listener PIDs. The two
+It accepts only mode-0600 managed v3 evidence produced while the managed
+legacy freeze guard holds a real BEGIN IMMEDIATE reservation on the authoritative
+Mission Control and n8n databases in that fixed order; hand-written JSON is rejected. Two stable zero-work
+samples and an integrity-checked rollback proof are required. The evidence
+binds the target slot/release/manifest, persistent queue digest, live
+Mission Control and n8n SQLite files, and exact process identities. The two
 fixed n8n workflows must already be active, published from the workflow files
 in this Git HEAD, and implement the slot-v1 execution-owner callback protocol.
 Bootstrap verifies that contract and both databases read-only before and after
@@ -250,13 +253,65 @@ bootstrap_pending_file() {
   printf '%s/bootstrap.pending.json\n' "$RUN_DIR"
 }
 
+assert_bootstrap_operation_gate() {
+  local requested="$1"
+  shift || true
+  local pending
+  pending="$(bootstrap_pending_file)"
+  if [[ ! -e "$pending" && ! -L "$pending" ]]; then return; fi
+  assert_immutable_private_file "bootstrap pending marker" "$pending"
+  case "$requested" in
+    status) return ;;
+    bootstrap)
+      [[ "$#" -eq 6 ]] \
+        || fail "bootstrap recovery requires the complete release, evidence, proof, and confirmed-attempt binding"
+      return
+      ;;
+    *) fail "bootstrap recovery hold is active; only status or the fully bound bootstrap recovery may run" ;;
+  esac
+}
+
 write_json_atomic() {
   local destination="$1"
   local payload="$2"
-  local temporary="$destination.tmp.$$"
-  (umask 077; printf '%s\n' "$payload" > "$temporary")
-  chmod 600 "$temporary"
-  mv -f "$temporary" "$destination"
+  "$NODE_BIN" - "$destination" "$payload" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const [destination, payload] = process.argv.slice(2)
+const parentPath = path.dirname(destination)
+const parentEntry = fs.lstatSync(parentPath, { bigint: true })
+if (!path.isAbsolute(destination) || !parentEntry.isDirectory() || parentEntry.isSymbolicLink()
+  || parentEntry.uid !== BigInt(process.getuid())
+  || fs.realpathSync.native(parentPath) !== parentPath) process.exit(2)
+const temporary = path.join(parentPath,
+  `.${path.basename(destination)}.${crypto.randomBytes(16).toString('hex')}.tmp`)
+let descriptor
+try {
+  descriptor = fs.openSync(temporary,
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+    0o600)
+  const source = Buffer.from(`${payload}\n`)
+  let offset = 0
+  while (offset < source.length) offset += fs.writeSync(descriptor, source, offset, source.length - offset)
+  fs.fsyncSync(descriptor)
+  fs.fchmodSync(descriptor, 0o600)
+  fs.closeSync(descriptor)
+  descriptor = undefined
+  fs.renameSync(temporary, destination)
+  const published = fs.lstatSync(destination, { bigint: true })
+  if (!published.isFile() || published.isSymbolicLink()
+    || published.uid !== BigInt(process.getuid()) || (published.mode & 0o7777n) !== 0o600n
+    || published.nlink !== 1n) process.exit(3)
+  const parent = fs.openSync(parentPath, fs.constants.O_RDONLY)
+  try { fs.fsyncSync(parent) } finally { fs.closeSync(parent) }
+} catch (error) {
+  try { if (descriptor !== undefined) fs.closeSync(descriptor) } catch {}
+  try { fs.unlinkSync(temporary) } catch {}
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  process.exit(1)
+}
+NODE
 }
 
 write_router_state_atomic() {
@@ -316,6 +371,74 @@ assert_private_file() {
   local mode
   mode="$(stat -f '%Lp' "$pathname" 2>/dev/null || stat -c '%a' "$pathname")"
   [[ "$mode" == 600 ]] || fail "$label must have mode 0600"
+}
+
+assert_immutable_private_file() {
+  local label="$1"
+  local pathname="$2"
+  assert_secure_file "$label" "$pathname"
+  local mode links
+  mode="$(stat -f '%Lp' "$pathname" 2>/dev/null || stat -c '%a' "$pathname")"
+  links="$(stat -f '%l' "$pathname" 2>/dev/null || stat -c '%h' "$pathname")"
+  [[ "$mode" == 400 && "$links" == 1 ]] \
+    || fail "$label must be an immutable mode-0400 single-link file"
+}
+
+write_json_immutable() {
+  local destination="$1"
+  local payload="$2"
+  "$NODE_BIN" - "$destination" "$payload" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const [destination, payload] = process.argv.slice(2)
+let descriptor
+try {
+  descriptor = fs.openSync(destination,
+    fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW,
+    0o600)
+  const source = Buffer.from(`${payload}\n`)
+  let offset = 0
+  while (offset < source.length) offset += fs.writeSync(descriptor, source, offset, source.length - offset)
+  fs.fsyncSync(descriptor)
+  fs.fchmodSync(descriptor, 0o400)
+  fs.closeSync(descriptor)
+  descriptor = undefined
+  const entry = fs.lstatSync(destination, { bigint: true })
+  if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== BigInt(process.getuid())
+    || (entry.mode & 0o7777n) !== 0o400n || entry.nlink !== 1n) process.exit(3)
+  const parent = fs.openSync(path.dirname(destination), fs.constants.O_RDONLY)
+  try { fs.fsyncSync(parent) } finally { fs.closeSync(parent) }
+} catch (error) {
+  try { if (descriptor !== undefined) fs.closeSync(descriptor) } catch {}
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+  process.exit(2)
+}
+NODE
+}
+
+remove_immutable_file_durable() {
+  local label="$1"
+  local pathname="$2"
+  assert_immutable_private_file "$label" "$pathname"
+  "$NODE_BIN" - "$pathname" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const pathname = process.argv[2]
+const before = fs.lstatSync(pathname, { bigint: true })
+const descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+try {
+  const opened = fs.fstatSync(descriptor, { bigint: true })
+  const current = fs.lstatSync(pathname, { bigint: true })
+  if (!opened.isFile() || opened.uid !== BigInt(process.getuid())
+    || (opened.mode & 0o7777n) !== 0o400n || opened.nlink !== 1n
+    || current.dev !== opened.dev || current.ino !== opened.ino
+    || current.size !== opened.size || current.mtimeNs !== opened.mtimeNs
+    || current.ctimeNs !== opened.ctimeNs) process.exit(2)
+  fs.unlinkSync(pathname)
+  const parent = fs.openSync(path.dirname(pathname), fs.constants.O_RDONLY)
+  try { fs.fsyncSync(parent) } finally { fs.closeSync(parent) }
+} finally { fs.closeSync(descriptor) }
+NODE
 }
 
 read_control_token() {
@@ -984,67 +1107,137 @@ NODE
 }
 
 assert_bootstrap_pending_identity() {
-  local pathname="$1" expected_payload="$2" allow_evidence_refresh="$3"
-  assert_private_file "bootstrap pending marker" "$pathname"
-  [[ "$allow_evidence_refresh" == 0 || "$allow_evidence_refresh" == 1 ]] \
-    || fail "invalid bootstrap pending comparison mode"
+  local pathname="$1" expected_payload="$2"
+  assert_immutable_private_file "bootstrap pending marker" "$pathname"
   "$NODE_BIN" -e '
     const fs = require("node:fs")
-    const [pathname, rawExpected, rawAllowRefresh] = process.argv.slice(1)
+    const [pathname, rawExpected] = process.argv.slice(1)
     const actual = JSON.parse(fs.readFileSync(pathname, "utf8"))
     const expected = JSON.parse(rawExpected)
-    const expectedKeys = ["baselineSourceCommit", "dbPath", "evidenceObservedAt", "evidenceSha256",
-      "legacyCwd", "legacyPid", "legacyReleaseId", "manifestSha256", "n8nDbPath", "n8nPid",
-      "n8nWorkflowDigest", "n8nWorkflowProtocol", "n8nWorkflowSourceCommit", "releaseId",
-      "releaseRoot", "routerPort", "routerStatePath", "schema", "slot"]
-    const releasePrefix = actual.releaseId?.endsWith("-runtime")
-      ? actual.releaseId.slice(0, -"-runtime".length) : actual.releaseId
-    if (JSON.stringify(Object.keys(actual).sort()) !== JSON.stringify(expectedKeys)
-      || actual.schema !== "video-autoworker-blue-green-bootstrap-pending/v3"
+    const keys = (value, names) => value && typeof value === "object" && !Array.isArray(value)
+      && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...names].sort())
+    const ref = value => keys(value, ["dev", "ino", "path", "sha256", "size"])
+      && /^\d+$/.test(value.dev) && /^\d+$/.test(value.ino) && /^[a-f0-9]{64}$/.test(value.sha256)
+      && Number.isSafeInteger(value.size) && value.size > 0 && value.path.startsWith("/")
+    const fullRef = value => keys(value, ["ctimeNs", "dev", "ino", "mode", "mtimeNs", "nlink",
+      "path", "sha256", "size", "uid"])
+      && /^\d+$/.test(value.dev) && /^\d+$/.test(value.ino) && /^\d+$/.test(value.ctimeNs)
+      && /^\d+$/.test(value.mtimeNs) && /^[0-7]{3,4}$/.test(value.mode)
+      && Number.isSafeInteger(value.nlink) && value.nlink === 1
+      && Number.isSafeInteger(value.uid) && value.uid >= 0
+      && /^[a-f0-9]{64}$/.test(value.sha256) && Number.isSafeInteger(value.size)
+      && value.size > 0 && value.path.startsWith("/")
+    const identity = value => keys(value, ["dev", "ino", "path"])
+      && /^\d+$/.test(value.dev) && /^\d+$/.test(value.ino) && value.path.startsWith("/")
+    const fullDirectory = value => keys(value, ["dev", "ino", "mode", "path", "uid"])
+      && /^\d+$/.test(value.dev) && /^\d+$/.test(value.ino) && /^[0-7]{3,4}$/.test(value.mode)
+      && Number.isSafeInteger(value.uid) && value.uid >= 0 && value.path.startsWith("/")
+    const expectedKeys = ["attemptId", "authorization", "baselineSourceCommit", "bootstrapClaim", "createdAt", "databases",
+      "evidence", "evidenceObservedAt", "legacyCwd", "legacyPid", "legacyReleaseId", "manifestSha256",
+      "n8n", "proof", "releaseId", "releaseRoot", "router", "schema", "slot", "transition"]
+    if (!keys(actual, expectedKeys) || actual.schema !== "video-autoworker-blue-green-bootstrap-pending/v4"
       || !["blue", "green"].includes(actual.slot)
-      || !/^[a-f0-9]{7,40}$/u.test(releasePrefix)
+      || !/^[a-f0-9-]{36}$/.test(actual.attemptId || "")
       || !/^[a-f0-9]{40}$/u.test(actual.baselineSourceCommit)
-      || !actual.baselineSourceCommit.startsWith(releasePrefix)
+      || actual.releaseId !== `${actual.baselineSourceCommit}-runtime`
       || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(actual.legacyReleaseId)
       || actual.releaseId === actual.legacyReleaseId
       || !/^[a-f0-9]{64}$/u.test(actual.manifestSha256)
-      || !/^[a-f0-9]{64}$/u.test(actual.evidenceSha256)
-      || !/^[a-f0-9]{64}$/u.test(actual.n8nWorkflowDigest)
+      || !ref(actual.evidence) || !ref(actual.proof)
+      || !fullRef(actual.bootstrapClaim)
+      || !keys(actual.authorization, ["confirm", "prepare", "shutdown"])
+      || !Object.values(actual.authorization).every(ref)
+      || !keys(actual.databases, ["mission", "n8n"])
+      || !identity(actual.databases.mission) || !identity(actual.databases.n8n)
+      || !keys(actual.transition, ["anchor", "attestation", "claim", "committedJournalHeadSha256",
+        "confirmation", "intent", "journal", "liveCombinedSha256", "upgradeId"])
+      || ![actual.transition.anchor, actual.transition.attestation, actual.transition.claim,
+        actual.transition.confirmation, actual.transition.intent].every(fullRef)
+      || !fullDirectory(actual.transition.journal)
+      || actual.bootstrapClaim.path !== actual.transition.claim.path
+      || actual.bootstrapClaim.sha256 !== actual.transition.claim.sha256
+      || !/^[a-f0-9-]{36}$/u.test(actual.transition.upgradeId || "")
+      || !/^[a-f0-9]{64}$/u.test(actual.transition.committedJournalHeadSha256 || "")
+      || !/^[a-f0-9]{64}$/u.test(actual.transition.liveCombinedSha256 || "")
+      || !keys(actual.router, ["port", "runDirectory", "statePath"])
+      || !identity(actual.router.runDirectory) || actual.router.port !== 3017
+      || !keys(actual.n8n, ["dbPath", "pid", "workflowDigest", "workflowProtocol", "workflowReport", "workflowSourceCommit"])
+      || !ref(actual.n8n.workflowReport)
+      || !/^[a-f0-9]{64}$/u.test(actual.n8n.workflowDigest)
+      || actual.n8n.workflowDigest !== actual.transition.liveCombinedSha256
       || !Number.isSafeInteger(actual.evidenceObservedAt) || actual.evidenceObservedAt <= 0
+      || !Number.isSafeInteger(actual.createdAt) || actual.createdAt <= 0
       || !Number.isSafeInteger(actual.legacyPid) || actual.legacyPid <= 0
-      || !Number.isSafeInteger(actual.n8nPid) || actual.n8nPid <= 0
-      || !Number.isSafeInteger(actual.routerPort) || actual.routerPort <= 0
-      || actual.n8nWorkflowProtocol !== "slot-v1-execution-owner-v1"
-      || actual.n8nWorkflowSourceCommit !== actual.baselineSourceCommit
-      || !["legacyCwd", "releaseRoot", "dbPath", "routerStatePath", "n8nDbPath"]
-        .every(key => typeof actual[key] === "string" && actual[key].startsWith("/")
-          && !/[\r\n]/u.test(actual[key]))) process.exit(2)
-    if (rawAllowRefresh === "1") {
-      for (const field of ["evidenceSha256", "evidenceObservedAt"]) {
-        delete actual[field]
-        delete expected[field]
-      }
-    }
+      || !Number.isSafeInteger(actual.n8n.pid) || actual.n8n.pid <= 0
+      || actual.n8n.workflowProtocol !== "slot-v1-execution-owner-v1"
+      || actual.n8n.workflowSourceCommit !== actual.baselineSourceCommit
+      || actual.n8n.dbPath !== actual.databases.n8n.path
+      || ![actual.legacyCwd, actual.releaseRoot, actual.router.statePath]
+        .every(value => typeof value === "string" && value.startsWith("/") && !/[\r\n]/u.test(value))) process.exit(2)
+    delete actual.createdAt
+    delete expected.createdAt
     if (JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(3)
-  ' "$pathname" "$expected_payload" "$allow_evidence_refresh" \
+  ' "$pathname" "$expected_payload" \
     || fail "bootstrap retry does not match its pending runtime identity"
 }
 
+bootstrap_pending_probe() {
+  local pathname="$1"
+  assert_immutable_private_file "bootstrap pending marker" "$pathname"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    if (value.schema !== "video-autoworker-blue-green-bootstrap-pending/v4"
+      || !Number.isSafeInteger(value.legacyPid) || value.legacyPid <= 0
+      || !/^[a-f0-9]{64}$/u.test(value.evidence?.sha256 || "")) process.exit(2)
+    process.stdout.write(`${value.legacyPid}\n${value.evidence.sha256}\n`)
+  ' "$pathname" || fail "bootstrap pending marker cannot be safely probed"
+}
+
+probe_evidenced_legacy_state() {
+  local state
+  state="$(env -u NODE_ENV \
+    -u AIWORKER_TEST_LEGACY_FREEZE \
+    -u AIWORKER_TEST_LEGACY_FREEZE_GUARD_SOCKET \
+    -u AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
+    "$NODE_BIN" "$evidence_generator" --probe-legacy-state-fd "$evidence_fd" \
+      --router-port "$ROUTER_PORT")" \
+    || fail "unable to compare the current process with the evidenced legacy identity"
+  [[ "$state" == alive || "$state" == stopped ]] \
+    || fail "managed legacy identity probe returned an invalid state"
+  printf '%s\n' "$state"
+}
+
 bootstrap_baseline() {
-  local slot release_id standalone_root evidence_file physical_root manifest live_db canonical_router_state
+  local slot release_id standalone_root evidence_file rollback_proof attempt_dir physical_root manifest live_db canonical_router_state
   local evidence_values legacy_release legacy_pid legacy_cwd n8n_pid n8n_db evidence_observed evidence_sha now
   local pending pending_payload binding_payload state_payload baseline_payload other_slot listeners deadline
   local evidence_max_age evidence_age pending_exists=0 manager installer intake_revision baseline_readiness baseline_epoch
   local workflow_compatibility workflow_compatibility_after workflow_compatibility_final workflow_digest source_commit
+  local workflow_report
+  local evidence_fd=9 evidence_generator rollback_generator verified_evidence_sha guard_controller guard_socket guard_token
+  local evidence_verify_mode=--verify-evidence-fd evidence_static_recovery=0 pending_probe pending_legacy_pid pending_evidence_sha
+  local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status guard_mode
+  local n8n_listener_pid n8n_runtime_cwd n8n_runtime_release recovery_attempt recovery_parent recovery_guard_pid
+  local legacy_state
+  local guard_available=0
   slot="$(require_slot "${1:-}")"
   release_id="${2:-}"
   standalone_root="${3:-}"
   evidence_file="${4:-}"
-  [[ -n "$release_id" && -n "$standalone_root" && -n "$evidence_file" ]] || { usage >&2; exit 2; }
+  rollback_proof="${5:-}"
+  attempt_dir="${6:-}"
+  [[ -n "$release_id" && -n "$standalone_root" && -n "$evidence_file" && -n "$rollback_proof" \
+    && -n "$attempt_dir" ]] \
+    || { usage >&2; exit 2; }
   acquire_lock
+  pending="$(bootstrap_pending_file)"
   if [[ -e "$(baseline_file)" || -L "$(baseline_file)" ]]; then
     validate_state
-    assert_baseline >/dev/null
+    local completed_baseline completed_binding
+    completed_baseline="$(assert_baseline)"
     local existing_active existing_release existing_generation
     existing_active="$(read_state_field active)"
     existing_release="$(read_state_slot_release "$existing_active")"
@@ -1054,11 +1247,125 @@ bootstrap_baseline() {
       && "$SCRIPT_DIR/manage-blue-green-services.sh" status router >/dev/null \
       && "$SCRIPT_DIR/manage-blue-green-services.sh" status "$existing_active" >/dev/null \
       || fail "completed baseline is not under the expected service manager"
-    printf 'Blue-green baseline already completed; refusing to repeat legacy shutdown\n'
+    if [[ -e "$pending" || -L "$pending" ]]; then
+      assert_immutable_private_file "bootstrap pending marker" "$pending"
+      physical_root="$(assert_release "$release_id" "$standalone_root")"
+      manifest="$(release_manifest_sha "$physical_root")"
+      completed_binding="$(binding_values "$existing_active")"
+      "$NODE_BIN" - "$(baseline_file)" "$pending" "$slot" "$release_id" "$physical_root" \
+        "$manifest" "$evidence_file" "$rollback_proof" "$attempt_dir" "$existing_active" \
+        "$existing_release" "$existing_generation" "$completed_binding" "$(slot_port "$slot")" <<'NODE' \
+        || fail "completed baseline does not exactly match the pending bootstrap operation"
+const fs = require('node:fs')
+const path = require('node:path')
+const [baselinePath, pendingPath, slot, releaseId, releaseRoot, manifestSha256,
+  evidencePath, proofPath, attemptDir, active, activeRelease, rawGeneration,
+  rawBinding, rawSlotPort] = process.argv.slice(2)
+const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
+const pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
+const binding = rawBinding.trimEnd().split('\n')
+if (pending.schema !== 'video-autoworker-blue-green-bootstrap-pending/v4'
+  || baseline.schema !== 'video-autoworker-blue-green-baseline/v3'
+  || Number(rawGeneration) !== 1 || active !== slot || activeRelease !== releaseId
+  || pending.slot !== slot || pending.releaseId !== releaseId
+  || pending.releaseRoot !== releaseRoot || pending.manifestSha256 !== manifestSha256
+  || pending.evidence?.path !== evidencePath || pending.proof?.path !== proofPath
+  || path.dirname(pending.authorization?.prepare?.path || '') !== attemptDir
+  || baseline.baselineSlot !== pending.slot
+  || baseline.baselineReleaseId !== pending.releaseId
+  || baseline.baselineReleaseRoot !== pending.releaseRoot
+  || baseline.baselineManifestSha256 !== pending.manifestSha256
+  || baseline.legacyReleaseId !== pending.legacyReleaseId
+  || baseline.legacyPid !== pending.legacyPid
+  || baseline.evidenceSha256 !== pending.evidence?.sha256
+  || baseline.dbPath !== pending.databases?.mission?.path
+  || baseline.routerStatePath !== pending.router?.statePath
+  || baseline.routerPort !== pending.router?.port
+  || baseline.n8nPid !== pending.n8n?.pid
+  || baseline.n8nDbPath !== pending.n8n?.dbPath
+  || baseline.baselineSourceCommit !== pending.baselineSourceCommit
+  || baseline.n8nWorkflowSourceCommit !== pending.n8n?.workflowSourceCommit
+  || baseline.n8nWorkflowProtocol !== pending.n8n?.workflowProtocol
+  || baseline.n8nWorkflowDigest !== pending.n8n?.workflowDigest
+  || binding.length !== 5 || binding[0] !== releaseId || binding[1] !== releaseRoot
+  || binding[2] !== manifestSha256 || binding[3] !== '127.0.0.1'
+  || binding[4] !== rawSlotPort) process.exit(2)
+NODE
+      local completed_runtime completed_n8n_pid completed_n8n_db completed_source_commit
+      local completed_workflow_digest completed_mission_db completed_guard_socket completed_guard_token
+      completed_runtime="$($NODE_BIN - "$pending" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const pending = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const evidencePath = pending.evidence?.path
+const evidenceEntry = fs.lstatSync(evidencePath, { bigint: true })
+const evidenceSource = fs.readFileSync(evidencePath)
+const evidence = JSON.parse(evidenceSource)
+if (!evidenceEntry.isFile() || evidenceEntry.isSymbolicLink()
+  || evidenceEntry.uid !== BigInt(process.getuid()) || (evidenceEntry.mode & 0o7777n) !== 0o600n
+  || evidenceEntry.nlink !== 1n
+  || crypto.createHash('sha256').update(evidenceSource).digest('hex') !== pending.evidence.sha256
+  || evidence.schema !== 'video-autoworker-legacy-freeze-evidence/v3'
+  || typeof evidence.frozen?.socket?.path !== 'string' || !evidence.frozen.socket.path.startsWith('/')) process.exit(2)
+process.stdout.write(`${pending.n8n.pid}\n${pending.n8n.dbPath}\n${pending.baselineSourceCommit}\n`
+  + `${pending.n8n.workflowDigest}\n${pending.databases.mission.path}\n${evidence.frozen.socket.path}\n`)
+NODE
+      )" || fail "completed baseline pending evidence is unavailable or changed"
+      completed_n8n_pid="$(printf '%s\n' "$completed_runtime" | sed -n '1p')"
+      completed_n8n_db="$(printf '%s\n' "$completed_runtime" | sed -n '2p')"
+      completed_source_commit="$(printf '%s\n' "$completed_runtime" | sed -n '3p')"
+      completed_workflow_digest="$(printf '%s\n' "$completed_runtime" | sed -n '4p')"
+      completed_mission_db="$(printf '%s\n' "$completed_runtime" | sed -n '5p')"
+      completed_guard_socket="$(printf '%s\n' "$completed_runtime" | sed -n '6p')"
+      completed_guard_token="$(dirname "$completed_guard_socket")/guard.token"
+      kill -0 "$completed_n8n_pid" 2>/dev/null \
+        || fail "completed baseline n8n PID is no longer running"
+      lsof -a -p "$completed_n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' \
+        | grep -Fxq "$completed_n8n_db" \
+        || fail "completed baseline n8n PID no longer owns its authoritative database"
+      check_legacy_databases_quiescent "$completed_mission_db" "$completed_n8n_db" >/dev/null \
+        || fail "completed baseline databases are no longer quiescent"
+      workflow_compatibility="$(check_n8n_workflow_compatibility \
+        "$completed_n8n_pid" "$completed_n8n_db" "$completed_source_commit")" \
+        || fail "completed baseline n8n workflow identity changed"
+      [[ "$($NODE_BIN -e '
+        const value = JSON.parse(process.argv[1])
+        if (!/^[a-f0-9]{64}$/u.test(value?.combinedSha256 || "")) process.exit(2)
+        process.stdout.write(value.combinedSha256)
+      ' "$workflow_compatibility")" == "$completed_workflow_digest" ]] \
+        || fail "completed baseline n8n workflow digest changed"
+      if [[ -e "$completed_guard_socket" || -L "$completed_guard_socket" \
+        || -e "$completed_guard_token" || -L "$completed_guard_token" ]]; then
+        guard_controller="$PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
+        [[ -S "$completed_guard_socket" && ! -L "$completed_guard_socket" \
+          && -f "$completed_guard_token" && ! -L "$completed_guard_token" ]] \
+          || fail "completed baseline has partial recovery-hold state"
+        if "$NODE_BIN" "$guard_controller" status --socket "$completed_guard_socket" \
+          --database "$completed_mission_db" --n8n-database "$completed_n8n_db" >/dev/null 2>&1; then
+          "$NODE_BIN" "$guard_controller" revoke --socket "$completed_guard_socket" \
+            --token-file "$completed_guard_token" --database "$completed_mission_db" \
+            --n8n-database "$completed_n8n_db" >/dev/null \
+            || fail "unable to release the completed baseline recovery hold"
+        else
+          "$NODE_BIN" "$guard_controller" recover-stale --socket "$completed_guard_socket" \
+            --token-file "$completed_guard_token" --database "$completed_mission_db" \
+            --n8n-database "$completed_n8n_db" >/dev/null \
+            || fail "unable to remove stale completed baseline recovery-hold state"
+        fi
+      fi
+      remove_immutable_file_durable "completed bootstrap pending marker" "$pending" \
+        || fail "unable to durably finalize the completed bootstrap marker"
+      printf 'Finalized previously completed blue-green baseline; legacy shutdown was not repeated\n'
+      return
+    fi
+    printf 'Blue-green baseline already completed; legacy shutdown was not repeated\n'
     return
   fi
   assert_absolute "bootstrap evidence" "$evidence_file"
   assert_private_file "bootstrap evidence" "$evidence_file"
+  assert_absolute "bootstrap rollback proof" "$rollback_proof"
+  assert_private_file "bootstrap rollback proof" "$rollback_proof"
+  assert_absolute "bootstrap confirmed attempt directory" "$attempt_dir"
   [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for bootstrap"
   assert_absolute "AIWORKER_BG_LIVE_DB_PATH" "$LIVE_DB_PATH"
   [[ -f "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH must identify the existing live SQLite database"
@@ -1071,6 +1378,62 @@ bootstrap_baseline() {
   physical_root="$(assert_release "$release_id" "$standalone_root")"
   manifest="$(release_manifest_sha "$physical_root")"
   source_commit="$(resolve_baseline_source_commit "$release_id")"
+  evidence_generator="$PROJECT_ROOT/scripts/generate-legacy-freeze-evidence.mjs"
+  [[ -f "$evidence_generator" && ! -L "$evidence_generator" ]] \
+    || fail "managed legacy freeze evidence generator is unavailable"
+  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-freeze-evidence.mjs >/dev/null 2>&1 \
+    || fail "managed legacy freeze evidence generator is not tracked"
+  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-freeze-evidence.mjs \
+    || fail "managed legacy freeze evidence generator differs from Git HEAD"
+  rollback_generator="$PROJECT_ROOT/scripts/generate-legacy-bootstrap-rollback-proof.mjs"
+  [[ -f "$rollback_generator" && ! -L "$rollback_generator" ]] \
+    || fail "managed rollback proof generator is unavailable"
+  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-bootstrap-rollback-proof.mjs >/dev/null 2>&1 \
+    || fail "managed rollback proof generator is not tracked"
+  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-bootstrap-rollback-proof.mjs \
+    || fail "managed rollback proof generator differs from Git HEAD"
+  guard_controller="$PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
+  [[ -f "$guard_controller" && ! -L "$guard_controller" ]] \
+    || fail "managed legacy freeze guard is unavailable"
+  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-freeze-guard.mjs >/dev/null 2>&1 \
+    || fail "managed legacy freeze guard is not tracked"
+  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-freeze-guard.mjs \
+    || fail "managed legacy freeze guard differs from Git HEAD"
+  bootstrap_controller="$PROJECT_ROOT/scripts/legacy-bootstrap-controller.mjs"
+  [[ -f "$bootstrap_controller" && ! -L "$bootstrap_controller" ]] \
+    || fail "managed legacy bootstrap confirmation controller is unavailable"
+  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-bootstrap-controller.mjs >/dev/null 2>&1 \
+    || fail "managed legacy bootstrap confirmation controller is not tracked"
+  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-bootstrap-controller.mjs \
+    || fail "managed legacy bootstrap confirmation controller differs from Git HEAD"
+  if ( : <&9 ) 2>/dev/null; then fail "reserved bootstrap evidence FD 9 is already open"; fi
+  exec 9<"$evidence_file" || fail "unable to open bootstrap evidence"
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    pending_exists=1
+    pending_probe="$(bootstrap_pending_probe "$pending")"
+    pending_legacy_pid="$(printf '%s\n' "$pending_probe" | sed -n '1p')"
+    pending_evidence_sha="$(printf '%s\n' "$pending_probe" | sed -n '2p')"
+    legacy_state="$(probe_evidenced_legacy_state)"
+    if [[ "$legacy_state" == stopped ]]; then
+      evidence_verify_mode=--verify-evidence-static-fd
+      evidence_static_recovery=1
+    fi
+  fi
+  verified_evidence_sha="$(env -u NODE_ENV \
+    -u AIWORKER_TEST_LEGACY_FREEZE \
+    -u AIWORKER_TEST_LEGACY_FREEZE_GUARD_SOCKET \
+    -u AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
+    "$NODE_BIN" "$evidence_generator" "$evidence_verify_mode" "$evidence_fd" \
+      --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
+      --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" \
+    || fail "managed bootstrap evidence signature or target binding is invalid"
+  [[ "$verified_evidence_sha" =~ ^[a-f0-9]{64}$ ]] \
+    || fail "managed bootstrap evidence digest is invalid"
+  if (( pending_exists == 1 )) && [[ "$verified_evidence_sha" != "$pending_evidence_sha" ]]; then
+    fail "bootstrap retry evidence does not match the pending digest"
+  fi
   manager="$SCRIPT_DIR/manage-blue-green-services.sh"
   installer="$SCRIPT_DIR/install-blue-green-launch-agents.sh"
   [[ -x "$manager" && -x "$installer" ]] \
@@ -1080,48 +1443,110 @@ bootstrap_baseline() {
   "$manager" preflight all >/dev/null \
     || fail "installed blue-green service manager is not ready before legacy shutdown"
   now="$(date +%s)"
-  pending="$(bootstrap_pending_file)"
   evidence_max_age="$BOOTSTRAP_EVIDENCE_MAX_AGE"
-  if [[ -e "$pending" || -L "$pending" ]]; then
-    assert_private_file "bootstrap pending marker" "$pending"
-    pending_exists=1
-    # A completed legacy shutdown may need operator recovery after the normal
-    # evidence window. Parse the original signed-off evidence first, then below
-    # require fresh evidence again whenever the legacy PID is still alive.
-    evidence_max_age=315360000
-  fi
-  evidence_values="$($NODE_BIN - "$evidence_file" "$ROUTER_PORT" "$now" "$evidence_max_age" <<'NODE'
-const value = JSON.parse(require('node:fs').readFileSync(process.argv[2], 'utf8'))
-const [rawPort, rawNow, rawMaxAge] = process.argv.slice(3)
-const expectedKeys = ['counts', 'frozen', 'legacy', 'observedAt', 'schema', 'supervisorQuiesced']
-if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expectedKeys)) process.exit(2)
-  const legacyKeys = ['cwd', 'n8nDbPath', 'n8nPid', 'pid', 'releaseId', 'routerPort']
+  evidence_values="$($NODE_BIN - "$evidence_fd" "$evidence_file" "$ROUTER_PORT" "$now" \
+    "$evidence_max_age" "$slot" "$release_id" "$physical_root" "$manifest" "$live_db" \
+    "$n8n_db" "$verified_evidence_sha" "$rollback_proof" "$evidence_static_recovery" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const [rawFd, pathname, rawPort, rawNow, rawMaxAge, slot, releaseId, releaseRoot,
+  manifestSha256, liveDb, n8nDb, verifiedSha256, rollbackProof, rawStaticRecovery] = process.argv.slice(2)
+const staticRecovery = rawStaticRecovery === '1'
+const fd = Number(rawFd)
+const opened = fs.fstatSync(fd, { bigint: true })
+const pathEntry = fs.lstatSync(pathname, { bigint: true })
+if (!opened.isFile() || pathEntry.isSymbolicLink() || !pathEntry.isFile()
+  || opened.dev !== pathEntry.dev || opened.ino !== pathEntry.ino
+  || opened.uid !== BigInt(process.getuid()) || (opened.mode & 0o7777n) !== 0o600n
+  || opened.nlink !== 1n) process.exit(2)
+const source = Buffer.alloc(Number(opened.size))
+if (fs.readSync(fd, source, 0, source.length, 0) !== source.length
+  || crypto.createHash('sha256').update(source).digest('hex') !== verifiedSha256) process.exit(3)
+const value = JSON.parse(source)
+const keys = (object, expected) => object && typeof object === 'object' && !Array.isArray(object)
+  && JSON.stringify(Object.keys(object).sort()) === JSON.stringify([...expected].sort())
+const fileIdentity = item => keys(item, ['dev', 'ino', 'path'])
+  && typeof item.path === 'string' && item.path.startsWith('/') && !/[\r\n]/u.test(item.path)
+  && /^\d+$/u.test(item.dev) && /^\d+$/u.test(item.ino)
+const processIdentity = (item, extra) => keys(item, [
+  'argvSha256', 'cwd', 'database', 'executable', 'pid', 'ppid', 'startTime', 'uid', ...extra,
+]) && Number.isSafeInteger(item.pid) && item.pid > 0
+  && Number.isSafeInteger(item.ppid) && item.ppid > 0
+  && Number.isSafeInteger(item.uid) && item.uid >= 0 && typeof item.startTime === 'string'
+  && item.startTime.length > 0 && /^[a-f0-9]{64}$/u.test(item.argvSha256)
+  && fileIdentity(item.cwd) && fileIdentity(item.database) && fileIdentity(item.executable)
+const expectedKeys = ['counts', 'frozen', 'generatorSha256', 'legacy', 'n8n', 'observedAt',
+  'queueDigestSha256', 'rollback', 'schema', 'supervisor', 'target']
 const countKeys = ['mediaNodes', 'n8nActiveExecutions', 'queueRunning', 'queueWaiting']
-if (value.schema !== 'video-autoworker-legacy-freeze-evidence/v2' || value.frozen !== true
-  || value.supervisorQuiesced !== true
-  || !value.legacy || JSON.stringify(Object.keys(value.legacy).sort()) !== JSON.stringify(legacyKeys)
-  || !value.counts || JSON.stringify(Object.keys(value.counts).sort()) !== JSON.stringify(countKeys)
-  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(value.legacy.releaseId)
-  || !Number.isSafeInteger(value.legacy.pid) || value.legacy.pid <= 0
-  || !Number.isSafeInteger(value.legacy.n8nPid) || value.legacy.n8nPid <= 0
-  || typeof value.legacy.n8nDbPath !== 'string' || !value.legacy.n8nDbPath.startsWith('/')
-  || /[\r\n]/u.test(value.legacy.n8nDbPath)
-  || typeof value.legacy.cwd !== 'string' || !value.legacy.cwd.startsWith('/') || /[\r\n]/u.test(value.legacy.cwd)
-  || value.legacy.routerPort !== Number(rawPort)
-  || !countKeys.every(key => value.counts[key] === 0)
-  || !Number.isSafeInteger(value.observedAt)) process.exit(3)
+if (!keys(value, expectedKeys) || value.schema !== 'video-autoworker-legacy-freeze-evidence/v3'
+  || !/^[a-f0-9]{64}$/u.test(value.generatorSha256)
+  || !keys(value.target, ['manifestSha256', 'releaseId', 'releaseRoot', 'slot'])
+  || value.target.slot !== slot || value.target.releaseId !== releaseId
+  || value.target.releaseRoot !== releaseRoot || value.target.manifestSha256 !== manifestSha256
+  || !processIdentity(value.legacy, ['releaseId', 'routerPort'])
+  || value.legacy.releaseId === releaseId || value.legacy.routerPort !== Number(rawPort)
+  || value.legacy.database.path !== liveDb
+  || !processIdentity(value.n8n, ['launchPid', 'port'])
+  || !Number.isSafeInteger(value.n8n.launchPid) || value.n8n.launchPid <= 0
+  || value.n8n.ppid !== value.n8n.launchPid || value.n8n.port !== 5678
+  || value.n8n.database.path !== n8nDb
+  || !keys(value.counts, countKeys) || !countKeys.every(key => value.counts[key] === 0)
+  || !/^[a-f0-9]{64}$/u.test(value.queueDigestSha256)
+  || !keys(value.rollback, ['dev', 'ino', 'path', 'sha256'])
+  || value.rollback.path !== rollbackProof || !/^\d+$/u.test(value.rollback.dev)
+  || !/^\d+$/u.test(value.rollback.ino) || !/^[a-f0-9]{64}$/u.test(value.rollback.sha256)
+  || !keys(value.supervisor, ['disabled', 'loaded', 'lockAbsent', 'workerPids'])
+  || value.supervisor.disabled !== true || value.supervisor.loaded !== false
+  || value.supervisor.lockAbsent !== true || !Array.isArray(value.supervisor.workerPids)
+  || value.supervisor.workerPids.length !== 0
+  || !keys(value.frozen, ['argvSha256', 'database', 'expiresAt', 'guardNonceSha256', 'issuedAt',
+    'legacyBindingSha256', 'mode', 'n8nDatabase', 'pid', 'ready', 'schema', 'scriptSha256', 'socket', 'startedAt', 'uid'])
+  || value.frozen.schema !== 'video-autoworker-legacy-freeze-guard/v1'
+  || value.frozen.mode !== 'dual'
+  || value.frozen.ready !== true
+  || !Number.isSafeInteger(value.frozen.pid) || value.frozen.pid <= 0
+  || !Number.isSafeInteger(value.frozen.uid) || value.frozen.uid !== process.getuid()
+  || !['argvSha256', 'guardNonceSha256', 'legacyBindingSha256', 'scriptSha256']
+    .every(key => /^[a-f0-9]{64}$/u.test(value.frozen[key]))
+  || !fileIdentity(value.frozen.database) || !fileIdentity(value.frozen.n8nDatabase)
+  || !fileIdentity(value.frozen.socket)
+  || value.frozen.database.path !== liveDb || typeof value.frozen.startedAt !== 'string'
+  || value.frozen.n8nDatabase.path !== n8nDb
+  || !Number.isSafeInteger(value.frozen.issuedAt) || !Number.isSafeInteger(value.frozen.expiresAt)
+  || value.frozen.issuedAt > Number(rawNow)
+  || (!staticRecovery && value.frozen.expiresAt < Number(rawNow))
+  || value.frozen.expiresAt - value.frozen.issuedAt < 30
+  || value.frozen.expiresAt - value.frozen.issuedAt > 1800
+  || !Number.isSafeInteger(value.observedAt)) process.exit(4)
 const age = Number(rawNow) - value.observedAt
-if (age < 0 || age > Number(rawMaxAge)) process.exit(4)
-process.stdout.write(`${value.legacy.releaseId}\n${value.legacy.pid}\n${value.legacy.cwd}\n${value.legacy.n8nPid}\n${value.legacy.n8nDbPath}\n${value.observedAt}\n`)
+// Once immutable pending v4 proves the legacy process has stopped, the old
+// evidence is historical identity only. Fresh safety is established by the
+// one-use resume snapshot under newly acquired database reservations.
+if (age < 0 || (!staticRecovery && age > Number(rawMaxAge))) process.exit(5)
+process.stdout.write(`${value.legacy.releaseId}\n${value.legacy.pid}\n${value.legacy.cwd.path}\n`
+  + `${value.n8n.pid}\n${value.n8n.database.path}\n${value.observedAt}\n${value.frozen.socket.path}\n`)
 NODE
   )" || fail "bootstrap evidence is invalid, stale, not frozen, or not fully zero"
   legacy_release="$(printf '%s\n' "$evidence_values" | sed -n '1p')"
   legacy_pid="$(printf '%s\n' "$evidence_values" | sed -n '2p')"
+  if (( pending_exists == 1 )) && [[ "$legacy_pid" != "$pending_legacy_pid" ]]; then
+    fail "bootstrap evidence legacy PID does not match the pending marker"
+  fi
   legacy_cwd="$(printf '%s\n' "$evidence_values" | sed -n '3p')"
   n8n_pid="$(printf '%s\n' "$evidence_values" | sed -n '4p')"
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if (( pending_exists == 1 )) && [[ "$legacy_state" == stopped ]]; then
+    n8n_listener_pid="$(lsof -tiTCP:5678 -sTCP:LISTEN 2>/dev/null | sort -u)"
+    [[ "$n8n_listener_pid" =~ ^[1-9][0-9]*$ ]] \
+      || fail "bootstrap disaster recovery requires exactly one managed n8n listener"
+    n8n_pid="$n8n_listener_pid"
+  fi
   [[ "$(printf '%s\n' "$evidence_values" | sed -n '5p')" == "$n8n_db" ]] \
     || fail "bootstrap evidence does not bind AIWORKER_BG_N8N_DB_PATH"
   evidence_observed="$(printf '%s\n' "$evidence_values" | sed -n '6p')"
+  guard_socket="$(printf '%s\n' "$evidence_values" | sed -n '7p')"
+  guard_token="$(dirname "$guard_socket")/guard.token"
+  evidence_sha="$verified_evidence_sha"
   legacy_cwd="$(physical_path "$legacy_cwd")" || fail "unable to resolve legacy cwd"
   "$NODE_BIN" - "$legacy_cwd" "$legacy_release" <<'NODE' \
     || fail "legacy release ID is not bound to its physical cwd"
@@ -1153,38 +1578,273 @@ NODE
     process.stdout.write(value.combinedSha256)
   ' "$workflow_compatibility" "$n8n_db" "$source_commit")" \
     || fail "published n8n workflow compatibility result is invalid"
-  if (( pending_exists == 1 )) && kill -0 "$legacy_pid" 2>/dev/null; then
+  bootstrap_authorization="$("$NODE_BIN" "$bootstrap_controller" status --attempt-dir "$attempt_dir")" \
+    || fail "legacy bootstrap confirmation and workflow transition chain is invalid"
+  workflow_report="$("$NODE_BIN" - "$bootstrap_authorization" <<'NODE'
+const fs = require('node:fs')
+const value = JSON.parse(process.argv[2])
+const transition = value.bindings?.transition
+if (!transition || typeof transition.attestation?.path !== 'string'
+  || !transition.attestation.path.startsWith('/') || !/^[a-f0-9]{64}$/u.test(transition.attestation.sha256 || '')) process.exit(2)
+const attestation = JSON.parse(fs.readFileSync(transition.attestation.path, 'utf8'))
+const report = attestation?.deployed?.report
+if (!report || typeof report.path !== 'string' || !report.path.startsWith('/')
+  || !/^[a-f0-9]{64}$/u.test(report.sha256 || '')) process.exit(3)
+process.stdout.write(report.path)
+NODE
+  )" || fail "workflow transition attestation does not expose its pinned live report"
+  assert_immutable_private_file "attested n8n workflow compatibility report" "$workflow_report"
+  "$NODE_BIN" - "$workflow_report" "$workflow_compatibility" <<'NODE' \
+    || fail "attested n8n workflow compatibility report differs from the current verified runtime"
+const fs = require('node:fs')
+const [pathname, rawExpected] = process.argv.slice(2)
+const canonical = value => Array.isArray(value) ? value.map(canonical)
+  : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value
+if (JSON.stringify(canonical(JSON.parse(fs.readFileSync(pathname, 'utf8'))))
+  !== JSON.stringify(canonical(JSON.parse(rawExpected)))) process.exit(2)
+NODE
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if (( pending_exists == 1 )) && [[ "$legacy_state" == alive ]]; then
     evidence_age=$(( now - evidence_observed ))
     (( evidence_age >= 0 && evidence_age <= BOOTSTRAP_EVIDENCE_MAX_AGE )) \
       || fail "bootstrap retry requires fresh zero-work evidence while the legacy PID is still alive"
   fi
   [[ "$legacy_release" != "$release_id" ]] || fail "baseline release must differ from the legacy release"
-  evidence_sha="$(shasum -a 256 "$evidence_file" | awk '{print $1}')"
   canonical_router_state="$STATE_FILE"
   other_slot="$([[ "$slot" == blue ]] && printf green || printf blue)"
-  pending_payload="$($NODE_BIN -e '
-    const [slot, releaseId, releaseRoot, manifest, legacyRelease, rawLegacyPid, legacyCwd,
-      evidenceSha, rawObserved, dbPath, routerStatePath, rawRouterPort, rawN8nPid, n8nDbPath,
-      sourceCommit, n8nWorkflowDigest] = process.argv.slice(1)
-    process.stdout.write(JSON.stringify({
-      schema: "video-autoworker-blue-green-bootstrap-pending/v3", slot, releaseId, releaseRoot,
-      manifestSha256: manifest, legacyReleaseId: legacyRelease, legacyPid: Number(rawLegacyPid),
-      legacyCwd, evidenceSha256: evidenceSha, evidenceObservedAt: Number(rawObserved), dbPath,
-      routerStatePath, routerPort: Number(rawRouterPort), n8nPid: Number(rawN8nPid), n8nDbPath,
-      baselineSourceCommit: sourceCommit, n8nWorkflowProtocol: "slot-v1-execution-owner-v1",
-      n8nWorkflowSourceCommit: sourceCommit, n8nWorkflowDigest,
-    }))
-  ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
-    "$evidence_sha" "$evidence_observed" "$live_db" "$canonical_router_state" "$ROUTER_PORT" \
-    "$n8n_pid" "$n8n_db" "$source_commit" "$workflow_digest")"
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if (( pending_exists == 1 )) && [[ "$legacy_state" == stopped ]]; then
+    if [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
+      && "$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
+        --database "$live_db" --n8n-database "$n8n_db" >/dev/null 2>&1; then
+      guard_available=1
+    elif [[ -e "$guard_socket" || -L "$guard_socket" || -e "$guard_token" || -L "$guard_token" ]]; then
+      [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
+        || fail "partial stale freeze guard state cannot be recovered automatically"
+      "$NODE_BIN" "$guard_controller" recover-stale --socket "$guard_socket" \
+        --token-file "$guard_token" --database "$live_db" --n8n-database "$n8n_db" >/dev/null \
+        || fail "unable to prove and remove stale freeze guard state"
+    fi
+  fi
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if (( pending_exists == 1 && guard_available == 0 )) && [[ "$legacy_state" == stopped ]]; then
+    n8n_runtime_cwd="$(lsof -a -p "$n8n_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')"
+    [[ -n "$n8n_runtime_cwd" && "$n8n_runtime_cwd" == */ops/n8n ]] \
+      || fail "managed n8n runtime cwd cannot be resolved for bootstrap recovery"
+    n8n_runtime_release="$(physical_path "$(dirname "$(dirname "$n8n_runtime_cwd")")")" \
+      || fail "managed n8n runtime release cannot be resolved"
+    recovery_parent="$attempt_dir/disaster-recovery-attempts"
+    recovery_attempt="$($NODE_BIN - "$attempt_dir" "$recovery_parent" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const crypto = require('node:crypto')
+const [attempt, parent] = process.argv.slice(2)
+const assertDirectory = (pathname, mode) => {
+  const value = fs.lstatSync(pathname, { bigint: true })
+  if (!value.isDirectory() || value.isSymbolicLink() || value.uid !== BigInt(process.getuid())
+    || (value.mode & 0o7777n) !== BigInt(mode) || fs.realpathSync.native(pathname) !== pathname) process.exit(2)
+}
+assertDirectory(attempt, 0o700)
+if (parent !== path.join(attempt, 'disaster-recovery-attempts')) process.exit(3)
+try { fs.mkdirSync(parent, { mode: 0o700 }) } catch (error) { if (error?.code !== 'EEXIST') throw error }
+assertDirectory(parent, 0o700)
+const branchPath = path.join(attempt, 'recovery-branch.claim.json')
+if (fs.existsSync(branchPath)) {
+  const branchEntry = fs.lstatSync(branchPath, { bigint: true })
+  const branch = JSON.parse(fs.readFileSync(branchPath, 'utf8'))
+  if (!branchEntry.isFile() || branchEntry.isSymbolicLink()
+    || branchEntry.uid !== BigInt(process.getuid()) || (branchEntry.mode & 0o7777n) !== 0o400n
+    || branchEntry.nlink !== 1n
+    || branch.schema !== 'video-autoworker-legacy-bootstrap-recovery-branch/v2'
+    || branch.branch !== 'resume') process.exit(4)
+}
+const entries = fs.readdirSync(parent, { withFileTypes: true })
+if (entries.length > 1_000 || entries.some(entry => !entry.isDirectory()
+  || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(entry.name))) {
+  process.exit(5)
+}
+const resumable = []
+for (const entry of entries) {
+  const candidate = path.join(parent, entry.name)
+  assertDirectory(candidate, 0o700)
+  const names = fs.readdirSync(candidate).sort()
+  const allowed = new Set(['guard.log', 'resume.consumed.json', 'resume.receipt.json', 'resume.token.json'])
+  if (names.some(name => !allowed.has(name))) continue
+  const hasReceipt = names.includes('resume.receipt.json')
+  const hasToken = names.includes('resume.token.json')
+  const consumed = names.includes('resume.consumed.json')
+  if (hasReceipt && !hasToken && !consumed) process.exit(6)
+  if (consumed) continue
+  if (!hasReceipt && !hasToken && !names.includes('guard.log')) {
+    resumable.push(candidate)
+    continue
+  }
+  if (hasToken) {
+    const tokenPath = path.join(candidate, 'resume.token.json')
+    const tokenEntry = fs.lstatSync(tokenPath, { bigint: true })
+    let token
+    try { token = JSON.parse(fs.readFileSync(tokenPath, 'utf8')) } catch { process.exit(7) }
+    if (!tokenEntry.isFile() || tokenEntry.isSymbolicLink()
+      || tokenEntry.uid !== BigInt(process.getuid()) || (tokenEntry.mode & 0o7777n) !== 0o600n
+      || tokenEntry.nlink !== 1n || token.schema !== 'video-autoworker-legacy-bootstrap-resume-capability/v2'
+      || token.recoveryAttemptId !== entry.name || !Number.isSafeInteger(token.expiresAt)) process.exit(8)
+    if (token.expiresAt > Math.floor(Date.now() / 1000)) resumable.push(candidate)
+  }
+}
+if (resumable.length > 1) process.exit(9)
+if (resumable.length === 1) {
+  process.stdout.write(resumable[0])
+  process.exit(0)
+}
+for (let index = 0; index < 8; index += 1) {
+  const candidate = path.join(parent, crypto.randomUUID())
+  try {
+    fs.mkdirSync(candidate, { mode: 0o700 })
+    const descriptor = fs.openSync(parent, fs.constants.O_RDONLY)
+    try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
+    process.stdout.write(candidate)
+    process.exit(0)
+  } catch (error) { if (error?.code !== 'EEXIST') throw error }
+}
+process.exit(10)
+NODE
+    )" || fail "unable to create a private bootstrap recovery attempt"
+    "$NODE_BIN" "$bootstrap_controller" derive-bootstrap-resume \
+      --prepare "$attempt_dir/prepare.receipt.json" \
+      --confirm "$attempt_dir/current-confirm.receipt.json" \
+      --shutdown "$attempt_dir/shutdown-requested.receipt.json" \
+      --pending "$pending" --runtime-release "$n8n_runtime_release" --n8n-pid "$n8n_pid" \
+      --recovery-attempt-dir "$recovery_attempt" >/dev/null \
+      || fail "fresh bootstrap resume capability could not be derived"
+    "$NODE_BIN" "$guard_controller" serve-recovery --database "$live_db" \
+      --n8n-database "$n8n_db" --socket "$guard_socket" --token-file "$guard_token" \
+      --resume-receipt "$recovery_attempt/resume.receipt.json" \
+      --resume-token "$recovery_attempt/resume.token.json" --ttl-seconds 1800 \
+      >"$recovery_attempt/guard.log" 2>&1 &
+    recovery_guard_pid=$!
+    chmod 600 "$recovery_attempt/guard.log"
+    deadline=$(( $(date +%s) + 15 ))
+    while [[ ! -S "$guard_socket" || ! -f "$guard_token" ]]; do
+      kill -0 "$recovery_guard_pid" 2>/dev/null \
+        || fail "bootstrap recovery guard exited before becoming ready"
+      (( $(date +%s) < deadline )) || fail "bootstrap recovery guard did not become ready"
+      sleep 1
+    done
+  fi
+  [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
+    || fail "verified dual-database freeze guard is unavailable before bootstrap authorization"
+  guard_status="$("$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
+    --database "$live_db" --n8n-database "$n8n_db")" \
+    || fail "unable to attest the dual-database freeze guard before bootstrap authorization"
+  guard_mode="$("$NODE_BIN" -e '
+    const value = JSON.parse(process.argv[1])
+    if (!value || !["dual", "dual-recovery", "recovery-hold"].includes(value.mode)) process.exit(2)
+    process.stdout.write(value.mode)
+  ' "$guard_status")" || fail "freeze guard mode is invalid"
+  allow_expired_authorization=0
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if [[ "$legacy_state" == alive ]]; then
+    [[ "$guard_mode" == dual ]] || fail "live legacy shutdown requires the full dual-database freeze"
+  else
+    (( pending_exists == 1 )) || fail "a stopped legacy runtime requires an existing bootstrap pending marker"
+    [[ "$guard_mode" == dual || "$guard_mode" == dual-recovery || "$guard_mode" == recovery-hold ]] \
+      || fail "stopped legacy recovery requires the managed n8n recovery hold"
+    allow_expired_authorization=1
+  fi
+  bootstrap_authorization="$("$NODE_BIN" "$bootstrap_controller" status --attempt-dir "$attempt_dir")" \
+    || fail "legacy bootstrap confirmation chain is invalid"
+  proof_sha="$(shasum -a 256 "$rollback_proof" | awk '{print $1}')"
+  "$NODE_BIN" - "$bootstrap_authorization" "$allow_expired_authorization" "$source_commit" \
+    "$slot" "$release_id" "$physical_root" "$manifest" "$evidence_file" "$evidence_sha" \
+    "$rollback_proof" "$proof_sha" "$live_db" "$n8n_db" "$(physical_path "$RUN_DIR")" \
+    "$STATE_FILE" "$ROUTER_PORT" <<'NODE' \
+    || fail "legacy bootstrap confirmation is expired or bound to another operation"
+const value = JSON.parse(process.argv[2])
+const [rawAllowExpired, sourceCommit, slot, releaseId, releaseRoot, manifestSha256,
+  evidencePath, evidenceSha256, proofPath, proofSha256, missionDb, n8nDb,
+  runDirectory, statePath, rawPort] = process.argv.slice(3)
+const binding = value.bindings
+if (value.phase !== 'SHUTDOWN_REQUESTED' || typeof value.attemptId !== 'string'
+  || !Number.isSafeInteger(value.expiresAt) || value.tokenPresent !== false
+  || (rawAllowExpired !== '1' && value.expired !== false)
+  || !binding || binding.sourceCommit !== sourceCommit
+  || binding.target?.slot !== slot || binding.target?.releaseId !== releaseId
+  || binding.target?.releaseRoot !== releaseRoot
+  || binding.target?.manifest?.sha256 !== manifestSha256
+  || binding.evidence?.path !== evidencePath || binding.evidence?.sha256 !== evidenceSha256
+  || binding.proof?.path !== proofPath || binding.proof?.sha256 !== proofSha256
+  || binding.databases?.mission?.path !== missionDb || binding.databases?.n8n?.path !== n8nDb
+  || binding.routing?.runDirectory?.path !== runDirectory
+  || binding.routing?.statePath !== statePath || binding.routing?.port !== Number(rawPort)) process.exit(2)
+NODE
+  pending_payload="$($NODE_BIN - "$bootstrap_authorization" "$attempt_dir" "$slot" "$release_id" \
+    "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
+    "$evidence_observed" "$source_commit" "$n8n_pid" "$workflow_digest" "$workflow_report" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const path = require('node:path')
+const [rawAuthorization, attemptDir, slot, releaseId, releaseRoot, manifestSha256,
+  legacyReleaseId, rawLegacyPid, legacyCwd, rawObservedAt, sourceCommit,
+  rawN8nPid, n8nWorkflowDigest, workflowReportPath] = process.argv.slice(2)
+const status = JSON.parse(rawAuthorization)
+const reference = pathname => {
+  const before = fs.lstatSync(pathname, { bigint: true })
+  if (!before.isFile() || before.isSymbolicLink() || before.uid !== BigInt(process.getuid())
+    || (before.mode & 0o7777n) !== 0o400n || before.nlink !== 1n) process.exit(2)
+  const fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true })
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) process.exit(3)
+    const source = fs.readFileSync(fd)
+    const after = fs.lstatSync(pathname, { bigint: true })
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size) process.exit(4)
+    return { path: pathname, dev: opened.dev.toString(), ino: opened.ino.toString(),
+      size: Number(opened.size), sha256: crypto.createHash('sha256').update(source).digest('hex') }
+  } finally { fs.closeSync(fd) }
+}
+if (path.resolve(attemptDir) !== attemptDir || status.phase !== 'SHUTDOWN_REQUESTED'
+  || !/^[a-f0-9-]{36}$/u.test(status.attemptId || '')) process.exit(5)
+const prepare = reference(path.join(attemptDir, 'prepare.receipt.json'))
+const confirm = reference(path.join(attemptDir, 'current-confirm.receipt.json'))
+const shutdown = reference(path.join(attemptDir, 'shutdown-requested.receipt.json'))
+const workflowReport = reference(workflowReportPath)
+process.stdout.write(JSON.stringify({
+  schema: 'video-autoworker-blue-green-bootstrap-pending/v4',
+  createdAt: Math.floor(Date.now() / 1000),
+  attemptId: status.attemptId,
+  slot,
+  releaseId,
+  releaseRoot,
+  manifestSha256,
+  legacyReleaseId,
+  legacyPid: Number(rawLegacyPid),
+  legacyCwd,
+  evidence: status.bindings.evidence,
+  evidenceObservedAt: Number(rawObservedAt),
+  proof: status.bindings.proof,
+  transition: status.bindings.transition,
+  bootstrapClaim: status.bindings.transition.claim,
+  authorization: { prepare, confirm, shutdown },
+  databases: status.bindings.databases,
+  router: status.bindings.routing,
+  n8n: {
+    pid: Number(rawN8nPid),
+    dbPath: status.bindings.databases.n8n.path,
+    workflowProtocol: 'slot-v1-execution-owner-v1',
+    workflowSourceCommit: sourceCommit,
+    workflowDigest: n8nWorkflowDigest,
+    workflowReport,
+  },
+  baselineSourceCommit: sourceCommit,
+}))
+NODE
+  )" || fail "unable to build immutable bootstrap pending v4"
   if [[ -e "$pending" || -L "$pending" ]]; then
-    if kill -0 "$legacy_pid" 2>/dev/null; then
-      assert_bootstrap_pending_identity "$pending" "$pending_payload" 1
-      # Refresh only the evidence digest/time after every other immutable
-      # bootstrap field has matched the existing marker.
-      write_json_atomic "$pending" "$pending_payload"
+    if (( evidence_static_recovery == 1 )); then
+      assert_bootstrap_pending_identity "$pending" "$(<"$pending")"
     else
-      assert_bootstrap_pending_identity "$pending" "$pending_payload" 0
+      assert_bootstrap_pending_identity "$pending" "$pending_payload"
     fi
   else
     [[ ! -e "$STATE_FILE" && ! -L "$STATE_FILE" ]] \
@@ -1192,27 +1852,44 @@ NODE
     [[ ! -e "$(binding_file blue)" && ! -L "$(binding_file blue)" \
       && ! -e "$(binding_file green)" && ! -L "$(binding_file green)" ]] \
       || fail "legacy bootstrap requires unused slot bindings"
-    write_json_atomic "$pending" "$pending_payload"
+    write_json_immutable "$pending" "$pending_payload" \
+      || fail "unable to publish immutable bootstrap pending v4"
+    assert_immutable_private_file "bootstrap pending marker" "$pending"
   fi
-  if kill -0 "$legacy_pid" 2>/dev/null; then
-    listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
-    [[ "$listeners" == "$legacy_pid" ]] || fail "legacy PID is not the sole listener on router port $ROUTER_PORT"
-    lsof -a -p "$legacy_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$legacy_cwd" \
-      || fail "legacy PID cwd does not match the external freeze evidence"
-    lsof -a -p "$legacy_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$live_db" \
-      || fail "legacy PID is not using AIWORKER_BG_LIVE_DB_PATH as its authoritative SQLite database"
+  legacy_state="$(probe_evidenced_legacy_state)"
+  if [[ "$legacy_state" == alive ]]; then
+    [[ "$(env -u NODE_ENV \
+      -u AIWORKER_TEST_LEGACY_FREEZE \
+      -u AIWORKER_TEST_LEGACY_FREEZE_GUARD_SOCKET \
+      -u AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT \
+      -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
+      -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
+      "$NODE_BIN" "$evidence_generator" --verify-evidence-fd "$evidence_fd" \
+        --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
+        --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
+      || fail "legacy or n8n full identity changed immediately before SIGTERM"
     kill -TERM "$legacy_pid"
     deadline=$(( $(date +%s) + 30 ))
-    while kill -0 "$legacy_pid" 2>/dev/null && (( $(date +%s) < deadline )); do sleep 1; done
+    while [[ "$(probe_evidenced_legacy_state)" == alive ]] \
+      && (( $(date +%s) < deadline )); do sleep 1; done
   fi
-  ! kill -0 "$legacy_pid" 2>/dev/null || fail "legacy PID did not exit after SIGTERM; no force kill was attempted"
+  [[ "$(probe_evidenced_legacy_state)" == stopped ]] \
+    || fail "legacy PID did not exit after SIGTERM; no force kill was attempted"
   for _ in 1 2 3 4 5; do
     listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
     [[ -z "$listeners" ]] || fail "router port $ROUTER_PORT was reclaimed after legacy shutdown; supervisor is not quiesced"
     sleep 1
   done
-  [[ "$(shasum -a 256 "$evidence_file" | awk '{print $1}')" == "$evidence_sha" ]] \
-    || fail "bootstrap evidence changed during legacy shutdown"
+  [[ "$(env -u NODE_ENV \
+    -u AIWORKER_TEST_LEGACY_FREEZE \
+    -u AIWORKER_TEST_LEGACY_FREEZE_GUARD_SOCKET \
+    -u AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
+    -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
+    "$NODE_BIN" "$evidence_generator" --verify-evidence-static-fd "$evidence_fd" \
+      --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
+      --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
+    || fail "bootstrap evidence or external ingress freeze changed during legacy shutdown"
   kill -0 "$n8n_pid" 2>/dev/null || fail "n8n PID changed or stopped during bootstrap"
   lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
     || fail "n8n database identity changed during bootstrap"
@@ -1222,6 +1899,24 @@ NODE
     || fail "published n8n workflow compatibility changed during legacy shutdown"
   [[ "$workflow_compatibility_after" == "$workflow_compatibility" ]] \
     || fail "published n8n workflow digest changed during legacy shutdown"
+
+  [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
+    || fail "legacy freeze guard recovery state is incomplete"
+  if [[ "$guard_mode" == dual ]]; then
+    "$NODE_BIN" "$guard_controller" handoff --socket "$guard_socket" \
+      --token-file "$guard_token" --database "$live_db" --n8n-database "$n8n_db" >/dev/null \
+      || fail "unable to enter the managed post-shutdown n8n recovery hold"
+  fi
+  guard_status="$("$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
+    --database "$live_db" --n8n-database "$n8n_db")" \
+    || fail "post-shutdown n8n recovery hold is unavailable"
+  guard_mode="$("$NODE_BIN" -e '
+    const value = JSON.parse(process.argv[1])
+    if (value?.mode !== "recovery-hold") process.exit(2)
+    process.stdout.write(value.mode)
+  ' "$guard_status")" || fail "post-shutdown n8n recovery hold did not become active"
+  listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+  [[ -z "$listeners" ]] || fail "router port was reclaimed before managed baseline startup"
 
   binding_payload="$($NODE_BIN -e '
     const [slot, releaseId, releaseRoot, manifestSha, port] = process.argv.slice(1)
@@ -1301,7 +1996,15 @@ NODE
     "$source_commit" "$workflow_digest")"
   write_json_atomic "$(baseline_file)" "$baseline_payload"
   assert_baseline >/dev/null
-  rm -f -- "$pending"
+  "$NODE_BIN" "$guard_controller" revoke --socket "$guard_socket" \
+    --token-file "$guard_token" --database "$live_db" --n8n-database "$n8n_db" >/dev/null \
+    || fail "unable to release the post-shutdown n8n recovery hold"
+  [[ ! -e "$guard_socket" && ! -L "$guard_socket" && ! -e "$guard_token" && ! -L "$guard_token" ]] \
+    || fail "post-shutdown n8n recovery hold did not remove its private socket and token"
+  kill -0 "$n8n_pid" 2>/dev/null || fail "n8n stopped while releasing the recovery hold"
+  exec 9<&-
+  remove_immutable_file_durable "completed bootstrap pending marker" "$pending" \
+    || fail "unable to durably finalize the completed bootstrap marker"
   BOOTSTRAP_MAINTENANCE=0
   printf 'Established managed blue-green baseline: slot=%s release=%s; legacy release %s is fenced\n' \
     "$slot" "$release_id" "$legacy_release"
@@ -1966,6 +2669,20 @@ rollback_state() {
 }
 
 show_status() {
+  local pending
+  pending="$(bootstrap_pending_file)"
+  if [[ -e "$pending" || -L "$pending" ]]; then
+    assert_immutable_private_file "bootstrap pending marker" "$pending"
+    "$NODE_BIN" -e '
+      const value = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"))
+      if (value.schema !== "video-autoworker-blue-green-bootstrap-pending/v4"
+        || !["blue", "green"].includes(value.slot)
+        || typeof value.releaseId !== "string" || !Number.isSafeInteger(value.legacyPid)
+        || !Number.isSafeInteger(value.n8n?.pid)) process.exit(2)
+      process.stdout.write(`bootstrap=recovery-hold slot=${value.slot} release=${value.releaseId} legacyPid=${value.legacyPid} n8nPid=${value.n8n.pid}\n`)
+    ' "$pending" || fail "bootstrap recovery pending marker is invalid"
+    return
+  fi
   prepare_run_dir
   validate_state
   local active release_id generation
@@ -1989,6 +2706,11 @@ show_status() {
 
 command="${1:-}"
 shift || true
+case "$command" in
+  init|bootstrap|stage|bind|retire|switch|rollback|status)
+    assert_bootstrap_operation_gate "$command" "$@"
+    ;;
+esac
 case "$command" in
   init) init_state "$@" ;;
   bootstrap) bootstrap_baseline "$@" ;;

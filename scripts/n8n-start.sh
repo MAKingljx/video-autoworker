@@ -28,6 +28,13 @@ fi
 
 run_foreground() {
   local lock_dir="$AIWORKER_N8N_RUN_DIR/start.lock"
+  n8n_maintenance_lock_acquire start "$SCRIPT_DIR/n8n-maintenance-lock.mjs" || exit 1
+  cleanup_start() {
+    rm -f "$lock_dir/pid"
+    rmdir "$lock_dir" 2>/dev/null || true
+    n8n_maintenance_lock_release || true
+  }
+  trap cleanup_start EXIT
   if ! mkdir "$lock_dir" 2>/dev/null; then
     local lock_owner=""
     [[ -f "$lock_dir/pid" ]] && lock_owner="$(tr -d '[:space:]' < "$lock_dir/pid")"
@@ -40,7 +47,6 @@ run_foreground() {
     mkdir "$lock_dir"
   fi
   printf '%s\n' "$$" > "$lock_dir/pid"
-  trap 'rm -f "$lock_dir/pid"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
 
   if n8n_pid_is_running; then
     local existing_pid
@@ -69,8 +75,7 @@ run_foreground() {
   if [[ -f "$AIWORKER_N8N_PID_FILE" ]] && [[ "$(tr -d '[:space:]' < "$AIWORKER_N8N_PID_FILE")" == "$child_pid" ]]; then
     rm -f "$AIWORKER_N8N_PID_FILE"
   fi
-  rm -f "$lock_dir/pid"
-  rmdir "$lock_dir" 2>/dev/null || true
+  cleanup_start
   trap - EXIT TERM INT HUP
   exit "$exit_code"
 }

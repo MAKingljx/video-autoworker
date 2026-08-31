@@ -53,6 +53,8 @@ fi
 n8n_load_environment
 n8n_require_node
 n8n_prepare_runtime_directories
+n8n_maintenance_lock_acquire install "$SCRIPT_DIR/n8n-maintenance-lock.mjs" || exit 1
+trap 'n8n_maintenance_lock_release || true' EXIT
 
 case "$AIWORKER_N8N_RUNTIME_ROOT" in
   /*) ;;
@@ -132,7 +134,15 @@ if [[ ! -d "$release_dir" ]]; then
     "$staging_dir/ops/n8n/lib" \
     "$staging_dir/ops/n8n/workflows"
 
-  for control_script in n8n-start.sh n8n-stop.sh n8n-status.sh n8n-import-workflows.sh; do
+  for control_script in \
+    n8n-start.sh \
+    n8n-stop.sh \
+    n8n-status.sh \
+    n8n-import-workflows.sh \
+    n8n-maintenance-lock.mjs \
+    n8n-workflow-transition-anchor.mjs \
+    n8n-backup-managed-workflows.mjs \
+    n8n-restore-managed-workflows.sh; do
     install -m 700 "$SCRIPT_DIR/$control_script" "$staging_dir/scripts/$control_script"
   done
   install -m 700 "$AIWORKER_N8N_SOURCE_DIR/lib/common.sh" "$staging_dir/ops/n8n/lib/common.sh"
@@ -199,7 +209,7 @@ if [[ -d "$N8N_USER_FOLDER" ]] && [[ -n "$(find "$N8N_USER_FOLDER" -mindepth 1 -
   release_backup="$AIWORKER_N8N_BACKUP_DIR/pre-release-$backup_stamp-${source_commit:0:12}"
   install -d -m 700 "$release_backup"
   state_archive="$release_backup/n8n-state.tar.gz"
-  tar -czf "$state_archive" -C "$(dirname "$N8N_USER_FOLDER")" "$(basename "$N8N_USER_FOLDER")"
+  n8n_archive_state_without_runtime_locks "$N8N_USER_FOLDER" "$state_archive"
   install -m 600 "$ENV_FILE" "$release_backup/n8n.env"
   previous_release="$(readlink "$AIWORKER_N8N_RUNTIME_CURRENT" 2>/dev/null || printf 'none')"
   if [[ "$previous_release" != "none" && -f "$previous_release/SOURCE_MANIFEST" ]]; then

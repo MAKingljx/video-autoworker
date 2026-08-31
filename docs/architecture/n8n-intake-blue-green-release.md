@@ -157,6 +157,78 @@ switch/rollback 同时核对 binding、attestation、PID、监听进程 cwd、re
    `start` argv、父子 PID、物理 cwd、数据库 open FD 的 device/inode、40 位 commit release 根、
    `SOURCE_COMMIT`、`SOURCE_MANIFEST`、`RUNTIME_SOURCE_SHA256SUMS` 和 n8n `2.31.6` 包版本。
 
+首次引导证据固定使用 `video-autoworker-legacy-freeze-evidence/v3`，不能再手填 v2 JSON。
+`generate-legacy-freeze-evidence.mjs` 从 3017/5678 唯一 listener 派生 PID，以 macOS `lsof` 中唯一
+物理 `/bin/node` txt 映射、进程启动时间、argv 摘要、物理 cwd 和数据库 FD 的 device/inode 建立身份；两库
+必须无符号链接、归当前用户所有、组/其他用户不可写且 `quick_check=ok`。正式队列通过 3017
+只读队列接口合并持久批次和平台任务，证据同时绑定队列投影摘要。生成前还要求 video-lane
+supervisor 已 disabled + unloaded、没有 worker、没有全局锁，并连续取得两次完全相同的零活动
+快照。
+
+legacy 停止判断绑定的是进程 incarnation，而不是单独一个 PID：PID、PPID、UID、启动时间和 argv
+任一变化且 3017 已无 listener 时，可判定旧 incarnation 已结束；如果复用该 PID 的新进程正在监听
+3017，或 3017 被其他 PID 占用，则必须失败关闭。同一 incarnation 下 executable、cwd 或数据库 FD
+身份漂移同样不是“已停止”，不得回收 guard、继续 bootstrap 或把新进程误认成原 legacy。
+
+数据库归零本身不能证明入口持续冻结，因此生成器要求 `legacy-freeze-guard.mjs` 按固定顺序对
+3017 实际打开的 Mission Control SQLite 和 n8n SQLite 同时持有 `BEGIN IMMEDIATE` writer reservation。
+guard 等待锁前既有 writer 完成，取得双锁后再次复核精确 legacy PID 的 3017 listener/启动时间/
+argv/Node txt/双数据库 FD 身份；锁后两库新写都无法提交，而旧 3017 与 n8n 仍可提供只读探针。
+guard 用随机 challenge、私有 token、PID/open-FD/socket 身份和 TTL 证明持续持锁，
+TTL 到期或受管 revoke 会自动 rollback 并清理 socket/token，崩溃残留只允许在证明旧 PID 已消失后
+精确回收。证据还绑定两份 `quick_check=ok`、摘要匹配的 Mission/n8n SQLite 回滚备份证明。
+回滚证明只能由 `generate-legacy-bootstrap-rollback-proof.mjs` 在同一 guard 持锁、四项活动归零时生成；
+它从 3017/5678 open FD 派生权威源库，以 SQLite online backup 建立快照，并绑定 guard、完整运行身份、
+队列摘要和目标 slot/release/manifest。大库摘要使用同一 FD 分块读取并复核前后 dev/inode/size，避免
+整库读入内存及路径替换。
+证据只写入 mode `0700` 安全目录，以独占 hard-link publish 原子创建 mode `0600` 文件。bootstrap
+使用 Bash 3.2 兼容的固定 FD 9，并在 SIGTERM 紧前再次做完整双快照。
+
+停止 legacy 前还必须由 `legacy-bootstrap-controller.mjs` 完成 prepare → 当前状态复核 → apply；部署器
+只消费同一次 `SHUTDOWN_REQUESTED` 收据，并逐项绑定提交、release、manifest、evidence、proof、
+双库和 router 路径。legacy 停止后 guard 进入 `recovery-hold`：只释放 Mission Control 写锁供新槽
+迁移和启动，继续持有 n8n 写锁；新槽、暂停闸门、router 和最终工作流复核全部成功后才释放。
+`bootstrap.pending` 存在期间，init/stage/bind/retire/switch/rollback 全部失败关闭，只有只读 status
+和完整绑定的 bootstrap 恢复可进入。
+
+工作流离线迁移另有独立的人类授权门。transition anchor 先把权威 n8n SQLite、回滚包、目标完整
+提交、受管 n8n runtime 和 application release 固定到 upgrade intent；用户审阅本次意图、备份和
+目标后，由外部受控步骤提供一次性 64-hex token，才能生成短时 current confirmation/capability 并
+调用强制发布两条固定工作流的 importer。`legacy-bootstrap-controller.mjs current-confirm --prepare`
+只做系统实时状态复核，不是用户授权，也不得代替、复制或伪造该 token。import、restore、install 与
+n8n start 还共享物理 maintenance lock，确保停机检查到 journal 提交的维护窗口互斥。
+
+`bootstrap.pending` 已升级为不可变 v4：以 `O_EXCL|O_NOFOLLOW` 独占创建、文件与父目录 fsync，
+最终必须为 `0400`、`nlink=1`。它固定三段授权收据、evidence/proof、目标 release、双库物理身份、
+router 和原始 n8n/workflow 身份；恢复时不刷新、不覆盖，也不把已过期的历史证据冒充当前安全。
+若 guard 因 TTL、SIGKILL 或主机重启消失，部署器为本次恢复创建独立 UUID 目录，重新证明 legacy PID
+与 3017 listener 均不存在、当前 n8n 来自精确受管 release、工作流未漂移、两库 `quick_check=ok`，
+并离线复核媒体节点、n8n active execution、正式 waiting/running 都为零。历史非 durable accepted/running
+超过 24 小时只进入 attention，不永久阻断；durable 队列无论年龄仍阻断。离线 projection 摘要和原始
+queue digest 同时绑定到 120 秒一次性 resume capability。
+
+fresh capability 先在锁外验证，再由 `serve-recovery` 按 Mission → n8n 固定顺序取得双库
+`BEGIN IMMEDIATE`，锁内再次复核相同 runtime/projection。只有私有 socket/token 已原子就绪后才写入
+不可变 consumed 收据并删除 capability；重放、错库、活跃任务、工作流漂移和部分 stale guard 状态
+全部失败关闭。新 guard 以 `dual-recovery` 出现，随后按既有 handoff 只释放 Mission 锁并进入
+`recovery-hold`。工作流确实损坏时必须先在 n8n 完全停止后走独立 restore-only journal，不能借 resume
+路径放宽证据。
+
+restore-only 分为两种收据。normal restore 只适用于 `bootstrap.pending` 尚未写入、legacy 尚未停止，
+且原 guard 与 prepare/confirm/shutdown 链仍新鲜的首次迁移失败；由 controller 的
+`derive-n8n-restore-confirmation` 派生。disaster restore 只适用于 pending v4 已写、legacy 已停止、
+原确认或 guard 已失效的崩溃/重启现场；由 `derive-n8n-disaster-recovery-confirmation` 在 n8n、
+LaunchAgent、3017/5678 listener 和目标数据库 open FD 全部满足停机证明后派生。同一 bootstrap
+attempt 的 restore 与 resume 以不可变 branch claim 互斥。统一恢复脚本按 receipt schema 选择
+normal/disaster journal；未提交阶段可在身份不变时续跑，`COMMITTED` 不可重放。恢复后必须先启动
+精确受管 n8n release，复验 5678、真实数据库 FD、两条唯一 active/published 工作流及内容摘要，
+再重新取得零活动证明并派生 fresh resume，绝不能从 restore 直接开放入口。
+
+`bootstrap.pending`、evidence/proof 和备份已有明确的文件与父目录 fsync 边界。workflow transition、
+normal/disaster restore 和 maintenance lock 的完整 durability 必须继续以候选实现的 file → directory
+fsync 顺序、崩溃注入、重启恢复和 journal 续跑测试为发布门；在这些测试通过并形成证据前，文档不把
+所有中间状态统称为已持久化保证。
+
 生产 argv 允许使用受控的 n8n 与 Node `current` 软链接；验证器逐组件绑定其 owner、mode、
 device/inode、链接目标与最终物理文件，n8n CLI 最终必须落到本次 40 位 commit release，Node
 最终文件必须与 n8n 进程的 executable FD 一致。数据库、cwd 和物理 release 自身仍禁止软链接。

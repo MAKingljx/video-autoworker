@@ -110,6 +110,56 @@ n8n_prepare_runtime_directories() {
   chmod 700 "$N8N_USER_FOLDER" "$AIWORKER_N8N_LOG_DIR" "$AIWORKER_N8N_RUN_DIR"
 }
 
+n8n_maintenance_lock_acquire() {
+  local owner="$1" tool="${2:-$AIWORKER_N8N_RUNTIME_CURRENT/scripts/n8n-maintenance-lock.mjs}"
+  local lock_path="$N8N_USER_FOLDER/.n8n-maintenance.lock" nonce
+  if [[ ! -f "$tool" || -L "$tool" ]]; then
+    printf 'n8n maintenance lock tool is unavailable: %s\n' "$tool" >&2
+    return 1
+  fi
+  nonce="$("$N8N_NODE_BIN" "$tool" acquire "$lock_path" "$owner" "$$")" || return 1
+  if [[ ! "$nonce" =~ ^[a-f0-9]{64}$ ]]; then
+    printf 'n8n maintenance lock returned an invalid capability.\n' >&2
+    return 1
+  fi
+  AIWORKER_N8N_MAINTENANCE_LOCK_PATH="$lock_path"
+  AIWORKER_N8N_MAINTENANCE_LOCK_OWNER="$owner"
+  AIWORKER_N8N_MAINTENANCE_LOCK_NONCE="$nonce"
+  AIWORKER_N8N_MAINTENANCE_LOCK_TOOL="$tool"
+  export AIWORKER_N8N_MAINTENANCE_LOCK_PATH AIWORKER_N8N_MAINTENANCE_LOCK_OWNER
+  export AIWORKER_N8N_MAINTENANCE_LOCK_NONCE AIWORKER_N8N_MAINTENANCE_LOCK_TOOL
+}
+
+n8n_maintenance_lock_release() {
+  if [[ -z "${AIWORKER_N8N_MAINTENANCE_LOCK_NONCE:-}" ]]; then
+    return 0
+  fi
+  local nonce="$AIWORKER_N8N_MAINTENANCE_LOCK_NONCE"
+  AIWORKER_N8N_MAINTENANCE_LOCK_NONCE=""
+  "$N8N_NODE_BIN" "$AIWORKER_N8N_MAINTENANCE_LOCK_TOOL" release \
+    "$AIWORKER_N8N_MAINTENANCE_LOCK_PATH" "$AIWORKER_N8N_MAINTENANCE_LOCK_OWNER" "$$" "$nonce"
+}
+
+n8n_archive_state_without_runtime_locks() {
+  local state_root="$1" archive="$2" state_parent state_name member
+  state_parent="$(cd "$(dirname "$state_root")" && pwd -P)" || return 1
+  state_name="$(basename "$state_root")"
+  tar -czf "$archive" \
+    --exclude="$state_name/.n8n-maintenance.lock" \
+    --exclude="$state_name/.managed-workflow-restore.lock" \
+    -C "$state_parent" "$state_name" || return 1
+  while IFS= read -r member; do
+    case "$member" in
+      "$state_name/.n8n-maintenance.lock"|"$state_name/.n8n-maintenance.lock/"*|\
+      "$state_name/.managed-workflow-restore.lock"|"$state_name/.managed-workflow-restore.lock/"*)
+        rm -f "$archive"
+        printf 'n8n state archive contains a runtime lock artifact: %s\n' "$member" >&2
+        return 1
+        ;;
+    esac
+  done < <(tar -tzf "$archive")
+}
+
 n8n_require_node() {
   if [[ -z "${N8N_NODE_BIN:-}" || ! -x "$N8N_NODE_BIN" ]]; then
     printf 'Node executable is unavailable: %s\n' "${N8N_NODE_BIN:-<empty>}" >&2
@@ -151,6 +201,10 @@ n8n_runtime_source_manifest() {
       scripts/n8n-stop.sh \
       scripts/n8n-status.sh \
       scripts/n8n-import-workflows.sh \
+      scripts/n8n-maintenance-lock.mjs \
+      scripts/n8n-workflow-transition-anchor.mjs \
+      scripts/n8n-backup-managed-workflows.mjs \
+      scripts/n8n-restore-managed-workflows.sh \
       ops/n8n/.env.example \
       ops/n8n/lib/common.sh \
       ops/n8n/package.json \

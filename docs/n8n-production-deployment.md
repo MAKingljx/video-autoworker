@@ -65,24 +65,61 @@ N8N_NPM_BIN="/absolute/path/to/npm"
 
 然后再次执行安装脚本。脚本要求 Git 工作树干净，把当前提交中的控制脚本、公共库、工作流、`package.json` 和 `package-lock.json` 复制到临时 release，再执行 `npm ci`、版本断言和逐文件 SHA-256 校验；运行清单本身还会与干净 Git 源码重新计算出的清单哈希交叉核对，不能由 release 自证完整性。全部成功后才用同目录临时链接和原子 rename 切换 `current`。`SOURCE_COMMIT` 与 `SOURCE_MANIFEST` 会记录来源提交、脱敏 remote、lock/workflow SHA-256 和 n8n 版本。切换前若已有状态，脚本会把数据库状态、对应加密环境、切换前/目标 release 清单和 `RELEASE_TRANSITION` 一起备份。不要直接编辑生成的运行副本，任何变更都应先进入 GitHub 再重装。
 
-## 导入样例工作流
+## 离线导入并发布受管工作流
 
-n8n CLI 离线导入期间不能让服务同时写 SQLite。脚本会同时检查 LaunchAgent、受管 PID 和 `/healthz`，发现 n8n 仍在运行时会拒绝继续；已有状态及与之配套的外部加密环境文件会一起备份到仓库外并生成 SHA-256：
+n8n CLI 离线导入期间不能让服务同时写 SQLite。导入器会同时检查 LaunchAgent、受管 PID 和
+`/healthz`，发现 n8n 仍在运行时拒绝继续；它只接受 release 内按固定顺序提供的两条受管工作流，
+并强制执行 `unpublish（仅已存在时） -> import:workflow -> publish:workflow`。无参数调用和
+`--no-activate` 都会失败关闭，不能把未发布草稿留作首次蓝绿迁移的目标状态。
 
-```bash
-runtime="$HOME/ai-worker/services/video-autoworker-n8n/current"
-bash "$runtime/scripts/n8n-stop.sh"
-bash "$runtime/scripts/n8n-import-workflows.sh"
-```
-
-首次部署在导入后直接继续安装下文的 LaunchAgent，由 LaunchAgent 完成首次启动。已有 LaunchAgent 的升级导入则在上述命令后执行 `bash "$runtime/scripts/n8n-start.sh"` 恢复服务。
-
-导入脚本默认执行无人值守的 `unpublish（仅已存在时） -> import:workflow -> publish:workflow`，并用活动工作流清单复核固定 ID 只存在一份。若仅需导入草稿，可显式执行：
+每次导入都必须先建立独立的 mode `0700` transition 目录和受管回滚包，再生成绑定权威 n8n
+SQLite、目标完整提交、受管 n8n runtime 与 application release 的不可变意图。以下命令只展示
+参数合同；路径、UUID、提交、槽位与 release 必须来自本次已复核维护计划：
 
 ```bash
-runtime="$HOME/ai-worker/services/video-autoworker-n8n/current"
-bash "$runtime/scripts/n8n-import-workflows.sh" --no-activate
+runtime_release=/absolute/path/releases/<40-character-commit>
+application_release=/absolute/path/application-releases/<release-id>/standalone
+transition_dir=/absolute/private-state/workflow-transition
+
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" prepare-intent \
+  --upgrade-id <one-current-uuid> \
+  --database /absolute/path/database.sqlite \
+  --rollback-package /absolute/path/recovery-package \
+  --runtime-root "$runtime_release" \
+  --target-commit <40-character-commit> \
+  --slot <blue-or-green> \
+  --release-id <application-release-id> \
+  --application-release-root "$application_release" \
+  --output "$transition_dir/upgrade-intent.json"
 ```
+
+运维人员必须先审阅意图、实际备份、权威数据库与目标 release，再对“本次生产工作流写入”作出
+明确确认。`operator-token` 必须由外部受控确认步骤当次提供为 mode `0400` 的单个 64 位十六进制
+token；导入脚本、transition anchor 和 legacy bootstrap controller 都不得自行复制、生成或伪造
+该授权。确认收据和短时 capability 使用固定文件名：
+
+```bash
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" current-confirm \
+  --intent "$transition_dir/upgrade-intent.json" \
+  --confirmation-token-file "$transition_dir/operator-token" \
+  --confirmation-receipt-id <one-current-uuid> \
+  --confirmation-output "$transition_dir/current-confirmation.json" \
+  --capability-output "$transition_dir/import-capability.json"
+
+bash "$runtime_release/scripts/n8n-stop.sh"
+bash "$runtime_release/scripts/n8n-import-workflows.sh" \
+  --transition-intent "$transition_dir/upgrade-intent.json" \
+  --transition-confirmation "$transition_dir/current-confirmation.json" \
+  --transition-token-file "$transition_dir/operator-token" \
+  --transition-capability "$transition_dir/import-capability.json" \
+  --transition-journal "$transition_dir/journal"
+```
+
+首次部署在导入后继续安装下文的 LaunchAgent，由 LaunchAgent 完成首次启动；已有 LaunchAgent 的
+升级导入则执行 `bash "$runtime_release/scripts/n8n-start.sh"` 恢复服务。安装、导入、恢复和启动
+共用同一物理 maintenance lock，互斥覆盖整个离线变更窗口，不能并发跨过停机检查。导入成功后
+仍须启动精确受管 release 并完成下述 PID、数据库 FD、版本和工作流内容复验，不能仅凭 CLI 退出码
+恢复入口。
 
 ### 首次迁入 3017 蓝绿协议
 
@@ -96,6 +133,83 @@ versionId，因此验证器不把数据库 versionId 与 JSON 中的 source vers
 数据库三个版本引用同一已发布 history，并比较规范化后的 nodes、connections、settings 和
 nodeGroups。应用基线 release、受管 n8n release 的 `SOURCE_COMMIT` 和工作流内容还必须来自
 同一个精确 Git 提交。
+
+bootstrap 的固定顺序是 **serve guard → rollback proof → evidence**。生成器不会用布尔字段
+自行宣称入口冻结；必须先启动 `legacy-freeze-guard.mjs serve`，由它按
+Mission Control → n8n 的固定顺序对两份权威 SQLite 取得 `BEGIN IMMEDIATE` writer reservation；
+锁建立后 guard 再次复核精确 legacy PID 的进程/监听/双库 FD 身份。legacy 3017 与 n8n 保持在线，
+读探针继续工作，但两库新写会被阻塞或拒绝。guard 状态目录、proof/备份目录和 evidence 目录须
+预先由运维方建立为当前用户所有的 mode `0700` 独立物理目录，目标文件必须不存在。以下三个步骤
+必须保持同一个 guard 进程，并由 proof 固定绑定同一个 `guard_socket`：
+
+```bash
+guard_socket=/absolute/private-state/legacy-freeze/guard.sock
+guard_token=/absolute/private-state/legacy-freeze/guard.token
+
+node scripts/legacy-freeze-guard.mjs serve \
+  --database /absolute/path/mission-control.db \
+  --n8n-database /absolute/path/database.sqlite \
+  --socket "$guard_socket" \
+  --token-file "$guard_token" \
+  --ttl-seconds 1800 \
+  --legacy-pid <verified-3017-pid> &
+```
+
+等待 guard 报告 active 后，从另一个受控会话用相同数据库和 socket 执行 `status`；status 未成功
+时不得生成 proof：
+
+```bash
+guard_socket=/absolute/private-state/legacy-freeze/guard.sock
+
+node scripts/legacy-freeze-guard.mjs status \
+  --database /absolute/path/mission-control.db \
+  --n8n-database /absolute/path/database.sqlite \
+  --socket "$guard_socket"
+
+node scripts/generate-legacy-bootstrap-rollback-proof.mjs \
+  --output /absolute/managed-backup/rollback-proof.json \
+  --slot blue \
+  --release-id <target-release-id> \
+  --standalone-root /absolute/repository/.runtime/releases/<target-release-id>/standalone \
+  --guard-socket "$guard_socket"
+
+node scripts/generate-legacy-freeze-evidence.mjs \
+  --output /absolute/managed-evidence/freeze.json \
+  --slot blue \
+  --release-id <target-release-id> \
+  --standalone-root /absolute/repository/.runtime/releases/<target-release-id>/standalone \
+  --rollback-proof /absolute/managed-backup/rollback-proof.json
+```
+
+guard 默认最长只允许 1800 秒，
+TTL 到期或 `revoke` 都自动 rollback 并删除 socket/token；
+SIGKILL 遗留只能用 `recover-stale` 在证明旧 guard PID 不存在且 state/数据库身份完全匹配后清理。
+回滚生成器只在同一 guard 已验真且四项活动归零时工作；它从 3017/5678 唯一 listener 的 open FD
+绑定两库，使用 SQLite online backup 生成一致性快照，以单 FD 分块摘要、前后身份、`quick_check`、
+`0600`、`nlink=1` 和目录 fsync 验证，再独占发布 v2 proof。proof 绑定目标、guard、运行身份和队列摘要。
+冻结证据生成器随后要求 supervisor disabled/unloaded、worker 与全局锁均不存在，并回读该 proof；
+两个生成器都必须是当前 Git HEAD 中受管文件，普通手填 JSON 不能替代。
+
+停止状态不能只比较 PID 数字。冻结证据把 legacy incarnation 固定为 PID、PPID、UID、启动时间和
+argv：若该 PID 已被新 incarnation 复用且 3017 无 listener，才可认定旧 legacy 已停；若复用 PID
+正在监听 3017，或 3017 被其他 PID 占用，则失败关闭。同一 incarnation 的 executable、cwd 或
+数据库 FD 身份发生漂移也必须阻断，不得回收 guard 或继续 bootstrap。
+
+停止旧 3017 前还必须使用 `legacy-bootstrap-controller.mjs` 生成同一私有 attempt 目录中的
+prepare、当前状态复核和 `SHUTDOWN_REQUESTED` 收据，并把 attempt 目录作为 bootstrap 的最后一个参数。
+其中 `legacy-bootstrap-controller.mjs current-confirm --prepare ...` 只证明运行身份、活动量和绑定在
+该时刻仍然新鲜，不代表用户批准生产写入，也不能替代上文外部提供的 workflow transition token。
+部署器在写入或刷新 pending 前精确核对收据与提交、目标 release、证据、证明、双库和 router；
+停止后 guard 只释放 Mission、继续以 n8n 写锁保持 `recovery-hold`，直到新槽、全局暂停闸门、
+3017 router 与最终工作流复核全部成功。pending 期间其他变更命令失败关闭，`status` 保持可读。
+
+orphan 对账固定为 dry-run → prepare/实际备份 → 用户查看本次差异与备份并明确确认生产数据写入
+→ apply。apply 只接受该次 prepare manifest 与对应 confirm token；权威数据、manifest 或确认过期/
+漂移后必须重新 prepare 并重新取得用户确认，不能复用旧授权。apply 失败按备份和 journal 保留现场，
+不得猜测删除或覆盖；成功也固定输出 `handoffReady=false / NO-GO`，不能直接授权 bootstrap。只有随后
+在 freeze guard 锁内重新证明四项活动归零、复核回滚包和隔离 release，才可进入下一门。完整操作与
+回滚检查见 `docs/operations/legacy-media-orphan-reconciliation.md`。生产首次 bootstrap 仍默认
+`BLOCKED / NO-GO`。
 
 验证器还要求 `com.video-autoworker.n8n` LaunchAgent job PID 是 n8n Node PID 的直接父进程，
 5678 只有该 Node PID 监听，argv 精确为 Node、当前 40 位 commit release 内的 n8n CLI 和
@@ -370,6 +484,97 @@ curl --fail-with-body \
 10. 从 OpenClaw 当前会话执行技能的 `--video-file ... --wait-seconds ...`，确认是 OpenClaw 发起、n8n 编排、本地模型实际完成，而不是直接调用测试接口冒充完整链路。
 
 ## 升级与回退
+
+### 首次蓝绿引导的恢复与灾后继续
+
+首次工作流迁移失败时先判断不可混用的两类恢复路径：
+
+- **normal restore**：尚未写入 `bootstrap.pending`、legacy 3017 尚未停止，而且原 freeze guard、
+  prepare/当前确认/`SHUTDOWN_REQUESTED` 链仍新鲜时，使用
+  `legacy-bootstrap-controller.mjs derive-n8n-restore-confirmation` 派生 normal restore receipt；收据
+  必须由 controller 独占写入同一 bootstrap attempt 根目录，固定 basename 为
+  `n8n-restore-confirmation.receipt.json`。
+- **disaster restore**：`bootstrap.pending` v4 已写且 legacy 3017 已停止，原 guard 或确认已因崩溃、
+  超时或重启失效时，使用 `derive-n8n-disaster-recovery-confirmation`。该路径还必须证明 n8n 与其
+  LaunchAgent 完全停止、3017/5678 无监听、目标 SQLite 没有任何 open FD，并绑定 pending、proof、
+  recovery attempt、回滚包与精确 runtime release；收据固定 basename 为
+  `n8n-disaster-recovery-confirmation.receipt.json`，且只能位于该 bootstrap attempt 下预先建立的
+  mode `0700` disaster recovery UUID 目录。
+
+同一个 bootstrap attempt 的 restore 与 resume 分支通过不可变 branch claim 互斥；选择一支后不得
+切换到另一支。normal 路径必须按以下完整参数派生固定收据，再把该精确路径交给统一恢复入口：
+
+```bash
+attempt_dir=/absolute/private-state/bootstrap-attempt
+runtime_release=/absolute/path/releases/<40-character-commit>
+
+node scripts/legacy-bootstrap-controller.mjs derive-n8n-restore-confirmation \
+  --prepare "$attempt_dir/prepare.receipt.json" \
+  --confirm "$attempt_dir/current-confirm.receipt.json" \
+  --shutdown "$attempt_dir/shutdown-requested.receipt.json" \
+  --package /absolute/path/recovery-package \
+  --runtime-release "$runtime_release" \
+  --database /absolute/path/database.sqlite
+
+bash "$runtime_release/scripts/n8n-restore-managed-workflows.sh" \
+  --database /absolute/path/database.sqlite \
+  --package /absolute/path/recovery-package \
+  --confirmation-receipt "$attempt_dir/n8n-restore-confirmation.receipt.json" \
+  --runtime-release "$runtime_release"
+```
+
+disaster 路径的 recovery UUID 目录必须位于固定的 `disaster-recovery-attempts/` 父目录；其派生参数
+额外绑定 pending、proof 和本次 recovery attempt：
+
+```bash
+attempt_dir=/absolute/private-state/bootstrap-attempt
+recovery_dir="$attempt_dir/disaster-recovery-attempts/<one-current-uuid>"
+runtime_release=/absolute/path/releases/<40-character-commit>
+run_dir=/absolute/private-state/blue-green-run
+
+node scripts/legacy-bootstrap-controller.mjs \
+  derive-n8n-disaster-recovery-confirmation \
+  --prepare "$attempt_dir/prepare.receipt.json" \
+  --confirm "$attempt_dir/current-confirm.receipt.json" \
+  --shutdown "$attempt_dir/shutdown-requested.receipt.json" \
+  --pending "$run_dir/bootstrap.pending.json" \
+  --proof /absolute/managed-backup/rollback-proof.json \
+  --package /absolute/path/recovery-package \
+  --runtime-release "$runtime_release" \
+  --database /absolute/path/database.sqlite \
+  --recovery-attempt-dir "$recovery_dir"
+
+bash "$runtime_release/scripts/n8n-restore-managed-workflows.sh" \
+  --database /absolute/path/database.sqlite \
+  --package /absolute/path/recovery-package \
+  --confirmation-receipt \
+    "$recovery_dir/n8n-disaster-recovery-confirmation.receipt.json" \
+  --runtime-release "$runtime_release"
+```
+
+统一恢复脚本按 receipt schema 选择 normal/disaster journal。未完成 journal 可以在所有身份仍精确
+匹配时重跑剩余阶段；已写 `COMMITTED` 的恢复不得重放。
+恢复完成后必须先启动 receipt 绑定的精确受管 n8n release，再验证 5678 唯一 listener、真实数据库
+open FD、`quick_check=ok`、两条固定 ID 工作流唯一且 active/published，以及 current/active/published
+version 与规范化摘要一致。只有这些检查和零活动证明重新通过后才可派生 fresh resume；恢复完成
+本身不能直接开放 3017 或新任务入口。
+
+首次引导已经写入 `bootstrap.pending` 且 legacy 3017 已停止后，如果 freeze guard 因超时、被杀或
+主机重启消失，不要手工改 pending、伪造收据或直接开放入口。再次执行原参数完全一致的 bootstrap
+时，部署器只会在 pending v4、prepare/confirm/shutdown、evidence/proof、双库、目标 release 与
+router 全部精确匹配后创建 fresh resume attempt。当前 n8n 必须是同一提交的受管 release，5678
+listener、数据库 FD 和两条 published workflow 必须一致；媒体、n8n active execution 和正式队列
+waiting/running 必须为零。旧 stale attention 可以保留，但任何 durable 或新鲜 waiting/running 都会
+阻断。恢复 guard 成功后继续既有 baseline 流程；resume token 只能消费一次。
+
+如果 n8n 工作流或数据库确实需要恢复，必须使用上述独立 restore-only journal；不得借 resume
+路径放宽停机证明或授权。任一步失败都继续保持维护冻结态。
+
+持久化边界必须按故障点验证：`bootstrap.pending`、evidence/proof、SQLite 备份和已经实现的收据
+创建都要求文件内容落盘并同步父目录；normal/disaster transition、restore journal 与 maintenance
+lock 的完整 file → directory fsync 顺序仍以当前候选代码和测试结果为准。提交或生产发布前必须
+通过对应 fsync 顺序、进程崩溃、主机重启与 journal 续跑测试，不能把“写入成功”或内存中的状态
+当成 durable 完成。
 
 升级时不要直接执行 `npm update`。应在开发仓库中同时修改 `ops/n8n/package.json` 的精确版本、重新生成并审查 `package-lock.json`，完成离线导入与真实 Webhook 回归后再提交。生产部署前备份整个外部 n8n 状态和环境文件，随后只从 GitHub 拉取并重新执行 `scripts/n8n-install.sh`，由脚本刷新仓库外运行副本。
 

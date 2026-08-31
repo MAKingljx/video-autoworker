@@ -4,6 +4,7 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_pr
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   renameSync,
@@ -41,6 +42,10 @@ const runtimeSourcePaths = [
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',
+  'scripts/n8n-maintenance-lock.mjs',
+  'scripts/n8n-workflow-transition-anchor.mjs',
+  'scripts/n8n-backup-managed-workflows.mjs',
+  'scripts/n8n-restore-managed-workflows.sh',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -141,9 +146,18 @@ function sha256(value: string | Buffer): string {
 }
 
 function gitSource(pathname: string): Buffer {
-  return execFileSync('git', ['-C', projectRoot, 'show', `${projectCommit}:${pathname}`], {
+  const result = spawnSync('git', ['-C', projectRoot, 'show', `${projectCommit}:${pathname}`], {
     maxBuffer: 4 * 1024 * 1024,
   })
+  if (result.status === 0 && result.stdout) return result.stdout
+  const candidateOnly = new Set([
+    'scripts/n8n-backup-managed-workflows.mjs',
+    'scripts/n8n-maintenance-lock.mjs',
+    'scripts/n8n-restore-managed-workflows.sh',
+    'scripts/n8n-workflow-transition-anchor.mjs',
+  ])
+  if (!candidateOnly.has(pathname)) throw new Error(`tracked fixture source is unavailable: ${pathname}`)
+  return readFileSync(join(projectRoot, pathname))
 }
 
 interface IdentityFixture {
@@ -703,13 +717,47 @@ assert_baseline
     expect(rejected.stderr).toContain('blue-green baseline is invalid')
   })
 
-  it('parses v3 bootstrap pending identity and limits retry changes to fresh evidence', () => {
-    const root = realpathSync(mkdtempSync(join(tmpdir(), 'blue-green-pending-v3-')))
+  it('parses an immutable v4 bootstrap pending identity and rejects retry drift', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'blue-green-pending-v4-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
     const markerPath = join(root, 'bootstrap.pending.json')
     const expectedPath = join(root, 'expected.json')
+    const fileReference = (name: string, digest: string) => ({
+      path: join(root, name),
+      dev: '1',
+      ino: '2',
+      size: 1,
+      sha256: digest,
+    })
+    const fullFileReference = (name: string, digest: string) => ({
+      ...fileReference(name, digest),
+      mtimeNs: '3',
+      ctimeNs: '4',
+      uid: process.getuid!(),
+      mode: '400',
+      nlink: 1,
+    })
+    const databaseIdentity = (name: string, ino: string) => ({
+      path: join(root, name),
+      dev: '1',
+      ino,
+    })
+    const transitionClaim = fullFileReference('bootstrap-claim.json', '1'.repeat(64))
+    const transition = {
+      anchor: fullFileReference('n8n-workflow-transition-anchor.mjs', '2'.repeat(64)),
+      intent: fullFileReference('upgrade-intent.json', '3'.repeat(64)),
+      confirmation: fullFileReference('current-confirmation.json', '4'.repeat(64)),
+      journal: { ...databaseIdentity('transition-journal', '6'), uid: process.getuid!(), mode: '700' },
+      attestation: fullFileReference('transition-attestation.json', '5'.repeat(64)),
+      claim: transitionClaim,
+      upgradeId: '223e4567-e89b-42d3-a456-426614174000',
+      committedJournalHeadSha256: '7'.repeat(64),
+      liveCombinedSha256: '6'.repeat(64),
+    }
     const pending = {
-      schema: 'video-autoworker-blue-green-bootstrap-pending/v3',
+      schema: 'video-autoworker-blue-green-bootstrap-pending/v4',
+      createdAt: 1_788_105_601,
+      attemptId: '123e4567-e89b-12d3-a456-426614174000',
       slot: 'green',
       releaseId: `${projectCommit}-runtime`,
       releaseRoot: join(root, 'releases', `${projectCommit}-runtime`, 'standalone'),
@@ -717,41 +765,69 @@ assert_baseline
       legacyReleaseId: 'legacy-runtime',
       legacyPid: 123,
       legacyCwd: join(root, 'legacy-runtime'),
-      evidenceSha256: 'b'.repeat(64),
+      evidence: fileReference('evidence.json', 'b'.repeat(64)),
       evidenceObservedAt: 1_788_105_600,
-      dbPath: join(root, 'mission-control.db'),
-      routerStatePath: join(root, 'router-state.json'),
-      routerPort: 3017,
-      n8nPid: 456,
-      n8nDbPath: join(root, 'n8n.sqlite'),
+      proof: fileReference('proof.json', 'c'.repeat(64)),
+      transition,
+      bootstrapClaim: transitionClaim,
+      authorization: {
+        prepare: fileReference('prepare.receipt.json', 'd'.repeat(64)),
+        confirm: fileReference('current-confirm.receipt.json', 'e'.repeat(64)),
+        shutdown: fileReference('shutdown-requested.receipt.json', 'f'.repeat(64)),
+      },
+      databases: {
+        mission: databaseIdentity('mission-control.db', '3'),
+        n8n: databaseIdentity('n8n.sqlite', '4'),
+      },
+      router: {
+        port: 3017,
+        runDirectory: databaseIdentity('run', '5'),
+        statePath: join(root, 'router-state.json'),
+      },
+      n8n: {
+        pid: 456,
+        dbPath: join(root, 'n8n.sqlite'),
+        workflowProtocol: 'slot-v1-execution-owner-v1',
+        workflowSourceCommit: projectCommit,
+        workflowDigest: '6'.repeat(64),
+        workflowReport: fileReference('workflow-report.json', '8'.repeat(64)),
+      },
       baselineSourceCommit: projectCommit,
-      n8nWorkflowProtocol: 'slot-v1-execution-owner-v1',
-      n8nWorkflowSourceCommit: projectCommit,
-      n8nWorkflowDigest: 'c'.repeat(64),
     }
-    writeFileSync(markerPath, JSON.stringify(pending), { mode: 0o600 })
+    writeFileSync(markerPath, JSON.stringify(pending), { mode: 0o400 })
+    chmodSync(markerPath, 0o400)
     writeFileSync(expectedPath, JSON.stringify(pending), { mode: 0o600 })
     const deployScript = readFileSync(resolve(projectRoot, 'scripts/deploy-blue-green.sh'), 'utf8')
     const functionPrelude = deployScript.slice(0, deployScript.indexOf('\ncommand="${1:-}"'))
     const harness = join(root, 'pending-harness.sh')
     writeFileSync(harness, `${functionPrelude}
-assert_bootstrap_pending_identity "$1" "$(cat "$2")" "$3"
+assert_bootstrap_pending_identity "$1" "$(cat "$2")"
 `)
     chmodSync(harness, 0o700)
     const env = { ...process.env, NODE_BIN: process.execPath }
-    expect(spawnSync('bash', [harness, markerPath, expectedPath, '0'], { env }).status).toBe(0)
+    expect(spawnSync('bash', [harness, markerPath, expectedPath], { env }).status).toBe(0)
+
+    const alias = `${markerPath}.alias`
+    linkSync(markerPath, alias)
+    expect(spawnSync('bash', [harness, markerPath, expectedPath], { env }).status).not.toBe(0)
+    rmSync(alias)
+    chmodSync(markerPath, 0o600)
+    expect(spawnSync('bash', [harness, markerPath, expectedPath], { env }).status).not.toBe(0)
+    chmodSync(markerPath, 0o400)
 
     const refreshed = {
       ...pending,
-      evidenceSha256: 'd'.repeat(64),
+      evidence: fileReference('evidence.json', '7'.repeat(64)),
       evidenceObservedAt: pending.evidenceObservedAt + 30,
     }
     writeFileSync(expectedPath, JSON.stringify(refreshed), { mode: 0o600 })
-    expect(spawnSync('bash', [harness, markerPath, expectedPath, '1'], { env }).status).toBe(0)
-    expect(spawnSync('bash', [harness, markerPath, expectedPath, '0'], { env }).status).not.toBe(0)
+    expect(spawnSync('bash', [harness, markerPath, expectedPath], { env }).status).not.toBe(0)
 
-    writeFileSync(expectedPath, JSON.stringify({ ...refreshed, n8nPid: 999 }), { mode: 0o600 })
-    const drifted = spawnSync('bash', [harness, markerPath, expectedPath, '1'], {
+    writeFileSync(expectedPath, JSON.stringify({
+      ...pending,
+      n8n: { ...pending.n8n, pid: 999 },
+    }), { mode: 0o600 })
+    const drifted = spawnSync('bash', [harness, markerPath, expectedPath], {
       encoding: 'utf8', env,
     })
     expect(drifted.status).not.toBe(0)

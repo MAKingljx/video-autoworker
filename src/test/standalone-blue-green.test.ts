@@ -1,19 +1,22 @@
 // @vitest-environment node
 
 import { execFile, execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer, type Server as HttpServer } from 'node:http'
-import { connect, type Socket } from 'node:net'
+import { connect, createServer as createNetServer, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -203,6 +206,270 @@ afterEach(() => {
 })
 
 describe('standalone blue-green router', () => {
+  it('durably publishes JSON state before exposing the atomic rename', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-durable-json-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const deployScript = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const writerBody = deployScript.slice(
+      deployScript.indexOf('write_json_atomic()'),
+      deployScript.indexOf('write_router_state_atomic()'),
+    )
+    expect(writerBody.indexOf('fs.fsyncSync(descriptor)'))
+      .toBeLessThan(writerBody.indexOf('fs.renameSync(temporary, destination)'))
+    expect(writerBody.indexOf('fs.renameSync(temporary, destination)'))
+      .toBeLessThan(writerBody.lastIndexOf('fs.fsyncSync(parent)'))
+    const functionPrelude = deployScript.slice(0, deployScript.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'durable-writer.sh')
+    writeFileSync(harness, `${functionPrelude}
+write_json_atomic "$1" "$2"
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const destination = join(root, 'baseline.json')
+    for (const generation of [1, 2]) {
+      const result = spawnSync('/bin/bash', [harness, destination, JSON.stringify({ generation })], {
+        encoding: 'utf8',
+        env: { ...process.env, NODE_BIN: process.execPath },
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(readFileSync(destination, 'utf8'))).toEqual({ generation })
+      expect(statSync(destination).mode & 0o777).toBe(0o600)
+    }
+  })
+
+  it('durably finalizes a matching pending marker after a baseline-write crash and rejects an unknown router', async () => {
+    const makeFixture = () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-bootstrap-finalize-')))
+      cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+      const runDir = join(root, 'run')
+      const slotsDir = join(runDir, 'slots')
+      const attempt = join(root, 'attempt')
+      const releaseId = `${'a'.repeat(40)}-runtime`
+      const releaseRoot = join(root, 'releases', releaseId, 'standalone')
+      const statePath = join(runDir, 'router-state.json')
+      const evidence = join(root, 'evidence.json')
+      const proof = join(root, 'proof.json')
+      const manifest = 'b'.repeat(64)
+      const sourceCommit = 'a'.repeat(40)
+      const evidenceSource = `${JSON.stringify({
+        schema: 'video-autoworker-legacy-freeze-evidence/v3',
+        frozen: { socket: { path: join(root, 'guard.sock') } },
+      })}\n`
+      mkdirSync(slotsDir, { recursive: true, mode: 0o700 })
+      mkdirSync(attempt, { mode: 0o700 })
+      mkdirSync(releaseRoot, { recursive: true, mode: 0o700 })
+      writeFileSync(statePath, '{}\n', { mode: 0o600 })
+      writeFileSync(evidence, evidenceSource, { mode: 0o600 })
+      chmodSync(evidence, 0o600)
+      const pending = {
+        schema: 'video-autoworker-blue-green-bootstrap-pending/v4',
+        slot: 'blue', releaseId, releaseRoot, manifestSha256: manifest,
+        legacyReleaseId: 'legacy-runtime', legacyPid: 123,
+        evidence: {
+          path: evidence,
+          sha256: createHash('sha256').update(evidenceSource).digest('hex'),
+        },
+        proof: { path: proof },
+        authorization: { prepare: { path: join(attempt, 'prepare.receipt.json') } },
+        databases: { mission: { path: join(root, 'mission.db') } },
+        router: { statePath, port: 3017 },
+        n8n: {
+          pid: 456, dbPath: join(root, 'n8n.sqlite'),
+          workflowSourceCommit: sourceCommit,
+          workflowProtocol: 'slot-v1-execution-owner-v1',
+          workflowDigest: 'd'.repeat(64),
+        },
+        baselineSourceCommit: sourceCommit,
+      }
+      const baseline = {
+        schema: 'video-autoworker-blue-green-baseline/v3',
+        baselineSlot: 'blue', baselineReleaseId: releaseId,
+        baselineReleaseRoot: releaseRoot, baselineManifestSha256: manifest,
+        legacyReleaseId: pending.legacyReleaseId, legacyPid: pending.legacyPid,
+        evidenceSha256: pending.evidence.sha256,
+        dbPath: pending.databases.mission.path,
+        routerStatePath: statePath, routerPort: 3017,
+        n8nPid: pending.n8n.pid, n8nDbPath: pending.n8n.dbPath,
+        baselineSourceCommit: sourceCommit,
+        n8nWorkflowSourceCommit: sourceCommit,
+        n8nWorkflowProtocol: pending.n8n.workflowProtocol,
+        n8nWorkflowDigest: pending.n8n.workflowDigest,
+        completedAt: 1,
+      }
+      writeFileSync(join(runDir, 'baseline.json'), `${JSON.stringify(baseline)}\n`, { mode: 0o600 })
+      const pendingPath = join(runDir, 'bootstrap.pending.json')
+      writeFileSync(pendingPath, `${JSON.stringify(pending)}\n`, { mode: 0o400 })
+      chmodSync(pendingPath, 0o400)
+      writeFileSync(join(slotsDir, 'blue.json'), `${JSON.stringify({
+        schema: 'video-autoworker-standalone-slot/v1', slot: 'blue',
+        releaseId, releaseRoot, manifestSha256: manifest,
+        host: '127.0.0.1', port: 3317,
+      })}\n`, { mode: 0o600 })
+      const manager = join(root, 'manage-blue-green-services.sh')
+      writeFileSync(manager, '#!/bin/bash\nexit 0\n', { mode: 0o700 })
+      chmodSync(manager, 0o700)
+      const deployScript = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+      const functionPrelude = deployScript.slice(0, deployScript.indexOf('\ncommand="${1:-}"'))
+      const harness = join(root, 'deploy-blue-green.sh')
+      writeFileSync(harness, `${functionPrelude}
+PROJECT_ROOT="$SCRIPT_DIR"
+acquire_lock() { :; }
+validate_state() { :; }
+assert_baseline() { printf '%s\\n' legacy-runtime ${releaseId} ${releaseRoot} ${manifest}; }
+assert_release() { printf '%s\\n' "$2"; }
+release_manifest_sha() { printf '${manifest}\\n'; }
+kill() { return 0; }
+lsof() { printf 'n${pending.n8n.dbPath}\\n'; }
+check_legacy_databases_quiescent() { :; }
+check_n8n_workflow_compatibility() {
+  printf '%s\\n' '{"combinedSha256":"${pending.n8n.workflowDigest}"}'
+}
+read_state_field() {
+  case "$1" in active) printf 'blue\\n' ;; generation) printf '1\\n' ;; previous) printf '\\n' ;; esac
+}
+read_state_slot_release() { printf '${releaseId}\\n'; }
+assert_router_identity() { [[ "\${FAIL_ROUTER_IDENTITY:-0}" != 1 ]]; }
+bootstrap_baseline "$@"
+`, { mode: 0o700 })
+      chmodSync(harness, 0o700)
+      return { root, runDir, attempt, releaseId, releaseRoot, evidence, proof, pendingPath, harness }
+    }
+
+    const prepareGuard = async (fixture: ReturnType<typeof makeFixture>, mode: 'active' | 'stale') => {
+      const socketPath = join(fixture.root, 'guard.sock')
+      const tokenPath = join(fixture.root, 'guard.token')
+      const actionLog = join(fixture.root, 'guard-actions.log')
+      const scriptsDir = join(fixture.root, 'scripts')
+      mkdirSync(scriptsDir, { mode: 0o700 })
+      const guardStub = join(scriptsDir, 'legacy-freeze-guard.mjs')
+      writeFileSync(guardStub, `#!/usr/bin/env node
+import { appendFileSync, existsSync, unlinkSync } from 'node:fs'
+const command = process.argv[2]
+const value = name => process.argv[process.argv.indexOf(name) + 1]
+appendFileSync(${JSON.stringify(actionLog)}, \`\${command}\\n\`)
+if (command === 'status') process.exit(${mode === 'active' ? 0 : 1})
+if (!['revoke', 'recover-stale'].includes(command)) process.exit(2)
+for (const pathname of [value('--socket'), value('--token-file')]) {
+  if (existsSync(pathname)) unlinkSync(pathname)
+}
+`, { mode: 0o700 })
+      chmodSync(guardStub, 0o700)
+      writeFileSync(tokenPath, 'test-token\n', { mode: 0o600 })
+      chmodSync(tokenPath, 0o600)
+      const server = createNetServer()
+      await new Promise<void>((resolvePromise, reject) => {
+        server.once('error', reject)
+        server.listen(socketPath, resolvePromise)
+      })
+      cleanup.push(() => server.close())
+      chmodSync(socketPath, 0o600)
+      return actionLog
+    }
+
+    const completed = makeFixture()
+    const env = {
+      ...process.env,
+      NODE_BIN: process.execPath,
+      AIWORKER_BG_RUN_DIR: completed.runDir,
+      AIWORKER_BG_ROUTER_STATE: join(completed.runDir, 'router-state.json'),
+    }
+    const finalized = spawnSync('/bin/bash', [
+      completed.harness, 'blue', completed.releaseId, completed.releaseRoot,
+      completed.evidence, completed.proof, completed.attempt,
+    ], { encoding: 'utf8', env })
+    expect(finalized.status, finalized.stderr).toBe(0)
+    expect(finalized.stdout).toContain('Finalized previously completed')
+    expect(existsSync(completed.pendingPath)).toBe(false)
+
+    const activeGuard = makeFixture()
+    const activeActionLog = await prepareGuard(activeGuard, 'active')
+    const activeFinalized = spawnSync('/bin/bash', [
+      activeGuard.harness, 'blue', activeGuard.releaseId, activeGuard.releaseRoot,
+      activeGuard.evidence, activeGuard.proof, activeGuard.attempt,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_BIN: process.execPath,
+        AIWORKER_BG_RUN_DIR: activeGuard.runDir,
+        AIWORKER_BG_ROUTER_STATE: join(activeGuard.runDir, 'router-state.json'),
+      },
+    })
+    expect(activeFinalized.status, activeFinalized.stderr).toBe(0)
+    expect(readFileSync(activeActionLog, 'utf8')).toBe('status\nrevoke\n')
+    expect(existsSync(activeGuard.pendingPath)).toBe(false)
+
+    const staleGuard = makeFixture()
+    const staleActionLog = await prepareGuard(staleGuard, 'stale')
+    const staleFinalized = spawnSync('/bin/bash', [
+      staleGuard.harness, 'blue', staleGuard.releaseId, staleGuard.releaseRoot,
+      staleGuard.evidence, staleGuard.proof, staleGuard.attempt,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_BIN: process.execPath,
+        AIWORKER_BG_RUN_DIR: staleGuard.runDir,
+        AIWORKER_BG_ROUTER_STATE: join(staleGuard.runDir, 'router-state.json'),
+      },
+    })
+    expect(staleFinalized.status, staleFinalized.stderr).toBe(0)
+    expect(readFileSync(staleActionLog, 'utf8')).toBe('status\nrecover-stale\n')
+    expect(existsSync(staleGuard.pendingPath)).toBe(false)
+
+    const unknownRouter = makeFixture()
+    const refused = spawnSync('/bin/bash', [
+      unknownRouter.harness, 'blue', unknownRouter.releaseId, unknownRouter.releaseRoot,
+      unknownRouter.evidence, unknownRouter.proof, unknownRouter.attempt,
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        NODE_BIN: process.execPath,
+        AIWORKER_BG_RUN_DIR: unknownRouter.runDir,
+        AIWORKER_BG_ROUTER_STATE: join(unknownRouter.runDir, 'router-state.json'),
+        FAIL_ROUTER_IDENTITY: '1',
+      },
+    })
+    expect(refused.status).not.toBe(0)
+    expect(existsSync(unknownRouter.pendingPath)).toBe(true)
+  })
+
+  it('blocks every mutating command during bootstrap recovery while status remains readable', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'blue-green-recovery-gate.')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const runDir = join(root, 'run')
+    const releasesDir = join(root, 'releases')
+    mkdirSync(runDir, { mode: 0o700 })
+    mkdirSync(releasesDir, { mode: 0o700 })
+    const pendingPath = join(runDir, 'bootstrap.pending.json')
+    writeFileSync(pendingPath, `${JSON.stringify({
+      schema: 'video-autoworker-blue-green-bootstrap-pending/v4',
+      slot: 'blue',
+      releaseId: 'abcdef012345-runtime',
+      legacyPid: 1200,
+      n8n: { pid: 1300 },
+    })}\n`, { mode: 0o400 })
+    chmodSync(pendingPath, 0o400)
+    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const env = {
+      ...process.env,
+      AIWORKER_BG_RUN_DIR: runDir,
+      AIWORKER_BG_RELEASES_DIR: releasesDir,
+      NODE_BIN: process.execPath,
+    }
+    for (const command of ['init', 'stage', 'bind', 'retire', 'switch', 'rollback']) {
+      const result = spawnSync('/bin/bash', [script, command], { encoding: 'utf8', env })
+      expect(result.status, `${command}: ${result.stderr}`).not.toBe(0)
+      expect(result.stderr).toContain('bootstrap recovery hold is active')
+    }
+    const incompleteBootstrap = spawnSync('/bin/bash', [script, 'bootstrap'], { encoding: 'utf8', env })
+    expect(incompleteBootstrap.status).not.toBe(0)
+    expect(incompleteBootstrap.stderr).toContain('bootstrap recovery requires the complete')
+    const status = spawnSync('/bin/bash', [script, 'status'], { encoding: 'utf8', env })
+    expect(status.status, status.stderr).toBe(0)
+    expect(status.stdout).toContain('bootstrap=recovery-hold slot=blue release=abcdef012345-runtime')
+  })
+
   it('routes new requests to the atomically selected slot while an SSE response drains on the old slot', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-router-http-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -952,7 +1219,10 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(deployScript).toContain('counters.activeRequests !== 0')
     expect(deployScript).toContain('counters.upgradedSockets !== 0')
     expect(deployScript).toContain('video-autoworker-blue-green-baseline/v3')
-    expect(deployScript).toContain('video-autoworker-blue-green-bootstrap-pending/v3')
+    expect(deployScript).toContain('video-autoworker-blue-green-bootstrap-pending/v4')
+    expect(deployScript).toContain('workflow transition attestation')
+    expect(deployScript).toContain('bootstrapClaim')
+    expect(deployScript).toContain('workflowReport')
     expect(deployScript).toContain('slot-v1-execution-owner-v1')
     expect(deployScript).toContain('check_n8n_workflow_compatibility')
     const bootstrapBody = deployScript.slice(
@@ -965,14 +1235,46 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(bootstrapBody).toContain('"$workflow_compatibility_final" == "$workflow_compatibility_after"')
     expect(bootstrapBody.indexOf('workflow_digest="$($NODE_BIN', finalWorkflowCheck))
       .toBeLessThan(bootstrapBody.indexOf('baseline_payload='))
-    expect(deployScript).toContain('video-autoworker-legacy-freeze-evidence/v2')
-    expect(deployScript).toContain('supervisorQuiesced !== true')
+    expect(deployScript).toContain('video-autoworker-legacy-freeze-evidence/v3')
+    expect(deployScript).toContain('generate-legacy-freeze-evidence.mjs')
+    expect(deployScript).toContain('--verify-evidence-fd "$evidence_fd"')
+    expect(deployScript).toContain('--verify-evidence-static-fd "$evidence_fd"')
+    expect(deployScript).toContain('--probe-legacy-state-fd "$evidence_fd"')
+    expect(bootstrapBody).toContain('probe_evidenced_legacy_state')
+    expect(bootstrapBody).not.toContain('kill -0 "$legacy_pid"')
+    expect(bootstrapBody).not.toContain('kill -0 "$pending_legacy_pid"')
+    expect(bootstrapBody.indexOf('pending_probe="$(bootstrap_pending_probe "$pending")"'))
+      .toBeLessThan(bootstrapBody.indexOf('verified_evidence_sha="$(env'))
+    expect(bootstrapBody).toContain('evidence_verify_mode=--verify-evidence-static-fd')
+    expect(bootstrapBody).toContain('bootstrap retry evidence does not match the pending digest')
+    expect(bootstrapBody).not.toContain('315360000')
+    expect(bootstrapBody).not.toContain('evidence_max_age=1800')
+    expect(bootstrapBody).toContain('(!staticRecovery && age > Number(rawMaxAge))')
+    expect(bootstrapBody).toContain('legacy-bootstrap-controller.mjs')
+    expect(bootstrapBody).toContain("value.phase !== 'SHUTDOWN_REQUESTED'")
+    expect(bootstrapBody).toContain('legacy bootstrap confirmation is expired or bound to another operation')
+    expect(bootstrapBody.indexOf('bootstrap_authorization='))
+      .toBeLessThan(bootstrapBody.indexOf('write_json_immutable "$pending"'))
+    expect(bootstrapBody.indexOf('write_json_immutable "$workflow_report"'))
+      .toBeLessThan(bootstrapBody.indexOf('write_json_immutable "$pending"'))
+    expect(deployScript).toContain('assert_bootstrap_operation_gate "$command" "$@"')
+    expect(bootstrapBody).toContain('guard_controller" handoff')
+    expect(bootstrapBody).toContain('post-shutdown n8n recovery hold did not become active')
+    expect(bootstrapBody.indexOf('guard_controller" handoff'))
+      .toBeLessThan(bootstrapBody.indexOf('"$manager" start "$slot"'))
+    const baselineWrite = bootstrapBody.indexOf('write_json_atomic "$(baseline_file)"')
+    const finalGuardRevoke = bootstrapBody.lastIndexOf('guard_controller" revoke')
+    expect(baselineWrite).toBeGreaterThan(finalWorkflowCheck)
+    expect(finalGuardRevoke).toBeGreaterThan(baselineWrite)
     expect(deployScript).toContain('bootstrap retry requires fresh zero-work evidence while the legacy PID is still alive')
-    expect(deployScript).toContain('legacy PID is not using AIWORKER_BG_LIVE_DB_PATH as its authoritative SQLite database')
+    expect(deployScript).toContain('legacy or n8n full identity changed immediately before SIGTERM')
+    expect(deployScript).toContain('reserved bootstrap evidence FD 9 is already open')
+    expect(deployScript).toContain('exec 9<"$evidence_file"')
+    expect(deployScript).not.toContain('exec {evidence_fd}')
     expect(deployScript).toContain('legacy release ID is not bound to its physical cwd')
     expect(deployScript).toContain('evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH')
     expect(deployScript).toContain('check_legacy_databases_quiescent "$live_db" "$n8n_db"')
-    expect(deployScript).toContain('delete actual[field]')
+    expect(deployScript).toContain('delete actual.createdAt')
     expect(deployScript).toContain('manage-blue-green-services.sh')
     expect(deployScript).toContain('check_routed_readonly_endpoint /materials page')
     expect(deployScript).toContain('check_routed_readonly_endpoint /api/tasks api')
