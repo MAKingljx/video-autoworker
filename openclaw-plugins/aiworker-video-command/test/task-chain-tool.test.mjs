@@ -72,6 +72,27 @@ describe('AI-worker direct task-chain tool', () => {
     expect(runner.dispatchDirectory).toHaveBeenCalledOnce()
   })
 
+  it('passes an optional work name and binds it into the stable task identity', async () => {
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId }) => ({
+        kind: 'task', id: taskId, status: 'queued', duplicate: false,
+      })),
+    }
+    const value = tool({ runner })
+    await value.execute('bound', {
+      action: 'submit_video', videoPath: '/data/S03E03.mp4', directorWork: '地球之极',
+    })
+    await value.execute('unbound', {
+      action: 'submit_video', videoPath: '/data/S03E03.mp4',
+    })
+    expect(runner.dispatchVideo.mock.calls[0][0]).toMatchObject({
+      videoPath: '/data/S03E03.mp4', directorWork: '地球之极',
+    })
+    expect(runner.dispatchVideo.mock.calls[0][0].taskId)
+      .not.toBe(runner.dispatchVideo.mock.calls[1][0].taskId)
+    expect(value.parameters.properties.directorWork.description).toContain('不要填写内部作品 ID')
+  })
+
   it('requires a second user-confirmed tool action before re-analyzing an exact duplicate', async () => {
     const runner = {
       dispatchVideo: vi.fn(async ({ taskId, confirmDuplicate = false }) => (

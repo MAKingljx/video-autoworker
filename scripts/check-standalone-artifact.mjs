@@ -134,7 +134,10 @@ const ALLOWED_NEXT_ROOT_FILES = new Set([
 const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/feishu-director-brain.mjs',
   'scripts/install-aiworker-director-brain.sh',
+  'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
+  'scripts/lib/runtime-safe-offline-queue.mjs',
+  'scripts/lib/shared-deployment-lock.sh',
 ])
 
 const ALLOWED_STANDALONE_OPS_PATHS = new Set([
@@ -183,7 +186,10 @@ const REQUIRED_STANDALONE_FILES = [
   'runtime/schema.sql',
   'scripts/feishu-director-brain.mjs',
   'scripts/install-aiworker-director-brain.sh',
+  'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
+  'scripts/lib/runtime-safe-offline-queue.mjs',
+  'scripts/lib/shared-deployment-lock.sh',
   'server.js',
 ]
 

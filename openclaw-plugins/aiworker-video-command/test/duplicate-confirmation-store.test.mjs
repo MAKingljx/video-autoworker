@@ -22,7 +22,9 @@ describe('duplicate confirmation store', () => {
     let clock = 1_000
     const pathname = storagePath()
     const scopeKey = duplicateConfirmationScopeKey('agent:second-original:explicit:video-test')
-    const operation = { kind: 'task', id: 'video-command-test', path: '/data/video.mov' }
+    const operation = {
+      kind: 'task', id: 'video-command-test', path: '/data/video.mov', directorWork: '导演脑验收片',
+    }
     createDuplicateConfirmationStore({ now: () => clock, storagePath: pathname }).set(scopeKey, operation)
 
     const restored = createDuplicateConfirmationStore({ now: () => clock, storagePath: pathname })

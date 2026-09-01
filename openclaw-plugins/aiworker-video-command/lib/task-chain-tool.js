@@ -18,6 +18,7 @@ import {
   duplicateConfirmationScopeKey,
   DUPLICATE_CONFIRMATION_TEXT,
 } from './duplicate-confirmation-store.js'
+import { isValidDirectorWork, MAX_DIRECTOR_WORK_LENGTH } from './director-work-policy.js'
 
 // Keep the established OpenClaw tool name so existing profiles and health
 // checks continue to discover the capability while its schema grows to cover
@@ -43,6 +44,12 @@ const TOOL_PARAMETERS = Object.freeze({
       minLength: 1,
       maxLength: 4_096,
       description: '要学习的本地绝对视频文件路径。',
+    },
+    directorWork: {
+      type: 'string',
+      minLength: 1,
+      maxLength: MAX_DIRECTOR_WORK_LENGTH,
+      description: '可选：要归入导演脑的作品名称或别名。不要填写内部作品 ID。',
     },
     videoDirectory: {
       type: 'string',
@@ -94,11 +101,17 @@ function normalizeRequest(params) {
     return keys.length === 1 ? { action } : null
   }
   if (action === 'submit_video') {
-    if (keys.sort().join(',') !== 'action,videoPath') return null
+    const expected = keys.sort().join(',')
+    if (expected !== 'action,videoPath' && expected !== 'action,directorWork,videoPath') return null
     // Structured tool arguments have no shell-style ambiguity, so paths with
     // spaces do not need the quoting rule used for free-form chat parsing.
     const checked = validateVideoPath(params.videoPath, { quoted: true })
-    return checked.ok ? { action, videoPath: checked.videoPath } : null
+    if (params.directorWork !== undefined && !isValidDirectorWork(params.directorWork)) return null
+    return checked.ok ? {
+      action,
+      videoPath: checked.videoPath,
+      ...(params.directorWork === undefined ? {} : { directorWork: params.directorWork }),
+    } : null
   }
   if (action === 'submit_directory') {
     if (keys.sort().join(',') !== 'action,videoDirectory') return null
@@ -150,16 +163,20 @@ async function executeRequest(request, {
     const taskId = stableOperationId({
       action: request.action,
       sessionKey,
-      value: request.videoPath,
+      value: request.directorWork === undefined
+        ? request.videoPath
+        : `${request.videoPath}\0director-work:${request.directorWork}`,
     })
     try {
       const result = await runner.dispatchVideo({
         videoPath: request.videoPath,
         taskId,
+        ...(request.directorWork === undefined ? {} : { directorWork: request.directorWork }),
       })
       if (result.confirmationRequired) {
         duplicateConfirmationStore.set(duplicateConfirmationScope, {
           kind: 'task', id: taskId, path: request.videoPath,
+          ...(request.directorWork === undefined ? {} : { directorWork: request.directorWork }),
         })
       }
       return textResult(dispatchReceipt(result))
@@ -206,6 +223,7 @@ async function executeRequest(request, {
           ...(pending.trustedExistingMaterialId === undefined
             ? {}
             : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
+          ...(pending.directorWork === undefined ? {} : { directorWork: pending.directorWork }),
           confirmDuplicate: true,
         })
       if (result.intakePaused === true) duplicateConfirmationStore.set(duplicateConfirmationScope, pending)

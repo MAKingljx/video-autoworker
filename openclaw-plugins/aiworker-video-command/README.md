@@ -1,6 +1,6 @@
 # AI-worker Video Command
 
-当前版本为 `0.5.13`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
+当前版本为 `0.5.14`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
 旧版运行模块、版本化升级脚本、影子链路或长期兼容分支。
 
 ## 单链路边界
@@ -64,7 +64,7 @@ bash scripts/install-aiworker-video-command-plugin.sh --dry-run --target-sha "$t
 bash scripts/install-aiworker-video-command-plugin.sh --apply --target-sha "$target_sha"
 ```
 
-安装器允许受支持旧版本（包括 `0.5.12`）迁移到 `0.5.13`；已是当前版本时验证后无操作。
+安装器允许受支持旧版本（包括 `0.5.13`）迁移到 `0.5.14`；已是当前版本时验证后无操作。
 它使用 OpenClaw 官方命令移除已退役且运行时不再使用的 sender hash 配置，再安装
 当前插件并只重启 `qwen-current` Gateway。除该字段外配置语义必须完全不变；安装后
 还会核对运行载荷与当前源码字节一致，并验证工具目录和受保护监听端口。它不启动或

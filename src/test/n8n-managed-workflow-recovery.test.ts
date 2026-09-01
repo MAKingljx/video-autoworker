@@ -453,7 +453,7 @@ function createTransitionBinding(options: {
   workflowReport: string
 }) {
   const state = join(options.root, 'workflow-transition')
-  mkdirSync(state, { mode: 0o700 })
+  if (!existsSync(state)) mkdirSync(state, { mode: 0o700 })
   const intent = join(state, 'upgrade-intent.json')
   const confirmation = join(state, 'current-confirmation.json')
   const capability = join(state, 'import-capability.json')
@@ -509,6 +509,60 @@ function createTransitionBinding(options: {
     committedJournalHeadSha256: transition.committedJournalHeadSha256,
     liveCombinedSha256: transition.liveCombinedSha256,
   }
+}
+
+function createTransitionRollbackAuthorization(
+  root: string,
+  packagePath: string,
+  database: string,
+  runtimeRelease: string,
+): { authorization: string, state: string, journal: string } {
+  const state = join(root, 'workflow-transition')
+  mkdirSync(state, { mode: 0o700 })
+  const releaseId = `${commit}-runtime`
+  const releaseRoot = join(root, 'application-releases', releaseId, 'standalone')
+  mkdirSync(releaseRoot, { recursive: true, mode: 0o700 })
+  const releaseManifest = join(releaseRoot, 'release-manifest.json')
+  writeFileSync(releaseManifest, '{"schema":"test-release/v1"}\n', { mode: 0o400 })
+  chmodSync(releaseManifest, 0o400)
+  const intent = join(state, 'upgrade-intent.json')
+  const confirmation = join(state, 'current-confirmation.json')
+  const capability = join(state, 'import-capability.json')
+  const token = join(state, 'operator-token')
+  const journal = join(state, 'journal')
+  const authorization = join(state, 'transition-rollback-authorization.receipt.json')
+  runTransition(
+    'prepare-intent', '--upgrade-id', '88888888-8888-4888-8888-888888888888',
+    '--database', database, '--rollback-package', packagePath,
+    '--runtime-root', runtimeRelease, '--target-commit', commit,
+    '--application-release-root', releaseRoot, '--slot', 'blue',
+    '--release-id', releaseId, '--output', intent,
+  )
+  writeFileSync(token, `${'8'.repeat(64)}\n`, { mode: 0o400 })
+  chmodSync(token, 0o400)
+  runTransition(
+    'current-confirm', '--intent', intent, '--confirmation-token-file', token,
+    '--confirmation-receipt-id', '77777777-7777-4777-8777-777777777777',
+    '--confirmation-output', confirmation, '--capability-output', capability,
+  )
+  runTransition(
+    'claim-import', '--intent', intent, '--confirmation', confirmation,
+    '--confirmation-token-file', token, '--capability', capability, '--journal-dir', journal,
+  )
+  runTransition(
+    'begin-mutation', '--intent', intent, '--confirmation', confirmation, '--journal-dir', journal,
+  )
+  const db = new Database(database)
+  db.prepare(`
+    UPDATE workflow_entity SET name = 'partial-target-import', nodes = '[]', active = 0,
+      activeVersionId = NULL WHERE id IN ('aiworker-task-intake-v1', 'aiworker-video-analysis-v1')
+  `).run()
+  db.close()
+  runTransition(
+    'authorize-transition-rollback', '--intent', intent, '--confirmation', confirmation,
+    '--journal-dir', journal, '--output', authorization,
+  )
+  return { authorization, state, journal }
 }
 
 function createReceipt(attempt: string, packagePath: string, database: string, release: string): string {
@@ -594,7 +648,7 @@ function createDisasterReceipt(
     proofSchema?: string,
     workflowCombinedSha256?: string,
   } = {},
-): { receipt: string, recoveryDirectory: string, pending: string, mission: string } {
+): { receipt: string, recoveryDirectory: string, pending: string, mission: string, workflowReport: string } {
   mkdirSync(attempt, { mode: 0o700 })
   const databaseEntry = statSync(database, { bigint: true })
   const controllerSha256 = 'c'.repeat(64)
@@ -673,7 +727,9 @@ function createDisasterReceipt(
       workflow.publishedVersionId, workflow.sha256,
     ].join(':')),
   ].join('\n'))
-  const workflowReportPath = join(attempt, 'n8n-workflow-compatibility.receipt.json')
+  const transitionState = join(root, 'workflow-transition')
+  mkdirSync(transitionState, { mode: 0o700 })
+  const workflowReportPath = join(transitionState, 'live-report.json')
   const workflowReportValue = {
     schema: 'video-autoworker-n8n-workflow-compatibility/v2',
     protocol: 'slot-v1-execution-owner-v1',
@@ -775,7 +831,7 @@ function createDisasterReceipt(
     },
   })}\n`, { mode: 0o400 })
   chmodSync(receipt, 0o400)
-  return { receipt, recoveryDirectory, pending: pending.path, mission }
+  return { receipt, recoveryDirectory, pending: pending.path, mission, workflowReport: workflowReport.path }
 }
 
 function verifyDisasterReceipt(
@@ -1047,6 +1103,68 @@ printf '%s\\n' '#!/usr/bin/env node' > node_modules/n8n/bin/n8n
     expect(replay.stderr).toContain('completed restore cannot be replayed')
   })
 
+  it('rolls back a pre-bootstrap partial transition through one durable claim and rejects replay', () => {
+    const root = mkdtempSync(join(physicalTmp, 'n8n-transition-rollback-recovery-'))
+    cleanup.push(() => removeFixture(root))
+    const database = join(root, 'database.sqlite')
+    const live = createDatabase(database)
+    const runtime = createRuntime(root)
+    const packagePath = join(root, 'managed-workflows-backup')
+    live.close()
+    expect(backup(database, packagePath, runtime.runtimeDir).status).toBe(0)
+    const bootstrapAttempt = join(root, 'bootstrap-attempt')
+    mkdirSync(bootstrapAttempt, { mode: 0o700 })
+    const transition = createTransitionRollbackAuthorization(
+      root, packagePath, database, runtime.release,
+    )
+    expect(readdirSync(bootstrapAttempt)).toEqual([])
+    expect(dirname(transition.authorization)).toBe(transition.state)
+
+    const restore = (env: NodeJS.ProcessEnv) => spawnSync('/bin/bash', [
+      restoreTool, '--database', database, '--package', packagePath,
+      '--confirmation-receipt', transition.authorization, '--runtime-release', runtime.release,
+    ], { encoding: 'utf8', env })
+    const interrupted = restore({
+      ...runtime.env,
+      NODE_ENV: 'test',
+      AIWORKER_TEST_N8N_CRASH_AFTER_RESTORE_CLAIM: '1',
+    })
+    expect(interrupted.status).not.toBe(0)
+    const claimPath = join(transition.state, 'transition-rollback.CLAIMED.receipt.json')
+    expect(existsSync(claimPath)).toBe(true)
+    expect(readdirSync(bootstrapAttempt)).toEqual([])
+
+    const resumed = restore({
+      ...runtime.env,
+      NODE_ENV: 'test',
+      AIWORKER_TEST_N8N_RECOVERY_NOW: String(Math.floor(Date.now() / 1000) + 86_400),
+    })
+    expect(resumed.status, `${resumed.stdout}\n${resumed.stderr}`).toBe(0)
+    const eventDirectory = join(transition.state, 'transition-rollback-journal', 'events')
+    const events = readdirSync(eventDirectory).sort()
+      .map(name => JSON.parse(readFileSync(join(eventDirectory, name), 'utf8')))
+    expect(events.map(value => value.state)).toEqual([
+      'CLAIMED', 'MUTATING', 'MUTATING', 'MUTATING', 'MUTATING', 'VERIFIED', 'COMMITTED',
+    ])
+    expect(events.every(value => value.schema
+      === 'video-autoworker-n8n-workflow-transition-rollback-journal/v1')).toBe(true)
+    const restored = new Database(database, { readonly: true })
+    try {
+      expect(restored.prepare(`
+        SELECT id, name, active FROM workflow_entity
+        WHERE id IN ('aiworker-task-intake-v1', 'aiworker-video-analysis-v1') ORDER BY id
+      `).all()).toEqual([
+        { id: 'aiworker-task-intake-v1', name: 'workflow-intake-original', active: 1 },
+        { id: 'aiworker-video-analysis-v1', name: 'workflow-video-original', active: 0 },
+      ])
+    } finally { restored.close() }
+    expect(readdirSync(bootstrapAttempt)).toEqual([])
+
+    const replay = restore(runtime.env)
+    expect(replay.status).not.toBe(0)
+    expect(replay.stderr).toContain('completed restore cannot be replayed')
+  })
+
   it('atomically publishes claim before repairing partial directories and fails closed on unknown members', () => {
     const root = mkdtempSync(join(physicalTmp, 'n8n-managed-atomic-claim-'))
     cleanup.push(() => removeFixture(root))
@@ -1286,6 +1404,8 @@ printf '%s\\n' '#!/usr/bin/env node' > node_modules/n8n/bin/n8n
     )
     const valid = verifyDisasterReceipt(disaster.receipt, packagePath, database, runtime.release)
     expect(valid.status, `${valid.stdout}\n${valid.stderr}`).toBe(0)
+    expect(dirname(disaster.workflowReport)).toBe(join(root, 'workflow-transition'))
+    expect(dirname(disaster.workflowReport)).not.toBe(join(root, 'bootstrap-attempt'))
     const original = JSON.parse(readFileSync(disaster.pending, 'utf8')) as JsonRecord
     const mutations: Array<{ name: string, mutate: (value: JsonRecord) => void }> = [
       { name: 'extra top-level field', mutate: value => { value.extra = true } },
@@ -1343,7 +1463,30 @@ printf '%s\\n' '#!/usr/bin/env node' > node_modules/n8n/bin/n8n
       expect(rejected.status, `${entry.name}: ${rejected.stdout}\n${rejected.stderr}`).not.toBe(0)
     }
 
+    const alternateReport = writeBootstrapReceipt(
+      join(root, 'workflow-transition', 'alternate-live-report.json'),
+      JSON.parse(readFileSync(disaster.workflowReport, 'utf8')),
+    )
+    const coordinated = structuredClone(original)
+    child(child(coordinated, 'n8n'), 'workflowReport').path = alternateReport.path
+    child(child(coordinated, 'n8n'), 'workflowReport').dev = alternateReport.dev
+    child(child(coordinated, 'n8n'), 'workflowReport').ino = alternateReport.ino
+    child(child(coordinated, 'n8n'), 'workflowReport').size = alternateReport.size
+    child(child(coordinated, 'n8n'), 'workflowReport').sha256 = alternateReport.sha256
+    replacePending(disaster, coordinated)
+    const coordinatedReceipt = JSON.parse(readFileSync(disaster.receipt, 'utf8')) as JsonRecord
+    child(coordinatedReceipt, 'authorization').workflowReport = alternateReport
+    overwriteJson(disaster.receipt, coordinatedReceipt)
+    const coordinatedRejected = verifyDisasterReceipt(
+      disaster.receipt, packagePath, database, runtime.release,
+    )
+    expect(coordinatedRejected.status).not.toBe(0)
+    expect(coordinatedRejected.stderr).toContain('attested deployed workflow binding changed')
+
     replacePending(disaster, structuredClone(original))
+    const restoredReceipt = JSON.parse(readFileSync(disaster.receipt, 'utf8')) as JsonRecord
+    child(restoredReceipt, 'authorization').workflowReport = child(child(original, 'n8n'), 'workflowReport')
+    overwriteJson(disaster.receipt, restoredReceipt)
     chmodSync(disaster.pending, 0o600)
     const writable = verifyDisasterReceipt(disaster.receipt, packagePath, database, runtime.release)
     expect(writable.status).not.toBe(0)

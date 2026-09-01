@@ -4,6 +4,10 @@ import { requireN8nGlobalReleaseManager } from '@/lib/n8n-global-release-auth'
 import { getN8nIntakeControl } from '@/lib/n8n-intake-control'
 import { getSchedulerLeadershipStatus } from '@/lib/scheduler'
 import {
+  directorEvidenceProjectionContractDigest,
+  getDirectorEvidenceOutboxCounts,
+} from '@/lib/director-evidence-outbox'
+import {
   buildN8nReleaseReadiness,
   getN8nRollingDatabaseCompatibility,
   getN8nRuntimeDrainStatus,
@@ -35,6 +39,7 @@ export async function GET(request: NextRequest) {
   try {
     const db = getDatabase()
     const database = getN8nRollingDatabaseCompatibility(db)
+    const outbox = getDirectorEvidenceOutboxCounts(db)
     const control = getN8nIntakeControl(db)
     if (control.accepting) {
       return NextResponse.json({
@@ -49,6 +54,12 @@ export async function GET(request: NextRequest) {
         getN8nRuntimeDrainStatus(db, runtime),
         getSchedulerLeadershipStatus(),
         database,
+        {
+          schema: 'video-autoworker-director-evidence-outbox-readiness/v1',
+          contractDigest: directorEvidenceProjectionContractDigest(),
+          pending: outbox.pending,
+          incompatiblePending: outbox.incompatiblePending,
+        },
       ),
     }, { headers: NO_STORE_HEADERS })
   } catch {

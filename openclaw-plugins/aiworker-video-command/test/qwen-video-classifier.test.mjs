@@ -24,6 +24,8 @@ describe('Qwen one-shot classifier', () => {
     expect(complete.mock.calls[0][0].signal).toBeInstanceOf(AbortSignal)
     expect(complete.mock.calls[0][0].systemPrompt).toContain('最小且唯一的标题、文件名、季集号或关键词（例如 S03E03）')
     expect(complete.mock.calls[0][0].systemPrompt).toContain('不得加入旧上下文、改写或补全')
+    expect(complete.mock.calls[0][0].systemPrompt).toContain('directorWork 只能用于 dispatch_single')
+    expect(complete.mock.calls[0][0].systemPrompt).toContain('必须从当前消息逐字复制')
   })
 
   it('accepts a title or keyword copied from the current message for status search', () => {
@@ -32,6 +34,21 @@ describe('Qwen one-shot classifier', () => {
     )).toEqual({
       action: 'status_search', value: '《地球之极》第三季第三集',
     })
+  })
+
+  it('accepts an optional director-work name only for a single-video dispatch', () => {
+    expect(parseQwenClassifierResult(
+      '{"action":"dispatch_single","value":"/data/test.mp4","directorWork":"导演脑验收片"}',
+    )).toEqual({
+      action: 'dispatch_single', value: '/data/test.mp4', directorWork: '导演脑验收片',
+    })
+    const longestName = '片'.repeat(240)
+    expect(parseQwenClassifierResult(JSON.stringify({
+      action: 'dispatch_single', value: '/data/test.mp4', directorWork: longestName,
+    })).directorWork).toBe(longestName)
+    expect(() => parseQwenClassifierResult(JSON.stringify({
+      action: 'dispatch_single', value: '/data/test.mp4', directorWork: `${longestName}片`,
+    }))).toThrow('classifier_invalid')
   })
 
   it('accepts the separate complete-report classification', () => {
@@ -45,8 +62,11 @@ describe('Qwen one-shot classifier', () => {
   it.each([
     ['markdown', '```json\n{"action":"pass","value":""}\n```'],
     ['multiline', '{"action":"pass",\n"value":""}'],
+    ['null', 'null'],
     ['unknown action', '{"action":"execute","value":"/data/test.mp4"}'],
     ['extra field', '{"action":"pass","value":"","extra":true}'],
+    ['director work on another action', '{"action":"dispatch_directory","value":"/data","directorWork":"验收片"}'],
+    ['blank director work', '{"action":"dispatch_single","value":"/data/test.mp4","directorWork":" "}'],
     ['nonempty pass', '{"action":"pass","value":"x"}'],
   ])('rejects %s output', (_name, text) => {
     expect(() => parseQwenClassifierResult(text)).toThrow('classifier_invalid')

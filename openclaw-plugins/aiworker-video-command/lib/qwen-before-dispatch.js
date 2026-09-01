@@ -14,6 +14,7 @@ import {
   DUPLICATE_CONFIRMATION_TEXT,
   isDuplicateConfirmationText,
 } from './duplicate-confirmation-store.js'
+import { isValidDirectorWork } from './director-work-policy.js'
 
 const TARGET_AGENT = 'second-original'
 const TASK_ID_PATTERN = /(?:video-command|video-natural)-[a-f0-9]{64}/gu
@@ -33,6 +34,14 @@ const VISUAL_SCOPE = /(?:画面|视觉|图像|镜头)/u
 const AUDIO_SCOPE = /(?:音频|声音|语音|对白|台词)/u
 const COMBINED_AUDIO_VISUAL_SCOPE = /(?:音画|视听)/u
 const OTHER_PARTIAL_SCOPE = /(?:字幕|文字轨|音轨)/u
+const DIRECTOR_WORK_ASSIGNMENT_PATTERN = /(?:归入|纳入|关联(?:到|至)?|绑定(?:到|至)?)(?:\s*(?:导演脑)?\s*(?:的)?\s*(?:作品|项目))?(?:\s*名(?:称)?\s*(?:为|是)?)?\s*[:：]?\s*/gu
+const DIRECTOR_WORK_NEGATION = /(?:不要|别|无需|无须|禁止|不(?:需要|必|应|想)?|未(?:确认|决定|选择)(?:是否)?)(?:把|将)?(?:这个视频|该视频|它)?\s*$/u
+const DIRECTOR_WORK_NON_AFFIRMATIVE_PREFIX = /(?:不能|不可|不是(?:要)?|取消|解除|拒绝|避免|停止|是否|要不要|能否|能不能|可否|该不该|应不应该|请问|想问|询问|并非|不想|不应|不必|不需|不再|不允许|不可以|没有(?:要)?|没(?:有)?决定|未(?:确认|决定|选择)(?:是否)?|禁止|切勿|勿|无需|无须|不要|别)/u
+const DIRECTOR_WORK_AMBIGUITY = /(?:还是|或者|或是|二选一|任选|待定)/u
+const DIRECTOR_WORK_CLAUSE_END = /[，,。；;！？!?\r\n]/u
+const DIRECTOR_WORK_QUOTE_PAIRS = new Map([
+  ['《', '》'], ['「', '」'], ['『', '』'], ['“', '”'], ['‘', '’'], ['"', '"'], ["'", "'"],
+])
 const MAX_PENDING_OPERATIONS = 256
 const OPERATION_TTL_MS = 15 * 60 * 1_000
 export const INTAKE_MAINTENANCE_MESSAGE = '视频学习服务正在发布维护，暂时停止接收新任务，请稍后再试。'
@@ -100,6 +109,36 @@ function isSearchQueryText(value) {
     && !/[\u0000-\u001f\u007f]/u.test(value)
 }
 
+export function extractExplicitDirectorWork(content) {
+  if (typeof content !== 'string') return null
+  const searchable = extractEvidence(content).paths.reduce(
+    (text, path) => text.replaceAll(path, ' '.repeat(path.length)),
+    content,
+  )
+  const assignments = [...searchable.matchAll(DIRECTOR_WORK_ASSIGNMENT_PATTERN)]
+  if (assignments.length !== 1) return null
+  const assignment = assignments[0]
+  const prefix = searchable.slice(0, assignment.index).split(DIRECTOR_WORK_CLAUSE_END).at(-1)?.trim() || ''
+  if (DIRECTOR_WORK_NEGATION.test(prefix)
+    || DIRECTOR_WORK_NON_AFFIRMATIVE_PREFIX.test(prefix)) return null
+
+  const remainder = content.slice(assignment.index + assignment[0].length)
+  const clauseEndIndex = remainder.search(DIRECTOR_WORK_CLAUSE_END)
+  if (clauseEndIndex >= 0 && /[？?]/u.test(remainder[clauseEndIndex])) return null
+  const clause = (clauseEndIndex < 0 ? remainder : remainder.slice(0, clauseEndIndex)).trim()
+  if (!clause) return null
+  const closingQuote = DIRECTOR_WORK_QUOTE_PAIRS.get(clause[0])
+  let candidate = clause
+  if (closingQuote) {
+    const closingIndex = clause.indexOf(closingQuote, 1)
+    if (closingIndex < 2 || clause.slice(closingIndex + 1).trim()) return null
+    candidate = clause.slice(1, closingIndex)
+  } else if (DIRECTOR_WORK_AMBIGUITY.test(clause) || /[或/、]/u.test(clause)) {
+    return null
+  }
+  return isValidDirectorWork(candidate) ? candidate : null
+}
+
 function statusSearchText(content) {
   return content
     .normalize('NFKC')
@@ -129,6 +168,9 @@ export function isClassifierCandidate(content) {
 }
 
 function validateDecision(decision, content) {
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) return null
+  const hasDirectorWork = Object.hasOwn(decision, 'directorWork')
+  if (hasDirectorWork && decision.action !== 'dispatch_single') return null
   if (NEGATIVE_OR_NONEXECUTING.test(content)
     && (decision.action === 'dispatch_single' || decision.action === 'dispatch_directory')) {
     return { action: 'respond' }
@@ -140,11 +182,20 @@ function validateDecision(decision, content) {
   const evidence = extractEvidence(content)
   if (decision.action === 'dispatch_single') {
     if (evidence.paths.length !== 1 || evidence.paths[0] !== decision.value) return null
+    const explicitDirectorWork = extractExplicitDirectorWork(content)
+    if ((hasDirectorWork && (
+      !isValidDirectorWork(decision.directorWork)
+      || explicitDirectorWork !== decision.directorWork
+    )) || (!hasDirectorWork && explicitDirectorWork !== null)) return null
     const checked = validateVideoPath(decision.value, {
       quoted: evidence.quotedPaths.includes(decision.value),
     })
     if (!checked.ok || DIRECTORY_HINT.test(content)) return null
-    return { action: decision.action, videoPath: checked.videoPath }
+    return {
+      action: decision.action,
+      videoPath: checked.videoPath,
+      ...(hasDirectorWork ? { directorWork: decision.directorWork } : {}),
+    }
   }
   if (decision.action === 'dispatch_directory') {
     if (evidence.paths.length !== 1 || evidence.paths[0] !== decision.value) return null
@@ -429,10 +480,12 @@ export function createQwenBeforeDispatchHandler({
         const result = await runner.dispatchVideo({
           videoPath: decision.videoPath,
           taskId,
+          ...(decision.directorWork === undefined ? {} : { directorWork: decision.directorWork }),
         })
         if (result.confirmationRequired) {
           duplicateConfirmationStore.set(scopeKey, {
             kind: 'task', id: taskId, path: decision.videoPath,
+            ...(decision.directorWork === undefined ? {} : { directorWork: decision.directorWork }),
           })
         }
         return handled(dispatchReceipt(result))
@@ -500,6 +553,7 @@ export function createQwenBeforeDispatchHandler({
           ...(pending.trustedExistingMaterialId === undefined
             ? {}
             : { trustedExistingMaterialId: pending.trustedExistingMaterialId }),
+          ...(pending.directorWork === undefined ? {} : { directorWork: pending.directorWork }),
           confirmDuplicate: true,
         })
       if (result.intakePaused === true) duplicateConfirmationStore.set(pendingScopeKey, pending)

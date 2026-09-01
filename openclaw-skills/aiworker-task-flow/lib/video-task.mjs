@@ -10,6 +10,7 @@ import {
   stageVideoFile,
 } from './media-ingest.mjs'
 import { isN8nIntakeDrainingError } from './platform-client.mjs'
+import { assertOptionalDirectorWork } from './director-work-policy.mjs'
 
 const UUID_PATTERN = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
 const VIDEO_KEY_PATTERN = new RegExp(`^${UUID_PATTERN}\\.(?:mp4|mov|mkv|webm|m4v)$`, 'u')
@@ -80,6 +81,7 @@ export function buildVideoTaskPayload({
   batchId,
   batchIndex,
   visionRoute,
+  directorWork,
 }) {
   const normalizedBatchId = String(batchId || '').trim().slice(0, 120)
   const normalizedBatchIndex = Number(batchIndex)
@@ -88,6 +90,7 @@ export function buildVideoTaskPayload({
     taskId,
     idempotencyKey,
     source: 'openclaw',
+    ...(directorWork === undefined || directorWork === null ? {} : { directorWork }),
     input: {
       prompt: prompt.trim(),
       videoKey,
@@ -110,6 +113,7 @@ function validateVideoTaskRequest(request) {
     throw new TypeError('video_task_request_invalid')
   }
   if (Object.hasOwn(request, 'materialId')) throw new Error('untrusted_material_id_field')
+  assertOptionalDirectorWork(request.directorWork)
   for (const [name, value] of [
     ['onStagingPrepared', request.onStagingPrepared],
     ['onSourceAnchorCreated', request.onSourceAnchorCreated],
@@ -140,6 +144,7 @@ async function triggerStagedVideoTask(request, staged) {
     onLocalCleanupStarted = null,
     onMediaSettled = null,
     recoverAfterTriggerError = true,
+    directorWork = null,
   } = request
   let ownershipTransferred = false
   let localReleased = false
@@ -158,6 +163,7 @@ async function triggerStagedVideoTask(request, staged) {
         batchId,
         batchIndex,
         visionRoute,
+        directorWork,
       }))
     } catch (error) {
       if (isN8nIntakeDrainingError(error)) {

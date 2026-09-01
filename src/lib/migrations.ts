@@ -1702,6 +1702,54 @@ const migrations: Migration[] = [
           ON n8n_parent_execution_claims(tenant_id, workspace_id, execution_owner, updated_at DESC);
       `)
     }
+  },
+  {
+    id: '057_n8n_director_evidence_outbox',
+    up(db: Database.Database) {
+      // The successful parent task remains authoritative. The outbox stores
+      // only stable routing and digest metadata so retries cannot become a
+      // second task/result store.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_director_evidence_outbox (
+          task_id TEXT PRIMARY KEY,
+          binding_id INTEGER NOT NULL,
+          tenant_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          work_id TEXT NOT NULL
+            CHECK(length(work_id) BETWEEN 1 AND 160
+              AND work_id NOT GLOB '*[^A-Za-z0-9._:-]*'),
+          query_digest TEXT NOT NULL
+            CHECK(length(query_digest) = 64
+              AND query_digest NOT GLOB '*[^0-9a-f]*'),
+          projection_contract_digest TEXT NOT NULL
+            CHECK(length(projection_contract_digest) = 64
+              AND projection_contract_digest NOT GLOB '*[^0-9a-f]*'),
+          idempotency_key TEXT NOT NULL UNIQUE
+            CHECK(length(idempotency_key) = 64
+              AND idempotency_key NOT GLOB '*[^0-9a-f]*'),
+          result_sha256 TEXT NOT NULL
+            CHECK(length(result_sha256) = 64
+              AND result_sha256 NOT GLOB '*[^0-9a-f]*'),
+          status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending', 'delivered', 'conflict')),
+          attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+          next_attempt_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          last_error_code TEXT
+            CHECK(last_error_code IS NULL OR (
+              length(last_error_code) BETWEEN 1 AND 200
+              AND last_error_code NOT GLOB '*[^A-Za-z0-9_:-]*'
+            )),
+          delivered_at INTEGER,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_director_evidence_outbox_due
+          ON n8n_director_evidence_outbox(status, next_attempt_at, updated_at, task_id);
+        CREATE INDEX IF NOT EXISTS idx_n8n_director_evidence_outbox_scope
+          ON n8n_director_evidence_outbox(tenant_id, workspace_id, status, updated_at DESC);
+      `)
+    }
   }
 ]
 

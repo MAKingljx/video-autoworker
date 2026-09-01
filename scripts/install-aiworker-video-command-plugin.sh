@@ -6,8 +6,8 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12")
-CURRENT_VERSION="0.5.13"
+SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13")
+CURRENT_VERSION="0.5.14"
 OPENCLAW_VERSION="2026.7.1-2"
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
@@ -15,6 +15,8 @@ EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 RUNTIME_VALIDATOR="$PLUGIN_DIR/scripts/validate-runtime-inspection.mjs"
+SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
+SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
 PROFILE_STATE_DIR="$HOME/.openclaw-qwen-current"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
 INSTALLED_PLUGIN_DIR="$PROFILE_STATE_DIR/extensions/$PLUGIN_ID"
@@ -29,6 +31,19 @@ BEFORE_LISTENERS=""
 LEGACY_SENDER_HASH_PRESENT=0
 MIGRATED_CONFIG=""
 MIGRATED_CONFIG_SHA=""
+DEPLOYMENT_RUN_DIR="${AIWORKER_BG_RUN_DIR:-$REPOSITORY_ROOT/.run/blue-green}"
+DEPLOYMENT_LOCK_DIR="$DEPLOYMENT_RUN_DIR/.deployment.lock"
+MISSION_CONTROL_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
+N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
+LEGACY_BOOTSTRAP_ATTEMPT_DIR="${AIWORKER_BG_LEGACY_BOOTSTRAP_ATTEMPT_DIR:-}"
+VIDEO_BATCH_ROOT="${AIWORKER_VIDEO_BATCH_DIR:-$HOME/ai-worker/state/video-autoworker/video-batches}"
+
+[[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
+  printf 'Shared deployment lock helper is unavailable.\n' >&2
+  exit 1
+}
+# shellcheck source=scripts/lib/shared-deployment-lock.sh
+. "$SHARED_DEPLOYMENT_LOCK_HELPER"
 
 usage() {
   printf 'Usage: %s (--dry-run|--apply|--rollback) --target-sha <40-lowercase-hex-sha> [--backup <absolute-backup>]\n' "$0"
@@ -58,6 +73,8 @@ done
 [[ -n "$MODE" && "$TARGET_SHA" =~ ^[a-f0-9]{40}$ ]] || { usage >&2; exit 2; }
 [[ "$MODE" == "rollback" || -z "$ROLLBACK_BACKUP" ]] || { usage >&2; exit 2; }
 [[ "$MODE" != "rollback" || -n "$ROLLBACK_BACKUP" ]] || { usage >&2; exit 2; }
+EXPECTED_SOURCE_COMMIT="$TARGET_SHA"
+EXPECTED_RELEASE_ID="$TARGET_SHA-runtime"
 
 for command_name in awk chmod cmp cp date env find git hostname id install lsof mkdir mktemp node openclaw readlink rm shasum sort stat tr; do
   command -v "$command_name" >/dev/null 2>&1 || {
@@ -83,6 +100,9 @@ cleanup() {
       *) printf 'Refusing unexpected temporary cleanup path.\n' >&2; status=70 ;;
     esac
   fi
+  if [[ "$DEPLOYMENT_LOCK_OWNED" == 1 ]]; then
+    if ! release_shared_deployment_lock; then status=70; fi
+  fi
   exit "$status"
 }
 
@@ -103,6 +123,23 @@ is_supported_previous_version() {
     [[ "$candidate" == "$supported" ]] && return 0
   done
   return 1
+}
+
+verify_shared_install_gate() {
+  local -a gate_arguments=(
+    --mission-control-db-path "$MISSION_CONTROL_DB_PATH"
+    --n8n-db-path "$N8N_DB_PATH"
+    --video-batch-root "$VIDEO_BATCH_ROOT"
+    --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
+    --expected-release-id "$EXPECTED_RELEASE_ID"
+  )
+  if [[ -n "$LEGACY_BOOTSTRAP_ATTEMPT_DIR" ]]; then
+    gate_arguments+=(--legacy-attempt-dir "$LEGACY_BOOTSTRAP_ATTEMPT_DIR")
+  fi
+  node "$SHARED_INSTALL_GATE" "${gate_arguments[@]}" >/dev/null || {
+    printf 'Shared video-command replacement requires paused intake, zero active tasks, and zero pending director outbox rows.\n' >&2
+    return 1
+  }
 }
 
 listener_snapshot() {
@@ -152,6 +189,8 @@ validate_source() {
   validate_git_target
   [[ -f "$PROFILE_CONFIG" && ! -L "$PROFILE_CONFIG" ]] || return 1
   [[ -d "$PLUGIN_DIR" && ! -L "$PLUGIN_DIR" ]] || return 1
+  [[ -f "$SHARED_INSTALL_GATE" && ! -L "$SHARED_INSTALL_GATE" ]] || return 1
+  [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/package.json")" == "$CURRENT_VERSION" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/openclaw.plugin.json")" == "$CURRENT_VERSION" ]] || return 1
   node - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'
@@ -426,6 +465,8 @@ BEFORE_LISTENERS="$(listener_snapshot)"
 validate_runtime "$installed_version" "$WORK_ROOT/runtime-before.json" "$WORK_ROOT/catalog-before.json"
 
 if [[ "$MODE" == "rollback" ]]; then
+  acquire_shared_deployment_lock
+  verify_shared_install_gate
   metadata="$(verify_backup "$ROLLBACK_BACKUP")" || {
     printf 'Rollback backup is not a verified current-release recovery point.\n' >&2
     exit 1
@@ -462,6 +503,8 @@ if [[ "$MODE" == "dry-run" ]]; then
   printf 'No plugin, config, gateway, queue, n8n, media, database, or scheduler state changed.\n'
   exit 0
 fi
+
+acquire_shared_deployment_lock
 
 if [[ -L "$BACKUP_ROOT" ]]; then
   printf 'Backup root must not be a symlink.\n' >&2
@@ -511,6 +554,7 @@ if [[ "$migration_failed" -ne 0 ]]; then
   exit 1
 fi
 
+verify_shared_install_gate
 apply_failed=0
 install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG" || apply_failed=1
 if [[ "$apply_failed" -eq 0 ]]; then

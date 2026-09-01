@@ -7,6 +7,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  realpath,
   readFile,
   readdir,
   rename,
@@ -18,6 +19,7 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
+import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
@@ -49,9 +51,14 @@ async function initializeGitRepository(pathname: string) {
 }
 
 async function createFixture(root: string) {
+  await mkdir(root, { recursive: true })
   const stateDir = resolve(root, 'state')
   const workspace = resolve(root, 'workspace')
   const backupRoot = resolve(root, 'backups')
+  const liveDbPath = resolve(root, 'mission-control.db')
+  const n8nDbPath = resolve(root, 'n8n.sqlite')
+  const deploymentRunDir = resolve(await realpath(root), 'blue-green-run')
+  const videoBatchRoot = resolve(root, 'video-batches')
   await mkdir(resolve(stateDir, 'extensions/aiworker-director-brain'), { recursive: true })
   await mkdir(resolve(workspace, 'skills/aiworker-director-brain'), { recursive: true })
   await writeFile(resolve(stateDir, 'extensions/aiworker-director-brain/old.txt'), 'old plugin\n')
@@ -70,7 +77,46 @@ async function createFixture(root: string) {
       ],
     },
   }, null, 2) + '\n')
-  return { stateDir, workspace, backupRoot }
+  const database = new Database(liveDbPath)
+  database.exec(`
+    CREATE TABLE n8n_intake_controls (
+      control_id INTEGER PRIMARY KEY,
+      accepting INTEGER NOT NULL,
+      revision INTEGER NOT NULL
+    );
+    INSERT INTO n8n_intake_controls VALUES (1, 0, 1);
+    CREATE TABLE n8n_task_runs (
+      id INTEGER PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      source TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_director_evidence_outbox (status TEXT NOT NULL);
+  `)
+  database.close()
+  await chmod(liveDbPath, 0o600)
+  const n8n = new Database(n8nDbPath)
+  n8n.exec(`
+    CREATE TABLE execution_entity (
+      id INTEGER PRIMARY KEY,
+      status TEXT NOT NULL,
+      "stoppedAt" INTEGER
+    );
+  `)
+  n8n.close()
+  await chmod(n8nDbPath, 0o600)
+  await mkdir(videoBatchRoot, { mode: 0o700 })
+  return {
+    stateDir,
+    workspace,
+    backupRoot,
+    liveDbPath: await realpath(liveDbPath),
+    n8nDbPath: await realpath(n8nDbPath),
+    deploymentRunDir,
+    videoBatchRoot: await realpath(videoBatchRoot),
+  }
 }
 
 async function runInstaller(
@@ -89,12 +135,37 @@ async function runInstaller(
     '--backup-root', fixture.backupRoot,
     ...extra,
   ], {
-    env: { ...process.env, ...environment },
+    env: {
+      ...process.env,
+      AIWORKER_BG_RUN_DIR: fixture.deploymentRunDir,
+      AIWORKER_BG_LIVE_DB_PATH: fixture.liveDbPath,
+      AIWORKER_BG_N8N_DB_PATH: fixture.n8nDbPath,
+      AIWORKER_VIDEO_BATCH_DIR: fixture.videoBatchRoot,
+      ...environment,
+    },
     encoding: 'utf8',
   })
 }
 
 describe('transactional director-brain OpenClaw installer', () => {
+  it('does not create a backup while the shared deployment lock is held', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-deployment-lock-'))
+    try {
+      const fixture = await createFixture(root)
+      await mkdir(resolve(fixture.deploymentRunDir, '.deployment.lock'), {
+        recursive: true,
+        mode: 0o700,
+      })
+      await chmod(fixture.deploymentRunDir, 0o700)
+      await expect(runInstaller(fixture, '--apply')).rejects.toThrow()
+      expect(await exists(fixture.backupRoot)).toBe(false)
+      expect(await readFile(resolve(fixture.stateDir, 'extensions/aiworker-director-brain/old.txt'), 'utf8'))
+        .toBe('old plugin\n')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('requires an explicit mode, profile, state directory, and workspace', async () => {
     await expect(execFileAsync('bash', [installer, '--dry-run'], { encoding: 'utf8' }))
       .rejects.toMatchObject({ code: 2 })
@@ -396,6 +467,10 @@ describe('transactional director-brain OpenClaw installer', () => {
       expect(first.stdout).toContain('Installed director-brain plugin, private shared runtime, and Skill')
       expect(first.stdout).toContain('Gateway was not restarted')
       expect(backups).toHaveLength(1)
+      expect(await exists(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/runtime/scripts/feishu-director-brain.mjs',
+      ))).toBe(true)
       expect(await exists(resolve(
         fixture.stateDir,
         'extensions/aiworker-director-brain/runtime/scripts/lib/feishu-director-brain.mjs',

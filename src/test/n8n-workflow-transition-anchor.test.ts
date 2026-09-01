@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -10,6 +11,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -20,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 const projectRoot = resolve(import.meta.dirname, '../..')
 const anchor = resolve(projectRoot, 'scripts/n8n-workflow-transition-anchor.mjs')
 const importer = resolve(projectRoot, 'scripts/n8n-import-workflows.sh')
+const maintenanceLock = resolve(projectRoot, 'scripts/n8n-maintenance-lock.mjs')
 const verifier = resolve(projectRoot, 'scripts/verify-n8n-blue-green-workflows.mjs')
 const targetCommit = 'a'.repeat(40)
 const oldCommit = targetCommit
@@ -241,6 +244,7 @@ function createFixture() {
     journal: join(state, 'journal'),
     liveReport: join(state, 'live-report.json'),
     attestation: join(state, 'transition-attestation.json'),
+    rollbackAuthorization: join(state, 'transition-rollback-authorization.receipt.json'),
   }
 }
 
@@ -542,37 +546,158 @@ describe('n8n workflow transition dual anchor producer', () => {
     }
   })
 
-  it('requires a fresh confirmation before first MUTATING but treats it as history after mutation starts', () => {
-    const before = createFixture()
-    expect(prepare(before).status).toBe(0)
-    expect(confirm(before).status).toBe(0)
-    expect(claim(before).status).toBe(0)
-    const receipt = JSON.parse(readFileSync(before.confirmation, 'utf8'))
-    const expiredBegin = runAtTime(
-      receipt.expiresAt + 1,
-      'begin-mutation',
-      '--intent', before.intent,
-      '--confirmation', before.confirmation,
-      '--journal-dir', before.journal,
-    )
-    expect(expiredBegin.status).not.toBe(0)
-    expect(expiredBegin.stderr).toContain('current confirmation capability expired')
+  it('requires freshness until atomic capability claim, then resumes CLAIMED into MUTATING after expiry', () => {
+    const unclaimed = createFixture()
+    expect(prepare(unclaimed).status).toBe(0)
+    expect(confirm(unclaimed).status).toBe(0)
+    const interruptedBeforeClaim = runAtFailpoint('after-journal-mkdir', ...claimArguments(unclaimed))
+    expect(interruptedBeforeClaim.status).not.toBe(0)
+    const unclaimedReceipt = JSON.parse(readFileSync(unclaimed.confirmation, 'utf8'))
+    const expiredUnclaimed = runAtTime(unclaimedReceipt.expiresAt + 1, ...claimArguments(unclaimed))
+    expect(expiredUnclaimed.status).not.toBe(0)
+    expect(expiredUnclaimed.stderr).toContain('current confirmation capability expired')
+    expect(() => statSync(unclaimed.capability)).not.toThrow()
 
-    const after = createFixture()
-    expect(prepare(after).status).toBe(0)
-    expect(confirm(after).status).toBe(0)
-    expect(claim(after).status).toBe(0)
-    expect(journalCommand(after, 'begin-mutation').status).toBe(0)
-    const afterReceipt = JSON.parse(readFileSync(after.confirmation, 'utf8'))
+    const claimed = createFixture()
+    expect(prepare(claimed).status).toBe(0)
+    expect(confirm(claimed).status).toBe(0)
+    const interruptedAfterClaim = runAtFailpoint('after-capability-consumed', ...claimArguments(claimed))
+    expect(interruptedAfterClaim.status).not.toBe(0)
+    const claimedReceipt = JSON.parse(readFileSync(claimed.confirmation, 'utf8'))
+    const resumedClaim = runAtTime(claimedReceipt.expiresAt + 1, ...claimArguments(claimed))
+    expect(resumedClaim.status, resumedClaim.stderr).toBe(0)
+    expect(JSON.parse(resumedClaim.stdout)).toMatchObject({ resumed: true, nextState: 'MUTATING' })
+    const expiredBegin = runAtTime(
+      claimedReceipt.expiresAt + 1,
+      'begin-mutation',
+      '--intent', claimed.intent,
+      '--confirmation', claimed.confirmation,
+      '--journal-dir', claimed.journal,
+    )
+    expect(expiredBegin.status, expiredBegin.stderr).toBe(0)
+    expect(JSON.parse(expiredBegin.stdout)).toMatchObject({ state: 'MUTATING' })
+
     const continued = runAtTime(
-      afterReceipt.expiresAt + 1,
+      claimedReceipt.expiresAt + 1,
       'verify-target',
-      '--intent', after.intent,
-      '--confirmation', after.confirmation,
-      '--journal-dir', after.journal,
-      '--id', after.targets[0].id,
+      '--intent', claimed.intent,
+      '--confirmation', claimed.confirmation,
+      '--journal-dir', claimed.journal,
+      '--id', claimed.targets[0].id,
     )
     expect(continued.status, continued.stderr).toBe(0)
+  })
+
+  it('selects one immutable transition rollback branch without populating a bootstrap attempt', () => {
+    const fixture = createFixture()
+    const bootstrapAttempt = join(fixture.root, 'bootstrap-attempt')
+    mkdirSync(bootstrapAttempt, { mode: 0o700 })
+    expect(prepare(fixture).status).toBe(0)
+    expect(confirm(fixture).status).toBe(0)
+    expect(claim(fixture).status).toBe(0)
+    expect(journalCommand(fixture, 'begin-mutation').status).toBe(0)
+    writeControlled(fixture.database, 'partially-mutated-sqlite\n')
+    const confirmation = JSON.parse(readFileSync(fixture.confirmation, 'utf8'))
+    const args = [
+      'authorize-transition-rollback',
+      '--intent', fixture.intent,
+      '--confirmation', fixture.confirmation,
+      '--journal-dir', fixture.journal,
+      '--output', fixture.rollbackAuthorization,
+    ]
+    const authorized = runAtTime(confirmation.expiresAt + 1, ...args)
+    expect(authorized.status, authorized.stderr).toBe(0)
+    expect(JSON.parse(authorized.stdout)).toMatchObject({
+      schema: 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1',
+      resumed: false,
+    })
+    expect(readdirSync(bootstrapAttempt)).toEqual([])
+    expect(Number(statSync(fixture.rollbackAuthorization).mode & 0o777)).toBe(0o400)
+
+    const verified = runAtTime(
+      confirmation.expiresAt + 1,
+      'verify-transition-rollback',
+      '--intent', fixture.intent,
+      '--confirmation', fixture.confirmation,
+      '--journal-dir', fixture.journal,
+      '--authorization', fixture.rollbackAuthorization,
+    )
+    expect(verified.status, verified.stderr).toBe(0)
+    expect(JSON.parse(verified.stdout)).toMatchObject({
+      schema: 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1',
+      transitionHeadSha256: JSON.parse(authorized.stdout).transitionHeadSha256,
+    })
+    const replayedAuthorization = runAtTime(confirmation.expiresAt + 1, ...args)
+    expect(replayedAuthorization.status, replayedAuthorization.stderr).toBe(0)
+    expect(JSON.parse(replayedAuthorization.stdout)).toMatchObject({ resumed: true })
+
+    const forward = runAtTime(
+      confirmation.expiresAt + 1,
+      'verify-target',
+      '--intent', fixture.intent,
+      '--confirmation', fixture.confirmation,
+      '--journal-dir', fixture.journal,
+      '--id', fixture.targets[0].id,
+    )
+    expect(forward.status).not.toBe(0)
+    expect(forward.stderr).toContain('selected the rollback branch')
+
+    const tampered = JSON.parse(readFileSync(fixture.rollbackAuthorization, 'utf8'))
+    tampered.target.database.ino = String(BigInt(tampered.target.database.ino) + BigInt(1))
+    chmodSync(fixture.rollbackAuthorization, 0o600)
+    writeControlled(fixture.rollbackAuthorization, `${JSON.stringify(tampered)}\n`, 0o400)
+    const rejected = runAtTime(
+      confirmation.expiresAt + 1,
+      'verify-transition-rollback',
+      '--intent', fixture.intent,
+      '--confirmation', fixture.confirmation,
+      '--journal-dir', fixture.journal,
+      '--authorization', fixture.rollbackAuthorization,
+    )
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('authorization identity changed')
+  })
+
+  it('serializes rollback authorization with the importer maintenance window and releases on failure', () => {
+    const fixture = createFixture()
+    expect(prepare(fixture).status).toBe(0)
+    expect(confirm(fixture).status).toBe(0)
+    expect(claim(fixture).status).toBe(0)
+    expect(journalCommand(fixture, 'begin-mutation').status).toBe(0)
+    writeControlled(fixture.database, 'partially-mutated-sqlite\n')
+    const args = [
+      'authorize-transition-rollback',
+      '--intent', fixture.intent,
+      '--confirmation', fixture.confirmation,
+      '--journal-dir', fixture.journal,
+      '--output', fixture.rollbackAuthorization,
+    ]
+    const lockPath = join(dirname(fixture.database), '.n8n-maintenance.lock')
+    const bootstrapClaim = join(fixture.state, 'bootstrap-claim.json')
+    writeControlled(bootstrapClaim, '{}\n', 0o400)
+    const failed = run(...args)
+    expect(failed.status).not.toBe(0)
+    expect(failed.stderr).toContain('claimed for bootstrap')
+    expect(existsSync(lockPath)).toBe(false)
+    unlinkSync(bootstrapClaim)
+
+    const acquired = spawnSync(process.execPath, [
+      maintenanceLock, 'acquire', lockPath, 'import', String(process.pid),
+    ], { encoding: 'utf8' })
+    expect(acquired.status, acquired.stderr).toBe(0)
+    const blocked = run(...args)
+    expect(blocked.status).not.toBe(0)
+    expect(blocked.stderr).toContain('maintenance lock is held by import')
+    expect(existsSync(fixture.rollbackAuthorization)).toBe(false)
+    const released = spawnSync(process.execPath, [
+      maintenanceLock, 'release', lockPath, 'import', String(process.pid), acquired.stdout.trim(),
+    ], { encoding: 'utf8' })
+    expect(released.status, released.stderr).toBe(0)
+
+    const authorized = run(...args)
+    expect(authorized.status, authorized.stderr).toBe(0)
+    expect(JSON.parse(authorized.stdout)).toMatchObject({ resumed: false })
+    expect(existsSync(lockPath)).toBe(false)
   })
 
   it('rejects a normal process holding the authoritative database open', async () => {

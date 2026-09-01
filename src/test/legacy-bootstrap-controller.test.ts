@@ -592,6 +592,17 @@ function mutateLive(entry: Fixture, mutate: (value: any) => void) {
 }
 
 describe('legacy bootstrap confirmation controller', () => {
+  it('requires a completely empty bootstrap attempt before prepare', () => {
+    const entry = fixture()
+    writeFileSync(join(entry.attempt, 'transition-rollback-authorization.receipt.json'), '{}\n', {
+      mode: 0o400,
+    })
+    const refused = prepare(entry)
+    expect(refused.status).not.toBe(0)
+    expect(refused.stderr).toContain('attempt directory must be empty')
+    expect(existsSync(join(entry.attempt, 'prepare.receipt.json'))).toBe(false)
+  })
+
   it('creates a private immutable prepare/confirm/shutdown receipt chain without service actions', () => {
     const entry = fixture()
     const prepared = prepare(entry)

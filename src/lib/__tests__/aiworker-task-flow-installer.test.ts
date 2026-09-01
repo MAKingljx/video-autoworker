@@ -1,5 +1,8 @@
 import { execFile } from 'node:child_process'
 import {
+  chmodSync, existsSync, mkdirSync, realpathSync,
+} from 'node:fs'
+import {
   access,
   chmod,
   lstat,
@@ -16,6 +19,7 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import Database from 'better-sqlite3'
 
 const repositoryRoot = process.cwd()
 const installer = resolve(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')
@@ -32,6 +36,46 @@ function runInstaller(
   extraEnv: Record<string, string> = {},
   mode: '--dry-run' | '--apply' = '--apply',
 ) {
+  const gateRoot = realpathSync.native(resolve(backupRoot, '..'))
+  const liveDbPath = resolve(gateRoot, '.mission-control-install-gate.db')
+  const n8nDbPath = resolve(gateRoot, '.n8n-install-gate.db')
+  const deploymentRunDir = resolve(gateRoot, '.blue-green-run')
+  const videoBatchRoot = resolve(gateRoot, '.video-batches')
+  if (!existsSync(liveDbPath)) {
+    const database = new Database(liveDbPath)
+    database.exec(`
+      CREATE TABLE n8n_intake_controls (
+        control_id INTEGER PRIMARY KEY,
+        accepting INTEGER NOT NULL,
+        revision INTEGER NOT NULL
+      );
+      INSERT INTO n8n_intake_controls VALUES (1, 0, 1);
+      CREATE TABLE n8n_task_runs (
+        id INTEGER PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE n8n_director_evidence_outbox (status TEXT NOT NULL);
+    `)
+    database.close()
+    chmodSync(liveDbPath, 0o600)
+  }
+  if (!existsSync(n8nDbPath)) {
+    const n8n = new Database(n8nDbPath)
+    n8n.exec(`
+      CREATE TABLE execution_entity (
+        id INTEGER PRIMARY KEY,
+        status TEXT NOT NULL,
+        "stoppedAt" INTEGER
+      );
+    `)
+    n8n.close()
+    chmodSync(n8nDbPath, 0o600)
+  }
+  if (!existsSync(videoBatchRoot)) mkdirSync(videoBatchRoot, { mode: 0o700 })
   return new Promise<InstallerResult>((resolvePromise, rejectPromise) => {
     execFile('bash', [installer, mode], {
       cwd: repositoryRoot,
@@ -40,6 +84,10 @@ function runInstaller(
         AIWORKER_NODE_BIN: process.execPath,
         AIWORKER_QWEN_WORKSPACE: workspace,
         AIWORKER_SKILL_BACKUP_ROOT: backupRoot,
+        AIWORKER_BG_RUN_DIR: deploymentRunDir,
+        AIWORKER_BG_LIVE_DB_PATH: realpathSync.native(liveDbPath),
+        AIWORKER_BG_N8N_DB_PATH: realpathSync.native(n8nDbPath),
+        AIWORKER_VIDEO_BATCH_DIR: realpathSync.native(videoBatchRoot),
         ...extraEnv,
       },
       encoding: 'utf8',
@@ -173,6 +221,26 @@ describe('managed AI-worker workspace section renderer', () => {
 })
 
 describe('transactional AI-worker task-flow installer', () => {
+  it('does not mutate the workspace while the shared deployment lock is held', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-deployment-lock-test-'))
+    const workspace = resolve(root, 'workspace')
+    const backupRoot = resolve(root, 'backups')
+    try {
+      await mkdir(workspace)
+      await createExistingInstallation(workspace)
+      const agentsBefore = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
+      await mkdir(resolve(root, '.blue-green-run/.deployment.lock'), {
+        recursive: true,
+        mode: 0o700,
+      })
+      await expect(runInstaller(workspace, backupRoot)).rejects.toThrow()
+      expect(await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')).toBe(agentsBefore)
+      expect(await pathExists(backupRoot)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('keeps the workspace and backup root unchanged during a dry-run', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-dry-run-test-'))
     const workspace = resolve(root, 'workspace')

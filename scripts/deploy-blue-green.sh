@@ -10,6 +10,7 @@ RELEASES_DIR="${AIWORKER_BG_RELEASES_DIR:-$PROJECT_ROOT/.runtime/releases}"
 STATE_FILE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
 LOCK_DIR="$RUN_DIR/.deployment.lock"
 AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
+DIRECTOR_VIDEO_READINESS="$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs"
 NODE_BIN="${NODE_BIN:-node}"
 ROUTER_HOST="${AIWORKER_BG_ROUTER_HOST:-127.0.0.1}"
 ROUTER_PORT="${AIWORKER_BG_ROUTER_PORT:-3017}"
@@ -68,8 +69,10 @@ that has carried production traffic requires that proof and a stopped old PID.
 `switch` and `rollback` require AIWORKER_BG_LIVE_DB_PATH, an `active` runtime
 attestation for the same canonical SQLite database, and a paused intake gate.
 They verify the selected release through port 3017 and automatically roll back
-if the routed read-only checks fail. They do not stop either backend or mutate
-application data. Set AIWORKER_BG_CONTROL_TOKEN_FILE to a mode-0600 file that
+if the routed read-only checks fail. Ordinary switch and explicit rollback are
+contract-preserving only; a different director projection contract is rejected
+even at zero work. They do not stop either backend or mutate application data.
+Set AIWORKER_BG_CONTROL_TOKEN_FILE to a mode-0600 file that
 contains the viewer/admin API token (or inject AIWORKER_BG_CONTROL_TOKEN).
 `bootstrap` is the only supported migration from a legacy single-process 3017.
 It accepts only mode-0600 managed v3 evidence produced while the managed
@@ -89,6 +92,55 @@ EOF
 fail() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+verify_director_video_release_chain() {
+  local release_id="$1"
+  local release_root="$2"
+  local repository_release_mode="${3:-head}"
+  local report
+  [[ "$repository_release_mode" == head || "$repository_release_mode" == ancestor ]] \
+    || { printf 'error: invalid director/video repository release mode\n' >&2; return 1; }
+  [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
+    || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
+  report="$("$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
+    --repository-root "$PROJECT_ROOT" \
+    --releases-root "$RELEASES_DIR" \
+    --release-id "$release_id" \
+    --release-root "$release_root" \
+    --live-db-path "$LIVE_DB_PATH" \
+    --repository-release-mode "$repository_release_mode")" \
+    || { printf 'error: 3017, video-command, task-flow, director-brain, or projection outbox is incompatible\n' >&2; return 1; }
+  "$NODE_BIN" - "$report" "$release_id" <<'NODE' \
+    || { printf 'error: director/video release-readiness verifier returned an invalid report\n' >&2; return 1; }
+const [raw, releaseId] = process.argv.slice(2)
+let value
+try { value = JSON.parse(raw) } catch { process.exit(2) }
+const digest = value?.payloads?.projectionContract?.currentDigest
+const commitPrefix = releaseId.replace(/-runtime$/u, '')
+if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
+  || value?.ok !== true || value?.app?.releaseId !== releaseId
+  || typeof value?.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.commit)
+  || !value.commit.startsWith(commitPrefix)
+  || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)
+  || value?.projectionOutbox?.currentDigest !== digest
+  || value?.projectionOutbox?.incompatiblePending !== 0
+  || value?.contracts?.directorWork !== true
+  || value?.contracts?.outboxClosure !== true
+  || value?.contracts?.projectionContractCompatible !== true) process.exit(3)
+process.stdout.write(digest)
+NODE
+}
+
+verify_active_director_projection_chain() {
+  local active release_id release_root
+  active="$(read_state_field active)"
+  release_id="$(read_state_slot_release "$active")"
+  release_root="$(binding_values "$active" | sed -n '2p')" \
+    || { printf 'error: active slot binding is invalid\n' >&2; return 1; }
+  [[ "$release_root" == /* ]] \
+    || { printf 'error: active slot release root is invalid\n' >&2; return 1; }
+  verify_director_video_release_chain "$release_id" "$release_root" ancestor >/dev/null
 }
 
 require_slot() {
@@ -161,7 +213,11 @@ physical_path() {
 }
 
 release_manifest_sha() {
-  shasum -a 256 "$1/release-manifest.json" | awk '{print $1}'
+  file_sha256 "$1/release-manifest.json"
+}
+
+file_sha256() {
+  shasum -a 256 "$1" | awk '{print $1}'
 }
 
 assert_release() {
@@ -522,7 +578,8 @@ if (mode === 'router') {
     routerUpgradedSockets: counters.upgradedSockets,
   })}`)
 } else if (mode === 'readiness') {
-  const [slot, releaseId, rawPort, expectedRevision, expectedEpoch, expectedGeneration] = expected
+  const [slot, releaseId, rawPort, expectedRevision, expectedEpoch, expectedGeneration,
+    expectedProjectionContract] = expected
   const specified = value => value !== undefined && value !== ''
   const readiness = payload?.readiness
   if (!readiness || readiness.schema !== 'video-autoworker-release-readiness/v1'
@@ -551,6 +608,19 @@ if (mode === 'router') {
     || (specified(expectedEpoch) && database.schemaEpoch !== Number(expectedEpoch))) {
     fail('database rolling compatibility is invalid')
   }
+  const projection = readiness.projection
+  if (!projection
+    || projection.schema !== 'video-autoworker-director-evidence-outbox-readiness/v1'
+    || typeof projection.contractDigest !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(projection.contractDigest)
+    || !nonNegativeInteger(projection.pending)
+    || !nonNegativeInteger(projection.incompatiblePending)
+    || projection.incompatiblePending > projection.pending
+    || projection.incompatiblePending !== 0
+    || (specified(expectedProjectionContract)
+      && projection.contractDigest !== expectedProjectionContract)) {
+    fail('director evidence projection contract is incompatible')
+  }
   const drain = readiness.retirement
   const counts = drain?.counts
   if (!counts || !['tracked', 'active', 'queued', 'accepted', 'running', 'topLevel',
@@ -575,7 +645,7 @@ if (mode === 'router') {
       && (leadership.leaseExpired || leadership.leaseExpiresAt <= readiness.observedAt))) {
     fail('scheduler lease readiness is inconsistent')
   }
-  process.stdout.write(`${intake.revision}\n${database.schemaEpoch}\n`)
+  process.stdout.write(`${intake.revision}\n${database.schemaEpoch}\n${projection.contractDigest}\n${projection.pending}\n${projection.incompatiblePending}\n${intakeCounts.active}\n`)
 } else if (mode === 'drain') {
   const [slot, releaseId, rawPort] = expected
   const drain = payload?.drain
@@ -1965,6 +2035,8 @@ NODE
   baseline_epoch="$(printf '%s\n' "$baseline_readiness" | sed -n '2p')"
   verify_routed_release "$slot" "$release_id" 1 "$intake_revision" "$baseline_epoch" \
     || fail "baseline routed health, page, or read-only API verification failed"
+  verify_director_video_release_chain "$release_id" "$physical_root" >/dev/null \
+    || fail "baseline director/video release chain is incompatible"
   "$manager" status "$slot" >/dev/null \
     && "$manager" status router >/dev/null \
     || fail "baseline processes are healthy but not under the expected service manager"
@@ -2366,6 +2438,11 @@ retire_slot() {
     && "$(read_state_field generation)" == "$generation" ]] \
     || fail "$slot router state changed after frozen callback quiescence"
 
+  if ! verify_active_director_projection_chain; then
+    rm -f -- "$(callback_freeze_file "$slot")"
+    fail "$slot produced an incompatible projection outbox row; callback admission was reopened and the old slot remains running"
+  fi
+
   "$manager" stop "$slot" >/dev/null || fail "$slot callback is frozen, but the managed listener did not stop"
   ! kill -0 "$pid" 2>/dev/null || fail "$slot callback is frozen, but PID $pid is still running"
   [[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ]] \
@@ -2552,6 +2629,7 @@ verify_routed_release() {
   local generation="$3"
   local expected_revision="${4:-}"
   local expected_epoch="${5:-}"
+  local expected_projection_contract="${6:-}"
   local port
   port="$(slot_port "$slot")"
   assert_router_identity "$slot" "$release_id" "$generation" >/dev/null || return 1
@@ -2560,11 +2638,198 @@ verify_routed_release() {
     >/dev/null || return 1
   check_json_endpoint readiness "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" \
     "$slot" "$release_id" "$port" "$expected_revision" "$expected_epoch" "$generation" \
+    "$expected_projection_contract" \
     >/dev/null || return 1
   check_routed_readonly_endpoint /materials page || return 1
   check_routed_readonly_endpoint /tasks page || return 1
   check_routed_readonly_endpoint /api/materials api || return 1
   check_routed_readonly_endpoint /api/tasks api || return 1
+}
+
+capture_transition_release_evidence() {
+  local slot="$1"
+  local release_id="$2"
+  local readiness="$3"
+  local routed_slot="$4"
+  local routed_release="$5"
+  local routed_generation="$6"
+  local binding release_root manifest host port physical_root runtime runtime_release runtime_manifest
+  local runtime_host runtime_port runtime_db runtime_router live_db canonical_router
+  local binding_sha runtime_sha router_sha router_attestation
+
+  [[ "$(read_state_field active)" == "$routed_slot" \
+    && "$(read_state_slot_release "$routed_slot")" == "$routed_release" \
+    && "$(read_state_field generation)" == "$routed_generation" ]] \
+    || fail "router state changed while transition evidence was being captured"
+  binding="$(binding_values "$slot")" || fail "$slot binding is invalid"
+  [[ "$(printf '%s\n' "$binding" | wc -l | tr -d '[:space:]')" == 5 ]] \
+    || fail "$slot binding evidence is incomplete"
+  [[ "$(printf '%s\n' "$binding" | sed -n '1p')" == "$release_id" ]] \
+    || fail "$slot binding release changed while transition evidence was being captured"
+  release_root="$(printf '%s\n' "$binding" | sed -n '2p')"
+  manifest="$(printf '%s\n' "$binding" | sed -n '3p')"
+  host="$(printf '%s\n' "$binding" | sed -n '4p')"
+  port="$(printf '%s\n' "$binding" | sed -n '5p')"
+  physical_root="$(assert_release "$release_id" "$release_root")" \
+    || fail "$slot release cannot be captured for a safe transition"
+  [[ "$physical_root" == "$release_root" && "$(release_manifest_sha "$physical_root")" == "$manifest" ]] \
+    || fail "$slot release manifest changed while transition evidence was being captured"
+
+  runtime="$(runtime_attestation_values "$slot")" \
+    || fail "$slot runtime attestation cannot be captured"
+  runtime_release="$(printf '%s\n' "$runtime" | sed -n '4p')"
+  runtime_manifest="$(printf '%s\n' "$runtime" | sed -n '5p')"
+  runtime_host="$(printf '%s\n' "$runtime" | sed -n '6p')"
+  runtime_port="$(printf '%s\n' "$runtime" | sed -n '7p')"
+  runtime_db="$(printf '%s\n' "$runtime" | sed -n '8p')"
+  runtime_router="$(printf '%s\n' "$runtime" | sed -n '9p')"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve live database path"
+  canonical_router="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  [[ "$runtime_release" == "$release_id" && "$runtime_manifest" == "$manifest" \
+    && "$runtime_host" == "$host" && "$runtime_port" == "$port" \
+    && "$runtime_db" == "$live_db" && "$runtime_router" == "$canonical_router" ]] \
+    || fail "$slot runtime identity changed while transition evidence was being captured"
+
+  router_attestation="$(router_attestation_file)"
+  assert_private_file "standalone router runtime attestation" "$router_attestation"
+  binding_sha="$(file_sha256 "$(binding_file "$slot")")"
+  runtime_sha="$(file_sha256 "$(runtime_attestation_file "$slot")")"
+  router_sha="$(file_sha256 "$router_attestation")"
+  "$NODE_BIN" - "$slot" "$release_id" "$physical_root" "$manifest" "$binding_sha" \
+    "$runtime_sha" "$router_sha" "$readiness" "$routed_slot" "$routed_release" \
+    "$routed_generation" <<'NODE'
+const crypto = require('node:crypto')
+const [slot, releaseId, releaseRoot, manifestSha256, bindingSha256,
+  runtimeAttestationSha256, routerAttestationSha256, rawReadiness,
+  activeSlot, routedReleaseId, rawGeneration] = process.argv.slice(2)
+const lines = rawReadiness.split('\n')
+const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+const integer = (value, minimum = 0) => /^\d+$/u.test(value)
+  && Number.isSafeInteger(Number(value)) && Number(value) >= minimum
+if (!['blue', 'green'].includes(slot) || !['blue', 'green'].includes(activeSlot)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(releaseId)
+  || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(routedReleaseId)
+  || !releaseRoot.startsWith('/') || !sha(manifestSha256) || !sha(bindingSha256)
+  || !sha(runtimeAttestationSha256) || !sha(routerAttestationSha256)
+  || lines.length !== 6 || !integer(lines[0], 1) || !integer(lines[1], 1)
+  || !sha(lines[2]) || !integer(lines[3]) || !integer(lines[4])
+  || Number(lines[4]) !== 0 || !integer(lines[5]) || !integer(rawGeneration, 1)) process.exit(2)
+const payload = {
+  slot,
+  releaseId,
+  releaseRoot,
+  manifestSha256,
+  bindingSha256,
+  runtimeAttestationSha256,
+  routerAttestationSha256,
+  readiness: {
+    revision: Number(lines[0]),
+    schemaEpoch: Number(lines[1]),
+    contractDigest: lines[2],
+    pending: Number(lines[3]),
+    incompatiblePending: Number(lines[4]),
+    active: Number(lines[5]),
+  },
+  route: {
+    activeSlot,
+    releaseId: routedReleaseId,
+    generation: Number(rawGeneration),
+  },
+}
+const serialized = JSON.stringify(payload)
+process.stdout.write(JSON.stringify({
+  schema: 'video-autoworker-transition-release-evidence/v1',
+  payload,
+  evidenceSha256: crypto.createHash('sha256').update(serialized).digest('hex'),
+}))
+NODE
+}
+
+verify_captured_transition_release_evidence() {
+  local evidence="$1"
+  local expected_slot="$2"
+  local expected_release="$3"
+  local expected_generation="$4"
+  local expected_generation_delta="$5"
+  local values release_root manifest binding_sha runtime_sha router_sha revision epoch contract
+  local captured_generation
+  local binding physical_root
+  values="$("$NODE_BIN" - "$evidence" "$expected_slot" "$expected_release" <<'NODE'
+const crypto = require('node:crypto')
+const [raw, expectedSlot, expectedRelease] = process.argv.slice(2)
+const keys = (value, expected) => value && JSON.stringify(Object.keys(value).sort())
+  === JSON.stringify([...expected].sort())
+const sha = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+const integer = value => Number.isSafeInteger(value) && value >= 0
+let value
+try { value = JSON.parse(raw) } catch { process.exit(2) }
+if (!keys(value, ['evidenceSha256', 'payload', 'schema'])
+  || value.schema !== 'video-autoworker-transition-release-evidence/v1'
+  || !sha(value.evidenceSha256)) process.exit(3)
+const payload = value.payload
+if (!keys(payload, ['bindingSha256', 'manifestSha256', 'readiness', 'releaseId',
+  'releaseRoot', 'route', 'routerAttestationSha256', 'runtimeAttestationSha256', 'slot'])
+  || payload.slot !== expectedSlot || payload.releaseId !== expectedRelease
+  || typeof payload.releaseRoot !== 'string' || !payload.releaseRoot.startsWith('/')
+  || !sha(payload.manifestSha256) || !sha(payload.bindingSha256)
+  || !sha(payload.runtimeAttestationSha256) || !sha(payload.routerAttestationSha256)) process.exit(4)
+if (crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
+  !== value.evidenceSha256) process.exit(5)
+const readiness = payload.readiness
+if (!keys(readiness, ['active', 'contractDigest', 'incompatiblePending', 'pending',
+  'revision', 'schemaEpoch']) || !integer(readiness.revision) || readiness.revision < 1
+  || !integer(readiness.schemaEpoch) || readiness.schemaEpoch < 1
+  || !sha(readiness.contractDigest) || !integer(readiness.pending)
+  || readiness.incompatiblePending !== 0 || !integer(readiness.active)) process.exit(6)
+const route = payload.route
+if (!keys(route, ['activeSlot', 'generation', 'releaseId'])
+  || !['blue', 'green'].includes(route.activeSlot)
+  || typeof route.releaseId !== 'string' || !route.releaseId
+  || !integer(route.generation) || route.generation < 1) process.exit(7)
+for (const item of [payload.releaseRoot, payload.manifestSha256, payload.bindingSha256,
+  payload.runtimeAttestationSha256, payload.routerAttestationSha256,
+  String(readiness.revision), String(readiness.schemaEpoch), readiness.contractDigest,
+  String(route.generation)]) {
+  process.stdout.write(`${item}\n`)
+}
+NODE
+)" || return 1
+  release_root="$(printf '%s\n' "$values" | sed -n '1p')"
+  manifest="$(printf '%s\n' "$values" | sed -n '2p')"
+  binding_sha="$(printf '%s\n' "$values" | sed -n '3p')"
+  runtime_sha="$(printf '%s\n' "$values" | sed -n '4p')"
+  router_sha="$(printf '%s\n' "$values" | sed -n '5p')"
+  revision="$(printf '%s\n' "$values" | sed -n '6p')"
+  epoch="$(printf '%s\n' "$values" | sed -n '7p')"
+  contract="$(printf '%s\n' "$values" | sed -n '8p')"
+  captured_generation="$(printf '%s\n' "$values" | sed -n '9p')"
+
+  [[ "$expected_generation" =~ ^[1-9][0-9]*$ \
+    && "$expected_generation_delta" =~ ^[0-2]$ \
+    && $(( 10#$captured_generation + 10#$expected_generation_delta )) -eq 10#$expected_generation ]] \
+    || return 1
+
+  assert_private_file "$expected_slot binding" "$(binding_file "$expected_slot")" || return 1
+  assert_private_file "$expected_slot runtime attestation" \
+    "$(runtime_attestation_file "$expected_slot")" || return 1
+  assert_private_file "standalone router runtime attestation" \
+    "$(router_attestation_file)" || return 1
+  [[ "$(file_sha256 "$(binding_file "$expected_slot")")" == "$binding_sha" \
+    && "$(file_sha256 "$(runtime_attestation_file "$expected_slot")")" == "$runtime_sha" \
+    && "$(file_sha256 "$(router_attestation_file)")" == "$router_sha" ]] || return 1
+  binding="$(binding_values "$expected_slot")" || return 1
+  [[ "$(printf '%s\n' "$binding" | sed -n '1p')" == "$expected_release" \
+    && "$(printf '%s\n' "$binding" | sed -n '2p')" == "$release_root" \
+    && "$(printf '%s\n' "$binding" | sed -n '3p')" == "$manifest" ]] || return 1
+  physical_root="$(assert_release "$expected_release" "$release_root")" || return 1
+  [[ "$physical_root" == "$release_root" \
+    && "$(release_manifest_sha "$physical_root")" == "$manifest" ]] || return 1
+  [[ "$(read_state_field active)" == "$expected_slot" \
+    && "$(read_state_slot_release "$expected_slot")" == "$expected_release" \
+    && "$(read_state_field generation)" == "$expected_generation" ]] || return 1
+  probe_slot "$expected_slot" active >/dev/null || return 1
+  verify_routed_release "$expected_slot" "$expected_release" "$expected_generation" \
+    "$revision" "$epoch" "$contract"
 }
 
 preflight_transition() {
@@ -2608,6 +2873,9 @@ transition_with_verification() {
   local mode="$2"
   local source source_release target_release generation switched_generation rollback_generation
   local source_readiness target_readiness intake_revision source_epoch target_revision target_epoch
+  local source_projection_contract target_projection_contract
+  local source_evidence target_evidence target_verified_contract post_target_verified_contract
+  local target_release_root
   source="$(read_state_field active)"
   generation="$(read_state_field generation)"
   if [[ "$mode" == rollback ]]; then
@@ -2622,31 +2890,62 @@ transition_with_verification() {
     || fail "global release readiness changed immediately before router commit"
   intake_revision="$(printf '%s\n' "$source_readiness" | sed -n '1p')"
   source_epoch="$(printf '%s\n' "$source_readiness" | sed -n '2p')"
+  source_projection_contract="$(printf '%s\n' "$source_readiness" | sed -n '3p')"
   target_readiness="$(check_json_endpoint readiness \
     "http://127.0.0.1:$(slot_port "$target")$READINESS_PATH" "$target" "$target_release" \
     "$(slot_port "$target")" "$intake_revision" "$source_epoch" "$generation")" \
     || fail "target release readiness or database epoch is incompatible immediately before router commit"
   target_revision="$(printf '%s\n' "$target_readiness" | sed -n '1p')"
   target_epoch="$(printf '%s\n' "$target_readiness" | sed -n '2p')"
+  target_projection_contract="$(printf '%s\n' "$target_readiness" | sed -n '3p')"
   [[ "$target_revision" == "$intake_revision" && "$target_epoch" == "$source_epoch" ]] \
     || fail "source and target readiness snapshots are not from the same gate revision/database epoch"
+  [[ "$source_projection_contract" == "$target_projection_contract" ]] \
+    || fail "ordinary switch and rollback cannot cross director projection contracts; use the dedicated bootstrap migration path"
+  if [[ "$mode" == switch ]]; then
+    target_release_root="$(binding_values "$target" | sed -n '2p')" \
+      || fail "$target binding has no release root"
+    [[ "$target_release_root" == /* ]] || fail "$target binding release root is invalid"
+    target_verified_contract="$(verify_director_video_release_chain \
+      "$target_release" "$target_release_root")" \
+      || fail "target director/video release chain is incompatible immediately before router commit"
+    [[ "$target_verified_contract" == "$target_projection_contract" ]] \
+      || fail "target runtime projection contract does not match the HEAD-bound release verifier"
+  fi
+  source_evidence="$(capture_transition_release_evidence "$source" "$source_release" \
+    "$source_readiness" "$source" "$source_release" "$generation")" \
+    || fail "unable to capture immutable source transition evidence"
+  target_evidence="$(capture_transition_release_evidence "$target" "$target_release" \
+    "$target_readiness" "$source" "$source_release" "$generation")" \
+    || fail "unable to capture immutable target transition evidence"
+  readonly source_evidence target_evidence
   update_state "$target" "$mode"
   switched_generation="$(read_state_field generation)"
-  if ( verify_routed_release "$target" "$target_release" "$switched_generation" \
-    "$intake_revision" "$source_epoch" ); then
-    printf '%s router atomically: active=%s generation=%s\n' \
-      "$([[ "$mode" == switch ]] && printf 'Switched' || printf 'Rolled back')" \
-      "$target" "$switched_generation"
-    return
+  if ( verify_captured_transition_release_evidence "$target_evidence" "$target" \
+    "$target_release" "$switched_generation" 1 ); then
+    if [[ "$mode" != switch ]]; then
+      printf '%s router atomically: active=%s generation=%s\n' \
+        'Rolled back' "$target" "$switched_generation"
+      return
+    fi
+    if post_target_verified_contract="$(verify_director_video_release_chain \
+      "$target_release" "$target_release_root")" \
+      && [[ "$post_target_verified_contract" == "$target_projection_contract" ]]; then
+      printf 'Switched router atomically: active=%s generation=%s\n' \
+        "$target" "$switched_generation"
+      return
+    fi
+    printf 'error: projection compatibility changed during switch; attempting automatic rollback to %s\n' \
+      "$source" >&2
   fi
 
   printf 'error: post-%s verification failed; attempting automatic rollback to %s\n' "$mode" "$source" >&2
   probe_slot "$source" active
   update_state "$source" rollback
   rollback_generation="$(read_state_field generation)"
-  ( verify_routed_release "$source" "$source_release" "$rollback_generation" \
-    "$intake_revision" "$source_epoch" ) \
-    || fail "automatic rollback selected $source but routed verification also failed"
+  ( verify_captured_transition_release_evidence "$source_evidence" "$source" \
+    "$source_release" "$rollback_generation" 2 ) \
+    || fail "automatic rollback selected $source but its captured release or routed projection evidence also failed"
   fail "post-$mode verification failed; router automatically returned to $source generation $rollback_generation"
 }
 

@@ -183,12 +183,19 @@ describe('n8n blue/green runtime affinity', () => {
       routerGeneration: 4,
       activeJobs: 1,
     }
+    const projection = {
+      schema: 'video-autoworker-director-evidence-outbox-readiness/v1' as const,
+      contractDigest: 'a'.repeat(64),
+      pending: 2,
+      incompatiblePending: 0,
+    }
     expect(buildN8nReleaseReadiness(
       control,
       runtime,
       retirement,
       scheduler,
       getN8nRollingDatabaseCompatibility(db),
+      projection,
       { nowSeconds: 1_000 },
     )).toEqual({
       schema: 'video-autoworker-release-readiness/v1',
@@ -205,8 +212,9 @@ describe('n8n blue/green runtime affinity', () => {
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '056_n8n_parent_execution_claims',
+        latestMigration: '057_n8n_director_evidence_outbox',
       },
+      projection,
       retirement,
       scheduler,
     })
@@ -214,13 +222,14 @@ describe('n8n blue/green runtime affinity', () => {
       ...control,
       mode: 'active',
       accepting: true,
-    }, runtime, retirement, scheduler, getN8nRollingDatabaseCompatibility(db))).toThrow(/still accepting/)
+    }, runtime, retirement, scheduler, getN8nRollingDatabaseCompatibility(db), projection)).toThrow(/still accepting/)
     expect(() => buildN8nReleaseReadiness(
       control,
       runtime,
       { ...retirement, runtime: { ...runtime, runtimeReleaseId: 'release-forged' } },
       scheduler,
       getN8nRollingDatabaseCompatibility(db),
+      projection,
     )).toThrow(/does not match/)
   })
 

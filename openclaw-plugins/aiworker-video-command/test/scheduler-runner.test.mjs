@@ -97,6 +97,16 @@ describe('0.5 scheduler runner', () => {
     expect(execute.mock.calls[0][2]).toEqual({ timeout: 25_000 })
   })
 
+  it('passes a validated director work name as one CLI argument', async () => {
+    const { execute, runner } = fixture({ taskId, status: 'queued', duplicate: false })
+    await runner.dispatchVideo({ videoPath: '/data/test.mp4', taskId, directorWork: '地球之极 第三季' })
+    expect(execute.mock.calls[0][1]).toContain('--director-work')
+    expect(execute.mock.calls[0][1]).toContain('地球之极 第三季')
+    await expect(runner.dispatchVideo({
+      videoPath: '/data/test.mp4', taskId, directorWork: 'bad\nname',
+    })).rejects.toThrow('invalid_director_work')
+  })
+
   it('maps the exact intake pause result without treating submission as ambiguous', async () => {
     const paused = fixture({
       taskId,

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-export function validateRuntimeInspection(report, pluginId, expectedVersion = '0.5.13') {
+export function validateRuntimeInspection(report, pluginId, expectedVersion = '0.5.14') {
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
     throw new Error('Runtime inspection must be a JSON object.')
   }
@@ -39,7 +39,7 @@ export function validateRuntimeInspection(report, pluginId, expectedVersion = '0
 }
 
 async function main() {
-  const [reportPath, pluginId, expectedVersion = '0.5.13'] = process.argv.slice(2)
+  const [reportPath, pluginId, expectedVersion = '0.5.14'] = process.argv.slice(2)
   if (!reportPath || !pluginId) {
     throw new Error('Usage: validate-runtime-inspection.mjs <report.json> <plugin-id> [expected-version]')
   }

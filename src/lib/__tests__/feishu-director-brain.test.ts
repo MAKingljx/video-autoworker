@@ -17,6 +17,13 @@ const execFileAsync = promisify(execFile)
 interface DirectorBrainModule {
   DEFAULT_CATALOG_PATH: string
   DEFAULT_CATALOG_ROOT: string
+  DEFAULT_LOGIN_KEYCHAIN_PATH: string
+  validateDirectorBrainLoginKeychainPath: (pathname?: string) => string
+  readDirectorBrainKeychainSecret: (
+    appId: string,
+    service: string,
+    options?: Record<string, unknown>,
+  ) => Promise<string>
   exactRecordFilter: (fieldName: string, value: string) => string
   executeDirectorBrainOperation: (
     request: Record<string, unknown>,
@@ -127,7 +134,10 @@ async function prepareRequiredStandaloneFixture(
     'runtime/schema.sql': 'CREATE TABLE tasks (id TEXT, title TEXT, status TEXT);\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
+    'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
+    'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
+    'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
   for (const [member, content] of Object.entries(files)) {
     const pathname = join(root, member)
@@ -473,6 +483,57 @@ describe('Feishu director brain contract', () => {
       '技能技法库',
     ])
     expect(directorBrain.DEFAULT_CATALOG_PATH).not.toContain(process.cwd())
+  })
+
+  it('reads the credential from an explicit login keychain without relying on PATH or search lists', async () => {
+    const directorBrain = await loadModule()
+    const keychainPath = '/Users/runtime-user/Library/Keychains/login.keychain-db'
+    const execute = vi.fn(async () => ({ stdout: 'fixture-credential-value\n', stderr: '' }))
+
+    const value = await directorBrain.readDirectorBrainKeychainSecret(
+      'fixture-app',
+      'fixture-service',
+      { keychainPath, execFileAsync: execute },
+    )
+
+    expect(value).toBe('fixture-credential-value')
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(execute).toHaveBeenCalledWith('/usr/bin/security', [
+      'find-generic-password',
+      '-a',
+      'fixture-app',
+      '-s',
+      'fixture-service',
+      '-w',
+      keychainPath,
+    ], {
+      encoding: 'utf8',
+      maxBuffer: 1024 * 1024,
+    })
+    expect(directorBrain.DEFAULT_LOGIN_KEYCHAIN_PATH).toMatch(
+      /\/Library\/Keychains\/login\.keychain-db$/u,
+    )
+  })
+
+  it('rejects non-login keychain paths and preserves missing-item error mapping', async () => {
+    const directorBrain = await loadModule()
+    await expect(directorBrain.readDirectorBrainKeychainSecret(
+      'fixture-app',
+      'fixture-service',
+      { keychainPath: '/tmp/other.keychain-db', execFileAsync: vi.fn() },
+    )).rejects.toThrow('director_brain_login_keychain_path_invalid')
+
+    const missing = vi.fn(async () => {
+      throw Object.assign(new Error('fixture missing'), { code: 44, stderr: '' })
+    })
+    await expect(directorBrain.readDirectorBrainKeychainSecret(
+      'fixture-app',
+      'fixture-service',
+      {
+        keychainPath: '/Users/runtime-user/Library/Keychains/login.keychain-db',
+        execFileAsync: missing,
+      },
+    )).rejects.toThrow('director_brain_keychain_secret_missing')
   })
 
   it('uses stable domain IDs instead of Feishu record IDs or duplicate source IDs', async () => {

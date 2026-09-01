@@ -1,6 +1,6 @@
 {
   "name": "@aiworker/openclaw-aiworker-video-command",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "private": true,
   "description": "Qwen-classified video learning dispatch, status reads, and paged final reports",
   "type": "module",

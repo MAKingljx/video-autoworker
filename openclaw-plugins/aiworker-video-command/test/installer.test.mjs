@@ -13,9 +13,9 @@ describe('current video-command plugin installer', () => {
 
     expect(script).toContain('PROFILE="qwen-current"')
     expect(script).toContain('AGENT_ID="second-original"')
-    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12")')
+    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13")')
     expect(script).toContain('is_supported_previous_version "$installed_version"')
-    expect(script).toContain('CURRENT_VERSION="0.5.13"')
+    expect(script).toContain('CURRENT_VERSION="0.5.14"')
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('validate_git_target')
@@ -29,6 +29,12 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('plugin config schema must contain only the current release gate')
     expect(script).toContain('tools.catalog')
     expect(script).toContain('Current plugin %s is already installed and passed runtime validation.')
+    expect(script).toContain('acquire_shared_deployment_lock')
+    expect(script).toContain('release_shared_deployment_lock')
+    expect(script).toContain('--mission-control-db-path "$MISSION_CONTROL_DB_PATH"')
+    expect(script).toContain('--n8n-db-path "$N8N_DB_PATH"')
+    expect(script).toContain('--expected-source-commit "$EXPECTED_SOURCE_COMMIT"')
+    expect(script).toContain('--expected-release-id "$EXPECTED_RELEASE_ID"')
   })
 
   it('preserves config and creates a verified explicit rollback point', async () => {

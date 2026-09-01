@@ -1,6 +1,6 @@
 {
   "name": "@aiworker/openclaw-aiworker-director-brain",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Work-scoped OpenClaw bridge for the isolated Feishu director knowledge brain",
   "type": "module",

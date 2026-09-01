@@ -16,6 +16,11 @@ const mocks = vi.hoisted(() => ({
   settleDispatchSuccess: vi.fn(),
   settleDispatchFailure: vi.fn(),
   mutationLimiter: vi.fn(),
+  resolveDirectorWorkBinding: vi.fn(),
+  getN8nTaskRunByIdempotencyKey: vi.fn(),
+  getN8nIntakeControl: vi.fn(),
+  acquireSharedDeploymentLock: vi.fn(),
+  releaseSharedDeploymentLock: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n', () => ({
@@ -38,6 +43,11 @@ vi.mock('@/lib/n8n-workflows', () => ({
 
 vi.mock('@/lib/n8n-intake-control', () => ({
   createN8nTaskRunWithIntakeGate: mocks.createN8nTaskRun,
+  getN8nIntakeControl: mocks.getN8nIntakeControl,
+}))
+
+vi.mock('@/lib/shared-deployment-lock', () => ({
+  acquireSharedDeploymentLock: mocks.acquireSharedDeploymentLock,
 }))
 
 vi.mock('@/lib/n8n-task-dispatch', () => ({
@@ -48,6 +58,28 @@ vi.mock('@/lib/n8n-task-dispatch', () => ({
 
 vi.mock('@/lib/rate-limit', () => ({
   mutationLimiter: mocks.mutationLimiter,
+}))
+
+vi.mock('@/lib/n8n-task-runs', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/n8n-task-runs')>()
+  return {
+    ...actual,
+    getN8nTaskRunByIdempotencyKey: mocks.getN8nTaskRunByIdempotencyKey,
+  }
+})
+
+vi.mock('@/lib/director-evidence-outbox', () => ({
+  resolveDirectorWorkBinding: mocks.resolveDirectorWorkBinding,
+  directorWorkQueryDigest: (value: unknown) => (
+    value === '测试作品' ? 'a'.repeat(64) : 'b'.repeat(64)
+  ),
+  directorEvidenceBindingFromInput: (input: Record<string, any> | undefined) => (
+    input?.directorEvidence || null
+  ),
+  sameDirectorEvidenceBinding: (left: Record<string, any> | undefined, right: Record<string, any> | undefined) => (
+    (left?.directorEvidence?.workId || null) === (right?.directorEvidence?.workId || null)
+    && (left?.directorEvidence?.queryDigest || null) === (right?.directorEvidence?.queryDigest || null)
+  ),
 }))
 
 import { POST } from '@/app/api/n8n/trigger/route'
@@ -109,6 +141,21 @@ describe('n8n trigger route', () => {
     ))
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nWorkflowBinding.mockReturnValue(binding)
+    mocks.getN8nTaskRunByIdempotencyKey.mockReturnValue(null)
+    mocks.getN8nIntakeControl.mockReturnValue({ accepting: true })
+    mocks.releaseSharedDeploymentLock.mockReturnValue(undefined)
+    mocks.acquireSharedDeploymentLock.mockResolvedValue({
+      acquired: true,
+      lease: {
+        path: '/private/run/.deployment.lock',
+        release: mocks.releaseSharedDeploymentLock,
+      },
+    })
+    mocks.resolveDirectorWorkBinding.mockResolvedValue({
+      authority: 'director-brain-resolve-work-v1',
+      workId: 'WORK-001',
+      queryDigest: 'a'.repeat(64),
+    })
     mocks.triggerN8nWebhook.mockResolvedValue({
       ok: true,
       statusCode: 202,
@@ -217,6 +264,317 @@ describe('n8n trigger route', () => {
     )
   })
 
+  it('resolves an optional work name and persists only the trusted stable binding', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-bound',
+      idempotencyKey: 'idem-director-bound',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-001' },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(mocks.resolveDirectorWorkBinding).toHaveBeenCalledWith('测试作品')
+    const trustedInput = {
+      prompt: '分析视频',
+      materialId: 'MATERIAL-DIRECTOR-001',
+      directorEvidence: {
+        authority: 'director-brain-resolve-work-v1',
+        workId: 'WORK-001',
+        queryDigest: 'a'.repeat(64),
+      },
+    }
+    expect(mocks.createN8nTaskRun).toHaveBeenCalledWith({}, expect.objectContaining({
+      taskInput: trustedInput,
+    }), { workspaceId: 2, tenantId: 3 })
+    expect(mocks.triggerN8nWebhook).toHaveBeenCalledWith(
+      'webhook/aiworker-task',
+      expect.objectContaining({ input: trustedInput }),
+      expect.any(Object),
+    )
+    expect(mocks.acquireSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.getN8nIntakeControl).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.acquireSharedDeploymentLock.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.resolveDirectorWorkBinding.mock.invocationCallOrder[0])
+    expect(mocks.resolveDirectorWorkBinding.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.createN8nTaskRun.mock.invocationCallOrder[0])
+    expect(mocks.createN8nTaskRun.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.releaseSharedDeploymentLock.mock.invocationCallOrder[0])
+  })
+
+  it('requires a stable material ID before acquiring the director deployment lock', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-no-material',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频' },
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      code: 'DIRECTOR_MATERIAL_ID_REQUIRED',
+      error: '使用导演脑作品绑定时必须提供有效的 input.materialId',
+    })
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('does not resolve or admit a new director task while intake is paused', async () => {
+    mocks.getN8nIntakeControl.mockReturnValue({ accepting: false })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-paused',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-PAUSED' },
+    }))
+
+    expect(response.status).toBe(423)
+    expect(await response.json()).toMatchObject({ code: 'N8N_INTAKE_DRAINING' })
+    expect(mocks.acquireSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('does not resolve or admit a new director task when the shared lock is busy', async () => {
+    mocks.acquireSharedDeploymentLock.mockResolvedValue({ acquired: false, reason: 'busy' })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-lock-busy',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-BUSY' },
+    }))
+
+    expect(response.status).toBe(423)
+    expect(await response.json()).toMatchObject({ code: 'DEPLOYMENT_IN_PROGRESS' })
+    expect(mocks.getN8nIntakeControl).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.releaseSharedDeploymentLock).not.toHaveBeenCalled()
+  })
+
+  it('maps a shared-lock acquisition failure without misreporting Feishu resolution', async () => {
+    mocks.acquireSharedDeploymentLock.mockRejectedValue(new Error('run directory unsafe'))
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-lock-unavailable',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-UNAVAILABLE' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'DEPLOYMENT_LOCK_UNAVAILABLE' })
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('returns the durable task identity when lock release fails after admission', async () => {
+    mocks.createN8nTaskRun.mockReturnValue({
+      outcome: 'created',
+      run: { taskId: 'task-director-release-failed', status: 'queued', output: null },
+      control: { accepting: true },
+    })
+    mocks.releaseSharedDeploymentLock.mockImplementation(() => {
+      throw new Error('owner record changed')
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-release-failed',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-RELEASE' },
+    }))
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      code: 'DEPLOYMENT_LOCK_RELEASE_FAILED',
+      taskId: 'task-director-release-failed',
+      status: 'queued',
+      retryable: true,
+    })
+    expect(mocks.createN8nTaskRun).toHaveBeenCalledOnce()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('fails before task creation when a work name cannot resolve uniquely', async () => {
+    mocks.resolveDirectorWorkBinding.mockRejectedValueOnce(new Error('director_work_not_found'))
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-missing',
+      directorWork: '不存在的作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-404' },
+    }))
+    expect(response.status).toBe(404)
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('replays an existing exact work binding without depending on Feishu resolution', async () => {
+    const existing = {
+      taskId: 'task-director-existing',
+      idempotencyKey: 'idem-director-existing',
+      bindingId: 7,
+      status: 'succeeded',
+      output: { summary: '完成' },
+      input: {
+        prompt: '分析视频',
+        materialId: 'MATERIAL-DIRECTOR-REPLAY',
+        directorEvidence: {
+          authority: 'director-brain-resolve-work-v1',
+          workId: 'WORK-001',
+          queryDigest: 'a'.repeat(64),
+        },
+      },
+    }
+    mocks.getN8nTaskRunByIdempotencyKey.mockReturnValueOnce(existing)
+    mocks.createN8nTaskRun.mockReturnValueOnce({
+      outcome: 'existing',
+      run: existing,
+      control: { accepting: false },
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: existing.taskId,
+      idempotencyKey: existing.idempotencyKey,
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-REPLAY' },
+    }))
+    expect(response.status).toBe(200)
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects a terminal director replay when its stable material ID changes', async () => {
+    mocks.getN8nTaskRunByIdempotencyKey.mockReturnValueOnce({
+      taskId: 'task-director-material',
+      idempotencyKey: 'idem-director-material',
+      bindingId: 7,
+      status: 'succeeded',
+      output: { summary: '完成' },
+      input: {
+        materialId: 'MATERIAL-DIRECTOR-ORIGINAL',
+        directorEvidence: {
+          authority: 'director-brain-resolve-work-v1',
+          workId: 'WORK-001',
+          queryDigest: 'a'.repeat(64),
+        },
+      },
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-material',
+      idempotencyKey: 'idem-director-material',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-CHANGED' },
+    }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'DIRECTOR_WORK_BINDING_MISMATCH' })
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects a director replay when the same idempotency key names another task', async () => {
+    mocks.getN8nTaskRunByIdempotencyKey.mockReturnValueOnce({
+      taskId: 'task-director-original',
+      idempotencyKey: 'idem-director-identity',
+      bindingId: 7,
+      status: 'succeeded',
+      output: { summary: '完成' },
+      input: {
+        materialId: 'MATERIAL-DIRECTOR-IDENTITY',
+        directorEvidence: {
+          authority: 'director-brain-resolve-work-v1',
+          workId: 'WORK-001',
+          queryDigest: 'a'.repeat(64),
+        },
+      },
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-changed',
+      idempotencyKey: 'idem-director-identity',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-IDENTITY' },
+    }))
+
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'DIRECTOR_WORK_BINDING_MISMATCH' })
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects an existing idempotency row when the work query digest changes', async () => {
+    mocks.getN8nTaskRunByIdempotencyKey.mockReturnValueOnce({
+      taskId: 'task-director-existing',
+      idempotencyKey: 'idem-director-existing',
+      bindingId: 7,
+      input: {
+        materialId: 'MATERIAL-DIRECTOR-EXISTING',
+        directorEvidence: {
+          authority: 'director-brain-resolve-work-v1',
+          workId: 'WORK-001',
+          queryDigest: 'a'.repeat(64),
+        },
+      },
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-existing',
+      idempotencyKey: 'idem-director-existing',
+      directorWork: '另一作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-EXISTING' },
+    }))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'DIRECTOR_WORK_BINDING_MISMATCH' })
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+  })
+
+  it('rejects an idempotent replay that resolves to a different work', async () => {
+    mocks.createN8nTaskRun.mockReturnValueOnce({
+      outcome: 'existing',
+      run: {
+        taskId: 'task-director-conflict',
+        idempotencyKey: 'task-director-conflict',
+        bindingId: 7,
+        status: 'succeeded',
+        output: {},
+        input: {
+          materialId: 'MATERIAL-DIRECTOR-CONFLICT',
+          directorEvidence: { workId: 'WORK-OTHER' },
+        },
+      },
+      control: { accepting: true },
+    })
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-conflict',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: 'MATERIAL-DIRECTOR-CONFLICT' },
+    }))
+    expect(response.status).toBe(409)
+    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects caller-injected stable director evidence', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-director-injected',
+      input: { prompt: '分析视频', directorEvidence: { workId: 'WORK-EVIL' } },
+    }))
+    expect(response.status).toBe(400)
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
+  })
+
   it('rejects an invalid optional material ID before creating the task', async () => {
     const response = await POST(request({
       bindingId: 7,
@@ -228,6 +586,21 @@ describe('n8n trigger route', () => {
     expect(await response.json()).toMatchObject({ error: 'materialId 无效' })
     expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
     expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid director material ID before locking or resolving', async () => {
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'task-invalid-director-material',
+      directorWork: '测试作品',
+      input: { prompt: '分析视频', materialId: '/private/source/video.mp4' },
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ error: 'materialId 无效' })
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
   })
 
   it('fails before creating a parent task when the shared webhook secret is missing', async () => {

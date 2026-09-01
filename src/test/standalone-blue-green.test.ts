@@ -25,7 +25,11 @@ import Database from 'better-sqlite3'
 
 // The production entrypoint is plain ESM JavaScript so it can run without a
 // package install. Vitest loads that exact file to exercise the real router.
-import { createStandaloneRouter, writeRouterStateAtomic } from '../../scripts/standalone-router.mjs'
+import {
+  createStandaloneRouter,
+  writeRouterRuntimeAttestationAtomic,
+  writeRouterStateAtomic,
+} from '../../scripts/standalone-router.mjs'
 
 type RunningServer = { server: HttpServer; port: number }
 const cleanup: Array<() => void> = []
@@ -130,7 +134,13 @@ function releaseReadinessPayload(
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '056_n8n_parent_execution_claims',
+        latestMigration: '057_n8n_director_evidence_outbox',
+      },
+      projection: {
+        schema: 'video-autoworker-director-evidence-outbox-readiness/v1',
+        contractDigest: 'a'.repeat(64),
+        pending: 0,
+        incompatiblePending: 0,
       },
       retirement: {
         counts: {
@@ -501,6 +511,36 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     })
   })
 
+  it('keeps the router runtime attestation immutable across normal generation updates', () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-router-attestation-generation-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const stateFile = join(root, 'router-state.json')
+    const attestationFile = join(root, 'router.runtime.json')
+    writeRouterStateAtomic(stateFile, state(43317, 43417))
+    writeRouterRuntimeAttestationAtomic(attestationFile, {
+      schema: 'video-autoworker-standalone-router-runtime/v1',
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: 43017,
+      stateFile,
+      startedAt: Math.floor(Date.now() / 1_000),
+    })
+    const before = readFileSync(attestationFile)
+    const beforeStats = statSync(attestationFile)
+
+    const next = state(43317, 43417, 'green')
+    next.generation = 2
+    next.previous = 'blue'
+    writeRouterStateAtomic(stateFile, next)
+
+    const after = readFileSync(attestationFile)
+    const afterStats = statSync(attestationFile)
+    expect(createHash('sha256').update(after).digest('hex'))
+      .toBe(createHash('sha256').update(before).digest('hex'))
+    expect(afterStats.ino).toBe(beforeStats.ino)
+    expect(afterStats.mtimeMs).toBe(beforeStats.mtimeMs)
+  })
+
   it('keeps an upgraded socket pinned to its original slot after a switch', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-router-upgrade-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -851,6 +891,62 @@ check_json_endpoint readiness "http://127.0.0.1:${endpoint.port}/api/n8n/release
     },
   )
 
+  it('rejects an incompatible pending director projection in the deploy readiness parser', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-readiness-projection-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(root, 'readiness-harness.sh')
+    const payload = releaseReadinessPayload('leader') as {
+      readiness: { projection: { incompatiblePending: number } }
+    }
+    payload.readiness.projection.incompatiblePending = 1
+    const endpoint = await listen(createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(payload))
+    }))
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    writeFileSync(harness, `${functionPrelude}
+check_json_endpoint readiness "http://127.0.0.1:${endpoint.port}/api/n8n/release-readiness" \
+  blue release-blue 43317 "" "" 7
+`)
+
+    const failure = await execFileAsync('bash', [harness], {
+      env: {
+        ...process.env,
+        AIWORKER_BG_CONTROL_TOKEN: 'fixture-token-that-must-not-be-logged',
+        NODE_BIN: process.execPath,
+      },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain('director evidence projection contract is incompatible')
+    expect(failure?.stderr).not.toContain('fixture-token-that-must-not-be-logged')
+  })
+
+  it('pins routed readiness to the projection contract captured before the transition', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-readiness-projection-pin-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(root, 'readiness-harness.sh')
+    const endpoint = await listen(createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify(releaseReadinessPayload('leader')))
+    }))
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    writeFileSync(harness, `${functionPrelude}
+check_json_endpoint readiness "http://127.0.0.1:${endpoint.port}/api/n8n/release-readiness" \
+  blue release-blue 43317 "" "" 7 ${'b'.repeat(64)}
+`)
+
+    const failure = await execFileAsync('bash', [harness], {
+      env: {
+        ...process.env,
+        AIWORKER_BG_CONTROL_TOKEN: 'fixture-token-that-must-not-be-logged',
+        NODE_BIN: process.execPath,
+      },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain('director evidence projection contract is incompatible')
+    expect(failure?.stderr).not.toContain('fixture-token-that-must-not-be-logged')
+  })
+
   it('waits through a temporary follower state until the routed slot becomes leader', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-leader-handoff-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -943,11 +1039,27 @@ read_state_slot_release() {
 
 binding_values() {
   printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
 }
 
 preflight_transition() {
   transition_committed=0
   record_event "preflight:$1:$2:$3"
+}
+
+verify_director_video_release_chain() {
+  record_event "compatibility:$1:$state_generation"
+  printf '%s\n' '${'a'.repeat(64)}'
+}
+
+capture_transition_release_evidence() {
+  record_event "capture:$1:$2:$state_generation"
+  printf '%s\n' "$3"
+}
+
+verify_captured_transition_release_evidence() {
+  record_event "captured-evidence:$2:$3:$4"
+  verify_routed_release "$2" "$3" "$4" 3 1 '${'a'.repeat(64)}'
 }
 
 update_state() {
@@ -980,7 +1092,7 @@ check_json_endpoint() {
       else
         record_event "pre-readiness:$state_generation"
       fi
-      printf '3\\n1\\n'
+      printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
       ;;
     leader)
       [[ "\${1:-}" == "$state_generation" ]] || return 1
@@ -1034,6 +1146,8 @@ transition_with_verification green switch
     const position = (event: string) => events.indexOf(event)
 
     expect(events.some(event => event.startsWith('violation:'))).toBe(false)
+    expect(position('compatibility:release-green:7')).toBeGreaterThan(position('pre-readiness:7'))
+    expect(position('compatibility:release-green:7')).toBeLessThan(position('update:switch:green:8'))
     for (const generationValue of [8, 9]) {
       expect(events).toContain(`api:/api/tasks:${generationValue}`)
       expect(position(`leader-wait:${generationValue}`)).toBeGreaterThan(position(
@@ -1046,6 +1160,359 @@ transition_with_verification green switch
       expect(position(`api:/api/tasks:${generationValue}`)).toBeGreaterThan(position(`leader-ready:${generationValue}`))
     }
     expect(position('update:rollback:blue:9')).toBeGreaterThan(position('api:/api/tasks:8'))
+  })
+
+  it('rejects a target whose runtime digest disagrees with the HEAD-bound static verifier', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-projection-static-runtime-mismatch-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'projection-static-runtime-mismatch.sh')
+    const updateMarker = join(root, 'updated')
+    writeFileSync(harness, `${functionPrelude}
+read_state_field() {
+  case "$1" in active) printf 'blue\\n' ;; generation) printf '7\\n' ;; esac
+}
+read_state_slot_release() { printf 'release-%s\\n' "$1"; }
+binding_values() {
+  printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
+}
+verify_director_video_release_chain() { printf '%s\\n' '${'b'.repeat(64)}'; }
+update_state() { : > ${JSON.stringify(updateMarker)}; }
+transition_with_verification green switch
+`)
+
+    const failure = await execFileAsync('bash', [harness], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain(
+      'target runtime projection contract does not match the HEAD-bound release verifier',
+    )
+    expect(existsSync(updateMarker)).toBe(false)
+  })
+
+  it('seals captured transition evidence and rejects a mutated envelope', () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-transition-evidence-envelope-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'transition-evidence-envelope.sh')
+    const eventsFile = join(root, 'events')
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+LIVE_DB_PATH=/private/test/live.db
+STATE_FILE=/private/test/router-state.json
+read_state_field() {
+  case "$1" in active) printf 'blue\\n' ;; generation) printf '7\\n' ;; esac
+}
+read_state_slot_release() { printf 'release-blue\\n'; }
+binding_values() {
+  printf 'release-blue\\n/private/test/releases/release-blue/standalone\\n%s\\n127.0.0.1\\n3317\\n' \
+    '${'a'.repeat(64)}'
+}
+assert_release() { printf '%s\\n' "$2"; }
+release_manifest_sha() { printf '%s\\n' '${'a'.repeat(64)}'; }
+runtime_attestation_values() {
+  printf '1234\\nblue\\nactive\\nrelease-blue\\n%s\\n127.0.0.1\\n3317\\n%s\\n%s\\n' \
+    '${'a'.repeat(64)}' "$LIVE_DB_PATH" "$STATE_FILE"
+}
+physical_path() { printf '%s\\n' "$1"; }
+binding_file() { printf '/private/test/blue.json\\n'; }
+runtime_attestation_file() { printf '/private/test/blue.runtime.json\\n'; }
+router_attestation_file() { printf '/private/test/router.runtime.json\\n'; }
+assert_private_file() { :; }
+file_sha256() {
+  case "$1" in
+    */blue.json) printf '%s\\n' '${'b'.repeat(64)}' ;;
+    */blue.runtime.json) printf '%s\\n' '${'c'.repeat(64)}' ;;
+    */router.runtime.json) printf '%s\\n' '${'d'.repeat(64)}' ;;
+    *) return 1 ;;
+  esac
+}
+probe_slot() { :; }
+verify_routed_release() { printf 'routed:%s:%s:%s:%s:%s:%s\\n' "$@" >> "$EVENTS_FILE"; }
+readiness=$(printf '3\\n1\\n%s\\n0\\n0\\n0' '${'e'.repeat(64)}')
+evidence="$(capture_transition_release_evidence blue release-blue "$readiness" \
+  blue release-blue 7)"
+verify_captured_transition_release_evidence "$evidence" blue release-blue 7 0
+tampered="$("$NODE_BIN" -e '
+  const value = JSON.parse(process.argv[1]); value.payload.readiness.pending = 1;
+  process.stdout.write(JSON.stringify(value))
+' "$evidence")"
+if verify_captured_transition_release_evidence "$tampered" blue release-blue 7 0; then
+  printf 'mutated evidence was accepted\\n' >&2
+  exit 9
+fi
+`)
+
+    const result = spawnSync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+      encoding: 'utf8',
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(eventsFile, 'utf8').trim()).toBe(
+      `routed:blue:release-blue:7:3:1:${'e'.repeat(64)}`,
+    )
+  })
+
+  it('rejects an ordinary cross-contract switch even when both sides have no active work', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-projection-contract-switch-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'projection-switch-harness.sh')
+    const updateMarker = join(root, 'updated')
+    writeFileSync(harness, `${functionPrelude}
+read_state_field() {
+  case "$1" in active) printf 'blue\\n' ;; generation) printf '7\\n' ;; esac
+}
+read_state_slot_release() { printf 'release-%s\\n' "$1"; }
+binding_values() {
+  printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  if [[ "$2" == *':3017/'* ]]; then
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
+  else
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'b'.repeat(64)}'
+  fi
+}
+verify_director_video_release_chain() { :; }
+update_state() { : > ${JSON.stringify(updateMarker)}; }
+transition_with_verification green switch
+`)
+
+    const failure = await execFileAsync('bash', [harness], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain(
+      'ordinary switch and rollback cannot cross director projection contracts',
+    )
+    expect(existsSync(updateMarker)).toBe(false)
+  })
+
+  it('rejects an explicit cross-contract rollback even when both sides have no active work', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-projection-contract-rollback-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'projection-rollback-harness.sh')
+    const updateMarker = join(root, 'updated')
+    writeFileSync(harness, `${functionPrelude}
+read_state_field() {
+  case "$1" in
+    active) printf 'blue\\n' ;;
+    previous) printf 'green\\n' ;;
+    generation) printf '7\\n' ;;
+  esac
+}
+read_state_slot_release() { printf 'release-%s\\n' "$1"; }
+binding_values() {
+  printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  if [[ "$2" == *':3017/'* ]]; then
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
+  else
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'b'.repeat(64)}'
+  fi
+}
+update_state() { : > ${JSON.stringify(updateMarker)}; }
+transition_with_verification green rollback
+`)
+
+    const failure = await execFileAsync('bash', [harness], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain(
+      'ordinary switch and rollback cannot cross director projection contracts',
+    )
+    expect(existsSync(updateMarker)).toBe(false)
+  })
+
+  it('uses captured source evidence when source=A, HEAD target=B, and the switch fails', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-projection-post-switch-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'projection-post-switch-harness.sh')
+    const eventsFile = join(root, 'events')
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+active_slot=blue
+previous_slot=""
+state_generation=7
+read_state_field() {
+  case "$1" in
+    active) printf '%s\\n' "$active_slot" ;;
+    previous) printf '%s\\n' "$previous_slot" ;;
+    generation) printf '%s\\n' "$state_generation" ;;
+  esac
+}
+read_state_slot_release() {
+  case "$1" in
+    blue) printf '%s-runtime\\n' '${'a'.repeat(40)}' ;;
+    green) printf '%s-runtime\\n' '${'b'.repeat(40)}' ;;
+  esac
+}
+binding_values() {
+  local release
+  release="$(read_state_slot_release "$1")"
+  printf '%s\\n' "$release"
+  printf '/private/test/releases/%s/standalone\\n' "$release"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
+}
+verify_director_video_release_chain() {
+  printf 'compatibility:%s:%s\\n' "$1" "$state_generation" >> "$EVENTS_FILE"
+  if [[ "$1" == '${'b'.repeat(40)}-runtime' && "$state_generation" == 7 ]]; then
+    printf '%s\\n' '${'a'.repeat(64)}'
+    return
+  fi
+  [[ "$1" != '${'a'.repeat(40)}-runtime' ]] \
+    || printf 'forbidden-head-verifier:%s:%s\\n' "$1" "$state_generation" >> "$EVENTS_FILE"
+  return 1
+}
+capture_transition_release_evidence() {
+  printf 'capture:%s:%s:%s\\n' "$1" "$2" "$state_generation" >> "$EVENTS_FILE"
+  printf 'captured-%s\\n' "$1"
+}
+verify_captured_transition_release_evidence() {
+  printf 'captured-evidence:%s:%s:%s\\n' "$2" "$3" "$4" >> "$EVENTS_FILE"
+}
+update_state() {
+  previous_slot="$active_slot"
+  active_slot="$1"
+  state_generation=$((state_generation + 1))
+  printf 'update:%s:%s:%s\\n' "$2" "$1" "$state_generation" >> "$EVENTS_FILE"
+}
+probe_slot() { :; }
+transition_with_verification green switch
+`)
+
+    const failure = await execFileAsync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain('projection compatibility changed during switch')
+    expect(failure?.stderr).toContain('router automatically returned to blue generation 9')
+    expect(failure).not.toBeNull()
+    expect(readFileSync(eventsFile, 'utf8').trim().split('\n')).toEqual([
+      `compatibility:${'b'.repeat(40)}-runtime:7`,
+      `capture:blue:${'a'.repeat(40)}-runtime:7`,
+      `capture:green:${'b'.repeat(40)}-runtime:7`,
+      'update:switch:green:8',
+      `captured-evidence:green:${'b'.repeat(40)}-runtime:8`,
+      `compatibility:${'b'.repeat(40)}-runtime:8`,
+      'update:rollback:blue:9',
+      `captured-evidence:blue:${'a'.repeat(40)}-runtime:9`,
+    ])
+  })
+
+  it('verifies an explicit same-contract rollback through captured target evidence', () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-explicit-rollback-evidence-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'explicit-rollback-evidence.sh')
+    const eventsFile = join(root, 'events')
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+active_slot=blue
+previous_slot=green
+state_generation=7
+read_state_field() {
+  case "$1" in
+    active) printf '%s\\n' "$active_slot" ;;
+    previous) printf '%s\\n' "$previous_slot" ;;
+    generation) printf '%s\\n' "$state_generation" ;;
+  esac
+}
+read_state_slot_release() { printf 'release-%s\\n' "$1"; }
+binding_values() {
+  printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'a'.repeat(64)}'
+}
+verify_director_video_release_chain() {
+  printf 'unexpected-head-verifier:%s\\n' "$1" >> "$EVENTS_FILE"
+  return 1
+}
+capture_transition_release_evidence() {
+  printf 'capture:%s:%s\\n' "$1" "$2" >> "$EVENTS_FILE"
+  printf 'captured-%s\\n' "$1"
+}
+verify_captured_transition_release_evidence() {
+  printf 'captured-evidence:%s:%s:%s\\n' "$2" "$3" "$4" >> "$EVENTS_FILE"
+}
+update_state() {
+  previous_slot="$active_slot"
+  active_slot="$1"
+  state_generation=$((state_generation + 1))
+  printf 'update:%s:%s:%s\\n' "$2" "$1" "$state_generation" >> "$EVENTS_FILE"
+}
+transition_with_verification green rollback
+`)
+
+    const output = execFileSync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+      encoding: 'utf8',
+    })
+    expect(output).toContain('Rolled back router atomically: active=green generation=8')
+    expect(readFileSync(eventsFile, 'utf8').trim().split('\n')).toEqual([
+      'capture:blue:release-blue',
+      'capture:green:release-green',
+      'update:rollback:green:8',
+      'captured-evidence:green:release-green:8',
+    ])
+  })
+
+  it('uses the ancestor-safe static verifier when delayed retirement follows a docs-only HEAD', () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-delayed-retirement-head-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'delayed-retirement-head.sh')
+    const eventsFile = join(root, 'events')
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+read_state_field() { printf 'blue\\n'; }
+read_state_slot_release() { printf '%s-runtime\\n' '${'a'.repeat(40)}'; }
+binding_values() {
+  printf '%s-runtime\\n' '${'a'.repeat(40)}'
+  printf '/private/test/releases/%s-runtime/standalone\\n' '${'a'.repeat(40)}'
+}
+verify_director_video_release_chain() {
+  printf 'verify:%s:%s:%s\\n' "$1" "$2" "\${3:-head}" >> "$EVENTS_FILE"
+  [[ "\${3:-head}" == ancestor ]]
+}
+verify_active_director_projection_chain
+`)
+
+    const result = spawnSync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+      encoding: 'utf8',
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(eventsFile, 'utf8').trim()).toContain(':ancestor')
   })
 
   it('rechecks release quiescence directly from SQLite after callback freeze and shutdown', async () => {
@@ -1169,10 +1636,21 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(transitionBody.indexOf('preflight_transition "$source" "$target"'))
       .toBeLessThan(transitionBody.indexOf('update_state "$target" "$mode"'))
     expect(transitionBody.indexOf('update_state "$target" "$mode"'))
-      .toBeLessThan(transitionBody.indexOf('verify_routed_release "$target"'))
+      .toBeLessThan(transitionBody.indexOf(
+        'verify_captured_transition_release_evidence "$target_evidence"',
+      ))
     expect(transitionBody).toContain('attempting automatic rollback')
     expect(transitionBody).toContain('update_state "$source" rollback')
-    expect(transitionBody).toContain('"$intake_revision" "$source_epoch"')
+    expect(transitionBody).toContain(
+      'verify_captured_transition_release_evidence "$source_evidence"',
+    )
+    expect(transitionBody).not.toContain('verify_director_video_release_chain "$source_release"')
+    expect(transitionBody).toContain(
+      '[[ "$target_verified_contract" == "$target_projection_contract" ]]',
+    )
+    expect(transitionBody).toContain(
+      '[[ "$source_projection_contract" == "$target_projection_contract" ]]',
+    )
     expect(deployScript).not.toMatch(/\b(?:launchctl|n8n-stop|n8n-start)\b/u)
     expect(deployScript).toContain('stage_release()')
     expect(deployScript).toContain('source standalone artifact failed verification')
@@ -1281,6 +1759,11 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(retireBody).toContain('$DRAIN_PATH')
     expect(retireBody).toContain('$SCHEDULER_PATH')
     expect(retireBody).not.toContain('$READINESS_PATH')
+    expect(retireBody).toContain('verify_active_director_projection_chain')
+    expect(retireBody.indexOf('wait_for_frozen_retirement_quiescence'))
+      .toBeLessThan(retireBody.indexOf('verify_active_director_projection_chain'))
+    expect(retireBody.indexOf('verify_active_director_projection_chain'))
+      .toBeLessThan(retireBody.indexOf('"$manager" stop "$slot"'))
     expect(deployScript).toContain('slot_established_connection_count')
     expect(deployScript).toContain('-sTCP:ESTABLISHED')
     const frozenWaitBody = deployScript.slice(

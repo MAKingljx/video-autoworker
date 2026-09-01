@@ -29,6 +29,8 @@ const RECEIPT_SCHEMA = 'video-autoworker-n8n-managed-workflow-restore-confirmati
 const RESTORE_JOURNAL_SCHEMA = 'video-autoworker-n8n-managed-workflow-restore-journal/v1'
 const DISASTER_RECEIPT_SCHEMA = 'video-autoworker-n8n-managed-workflow-disaster-recovery-confirmation/v1'
 const DISASTER_JOURNAL_SCHEMA = 'video-autoworker-n8n-disaster-recovery-journal/v1'
+const TRANSITION_ROLLBACK_RECEIPT_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1'
+const TRANSITION_ROLLBACK_JOURNAL_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-journal/v1'
 const BOOTSTRAP_PREPARE_SCHEMA = 'video-autoworker-legacy-bootstrap-prepare/v1'
 const BOOTSTRAP_CONFIRM_SCHEMA = 'video-autoworker-legacy-bootstrap-current-confirm/v1'
 const BOOTSTRAP_SHUTDOWN_SCHEMA = 'video-autoworker-legacy-bootstrap-shutdown-requested/v1'
@@ -311,12 +313,9 @@ function validateDisasterRecoveryBranch(reference, bootstrapDirectory, receipt) 
   return value
 }
 
-function validateDisasterWorkflowReport(reference, receipt, pending, bootstrapDirectory) {
+function validateDisasterWorkflowReport(reference, receipt, pending) {
   if (canonicalJson(reference) !== canonicalJson(receipt.authorization.workflowReport)) {
     fail('pending workflow report reference changed')
-  }
-  if (reference.path !== join(bootstrapDirectory, 'n8n-workflow-compatibility.receipt.json')) {
-    fail('pending workflow report path is not canonical')
   }
   const loaded = readReferencedJson(reference, 'pending n8n workflow compatibility report')
   const report = loaded.value
@@ -618,9 +617,7 @@ function validateDisasterPending(
   const proof = proofLoaded.value
   if (evidence?.schema !== LEGACY_FREEZE_EVIDENCE_SCHEMA) fail('pending freeze evidence schema is invalid')
   if (proof?.schema !== LEGACY_ROLLBACK_PROOF_SCHEMA) fail('pending rollback proof schema is invalid')
-  validateDisasterWorkflowReport(
-    pending.n8n.workflowReport, receipt, pending, bootstrapDirectory,
-  )
+  validateDisasterWorkflowReport(pending.n8n.workflowReport, receipt, pending)
   validateDisasterTransition(
     pending.transition,
     pending.bootstrapClaim,
@@ -775,6 +772,13 @@ function parseArguments(argv) {
       '--database', '--n8n-version', '--package', '--receipt', '--runtime-release', '--source-commit',
     ]),
     'disaster-journal': new Set([
+      '--database', '--n8n-version', '--operation', '--package', '--receipt', '--runtime-release',
+      '--source-commit', '--workflow-id',
+    ]),
+    'verify-transition-rollback-receipt': new Set([
+      '--database', '--n8n-version', '--package', '--receipt', '--runtime-release', '--source-commit',
+    ]),
+    'transition-rollback-journal': new Set([
       '--database', '--n8n-version', '--operation', '--package', '--receipt', '--runtime-release',
       '--source-commit', '--workflow-id',
     ]),
@@ -1182,6 +1186,176 @@ function databaseSentinel(values) {
   } finally { try { db?.close() } catch {} }
 }
 
+function validateTransitionRollbackReceipt(values) {
+  const sourceCommit = values['--source-commit']
+  const n8nVersion = values['--n8n-version']
+  if (!COMMIT.test(sourceCommit) || !VERSION.test(n8nVersion)) {
+    fail('transition rollback source identity is invalid')
+  }
+  const packageResult = validatePackage(values['--package'], sourceCommit, n8nVersion)
+  const databaseIdentity = pathIdentity(values['--database'], 'n8n database')
+  const runtimeRelease = values['--runtime-release']
+  normalizedAbsolute(runtimeRelease, '--runtime-release')
+  const runtimeEntry = safeEntry(runtimeRelease, '--runtime-release', 'directory')
+  if (realpathSync(runtimeRelease) !== runtimeRelease) fail('--runtime-release must be physical')
+
+  const loaded = readJsonFile(
+    values['--receipt'], 'transition rollback authorization', 0o400, MAX_RECEIPT_BYTES,
+  )
+  const receipt = loaded.value
+  exactKeys(receipt, [
+    'action', 'authorization', 'authorizationId', 'issuedAt', 'journal', 'nonce',
+    'packageManifestSha256', 'rollback', 'schema', 'scope', 'target', 'uid',
+  ], 'transition rollback authorization')
+  exactKeys(receipt.authorization, [
+    'confirmation', 'consumedCapability', 'intent', 'kind', 'lastEvent', 'mutatingEvent',
+    'producer', 'transitionHeadSha256', 'transitionJournal', 'transitionState', 'upgradeId',
+  ], 'transition rollback source authorization')
+  exactKeys(receipt.target, [
+    'database', 'n8nVersion', 'runtimeRelease', 'sourceCommit', 'tooling',
+  ], 'transition rollback target')
+  exactKeys(receipt.target.database, ['dev', 'ino', 'path'], 'transition rollback database target')
+  exactKeys(receipt.target.runtimeRelease, ['dev', 'ino', 'mode', 'path', 'uid'], 'transition rollback runtime release')
+  exactKeys(receipt.target.tooling, [
+    'importer', 'maintenanceLock', 'packageValidator', 'restore', 'transitionAnchor',
+  ], 'transition rollback tooling')
+  exactKeys(receipt.journal, ['claim', 'completed', 'directory', 'events', 'schema'], 'transition rollback journal')
+  exactKeys(receipt.rollback, [
+    'combinedSha256', 'database', 'directory', 'manifest', 'n8nVersion', 'sourceCommit', 'workflows',
+  ], 'transition rollback package binding')
+  exactKeys(receipt.rollback.directory, ['dev', 'ino', 'mode', 'path', 'uid'], 'transition rollback package directory')
+  exactKeys(receipt.rollback.manifest, [
+    'ctimeNs', 'dev', 'ino', 'mode', 'mtimeNs', 'nlink', 'path', 'sha256', 'size', 'uid',
+  ], 'transition rollback package manifest')
+
+  const transitionDirectory = dirname(receipt.authorization.intent?.path || '')
+  const expectedJournal = {
+    schema: TRANSITION_ROLLBACK_JOURNAL_SCHEMA,
+    directory: join(transitionDirectory, 'transition-rollback-journal'),
+    claim: join(transitionDirectory, 'transition-rollback.CLAIMED.receipt.json'),
+    events: join(transitionDirectory, 'transition-rollback-journal', 'events'),
+    completed: join(transitionDirectory, 'transition-rollback-journal', 'COMMITTED.receipt.json'),
+  }
+  if (receipt.schema !== TRANSITION_ROLLBACK_RECEIPT_SCHEMA
+    || receipt.action !== 'restore-managed-n8n-workflows'
+    || receipt.scope !== 'uncommitted-workflow-transition-rollback-only'
+    || receipt.uid !== process.getuid() || !/^[a-f0-9-]{36}$/u.test(receipt.authorizationId)
+    || !Number.isSafeInteger(receipt.issuedAt) || receipt.issuedAt <= 0
+    || !SHA256.test(receipt.nonce) || !SHA256.test(receipt.authorization.transitionHeadSha256)
+    || receipt.authorization.kind !== 'uncommitted-workflow-transition-rollback/v1'
+    || receipt.packageManifestSha256 !== packageResult.manifestSha256
+    || receipt.target.database.path !== values['--database']
+    || BigInt(receipt.target.database.dev) !== BigInt(databaseIdentity.dev)
+    || BigInt(receipt.target.database.ino) !== BigInt(databaseIdentity.ino)
+    || receipt.target.runtimeRelease.path !== runtimeRelease
+    || receipt.target.runtimeRelease.dev !== runtimeEntry.dev.toString()
+    || receipt.target.runtimeRelease.ino !== runtimeEntry.ino.toString()
+    || receipt.target.runtimeRelease.uid !== Number(runtimeEntry.uid)
+    || receipt.target.runtimeRelease.mode !== Number(runtimeEntry.mode & 0o7777n).toString(8)
+    || receipt.target.sourceCommit !== sourceCommit || receipt.target.n8nVersion !== n8nVersion
+    || values['--receipt'] !== join(transitionDirectory, 'transition-rollback-authorization.receipt.json')
+    || canonicalJson(receipt.journal) !== canonicalJson(expectedJournal)) {
+    fail('transition rollback authorization target is invalid')
+  }
+
+  const packageDirectory = safeEntry(values['--package'], 'transition rollback package', 'directory', 0o500)
+  if (receipt.rollback.directory.path !== values['--package']
+    || receipt.rollback.directory.dev !== packageDirectory.dev.toString()
+    || receipt.rollback.directory.ino !== packageDirectory.ino.toString()
+    || receipt.rollback.manifest.path !== join(values['--package'], 'manifest.json')
+    || receipt.rollback.manifest.sha256 !== packageResult.manifestSha256
+    || receipt.rollback.sourceCommit !== sourceCommit || receipt.rollback.n8nVersion !== n8nVersion
+    || receipt.rollback.combinedSha256 !== packageResult.manifest.combinedSha256
+    || !Array.isArray(receipt.rollback.workflows)
+    || canonicalJson(receipt.rollback.workflows.map(workflow => ({
+      id: workflow.id,
+      active: workflow.active,
+      fileSha256: workflow.fileSha256,
+      semanticSha256: workflow.semanticSha256,
+    }))) !== canonicalJson(packageResult.reports.map(workflow => ({
+      id: workflow.id,
+      active: workflow.active,
+      fileSha256: workflow.fileSha256,
+      semanticSha256: workflow.semanticSha256,
+    })))) {
+    fail('transition rollback package differs from its original intent')
+  }
+  validateAnchorFileReference(receipt.rollback.manifest, 'transition rollback package manifest')
+  for (const [name, reference] of Object.entries(receipt.target.tooling)) {
+    validateAnchorFileReference(reference, `transition rollback ${name}`, null)
+  }
+  for (const [name, reference] of [
+    ['intent', receipt.authorization.intent],
+    ['confirmation', receipt.authorization.confirmation],
+    ['consumed capability', receipt.authorization.consumedCapability],
+    ['mutating event', receipt.authorization.mutatingEvent],
+    ['last event', receipt.authorization.lastEvent],
+  ]) validateAnchorFileReference(reference, `transition rollback ${name}`)
+  validateAnchorFileReference(receipt.authorization.producer, 'transition rollback producer', null)
+  const transitionJournal = receipt.authorization.transitionJournal
+  exactKeys(transitionJournal, ['dev', 'ino', 'mode', 'path', 'uid'], 'transition rollback source journal')
+  const transitionJournalEntry = safeEntry(
+    transitionJournal.path, 'transition rollback source journal', 'directory', 0o700,
+  )
+  if (transitionJournal.dev !== transitionJournalEntry.dev.toString()
+    || transitionJournal.ino !== transitionJournalEntry.ino.toString()
+    || transitionJournal.uid !== Number(transitionJournalEntry.uid) || transitionJournal.mode !== '700') {
+    fail('transition rollback source journal identity changed')
+  }
+
+  const currentAnchorSha256 = hashStableFile(
+    transitionAnchorPath, 'workflow transition anchor', MAX_JSON_BYTES,
+  ).sha256
+  const currentValidatorSha256 = hashStableFile(
+    scriptPath, 'managed workflow package validator', MAX_JSON_BYTES,
+  ).sha256
+  if (receipt.target.tooling.transitionAnchor.sha256 !== currentAnchorSha256
+    || receipt.target.tooling.packageValidator.sha256 !== currentValidatorSha256) {
+    fail('transition rollback verifier differs from the target runtime tooling')
+  }
+  const verified = spawnSync(process.execPath, [
+    transitionAnchorPath,
+    'verify-transition-rollback',
+    '--intent', receipt.authorization.intent.path,
+    '--confirmation', receipt.authorization.confirmation.path,
+    '--journal-dir', transitionJournal.path,
+    '--authorization', values['--receipt'],
+  ], { encoding: 'utf8', maxBuffer: MAX_JSON_BYTES, timeout: 30_000 })
+  if (verified.error || verified.signal || verified.status !== 0) {
+    fail('workflow transition rollback anchor verification failed')
+  }
+  const verifiedResult = strictJson(
+    verified.stdout.trim(), 'workflow transition rollback verification', MAX_RECEIPT_BYTES,
+  )
+  exactKeys(verifiedResult, [
+    'authorizationId', 'authorizationSha256', 'journal', 'offline',
+    'packageManifestSha256', 'schema', 'transitionHeadSha256',
+  ], 'workflow transition rollback verification')
+  if (verifiedResult.schema !== TRANSITION_ROLLBACK_RECEIPT_SCHEMA
+    || verifiedResult.authorizationId !== receipt.authorizationId
+    || verifiedResult.authorizationSha256 !== sha256(loaded.source)
+    || verifiedResult.transitionHeadSha256 !== receipt.authorization.transitionHeadSha256
+    || verifiedResult.packageManifestSha256 !== packageResult.manifestSha256
+    || canonicalJson(verifiedResult.journal) !== canonicalJson(receipt.journal)) {
+    fail('workflow transition rollback verification result changed')
+  }
+  return {
+    receipt,
+    receiptSha256: sha256(loaded.source),
+    inputSha256: sha256(canonicalJson({
+      authorizationId: receipt.authorizationId,
+      packageManifestSha256: packageResult.manifestSha256,
+      databaseDev: databaseIdentity.dev,
+      databaseIno: databaseIdentity.ino,
+      runtimeRelease,
+      sourceCommit,
+      n8nVersion,
+    })),
+    expired: false,
+    journal: receipt.journal,
+  }
+}
+
 function validateReceipt(values, allowExpired = false) {
   const packageResult = validatePackage(values['--package'])
   const sourceCommit = values['--source-commit']
@@ -1289,6 +1463,7 @@ function validateReceipt(values, allowExpired = false) {
     })),
     expired: now > receipt.expiresAt,
     journal: {
+      schema: RESTORE_JOURNAL_SCHEMA,
       directory: journalDirectory,
       claim: join(authorizationDirectory, 'n8n-managed-workflow-restore.CLAIMED.receipt.json'),
       events: join(journalDirectory, 'events'),
@@ -1304,6 +1479,17 @@ function verifyReceipt(values) {
     confirmedAt: validated.receipt.issuedAt,
     expiresAt: validated.receipt.expiresAt,
     packageManifestSha256: validated.receipt.packageManifestSha256,
+  })}\n`)
+}
+
+function verifyTransitionRollbackReceipt(values) {
+  const validated = validateTransitionRollbackReceipt(values)
+  process.stdout.write(`${JSON.stringify({
+    schema: TRANSITION_ROLLBACK_RECEIPT_SCHEMA,
+    authorizationId: validated.receipt.authorizationId,
+    packageManifestSha256: validated.receipt.packageManifestSha256,
+    receiptSha256: validated.receiptSha256,
+    inputSha256: validated.inputSha256,
   })}\n`)
 }
 
@@ -1329,7 +1515,7 @@ function restoreEvents(validated) {
       'at', 'completedWorkflows', 'currentWorkflow', 'index', 'inputSha256', 'previousSha256',
       'receiptSha256', 'schema', 'state',
     ], 'restore journal event')
-    if (value.schema !== RESTORE_JOURNAL_SCHEMA || value.index !== index
+    if (value.schema !== validated.journal.schema || value.index !== index
       || value.receiptSha256 !== validated.receiptSha256
       || value.inputSha256 !== validated.inputSha256
       || value.previousSha256 !== previousSha256 || !Number.isSafeInteger(value.at)
@@ -1382,7 +1568,7 @@ function restoreEvents(validated) {
 function appendRestoreEvent(validated, state, completedWorkflows, currentWorkflow, previous) {
   const index = previous ? previous.index + 1 : 0
   const value = {
-    schema: RESTORE_JOURNAL_SCHEMA,
+    schema: validated.journal.schema,
     index,
     state,
     at: nowSeconds(),
@@ -1410,7 +1596,7 @@ function readRestoreClaim(validated) {
     'at', 'completedWorkflows', 'currentWorkflow', 'index', 'inputSha256', 'previousSha256',
     'receiptSha256', 'schema', 'state',
   ], 'restore claim marker')
-  if (value.schema !== RESTORE_JOURNAL_SCHEMA || value.index !== 0 || value.state !== 'CLAIMED'
+  if (value.schema !== validated.journal.schema || value.index !== 0 || value.state !== 'CLAIMED'
     || !Number.isSafeInteger(value.at) || value.receiptSha256 !== validated.receiptSha256
     || value.inputSha256 !== validated.inputSha256 || value.previousSha256 !== null
     || canonicalJson(value.completedWorkflows) !== '[]' || value.currentWorkflow !== null) {
@@ -1428,8 +1614,10 @@ function validateRestoreJournalMembers(journal) {
   }
 }
 
-function restoreJournal(values) {
-  const validated = validateReceipt(values, true)
+function restoreJournal(values, transitionRollback = false) {
+  const validated = transitionRollback
+    ? validateTransitionRollbackReceipt(values)
+    : validateReceipt(values, true)
   const operation = values['--operation']
   const workflowId = values['--workflow-id']
   if (!['claim', 'start', 'workflow', 'verified', 'committed', 'status'].includes(operation)) {
@@ -1450,7 +1638,7 @@ function restoreJournal(values) {
     if (operation !== 'claim') fail('restore has not been claimed')
     if (validated.expired) fail('restore claim expired')
     const claimed = {
-      schema: RESTORE_JOURNAL_SCHEMA,
+      schema: validated.journal.schema,
       index: 0,
       state: 'CLAIMED',
       at: nowSeconds(),
@@ -1870,6 +2058,8 @@ try {
   else if (command === 'verify-export') verifyExport(values)
   else if (command === 'database-sentinel') databaseSentinel(values)
   else if (command === 'restore-journal') restoreJournal(values)
+  else if (command === 'verify-transition-rollback-receipt') verifyTransitionRollbackReceipt(values)
+  else if (command === 'transition-rollback-journal') restoreJournal(values, true)
   else if (command === 'verify-disaster-receipt') verifyDisasterReceipt(values)
   else if (command === 'disaster-journal') disasterJournal(values)
   else verifyReceipt(values)

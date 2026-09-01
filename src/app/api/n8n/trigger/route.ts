@@ -9,11 +9,15 @@ import {
   validateN8nWebhookDispatchConfiguration,
 } from '@/lib/n8n'
 import {
+  getN8nTaskRunByIdempotencyKey,
   n8nTaskDeliverySchema,
   n8nTaskIdentitySchema,
   type N8nTaskRun,
 } from '@/lib/n8n-task-runs'
-import { createN8nTaskRunWithIntakeGate } from '@/lib/n8n-intake-control'
+import {
+  createN8nTaskRunWithIntakeGate,
+  getN8nIntakeControl,
+} from '@/lib/n8n-intake-control'
 import {
   acquireN8nTaskDispatchOwnership,
   settleN8nTaskDispatchFailure,
@@ -29,6 +33,16 @@ import { mutationLimiter } from '@/lib/rate-limit'
 import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 import { resolveN8nRuntimeAffinity } from '@/lib/n8n-runtime-affinity'
 import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
+import {
+  directorEvidenceBindingFromInput,
+  directorWorkQueryDigest,
+  resolveDirectorWorkBinding,
+  sameDirectorEvidenceBinding,
+} from '@/lib/director-evidence-outbox'
+import {
+  acquireSharedDeploymentLock,
+  type SharedDeploymentLockResult,
+} from '@/lib/shared-deployment-lock'
 
 function resolveN8nLoopbackCallbackUrl(configuredValue: string, pathname: string, label: string): string {
   const configured = String(configuredValue || '').trim()
@@ -121,6 +135,94 @@ function existingDispatchResponse(
   }, { status: 409 })
 }
 
+function intakeDrainingResponse(): NextResponse {
+  return NextResponse.json({
+    code: 'N8N_INTAKE_DRAINING',
+    error: '系统正在维护，当前未接收新任务；已运行任务不受影响',
+    retryable: true,
+    retryAfterSeconds: 30,
+  }, { status: 423, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function deploymentBusyResponse(): NextResponse {
+  return NextResponse.json({
+    code: 'DEPLOYMENT_IN_PROGRESS',
+    error: '共享导演组件正在发布或补偿，请稍后使用原任务标识重试',
+    retryable: true,
+    retryAfterSeconds: 30,
+  }, { status: 423, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function deploymentLockUnavailableResponse(error: unknown): NextResponse {
+  const failure = projectSafeOperationError(error, 'DEPLOYMENT_LOCK_UNAVAILABLE')
+  logSafeOperationError('shared_deployment_lock_acquire', error, failure)
+  return NextResponse.json({
+    code: failure.code,
+    error: failure.summary,
+    retryable: true,
+    retryAfterSeconds: 30,
+  }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function deploymentLockReleaseFailedResponse(
+  error: unknown,
+  run?: N8nTaskRun | null,
+): NextResponse {
+  const failure = projectSafeOperationError(error, 'DEPLOYMENT_LOCK_RELEASE_FAILED')
+  logSafeOperationError('shared_deployment_lock_release', error, failure)
+  return NextResponse.json({
+    code: failure.code,
+    error: run
+      ? '任务已安全持久化，但共享发布锁释放失败；请使用原任务标识重试并人工检查锁目录'
+      : failure.summary,
+    retryable: true,
+    retryAfterSeconds: 30,
+    ...(run ? { taskId: run.taskId, status: run.status } : {}),
+  }, { status: 503, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function directorWorkFailureResponse(error: unknown): NextResponse {
+  const code = error instanceof Error ? error.message : 'director_work_resolution_failed'
+  if (code === 'director_work_not_found') {
+    return NextResponse.json({
+      code: 'DIRECTOR_WORK_NOT_FOUND',
+      error: '未找到已生效的导演脑作品',
+    }, { status: 404 })
+  }
+  if (code === 'work_resolution_ambiguous') {
+    return NextResponse.json({
+      code: 'DIRECTOR_WORK_AMBIGUOUS',
+      error: '作品名称匹配到多条记录，请使用更准确的名称或别名',
+    }, { status: 409 })
+  }
+  if (code === 'director_work_query_invalid') {
+    return NextResponse.json({
+      code: 'DIRECTOR_WORK_INVALID',
+      error: '作品名称或别名无效',
+    }, { status: 400 })
+  }
+  if (code === 'director_evidence_binding_mismatch') {
+    return NextResponse.json({
+      code: 'DIRECTOR_WORK_BINDING_MISMATCH',
+      error: '该幂等任务已绑定其他导演脑作品或素材，未重新派发',
+    }, { status: 409 })
+  }
+  const failure = projectSafeOperationError(error, 'DIRECTOR_WORK_RESOLUTION_FAILED')
+  logSafeOperationError('director_work_resolution', error, failure)
+  return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 503 })
+}
+
+function sameDirectorTaskBinding(
+  left: Record<string, unknown> | null | undefined,
+  right: Record<string, unknown> | null | undefined,
+): boolean {
+  const leftBinding = directorEvidenceBindingFromInput(left)
+  const rightBinding = directorEvidenceBindingFromInput(right)
+  if (!leftBinding && !rightBinding) return true
+  return sameDirectorEvidenceBinding(left, right)
+    && left?.materialId === right?.materialId
+}
+
 export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
@@ -172,9 +274,23 @@ export async function POST(request: NextRequest) {
       error: '视频分析工作节点不进入 OpenClaw 会话；请由 OpenClaw 等待任务结果后在当前会话回复',
     }, { status: 400 })
   }
-  if (binding.taskType === 'video-analysis' && Object.hasOwn(input, 'materialId')) {
+  const inputRecord = input as Record<string, unknown>
+  if (Object.hasOwn(inputRecord, 'directorEvidence') || Object.hasOwn(inputRecord, 'directorWork')) {
+    return NextResponse.json({ error: '导演脑作品绑定只能由服务端可信入口生成' }, { status: 400 })
+  }
+  if (body?.directorWork !== undefined && binding.taskType !== 'video-analysis') {
+    return NextResponse.json({ error: '导演脑作品绑定仅适用于视频分析任务' }, { status: 400 })
+  }
+  if (body?.directorWork !== undefined && !Object.hasOwn(inputRecord, 'materialId')) {
+    return NextResponse.json({
+      code: 'DIRECTOR_MATERIAL_ID_REQUIRED',
+      error: '使用导演脑作品绑定时必须提供有效的 input.materialId',
+    }, { status: 400 })
+  }
+  let normalizedInput = { ...inputRecord }
+  if (binding.taskType === 'video-analysis' && Object.hasOwn(inputRecord, 'materialId')) {
     const materialIdResult = n8nMaterialIdentitySchema.safeParse(
-      (input as Record<string, unknown>).materialId,
+      inputRecord.materialId,
     )
     if (!materialIdResult.success) {
       return NextResponse.json({
@@ -182,6 +298,7 @@ export async function POST(request: NextRequest) {
         issues: materialIdResult.error.issues,
       }, { status: 400 })
     }
+    normalizedInput = { ...normalizedInput, materialId: materialIdResult.data }
   }
   const source = body?.source === undefined ? 'video-autoworker' : String(body.source).trim()
   if (!['video-autoworker', 'openclaw'].includes(source)) {
@@ -204,57 +321,178 @@ export async function POST(request: NextRequest) {
 
   const taskId = taskIdResult.data
   const idempotencyKey = idempotencyResult.data
-  let nodeCallbackUrl: string
-  let mediaCallbackUrl: string
-  let claimCallbackUrl: string
-  let runtimeAffinity: ReturnType<typeof resolveN8nRuntimeAffinity>
-  try {
-    nodeCallbackUrl = resolveN8nNodeCallbackUrl()
-    mediaCallbackUrl = resolveN8nMediaCallbackUrl()
-    claimCallbackUrl = resolveN8nClaimCallbackUrl()
-    runtimeAffinity = resolveN8nRuntimeAffinity()
-  } catch (error) {
-    const failure = projectSafeOperationError(error, 'N8N_CALLBACK_CONFIG_INVALID')
-    logSafeOperationError('n8n_callback_configuration', error, failure)
-    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 503 })
+  type AdmissionPreparation = {
+    ok: true
+    trustedTaskInput: Record<string, unknown>
+    routing: Parameters<typeof createN8nTaskRunWithIntakeGate>[1]['routing']
+    admission: ReturnType<typeof createN8nTaskRunWithIntakeGate>
+  } | { ok: false; response: NextResponse }
+
+  const prepareAdmission = (
+    directorEvidence: Awaited<ReturnType<typeof resolveDirectorWorkBinding>> | null,
+  ): AdmissionPreparation => {
+    const trustedTaskInput = {
+      ...normalizedInput,
+      ...(directorEvidence ? { directorEvidence } : {}),
+    }
+    let nodeCallbackUrl: string
+    let mediaCallbackUrl: string
+    let claimCallbackUrl: string
+    let runtimeAffinity: ReturnType<typeof resolveN8nRuntimeAffinity>
+    try {
+      nodeCallbackUrl = resolveN8nNodeCallbackUrl()
+      mediaCallbackUrl = resolveN8nMediaCallbackUrl()
+      claimCallbackUrl = resolveN8nClaimCallbackUrl()
+      runtimeAffinity = resolveN8nRuntimeAffinity()
+    } catch (error) {
+      const failure = projectSafeOperationError(error, 'N8N_CALLBACK_CONFIG_INVALID')
+      logSafeOperationError('n8n_callback_configuration', error, failure)
+      return {
+        ok: false,
+        response: NextResponse.json({ code: failure.code, error: failure.summary }, { status: 503 }),
+      }
+    }
+    const routing = {
+      id: binding.id,
+      name: binding.name,
+      taskType: binding.taskType,
+      agentRole: binding.agentRole,
+      model: binding.model,
+      timeoutSeconds: binding.timeoutSeconds,
+      retryCount: binding.retryCount,
+      nodeCallbackUrl,
+      mediaCallbackUrl,
+      claimCallbackUrl,
+      claimScope: scope,
+      config: binding.config,
+      ...(runtimeAffinity || {}),
+      ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
+      ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
+    }
+    const admission = createN8nTaskRunWithIntakeGate(db, {
+      taskId,
+      idempotencyKey,
+      bindingId: binding.id,
+      source,
+      requestedBy: auth.user.username,
+      routing,
+      taskInput: trustedTaskInput,
+      delivery: deliveryResult.data,
+      maxAttempts: binding.retryCount + 1,
+    }, scope)
+    return { ok: true, trustedTaskInput, routing, admission }
   }
-  const routing = {
-    id: binding.id,
-    name: binding.name,
-    taskType: binding.taskType,
-    agentRole: binding.agentRole,
-    model: binding.model,
-    timeoutSeconds: binding.timeoutSeconds,
-    retryCount: binding.retryCount,
-    nodeCallbackUrl,
-    mediaCallbackUrl,
-    claimCallbackUrl,
-    claimScope: scope,
-    config: binding.config,
-    ...(runtimeAffinity || {}),
-    ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
-    ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
+
+  let prepared: AdmissionPreparation | null = null
+  let directorEvidence: Awaited<ReturnType<typeof resolveDirectorWorkBinding>> | null = null
+  if (body?.directorWork !== undefined) {
+    let queryDigest: string
+    try {
+      queryDigest = directorWorkQueryDigest(body.directorWork)
+    } catch (error) {
+      return directorWorkFailureResponse(error)
+    }
+
+    const matchesRequest = (run: N8nTaskRun): boolean => {
+      const existingBinding = directorEvidenceBindingFromInput(run.input)
+      return run.taskId === taskId
+        && run.idempotencyKey === idempotencyKey
+        && run.bindingId === binding.id
+        && Boolean(existingBinding
+        && existingBinding.queryDigest === queryDigest
+        && run.input.materialId === normalizedInput.materialId)
+    }
+    let existingRun = getN8nTaskRunByIdempotencyKey(db, idempotencyKey, scope)
+    if (existingRun) {
+      if (!matchesRequest(existingRun)) {
+        return directorWorkFailureResponse(new Error('director_evidence_binding_mismatch'))
+      }
+      directorEvidence = directorEvidenceBindingFromInput(existingRun.input)
+    } else {
+      let directorLease: SharedDeploymentLockResult
+      try {
+        directorLease = await acquireSharedDeploymentLock()
+      } catch (error) {
+        return deploymentLockUnavailableResponse(error)
+      }
+      if (!directorLease.acquired) return deploymentBusyResponse()
+
+      let lockedResponse: NextResponse | null = null
+      let lockedError: unknown
+      let releaseError: unknown
+      try {
+        // A competing exact request may have committed while this caller was
+        // waiting for the shared lock. Re-read before contacting Feishu.
+        existingRun = getN8nTaskRunByIdempotencyKey(db, idempotencyKey, scope)
+        if (existingRun) {
+          if (!matchesRequest(existingRun)) {
+            lockedResponse = directorWorkFailureResponse(
+              new Error('director_evidence_binding_mismatch'),
+            )
+          } else {
+            directorEvidence = directorEvidenceBindingFromInput(existingRun.input)
+          }
+        } else if (!getN8nIntakeControl(db).accepting) {
+          lockedResponse = intakeDrainingResponse()
+        } else {
+          try {
+            directorEvidence = await resolveDirectorWorkBinding(body.directorWork)
+          } catch (error) {
+            lockedResponse = directorWorkFailureResponse(error)
+          }
+        }
+        if (!lockedResponse) prepared = prepareAdmission(directorEvidence)
+      } catch (error) {
+        lockedError = error
+      } finally {
+        try {
+          directorLease.lease.release()
+        } catch (error) {
+          releaseError = error
+        }
+      }
+      if (releaseError) {
+        return deploymentLockReleaseFailedResponse(
+          releaseError,
+          prepared?.ok && prepared.admission.outcome !== 'blocked'
+            ? prepared.admission.run
+            : null,
+        )
+      }
+      if (lockedError) throw lockedError
+      if (lockedResponse) return lockedResponse
+    }
   }
-  const admission = createN8nTaskRunWithIntakeGate(db, {
-    taskId,
-    idempotencyKey,
-    bindingId: binding.id,
-    source,
-    requestedBy: auth.user.username,
-    routing,
-    taskInput: input as Record<string, unknown>,
-    delivery: deliveryResult.data,
-    maxAttempts: binding.retryCount + 1,
-  }, scope)
+
+  prepared ||= prepareAdmission(directorEvidence)
+  if (!prepared.ok) return prepared.response
+  const { admission, routing, trustedTaskInput } = prepared
   if (admission.outcome === 'blocked') {
-    return NextResponse.json({
-      code: 'N8N_INTAKE_DRAINING',
-      error: '系统正在维护，当前未接收新任务；已运行任务不受影响',
-      retryable: true,
-      retryAfterSeconds: 30,
-    }, { status: 423, headers: { 'Cache-Control': 'no-store' } })
+    return intakeDrainingResponse()
   }
   const created = { created: admission.outcome === 'created', run: admission.run }
+
+  if (!created.created && !sameDirectorTaskBinding(created.run.input, trustedTaskInput)) {
+    return NextResponse.json({
+      taskId: created.run.taskId,
+      duplicate: true,
+      status: created.run.status,
+      error: '幂等任务身份或导演脑作品绑定与当前请求不匹配，未重新派发',
+    }, { status: 409 })
+  }
+
+  if (body?.directorWork !== undefined && !created.created && (
+    created.run.taskId !== taskId
+    || created.run.idempotencyKey !== idempotencyKey
+    || created.run.bindingId !== binding.id
+  )) {
+    return NextResponse.json({
+      taskId: created.run.taskId,
+      duplicate: true,
+      status: created.run.status,
+      error: '幂等任务身份或导演脑作品绑定与当前请求不匹配，未重新派发',
+    }, { status: 409 })
+  }
 
   if (!created.created && created.run.status !== 'queued') {
     const status = created.run.status === 'succeeded'
@@ -296,7 +534,7 @@ export async function POST(request: NextRequest) {
         source,
         requestedBy: auth.user.username,
         routing,
-        input: input as Record<string, unknown>,
+        input: trustedTaskInput,
         delivery: deliveryResult.data,
       }
     : {

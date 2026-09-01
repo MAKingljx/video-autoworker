@@ -13,6 +13,7 @@ const requeueStaleTasks = vi.fn()
 const autoRouteInboxTasks = vi.fn()
 const spawnRecurringTasks = vi.fn()
 const drainN8nMediaCleanupDebts = vi.fn()
+const drainDirectorEvidenceOutbox = vi.fn()
 const pruneGatewaySessionsOlderThan = vi.fn()
 const getAgentLiveStatuses = vi.fn()
 const logger = { info: vi.fn(), warn: vi.fn() }
@@ -65,6 +66,7 @@ vi.mock('@/lib/local-agent-sync', () => ({ syncLocalAgents }))
 vi.mock('@/lib/task-dispatch', () => ({ dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks }))
 vi.mock('@/lib/recurring-tasks', () => ({ spawnRecurringTasks }))
 vi.mock('@/lib/n8n-media-cleanup', () => ({ drainN8nMediaCleanupDebts }))
+vi.mock('@/lib/director-evidence-outbox', () => ({ drainDirectorEvidenceOutbox }))
 vi.mock('@/lib/scheduler-leader', () => ({
   acquireOrRenewSchedulerLeadership,
   createSchedulerHolderId: () => '00000000000000000000000000000000',
@@ -116,6 +118,12 @@ describe('scheduler gateway live-status boundary', () => {
     requeueStaleTasks.mockResolvedValue({ ok: true, message: 'No stale tasks' })
     spawnRecurringTasks.mockResolvedValue({ ok: true, message: 'No recurring tasks' })
     drainN8nMediaCleanupDebts.mockResolvedValue({ scanned: 1, cleaned: 1, pending: 0, rejected: 0 })
+    drainDirectorEvidenceOutbox.mockResolvedValue({
+      scanned: 0,
+      delivered: 0,
+      pending: 0,
+      conflict: 0,
+    })
     pruneGatewaySessionsOlderThan.mockReturnValue({ deleted: 0, filesTouched: 0 })
 
     getDatabase.mockReturnValue({
@@ -125,6 +133,9 @@ describe('scheduler gateway live-status boundary', () => {
         }
         if (sql === 'SELECT id, name, config FROM agents') {
           return { all: vi.fn(() => [{ id: 1, name: 'main', config: null }]) }
+        }
+        if (sql.includes("WHERE status != 'offline'")) {
+          return { all: vi.fn(() => []) }
         }
         if (sql.startsWith('UPDATE agents SET status = ?')) {
           return { run: vi.fn(() => ({ changes: 1 })) }
@@ -217,6 +228,67 @@ describe('scheduler gateway live-status boundary', () => {
     stopScheduler()
   })
 
+  it('keeps other scheduler paths moving while director evidence projection is pending', async () => {
+    let finishProjection: ((value: {
+      scanned: number
+      delivered: number
+      pending: number
+      conflict: number
+    }) => void) | undefined
+    drainDirectorEvidenceOutbox.mockImplementationOnce(() => new Promise(resolve => {
+      finishProjection = resolve
+    }))
+    const {
+      getSchedulerLeadershipStatus,
+      getSchedulerStatus,
+      initScheduler,
+      stopScheduler,
+    } = await import('@/lib/scheduler')
+
+    initScheduler()
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(drainDirectorEvidenceOutbox).toHaveBeenCalledTimes(1)
+    expect(processWebhookRetries).toHaveBeenCalledTimes(1)
+    expect(autoRouteInboxTasks).toHaveBeenCalledTimes(1)
+    expect(dispatchAssignedTasks).toHaveBeenCalledTimes(1)
+    expect(getSchedulerLeadershipStatus()).toMatchObject({ activeJobs: 1 })
+    expect(getSchedulerStatus().find(task => task.id === 'director_evidence_outbox'))
+      .toMatchObject({ running: true, lastRun: null })
+
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    expect(drainDirectorEvidenceOutbox).toHaveBeenCalledTimes(1)
+    expect(processWebhookRetries).toHaveBeenCalledTimes(2)
+    expect(autoRouteInboxTasks).toHaveBeenCalledTimes(2)
+    expect(dispatchAssignedTasks).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(3 * 60_000)
+
+    expect(drainDirectorEvidenceOutbox).toHaveBeenCalledTimes(1)
+    expect(processWebhookRetries).toHaveBeenCalledTimes(5)
+    expect(autoRouteInboxTasks).toHaveBeenCalledTimes(5)
+    expect(dispatchAssignedTasks).toHaveBeenCalledTimes(5)
+    expect(getSchedulerStatus().find(task => task.id === 'agent_heartbeat'))
+      .toMatchObject({
+        running: false,
+        lastResult: expect.objectContaining({ ok: true, message: 'All agents healthy' }),
+      })
+
+    finishProjection?.({ scanned: 1, delivered: 1, pending: 0, conflict: 0 })
+    for (let turn = 0; turn < 10; turn += 1) await Promise.resolve()
+    expect(getSchedulerLeadershipStatus()).toMatchObject({ activeJobs: 0 })
+    expect(getSchedulerStatus().find(task => task.id === 'director_evidence_outbox'))
+      .toMatchObject({
+        running: false,
+        lastResult: expect.objectContaining({
+          ok: true,
+          message: 'Director evidence: 1 delivered, 0 pending, 0 conflict',
+        }),
+      })
+    stopScheduler()
+  })
+
   it('renews through an in-flight job, prevents same-job re-entry, then releases after router handoff', async () => {
     let finishRetry: ((value: { ok: boolean; message: string }) => void) | undefined
     processWebhookRetries.mockImplementationOnce(() => new Promise(resolve => {
@@ -248,6 +320,17 @@ describe('scheduler gateway live-status boundary', () => {
       reason: 'draining_running_jobs',
       activeJobs: 1,
     })
+    await expect(triggerTask('task_dispatch')).resolves.toEqual({
+      ok: false,
+      message: 'Built-in scheduler is passive on this application instance',
+    })
+    expect(dispatchAssignedTasks).not.toHaveBeenCalled()
+
+    // The first periodic tick also observes the inactive slot. It may renew
+    // the draining lease, but must not start webhook retries or later jobs.
+    await vi.advanceTimersByTimeAsync(55_000)
+    expect(processWebhookRetries).toHaveBeenCalledTimes(1)
+    expect(dispatchAssignedTasks).not.toHaveBeenCalled()
 
     finishRetry?.({ ok: true, message: 'retry completed' })
     await expect(running).resolves.toEqual({ ok: true, message: 'retry completed' })

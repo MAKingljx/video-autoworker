@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getDrainStatus: vi.fn(),
   getRollingDatabaseCompatibility: vi.fn(),
   getSchedulerLeadershipStatus: vi.fn(),
+  getDirectorEvidenceOutboxCounts: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n-global-release-auth', () => ({
@@ -27,6 +28,10 @@ vi.mock('@/lib/n8n-runtime-affinity', async (importOriginal) => {
 })
 vi.mock('@/lib/scheduler', () => ({
   getSchedulerLeadershipStatus: mocks.getSchedulerLeadershipStatus,
+}))
+vi.mock('@/lib/director-evidence-outbox', () => ({
+  directorEvidenceProjectionContractDigest: () => 'a'.repeat(64),
+  getDirectorEvidenceOutboxCounts: mocks.getDirectorEvidenceOutboxCounts,
 }))
 
 import { GET } from '@/app/api/n8n/release-readiness/route'
@@ -98,9 +103,12 @@ describe('n8n release readiness route', () => {
     mocks.getRollingDatabaseCompatibility.mockReturnValue({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '056_n8n_parent_execution_claims',
+      latestMigration: '057_n8n_director_evidence_outbox',
     })
     mocks.getSchedulerLeadershipStatus.mockReturnValue(scheduler)
+    mocks.getDirectorEvidenceOutboxCounts.mockReturnValue({
+      pending: 2, delivered: 7, conflict: 1, incompatiblePending: 0,
+    })
   })
 
   it('returns machine-readable readiness while active work drains', async () => {
@@ -112,6 +120,7 @@ describe('n8n release readiness route', () => {
     expect(mocks.getIntakeControl).toHaveBeenCalledWith({})
     expect(mocks.getRollingDatabaseCompatibility).toHaveBeenCalledWith({})
     expect(mocks.getDrainStatus).toHaveBeenCalledWith({}, runtime)
+    expect(mocks.getDirectorEvidenceOutboxCounts).toHaveBeenCalledWith({})
     expect(await response.json()).toEqual({
       readiness: {
         schema: 'video-autoworker-release-readiness/v1',
@@ -128,7 +137,13 @@ describe('n8n release readiness route', () => {
         database: {
           schemaEpoch: 1,
           rollingSafeFrom: '052_n8n_intake_controls',
-          latestMigration: '056_n8n_parent_execution_claims',
+          latestMigration: '057_n8n_director_evidence_outbox',
+        },
+        projection: {
+          schema: 'video-autoworker-director-evidence-outbox-readiness/v1',
+          contractDigest: 'a'.repeat(64),
+          pending: 2,
+          incompatiblePending: 0,
         },
         retirement,
         scheduler,

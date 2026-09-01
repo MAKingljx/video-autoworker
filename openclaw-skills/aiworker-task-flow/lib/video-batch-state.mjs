@@ -11,6 +11,7 @@ import {
   sha256FileHandle,
   sourceIdentity,
 } from './media-ingest.mjs'
+import { assertOptionalDirectorWork } from './director-work-policy.mjs'
 
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]+$/
 const MAX_BATCH_ITEMS = 100
@@ -74,6 +75,7 @@ function singleRequestIdentity({
   sourcePath,
   inboxRoot,
   trustedExistingMaterialId,
+  directorWork,
 }) {
   return {
     taskId: String(taskId || ''),
@@ -87,6 +89,9 @@ function singleRequestIdentity({
     ...(trustedExistingMaterialId === undefined
       ? {}
       : { trustedExistingMaterialId: normalizeMaterialId(trustedExistingMaterialId) }),
+    ...(directorWork === undefined || directorWork === null
+      ? {}
+      : { directorWork: String(directorWork) }),
   }
 }
 
@@ -787,6 +792,7 @@ export async function prepareMaterialHandoffJournalContext({
   bindingId,
   prompt,
   visionRoute,
+  directorWork,
   videoFile,
   inboxRoot,
   batchRoot = defaultBatchRoot(),
@@ -800,6 +806,7 @@ export async function prepareMaterialHandoffJournalContext({
     bindingId,
     prompt,
     visionRoute,
+    directorWork,
     sourcePath: inspected.sourcePath,
     inboxRoot,
   })
@@ -1110,6 +1117,7 @@ export async function createSingleVideoState(request) {
     videoFile,
     expectedSourceIdentity,
     trustedExistingMaterialId,
+    directorWork,
     inboxRoot,
     batchRoot,
     confirmDuplicate = false,
@@ -1117,6 +1125,7 @@ export async function createSingleVideoState(request) {
   const normalizedTrustedExistingMaterialId = trustedExistingMaterialId === undefined
     ? undefined
     : normalizeMaterialId(trustedExistingMaterialId)
+  assertOptionalDirectorWork(directorWork)
   const inspected = await inspectVideoFile(videoFile, { capacityRoot: inboxRoot })
   if (expectedSourceIdentity !== undefined && !sameSourceIdentity(expectedSourceIdentity, {
     ...inspected.sourceIdentity,
@@ -1131,6 +1140,7 @@ export async function createSingleVideoState(request) {
     prompt,
     visionRoute,
     inboxRoot,
+    directorWork,
   }
   const requestIdentity = singleRequestIdentity({
     ...requestIdentityInput,
@@ -1192,6 +1202,7 @@ export async function createSingleVideoState(request) {
         bindingId,
         prompt: String(prompt || '').trim(),
         visionRoute: visionRoute || null,
+        ...(directorWork === undefined || directorWork === null ? {} : { directorWork }),
         sourceDirectory: dirname(inspected.sourcePath),
         inboxRoot: resolve(inboxRoot),
         createdAt,

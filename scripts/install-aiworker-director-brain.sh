@@ -10,7 +10,23 @@ REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 SKILL_SOURCE="$REPOSITORY_ROOT/openclaw-skills/$PLUGIN_ID"
 SERVICE_SOURCE="$REPOSITORY_ROOT/scripts/lib/feishu-director-brain.mjs"
+SERVICE_CLI_SOURCE="$REPOSITORY_ROOT/scripts/feishu-director-brain.mjs"
 SCHEMA_SOURCE="$REPOSITORY_ROOT/ops/feishu-director-brain/schema.json"
+SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
+SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
+DEPLOYMENT_RUN_DIR="${AIWORKER_BG_RUN_DIR:-$REPOSITORY_ROOT/.run/blue-green}"
+DEPLOYMENT_LOCK_DIR="$DEPLOYMENT_RUN_DIR/.deployment.lock"
+MISSION_CONTROL_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
+N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
+LEGACY_BOOTSTRAP_ATTEMPT_DIR="${AIWORKER_BG_LEGACY_BOOTSTRAP_ATTEMPT_DIR:-}"
+VIDEO_BATCH_ROOT="${AIWORKER_VIDEO_BATCH_DIR:-$HOME/ai-worker/state/video-autoworker/video-batches}"
+
+[[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
+  printf 'Shared deployment lock helper is unavailable.\n' >&2
+  exit 1
+}
+# shellcheck source=scripts/lib/shared-deployment-lock.sh
+. "$SHARED_DEPLOYMENT_LOCK_HELPER"
 
 MODE=""
 PROFILE=""
@@ -31,6 +47,7 @@ ROLLBACK_SOURCE_SKILL_IDENTITY=""
 WORK_ROOT=""
 LOCK_DIR=""
 LOCK_OWNED=0
+DEPLOYMENT_LOCK_OWNED=0
 COMMIT_STARTED=0
 COMMIT_COMPLETE=0
 PLUGIN_OLD_MOVED=0
@@ -164,6 +181,18 @@ case "$GIT_COMMAND" in
   /*) ;;
   *) printf 'Git command must resolve to an absolute path.\n' >&2; exit 1 ;;
 esac
+EXPECTED_SOURCE_COMMIT="$(env \
+  -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+  -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+  "$GIT_COMMAND" -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')" || {
+  printf 'Could not resolve the director-brain source commit.\n' >&2
+  exit 1
+}
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]] || {
+  printf 'Director-brain source commit must be one full lowercase Git commit.\n' >&2
+  exit 1
+}
+EXPECTED_RELEASE_ID="$EXPECTED_SOURCE_COMMIT-runtime"
 
 regular_directory() {
   [[ -d "$1" && ! -L "$1" ]]
@@ -523,6 +552,14 @@ for managed_root in "$STATE_DIR/extensions" "$WORKSPACE/skills"; do
     exit 1
   fi
 done
+regular_file "$SHARED_INSTALL_GATE" || {
+  printf 'Shared runtime install gate is unavailable: %s\n' "$SHARED_INSTALL_GATE" >&2
+  exit 1
+}
+regular_file "$SHARED_DEPLOYMENT_LOCK_HELPER" || {
+  printf 'Shared deployment lock helper is unavailable: %s\n' "$SHARED_DEPLOYMENT_LOCK_HELPER" >&2
+  exit 1
+}
 
 if [[ "$MODE" != "rollback" ]]; then
   validate_agent_workspace "$PROFILE_CONFIG"
@@ -533,6 +570,7 @@ if [[ "$MODE" != "rollback" ]]; then
     "$PLUGIN_SOURCE/lib/director-brain-tool.js" \
     "$SKILL_SOURCE/SKILL.md" \
     "$SERVICE_SOURCE" \
+    "$SERVICE_CLI_SOURCE" \
     "$SCHEMA_SOURCE"; do
     regular_file "$source_file" || {
       printf 'Director-brain source is incomplete: %s\n' "$source_file" >&2
@@ -547,6 +585,7 @@ if [[ "$MODE" != "rollback" ]]; then
   done
   node --check "$PLUGIN_SOURCE/index.js"
   node --check "$PLUGIN_SOURCE/lib/director-brain-tool.js"
+  node --check "$SERVICE_CLI_SOURCE"
   node --check "$SERVICE_SOURCE"
 fi
 
@@ -739,6 +778,7 @@ build_source_payload() {
   install -m 600 "$PLUGIN_SOURCE/package.json" "$plugin_destination/package.json"
   copy_tree_exact "$PLUGIN_SOURCE/lib" "$plugin_destination/lib"
   mkdir -m 700 -p "$plugin_destination/runtime/scripts/lib" "$plugin_destination/runtime/ops/feishu-director-brain"
+  install -m 600 "$SERVICE_CLI_SOURCE" "$plugin_destination/runtime/scripts/feishu-director-brain.mjs"
   install -m 600 "$SERVICE_SOURCE" "$plugin_destination/runtime/scripts/lib/feishu-director-brain.mjs"
   install -m 600 "$SCHEMA_SOURCE" "$plugin_destination/runtime/ops/feishu-director-brain/schema.json"
   copy_tree_exact "$SKILL_SOURCE" "$skill_destination"
@@ -1335,6 +1375,9 @@ cleanup() {
   [[ -z "$CONFIG_NEXT" || ! -e "$CONFIG_NEXT" ]] || rm -f -- "$CONFIG_NEXT"
   [[ -z "$WORK_ROOT" || ! -d "$WORK_ROOT" ]] || rm -rf -- "$WORK_ROOT"
   if [[ "$LOCK_OWNED" == 1 && -n "$LOCK_DIR" ]]; then rmdir "$LOCK_DIR" 2>/dev/null || true; fi
+  if [[ "$DEPLOYMENT_LOCK_OWNED" == 1 ]]; then
+    if ! release_shared_deployment_lock; then status=70; fi
+  fi
   exit "$status"
 }
 
@@ -1344,6 +1387,23 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+verify_shared_install_gate() {
+  local -a gate_arguments=(
+    --mission-control-db-path "$MISSION_CONTROL_DB_PATH"
+    --n8n-db-path "$N8N_DB_PATH"
+    --video-batch-root "$VIDEO_BATCH_ROOT"
+    --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
+    --expected-release-id "$EXPECTED_RELEASE_ID"
+  )
+  if [[ -n "$LEGACY_BOOTSTRAP_ATTEMPT_DIR" ]]; then
+    gate_arguments+=(--legacy-attempt-dir "$LEGACY_BOOTSTRAP_ATTEMPT_DIR")
+  fi
+  node "$SHARED_INSTALL_GATE" "${gate_arguments[@]}" >/dev/null || {
+    printf 'Shared director-brain replacement requires paused intake, zero active tasks, and zero pending director outbox rows.\n' >&2
+    return 1
+  }
+}
 
 defer_commit_signals() {
   trap 'DEFERRED_SIGNAL_STATUS=129' HUP
@@ -1462,6 +1522,7 @@ if [[ -n "$TEST_SYNC_DIR" ]]; then
   fi
 fi
 
+acquire_shared_deployment_lock
 LOCK_DIR="$STATE_DIR/.aiworker-director-brain-install.lock"
 if ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; then
   printf 'Another director-brain installation is already in progress.\n' >&2
@@ -1539,6 +1600,7 @@ if [[ "$(path_sha256 "$PROFILE_CONFIG")" != "$LOCKED_CONFIG_SHA256" ]]; then
   exit 1
 fi
 
+verify_shared_install_gate
 COMMIT_STARTED=1
 defer_commit_signals
 if [[ -d "$INSTALLED_PLUGIN" ]]; then

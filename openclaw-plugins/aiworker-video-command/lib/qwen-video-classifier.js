@@ -1,3 +1,5 @@
+import { isValidDirectorWork } from './director-work-policy.js'
+
 const ACTIONS = new Set([
   'dispatch_single',
   'dispatch_directory',
@@ -14,11 +16,14 @@ const TARGET_AGENT = 'second-original'
 const CLASSIFIER_TIMEOUT_MS = 90_000
 
 const SYSTEM_PROMPT = `你是视频学习入口的意图分类器，不是执行器。你没有工具，也不能访问文件。
-只输出一行 JSON，不要 Markdown、解释或额外字段：
+只输出一行 JSON，不要 Markdown、解释或额外字段。通常输出：
 {"action":"dispatch_single|dispatch_directory|status_task|status_batch|status_search|result_task|result_batch|result_search|respond|pass","value":"原文中的路径、编号、标题或关键词，其他动作为空字符串"}
+仅当 dispatch_single 的当前消息明确指定要归入的导演脑作品时，才增加可选字段：
+{"action":"dispatch_single","value":"原文中的唯一视频路径","directorWork":"原文中的导演脑作品名或别名"}
 
 判定规则：
 - 用户现在明确、肯定地要求学习/分析一个视频文件：dispatch_single。
+- directorWork 只能用于 dispatch_single；只有当前消息用“归入/纳入/关联/绑定到”一类正向指令明确指定唯一作品时才输出，作品名或别名必须从当前消息逐字复制。否定归属、二选一、多个作品候选、提问或待定时不得输出；不得推测、改写、补全或使用旧上下文。
 - 用户现在明确、肯定地要求学习/分析一个视频目录或文件夹：dispatch_directory。
 - 用户明确按完整任务编号查一次进度/结果：status_task。
 - 用户明确按完整批次编号查一次进度：status_batch。
@@ -39,14 +44,20 @@ function parseResult(text) {
   } catch {
     throw new Error('classifier_invalid')
   }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('classifier_invalid')
+  }
+  const keys = Object.keys(value).sort().join(',')
+  const hasDirectorWork = Object.hasOwn(value, 'directorWork')
   if (
-    !value
-    || typeof value !== 'object'
-    || Array.isArray(value)
-    || Object.keys(value).sort().join(',') !== 'action,value'
+    (keys !== 'action,value' && keys !== 'action,directorWork,value')
     || !ACTIONS.has(value.action)
     || typeof value.value !== 'string'
     || value.value.length > 4_096
+    || (hasDirectorWork && (
+      value.action !== 'dispatch_single'
+      || !isValidDirectorWork(value.directorWork)
+    ))
     || ((value.action === 'respond' || value.action === 'pass') && value.value !== '')
     || (!(value.action === 'respond' || value.action === 'pass') && !value.value)
   ) throw new Error('classifier_invalid')

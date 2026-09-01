@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   getDatabase: vi.fn(),
   getN8nIntakeControl: vi.fn(),
   setN8nIntakeControl: vi.fn(),
+  acquireSharedDeploymentLock: vi.fn(),
+  releaseSharedDeploymentLock: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n-global-release-auth', () => ({
@@ -16,6 +18,9 @@ vi.mock('@/lib/n8n-global-release-auth', () => ({
 }))
 vi.mock('@/lib/rate-limit', () => ({ mutationLimiter: mocks.mutationLimiter }))
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
+vi.mock('@/lib/shared-deployment-lock', () => ({
+  acquireSharedDeploymentLock: mocks.acquireSharedDeploymentLock,
+}))
 vi.mock('@/lib/n8n-intake-control', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/n8n-intake-control')>()
   return {
@@ -63,6 +68,11 @@ describe('n8n intake control route', () => {
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nIntakeControl.mockReturnValue(control)
     mocks.setN8nIntakeControl.mockReturnValue({ outcome: 'updated', control })
+    mocks.releaseSharedDeploymentLock.mockReturnValue(undefined)
+    mocks.acquireSharedDeploymentLock.mockResolvedValue({
+      acquired: true,
+      lease: { path: '/private/run/.deployment.lock', release: mocks.releaseSharedDeploymentLock },
+    })
   })
 
   it('returns the complete global intake state to an administrator', async () => {
@@ -122,6 +132,8 @@ describe('n8n intake control route', () => {
       { action: 'drain', reason: '准备发布新的服务版本', expectedRevision: 1 },
       { id: 8, name: 'admin' },
     )
+    expect(mocks.acquireSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
     expect(await response.json()).toEqual({ control: { ...control, canManage: true } })
   })
 
@@ -141,9 +153,64 @@ describe('n8n intake control route', () => {
     }))
     expect(conflict.status).toBe(409)
     expect(conflict.headers.get('cache-control')).toBe('no-store')
+    expect(mocks.acquireSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
     expect(await conflict.json()).toMatchObject({
       code: 'INTAKE_STATE_CONFLICT',
       control: { revision: 2 },
     })
+  })
+
+  it.each([
+    ['drain', '准备发布新的服务版本', 2],
+    ['resume', '发布完成后恢复接收新任务', 2],
+  ] as const)('does not apply %s while a shared installation owns the deployment lock', async (
+    action, reason, expectedRevision,
+  ) => {
+    mocks.acquireSharedDeploymentLock.mockResolvedValue({ acquired: false, reason: 'busy' })
+    const response = await POST(request('POST', {
+      action, reason, expectedRevision,
+    }))
+    expect(response.status).toBe(423)
+    expect(await response.json()).toMatchObject({ code: 'DEPLOYMENT_IN_PROGRESS' })
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.setN8nIntakeControl).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when the shared deployment lock cannot be inspected', async () => {
+    mocks.acquireSharedDeploymentLock.mockRejectedValue(new Error('unsafe run directory'))
+    const response = await POST(request('POST', {
+      action: 'drain', reason: '准备发布新的服务版本', expectedRevision: 2,
+    }))
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'DEPLOYMENT_LOCK_UNAVAILABLE' })
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.setN8nIntakeControl).not.toHaveBeenCalled()
+  })
+
+  it('releases the shared lock when the intake transaction throws', async () => {
+    mocks.setN8nIntakeControl.mockImplementation(() => {
+      throw new Error('database busy')
+    })
+    await expect(POST(request('POST', {
+      action: 'drain', reason: '准备发布新的服务版本', expectedRevision: 2,
+    }))).rejects.toThrow('database busy')
+    expect(mocks.acquireSharedDeploymentLock).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).toHaveBeenCalledOnce()
+  })
+
+  it('reports lock release failure without hiding the committed control state', async () => {
+    mocks.releaseSharedDeploymentLock.mockImplementation(() => {
+      throw new Error('lock replaced')
+    })
+    const response = await POST(request('POST', {
+      action: 'resume', reason: '发布完成后恢复接收新任务', expectedRevision: 2,
+    }))
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({
+      code: 'DEPLOYMENT_LOCK_RELEASE_FAILED',
+      control: { revision: 2 },
+    })
+    expect(mocks.setN8nIntakeControl).toHaveBeenCalledOnce()
   })
 })

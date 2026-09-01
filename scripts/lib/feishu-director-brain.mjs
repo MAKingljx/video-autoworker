@@ -23,6 +23,12 @@ export const DEFAULT_CATALOG_PATH = join(
   'test-catalog.json',
 )
 export const DEFAULT_CATALOG_ROOT = dirname(DEFAULT_CATALOG_PATH)
+export const DEFAULT_LOGIN_KEYCHAIN_PATH = join(
+  homedir(),
+  'Library',
+  'Keychains',
+  'login.keychain-db',
+)
 
 const TOKEN_EXPIRY_MARGIN_MS = 60_000
 const FIELD_TYPES = new Set([1, 2, 3, 4, 5])
@@ -386,20 +392,37 @@ async function requestJson(method, path, options = {}) {
   return payload
 }
 
-async function keychainSecret(appId, service) {
-  const result = await execFileAsync('security', [
+export function validateDirectorBrainLoginKeychainPath(pathname = DEFAULT_LOGIN_KEYCHAIN_PATH) {
+  if (typeof pathname !== 'string' || !isAbsolute(pathname)) {
+    throw new Error('director_brain_login_keychain_path_invalid')
+  }
+  const target = resolve(pathname)
+  if (target !== pathname || target.split('/').at(-1) !== 'login.keychain-db') {
+    throw new Error('director_brain_login_keychain_path_invalid')
+  }
+  return target
+}
+
+export async function readDirectorBrainKeychainSecret(appId, service, options = {}) {
+  const keychainPath = validateDirectorBrainLoginKeychainPath(
+    options.keychainPath ?? DEFAULT_LOGIN_KEYCHAIN_PATH,
+  )
+  const execute = options.execFileAsync || execFileAsync
+  const result = await execute('/usr/bin/security', [
     'find-generic-password',
     '-a',
     appId,
     '-s',
     service,
     '-w',
+    keychainPath,
   ], {
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
   }).catch(error => {
     const stderr = String(error?.stderr || '')
-    if (/could not be found|item not found|errSecItemNotFound|找不到/iu.test(stderr)) {
+    if (Number(error?.code) === 44
+      || /could not be found|item not found|errSecItemNotFound|找不到/iu.test(stderr)) {
       throw new Error('director_brain_keychain_secret_missing')
     }
     throw new Error('director_brain_keychain_unavailable')
@@ -409,21 +432,29 @@ async function keychainSecret(appId, service) {
   return secret
 }
 
-async function tenantAccessToken(appId, service) {
+async function tenantAccessToken(appId, service, options = {}) {
   const now = Date.now()
+  const keychainPath = validateDirectorBrainLoginKeychainPath(
+    options.keychainPath ?? DEFAULT_LOGIN_KEYCHAIN_PATH,
+  )
   if (cachedToken
     && cachedToken.appId === appId
     && cachedToken.service === service
+    && cachedToken.keychainPath === keychainPath
     && cachedToken.expiresAt > now) {
     return cachedToken.value
   }
-  const appSecret = await keychainSecret(appId, service)
+  const appSecret = await readDirectorBrainKeychainSecret(appId, service, {
+    keychainPath,
+    ...(options.execFileAsync ? { execFileAsync: options.execFileAsync } : {}),
+  })
   const response = await requestJson('POST', '/auth/v3/tenant_access_token/internal', {
     payload: { app_id: appId, app_secret: appSecret },
   })
   cachedToken = {
     appId,
     service,
+    keychainPath,
     value: response.tenant_access_token,
     expiresAt: now + Math.max(1_000, Number(response.expire || 7200) * 1000 - TOKEN_EXPIRY_MARGIN_MS),
   }
@@ -969,7 +1000,7 @@ export async function migrateDirectorBrain(options = {}) {
     return { ok: true, action: 'migrate', dryRun: true, ...plan }
   }
   const context = runtimeContext(schema, catalog, options.appId, { allowLegacyV1: true })
-  const accessToken = await tenantAccessToken(context.appId, context.service)
+  const accessToken = await tenantAccessToken(context.appId, context.service, options)
   const backupPath = await writeMigrationBackup(accessToken, catalog, options)
   const result = await bootstrapDirectorBrain({
     ...options,
@@ -999,7 +1030,7 @@ export async function bootstrapDirectorBrain(options = {}) {
     throw new Error('director_brain_migration_backup_required')
   }
   if (!catalog?.appToken) await prepareCatalogRoot(catalogPath)
-  const accessToken = await tenantAccessToken(context.appId, context.service)
+  const accessToken = await tenantAccessToken(context.appId, context.service, options)
   const createdTables = []
   const reconciled = {}
 
@@ -1862,7 +1893,7 @@ async function connectedContext(options = {}) {
   const catalog = await readCatalog(catalogPath)
   if (!catalog?.appToken) throw new Error('director_brain_catalog_missing')
   const context = runtimeContext(schema, catalog, options.appId)
-  const accessToken = await tenantAccessToken(context.appId, context.service)
+  const accessToken = await tenantAccessToken(context.appId, context.service, options)
   return { ...context, accessToken, catalogPath }
 }
 

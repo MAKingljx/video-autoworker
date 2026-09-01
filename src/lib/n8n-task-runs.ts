@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
+import { enqueueDirectorEvidenceOutbox } from '@/lib/director-evidence-outbox'
 
 export const n8nTaskIdentitySchema = z.string()
   .trim()
@@ -1488,6 +1489,7 @@ export function completeN8nFinalizeRun(
           .run(child.taskId, input.executionLease.leaseToken)
       }
       insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
+      enqueueDirectorEvidenceOutbox(db, parent, now)
       return { outcome: 'cached' as const, parent, child, output: parent.output || output }
     }
     const completed = db.prepare(`
@@ -1514,6 +1516,7 @@ export function completeN8nFinalizeRun(
       if (released.changes !== 1) throw new Error('最终媒体节点执行租约无法原子释放')
     }
     insertN8nMediaCleanupDebt(db, parent, 'finalize_succeeded')
+    enqueueDirectorEvidenceOutbox(db, parent, now)
     return { outcome: 'completed' as const, parent, child, output }
   })
   return execute.immediate()

@@ -852,7 +852,7 @@ async function main() {
     if (verifyCurrent) {
       const frozen = testMode
         ? validateSnapshot(await captureSnapshot(repositoryRoot)).frozen
-        : freezeGuard(evidence.legacy.database)
+        : freezeGuard(evidence.legacy.database, evidence.n8n.database)
       if (canonicalJson(evidence.frozen) !== canonicalJson(frozen)) {
         fail('evidence freeze guard binding is invalid')
       }

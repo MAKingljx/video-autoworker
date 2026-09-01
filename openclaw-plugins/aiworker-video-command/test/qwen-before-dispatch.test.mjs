@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   createQwenBeforeDispatchHandler,
+  extractExplicitDirectorWork,
   isClassifierCandidate,
   statusReceipt,
   validateDecision,
@@ -11,6 +12,7 @@ import {
   duplicateConfirmationScopeKey,
 } from '../lib/duplicate-confirmation-store.js'
 import { createTaskChainTool } from '../lib/task-chain-tool.js'
+import { createQwenClassifier } from '../lib/qwen-video-classifier.js'
 
 const senderId = 'telegram:123456'
 const sessionKey = 'agent:second-original:telegram:direct:123456'
@@ -89,6 +91,108 @@ describe('hook-owned Qwen video scheduler', () => {
       handled: true,
       text: expect.stringMatching(/^已提交，任务编号：video-natural-[a-f0-9]{64}。结果请稍后查询。$/u),
     })
+  })
+
+  it('carries a verbatim director-work name from Qwen through duplicate confirmation', async () => {
+    const complete = vi.fn(async () => ({
+      text: '{"action":"dispatch_single","value":"/data/S03E03.mp4","directorWork":"导演脑验收片"}',
+      agentId: 'second-original',
+    }))
+    const classifier = createQwenClassifier({ complete, timeoutMs: 1_000 })
+    const runner = {
+      dispatchVideo: vi.fn(async ({ taskId, confirmDuplicate = false }) => (
+        confirmDuplicate
+          ? { kind: 'task', id: taskId, status: 'queued', duplicate: false }
+          : {
+            kind: 'task', id: taskId, status: 'confirmation_required', duplicate: false,
+            confirmationRequired: true, duplicateCount: 1,
+            duplicateNames: ['S03E03.mp4'], truncated: false,
+          }
+      )),
+    }
+    const beforeDispatch = handler({ classifier, runner })
+    const first = await beforeDispatch(event({
+      content: '分析视频 /data/S03E03.mp4 并归入导演脑作品 导演脑验收片',
+    }), context)
+
+    expect(first.text).toContain('如需重新分析')
+    expect(complete).toHaveBeenCalledOnce()
+    expect(runner.dispatchVideo).toHaveBeenNthCalledWith(1, {
+      videoPath: '/data/S03E03.mp4',
+      taskId: expect.stringMatching(/^video-natural-[a-f0-9]{64}$/u),
+      directorWork: '导演脑验收片',
+    })
+
+    await beforeDispatch(event({
+      content: '确认重新分析',
+      timestamp: event().timestamp + 1,
+    }), context)
+    expect(runner.dispatchVideo).toHaveBeenNthCalledWith(2, {
+      videoPath: '/data/S03E03.mp4',
+      taskId: runner.dispatchVideo.mock.calls[0][0].taskId,
+      directorWork: '导演脑验收片',
+      confirmDuplicate: true,
+    })
+  })
+
+  it('accepts only one explicit positive director-work assignment', () => {
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4 并归入导演脑作品 验收片',
+    )).toBe('验收片')
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4 并归入导演脑作品《生存或死亡》',
+    )).toBe('生存或死亡')
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4，但不要归入导演脑作品 验收片',
+    )).toBeNull()
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4，但不归入导演脑作品 验收片',
+    )).toBeNull()
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4，也不纳入导演脑作品 验收片',
+    )).toBeNull()
+    for (const instruction of [
+      '，但不能归入导演脑作品《验收片》',
+      '，但不可归入导演脑作品《验收片》',
+      '，但不是要归入导演脑作品《验收片》',
+      '，并取消关联到导演脑作品《验收片》',
+      '，是否归入导演脑作品《验收片》？',
+      '，要不要归入导演脑作品《验收片》？',
+    ]) {
+      const content = `分析视频 /data/a.mp4${instruction}`
+      expect(extractExplicitDirectorWork(content)).toBeNull()
+      expect(validateDecision(
+        { action: 'dispatch_single', value: '/data/a.mp4', directorWork: '验收片' },
+        content,
+      )).toBeNull()
+      expect(validateDecision(
+        { action: 'dispatch_single', value: '/data/a.mp4' },
+        content,
+      )).toEqual({ action: 'dispatch_single', videoPath: '/data/a.mp4' })
+    }
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4，归入导演脑作品 验收片还是地球之极？',
+    )).toBeNull()
+    expect(extractExplicitDirectorWork(
+      '分析视频 /data/a.mp4，归入作品 验收片，关联到作品 地球之极',
+    )).toBeNull()
+
+    expect(validateDecision(
+      { action: 'dispatch_single', value: '/data/a.mp4', directorWork: '验收片' },
+      '分析视频 /data/a.mp4，但不要归入导演脑作品 验收片',
+    )).toBeNull()
+    expect(validateDecision(
+      { action: 'dispatch_single', value: '/data/a.mp4', directorWork: '验收片' },
+      '分析视频 /data/a.mp4，归入导演脑作品 验收片还是地球之极？',
+    )).toBeNull()
+    expect(validateDecision(
+      { action: 'dispatch_single', value: '/data/a.mp4' },
+      '分析视频 /data/a.mp4，并归入导演脑作品 验收片',
+    )).toBeNull()
+    expect(validateDecision(
+      { action: 'dispatch_single', value: '/data/归入作品.mp4' },
+      '分析视频 /data/归入作品.mp4',
+    )).toEqual({ action: 'dispatch_single', videoPath: '/data/归入作品.mp4' })
   })
 
   it('reports an intake pause as maintenance instead of an ambiguous submission', async () => {
@@ -584,6 +688,14 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(validateDecision(
       { action: 'dispatch_single', value: '/tmp/a.mp4' },
       '学习视频 abc/tmp/a.mp4',
+    )).toBeNull()
+    expect(validateDecision(
+      { action: 'dispatch_single', value: '/data/a.mp4', directorWork: '幻觉作品' },
+      '分析视频 /data/a.mp4 并归入导演脑作品 验收片',
+    )).toBeNull()
+    expect(validateDecision(
+      { action: 'dispatch_directory', value: '/data/series', directorWork: '验收片' },
+      '学习视频目录 /data/series 并归入验收片',
     )).toBeNull()
   })
 

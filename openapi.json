@@ -11468,6 +11468,8 @@
           "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "409": { "description": "The expected intake revision is stale" },
+          "423": { "description": "A shared deployment currently owns the lock for an intake drain or resume mutation" },
+          "503": { "description": "The shared deployment lock cannot be safely acquired or released" },
           "429": { "$ref": "#/components/responses/RateLimited" }
         }
       }
@@ -11622,11 +11624,18 @@
         "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "required": ["bindingId", "input"],
+          "allOf": [{
+            "if": { "required": ["directorWork"] },
+            "then": { "properties": { "input": { "required": ["materialId"] } } }
+          }],
           "properties": {
             "bindingId": { "type": "integer", "minimum": 1 }, "taskId": { "type": "string" },
             "idempotencyKey": { "type": "string" },
             "source": { "type": "string", "enum": ["video-autoworker", "openclaw"], "default": "video-autoworker" },
-            "input": { "type": "object" },
+            "directorWork": { "type": "string", "minLength": 1, "maxLength": 240, "description": "Optional director-brain work name or alias for video analysis. When present, input.materialId is required and must be a stable material identity; the server resolves and stores the stable work binding." },
+            "input": { "type": "object", "properties": {
+              "materialId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$", "description": "Stable material identity; required whenever directorWork is present." }
+            } },
             "routing": { "$ref": "#/components/schemas/N8nTaskRoutingOverride" },
             "delivery": { "$ref": "#/components/schemas/N8nTaskDelivery" }
           }
@@ -11636,11 +11645,11 @@
           "202": { "description": "The task was accepted, an existing run was returned, or delivery outcome is unknown and remains safely queued", "content": { "application/json": { "schema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string" }, "duplicate": { "type": "boolean" }, "dispatchInProgress": { "type": "boolean" }, "code": { "type": "string", "enum": ["N8N_DISPATCH_OUTCOME_UNKNOWN"] }, "dispatchOutcome": { "type": "string", "enum": ["outcome_unknown"] }, "retryable": { "type": "boolean" }, "result": { "type": "object" } } } } } },
           "400": { "$ref": "#/components/responses/BadRequest" }, "401": { "$ref": "#/components/responses/Unauthorized" },
           "403": { "$ref": "#/components/responses/Forbidden" }, "404": { "$ref": "#/components/responses/NotFound" },
-          "409": { "description": "Workflow binding is disabled, or the idempotency key already belongs to a failed or cancelled task" },
-          "423": { "description": "New task intake is paused; existing executions and callbacks remain available", "content": { "application/json": { "schema": {
+          "409": { "description": "Workflow binding is disabled, the idempotency key already belongs to a failed or cancelled task, or its director work/material binding differs" },
+          "423": { "description": "New task intake is paused or the shared deployment lock is busy; existing executions and callbacks remain available", "content": { "application/json": { "schema": {
             "type": "object", "required": ["code", "error", "retryable", "retryAfterSeconds"], "additionalProperties": false,
             "properties": {
-              "code": { "type": "string", "enum": ["N8N_INTAKE_DRAINING"] },
+              "code": { "type": "string", "enum": ["N8N_INTAKE_DRAINING", "DEPLOYMENT_IN_PROGRESS"] },
               "error": { "type": "string" },
               "retryable": { "type": "boolean", "enum": [true] },
               "retryAfterSeconds": { "type": "integer", "minimum": 1 }
@@ -11649,7 +11658,7 @@
           "429": { "$ref": "#/components/responses/RateLimited" },
           "500": { "description": "n8n accepted the webhook but durable local dispatch settlement failed; retry with the same task identity" },
           "502": { "description": "n8n returned an explicit non-retryable 4xx rejection" },
-          "503": { "description": "The shared n8n webhook secret is missing or an internal callback URL is not a safe loopback URL" }
+          "503": { "description": "The shared n8n webhook secret is missing, an internal callback URL is unsafe, or the shared deployment lock cannot be safely acquired or released" }
         }
       }
     },
@@ -11921,7 +11930,7 @@
       },
       "N8nReleaseReadiness": {
         "type": "object",
-        "required": ["schema", "globalScope", "observedAt", "intake", "runtime", "database", "retirement", "scheduler"],
+        "required": ["schema", "globalScope", "observedAt", "intake", "runtime", "database", "projection", "retirement", "scheduler"],
         "properties": {
           "schema": { "type": "string", "enum": ["video-autoworker-release-readiness/v1"] },
           "globalScope": { "type": "boolean", "enum": [true] },
@@ -11965,7 +11974,18 @@
             "properties": {
               "schemaEpoch": { "type": "integer", "enum": [1] },
               "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
-              "latestMigration": { "type": "string", "enum": ["056_n8n_parent_execution_claims"] }
+              "latestMigration": { "type": "string", "enum": ["057_n8n_director_evidence_outbox"] }
+            }
+          },
+          "projection": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["schema", "contractDigest", "pending", "incompatiblePending"],
+            "properties": {
+              "schema": { "type": "string", "enum": ["video-autoworker-director-evidence-outbox-readiness/v1"] },
+              "contractDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "pending": { "type": "integer", "minimum": 0 },
+              "incompatiblePending": { "type": "integer", "minimum": 0 }
             }
           },
           "retirement": { "$ref": "#/components/schemas/N8nRuntimeDrainStatus" },

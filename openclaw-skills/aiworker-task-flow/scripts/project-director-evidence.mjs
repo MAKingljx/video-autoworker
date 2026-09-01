@@ -2,7 +2,9 @@
 
 import { buildDirectorBrainEvidenceProjection } from '../lib/director-brain-evidence.mjs'
 
-const MAX_STDIN_BYTES = 2 * 1024 * 1024
+// The governed envelope is capped at 2 MiB before framing. Accept its single
+// trailing newline on the child-process wire without widening the JSON contract.
+const MAX_STDIN_BYTES = (2 * 1024 * 1024) + 1
 
 async function readStdin() {
   const chunks = []

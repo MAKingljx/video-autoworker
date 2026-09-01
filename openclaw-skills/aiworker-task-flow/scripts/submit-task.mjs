@@ -12,6 +12,7 @@ import {
   isRetryablePlatformError,
 } from '../lib/platform-client.mjs'
 import { defaultMediaInboxRoot, normalizeMaterialId, sameSourceIdentity } from '../lib/media-ingest.mjs'
+import { assertOptionalDirectorWork } from '../lib/director-work-policy.mjs'
 import {
   resolveAuthoritativeTaskRecord,
   toPublicDurableTaskStatus,
@@ -44,7 +45,7 @@ const VIDEO_ACTION = /(?:分析|解析|处理|识别|总结)/u
 const VIDEO_SUBJECT = /(?:视频|影片|录像|video|\/[^\r\n\0]*\.(?:3gp|avi|flv|m4v|mkv|mov|mp4|mpeg|mpg|ts|webm|wmv))/iu
 const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
-  '--delivery', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
+  '--delivery', '--director-work', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
   '--media-handoff', '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
   '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
@@ -114,6 +115,7 @@ function validateCliArguments() {
       '--video-file', '--base-url', '--binding-id', '--prompt', '--prompt-file', '--vision-route',
       '--delivery', '--session-key', '--channel', '--target', '--account-id', '--task-id',
       '--idempotency-key', '--media-handoff', '--wait-seconds', '--no-trigger-recovery', '--confirm-duplicate',
+      '--director-work',
     ]),
     generic: new Set([
       '--base-url', '--binding-id', '--prompt', '--prompt-file', '--planner-route',
@@ -656,6 +658,8 @@ async function main() {
     throw new Error('--no-trigger-recovery 仅用于视频单次派发')
   }
   const waitSeconds = Number(option('--wait-seconds') || '0')
+  const directorWork = option('--director-work')
+  assertOptionalDirectorWork(directorWork, '--director-work 必须是 1 到 240 字的作品名或别名')
   if (noTriggerRecovery && waitSeconds !== 0) {
     throw new Error('--no-trigger-recovery 必须与 --wait-seconds 0 一起使用')
   }
@@ -702,6 +706,7 @@ async function main() {
         prompt,
         videoFile,
         visionRoute,
+        directorWork,
         inboxRoot,
         batchRoot,
       })
@@ -726,6 +731,7 @@ async function main() {
         trustedExistingMaterialId: trustedHandoff?.materialId,
         expectedSourceIdentity: trustedHandoff?.sourceIdentity,
         visionRoute,
+        directorWork,
         inboxRoot,
         batchRoot,
         confirmDuplicate: flag('--confirm-duplicate'),

@@ -10,7 +10,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 const SCHEMA = 'video-autoworker-n8n-maintenance-lock/v1'
 const TERMINAL_SCHEMA = 'video-autoworker-n8n-maintenance-terminal/v1'
-const OWNERS = new Set(['import', 'install', 'restore', 'start'])
+const OWNERS = new Set(['import', 'install', 'restore', 'start', 'transition-rollback'])
 const EMPTY_GRACE_MS = 5_000
 const SHA256 = /^[a-f0-9]{64}$/u
 

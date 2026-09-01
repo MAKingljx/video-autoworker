@@ -16,11 +16,11 @@ Usage: n8n-restore-managed-workflows.sh \
   --confirmation-receipt /absolute/path/confirmation.json \
   --runtime-release /absolute/path/releases/<40-character-commit>
 
-The confirmation receipt must be derived by the managed legacy bootstrap
-controller after its current-confirm and apply steps. Handwritten receipts and
-the older v1 shape are rejected. The private immutable 0400 v2 receipt binds
-the complete prepare/confirm/shutdown chain, package manifest, database inode,
-runtime release, source commit, n8n version, UID, action, and a 32-byte nonce.
+The private immutable 0400 receipt must be either a legacy-bootstrap normal or
+disaster recovery receipt, or the one-way transition rollback authorization
+created by n8n-workflow-transition-anchor.mjs after an import mutation began.
+Handwritten receipts are rejected. Every mode binds the original package,
+database inode, target runtime/tooling and a durable one-time restore journal.
 EOF
 }
 
@@ -169,8 +169,11 @@ RECEIPT_SCHEMA="$($NODE_BIN -e '
   process.stdout.write(value.schema)
 ' "$RECEIPT")" || fail 'confirmation receipt schema is invalid'
 DISASTER_MODE=false
+TRANSITION_ROLLBACK_MODE=false
 if [[ "$RECEIPT_SCHEMA" == 'video-autoworker-n8n-managed-workflow-disaster-recovery-confirmation/v1' ]]; then
   DISASTER_MODE=true
+elif [[ "$RECEIPT_SCHEMA" == 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1' ]]; then
+  TRANSITION_ROLLBACK_MODE=true
 elif [[ "$RECEIPT_SCHEMA" != 'video-autoworker-n8n-managed-workflow-restore-confirmation/v2' ]]; then
   fail 'confirmation receipt schema is unsupported'
 fi
@@ -178,6 +181,7 @@ fi
 verify_current_receipt() {
   local command=verify-receipt
   [[ "$DISASTER_MODE" == true ]] && command=verify-disaster-receipt
+  [[ "$TRANSITION_ROLLBACK_MODE" == true ]] && command=verify-transition-rollback-receipt
   "$NODE_BIN" "$VALIDATOR" "$command" \
     --receipt "$RECEIPT" --package "$PACKAGE" --database "$DATABASE" \
     --runtime-release "$RUNTIME_RELEASE" --source-commit "$SOURCE_COMMIT" \
@@ -199,6 +203,7 @@ managed_journal() {
   local operation="$1" workflow_id="${2:--}"
   local command=restore-journal
   [[ "$DISASTER_MODE" == true ]] && command=disaster-journal
+  [[ "$TRANSITION_ROLLBACK_MODE" == true ]] && command=transition-rollback-journal
   "$NODE_BIN" "$VALIDATOR" "$command" \
     --receipt "$RECEIPT" --package "$PACKAGE" --database "$DATABASE" \
     --runtime-release "$RUNTIME_RELEASE" --source-commit "$SOURCE_COMMIT" \

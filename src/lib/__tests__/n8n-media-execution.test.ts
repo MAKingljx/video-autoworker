@@ -13,6 +13,7 @@ import {
   videoModelGenerationProfile,
   visibleModelAnswer,
 } from '@/lib/n8n-media-execution'
+import { buildDirectorBrainEvidenceProjection } from '../../../openclaw-skills/aiworker-task-flow/lib/director-brain-evidence.mjs'
 
 describe('n8n stateless media helpers', () => {
   let root = ''
@@ -45,6 +46,78 @@ describe('n8n stateless media helpers', () => {
       { index: 2, startSeconds: 60, durationSeconds: 60 },
       { index: 3, startSeconds: 120, durationSeconds: 5 },
     ])
+  })
+
+  it('preserves a sub-second final window through director evidence projection', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      resources: [],
+      routes: [{
+        id: 'vision-tail-test',
+        label: '尾段视觉路由',
+        description: '',
+        location: 'local',
+        transport: 'openai-compatible',
+        model: 'default_model',
+        baseUrl: 'http://127.0.0.1:18091/v1',
+        enabled: true,
+        capabilities: ['text', 'vision'],
+      }],
+    })
+    const taskId = 'video-subsecond-tail'
+    const workspace = mediaTaskWorkspace(taskId)
+    const windows = buildMediaSegmentWindows(120.5, 60)
+    await mkdir(workspace, { recursive: true })
+    const segments = await Promise.all(windows.map(async window => {
+      const frame = `frame-${String(window.index).padStart(3, '0')}.jpg`
+      await writeFile(join(workspace, frame), `frame-${window.index}`)
+      return { ...window, audioFile: null, frameFiles: [frame] }
+    }))
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId,
+      kind: 'prepared-video',
+      durationSeconds: 120.5,
+      sourceBytes: 100,
+      audioAvailable: false,
+      frameCount: 3,
+      segmentCount: 3,
+      segmentSeconds: 60,
+      memoryMode: 'none',
+      preparedAt: new Date().toISOString(),
+      segments,
+    }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '可复核画面事实' } }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const vision = await analyzeN8nVideoFrames(taskId, {
+      config: { modelRouting: { nodes: { vision: { routeId: 'vision-tail-test' } } } },
+    }, { prompt: '分析尾段' })
+    const timeline = (vision.segments as Array<Record<string, unknown>>).map(segment => ({
+      index: segment.index,
+      timeRange: segment.timeRange,
+      visualAnalysis: segment.analysis,
+      confidence: 0,
+    }))
+    expect(timeline.at(-1)?.timeRange).toBe('00:02:00.000-00:02:00.500')
+
+    const projection = buildDirectorBrainEvidenceProjection({
+      schemaVersion: 1,
+      projectId: 'PROJ-VIDEO-AUTOWORKER',
+      workId: 'WORK-TAIL',
+      taskId,
+      materialId: 'MATERIAL-TAIL',
+      mediaDurationSeconds: 120.5,
+      analysisVersion: 'analysis-v1',
+      status: 'succeeded',
+      taskType: 'video-analysis',
+      sourceAuthority: 'video-autoworker-final-result-v1',
+      output: { summary: '全片摘要', timeline },
+    })
+    expect(projection.items.at(-1)).toMatchObject({
+      '起始时间码': '00:02:00.000',
+      '结束时间码': '00:02:00.500',
+    })
   })
 
   it('merges worker output without creating a memory-bearing synthesis node', () => {

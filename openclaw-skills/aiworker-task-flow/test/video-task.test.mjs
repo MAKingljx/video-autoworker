@@ -37,6 +37,7 @@ test('video task payload stores only a safe display name and batch metadata', ()
     batchId: 'batch-a',
     batchIndex: 3,
     visionRoute: 'local-qwen38-vl-direct',
+    directorWork: '地球之极',
   })
 
   assert.deepEqual(payload.input, {
@@ -48,6 +49,7 @@ test('video task payload stores only a safe display name and batch metadata', ()
     batchIndex: 3,
   })
   assert.equal(JSON.stringify(payload).includes('/Users/operator/private'), false)
+  assert.equal(payload.directorWork, '地球之极')
   assert.deepEqual(payload.routing, {
     nodes: { vision: { routeId: 'local-qwen38-vl-direct', fallbackRouteIds: [] } },
   })

@@ -63,7 +63,10 @@ function createLauncherFixture(): LauncherFixture {
     'ops/feishu-director-brain/schema.json': '{}\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
+    'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
+    'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
+    'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
   for (const [member, content] of Object.entries(requiredRuntimeFiles)) {
     const pathname = join(standaloneRoot, member)

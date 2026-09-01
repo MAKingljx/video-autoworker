@@ -323,14 +323,23 @@ async function readExistingMetadata(taskId: string): Promise<MediaMetadata | nul
 }
 
 function segmentTimeLabel(segment: MediaSegment): string {
-  const format = (seconds: number) => {
-    const value = Math.max(0, Math.floor(seconds))
-    const hours = Math.floor(value / 3_600)
-    const minutes = Math.floor((value % 3_600) / 60)
-    const remaining = value % 60
-    return [hours, minutes, remaining].map(item => String(item).padStart(2, '0')).join(':')
+  const format = (milliseconds: number) => {
+    const hours = Math.floor(milliseconds / 3_600_000)
+    const minutes = Math.floor((milliseconds % 3_600_000) / 60_000)
+    const seconds = Math.floor((milliseconds % 60_000) / 1_000)
+    const remainder = milliseconds % 1_000
+    return `${[hours, minutes, seconds]
+      .map(item => String(item).padStart(2, '0')).join(':')}.${String(remainder).padStart(3, '0')}`
   }
-  return `${format(segment.startSeconds)}-${format(segment.startSeconds + segment.durationSeconds)}`
+  const startMilliseconds = Math.max(0, Math.round(segment.startSeconds * 1_000))
+  // Keep every positive tail window representable by the millisecond contract.
+  // Independent flooring used to collapse a 120.0-120.5s tail to 00:02:00-00:02:00,
+  // which the director-evidence projector correctly rejected as a zero-length range.
+  const endMilliseconds = Math.max(
+    startMilliseconds + 1,
+    Math.round((segment.startSeconds + segment.durationSeconds) * 1_000),
+  )
+  return `${format(startMilliseconds)}-${format(endMilliseconds)}`
 }
 
 export function buildMediaSegmentWindows(durationSeconds: number, segmentSeconds: number): MediaSegmentWindow[] {

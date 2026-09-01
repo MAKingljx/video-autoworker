@@ -13,6 +13,7 @@ import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
 import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
+import { drainDirectorEvidenceOutbox } from './director-evidence-outbox'
 import {
   acquireOrRenewSchedulerLeadership,
   createSchedulerHolderId,
@@ -40,6 +41,7 @@ const SCHEDULER_TASK_IDS = new Set([
   'auto_backup',
   'auto_cleanup',
   'media_cleanup_debt',
+  'director_evidence_outbox',
   'agent_heartbeat',
   'webhook_retry',
   'claude_session_scan',
@@ -164,11 +166,15 @@ function reconcileSchedulerLeadership(): boolean {
         holderId: schedulerHolderId,
         revision: heldLeaseRevision,
       })
-      return recordLeaseResult(
+      const isLeader = recordLeaseResult(
         renewed,
         eligibility.eligible ? eligibility.reason : 'draining_running_jobs',
         eligibility.generation,
       )
+      // An inactive slot may retain and renew the lease only so its already
+      // running jobs can drain without overlapping the new slot. Renewal is
+      // not permission to start another scheduled or manually triggered job.
+      return isLeader && eligibility.eligible
     }
 
     if (!eligibility.eligible) {
@@ -242,6 +248,30 @@ async function runTrackedSchedulerJob(
     if (schedulerStopping) finishSchedulerStopIfIdle()
     else reconcileSchedulerLeadership()
   }
+}
+
+function startNonBlockingScheduledTask(
+  taskId: string,
+  task: ScheduledTask,
+  startedAt: number,
+): void {
+  task.running = true
+  void runTrackedSchedulerJob(taskId, () => executeScheduledTask(taskId))
+    .then((result) => {
+      task.lastResult = { ...result, timestamp: startedAt }
+    })
+    .catch((err: unknown) => {
+      task.lastResult = {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+        timestamp: startedAt,
+      }
+    })
+    .finally(() => {
+      task.running = false
+      task.lastRun = startedAt
+      task.nextRun = startedAt + task.intervalMs
+    })
 }
 
 /** Check if a setting is enabled (reads from settings table, falls back to default) */
@@ -395,6 +425,30 @@ async function runMediaCleanupDebtJanitor(): Promise<{ ok: boolean; message: str
   }
 }
 
+/** Project successful, explicitly work-bound video results without affecting task state. */
+async function runDirectorEvidenceOutbox(): Promise<{ ok: boolean; message: string }> {
+  try {
+    const result = await drainDirectorEvidenceOutbox(getDatabase(), { limit: 20 })
+    if (result.scanned > 0) {
+      try {
+        logAuditEvent({
+          action: 'n8n_director_evidence_projection',
+          actor: 'scheduler',
+          detail: result,
+        })
+      } catch {
+        // Projection state is already durable; audit failure must not replay it.
+      }
+    }
+    return {
+      ok: result.conflict === 0,
+      message: `Director evidence: ${result.delivered} delivered, ${result.pending} pending, ${result.conflict} conflict`,
+    }
+  } catch (err: any) {
+    return { ok: false, message: `Director evidence outbox failed: ${err.message}` }
+  }
+}
+
 /** Check agent liveness - mark agents offline if not seen recently */
 async function runHeartbeatCheck(): Promise<{ ok: boolean; message: string }> {
   try {
@@ -518,6 +572,7 @@ async function executeScheduledTask(
   if (taskId === 'auto_backup') return runBackup()
   if (taskId === 'auto_cleanup') return runCleanup()
   if (taskId === 'media_cleanup_debt') return runMediaCleanupDebtJanitor()
+  if (taskId === 'director_evidence_outbox') return runDirectorEvidenceOutbox()
   if (taskId === 'agent_heartbeat') return runHeartbeatCheck()
   if (taskId === 'webhook_retry') return processWebhookRetries()
   if (taskId === 'claude_session_scan') return syncClaudeSessions()
@@ -587,6 +642,15 @@ export function initScheduler() {
     intervalMs: FIVE_MINUTES_MS,
     lastRun: null,
     nextRun: now + FIVE_MINUTES_MS,
+    enabled: true,
+    running: false,
+  })
+
+  tasks.set('director_evidence_outbox', {
+    name: 'Director Evidence Outbox',
+    intervalMs: TICK_MS,
+    lastRun: null,
+    nextRun: now + TICK_MS,
     enabled: true,
     running: false,
   })
@@ -736,6 +800,7 @@ async function tick() {
       const settingKey = id === 'auto_backup' ? 'general.auto_backup'
         : id === 'auto_cleanup' ? 'general.auto_cleanup'
         : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
+        : id === 'director_evidence_outbox' ? 'general.director_evidence_outbox'
         : id === 'webhook_retry' ? 'webhooks.retry_enabled'
         : id === 'claude_session_scan' ? 'general.claude_session_scan'
         : id === 'skill_sync' ? 'general.skill_sync'
@@ -746,12 +811,20 @@ async function tick() {
         : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
         : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
         : 'general.agent_heartbeat'
-      const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+      const defaultEnabled = id === 'media_cleanup_debt' || id === 'director_evidence_outbox' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
       if (!isSettingEnabled(settingKey, defaultEnabled)) continue
 
       // Re-read router state and renew between every job. An old slot never
       // begins another job after it observes that the router selected its peer.
       if (!reconcileSchedulerLeadership()) break
+
+      // Projection may wait on Feishu for much longer than a scheduler tick.
+      // Keep it under the normal active-job lease/drain lifecycle, but do not
+      // hold up heartbeat checks, webhook retries, or task dispatch behind it.
+      if (id === 'director_evidence_outbox') {
+        startNonBlockingScheduledTask(id, task, now)
+        continue
+      }
 
       task.running = true
       try {
@@ -786,6 +859,7 @@ export function getSchedulerStatus() {
     const settingKey = id === 'auto_backup' ? 'general.auto_backup'
       : id === 'auto_cleanup' ? 'general.auto_cleanup'
       : id === 'media_cleanup_debt' ? 'general.media_cleanup_debt'
+      : id === 'director_evidence_outbox' ? 'general.director_evidence_outbox'
       : id === 'webhook_retry' ? 'webhooks.retry_enabled'
       : id === 'claude_session_scan' ? 'general.claude_session_scan'
       : id === 'skill_sync' ? 'general.skill_sync'
@@ -796,7 +870,7 @@ export function getSchedulerStatus() {
       : id === 'recurring_task_spawn' ? 'general.recurring_task_spawn'
       : id === 'stale_task_requeue' ? 'general.stale_task_requeue'
       : 'general.agent_heartbeat'
-    const defaultEnabled = id === 'media_cleanup_debt' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
+    const defaultEnabled = id === 'media_cleanup_debt' || id === 'director_evidence_outbox' || id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan' || id === 'skill_sync' || id === 'local_agent_sync' || id === 'gateway_agent_sync' || id === 'task_dispatch' || id === 'aegis_review' || id === 'recurring_task_spawn' || id === 'stale_task_requeue'
     result.push({
       id,
       name: task.name,

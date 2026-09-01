@@ -5,9 +5,24 @@ umask 077
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE_DIR="$REPOSITORY_ROOT/openclaw-skills/aiworker-task-flow"
 RENDERER="$REPOSITORY_ROOT/scripts/lib/render-managed-markdown-section.mjs"
+SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
+SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
 WORKSPACE_ROOT="${AIWORKER_QWEN_WORKSPACE:-$HOME/AI-worker-second-original-workspace}"
 BACKUP_ROOT="${AIWORKER_SKILL_BACKUP_ROOT:-$HOME/ai-worker/backups/aiworker-task-flow-skill}"
+DEPLOYMENT_RUN_DIR="${AIWORKER_BG_RUN_DIR:-$REPOSITORY_ROOT/.run/blue-green}"
+DEPLOYMENT_LOCK_DIR="$DEPLOYMENT_RUN_DIR/.deployment.lock"
+MISSION_CONTROL_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
+N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
+LEGACY_BOOTSTRAP_ATTEMPT_DIR="${AIWORKER_BG_LEGACY_BOOTSTRAP_ATTEMPT_DIR:-}"
+VIDEO_BATCH_ROOT="${AIWORKER_VIDEO_BATCH_DIR:-$HOME/ai-worker/state/video-autoworker/video-batches}"
 MODE=""
+
+[[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
+  printf 'Shared deployment lock helper is unavailable.\n' >&2
+  exit 1
+}
+# shellcheck source=scripts/lib/shared-deployment-lock.sh
+. "$SHARED_DEPLOYMENT_LOCK_HELPER"
 
 usage() {
   printf 'Usage: %s (--dry-run|--apply)\n' "$0"
@@ -65,6 +80,8 @@ required_skill_files=(
   "$SOURCE_DIR/lib/video-batch-state.mjs"
   "$SOURCE_DIR/lib/video-result-page.mjs"
   "$RENDERER"
+  "$SHARED_INSTALL_GATE"
+  "$SHARED_DEPLOYMENT_LOCK_HELPER"
 )
 for required_skill_file in "${required_skill_files[@]}"; do
   if [[ ! -f "$required_skill_file" || -L "$required_skill_file" ]]; then
@@ -90,6 +107,22 @@ if [[ -z "$SHASUM_BIN" || ! -x "$SHASUM_BIN" ]]; then
   printf 'shasum is required to verify task-flow installation state.\n' >&2
   exit 1
 fi
+GIT_BIN="$(command -v git || true)"
+if [[ -z "$GIT_BIN" || ! -x "$GIT_BIN" ]]; then
+  printf 'Git is required to bind the task-flow payload to one source commit.\n' >&2
+  exit 1
+fi
+EXPECTED_SOURCE_COMMIT="$(env \
+  -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+  "$GIT_BIN" -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')" || {
+  printf 'Could not resolve the task-flow source commit.\n' >&2
+  exit 1
+}
+[[ "$EXPECTED_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]] || {
+  printf 'Task-flow source commit must be one full lowercase Git commit.\n' >&2
+  exit 1
+}
+EXPECTED_RELEASE_ID="$EXPECTED_SOURCE_COMMIT-runtime"
 
 if [[ -L "$SKILLS_ROOT" || ( -e "$SKILLS_ROOT" && ! -d "$SKILLS_ROOT" ) ]]; then
   printf 'Workspace skills path must be a regular directory: %s\n' "$SKILLS_ROOT" >&2
@@ -130,6 +163,7 @@ case "$TEST_FAILPOINT" in
 esac
 
 LOCK_OWNED=0
+DEPLOYMENT_LOCK_OWNED=0
 SKILLS_ROOT_CREATED=0
 TRANSACTION_DIR=""
 TRANSACTION_COMPLETE=0
@@ -492,6 +526,9 @@ cleanup() {
     rm -f -- "$LOCK_DIR/pid" || cleanup_failed=1
     rmdir "$LOCK_DIR" || cleanup_failed=1
   fi
+  if [[ "$DEPLOYMENT_LOCK_OWNED" == "1" ]]; then
+    release_shared_deployment_lock || cleanup_failed=1
+  fi
   if [[ "$cleanup_failed" != "0" && "$exit_code" == "0" ]]; then
     exit_code=1
   fi
@@ -503,7 +540,25 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+verify_shared_install_gate() {
+  local -a gate_arguments=(
+    --mission-control-db-path "$MISSION_CONTROL_DB_PATH"
+    --n8n-db-path "$N8N_DB_PATH"
+    --video-batch-root "$VIDEO_BATCH_ROOT"
+    --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
+    --expected-release-id "$EXPECTED_RELEASE_ID"
+  )
+  if [[ -n "$LEGACY_BOOTSTRAP_ATTEMPT_DIR" ]]; then
+    gate_arguments+=(--legacy-attempt-dir "$LEGACY_BOOTSTRAP_ATTEMPT_DIR")
+  fi
+  "$NODE_BIN" "$SHARED_INSTALL_GATE" "${gate_arguments[@]}" >/dev/null || {
+    printf 'Shared task-flow replacement requires paused intake, zero active tasks, and zero pending director outbox rows.\n' >&2
+    return 1
+  }
+}
+
 if [[ "$MODE" == "apply" ]]; then
+  acquire_shared_deployment_lock
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
     printf 'Another task-flow installation already holds the workspace lock: %s\n' "$LOCK_DIR" >&2
     exit 1
@@ -678,6 +733,7 @@ maybe_fail() {
   fi
 }
 
+verify_shared_install_gate
 COMMIT_STARTED=1
 if [[ "$SKILL_PRESENT" == "1" ]]; then
   mv "$TARGET_DIR" "$TRANSACTION_DIR/originals/aiworker-task-flow"

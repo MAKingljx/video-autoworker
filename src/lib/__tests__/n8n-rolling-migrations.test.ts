@@ -9,11 +9,31 @@ import {
 } from '@/lib/n8n-runtime-affinity'
 
 describe('n8n rolling database compatibility epoch', () => {
+  function replaceDirectorEvidenceOutbox(
+    db: Database.Database,
+    mutate: (sql: string) => string,
+  ) {
+    const table = db.prepare(`
+      SELECT sql FROM sqlite_master
+      WHERE type = 'table' AND name = 'n8n_director_evidence_outbox'
+    `).get() as { sql: string }
+    const changed = mutate(table.sql)
+    expect(changed).not.toBe(table.sql)
+    db.exec(`
+      DROP TABLE n8n_director_evidence_outbox;
+      ${changed};
+      CREATE INDEX idx_n8n_director_evidence_outbox_due
+        ON n8n_director_evidence_outbox(status, next_attempt_at, updated_at, task_id);
+      CREATE INDEX idx_n8n_director_evidence_outbox_scope
+        ON n8n_director_evidence_outbox(tenant_id, workspace_id, status, updated_at DESC);
+    `)
+  }
+
   it('keeps every migration in the declared epoch additive-only', () => {
     expect(N8N_ROLLING_DATABASE_COMPATIBILITY).toEqual({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '056_n8n_parent_execution_claims',
+      latestMigration: '057_n8n_director_evidence_outbox',
     })
 
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
@@ -100,6 +120,63 @@ describe('n8n rolling database compatibility epoch', () => {
       `)
       expect(() => getN8nRollingDatabaseCompatibility(db))
         .toThrow(/index columns are incompatible: idx_n8n_intake_control_events_time/)
+    } finally {
+      db.close()
+    }
+  })
+
+  it.each([
+    {
+      name: 'idempotency uniqueness',
+      mutate: (sql: string) => sql.replace(
+        'idempotency_key TEXT NOT NULL UNIQUE',
+        'idempotency_key TEXT NOT NULL',
+      ),
+      message: /idempotency identity is not unique/u,
+    },
+    {
+      name: 'parent cascade reference',
+      mutate: (sql: string) => sql.replace(
+        /,\s*FOREIGN KEY \(task_id\) REFERENCES n8n_task_runs\(task_id\) ON DELETE CASCADE/u,
+        '',
+      ),
+      message: /parent reference is incompatible/u,
+    },
+    {
+      name: 'status check',
+      mutate: (sql: string) => sql.replace(
+        /\s*CHECK\(status IN \('pending', 'delivered', 'conflict'\)\)/u,
+        '',
+      ),
+      message: /constraint is incompatible/u,
+    },
+    {
+      name: 'query digest check',
+      mutate: (sql: string) => sql.replace(
+        /\s*CHECK\(length\(query_digest\) = 64\s+AND query_digest NOT GLOB '\*\[\^0-9a-f\]\*'\)/u,
+        '',
+      ),
+      message: /constraint is incompatible/u,
+    },
+    {
+      name: 'projection contract digest check',
+      mutate: (sql: string) => sql.replace(
+        /\s*CHECK\(length\(projection_contract_digest\) = 64\s+AND projection_contract_digest NOT GLOB '\*\[\^0-9a-f\]\*'\)/u,
+        '',
+      ),
+      message: /constraint is incompatible/u,
+    },
+    {
+      name: 'pending default',
+      mutate: (sql: string) => sql.replace("DEFAULT 'pending'", "DEFAULT 'queued'"),
+      message: /column is incompatible: n8n_director_evidence_outbox\.status/u,
+    },
+  ])('rejects a counterfeit director evidence outbox without $name', ({ mutate, message }) => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      replaceDirectorEvidenceOutbox(db, mutate)
+      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(message)
     } finally {
       db.close()
     }

@@ -1,15 +1,45 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { chmodSync, readFileSync, realpathSync } from 'node:fs'
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import Database from 'better-sqlite3'
+
+async function stopTestVideoWorker(batchRoot: string): Promise<void> {
+  let pid: number | null = null
+  try {
+    const lock = JSON.parse(await readFile(resolve(batchRoot, '.global-video-worker.lock'), 'utf8')) as {
+      pid?: unknown
+    }
+    pid = Number.isInteger(lock.pid) && Number(lock.pid) > 0 ? Number(lock.pid) : null
+  } catch {
+    return
+  }
+  if (pid === null || pid === process.pid) return
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') throw error
+  }
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') return
+      throw error
+    }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+  }
+  throw new Error('test video worker did not stop')
+}
 
 describe('OpenClaw task-flow submit script', () => {
   it('routes explicit video arguments once and rejects video-shaped generic prompts', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'openclaw-video-command-test-'))
+    const batchRoot = resolve(root, 'batch-state')
     const inboxRoot = resolve(root, 'inbox')
     const videoPath = resolve(root, '中文 样片 (终版).mp4')
     const noRecoveryVideoPath = resolve(root, '独立无恢复样片.mp4')
@@ -77,7 +107,7 @@ globalThis.fetch = async (input, init = {}) => {
       const childEnv = {
         ...process.env,
         AIWORKER_MEDIA_INGEST_DIR: inboxRoot,
-        AIWORKER_VIDEO_BATCH_DIR: resolve(root, 'batch-state'),
+        AIWORKER_VIDEO_BATCH_DIR: batchRoot,
         FAKE_PLATFORM_LOG: requestLog,
         NODE_OPTIONS: [
           process.env.NODE_OPTIONS,
@@ -379,6 +409,7 @@ globalThis.fetch = async (input, init = {}) => {
       // the CLI contract only requires that the submitting process returns
       // immediately without issuing a second trigger.
     } finally {
+      await stopTestVideoWorker(batchRoot)
       await rm(root, { recursive: true, force: true })
     }
   }, 15_000)
@@ -578,6 +609,9 @@ globalThis.fetch = async (input, init = {}) => {
   it('appends the video command rule to a workspace that has no previous section', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-install-test-'))
     const workspace = resolve(root, 'workspace')
+    const liveDbPath = resolve(root, 'mission-control.db')
+    const n8nDbPath = resolve(root, 'n8n.sqlite')
+    const deploymentRunDir = resolve(realpathSync.native(root), 'blue-green-run')
     const installer = resolve(process.cwd(), 'scripts/install-aiworker-task-flow-skill.sh')
     const runInstaller = (backupRoot: string) => new Promise<void>((resolvePromise, rejectPromise) => {
       execFile('bash', [installer, '--apply'], {
@@ -586,12 +620,47 @@ globalThis.fetch = async (input, init = {}) => {
           ...process.env,
           AIWORKER_QWEN_WORKSPACE: workspace,
           AIWORKER_SKILL_BACKUP_ROOT: backupRoot,
+          AIWORKER_BG_RUN_DIR: deploymentRunDir,
+          AIWORKER_BG_LIVE_DB_PATH: realpathSync.native(liveDbPath),
+          AIWORKER_BG_N8N_DB_PATH: realpathSync.native(n8nDbPath),
+          AIWORKER_VIDEO_BATCH_DIR: realpathSync.native(resolve(root, 'video-batches')),
         },
         encoding: 'utf8',
       }, error => error ? rejectPromise(error) : resolvePromise())
     })
 
     try {
+      const database = new Database(liveDbPath)
+      database.exec(`
+        CREATE TABLE n8n_intake_controls (
+          control_id INTEGER PRIMARY KEY,
+          accepting INTEGER NOT NULL,
+          revision INTEGER NOT NULL
+        );
+        INSERT INTO n8n_intake_controls VALUES (1, 0, 1);
+        CREATE TABLE n8n_task_runs (
+          id INTEGER PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          source TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE n8n_director_evidence_outbox (status TEXT NOT NULL);
+      `)
+      database.close()
+      chmodSync(liveDbPath, 0o600)
+      const n8n = new Database(n8nDbPath)
+      n8n.exec(`
+        CREATE TABLE execution_entity (
+          id INTEGER PRIMARY KEY,
+          status TEXT NOT NULL,
+          "stoppedAt" INTEGER
+        );
+      `)
+      n8n.close()
+      chmodSync(n8nDbPath, 0o600)
+      await mkdir(resolve(root, 'video-batches'), { mode: 0o700 })
       await mkdir(workspace, { recursive: true })
       await writeFile(resolve(workspace, 'AGENTS.md'), '# Workspace Rules\n\nKeep this rule.\n')
       await runInstaller(resolve(root, 'backups-1'))

@@ -3,6 +3,34 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('n8n rolling and callback OpenAPI contract', () => {
+  it('documents the server-resolved director work name on the trigger boundary', () => {
+    const trigger = document.paths['/api/n8n/trigger'].post
+    const request = trigger.requestBody.content['application/json'].schema
+    expect(request.properties.directorWork).toMatchObject({
+      type: 'string',
+      minLength: 1,
+      maxLength: 240,
+    })
+    expect(request.properties.directorWork.description).toContain('input.materialId')
+    expect(request.properties.input.properties.materialId).toMatchObject({
+      type: 'string',
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$',
+    })
+    expect(request.allOf).toContainEqual({
+      if: { required: ['directorWork'] },
+      then: { properties: { input: { required: ['materialId'] } } },
+    })
+    expect(trigger.responses['423'].content['application/json'].schema.properties.code.enum)
+      .toEqual(['N8N_INTAKE_DRAINING', 'DEPLOYMENT_IN_PROGRESS'])
+    expect(trigger.responses['503'].description).toMatch(/deployment lock/i)
+  })
+
+  it('documents one shared lock for both intake mutations', () => {
+    const mutation = document.paths['/api/n8n/intake-control'].post
+    expect(mutation.responses['423'].description).toMatch(/drain or resume/i)
+    expect(mutation.responses['503'].description).toMatch(/acquired or released/i)
+  })
+
   const document = JSON.parse(
     readFileSync(resolve(process.cwd(), 'openapi.json'), 'utf8'),
   ) as Record<string, any>
@@ -38,7 +66,7 @@ describe('n8n rolling and callback OpenAPI contract', () => {
   it('uses a strict scheduler schema only for release readiness', () => {
     const readiness = document.components.schemas.N8nReleaseReadiness
     expect(readiness.properties.database.properties.latestMigration.enum)
-      .toEqual(['056_n8n_parent_execution_claims'])
+      .toEqual(['057_n8n_director_evidence_outbox'])
     expect(readiness.properties.scheduler.$ref)
       .toBe('#/components/schemas/N8nReleaseSchedulerLeadershipStatus')
     expect(document.components.schemas.N8nReleaseSchedulerLeadershipStatus.properties.state.enum)

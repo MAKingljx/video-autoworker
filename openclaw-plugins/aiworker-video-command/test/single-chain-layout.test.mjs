@@ -7,6 +7,7 @@ const pluginRoot = resolve(repositoryRoot, 'openclaw-plugins/aiworker-video-comm
 const libRoot = resolve(pluginRoot, 'lib')
 
 const currentModules = [
+  'director-work-policy.js',
   'dispatch-identity.js',
   'duplicate-confirmation-store.js',
   'json-command.js',

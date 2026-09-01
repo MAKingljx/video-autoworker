@@ -12,7 +12,6 @@ import {
   linkSync,
   lstatSync,
   openSync,
-  opendirSync,
   readFileSync,
   readSync,
   readdirSync,
@@ -24,6 +23,12 @@ import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  projectOfflineQueue,
+  scanOfflineDurableBatchStates,
+} from './lib/runtime-safe-offline-queue.mjs'
+
+export { projectOfflineQueue, scanOfflineDurableBatchStates }
 
 const PREPARE_SCHEMA = 'video-autoworker-legacy-bootstrap-prepare/v1'
 const CONFIRM_SCHEMA = 'video-autoworker-legacy-bootstrap-current-confirm/v1'
@@ -1800,146 +1805,6 @@ function validateResumeSnapshot(value, prepared, runtimeRelease, n8nPid) {
     fail('bootstrap resume n8n runtime release identity changed')
   }
   return value
-}
-
-export function projectOfflineQueue(rows, durableItems, now) {
-  if (!Number.isSafeInteger(now) || now <= 0 || !Array.isArray(rows) || !Array.isArray(durableItems)) {
-    fail('bootstrap resume queue projection input is invalid')
-  }
-  const durable = new Map(durableItems.map(item => [item.taskId, item]))
-  const projection = new Map(durable)
-  for (const row of rows) {
-    const durableItem = durable.get(row.taskId)
-    const stale = !durableItem && ['queued', 'accepted', 'running'].includes(row.status)
-      && now - Number(row.updatedAt || 0) >= 24 * 60 * 60
-    if (stale) {
-      projection.set(row.taskId, { taskId: row.taskId, status: row.status, origin: 'attention-stale' })
-    } else {
-      projection.set(row.taskId, {
-        taskId: row.taskId,
-        status: durableItem?.status || row.status,
-        origin: durableItem ? 'durable+n8n' : 'n8n',
-      })
-    }
-  }
-  const values = [...projection.values()].sort((left, right) => left.taskId.localeCompare(right.taskId))
-  return {
-    values,
-    digest: sha256(canonicalJson(values)),
-    waiting: values.filter(item => item.origin !== 'attention-stale'
-      && ['queued', 'staging', 'submitted', 'accepted', 'waiting', 'recovering', 'paused']
-        .includes(item.status)).length,
-    running: values.filter(item => item.origin !== 'attention-stale' && item.status === 'running').length,
-  }
-}
-
-export function scanOfflineDurableBatchStates(batchRoot) {
-  const root = resolve(batchRoot)
-  assertNoSymlink(root, 'bootstrap resume video batch root')
-  const rootEntry = safeEntry(root, 'bootstrap resume video batch root', 'directory')
-  if (realpathSync(root) !== root) fail('bootstrap resume video batch root is not physical')
-  if ((Number(rootEntry.mode & 0o7777n) & 0o077) !== 0) {
-    fail('bootstrap resume video batch root is not owner-private')
-  }
-  const maximumStateFiles = 2_000
-  const maximumDirectoryEntries = maximumStateFiles * 3
-  const maximumStateBytes = 8 * 1024 * 1024
-  const maximumTotalStateBytes = 512 * 1024 * 1024
-  const maximumItems = 20_000
-  const primaryPattern = /^[a-f0-9]{64}\.json$/u
-  const backupPattern = /^[a-f0-9]{64}\.json\.bak$/u
-  const primary = []
-  const backups = new Set()
-  let seenEntries = 0
-  const directory = opendirSync(root)
-  try {
-    for (;;) {
-      const entry = directory.readSync()
-      if (!entry) break
-      seenEntries += 1
-      if (seenEntries > maximumDirectoryEntries) {
-        fail('bootstrap resume video batch directory exceeds the bounded entry limit')
-      }
-      if (!entry.isFile()) fail('bootstrap resume video batch directory contains a non-file artifact')
-      if (primaryPattern.test(entry.name)) primary.push(entry.name)
-      else if (backupPattern.test(entry.name)) backups.add(entry.name.slice(0, -4))
-      else fail('bootstrap resume video batch directory contains an unrecognized artifact')
-    }
-  } finally {
-    directory.closeSync()
-  }
-  if (primary.length > maximumStateFiles) {
-    fail('bootstrap resume video batch state count exceeds the bounded limit')
-  }
-  const primarySet = new Set(primary)
-  for (const pathname of backups) {
-    if (!primarySet.has(pathname)) fail('bootstrap resume video batch backup has no authoritative primary')
-  }
-  const activeStatuses = new Set([
-    'queued', 'staging', 'submitted', 'accepted', 'running', 'waiting', 'recovering', 'paused',
-  ])
-  const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'attention'])
-  const batchStatuses = new Set([
-    ...activeStatuses, 'succeeded', 'completed_with_errors', 'failed', 'cancelled', 'attention',
-  ])
-  const durable = new Map()
-  let visited = 0
-  let totalBytes = 0
-  for (const name of primary.sort()) {
-    const pathname = join(root, name)
-    const stateEntry = safeEntry(pathname, 'bootstrap resume video batch state', 'file', {
-      maximumBytes: maximumStateBytes, nonempty: true,
-    })
-    totalBytes += Number(stateEntry.size)
-    if (totalBytes > maximumTotalStateBytes) {
-      fail('bootstrap resume video batch states exceed the bounded byte limit')
-    }
-    const state = readJson(pathname, 'bootstrap resume video batch state', {
-      maximumBytes: maximumStateBytes,
-    }).value
-    if (![1, 2].includes(state?.schemaVersion) || !Array.isArray(state.items)
-      || typeof state.status !== 'string' || !batchStatuses.has(state.status)) {
-      fail('bootstrap resume video batch state contract is invalid')
-    }
-    let activeItems = 0
-    for (const item of state.items) {
-      visited += 1
-      if (visited > maximumItems) {
-        fail('bootstrap resume video batch items exceed the bounded limit')
-      }
-      if (!item || typeof item !== 'object' || Array.isArray(item)) {
-        fail('bootstrap resume video batch item contract is invalid')
-      }
-      const taskId = typeof item.taskId === 'string' ? item.taskId.trim() : ''
-      const itemStatus = typeof item.status === 'string' ? item.status : ''
-      if (!/^[A-Za-z0-9._:-]{1,120}$/u.test(taskId)
-        || (!activeStatuses.has(itemStatus) && !terminalStatuses.has(itemStatus))) {
-        fail('bootstrap resume video batch item contract is invalid')
-      }
-      let status = itemStatus
-      if (state.status === 'paused' && !['submitted', 'accepted', 'running'].includes(status)
-        && !terminalStatuses.has(status)) status = 'paused'
-      else if (state.status === 'recovering' && status === 'queued') status = 'recovering'
-      if (!activeStatuses.has(status)) continue
-      activeItems += 1
-      if (durable.has(taskId)) fail('bootstrap resume video batch task identity is duplicated')
-      durable.set(taskId, { taskId, status, origin: 'durable' })
-    }
-    if (activeStatuses.has(state.status) && activeItems === 0) {
-      const batchId = typeof state.batchId === 'string' ? state.batchId.trim() : ''
-      if (!/^[A-Za-z0-9._:-]{1,80}$/u.test(batchId)) {
-        fail('bootstrap resume active video batch has no valid durable identity')
-      }
-      const taskId = `batch:${batchId}`
-      if (durable.has(taskId)) fail('bootstrap resume video batch identity is duplicated')
-      durable.set(taskId, {
-        taskId,
-        status: state.status === 'running' ? 'running' : 'waiting',
-        origin: 'durable-batch',
-      })
-    }
-  }
-  return [...durable.values()]
 }
 
 function offlineQueueProjection(db, now) {

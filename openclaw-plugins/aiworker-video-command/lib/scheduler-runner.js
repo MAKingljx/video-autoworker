@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { executeFile, parseSingleLineJson } from './json-command.js'
+import { isValidDirectorWork } from './director-work-policy.js'
 
 export const INSTALLED_TASK_FLOW_SCRIPT = resolve(
   homedir(),
@@ -1015,10 +1016,14 @@ export function createSchedulerRunner({
         videoPath,
         taskId,
         trustedExistingMaterialId,
+        directorWork,
         confirmDuplicate = false,
       } = options || {}
       if (!isSchedulerTaskId(taskId)) throw new Error('invalid_task_id')
       if (typeof confirmDuplicate !== 'boolean') throw new Error('invalid_confirmation')
+      if (directorWork !== undefined && !isValidDirectorWork(directorWork)) {
+        throw new Error('invalid_director_work')
+      }
       const normalizedMaterialId = normalizeTrustedExistingMaterialId(trustedExistingMaterialId)
       const handoff = normalizedMaterialId === undefined
         ? null
@@ -1036,6 +1041,7 @@ export function createSchedulerRunner({
             '--delivery', 'none',
             '--wait-seconds', '0',
             '--no-trigger-recovery',
+            ...(directorWork === undefined ? [] : ['--director-work', directorWork]),
             ...(confirmDuplicate ? ['--confirm-duplicate'] : []),
           ], DISPATCH_TIMEOUT_MS)
         } catch (error) {

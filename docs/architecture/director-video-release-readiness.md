@@ -1,0 +1,100 @@
+# 导演脑视频链发布兼容门
+
+## 目的
+
+`scripts/verify-director-video-release-readiness.mjs` 是 3017 视频分析到飞书导演脑单向投影链的
+唯一跨组件发布检查。它只读、失败关闭，不安装组件、不重启服务、不修改任务、数据库或飞书。
+
+当前兼容发布集固定为：
+
+| 组件 | 发布身份 |
+| --- | --- |
+| Video AutoWorker standalone | Git release ID + `2.0.1` + `release-manifest.json` |
+| `aiworker-video-command` | `0.5.14` |
+| `aiworker-task-flow` | 与同一 Git 提交生成的精确安装清单 |
+| `aiworker-director-brain` | `0.3.1`，包含插件和 Skill |
+
+## 验证范围
+
+检查要求 canonical 仓库位于 `main`、工作树干净、remote 正确，release ID 精确解析到当前
+Git HEAD。standalone 必须位于声明的不可变 releases 根下，并通过已有 standalone 完整性审计。
+
+三份 OpenClaw 安装载荷按现有安装器的真实 payload 边界重建期望清单，再与安装目录的目录集合、
+文件集合和每个文件 SHA-256 精确比较。任何软链接、额外文件、文件缺失、set-id 文件或组/其他用户
+可写对象都会失败。插件的 `package.json` 与 `openclaw.plugin.json` 版本必须同时匹配。
+
+集成契约另行确认：
+
+- 已安装 `submit-task.mjs` 仍接受并传递 `--director-work`；
+- 导演 CLI wrapper、Feishu service、schema、证据 transformer wrapper、inner library、
+  应用侧封套/分批/回执语义模块，以及 `director-evidence-delivery-core.ts` 的 SHA-256 与
+  `director-evidence-outbox.ts` 固定闭包一致；delivery core 自身不保存自己的摘要，避免自引用；
+- 上述七项闭包与投影 schema 版本共同计算 `projection_contract_digest`；当前 SQLite 中所有
+  `pending` outbox 必须使用同一摘要，存在旧摘要 pending 时 forward switch 失败关闭；
+- standalone 的服务端 bundle 实际包含同一组固定闭包摘要，而不是只检查源码副本。
+
+outbox 在创建时把投影契约摘要纳入幂等身份。部分批次已经写入后如果转换器或飞书写入契约
+升级，新版本不会继续投影或把该行错误标记为 delivered；旧契约恢复后仍可依靠稳定证据 ID
+完成幂等重放。该门只阻断投影契约不兼容的发布，不会让普通页面功能更新等待已 delivered、
+conflict 或同摘要 pending 记录。
+
+binding 严格解析、query digest、outbox 不可变身份、权威任务回读、transform、分批写入、回执、
+重试分类和全部状态 CAS 都位于 hashed delivery core；外层 outbox 只保留受管命令身份、子进程
+runner、投影契约构建与薄入口。transform 的 JSON 合同仍为 2 MiB，wire 只额外允许一个换行；
+其 stdout/stderr 总上限为 8 MiB，以容纳最多 240 段中文画面字段经受控复制后的合法投影。
+`operate`、`project-evidence` 继续使用较窄上限。只有 delivery core 已验证本次命令输入合同后，
+`director_command_output_too_large` 才是不可重试冲突；否则按可恢复错误退避。
+
+## 发布顺序
+
+首次 blue/green bootstrap 会在提交 baseline、释放维护保护之前自动执行该检查。常规 forward
+`switch` 会在 router 原子切换前执行，并把 HEAD 绑定的静态 verifier 摘要与 target runtime
+readiness 摘要直接对账；失败时 intake 继续暂停，router 不切换。普通 `switch` 和显式
+`rollback` 都只允许同一投影契约，任务归零也不能跨契约。legacy 首迁仍只能走带冻结证据和
+回滚证明的专用 bootstrap，不能把普通切换当作契约迁移通道。
+
+每个 slot 的 `release-readiness` 同时公开该 release 编译时的投影契约摘要和权威 outbox 计数。
+source/target 摘要相同，已有任务可继续按 release affinity 排空并热切换；摘要不同则普通转换
+直接失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
+attestation 哈希、readiness revision/schema epoch/契约摘要与原路由元组，并以进程内只读、带
+SHA-256 封套的证据复验。这样 source=A、仓库 HEAD=B 时，自动回滚不会拿只接受 HEAD 的 target
+verifier 错验历史 source；显式 rollback 也使用同一证据路径。目标验证失败仍返回非零，任一
+source 回滚证据失败则保持 intake 暂停。旧槽 callback 冻结并达到静默后、停止旧槽前还会再查
+不兼容 pending；普通页面和不改变投影闭包的功能发布仍保留热切换能力。
+
+延迟退役可能发生在发布后的 docs-only 审计提交之后。退役门允许 active release 是当前干净
+`main` HEAD 的 Git 祖先，但仍执行完整 payload、闭包、bundle 与 outbox 校验；非祖先 release、
+脏工作树或 projection 源码/安装树漂移继续失败关闭。router runtime attestation 只绑定启动 PID、
+监听地址和 router state 路径，不包含 generation；正常原子更新 router state 不会改写该文件，
+因此转换证据保存的 attestation SHA-256 不会因 generation 增长而自然失效。
+
+切换完成后，在显式启用 video lane 或把 intake 改回 active 前，应紧邻操作再执行一次只读检查：
+
+```bash
+node scripts/verify-director-video-release-readiness.mjs \
+  --repository-root /absolute/path/to/video-autoworker \
+  --releases-root /absolute/path/to/video-autoworker/.runtime/releases \
+  --release-id <git-commit-runtime> \
+  --release-root /absolute/path/to/video-autoworker/.runtime/releases/<git-commit-runtime>/standalone \
+  --live-db-path /absolute/path/to/authoritative-mission-control.sqlite
+```
+
+默认安装身份是 `~/.openclaw-qwen-current` 与
+`~/AI-worker-second-original-workspace`。非默认受管安装必须显式增加
+`--profile-state-root` 和 `--workspace-root`，不能通过指向源码目录来替代已安装载荷验收。
+
+成功只输出一行 JSON，包含 app manifest SHA、四个安装树 manifest SHA、插件版本、七项投影闭包
+摘要、当前投影契约摘要、pending 数和不兼容 pending 数。任一错误返回非零；不得忽略退出码
+继续开放 intake 或恢复 video lane。安装共享投影组件前仍应先让当前契约的 pending 归零，避免
+旧进程在共享安装树已经更新后失去完成重放的能力。
+
+三份共享安装器与 blue/green 发布器使用同一个 `.deployment.lock`。常规安装要求入口已暂停、
+权威 Mission Control/n8n SQLite 均为显式物理文件、durable batch 根目录现存且 owner-private，
+n8n active execution、媒体节点、正式队列 waiting/running 与 outbox pending 全部为零。入口
+`drain`、`resume` 和新 `directorWork` 的作品解析到任务准入均通过相同原子锁串行；安装或失败补偿
+持锁期间返回 locked，不会变更入口，也不会让新任务在两套导演组件之间解析和持久化。已有幂等任务
+继续读取原持久绑定，不依赖飞书在线。首次
+legacy 主库尚无 052/057 表时，不接受环境变量布尔绕过；只能使用未过期、绑定同一双数据库、
+源码提交和 `<commit>-runtime` 的 bootstrap attempt，实时复核 freeze guard、evidence、rollback
+proof 和双采样归零证据后安装。fresh `PREPARED` 可承载三项安装，120 秒的 current-confirm 留给
+最终 transition；confirmed/shutdown 阶段只接受同一 attempt 的恢复。

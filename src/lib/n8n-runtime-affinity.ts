@@ -14,7 +14,7 @@ export const N8N_RELEASE_READINESS_SCHEMA = 'video-autoworker-release-readiness/
 export const N8N_ROLLING_DATABASE_COMPATIBILITY = {
   schemaEpoch: 1,
   rollingSafeFrom: '052_n8n_intake_controls',
-  latestMigration: '056_n8n_parent_execution_claims',
+  latestMigration: '057_n8n_director_evidence_outbox',
 } as const
 
 export type N8nRollingDatabaseCompatibility = typeof N8N_ROLLING_DATABASE_COMPATIBILITY
@@ -24,6 +24,7 @@ type RequiredColumn = {
   type: 'INTEGER' | 'TEXT'
   notNull?: true
   primaryKey?: number
+  defaultValue?: string
 }
 
 type RequiredIndex = {
@@ -39,6 +40,7 @@ const REQUIRED_ROLLING_MIGRATIONS = [
   '054_n8n_task_dispatch_leases',
   '055_n8n_child_execution_leases',
   '056_n8n_parent_execution_claims',
+  '057_n8n_director_evidence_outbox',
 ] as const
 
 const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
@@ -103,7 +105,36 @@ const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
     { name: 'created_at', type: 'INTEGER', notNull: true },
     { name: 'updated_at', type: 'INTEGER', notNull: true },
   ],
+  n8n_director_evidence_outbox: [
+    { name: 'task_id', type: 'TEXT', primaryKey: 1 },
+    { name: 'binding_id', type: 'INTEGER', notNull: true },
+    { name: 'tenant_id', type: 'INTEGER', notNull: true },
+    { name: 'workspace_id', type: 'INTEGER', notNull: true },
+    { name: 'work_id', type: 'TEXT', notNull: true },
+    { name: 'query_digest', type: 'TEXT', notNull: true },
+    { name: 'projection_contract_digest', type: 'TEXT', notNull: true },
+    { name: 'idempotency_key', type: 'TEXT', notNull: true },
+    { name: 'result_sha256', type: 'TEXT', notNull: true },
+    { name: 'status', type: 'TEXT', notNull: true, defaultValue: "'pending'" },
+    { name: 'attempt_count', type: 'INTEGER', notNull: true, defaultValue: '0' },
+    { name: 'next_attempt_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+    { name: 'last_error_code', type: 'TEXT' },
+    { name: 'delivered_at', type: 'INTEGER' },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+    { name: 'updated_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
 }
+
+const DIRECTOR_EVIDENCE_OUTBOX_SQL_CONSTRAINTS = [
+  "CHECK(length(work_id) BETWEEN 1 AND 160 AND work_id NOT GLOB '*[^A-Za-z0-9._:-]*')",
+  "CHECK(length(query_digest) = 64 AND query_digest NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(length(projection_contract_digest) = 64 AND projection_contract_digest NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(length(idempotency_key) = 64 AND idempotency_key NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(length(result_sha256) = 64 AND result_sha256 NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(status IN ('pending', 'delivered', 'conflict'))",
+  'CHECK(attempt_count >= 0)',
+  "CHECK(last_error_code IS NULL OR ( length(last_error_code) BETWEEN 1 AND 200 AND last_error_code NOT GLOB '*[^A-Za-z0-9_:-]*' ))",
+] as const
 
 const REQUIRED_ROLLING_INDEXES: RequiredIndex[] = [
   {
@@ -142,6 +173,17 @@ const REQUIRED_ROLLING_INDEXES: RequiredIndex[] = [
     table: 'n8n_parent_execution_claims',
     name: 'idx_n8n_parent_execution_claims_owner',
     columns: ['tenant_id', 'workspace_id', 'execution_owner', 'updated_at'],
+    descending: [false, false, false, true],
+  },
+  {
+    table: 'n8n_director_evidence_outbox',
+    name: 'idx_n8n_director_evidence_outbox_due',
+    columns: ['status', 'next_attempt_at', 'updated_at', 'task_id'],
+  },
+  {
+    table: 'n8n_director_evidence_outbox',
+    name: 'idx_n8n_director_evidence_outbox_scope',
+    columns: ['tenant_id', 'workspace_id', 'status', 'updated_at'],
     descending: [false, false, false, true],
   },
 ]
@@ -239,6 +281,12 @@ export interface N8nReleaseReadiness {
   }
   runtime: N8nRuntimeIdentity
   database: N8nRollingDatabaseCompatibility
+  projection: {
+    schema: 'video-autoworker-director-evidence-outbox-readiness/v1'
+    contractDigest: string
+    pending: number
+    incompatiblePending: number
+  }
   retirement: N8nRuntimeDrainStatus
   scheduler: SchedulerLeadershipStatus
 }
@@ -247,6 +295,7 @@ type SqliteTableInfoRow = {
   name: string
   type: string
   notnull: number
+  dflt_value: string | null
   pk: number
 }
 
@@ -254,6 +303,7 @@ type SqliteIndexListRow = {
   name: string
   unique: number
   partial: number
+  origin: string
 }
 
 type SqliteIndexInfoRow = {
@@ -261,6 +311,15 @@ type SqliteIndexInfoRow = {
   name: string
   desc: number
   key: number
+}
+
+type SqliteForeignKeyRow = {
+  table: string
+  from: string
+  to: string
+  on_update: string
+  on_delete: string
+  match: string
 }
 
 function quotedSqliteIdentifier(identifier: string): string {
@@ -280,8 +339,8 @@ export function getN8nRollingDatabaseCompatibility(
 ): N8nRollingDatabaseCompatibility {
   for (const [table, requiredColumns] of Object.entries(REQUIRED_ROLLING_TABLES)) {
     const tableRecord = db.prepare(
-      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-    ).get(table) as { name?: string } | undefined
+      "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    ).get(table) as { name?: string; sql?: string } | undefined
     if (tableRecord?.name !== table) throw new Error(`n8n rolling table is missing: ${table}`)
 
     const columns = db.prepare(
@@ -292,8 +351,47 @@ export function getN8nRollingDatabaseCompatibility(
       const actual = byName.get(required.name)
       if (!actual || actual.type.toUpperCase() !== required.type
         || (required.notNull && actual.notnull !== 1)
-        || (required.primaryKey !== undefined && actual.pk !== required.primaryKey)) {
+        || (required.primaryKey !== undefined && actual.pk !== required.primaryKey)
+        || (required.defaultValue !== undefined && actual.dflt_value !== required.defaultValue)) {
         throw new Error(`n8n rolling column is incompatible: ${table}.${required.name}`)
+      }
+    }
+
+    if (table === 'n8n_director_evidence_outbox') {
+      const compactSql = String(tableRecord.sql || '').replace(/\s+/gu, ' ').trim()
+      for (const constraint of DIRECTOR_EVIDENCE_OUTBOX_SQL_CONSTRAINTS) {
+        if (!compactSql.includes(constraint)) {
+          throw new Error('n8n rolling director evidence constraint is incompatible')
+        }
+      }
+
+      const indexes = db.prepare(
+        `PRAGMA index_list(${quotedSqliteIdentifier(table)})`,
+      ).all() as SqliteIndexListRow[]
+      const uniqueIdentity = indexes.find((index) => {
+        if (index.unique !== 1 || index.partial !== 0 || index.origin !== 'u') return false
+        const columns = (db.prepare(
+          `PRAGMA index_xinfo(${quotedSqliteIdentifier(index.name)})`,
+        ).all() as SqliteIndexInfoRow[]).filter(column => column.key === 1)
+        return columns.length === 1 && columns[0]?.name === 'idempotency_key'
+      })
+      if (!uniqueIdentity) {
+        throw new Error('n8n rolling director evidence idempotency identity is not unique')
+      }
+
+      const foreignKeys = db.prepare(
+        `PRAGMA foreign_key_list(${quotedSqliteIdentifier(table)})`,
+      ).all() as SqliteForeignKeyRow[]
+      const parentReference = foreignKeys.find(foreignKey => (
+        foreignKey.table === 'n8n_task_runs'
+        && foreignKey.from === 'task_id'
+        && foreignKey.to === 'task_id'
+        && foreignKey.on_update === 'NO ACTION'
+        && foreignKey.on_delete === 'CASCADE'
+        && foreignKey.match === 'NONE'
+      ))
+      if (!parentReference) {
+        throw new Error('n8n rolling director evidence parent reference is incompatible')
       }
     }
   }
@@ -546,6 +644,7 @@ export function buildN8nReleaseReadiness(
   retirement: N8nRuntimeDrainStatus,
   scheduler: SchedulerLeadershipStatus,
   database: N8nRollingDatabaseCompatibility,
+  projection: N8nReleaseReadiness['projection'],
   options: { nowSeconds?: number } = {},
 ): N8nReleaseReadiness {
   if (!control.globalScope || control.accepting || control.mode === 'active') {
@@ -566,6 +665,14 @@ export function buildN8nReleaseReadiness(
     || database.rollingSafeFrom !== N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom
     || database.latestMigration !== N8N_ROLLING_DATABASE_COMPATIBILITY.latestMigration) {
     throw new TypeError('n8n rolling database compatibility was not verified')
+  }
+  if (projection.schema !== 'video-autoworker-director-evidence-outbox-readiness/v1'
+    || !/^[a-f0-9]{64}$/u.test(projection.contractDigest)
+    || !Number.isSafeInteger(projection.pending) || projection.pending < 0
+    || !Number.isSafeInteger(projection.incompatiblePending)
+    || projection.incompatiblePending < 0
+    || projection.incompatiblePending > projection.pending) {
+    throw new TypeError('n8n director evidence projection readiness is invalid')
   }
   if (scheduler.state === 'unknown' || scheduler.state === 'unavailable') {
     throw new TypeError('n8n scheduler leadership is not available for release')
@@ -604,6 +711,7 @@ export function buildN8nReleaseReadiness(
     },
     runtime: { ...runtime },
     database: { ...database },
+    projection: { ...projection },
     retirement,
     scheduler,
   }

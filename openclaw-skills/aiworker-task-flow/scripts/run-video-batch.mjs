@@ -293,6 +293,7 @@ async function runBatch(statePath) {
           batchId: state.batchId,
           batchIndex: item.index,
           visionRoute: state.visionRoute,
+          directorWork: state.directorWork,
           ...lifecycleCallbacks,
         }, staged)
       } else {
@@ -312,6 +313,7 @@ async function runBatch(statePath) {
         batchId: state.batchId,
         batchIndex: item.index,
         visionRoute: state.visionRoute,
+        directorWork: state.directorWork,
         inboxRoot: state.inboxRoot,
         onHashProgress: async () => {
           // Keep the durable worker heartbeat fresh while a large source is
@@ -378,6 +380,7 @@ async function runBatch(statePath) {
           batchId: state.batchId,
           batchIndex: item.index,
           visionRoute: state.visionRoute,
+          directorWork: state.directorWork,
           ...lifecycleCallbacks,
         }, queuedStaged)
         if (response.status === 'queued') {

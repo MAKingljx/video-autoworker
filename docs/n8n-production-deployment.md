@@ -115,6 +115,43 @@ bash "$runtime_release/scripts/n8n-import-workflows.sh" \
   --transition-journal "$transition_dir/journal"
 ```
 
+短时 confirmation 只约束 capability 的首次原子领取：仅创建空的 `journal/` 不算领取，超过 120 秒后
+仍必须失败关闭；`import-capability.json` 已在同一文件系统原子移动为
+`journal/capability.consumed.json` 后，确认只作为不可变历史见证。即使进程在 rename 后、写入
+`CLAIMED` 或进入 `MUTATING` 前崩溃，也必须用同一参数幂等补齐 journal 并继续，不能因为确认到期
+把已经获得写权限且可能开始改库的迁移永久卡死。
+
+如果 journal 已进入 `MUTATING`，但目标工作流因确定性错误无法完成，而且尚未生成
+`transition-attestation.json` 的 `COMMITTED` 事件或 `bootstrap-claim.json`，不能只反复尝试前进，
+也不能为了取得恢复权先伪造一个 bootstrap attempt。必须在 n8n、LaunchAgent、5678 listener 和
+数据库 open FD 全部停止后，从原 transition 目录派生单向 rollback 授权：
+
+```bash
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" \
+  authorize-transition-rollback \
+  --intent "$transition_dir/upgrade-intent.json" \
+  --confirmation "$transition_dir/current-confirmation.json" \
+  --journal-dir "$transition_dir/journal" \
+  --output "$transition_dir/transition-rollback-authorization.receipt.json"
+
+bash "$runtime_release/scripts/n8n-restore-managed-workflows.sh" \
+  --database /absolute/path/database.sqlite \
+  --package /absolute/path/recovery-package \
+  --confirmation-receipt \
+    "$transition_dir/transition-rollback-authorization.receipt.json" \
+  --runtime-release "$runtime_release"
+```
+
+授权命令与 importer、restore、install、start 共用权威数据库目录下同一把物理 maintenance lock；
+如果前向导入仍持锁，授权必须失败且不能产生 receipt。取得锁后才重新校验 transition journal 并原子
+选择分支，任何校验失败都先释放锁。该固定 0400 receipt 同时绑定原 intent、已消费 capability、
+CLAIMED/MUTATING journal 头、权威 SQLite inode、原 rollback package、目标 runtime 及
+importer/maintenance-lock/anchor/validator/restore 五项工具。
+创建后 transition 永久选择 rollback 分支，前向导入、attest 和 bootstrap claim 全部失败关闭；恢复
+使用独立 `transition-rollback-journal/` 和固定 claim，崩溃后只能续作同一恢复，`COMMITTED` 后不得
+重放。它不依赖尚不存在的 controller prepare/current-confirm/apply，且不得在空 bootstrap attempt
+中预置任何成员；controller 的 `prepare` 仍只接受完全空的 attempt 目录。
+
 首次部署在导入后继续安装下文的 LaunchAgent，由 LaunchAgent 完成首次启动；已有 LaunchAgent 的
 升级导入则执行 `bash "$runtime_release/scripts/n8n-start.sh"` 恢复服务。安装、导入、恢复和启动
 共用同一物理 maintenance lock，互斥覆盖整个离线变更窗口，不能并发跨过停机检查。导入成功后
@@ -487,7 +524,11 @@ curl --fail-with-body \
 
 ### 首次蓝绿引导的恢复与灾后继续
 
-首次工作流迁移失败时先判断不可混用的两类恢复路径：
+首次工作流迁移失败时先判断不可混用的三类恢复路径：
+
+- **transition rollback**：工作流导入已进入 `MUTATING`、尚未完成 transition commit，也尚未 claim
+  bootstrap 时，使用上文固定的 `authorize-transition-rollback`。这是 bootstrap 之前唯一的恢复
+  授权，不创建也不借用 controller attempt；一旦生成就不能再回到前向导入。
 
 - **normal restore**：尚未写入 `bootstrap.pending`、legacy 3017 尚未停止，而且原 freeze guard、
   prepare/当前确认/`SHUTDOWN_REQUESTED` 链仍新鲜时，使用
@@ -500,6 +541,11 @@ curl --fail-with-body \
   recovery attempt、回滚包与精确 runtime release；收据固定 basename 为
   `n8n-disaster-recovery-confirmation.receipt.json`，且只能位于该 bootstrap attempt 下预先建立的
   mode `0700` disaster recovery UUID 目录。
+
+disaster receipt 中的 workflow report 不要求位于 bootstrap attempt 根。实际 transition 本来就是
+独立 0700 目录；report 可以保留在该 transition 目录。验证器必须同时核对 receipt、pending、
+transition attestation 三方携带的同一完整 path/dev/ino/size/SHA-256 引用，并重算 report 内容与
+combined digest，任何一方漂移都失败关闭。
 
 同一个 bootstrap attempt 的 restore 与 resume 分支通过不可变 branch claim 互斥；选择一支后不得
 切换到另一支。normal 路径必须按以下完整参数派生固定收据，再把该精确路径交给统一恢复入口：
@@ -552,8 +598,8 @@ bash "$runtime_release/scripts/n8n-restore-managed-workflows.sh" \
   --runtime-release "$runtime_release"
 ```
 
-统一恢复脚本按 receipt schema 选择 normal/disaster journal。未完成 journal 可以在所有身份仍精确
-匹配时重跑剩余阶段；已写 `COMMITTED` 的恢复不得重放。
+统一恢复脚本按 receipt schema 选择 normal/disaster/transition-rollback journal。未完成 journal
+可以在所有身份仍精确匹配时重跑剩余阶段；已写 `COMMITTED` 的恢复不得重放。
 恢复完成后必须先启动 receipt 绑定的精确受管 n8n release，再验证 5678 唯一 listener、真实数据库
 open FD、`quick_check=ok`、两条固定 ID 工作流唯一且 active/published，以及 current/active/published
 version 与规范化摘要一致。只有这些检查和零活动证明重新通过后才可派生 fresh resume；恢复完成
@@ -571,8 +617,8 @@ waiting/running 必须为零。旧 stale attention 可以保留，但任何 dura
 路径放宽停机证明或授权。任一步失败都继续保持维护冻结态。
 
 持久化边界必须按故障点验证：`bootstrap.pending`、evidence/proof、SQLite 备份和已经实现的收据
-创建都要求文件内容落盘并同步父目录；normal/disaster transition、restore journal 与 maintenance
-lock 的完整 file → directory fsync 顺序仍以当前候选代码和测试结果为准。提交或生产发布前必须
+创建都要求文件内容落盘并同步父目录；normal/disaster/transition-rollback receipt、restore journal
+与 maintenance lock 的完整 file → directory fsync 顺序仍以当前候选代码和测试结果为准。提交或生产发布前必须
 通过对应 fsync 顺序、进程崩溃、主机重启与 journal 续跑测试，不能把“写入成功”或内存中的状态
 当成 durable 完成。
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -29,6 +29,8 @@ const CAPABILITY_SCHEMA = 'video-autoworker-n8n-workflow-import-capability/v1'
 const JOURNAL_SCHEMA = 'video-autoworker-n8n-workflow-upgrade-journal/v1'
 const ATTESTATION_SCHEMA = 'video-autoworker-n8n-workflow-transition-attestation/v1'
 const BOOTSTRAP_CLAIM_SCHEMA = 'video-autoworker-n8n-workflow-transition-bootstrap-claim/v1'
+const TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1'
+const TRANSITION_ROLLBACK_JOURNAL_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-journal/v1'
 const PACKAGE_SCHEMA = 'video-autoworker-n8n-managed-workflow-backup/v1'
 const LIVE_REPORT_SCHEMA = 'video-autoworker-n8n-workflow-compatibility/v2'
 const PROTOCOL = 'slot-v1-execution-owner-v1'
@@ -339,6 +341,8 @@ function parseArguments(argv) {
     'attest-transition': ['--intent', '--confirmation', '--journal-dir', '--live-report', '--verifier', '--output'],
     'verify-transition': ['--intent', '--confirmation', '--journal-dir', '--attestation'],
     'claim-bootstrap': ['--intent', '--confirmation', '--journal-dir', '--attestation', '--prepare-path', '--slot', '--release-id', '--release-root', '--manifest-sha256', '--output'],
+    'authorize-transition-rollback': ['--intent', '--confirmation', '--journal-dir', '--output'],
+    'verify-transition-rollback': ['--intent', '--confirmation', '--journal-dir', '--authorization'],
     'assert-offline': ['--intent', '--confirmation', '--journal-dir'],
     'assert-tooling': ['--intent', '--importer'],
   }
@@ -770,6 +774,22 @@ function validateCapabilityValue(value, intent, confirmation) {
     || value.expiresAt !== confirmation.value.expiresAt || value.issuedAt !== confirmation.value.confirmedAt) fail('import capability identity is invalid')
 }
 
+function validateClaimedCapability(journalDir, journal, intent, confirmation) {
+  if (journal.events.length === 0) return null
+  const consumed = readJsonFile(
+    join(journalDir, 'capability.consumed.json'), 'consumed import capability', 0o400,
+  )
+  validateCapabilityValue(consumed.value, intent, confirmation)
+  const claimed = journal.events[0]
+  exactKeys(claimed?.payload, ['actions', 'capability', 'claimedDatabase'], 'claimed workflow transition')
+  if (canonicalJson(claimed.payload.actions) !== canonicalJson(ACTIONS)
+    || canonicalJson(claimed.payload.claimedDatabase) !== canonicalJson(intent.value.database)
+    || canonicalJson(claimed.payload.capability) !== canonicalJson(consumed.reference)) {
+    fail('consumed import capability is not the claimed journal anchor')
+  }
+  return consumed
+}
+
 function context(values, allowExpired = true) {
   const intent = validateIntent(values['--intent'], true)
   const confirmation = validateConfirmation(values['--confirmation'], intent, allowExpired)
@@ -778,7 +798,71 @@ function context(values, allowExpired = true) {
   }
   const journal = readJournal(values['--journal-dir'], intent, confirmation)
   expectedNextState(journal.events)
-  return { intent, confirmation, journal }
+  const consumed = validateClaimedCapability(
+    values['--journal-dir'], journal, intent, confirmation,
+  )
+  return { intent, confirmation, journal, consumed }
+}
+
+function transitionRollbackAuthorizationPath(intent) {
+  return join(dirname(intent.reference.path), 'transition-rollback-authorization.receipt.json')
+}
+
+function transitionMaintenanceContext(values) {
+  const intent = validateIntent(values['--intent'], true)
+  const maintenanceLock = intent.value.runtime.runtimeSourceFiles
+    .find(item => item.name === 'scripts/n8n-maintenance-lock.mjs')?.file
+  if (!maintenanceLock) fail('transition rollback maintenance tooling is incomplete')
+  return {
+    lockPath: join(dirname(intent.value.database[0].path), '.n8n-maintenance.lock'),
+    maintenanceLock,
+  }
+}
+
+function invokeMaintenanceLock(tool, command, lockPath, nonce = null) {
+  const result = spawnSync(process.execPath, [
+    tool.path,
+    command,
+    lockPath,
+    'transition-rollback',
+    String(process.pid),
+    ...(nonce ? [nonce] : []),
+  ], { encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 30_000 })
+  if (result.error || result.signal || result.status !== 0) {
+    const detail = result.stderr.trim().split('\n').at(-1)
+    fail(`transition rollback maintenance lock ${command} failed${detail ? `: ${detail}` : ''}`)
+  }
+  return result.stdout.trim()
+}
+
+function withTransitionMaintenanceLock(values, callback) {
+  const maintenance = transitionMaintenanceContext(values)
+  const nonce = invokeMaintenanceLock(
+    maintenance.maintenanceLock, 'acquire', maintenance.lockPath,
+  )
+  if (!SHA256.test(nonce)) fail('transition rollback maintenance lock capability is invalid')
+  let output
+  let failure = null
+  try {
+    output = callback()
+  } catch (error) {
+    failure = error
+  }
+  try {
+    invokeMaintenanceLock(
+      maintenance.maintenanceLock, 'release', maintenance.lockPath, nonce,
+    )
+  } catch (error) {
+    if (!failure) failure = error
+  }
+  if (failure) throw failure
+  return output
+}
+
+function assertForwardTransitionOpen(intent) {
+  if (existsSync(transitionRollbackAuthorizationPath(intent))) {
+    fail('workflow transition selected the rollback branch and cannot continue forward')
+  }
 }
 
 function testFailpoint(name) {
@@ -822,12 +906,14 @@ function assertOfflineIdentity(intent) {
 
 function claimImport(values) {
   const resuming = existsSync(values['--journal-dir'])
-  const intent = validateIntent(values['--intent'], resuming)
-  const confirmation = validateConfirmation(values['--confirmation'], intent, resuming)
+  const consumedPath = join(values['--journal-dir'], 'capability.consumed.json')
+  const capabilityClaimed = resuming && existsSync(consumedPath)
+  const intent = validateIntent(values['--intent'], capabilityClaimed)
+  const confirmation = validateConfirmation(values['--confirmation'], intent, capabilityClaimed)
+  assertForwardTransitionOpen(intent)
   const offline = assertOfflineIdentity(intent)
   if (resuming) {
     let journal = readJournal(values['--journal-dir'], intent, confirmation)
-    const consumedPath = join(values['--journal-dir'], 'capability.consumed.json')
     if (!existsSync(consumedPath)) {
       if (journal.events.length !== 0) fail('upgrade journal has events without a consumed capability')
       const token = readToken(values['--confirmation-token-file'])
@@ -892,8 +978,8 @@ function claimImport(values) {
 
 function beginMutation(values) {
   const state = context(values)
+  assertForwardTransitionOpen(state.intent)
   const next = expectedNextState(state.journal.events)
-  if (next === 'MUTATING') validateConfirmation(values['--confirmation'], state.intent, false)
   const offline = assertOfflineIdentity(state.intent)
   if (next !== 'MUTATING') {
     if (state.journal.events.some(event => event.state === 'MUTATING') && next !== null && next !== 'COMMITTED') {
@@ -933,6 +1019,7 @@ function workflowDescriptor(id) {
 function workflowStatus(values) {
   workflowDescriptor(values['--id'])
   const state = context(values)
+  assertForwardTransitionOpen(state.intent)
   if (!state.journal.events.some(event => event.state === 'MUTATING')) fail('workflow mutation has not been claimed')
   const complete = state.journal.events.some(event => event.state === `WORKFLOW_${values['--id']}`)
   process.stdout.write(`${JSON.stringify({ id: values['--id'], complete })}\n`)
@@ -941,6 +1028,7 @@ function workflowStatus(values) {
 function verifyTarget(values) {
   workflowDescriptor(values['--id'])
   const state = context(values)
+  assertForwardTransitionOpen(state.intent)
   if (!state.journal.events.some(event => event.state === 'MUTATING')) fail('workflow mutation has not been claimed')
   const runtime = validateRuntime(state.intent.value.runtime.root.path, state.intent.value.target.commit)
   if (canonicalJson(runtime) !== canonicalJson(state.intent.value.runtime)) fail('target runtime changed during workflow import')
@@ -951,6 +1039,7 @@ function verifyTarget(values) {
 function recordWorkflow(values) {
   workflowDescriptor(values['--id'])
   const state = context(values)
+  assertForwardTransitionOpen(state.intent)
   const expected = expectedNextState(state.journal.events)
   const eventState = `WORKFLOW_${values['--id']}`
   if (state.journal.events.some(event => event.state === eventState)) {
@@ -996,6 +1085,7 @@ function validateLiveReport(pathname, intent) {
 
 function attestTransition(values) {
   let state = context(values)
+  assertForwardTransitionOpen(state.intent)
   let next = expectedNextState(state.journal.events)
   const wasResumed = next !== 'VERIFIED'
   if (!['VERIFIED', 'COMMITTED', null].includes(next)) fail('all managed workflow journal events are required before attestation')
@@ -1145,8 +1235,172 @@ function verifyTransition(values, quiet = false) {
   return { result, state, attestation: loaded, live }
 }
 
+function transitionRollbackContext(values) {
+  const state = context(values)
+  const last = state.journal.events.at(-1)
+  const mutating = state.journal.events.find(event => event.state === 'MUTATING')
+  if (!mutating || !last || last.state === 'COMMITTED') {
+    fail('transition rollback requires an uncommitted workflow mutation')
+  }
+  if (existsSync(join(dirname(state.intent.reference.path), 'bootstrap-claim.json'))) {
+    fail('a workflow transition claimed for bootstrap cannot select transition rollback')
+  }
+  const consumed = state.consumed
+  if (!consumed) fail('transition rollback is missing its consumed import capability')
+  const offline = assertOfflineIdentity(state.intent)
+  const runtime = validateRuntime(state.intent.value.runtime.root.path, state.intent.value.target.commit)
+  if (canonicalJson(runtime) !== canonicalJson(state.intent.value.runtime)) {
+    fail('target runtime changed before transition rollback authorization')
+  }
+  const runtimeFile = name => runtime.runtimeSourceFiles.find(item => item.name === name)?.file
+  const tooling = {
+    importer: runtimeFile('scripts/n8n-import-workflows.sh'),
+    maintenanceLock: runtimeFile('scripts/n8n-maintenance-lock.mjs'),
+    transitionAnchor: runtimeFile('scripts/n8n-workflow-transition-anchor.mjs'),
+    packageValidator: runtimeFile('scripts/n8n-backup-managed-workflows.mjs'),
+    restore: runtimeFile('scripts/n8n-restore-managed-workflows.sh'),
+  }
+  if (Object.values(tooling).some(value => !value)) fail('transition rollback tooling is incomplete')
+  const producer = fileSnapshot(realpathSync(process.argv[1]), 'transition rollback authorization producer')
+  if (producer.sha256 !== tooling.transitionAnchor.sha256) {
+    fail('transition rollback producer differs from the target runtime anchor')
+  }
+  const transitionDirectory = dirname(state.intent.reference.path)
+  const journal = {
+    schema: TRANSITION_ROLLBACK_JOURNAL_SCHEMA,
+    directory: join(transitionDirectory, 'transition-rollback-journal'),
+    claim: join(transitionDirectory, 'transition-rollback.CLAIMED.receipt.json'),
+    events: join(transitionDirectory, 'transition-rollback-journal', 'events'),
+    completed: join(transitionDirectory, 'transition-rollback-journal', 'COMMITTED.receipt.json'),
+  }
+  const target = {
+    database: {
+      path: state.intent.value.database[0].path,
+      dev: state.intent.value.database[0].dev,
+      ino: state.intent.value.database[0].ino,
+    },
+    runtimeRelease: runtime.root,
+    sourceCommit: state.intent.value.target.commit,
+    n8nVersion: runtime.n8nVersion,
+    tooling,
+  }
+  const authorization = {
+    kind: 'uncommitted-workflow-transition-rollback/v1',
+    upgradeId: state.intent.value.upgradeId,
+    intent: state.intent.reference,
+    confirmation: state.confirmation.reference,
+    consumedCapability: consumed.reference,
+    transitionJournal: safeDirectory(values['--journal-dir'], 'upgrade journal', 0o700),
+    transitionHeadSha256: state.journal.headSha256,
+    transitionState: last.state,
+    mutatingEvent: mutating.file,
+    lastEvent: last.file,
+    producer,
+  }
+  return { state, consumed, last, mutating, offline, runtime, journal, target, authorization }
+}
+
+function validateTransitionRollbackAuthorization(values, quiet = false) {
+  const recovery = transitionRollbackContext(values)
+  const expectedPath = transitionRollbackAuthorizationPath(recovery.state.intent)
+  if (values['--authorization'] !== expectedPath) {
+    fail('transition rollback authorization must use the fixed transition sidecar path')
+  }
+  const loaded = readJsonFile(values['--authorization'], 'transition rollback authorization', 0o400)
+  const receipt = loaded.value
+  exactKeys(receipt, [
+    'action', 'authorization', 'authorizationId', 'issuedAt', 'journal', 'nonce',
+    'packageManifestSha256', 'rollback', 'schema', 'scope', 'target', 'uid',
+  ], 'transition rollback authorization')
+  exactKeys(receipt.authorization, [
+    'confirmation', 'consumedCapability', 'intent', 'kind', 'lastEvent', 'mutatingEvent',
+    'producer', 'transitionHeadSha256', 'transitionJournal', 'transitionState', 'upgradeId',
+  ], 'transition rollback source authorization')
+  exactKeys(receipt.target, ['database', 'n8nVersion', 'runtimeRelease', 'sourceCommit', 'tooling'], 'transition rollback target')
+  exactKeys(receipt.target.database, ['dev', 'ino', 'path'], 'transition rollback database target')
+  exactKeys(receipt.target.tooling, [
+    'importer', 'maintenanceLock', 'packageValidator', 'restore', 'transitionAnchor',
+  ], 'transition rollback tooling')
+  exactKeys(receipt.journal, ['claim', 'completed', 'directory', 'events', 'schema'], 'transition rollback journal binding')
+  if (receipt.schema !== TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA
+    || receipt.action !== 'restore-managed-n8n-workflows'
+    || receipt.scope !== 'uncommitted-workflow-transition-rollback-only'
+    || receipt.uid !== process.getuid() || !UUID.test(receipt.authorizationId)
+    || !Number.isSafeInteger(receipt.issuedAt) || receipt.issuedAt <= 0
+    || receipt.issuedAt > nowSeconds() + 5 || !SHA256.test(receipt.nonce)
+    || receipt.packageManifestSha256 !== recovery.state.intent.value.rollback.manifest.sha256
+    || canonicalJson(receipt.rollback) !== canonicalJson(recovery.state.intent.value.rollback)
+    || canonicalJson(receipt.target) !== canonicalJson(recovery.target)
+    || canonicalJson(receipt.authorization) !== canonicalJson(recovery.authorization)
+    || canonicalJson(receipt.journal) !== canonicalJson(recovery.journal)) {
+    fail('transition rollback authorization identity changed')
+  }
+  const result = {
+    schema: TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA,
+    authorizationId: receipt.authorizationId,
+    authorizationSha256: loaded.reference.sha256,
+    transitionHeadSha256: receipt.authorization.transitionHeadSha256,
+    packageManifestSha256: receipt.packageManifestSha256,
+    journal: receipt.journal,
+    offline: recovery.offline,
+  }
+  if (!quiet) process.stdout.write(`${JSON.stringify(result)}\n`)
+  return { ...recovery, receipt, loaded, result }
+}
+
+function authorizeTransitionRollback(values) {
+  return withTransitionMaintenanceLock(values, () => authorizeTransitionRollbackLocked(values))
+}
+
+function authorizeTransitionRollbackLocked(values) {
+  const expectedOutput = join(dirname(values['--intent']), 'transition-rollback-authorization.receipt.json')
+  if (values['--output'] !== expectedOutput) {
+    fail('transition rollback authorization must use the fixed transition sidecar path')
+  }
+  if (existsSync(values['--output'])) {
+    const verified = validateTransitionRollbackAuthorization({
+      '--intent': values['--intent'],
+      '--confirmation': values['--confirmation'],
+      '--journal-dir': values['--journal-dir'],
+      '--authorization': values['--output'],
+    }, true)
+    process.stdout.write(`${JSON.stringify({ ...verified.result, resumed: true })}\n`)
+    return
+  }
+  const recovery = transitionRollbackContext(values)
+  if (values['--output'] !== transitionRollbackAuthorizationPath(recovery.state.intent)) {
+    fail('transition rollback authorization must use the fixed transition sidecar path')
+  }
+  const receipt = {
+    schema: TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA,
+    authorizationId: randomUUID(),
+    action: 'restore-managed-n8n-workflows',
+    scope: 'uncommitted-workflow-transition-rollback-only',
+    issuedAt: nowSeconds(),
+    uid: process.getuid(),
+    nonce: randomBytes(32).toString('hex'),
+    packageManifestSha256: recovery.state.intent.value.rollback.manifest.sha256,
+    rollback: recovery.state.intent.value.rollback,
+    target: recovery.target,
+    authorization: recovery.authorization,
+    journal: recovery.journal,
+  }
+  const written = writeImmutable(values['--output'], receipt)
+  process.stdout.write(`${JSON.stringify({
+    schema: TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA,
+    authorizationId: receipt.authorizationId,
+    authorizationSha256: written.reference.sha256,
+    transitionHeadSha256: receipt.authorization.transitionHeadSha256,
+    packageManifestSha256: receipt.packageManifestSha256,
+    journal: receipt.journal,
+    offline: recovery.offline,
+    resumed: false,
+  })}\n`)
+}
+
 function claimBootstrap(values) {
   const transition = verifyTransition(values, true)
+  assertForwardTransitionOpen(transition.state.intent)
   if (!['blue', 'green'].includes(values['--slot'])) fail('--slot must be blue or green')
   if (values['--release-id'] !== `${transition.state.intent.value.target.commit}-runtime`) {
     fail('--release-id must match the transition target commit')
@@ -1233,6 +1487,8 @@ try {
   else if (command === 'attest-transition') attestTransition(values)
   else if (command === 'verify-transition') verifyTransition(values)
   else if (command === 'claim-bootstrap') claimBootstrap(values)
+  else if (command === 'authorize-transition-rollback') authorizeTransitionRollback(values)
+  else if (command === 'verify-transition-rollback') validateTransitionRollbackAuthorization(values)
   else if (command === 'assert-offline') assertOfflineCommand(values)
   else assertTooling(values)
 } catch (error) {

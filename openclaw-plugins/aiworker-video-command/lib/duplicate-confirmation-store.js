@@ -8,6 +8,8 @@ import {
 } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 
+import { isValidDirectorWork } from './director-work-policy.js'
+
 export const DUPLICATE_CONFIRMATION_TEXT = '确认重新分析'
 
 const DEFAULT_TTL_MS = 15 * 60 * 1_000
@@ -63,6 +65,9 @@ export function createDuplicateConfirmationStore({
         && typeof operation.trustedExistingMaterialId === 'string'
         && operation.trustedExistingMaterialId === operation.trustedExistingMaterialId.trim()
         && MATERIAL_ID_PATTERN.test(operation.trustedExistingMaterialId))
+    const directorWorkValid = !Object.hasOwn(operation || {}, 'directorWork')
+      || (operation.kind === 'task'
+        && isValidDirectorWork(operation.directorWork))
     return operation
       && ['task', 'batch'].includes(operation.kind)
       && typeof operation.id === 'string'
@@ -71,6 +76,7 @@ export function createDuplicateConfirmationStore({
       && operation.path.length > 0
       && legacyMaterialIdAbsent
       && trustedExistingMaterialIdValid
+      && directorWorkValid
   }
 
   function load() {

@@ -230,10 +230,20 @@ test('same canonical video path requires confirmation before a new single task s
       ...common,
       taskId: 'video-command-first',
       idempotencyKey: 'video-command-first',
+      directorWork: '地球之极',
       trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
     })
     assert.equal(first.duplicate, false)
     assert.equal(first.state.items[0].trustedExistingMaterialId, 'MATERIAL-EXISTING-001')
+    assert.equal(first.state.directorWork, '地球之极')
+
+    await assert.rejects(createSingleVideoState({
+      ...common,
+      taskId: 'video-command-first',
+      idempotencyKey: 'video-command-first',
+      directorWork: '另一作品',
+      trustedExistingMaterialId: 'MATERIAL-EXISTING-001',
+    }), /同一任务 ID 已绑定其他视频、提示词或执行配置/u)
 
     const blocked = await createSingleVideoState({
       ...common,

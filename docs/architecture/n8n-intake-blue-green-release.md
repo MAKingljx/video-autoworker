@@ -108,12 +108,24 @@ blue/green 进程只有在受限 router state 中同时满足“当前 active sl
 释放。新 active slot 有界等待并成为合法 leader。`unknown`、`unavailable`、过期 leader lease
 或 router generation 不一致都会使发布失败关闭。
 
+`release-readiness` 还返回当前 release 编译时的导演证据投影契约摘要。摘要一致时，已有任务
+可按原 slot 回调并由新 leader 使用同一契约继续投影；摘要不一致时，普通 switch/rollback
+无条件拒绝，不能把“页面热更新无需等待”误扩展成投影契约迁移。forward switch 还会把
+HEAD 绑定的静态 verifier 摘要与 target runtime 摘要直接对账。路由切换后按预提交时封存的
+release/readiness/router 证据复验；自动回滚历史 source 不再调用只接受当前 HEAD 的 target
+verifier。旧槽 callback 冻结静默后仍复查不兼容 pending，失败时拒绝退役。
+延迟退役使用受限 ancestor 模式：active release 必须仍是干净 `main` HEAD 的祖先，才能避免
+docs-only 审计提交把已验证 release 永久挡在退役门外；该模式不接受分叉 release，也不放宽
+payload、投影闭包、standalone bundle 或 outbox 校验。
+
 ## 数据库滚动兼容门
 
 `release-readiness` 不相信代码里的迁移常量，而是回读当前进程实际打开的 SQLite：
 
-- `schema_migrations` 中必须存在 052 至 056；
-- 四组新增表、关键列、类型、主键和非空约束必须匹配；
+- `schema_migrations` 中必须存在 052 至 057；
+- 七张新增表的关键列、类型、主键、非空约束和默认值必须匹配；导演证据 outbox
+  还必须精确保留幂等键唯一性、父任务级联外键，以及作品查询、结果和投影契约摘要的
+  字段 CHECK 约束；
 - 必需索引的列顺序和升降序必须匹配；
 - source/target 的 schema epoch、闸门 revision 和 router generation 必须一致。
 
@@ -310,14 +322,35 @@ legacy 3017 后则不得自动把共享数据库或 n8n 工作流猜测性回滚
 ## OpenClaw 兼容组
 
 入口暂停协议要求 3017、`aiworker-task-flow` 和 `aiworker-video-command` 同时理解 423、稳定任务
-身份和恢复语义。插件候选版本为 `0.5.13`；task-flow 没有独立版本号，以唯一安装入口和目标
+身份和恢复语义。当前兼容候选插件版本为 `0.5.14`；task-flow 没有独立版本号，以唯一安装入口和目标
 Git 提交校验实际文件。
 
 蓝绿脚本不自动安装或重启 OpenClaw。生产变更单必须显式列出 plugin、Skill、3017 的兼容矩阵
 与分项回滚顺序，不能把 release 内附带源码误当作 Gateway 已加载的新载荷。
 
+video-command、task-flow 与 director-brain 三个共享安装器统一占用 blue/green 的
+`.deployment.lock`；入口 `drain`、`resume` 以及新 `directorWork` 从作品解析到任务准入也必须先以
+同一原子 `mkdir` 协议有限尝试取得该锁。已有幂等任务直接复用持久绑定，不再次查询飞书。安装器从
+gate 验证开始，经实际替换、验收和失败补偿结束前始终持锁，因此不能在一次 `exists` 检查后绕过
+锁变更入口或在作品解析与任务持久化之间切换共享树。常规路径必须显式传入物理规范的
+`AIWORKER_BG_LIVE_DB_PATH`、
+`AIWORKER_BG_N8N_DB_PATH` 和现存、物理、owner-private 的 `AIWORKER_VIDEO_BATCH_DIR`，并在实际替换前
+验证入口暂停、n8n active execution 为零、活跃媒体节点为零、正式 waiting/running 为零和导演
+outbox pending 为零；durable 根目录缺失不能按空队列处理。无 durable 归属且超过 24 小时的普通
+历史任务只计 attention，有 durable 状态仍阻断；旧媒体节点即使超龄也单独阻断。
+
+首次主库尚无 052/057 表时，只有同一未过期 bootstrap attempt 的 guard、evidence、proof、两库
+身份和目标提交实时复核全部通过才可进入 legacy 安装路径。fresh `PREPARED` 可用于先安装三项共享
+组件，避免把安装与 Gateway restart 挤进 `CURRENT_CONFIRMED` 的 120 秒窗口；最终 confirm/apply
+仍在安装结束后执行。`CURRENT_CONFIRMED`、`SHUTDOWN_REQUESTED` 只用于同一 attempt 的幂等恢复。
+三个安装器都会把当前源码提交和 `<commit>-runtime` 传给 gate，A attempt 不能安装 B release；缺表
+本身不能作为放行条件。
+
 ## 当前状态
 
-以上均为本地候选，尚未部署生产。首次迁移硬门仍有一个活跃媒体节点，因此生产 3017 继续运行
-旧 release；当前只允许测试、Git 交付和只读复核。新增 bootstrap 硬门会拒绝旧生产工作流、
-未发布工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走 legacy 3017。
+遗留媒体记录已按授权完成四字段 CAS，当前活跃媒体节点、n8n active execution 和正式队列
+waiting/running 均为零；video lane 仍保持 disabled、unloaded、worker-free。远端 OpenClaw 已可使用
+导演脑 `0.3.0` 的只读与候选入口，但生产 3017 仍运行 `542eebd-runtime`。当前 `0.5.14`、迁移
+`057`、导演脑 `0.3.1` 和自动投影链仍是待切换候选；首次 n8n 离线迁移、blue/green bootstrap、
+真实视频投影和恢复 lane 均须以当次运行核验为准。bootstrap 硬门会拒绝旧生产工作流、未发布
+工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走 legacy 3017。

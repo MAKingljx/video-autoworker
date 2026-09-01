@@ -164,6 +164,9 @@ required_files=(
   "$STANDALONE_NEXT_DIR/BUILD_ID"
   "$STANDALONE_DIR/runtime/schema.sql"
   "$STANDALONE_DIR/package.json"
+  "$STANDALONE_DIR/scripts/verify-shared-runtime-install-gate.mjs"
+  "$STANDALONE_DIR/scripts/lib/runtime-safe-offline-queue.mjs"
+  "$STANDALONE_DIR/scripts/lib/shared-deployment-lock.sh"
 )
 required_directories=(
   "$STANDALONE_STATIC_DIR"
