@@ -11,7 +11,9 @@ concurrency:
 
 jobs:
   quality-gate:
-    runs-on: ubuntu-latest
+    # Deployment and installer tests exercise launchd, plutil and BSD stat,
+    # matching the Mac Studio production target.
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
