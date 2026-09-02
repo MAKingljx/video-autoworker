@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, FormEvent } from 'react'
 import Image from 'next/image'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
+import { LanguageSwitcherSelect } from '@/components/ui/language-switcher'
 
 interface GoogleCredentialResponse {
   credential?: string
@@ -192,6 +193,9 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
+      <div className="fixed right-4 top-4">
+        <LanguageSwitcherSelect />
+      </div>
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center mb-8">
           <div className="w-12 h-12 rounded-lg overflow-hidden bg-background border border-border/50 flex items-center justify-center mb-3">

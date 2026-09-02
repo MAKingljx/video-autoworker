@@ -37,7 +37,7 @@ export default getRequestConfig(async () => {
 })
 
 function readLockedLocale(): Locale | null {
-  const raw = String(process.env.MC_LOCK_LOCALE || process.env.NEXT_PUBLIC_MC_LOCK_LOCALE || 'zh')
+  const raw = String(process.env.MC_LOCK_LOCALE || process.env.NEXT_PUBLIC_MC_LOCK_LOCALE || 'auto')
     .trim()
     .toLowerCase()
   if (!raw || raw === 'auto') return null

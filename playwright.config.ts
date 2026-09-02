@@ -12,6 +12,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:3005',
+    locale: 'en-US',
     trace: 'retain-on-failure'
   },
   projects: [
