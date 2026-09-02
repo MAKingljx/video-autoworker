@@ -327,6 +327,7 @@ if(child.status!==0){process.stderr.write(child.stderr||'consume failed\\n');pro
     runRoot,
     batchRoot,
     deploymentRun,
+    eventLog,
     state,
     writeState,
     readState,
@@ -539,12 +540,53 @@ describe('legacy media orphan post-CAS guardian retire', () => {
     const failed = fixture.retire(prepared, { [checkpoint]: '1' })
     expect(failed.status).not.toBe(0)
     expect(await waitForExit(holder)).toEqual({ code: 0, signal: null })
-
-    expect(parseOutput(fixture.retire(prepared)).mode).toBe('retired')
+    const retriesBeforeRecovery = readFileSync(fixture.eventLog, 'utf8')
+      .split('\n')
+      .filter(event => event === 'guardian:refresh-retry')
+      .length
+    const retryEnvironment = checkpoint === 'AIWORKER_TEST_WORKER_LAUNCH_AUTHORIZATION_KILL_BEFORE_CLAIM'
+      ? { AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_MTIME_STALLS: '1' }
+      : {}
+    expect(parseOutput(fixture.retire(prepared, retryEnvironment)).mode).toBe('retired')
+    if (checkpoint === 'AIWORKER_TEST_WORKER_LAUNCH_AUTHORIZATION_KILL_BEFORE_CLAIM') {
+      const retriesAfterRecovery = readFileSync(fixture.eventLog, 'utf8')
+        .split('\n')
+        .filter(event => event === 'guardian:refresh-retry')
+        .length
+      expect(retriesAfterRecovery - retriesBeforeRecovery).toBe(1)
+    }
     expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(false)
     expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.authorization.pending'))).toBe(false)
     expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.authorization'))).toBe(false)
     expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.authorization.claim'))).toBe(false)
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(false)
+  }, 30_000)
+
+  it('fails closed after the bounded guardian mtime refresh retries are exhausted', async () => {
+    const fixture = createFixture()
+    const { holder, prepared } = await fixture.startHeld()
+    const failed = fixture.retire(prepared, {
+      AIWORKER_TEST_WORKER_LAUNCH_AUTHORIZATION_KILL_BEFORE_CLAIM: '1',
+    })
+    expect(failed.status).not.toBe(0)
+    expect(await waitForExit(holder)).toEqual({ code: 0, signal: null })
+
+    const countRefreshRetries = () => readFileSync(fixture.eventLog, 'utf8')
+      .split('\n')
+      .filter(event => event === 'guardian:refresh-retry')
+      .length
+    const retriesBeforeStall = countRefreshRetries()
+    const stalled = fixture.retire(prepared, {
+      AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_MTIME_STALLS: '2',
+    })
+    expect(stalled.status).not.toBe(0)
+    expect(stalled.stderr).toContain('mtime refresh was not durable and monotonic')
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(true)
+    expect(countRefreshRetries() - retriesBeforeStall).toBe(1)
+
+    expect(parseOutput(fixture.retire(prepared)).mode).toBe('retired')
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(false)
     expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(false)
   }, 30_000)
 

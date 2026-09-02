@@ -80,6 +80,8 @@ const WAIT_MILLISECONDS = TEST_MODE ? 5 : 200
 const HANDOFF_WAIT_ATTEMPTS = TEST_MODE ? 200 : 50
 const HANDOFF_WAIT_MILLISECONDS = TEST_MODE ? 10 : 200
 const GUARDIAN_REFRESH_MILLISECONDS = TEST_MODE ? 250 : 5_000
+const GUARDIAN_REFRESH_ATTEMPTS = 2
+const GUARDIAN_REFRESH_RETRY_MILLISECONDS = 2
 const FINAL_READINESS_VERIFIER = join(REPOSITORY_ROOT, 'scripts', 'verify-legacy-retire-final-readiness.mjs')
 
 function fail(message) {
@@ -1659,33 +1661,76 @@ function openLaunchGuardian(batchRoot, transactionRoot, plan, takeover = false) 
     )
     if (!sameRecord(current, owner)) fail('video worker launch guardian owner record changed')
   }
+  let remainingTestMtimeStalls = TEST_MODE
+    && /^(?:0|[1-9][0-9]*)$/u.test(process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_MTIME_STALLS || '')
+    ? Number(process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_MTIME_STALLS)
+    : 0
+  const refreshIdentityIsStable = (before, observed) => {
+    const current = optionalEntry(pathname)
+    return current?.isFile() === true && !current.isSymbolicLink()
+      && before.dev.toString() === marker.dev && before.ino.toString() === marker.ino
+      && Number(before.uid) === marker.uid && Number(before.mode & 0o7777n) === marker.mode
+      && before.nlink === 1n && before.size === BigInt(Buffer.byteLength(immutableSource))
+      && observed.dev === before.dev && observed.ino === before.ino
+      && observed.uid === before.uid && observed.mode === before.mode
+      && observed.nlink === before.nlink && observed.size === before.size
+      && current.dev === observed.dev && current.ino === observed.ino
+      && current.uid === observed.uid && current.mode === observed.mode
+      && current.nlink === observed.nlink && current.size === observed.size
+      && readSmallFileDescriptor(descriptor, observed.size, 'video worker launch guardian') === immutableSource
+  }
   const refresh = () => {
     const before = fstatSync(descriptor, { bigint: true })
-    const current = optionalEntry(pathname)
-    if (!current || current.dev !== before.dev || current.ino !== before.ino
-      || before.dev.toString() !== marker.dev || before.ino.toString() !== marker.ino
-      || readSmallFileDescriptor(descriptor, before.size, 'video worker launch guardian') !== immutableSource) {
+    if (!refreshIdentityIsStable(before, before)) {
       fail('video worker launch guardian path or body changed before refresh')
     }
     verifyOwner()
-    const nextMtimeMilliseconds = Math.max(
-      Date.now(), Number(before.mtimeNs / 1_000_000n) + 1,
-    )
-    futimesSync(
-      descriptor,
-      Number(before.atimeNs) / 1_000_000_000,
-      nextMtimeMilliseconds / 1_000,
-    )
-    fsyncSync(descriptor)
-    const after = fstatSync(descriptor, { bigint: true })
-    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
-      || after.mtimeNs <= before.mtimeNs
-      || readSmallFileDescriptor(descriptor, after.size, 'video worker launch guardian') !== immutableSource) {
-      fail('video worker launch guardian mtime refresh was not durable and monotonic')
+    // Darwin may quantize back-to-back futimes calls to the current filesystem
+    // tick. Retry only that read-back condition; every identity and owner
+    // invariant is revalidated before the next bounded attempt.
+    for (let attempt = 0; attempt < GUARDIAN_REFRESH_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        const retryBefore = fstatSync(descriptor, { bigint: true })
+        if (!refreshIdentityIsStable(before, retryBefore)) {
+          fail('video worker launch guardian path or body changed before refresh retry')
+        }
+        verifyOwner()
+      }
+      const minimumMtimeMilliseconds = Number(before.mtimeNs / 1_000_000n) + attempt + 1
+      const nextMtimeMilliseconds = Math.max(
+        Date.now(), minimumMtimeMilliseconds,
+      )
+      if (remainingTestMtimeStalls > 0) {
+        remainingTestMtimeStalls -= 1
+      } else {
+        futimesSync(
+          descriptor,
+          Number(before.atimeNs) / 1_000_000_000,
+          nextMtimeMilliseconds / 1_000,
+        )
+      }
+      fsyncSync(descriptor)
+      const after = fstatSync(descriptor, { bigint: true })
+      if (!refreshIdentityIsStable(before, after)) {
+        fail('video worker launch guardian path or body changed during refresh')
+      }
+      verifyOwner()
+      if (after.mtimeNs > before.mtimeNs) {
+        recordTestEvent('guardian:refresh')
+        return after.mtimeNs
+      }
+      if (attempt === GUARDIAN_REFRESH_ATTEMPTS - 1) break
+      recordTestEvent('guardian:refresh-retry')
+      const targetMilliseconds = Number(before.mtimeNs / 1_000_000n) + 2
+      Atomics.wait(
+        new Int32Array(new SharedArrayBuffer(4)), 0, 0,
+        Math.max(0, Math.min(
+          GUARDIAN_REFRESH_RETRY_MILLISECONDS,
+          targetMilliseconds - Date.now(),
+        )),
+      )
     }
-    verifyOwner()
-    recordTestEvent('guardian:refresh')
-    return after.mtimeNs
+    fail('video worker launch guardian mtime refresh was not durable and monotonic')
   }
   refresh()
   const timer = setInterval(() => {

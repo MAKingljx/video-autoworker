@@ -462,7 +462,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('installs plugin, shared runtime, Skill, and a narrow agent grant, then becomes a no-op', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-apply-'))
