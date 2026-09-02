@@ -81,8 +81,8 @@ describe('legacy 3017 standalone switch bridge', () => {
     expect(script).toContain('runtime contract changed: $path')
     expect(script).toContain('$label cwd does not match its release')
     expect(script).toContain('$label does not hold the expected database FD')
-    expect(script).toContain('legacy PID marker does not match the listener')
-    expect(script).toContain('RUNNING_COMMIT does not identify the legacy release')
+    expect(script).toContain('source PID marker does not match the listener')
+    expect(script).toContain('RUNNING_COMMIT does not identify the live source release')
     expect(script).toContain('MC_OPENCLAW_PROFILE_TARGET="${MC_OPENCLAW_PROFILE_TARGET:-local}"')
     expect(script).toContain('MC_MATERIALS_REMOTE_PYTHON="${MC_MATERIALS_REMOTE_PYTHON:-/usr/bin/python3}"')
     expect(script).toContain('/api/status?action=health')
@@ -93,8 +93,8 @@ describe('legacy 3017 standalone switch bridge', () => {
   })
 
   it('preflights both rollback and candidate releases before stopping live 3017', () => {
-    const rollbackProbe = script.indexOf('probe_release "legacy-rollback"')
-    const candidateProbe = script.indexOf('probe_release "candidate"')
+    const rollbackProbe = script.indexOf('probe_release "$SOURCE_PROBE_LABEL"')
+    const candidateProbe = script.indexOf('probe_release "$TARGET_PROBE_LABEL"')
     const liveSwitch = script.lastIndexOf('perform_live_switch')
     expect(rollbackProbe).toBeGreaterThan(0)
     expect(candidateProbe).toBeGreaterThan(rollbackProbe)
@@ -311,13 +311,92 @@ trap - EXIT INT TERM HUP
       'verify:candidate runtime:202',
       'protected',
       'markers:0000000000000000000000000000000000000002:202',
-      'identity:committed candidate runtime:202',
+      'identity:committed target runtime:202',
       'protected',
     ])
     expect(markers).toEqual({
       commit: '0000000000000000000000000000000000000002',
       portPid: '202',
       genericPid: '202',
+    })
+  })
+
+  it('keeps fixed CLI release meanings while mapping rollback to the reverse direction', () => {
+    const source = `
+source ${JSON.stringify(scriptPath)}
+OLD_RELEASE_ROOT=/old
+OLD_COMMIT=0000000000000000000000000000000000000001
+NEW_RELEASE_ROOT=/new
+NEW_COMMIT=0000000000000000000000000000000000000002
+ROLLBACK=1
+configure_directional_roles
+printf '%s\n' "$SWITCH_DIRECTION" "$OLD_RELEASE_ROOT" "$OLD_COMMIT" "$NEW_RELEASE_ROOT" "$NEW_COMMIT" "$SOURCE_PROBE_LABEL" "$TARGET_PROBE_LABEL"
+`
+    const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+    expect(result.status).toBe(0)
+    expect(result.stdout.trim().split('\n')).toEqual([
+      'rollback',
+      '/new',
+      '0000000000000000000000000000000000000002',
+      '/old',
+      '0000000000000000000000000000000000000001',
+      'current-ui',
+      'legacy-rollback',
+    ])
+  })
+
+  it('rolls a verified current UI runtime back with one coherent old-release marker bundle', () => {
+    const { result, trace, markers } = runFailureScenario(`
+ROLLBACK=1
+configure_directional_roles
+trap on_exit EXIT
+trap on_signal INT TERM HUP
+perform_live_switch
+trap - EXIT INT TERM HUP
+`)
+    expect(result.status).toBe(0)
+    expect(trace).toEqual([
+      'stop:current UI runtime:101',
+      'start:/old:3017:/state/live.db:/secrets/live-tokens.json',
+      'verify:legacy rollback runtime:202',
+      'protected',
+      'markers:0000000000000000000000000000000000000001:202',
+      'identity:committed target runtime:202',
+      'protected',
+    ])
+    expect(markers).toEqual({
+      commit: '0000000000000000000000000000000000000001',
+      portPid: '202',
+      genericPid: '202',
+    })
+  })
+
+  it('restores the current UI source if the explicit rollback target fails verification', () => {
+    const { result, trace, markers } = runFailureScenario(`
+ROLLBACK=1
+configure_directional_roles
+wait_and_verify_runtime() {
+  printf 'verify:%s:%s\n' "$1" "$2" >> "$trace_file"
+  [[ "$2" != 202 ]]
+}
+trap on_exit EXIT
+perform_live_switch
+`)
+    expect(result.status).not.toBe(0)
+    expect(trace).toEqual([
+      'stop:current UI runtime:101',
+      'start:/old:3017:/state/live.db:/secrets/live-tokens.json',
+      'verify:legacy rollback runtime:202',
+      'stop:failed legacy rollback runtime:202',
+      'start:/new:3017:/state/live.db:/secrets/live-tokens.json',
+      'verify:restored current UI runtime:303',
+      'markers:0000000000000000000000000000000000000002:303',
+      'protected',
+    ])
+    expect(markers).toEqual({
+      commit: '0000000000000000000000000000000000000002',
+      portPid: '303',
+      genericPid: '303',
     })
   })
 
@@ -813,6 +892,104 @@ rollback_live
     }
   })
 
+  it('runs explicit rollback through the real CLI parser and main as preflight only', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-rollback-main-test-'))
+    const tracePath = resolve(directory, 'trace.log')
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(realpathSync(directory), 'mission-control-tokens.json')
+    const probeDirectory = resolve(directory, 'probe')
+    const oldRelease = resolve(directory, 'old')
+    const newRelease = resolve(directory, 'new')
+    try {
+      mkdirSync(probeDirectory)
+      mkdirSync(oldRelease)
+      mkdirSync(newRelease)
+      writeFileSync(liveDatabase, '')
+      writeFileSync(resolve(probeDirectory, 'mission-control.db'), '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+trace_file=${JSON.stringify(tracePath)}
+assert_release() { printf 'release:%s:%s:%s\\n' "$1" "$2" "$3" >> "$trace_file"; }
+assert_ui_only_diff() { printf 'ui-diff\\n' >> "$trace_file"; }
+prepare_live_tokens_contract() { live_tokens_identity=fixture; }
+assert_live_tokens_unchanged() { return 0; }
+assert_live_source_identity() { printf 'identity:%s:%s\\n' "$OLD_RELEASE_ROOT" "$OLD_COMMIT" >> "$trace_file"; }
+capture_protected_listeners() { printf 'protected'; }
+assert_protected_unchanged() { printf 'protected-unchanged\\n' >> "$trace_file"; }
+probe_release() { printf 'probe:%s:%s\\n' "$1" "$2" >> "$trace_file"; }
+perform_live_switch() { printf 'LIVE-SWITCH\\n' >> "$trace_file"; }
+main --rollback \\
+  --old-release-root ${JSON.stringify(oldRelease)} \\
+  --old-commit 542eebdd871f0d960d972e879310bec7a3d15cca \\
+  --new-release-root ${JSON.stringify(newRelease)} \\
+  --new-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
+  --live-db ${JSON.stringify(liveDatabase)} \\
+  --live-tokens ${JSON.stringify(liveTokens)} \\
+  --probe-data-dir ${JSON.stringify(probeDirectory)} \\
+  --source-app-dir ${JSON.stringify(directory)} \\
+  --runtime-dir ${JSON.stringify(directory)} \\
+  --node-bin ${JSON.stringify(process.execPath)}
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status, result.stderr).toBe(0)
+      expect(readFileSync(tracePath, 'utf8').trim().split('\n')).toEqual([
+        `release:legacy release:${oldRelease}:542eebdd871f0d960d972e879310bec7a3d15cca`,
+        `release:candidate release:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        'ui-diff',
+        `identity:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        `probe:current-ui:${newRelease}`,
+        `probe:legacy-rollback:${oldRelease}`,
+        `identity:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        'protected-unchanged',
+      ])
+      expect(readFileSync(tracePath, 'utf8')).not.toContain('LIVE-SWITCH')
+      expect(result.stdout).toContain('3017 rollback preflight passed')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects exchanged fixed release commits before configuring rollback direction', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-rollback-swapped-test-'))
+    const tracePath = resolve(directory, 'trace.log')
+    try {
+      writeFileSync(tracePath, '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+trace_file=${JSON.stringify(tracePath)}
+configure_directional_roles() { printf 'CONFIGURED\\n' >> "$trace_file"; }
+assert_release() { printf 'RELEASE\\n' >> "$trace_file"; }
+main --rollback \\
+  --old-release-root ${JSON.stringify(resolve(directory, 'new'))} \\
+  --old-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
+  --new-release-root ${JSON.stringify(resolve(directory, 'old'))} \\
+  --new-commit 542eebdd871f0d960d972e879310bec7a3d15cca \\
+  --live-db ${JSON.stringify(resolve(directory, 'mission-control.db'))} \\
+  --live-tokens ${JSON.stringify(resolve(directory, 'mission-control-tokens.json'))} \\
+  --probe-data-dir ${JSON.stringify(resolve(directory, 'probe'))} \\
+  --source-app-dir ${JSON.stringify(directory)} \\
+  --runtime-dir ${JSON.stringify(directory)} \\
+  --node-bin ${JSON.stringify(process.execPath)}
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('this bridge accepts only the verified legacy release')
+      expect(readFileSync(tracePath, 'utf8')).toBe('')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['--rollback', '--apply'])('rejects a duplicate %s mode flag', (flag) => {
+    const source = `
+source ${JSON.stringify(scriptPath)}
+parse_args ${flag} ${flag}
+`
+    const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain(`duplicate ${flag}`)
+  })
+
   it('does not enter the live stop path in preflight-only mode', () => {
     const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-preflight-test-'))
     const tracePath = resolve(directory, 'trace.log')
@@ -853,7 +1030,7 @@ live_tokens_state() {
   [[ ! -e "$LIVE_TOKENS_PATH" && ! -L "$LIVE_TOKENS_PATH" ]] || return 1
   printf 'missing:fixture-parent\\n'
 }
-assert_live_legacy_identity() { printf 'live-identity\\n' >> "$trace_file"; }
+assert_live_source_identity() { printf 'live-identity\\n' >> "$trace_file"; }
 capture_protected_listeners() { printf 'protected'; }
 assert_protected_unchanged() { printf 'protected-unchanged\\n' >> "$trace_file"; }
 probe_release() { printf 'probe:%s\\n' "$1" >> "$trace_file"; }

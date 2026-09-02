@@ -677,7 +677,9 @@ describe('managed legacy media orphan reconciliation', () => {
       const output = prepare(fixture)
       const finalDirectory = dirname(output.prepareManifest)
       const pendingDirectory = join(fixture.backupRoot, `.pending-${basename(finalDirectory)}`)
+      chmodSync(finalDirectory, 0o700)
       renameSync(finalDirectory, pendingDirectory)
+      chmodSync(pendingDirectory, 0o500)
       const result = apply(fixture, {
         ...output,
         prepareManifest: join(pendingDirectory, 'prepare-manifest.json'),

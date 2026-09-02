@@ -10,6 +10,7 @@ umask 077
 PORT=3017
 PROBE_PORT=3018
 APPLY=0
+ROLLBACK=0
 EXPECTED_OLD_COMMIT=542eebdd871f0d960d972e879310bec7a3d15cca
 EXPECTED_NEW_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138
 OLD_RELEASE_ROOT=""
@@ -37,10 +38,18 @@ protected_before=""
 live_tokens_identity=""
 live_database_identity=""
 LAST_LAUNCHED_PID=""
+SWITCH_DIRECTION=forward
+SOURCE_PROBE_LABEL=legacy-rollback
+TARGET_PROBE_LABEL=candidate
+SOURCE_RUNTIME_LABEL="legacy runtime"
+TARGET_RUNTIME_LABEL="candidate runtime"
+FAILED_TARGET_LABEL="failed candidate runtime"
+RESTORED_SOURCE_LABEL="restored legacy runtime"
+PARTIAL_SOURCE_LABEL="partially stopping legacy runtime"
 
 usage() {
   cat <<'EOF'
-Usage: switch-legacy-standalone-3017.sh [--apply] \
+Usage: switch-legacy-standalone-3017.sh [--rollback] [--apply] \
   --old-release-root ABS --old-commit FULL_SHA \
   --new-release-root ABS --new-commit FULL_SHA \
   --live-db ABS --live-tokens ABS --probe-data-dir ABS \
@@ -49,6 +58,9 @@ Usage: switch-legacy-standalone-3017.sh [--apply] \
 Without --apply the script performs the full identity, rollback-start and
 candidate-start preflight, then exits without stopping the live 3017 process.
 The probe directory must already contain a non-production mission-control.db.
+Use --rollback without --apply to preflight d3ca02e -> 542eebd, then repeat
+the exact command with --apply to perform that rollback. The old/new arguments
+always retain their fixed release meanings and must not be exchanged.
 EOF
 }
 
@@ -323,27 +335,27 @@ assert_runtime_identity() {
     || { fail "$label does not hold the expected database FD"; return 1; }
 }
 
-assert_live_legacy_identity() {
+assert_live_source_identity() {
   local recorded
   old_pid="$(single_listener_pid "$PORT")" || return 1
-  assert_runtime_identity "legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
+  assert_runtime_identity "$SOURCE_RUNTIME_LABEL" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
     || return 1
   old_process_start="$(process_start_identity "$old_pid")" \
-    || { fail "legacy process start identity cannot be read"; return 1; }
+    || { fail "source process start identity cannot be read"; return 1; }
   [[ -n "$old_process_start" ]] \
-    || { fail "legacy process start identity is unavailable"; return 1; }
+    || { fail "source process start identity is unavailable"; return 1; }
   for pathname in "$RUNTIME_DIR/video-autoworker-3017.pid" "$RUNTIME_DIR/video-autoworker.pid"; do
-    assert_private_file "legacy PID marker" "$pathname" || return 1
+    assert_private_file "source PID marker" "$pathname" || return 1
     recorded="$(tr -d '[:space:]' < "$pathname")" \
-      || { fail "legacy PID marker cannot be read"; return 1; }
+      || { fail "source PID marker cannot be read"; return 1; }
     [[ "$recorded" == "$old_pid" ]] \
-      || { fail "legacy PID marker does not match the listener"; return 1; }
+      || { fail "source PID marker does not match the listener"; return 1; }
   done
   assert_private_file "RUNNING_COMMIT" "$RUNTIME_DIR/RUNNING_COMMIT" || return 1
   recorded="$(tr -d '[:space:]' < "$RUNTIME_DIR/RUNNING_COMMIT")" \
     || { fail "RUNNING_COMMIT cannot be read"; return 1; }
   [[ "$recorded" == "$OLD_COMMIT" ]] \
-    || { fail "RUNNING_COMMIT does not identify the legacy release"; return 1; }
+    || { fail "RUNNING_COMMIT does not identify the live source release"; return 1; }
 }
 
 capture_protected_listeners() {
@@ -599,7 +611,7 @@ assert_no_live_database_holders() {
 rollback_live() {
   local rollback_pid rollback_start listeners
   if [[ -n "$new_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
-    stop_exact_runtime "failed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" || return 1
+    stop_exact_runtime "$FAILED_TARGET_LABEL" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" || return 1
   fi
   assert_live_database_unchanged || return 1
   assert_live_tokens_safe_for_rollback || return 1
@@ -608,14 +620,14 @@ rollback_live() {
     assert_live_database_unchanged || return 1
     assert_live_tokens_safe_for_rollback || return 1
     assert_protected_unchanged || return 1
-    printf 'Legacy 3017 release %s remained active with PID %s\n' "$OLD_COMMIT" "$old_pid" >&2 \
+    printf '3017 source release %s remained active with PID %s\n' "$OLD_COMMIT" "$old_pid" >&2 \
       || return 1
     return 0
   fi
   if [[ "$old_pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$old_pid" 2>/dev/null; then
     old_runtime_process_matches \
       || { fail "cannot restore legacy runtime while the original PID identity is unknown"; return 1; }
-    stop_exact_runtime "partially stopping legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" \
+    stop_exact_runtime "$PARTIAL_SOURCE_LABEL" "$old_pid" "$OLD_RELEASE_ROOT" \
       "$PORT" "$old_process_start" || return 1
   fi
   assert_no_live_database_holders || return 1
@@ -625,7 +637,7 @@ rollback_live() {
   start_release "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" "$LIVE_TOKENS_PATH" live \
     "$RUNTIME_DIR/video-autoworker-3017-rollback.log" || return 1
   rollback_pid="$LAST_LAUNCHED_PID"
-  wait_and_verify_runtime "restored legacy runtime" "$rollback_pid" "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
+  wait_and_verify_runtime "$RESTORED_SOURCE_LABEL" "$rollback_pid" "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
     || return 1
   rollback_start="$(process_start_identity "$rollback_pid")" \
     || { fail "restored legacy process start identity cannot be read"; return 1; }
@@ -635,7 +647,7 @@ rollback_live() {
   assert_live_tokens_safe_for_rollback || return 1
   write_runtime_markers "$OLD_COMMIT" "$rollback_pid" || return 1
   assert_protected_unchanged || return 1
-  printf 'Restored legacy 3017 release %s with PID %s\n' "$OLD_COMMIT" "$rollback_pid" >&2 \
+  printf 'Restored 3017 source release %s with PID %s\n' "$OLD_COMMIT" "$rollback_pid" >&2 \
     || return 1
 }
 
@@ -662,7 +674,7 @@ perform_live_switch() {
   assert_live_tokens_unchanged || return 1
   transition_started=1
   old_stop_requested=1
-  stop_exact_runtime "legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$old_process_start" \
+  stop_exact_runtime "$SOURCE_RUNTIME_LABEL" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$old_process_start" \
     || return 1
   listeners="$(listener_pids "$PORT")" || return 1
   [[ -z "$listeners" ]] \
@@ -670,7 +682,7 @@ perform_live_switch() {
   start_release "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" "$LIVE_TOKENS_PATH" live \
     "$RUNTIME_DIR/video-autoworker-3017-${NEW_COMMIT:0:7}.log" || return 1
   new_pid="$LAST_LAUNCHED_PID"
-  wait_and_verify_runtime "candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
+  wait_and_verify_runtime "$TARGET_RUNTIME_LABEL" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
     || return 1
   candidate_start="$(process_start_identity "$new_pid")" || return 1
   [[ -n "$candidate_start" ]] \
@@ -679,19 +691,49 @@ perform_live_switch() {
   assert_live_tokens_unchanged || return 1
   assert_protected_unchanged || return 1
   write_runtime_markers "$NEW_COMMIT" "$new_pid" || return 1
-  assert_runtime_identity "committed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
+  assert_runtime_identity "committed target runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" \
     || return 1
   assert_live_database_unchanged || return 1
   assert_live_tokens_unchanged || return 1
   assert_protected_unchanged || return 1
   switch_complete=1
-  printf 'Switched only 3017 to %s with PID %s\n' "$NEW_COMMIT" "$new_pid"
+  printf 'Switched only 3017 %s to %s with PID %s\n' "$SWITCH_DIRECTION" "$NEW_COMMIT" "$new_pid"
+}
+
+configure_directional_roles() {
+  local fixed_old_root fixed_old_commit
+  if (( ROLLBACK == 0 )); then
+    return 0
+  fi
+  fixed_old_root="$OLD_RELEASE_ROOT"
+  fixed_old_commit="$OLD_COMMIT"
+  OLD_RELEASE_ROOT="$NEW_RELEASE_ROOT"
+  OLD_COMMIT="$NEW_COMMIT"
+  NEW_RELEASE_ROOT="$fixed_old_root"
+  NEW_COMMIT="$fixed_old_commit"
+  SWITCH_DIRECTION=rollback
+  SOURCE_PROBE_LABEL=current-ui
+  TARGET_PROBE_LABEL=legacy-rollback
+  SOURCE_RUNTIME_LABEL="current UI runtime"
+  TARGET_RUNTIME_LABEL="legacy rollback runtime"
+  FAILED_TARGET_LABEL="failed legacy rollback runtime"
+  RESTORED_SOURCE_LABEL="restored current UI runtime"
+  PARTIAL_SOURCE_LABEL="partially stopping current UI runtime"
 }
 
 parse_args() {
   while (( $# > 0 )); do
     case "$1" in
-      --apply) APPLY=1; shift ;;
+      --apply)
+        (( APPLY == 0 )) || { usage >&2; fail "duplicate --apply"; return 2; }
+        APPLY=1
+        shift
+        ;;
+      --rollback)
+        (( ROLLBACK == 0 )) || { usage >&2; fail "duplicate --rollback"; return 2; }
+        ROLLBACK=1
+        shift
+        ;;
       --old-release-root) OLD_RELEASE_ROOT="${2:-}"; shift 2 ;;
       --old-commit) OLD_COMMIT="${2:-}"; shift 2 ;;
       --new-release-root) NEW_RELEASE_ROOT="${2:-}"; shift 2 ;;
@@ -755,21 +797,22 @@ main() {
   assert_release "legacy release" "$OLD_RELEASE_ROOT" "$OLD_COMMIT" || return 1
   assert_release "candidate release" "$NEW_RELEASE_ROOT" "$NEW_COMMIT" || return 1
   assert_ui_only_diff || return 1
-  assert_live_legacy_identity || return 1
+  configure_directional_roles || return 1
+  assert_live_source_identity || return 1
   assert_live_database_unchanged || return 1
   assert_live_tokens_unchanged || return 1
   protected_before="$(capture_protected_listeners)" || return 1
   assert_live_database_unchanged || return 1
-  probe_release "legacy-rollback" "$OLD_RELEASE_ROOT" || return 1
+  probe_release "$SOURCE_PROBE_LABEL" "$OLD_RELEASE_ROOT" || return 1
   assert_live_database_unchanged || return 1
   assert_live_tokens_unchanged || return 1
-  probe_release "candidate" "$NEW_RELEASE_ROOT" || return 1
-  assert_live_legacy_identity || return 1
+  probe_release "$TARGET_PROBE_LABEL" "$NEW_RELEASE_ROOT" || return 1
+  assert_live_source_identity || return 1
   assert_live_database_unchanged || return 1
   assert_live_tokens_unchanged || return 1
   assert_protected_unchanged || return 1
   if (( APPLY == 0 )); then
-    printf 'Legacy 3017 switch preflight passed; live runtime was not changed\n'
+    printf '3017 %s preflight passed; live runtime was not changed\n' "$SWITCH_DIRECTION"
     return
   fi
   trap on_exit EXIT
