@@ -146,6 +146,7 @@ describe('plugin and director service contract', () => {
       stored = fields
       return { record_id: 'must-not-leak', fields }
     })
+    const withStableCreateLock = vi.fn(async (_scope, action) => action())
 
     const result = await serviceModule.executeDirectorBrainOperation({
       action: 'propose',
@@ -166,6 +167,7 @@ describe('plugin and director service contract', () => {
         connect: async () => context,
         findExact,
         create,
+        withStableCreateLock,
       },
     })
 
@@ -187,6 +189,14 @@ describe('plugin and director service contract', () => {
     expect(result.stableId).toMatch(/^DB-DIRECTOR-INTENTS-[a-f0-9]{64}$/u)
     expect(JSON.stringify(result)).not.toMatch(/record_id|must-not-leak|accessToken|"tableId"/iu)
     expect(create).toHaveBeenCalledTimes(1)
+    expect(withStableCreateLock).toHaveBeenCalledTimes(1)
+    const [lockScope, lockAction] = withStableCreateLock.mock.calls[0]
+    expect(lockScope).toMatchObject({
+      context,
+      table: { key: 'director_intents' },
+      stableId: result.stableId,
+    })
+    expect(lockAction).toEqual(expect.any(Function))
   })
 
   it('accepts the plugin search shape and keeps remote record identifiers out', async () => {
