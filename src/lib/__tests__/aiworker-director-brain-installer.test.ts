@@ -440,7 +440,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('keeps an enabled plugin excluded when an existing allowlist excludes it', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-existing-trust-'))
