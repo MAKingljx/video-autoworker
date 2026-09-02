@@ -675,7 +675,7 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
 `, { mode: 0o700 })
     chmodSync(harness, 0o700)
 
-    const run = (overrides: NodeJS.ProcessEnv = {}) => spawnSync('/bin/bash', [harness, 'blue', 'probe'], {
+    const run = (overrides: Record<string, string | undefined> = {}) => spawnSync('/bin/bash', [harness, 'blue', 'probe'], {
       encoding: 'utf8',
       env: {
         ...process.env,
