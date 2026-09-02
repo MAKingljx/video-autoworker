@@ -66,12 +66,17 @@ test.describe('Docker mode – lazy DB init on first request', () => {
         name,
         host: 'http://gateway.internal:4443',
         port: 18789,
-        token: 'docker-mode-token',
       },
     })
     expect(res.status()).toBe(201)
     const body = await res.json()
     const id = body.gateway?.id as number
+    expect(body.gateway).not.toHaveProperty('token')
+    expect(body.gateway).toMatchObject({
+      token_set: false,
+      credential_source: 'none',
+      server_managed: true,
+    })
 
     // Cleanup
     await request.delete('/api/gateways', {
@@ -107,7 +112,6 @@ test.describe('Docker mode – gateway connect works without home env vars', () 
         name: `docker-mode-connect-${Date.now()}`,
         host: 'https://openclaw-gateway:4443/sessions',
         port: 18789,
-        token: 'docker-internal-token',
       },
     })
     expect(createRes.status()).toBe(201)
@@ -123,9 +127,11 @@ test.describe('Docker mode – gateway connect works without home env vars', () 
     const connectBody = await connectRes.json()
 
     // ws_url is derived purely from stored host — no env vars needed
-    expect(connectBody.ws_url).toBe('wss://openclaw-gateway:4443')
-    expect(connectBody.token).toBe('docker-internal-token')
-    expect(connectBody.token_set).toBe(true)
+    expect(connectBody.ws_url).toBe('wss://openclaw-gateway:4443/gateway-ws')
+    expect(connectBody).not.toHaveProperty('token')
+    expect(connectBody.token_set).toBe(false)
+    expect(connectBody.credential_source).toBe('none')
+    expect(connectBody.server_managed).toBe(true)
   })
 
   test('POST /api/gateways/connect returns 404 for unknown id (no crash on missing env)', async ({ request }) => {

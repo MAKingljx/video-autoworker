@@ -14,14 +14,13 @@ test.describe('Gateway Connect API', () => {
     cleanup.length = 0
   })
 
-  test('returns ws_url and token for selected gateway', async ({ request }) => {
+  test('returns browser-safe server-managed metadata for selected gateway', async ({ request }) => {
     const createRes = await request.post('/api/gateways', {
       headers: API_KEY_HEADER,
       data: {
         name: `e2e-gw-${Date.now()}`,
         host: 'https://example.tailnet.ts.net:4443/sessions',
         port: 18789,
-        token: 'gw-token-123',
       },
     })
     expect(createRes.status()).toBe(201)
@@ -36,9 +35,11 @@ test.describe('Gateway Connect API', () => {
     expect(connectRes.status()).toBe(200)
     const connectBody = await connectRes.json()
 
-    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net:4443')
-    expect(connectBody.token).toBe('gw-token-123')
-    expect(connectBody.token_set).toBe(true)
+    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net:4443/gateway-ws')
+    expect(connectBody).not.toHaveProperty('token')
+    expect(connectBody.token_set).toBe(false)
+    expect(connectBody.credential_source).toBe('none')
+    expect(connectBody.server_managed).toBe(true)
   })
 
   test('returns 404 for unknown gateway', async ({ request }) => {
@@ -49,7 +50,7 @@ test.describe('Gateway Connect API', () => {
     expect(res.status()).toBe(404)
   })
 
-  test('preserves token query param from gateway host URL', async ({ request }) => {
+  test('strips token query params from the browser websocket URL', async ({ request }) => {
     const createRes = await request.post('/api/gateways', {
       headers: API_KEY_HEADER,
       data: {
@@ -70,9 +71,12 @@ test.describe('Gateway Connect API', () => {
     expect(connectRes.status()).toBe(200)
     const connectBody = await connectRes.json()
 
-    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net:4443?token=url-token-123')
-    expect(connectBody.token).toBe('')
+    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net:4443/gateway-ws')
+    expect(connectBody).not.toHaveProperty('token')
+    expect(JSON.stringify(connectBody)).not.toContain('url-token-123')
     expect(connectBody.token_set).toBe(false)
+    expect(connectBody.credential_source).toBe('none')
+    expect(connectBody.server_managed).toBe(true)
   })
 
   test('uses wss when forwarded proto indicates https behind proxy', async ({ request }) => {
@@ -82,7 +86,6 @@ test.describe('Gateway Connect API', () => {
         name: `e2e-gw-forwarded-proto-${Date.now()}`,
         host: 'example.tailnet.ts.net',
         port: 18789,
-        token: 'forwarded-proto-token',
       },
     })
     expect(createRes.status()).toBe(201)
@@ -100,8 +103,10 @@ test.describe('Gateway Connect API', () => {
     expect(connectRes.status()).toBe(200)
     const connectBody = await connectRes.json()
 
-    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net')
-    expect(connectBody.token).toBe('forwarded-proto-token')
-    expect(connectBody.token_set).toBe(true)
+    expect(connectBody.ws_url).toBe('wss://example.tailnet.ts.net/gateway-ws')
+    expect(connectBody).not.toHaveProperty('token')
+    expect(connectBody.token_set).toBe(false)
+    expect(connectBody.credential_source).toBe('none')
+    expect(connectBody.server_managed).toBe(true)
   })
 })
