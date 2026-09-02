@@ -66,12 +66,12 @@ describe('buildGatewayWebSocketUrl', () => {
     })).toBe('wss://gateway.example.com:8443/gateway-ws')
   })
 
-  it('preserves token query while dropping unrelated path/query/hash from pasted dashboard URL', () => {
+  it('drops token and unrelated queries from pasted dashboard URLs', () => {
     expect(buildGatewayWebSocketUrl({
       host: 'https://node-02.tailnet456.ts.net:4443/sessions?foo=bar&token=abc123#frag',
       port: 18789,
       browserProtocol: 'https:',
-    })).toBe('wss://node-02.tailnet456.ts.net:4443/gateway-ws?token=abc123')
+    })).toBe('wss://node-02.tailnet456.ts.net:4443/gateway-ws')
   })
 
   it('preserves explicit proxy path when configured', () => {
@@ -107,10 +107,10 @@ describe('buildGatewayPathFallbackUrls', () => {
     ])
   })
 
-  it('keeps token query params when generating fallbacks', () => {
+  it('drops token query params when generating fallbacks', () => {
     expect(buildGatewayPathFallbackUrls('wss://gateway.example.com?token=abc')).toEqual([
-      'wss://gateway.example.com/gateway-ws?token=abc',
-      'wss://gateway.example.com/gw?token=abc',
+      'wss://gateway.example.com/gateway-ws',
+      'wss://gateway.example.com/gw',
     ])
   })
 

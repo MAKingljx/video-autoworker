@@ -35,21 +35,14 @@ describe('buildMissionControlCsp', () => {
   })
 
   it('does not allow a public n8n origin rejected by the backend policy', () => {
-    const previous = process.env.N8N_ALLOW_PRIVATE_REMOTE
-    delete process.env.N8N_ALLOW_PRIVATE_REMOTE
-    try {
-      const csp = buildMissionControlCsp({
-        nonce: 'nonce-123',
-        googleEnabled: false,
-        n8nBaseUrl: 'https://n8n.example.com',
-      })
+    const csp = buildMissionControlCsp({
+      nonce: 'nonce-123',
+      googleEnabled: false,
+      n8nBaseUrl: 'https://n8n.example.com',
+    })
 
-      expect(csp).toContain("frame-src 'self'")
-      expect(csp).not.toContain('n8n.example.com')
-    } finally {
-      if (previous === undefined) delete process.env.N8N_ALLOW_PRIVATE_REMOTE
-      else process.env.N8N_ALLOW_PRIVATE_REMOTE = previous
-    }
+    expect(csp).toContain("frame-src 'self'")
+    expect(csp).not.toContain('n8n.example.com')
   })
 })
 

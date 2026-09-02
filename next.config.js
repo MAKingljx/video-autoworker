@@ -10,6 +10,8 @@ const standaloneRuntimeIncludes = [
   './scripts/verify-shared-runtime-install-gate.mjs',
   './scripts/lib/feishu-director-brain.mjs',
   './scripts/lib/runtime-safe-offline-queue.mjs',
+  './scripts/lib/openclaw-secret-reference.mjs',
+  './scripts/lib/shared-deployment-lock.mjs',
   './scripts/lib/shared-deployment-lock.sh',
   './openclaw-plugins/aiworker-director-brain/index.js',
   './openclaw-plugins/aiworker-director-brain/openclaw.plugin.json',

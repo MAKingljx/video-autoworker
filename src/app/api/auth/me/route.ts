@@ -4,6 +4,7 @@ import { logAuditEvent } from '@/lib/db'
 import { verifyPassword } from '@/lib/password'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { logger } from '@/lib/logger'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 export async function GET(request: Request) {
   const localDesktopUser = getLocalProfilesDesktopUser(request)
@@ -40,6 +41,9 @@ export async function GET(request: Request) {
  * Body: { current_password, new_password } and/or { display_name }
  */
 export async function PATCH(request: NextRequest) {
+  if (isOpenClawLoopbackAuthMode()) {
+    return NextResponse.json({ error: 'OpenClaw manages this identity' }, { status: 403 })
+  }
   const user = getUserFromRequest(request)
   if (!user) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })

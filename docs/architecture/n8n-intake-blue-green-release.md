@@ -27,6 +27,24 @@ execution owner，因此首次迁移是一次明确的例外维护窗：必须�
 generation 和两个槽的 release 绑定。HTTP keep-alive、SSE 和 WebSocket 按连接转发；新请求
 在切换后进入新槽，旧槽不会因为 router 切换被立即停止。
 
+## 单一鉴权边界
+
+外部用户身份与访问授权统一由 OpenClaw 完成。3017、n8n 与导演脑只通过本机
+`127.0.0.1` HTTP 通道互调，不再生成或转发 Webhook 共享密钥，也不在每个内部接口重复实现
+登录和角色判断。3017 的 `MC_AUTH_MODE=openclaw-loopback` 分支拒绝非 HTTP loopback、外部
+Host 和外部 forwarded 链；普通本地请求只得到固定 viewer，只有精确的 task ingress、callback
+和发布控制路径获得内部权限。该分支不会回退到密码、Cookie session、全局/Agent API key、
+proxy header、desktop mode 或默认租户推断。
+
+OpenClaw Gateway token 由唯一 Gateway 适配器从 SecretRef 解析，只在真实 Gateway HTTP/CLI
+调用时短暂注入 Authorization 或子进程环境；列表和连接 API 只返回凭据来源/配置状态，不解析
+SecretRef、不向浏览器返回 token，也不把探测值写入 SQLite。旧版数据库中若已有 Gateway token，
+读接口只脱敏、不隐式修改生产库；发布前必须在已备份、显式批准的维护步骤中清除。
+
+任务 ID、execution owner、release affinity、lease、fencing、幂等键、revision/CAS 与发布锁
+继续保留；这些字段用于绑定任务和控制并发，不是第二套用户鉴权。若服务未来离开受控 loopback、
+通过不可信跨主机网络直连或进入多租户模式，必须先建立新的鉴权决策，不能静默放宽当前边界。
+
 ## 全局新任务闸门
 
 迁移 `052_n8n_intake_controls` 增加单例闸门、审计事件和单调 revision。
@@ -39,16 +57,10 @@ generation 和两个槽的 release 绑定。HTTP keep-alive、SSE 和 WebSocket 
 和 `N8N_INTAKE_DRAINING`；已有任务查询、幂等续派和 callback 不受影响。
 
 `GET/POST /api/n8n/intake-control` 使用 CAS revision，避免两个管理员覆盖彼此操作。
-完整全局计数、原因和操作者只对以下发布管理员可见：
-
-- 受信 loopback desktop；
-- 全局 API key 身份；
-- 默认 owner tenant/workspace 的正常管理员。
-
-其他租户管理员和 agent-scoped 管理身份不能写闸门，只能读到
-`{ accepting, canManage: false }`，不会获得跨租户计数或操作者信息。`drain-status` 和
-`release-readiness` 使用同一发布权限边界。`/tasks` 的按钮以后端返回的 `canManage` 为准，
-不能只凭租户角色显示。
+OpenClaw-only 模式下，精确 loopback 发布控制路径可读取并操作全局闸门；普通 loopback viewer
+不能获得全局管理权。旧鉴权模式仍保留原 owner workspace 范围，避免兼容运行时扩大租户管理员
+权限。`drain-status` 和
+`release-readiness` 使用同一角色判断。`/tasks` 的按钮以后端返回的 `canManage` 为准。
 
 ## Webhook 幂等与响应不确定性
 
@@ -60,7 +72,7 @@ generation 和两个槽的 release 绑定。HTTP keep-alive、SSE 和 WebSocket 
   `outcome_unknown`，不能证明 n8n 未接收。
 - `outcome_unknown` 返回 HTTP `202`，父任务保持 queued，派发租约保持不变；租约到期后
   只能携带同一任务 ID、幂等键和原始持久载荷续派。
-- 本地 base URL、webhook path 和共享 secret 在创建父任务前验证，本地配置错误返回 503，
+- 本地 base URL 和 webhook path 在创建父任务前验证，本地配置错误返回 503，
   不伪装成远端响应不确定。
 
 通用模型链和视频链都必须在第一个业务节点前调用父任务 claim。首次 claim 原子推进父任务并

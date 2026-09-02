@@ -3,7 +3,7 @@
   "info": {
     "title": "Mission Control API",
     "version": "1.3.0",
-    "description": "AI Agent Orchestration Platform API"
+    "description": "AI Agent Orchestration Platform API. In MC_AUTH_MODE=openclaw-loopback, OpenClaw is the only external user-authentication boundary; this service accepts loopback HTTP only and disables local login, session, proxy-header, global-key and agent-key authentication."
   },
   "servers": [
     {
@@ -3962,7 +3962,7 @@
         "tags": [
           "Admin"
         ],
-        "summary": "Resolve websocket connect payload for a gateway",
+        "summary": "Resolve browser-safe connection metadata for a gateway",
         "operationId": "connectGateway",
         "requestBody": {
           "required": true,
@@ -3984,7 +3984,7 @@
         },
         "responses": {
           "200": {
-            "description": "Resolved websocket URL and token metadata",
+            "description": "Resolved websocket URL and credential status; credential material is never returned",
             "content": {
               "application/json": {
                 "schema": {
@@ -3996,10 +3996,14 @@
                     "ws_url": {
                       "type": "string"
                     },
-                    "token": {
-                      "type": "string"
-                    },
                     "token_set": {
+                      "type": "boolean"
+                    },
+                    "credential_source": {
+                      "type": "string",
+                      "enum": ["environment", "inline-config", "exec-reference", "none"]
+                    },
+                    "server_managed": {
                       "type": "boolean"
                     }
                   }
@@ -11658,7 +11662,7 @@
           "429": { "$ref": "#/components/responses/RateLimited" },
           "500": { "description": "n8n accepted the webhook but durable local dispatch settlement failed; retry with the same task identity" },
           "502": { "description": "n8n returned an explicit non-retryable 4xx rejection" },
-          "503": { "description": "The shared n8n webhook secret is missing, an internal callback URL is unsafe, or the shared deployment lock cannot be safely acquired or released" }
+          "503": { "description": "An internal callback URL is unsafe, or the shared deployment lock cannot be safely acquired or released" }
         }
       }
     },
@@ -11666,7 +11670,6 @@
       "post": {
         "tags": ["n8n"], "summary": "Claim a persisted top-level n8n task", "operationId": "claimN8nTaskRun",
         "description": "Internal n8n callback that atomically binds an exact workspace-scoped top-level task to one stable n8n execution owner before any child nodes execute. A lost response may be retried only by that same execution owner.",
-        "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "additionalProperties": false,
           "required": ["taskId", "idempotencyKey", "bindingId", "workspaceId", "tenantId", "executionOwner"],
@@ -11697,7 +11700,6 @@
       "post": {
         "tags": ["n8n"], "summary": "Execute one persisted n8n model node", "operationId": "executeN8nModelNode",
         "description": "Internal loopback callback used by the bundled multi-model workflow. The selected route is resolved from the external registry and persisted task routing.",
-        "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "required": ["taskId", "idempotencyKey", "executionOwner", "nodeKey", "input"], "additionalProperties": false,
           "properties": {
@@ -11722,7 +11724,6 @@
       "post": {
         "tags": ["n8n"], "summary": "Execute one stateless video-analysis stage", "operationId": "executeN8nMediaStage",
         "description": "Internal loopback callback used by the bundled video workflow. Prepare, audio, vision, and finalize stages persist operational task results but never receive an OpenClaw session or memory context.",
-        "security": [{ "n8nWebhookSecret": [] }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "required": ["taskId", "idempotencyKey", "executionOwner", "stage"], "additionalProperties": false,
           "properties": {
@@ -11745,8 +11746,7 @@
     "/api/n8n/execute": {
       "post": {
         "tags": ["n8n"], "summary": "Execute an explicitly legacy-v1 persisted task through local OpenClaw", "operationId": "executeN8nTaskRun", "deprecated": true,
-        "description": "Legacy compatibility callback. It requires the external shared webhook secret and fails closed unless the persisted task explicitly declares callbackProtocol=legacy-v1 and the current process is a non-slot legacy runtime. Blue-green slot-v1 tasks must use claim plus node-execute/media-execute ownership and fencing.",
-        "security": [{ "n8nWebhookSecret": [] }],
+        "description": "Legacy loopback compatibility callback. It fails closed unless the persisted task explicitly declares callbackProtocol=legacy-v1 and the current process is a non-slot legacy runtime. Blue-green slot-v1 tasks must use claim plus node-execute/media-execute ownership and fencing.",
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "required": ["taskId", "idempotencyKey"],
           "properties": {
@@ -11811,11 +11811,6 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-api-key"
-      },
-      "n8nWebhookSecret": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-AIWorker-Webhook-Secret"
       }
     },
     "schemas": {

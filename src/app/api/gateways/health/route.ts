@@ -27,7 +27,6 @@ interface GatewayEntry {
   name: string
   host: string
   port: number
-  token: string
   is_primary: number
   status: string
 }
@@ -165,7 +164,9 @@ export async function POST(request: NextRequest) {
 
   const db = getDatabase()
   ensureGatewaysTable(db)
-  const gateways = db.prepare("SELECT * FROM gateways ORDER BY is_primary DESC, name ASC").all() as GatewayEntry[]
+  const gateways = db.prepare(
+    "SELECT id, name, host, port, is_primary, status FROM gateways ORDER BY is_primary DESC, name ASC"
+  ).all() as GatewayEntry[]
 
   // Build set of user-configured gateway hosts so the SSRF filter allows them
   const configuredHosts = new Set<string>()

@@ -27,8 +27,7 @@
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Content-Type", "value": "application/json" },
-            { "name": "X-AIWorker-Webhook-Secret", "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}" }
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
@@ -180,10 +179,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -217,10 +212,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -254,10 +245,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },

@@ -3,7 +3,6 @@ import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
   requireN8nRole: vi.fn(),
-  isN8nWebhookSecretConfigured: vi.fn(),
   isN8nWebhookDispatchError: vi.fn(),
   validateN8nWebhookDispatchConfiguration: vi.fn(),
   triggerN8nWebhook: vi.fn(),
@@ -25,7 +24,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/n8n', () => ({
   requireN8nRole: mocks.requireN8nRole,
-  isN8nWebhookSecretConfigured: mocks.isN8nWebhookSecretConfigured,
   isN8nWebhookDispatchError: mocks.isN8nWebhookDispatchError,
   validateN8nWebhookDispatchConfiguration: mocks.validateN8nWebhookDispatchConfiguration,
   triggerN8nWebhook: mocks.triggerN8nWebhook,
@@ -131,7 +129,6 @@ describe('n8n trigger route', () => {
       user: { id: 1, username: 'local-desktop', workspace_id: 2, tenant_id: 3 },
     })
     mocks.mutationLimiter.mockReturnValue(null)
-    mocks.isN8nWebhookSecretConfigured.mockReturnValue(true)
     mocks.validateN8nWebhookDispatchConfiguration.mockReturnValue(undefined)
     mocks.isN8nWebhookDispatchError.mockImplementation(error => (
       error instanceof Error
@@ -601,23 +598,6 @@ describe('n8n trigger route', () => {
     expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
     expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
     expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
-  })
-
-  it('fails before creating a parent task when the shared webhook secret is missing', async () => {
-    mocks.isN8nWebhookSecretConfigured.mockReturnValue(false)
-
-    const response = await POST(request({
-      bindingId: 7,
-      taskId: 'task-no-secret',
-      input: { prompt: '分析视频' },
-    }))
-
-    expect(response.status).toBe(503)
-    expect(await response.json()).toMatchObject({ error: expect.stringMatching(/N8N_WEBHOOK_SECRET/) })
-    expect(mocks.getDatabase).not.toHaveBeenCalled()
-    expect(mocks.createN8nTaskRun).not.toHaveBeenCalled()
-    expect(mocks.triggerN8nWebhook).not.toHaveBeenCalled()
-    expect(mocks.logAuditEvent).not.toHaveBeenCalled()
   })
 
   it('fails before creating a parent task when local webhook configuration is invalid', async () => {

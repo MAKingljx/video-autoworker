@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
-  verifyN8nWebhookSecret: vi.fn(),
   getDatabase: vi.fn(),
   resolveN8nNodeRoute: vi.fn(),
   executeN8nModelRoute: vi.fn(),
@@ -17,7 +16,6 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
-vi.mock('@/lib/n8n', () => ({ verifyN8nWebhookSecret: mocks.verifyN8nWebhookSecret }))
 vi.mock('@/lib/n8n-runtime-affinity', () => ({
   checkN8nCallbackAdmission: mocks.checkN8nCallbackAdmission,
   resolveN8nRuntimeInstanceId: () => 'a'.repeat(64),
@@ -85,10 +83,10 @@ const route = {
   systemPrompt: '',
 }
 
-function request(body: Record<string, unknown>, secret = 'shared-secret') {
+function request(body: Record<string, unknown>) {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/node-execute', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-AIWorker-Webhook-Secret': secret },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ executionOwner: 'n8n-execution:wf-1:123', ...body }),
   })
 }
@@ -96,7 +94,6 @@ function request(body: Record<string, unknown>, secret = 'shared-secret') {
 describe('n8n model node execution route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockReturnValue(parent)
     mocks.isScopedN8nParentExecutionOwner.mockReturnValue(true)
@@ -111,13 +108,6 @@ describe('n8n model node execution route', () => {
     mocks.completeN8nChildExecution.mockReturnValue({ settled: true })
     mocks.failN8nChildExecution.mockReturnValue({ settled: true })
     mocks.executeN8nModelRoute.mockResolvedValue({ text: '节点完成', routeId: 'local-qwen' })
-  })
-
-  it('rejects a callback without the shared secret', async () => {
-    mocks.verifyN8nWebhookSecret.mockReturnValue(false)
-    const response = await POST(request({ taskId: 'parent-1', idempotencyKey: 'idem-1', nodeKey: 'planner', input: {} }, 'wrong'))
-    expect(response.status).toBe(401)
-    expect(mocks.getDatabase).not.toHaveBeenCalled()
   })
 
   it.each(['succeeded', 'failed', 'cancelled'])('rejects a late callback after the parent is %s', async status => {

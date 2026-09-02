@@ -5,6 +5,7 @@ import { getDatabase, logAuditEvent } from '@/lib/db'
 import { verifyGoogleIdToken } from '@/lib/google-auth'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { loginLimiter } from '@/lib/rate-limit'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 function upsertAccessRequest(input: {
   email: string
@@ -27,6 +28,9 @@ function upsertAccessRequest(input: {
 }
 
 export async function POST(request: NextRequest) {
+  if (isOpenClawLoopbackAuthMode()) {
+    return NextResponse.json({ error: 'OpenClaw is the only authentication provider' }, { status: 403 })
+  }
   const rateCheck = loginLimiter(request)
   if (rateCheck) return rateCheck
 

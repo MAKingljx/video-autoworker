@@ -13,6 +13,7 @@ REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SOURCE_SKILL="$REPOSITORY_ROOT/openclaw-skills/aiworker-task-flow"
 TEMPLATE="$REPOSITORY_ROOT/ops/video-lane/launchd/$LABEL.plist.template"
 VALIDATOR="$REPOSITORY_ROOT/scripts/validate-aiworker-video-lane-supervisor.mjs"
+SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
 WORKSPACE_ROOT="${AIWORKER_QWEN_WORKSPACE:-$HOME/AI-worker-second-original-workspace}"
 INSTALLED_SKILL="$WORKSPACE_ROOT/skills/aiworker-task-flow"
 WORKER_SCRIPT="$INSTALLED_SKILL/scripts/run-video-batch.mjs"
@@ -22,16 +23,23 @@ LAUNCH_AGENTS_DIR="${AIWORKER_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$LABEL.plist"
 BACKUP_ROOT="${AIWORKER_VIDEO_LANE_BACKUP_ROOT:-$HOME/ai-worker/backups/video-lane-supervisor}"
 PROFILE_CONFIG="$HOME/.openclaw-qwen-current/openclaw.json"
-LOCK_DIR="$BACKUP_ROOT/.install.lock"
+DEPLOYMENT_RUN_DIR="${AIWORKER_BG_RUN_DIR:-$REPOSITORY_ROOT/.run/blue-green}"
+DEPLOYMENT_LOCK_DIR="$DEPLOYMENT_RUN_DIR/.deployment.lock"
 DOMAIN="gui/$(id -u)"
 SERVICE="$DOMAIN/$LABEL"
 MODE=""
 NODE_BIN="${AIWORKER_NODE_BIN:-}"
 WORK_ROOT=""
-LOCK_OWNED=0
 BACKUP_DIR=""
 COMMIT_STARTED=0
 ROLLBACK_FAILED=0
+
+[[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
+  printf 'Shared deployment lock helper is unavailable.\n' >&2
+  exit 1
+}
+# shellcheck source=scripts/lib/shared-deployment-lock.sh
+. "$SHARED_DEPLOYMENT_LOCK_HELPER"
 
 usage() {
   printf 'Usage: %s (--dry-run|--apply|--uninstall)\n' "$0"
@@ -234,9 +242,8 @@ cleanup() {
       printf 'Video-lane supervisor change failed; exact prior LaunchAgent state was restored.\n' >&2
     fi
   fi
-  if [[ "$LOCK_OWNED" == "1" ]]; then
-    rm -f -- "$LOCK_DIR/pid"
-    rmdir "$LOCK_DIR" || exit_code=1
+  if [[ "$DEPLOYMENT_LOCK_OWNED" == "1" ]]; then
+    release_shared_deployment_lock || exit_code=1
   fi
   if [[ -n "$WORK_ROOT" && "$ROLLBACK_FAILED" != "1" ]]; then
     case "$WORK_ROOT" in
@@ -296,6 +303,9 @@ assert_future_child_path "$PLIST_PATH" "$LAUNCH_AGENTS_DIR" "Video-lane LaunchAg
   printf 'Refusing non-production identity: user=%s host=%s\n' "$(id -un)" "$(hostname)" >&2
   exit 1
 }
+if [[ "$MODE" != "dry-run" ]]; then
+  acquire_shared_deployment_lock
+fi
 openclaw_version="$(run_clean_openclaw --version)"
 case "$openclaw_version" in
   "OpenClaw $OPENCLAW_VERSION ("*")") ;;
@@ -338,14 +348,6 @@ if [[ "$MODE" == "dry-run" ]]; then
 fi
 
 install -d -m 700 "$BACKUP_ROOT"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  printf 'Another video-lane supervisor operation holds the install lock.\n' >&2
-  exit 1
-fi
-LOCK_OWNED=1
-chmod 700 "$LOCK_DIR"
-printf '%s\n' "$$" > "$LOCK_DIR/pid"
-chmod 600 "$LOCK_DIR/pid"
 
 verified_before=0
 while IFS= read -r candidate; do

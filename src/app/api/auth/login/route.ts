@@ -4,8 +4,12 @@ import { logAuditEvent, needsFirstTimeSetup } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { loginLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 export async function POST(request: Request) {
+  if (isOpenClawLoopbackAuthMode()) {
+    return NextResponse.json({ error: 'OpenClaw is the only authentication provider' }, { status: 403 })
+  }
   try {
     const rateCheck = loginLimiter(request)
     if (rateCheck) return rateCheck

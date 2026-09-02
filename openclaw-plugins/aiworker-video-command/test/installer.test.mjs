@@ -10,6 +10,10 @@ const installerPath = resolve(
 describe('current video-command plugin installer', () => {
   it('owns the only supported current release path', async () => {
     const script = await readFile(installerPath, 'utf8')
+    const secretReference = await readFile(
+      resolve(process.cwd(), 'scripts/lib/openclaw-secret-reference.mjs'),
+      'utf8',
+    )
 
     expect(script).toContain('PROFILE="qwen-current"')
     expect(script).toContain('AGENT_ID="second-original"')
@@ -28,6 +32,23 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('delete pluginConfig.allowedSenderSha256')
     expect(script).toContain('plugin config schema must contain only the current release gate')
     expect(script).toContain('tools.catalog')
+    expect(script).toContain('run_qwen_openclaw_gateway_call tools.catalog')
+    expect(script).toContain('node "$REPOSITORY_ROOT/scripts/lib/openclaw-secret-reference.mjs" "$PROFILE_CONFIG"')
+    expect(secretReference).toContain("reference.source !== 'exec'")
+    expect(secretReference).toContain("provider.source === 'exec'")
+    expect(secretReference).toContain('env: {}')
+    expect(secretReference).toContain('maxBuffer = MAX_OUTPUT_BYTES')
+    expect(secretReference).toContain('timeoutMs = DEFAULT_TIMEOUT_MS')
+    expect(secretReference).toContain('TOKEN_PATTERN')
+    expect(script).toContain('OPENCLAW_GATEWAY_TOKEN="$gateway_token"')
+    expect(script).toContain('Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.')
+    expect(script).not.toContain('--token "$gateway_token"')
+    const ordinaryRunner = script.slice(
+      script.indexOf('run_qwen_openclaw() {'),
+      script.indexOf('resolve_gateway_token() {'),
+    )
+    expect(ordinaryRunner).not.toContain('resolve_gateway_token')
+    expect(ordinaryRunner).not.toContain('OPENCLAW_GATEWAY_TOKEN')
     expect(script).toContain('Current plugin %s is already installed and passed runtime validation.')
     expect(script).toContain('acquire_shared_deployment_lock')
     expect(script).toContain('release_shared_deployment_lock')

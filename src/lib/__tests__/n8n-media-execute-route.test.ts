@@ -6,7 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
-  verifyN8nWebhookSecret: vi.fn(),
   getDatabase: vi.fn(),
   createN8nMediaChildRunFromParent: vi.fn(),
   getN8nTaskRunByTaskId: vi.fn(),
@@ -28,7 +27,6 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
-vi.mock('@/lib/n8n', () => ({ verifyN8nWebhookSecret: mocks.verifyN8nWebhookSecret }))
 vi.mock('@/lib/n8n-runtime-affinity', () => ({
   checkN8nCallbackAdmission: mocks.checkN8nCallbackAdmission,
   resolveN8nRuntimeInstanceId: () => 'a'.repeat(64),
@@ -127,12 +125,11 @@ const parent = {
 
 function request(
   stage: 'prepare' | 'audio' | 'vision' | 'finalize',
-  secret = 'shared-secret',
   input = stage === 'prepare' ? parent.input : {},
 ) {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/media-execute', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-AIWorker-Webhook-Secret': secret },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       taskId: parent.taskId,
       idempotencyKey: parent.idempotencyKey,
@@ -151,7 +148,6 @@ function mediaChildId(prefix: 'task' | 'idem', identity: string, stage: 'prepare
 describe('n8n media node execution route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => {
       if (taskId === parent.taskId) return parent
@@ -196,13 +192,6 @@ describe('n8n media node execution route', () => {
     mocks.cleanupN8nMediaTask.mockResolvedValue(undefined)
     mocks.ensureN8nMediaCleanupDebt.mockReturnValue({ scheduled: true, reason: 'finalize_succeeded' })
     mocks.retryN8nMediaCleanupDebt.mockResolvedValue({ outcome: 'cleaned', debt: null, error: null })
-  })
-
-  it('rejects a callback without the shared secret', async () => {
-    mocks.verifyN8nWebhookSecret.mockReturnValue(false)
-    const response = await POST(request('prepare', 'wrong'))
-    expect(response.status).toBe(401)
-    expect(mocks.getDatabase).not.toHaveBeenCalled()
   })
 
   it.each(['succeeded', 'failed', 'cancelled'])('rejects a late callback after the parent is %s', async status => {
@@ -451,7 +440,7 @@ describe('n8n media node execution route', () => {
 
   it('rejects a prepare video key that is not owned by the parent task', async () => {
     const otherVideoKey = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.mp4'
-    const response = await POST(request('prepare', 'shared-secret', {
+    const response = await POST(request('prepare', {
       ...parent.input,
       videoKey: otherVideoKey,
     }))

@@ -89,6 +89,28 @@ run_qwen_openclaw() {
     openclaw --profile "$PROFILE" "$@"
 }
 
+resolve_gateway_token() {
+  node "$REPOSITORY_ROOT/scripts/lib/openclaw-secret-reference.mjs" "$PROFILE_CONFIG"
+}
+
+run_qwen_openclaw_gateway_call() {
+  local gateway_token status
+  gateway_token="$(resolve_gateway_token)" || {
+    printf 'Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.\n' >&2
+    return 1
+  }
+  if OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
+    env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
+      -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
+      openclaw --profile "$PROFILE" gateway call "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  unset gateway_token
+  return "$status"
+}
+
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
@@ -331,7 +353,7 @@ validate_runtime() {
   run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$report" \
     || return 1
   node "$RUNTIME_VALIDATOR" "$report" "$PLUGIN_ID" "$expected" || return 1
-  run_qwen_openclaw gateway call tools.catalog \
+  run_qwen_openclaw_gateway_call tools.catalog \
     --params "{\"agentId\":\"$AGENT_ID\",\"includePlugins\":true}" \
     --timeout 20000 --json > "$catalog" || return 1
   node - "$catalog" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'

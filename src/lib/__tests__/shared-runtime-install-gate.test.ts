@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile,
 } from 'node:fs/promises'
@@ -15,6 +16,49 @@ const offlineQueueHelperPath = resolve(
 )
 const expectedSourceCommit = 'a'.repeat(40)
 const expectedReleaseId = `${expectedSourceCommit}-runtime`
+
+function sha256(value: string) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+async function writeRuntimeBatchArtifacts(batchRoot: string, status = 'succeeded') {
+  const markerPath = resolve(batchRoot, '.worker-launch.lock')
+  const createdAt = new Date().toISOString()
+  const token = 'c'.repeat(64)
+  const markerSource = `${JSON.stringify({
+    schema: 'video-autoworker-worker-launch-guardian/v2',
+    pid: process.pid,
+    createdAt,
+    token,
+  })}\n`
+  await writeFile(markerPath, markerSource, { mode: 0o600 })
+  const marker = await stat(markerPath, { bigint: true })
+  await writeFile(resolve(batchRoot, '.worker-launch.lock.owner'), `${JSON.stringify({
+    schema: 'video-autoworker-worker-launch-guardian-owner/v1',
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    marker: {
+      path: markerPath,
+      dev: marker.dev.toString(),
+      ino: marker.ino.toString(),
+      tokenSha256: sha256(token),
+      createdAt,
+      sourceSha256: sha256(markerSource),
+    },
+  })}\n`, { mode: 0o600 })
+
+  const history = resolve(batchRoot, '2026-08-27-retest')
+  await mkdir(history, { mode: 0o700 })
+  const stateName = `${'d'.repeat(64)}.json`
+  const stateSource = `${JSON.stringify({
+    schemaVersion: 2,
+    batchId: 'terminal-history',
+    status,
+    items: [{ taskId: 'terminal-task', status }],
+  })}\n`
+  await writeFile(resolve(history, stateName), stateSource, { mode: 0o600 })
+  await writeFile(resolve(history, `${stateName}.bak`), stateSource, { mode: 0o600 })
+}
 
 async function createDatabase(root: string) {
   const missionPath = resolve(root, 'mission-control.db')
@@ -202,6 +246,34 @@ describe('shared runtime installation gate', () => {
         attentionStale: 0,
         pendingOutbox: 0,
       })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('ignores a verified runtime guardian pair and paired terminal history but rejects an active primary', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-gate-runtime-root-'))
+    try {
+      const fixture = await createDatabase(root)
+      await writeRuntimeBatchArtifacts(fixture.videoBatchRoot)
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      expect(verifySharedRuntimeInstallGate(fixture)).toMatchObject({
+        mode: 'rolling',
+        activeTasks: 0,
+        waiting: 0,
+        running: 0,
+      })
+
+      const history = resolve(fixture.videoBatchRoot, '2026-08-27-retest')
+      const stateName = `${'d'.repeat(64)}.json`
+      const activeSource = `${JSON.stringify({
+        schemaVersion: 2,
+        batchId: 'terminal-history',
+        status: 'running',
+        items: [{ taskId: 'terminal-task', status: 'running' }],
+      })}\n`
+      await writeFile(resolve(history, stateName), activeSource)
+      expect(() => verifySharedRuntimeInstallGate(fixture)).toThrow(/video_batch_root_unsafe/u)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

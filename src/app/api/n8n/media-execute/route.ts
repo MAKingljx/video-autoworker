@@ -11,7 +11,6 @@ import {
   type N8nMediaStage,
 } from '@/lib/n8n-media-execution'
 import { retryN8nMediaCleanupDebt } from '@/lib/n8n-media-cleanup'
-import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import { checkN8nCallbackAdmission, resolveN8nRuntimeInstanceId } from '@/lib/n8n-runtime-affinity'
 import {
   completeN8nChildExecution,
@@ -30,6 +29,7 @@ import {
 } from '@/lib/n8n-task-runs'
 import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 import { logSafeOperationError, SafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
+import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
 
 export const runtime = 'nodejs'
 
@@ -108,9 +108,8 @@ async function retryableFinalizeCleanupResponse(input: {
 }
 
 export async function POST(request: NextRequest) {
-  if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
-    return NextResponse.json({ error: 'n8n 媒体节点回调认证失败' }, { status: 401 })
-  }
+  const channel = checkOpenClawN8nCallbackRequest(request, '/api/n8n/media-execute')
+  if (!channel.allowed) return NextResponse.json({ error: channel.error }, { status: channel.status })
   const body = await request.json().catch(() => null)
   const parsed = mediaRequestSchema.safeParse(body)
   if (!parsed.success) {

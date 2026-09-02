@@ -137,6 +137,8 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
+  'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
 ])
 
@@ -189,6 +191,8 @@ const REQUIRED_STANDALONE_FILES = [
   'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
+  'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
   'server.js',
 ]

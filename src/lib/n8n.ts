@@ -1,7 +1,6 @@
-import { getLocalDesktopUserFromRequest, requireRole } from '@/lib/auth'
+import { getOpenClawN8nOperatorUser, requireRole } from '@/lib/auth'
 import { normalizeN8nBaseUrl } from '@/lib/n8n-base-url'
 import { SafeOperationError, type SafeOperationErrorCode } from '@/lib/operational-errors'
-import { timingSafeEqual } from 'node:crypto'
 
 const DEFAULT_TIMEOUT_MS = 8_000
 
@@ -10,7 +9,6 @@ export { normalizeN8nBaseUrl } from '@/lib/n8n-base-url'
 export interface N8nRuntimeConfig {
   baseUrl: string
   apiKeyConfigured: boolean
-  webhookSecretConfigured: boolean
   defaultWebhookPath: string
 }
 
@@ -95,34 +93,16 @@ export function getN8nRuntimeConfig(): N8nRuntimeConfig {
   return {
     baseUrl: normalizeN8nBaseUrl(),
     apiKeyConfigured: Boolean(String(process.env.N8N_API_KEY || '').trim()),
-    webhookSecretConfigured: isN8nWebhookSecretConfigured(),
     defaultWebhookPath: normalizeN8nWebhookPath(
       process.env.N8N_DEFAULT_WEBHOOK_PATH || 'webhook/aiworker-task',
     ),
   }
 }
 
-export function verifyN8nWebhookSecret(provided: string | null): boolean {
-  const expected = String(process.env.N8N_WEBHOOK_SECRET || '').trim()
-  const actual = String(provided || '').trim()
-  if (!expected || !actual) return false
-  const expectedBuffer = Buffer.from(expected)
-  const actualBuffer = Buffer.from(actual)
-  return expectedBuffer.length === actualBuffer.length
-    && timingSafeEqual(expectedBuffer, actualBuffer)
-}
-
-export function isN8nWebhookSecretConfigured(): boolean {
-  return Boolean(String(process.env.N8N_WEBHOOK_SECRET || '').trim())
-}
-
 /** Validate every local precondition before a durable parent task is created. */
 export function validateN8nWebhookDispatchConfiguration(webhookPath: string): void {
   normalizeN8nWebhookPath(webhookPath)
   normalizeN8nBaseUrl()
-  if (!isN8nWebhookSecretConfigured()) {
-    throw new Error('尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流')
-  }
 }
 
 async function parseResponseBody(response: Response): Promise<unknown> {
@@ -241,8 +221,6 @@ export async function triggerN8nWebhook(
   const headers = new Headers({ 'Content-Type': 'application/json' })
   const idempotencyKey = String(options.idempotencyKey || '').trim()
   if (idempotencyKey) headers.set('X-AIWorker-Idempotency-Key', idempotencyKey)
-  const secret = String(process.env.N8N_WEBHOOK_SECRET || '').trim()
-  headers.set('X-AIWorker-Webhook-Secret', secret)
 
   let result: Awaited<ReturnType<typeof n8nFetch>>
   try {
@@ -277,12 +255,7 @@ export async function triggerN8nWebhook(
 }
 
 export function requireN8nRole(request: Request, minRole: 'viewer' | 'operator' | 'admin') {
-  const localDesktop = getLocalDesktopUserFromRequest(request)
-  if (localDesktop) {
-    // MC_DESKTOP_MODE is an explicit trusted-console boundary and auth.ts only
-    // returns this identity for loopback URLs. Represent that trust accurately
-    // instead of silently treating a viewer as an operator.
-    return { user: { ...localDesktop, role: 'admin' as const } }
-  }
+  const internal = getOpenClawN8nOperatorUser(request)
+  if (internal) return { user: internal }
   return requireRole(request, minRole)
 }

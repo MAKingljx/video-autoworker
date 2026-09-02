@@ -2,6 +2,10 @@
 
 ## 目标与边界
 
+3017 生产进程固定设置 `MC_AUTH_MODE=openclaw-loopback` 并监听 `127.0.0.1`；OpenClaw 是唯一
+外部用户鉴权入口。内部请求不携带第二套长期共享密钥，非 loopback Host/forwarded 链直接拒绝。
+密码登录、Cookie session、全局/Agent API key、proxy header 与 desktop bypass 在该模式中均失效。
+
 本方案在同一台 Mac Studio 上把 n8n 作为 Video AutoWorker 的确定性工作流调度层，固定使用 `n8n 2.31.6` 和 `Node.js >= 22.22`。OpenClaw 负责提交任务；通用链依次编排 `planner`、`executor`、`reviewer`，视频链则执行“受控收件箱 → ffmpeg 预处理 → 音频/画面无状态分支执行 → 确定性合并”。每个生成模型节点都从外部注册表选择本地模型或云端模型 API，不在工作流 JSON 中固定供应商或密钥。n8n 仅监听 `127.0.0.1:5678`，Video AutoWorker 通过本机回环地址调用，默认不把编辑器或 Webhook 暴露到公网。
 
 进入 GitHub 的内容：
@@ -16,7 +20,7 @@
 
 - SQLite 数据库、用户账户、凭据和加密密钥。
 - 运行日志、PID、缓存、导入前备份和临时文件。
-- 实际生产环境文件及其中的 `N8N_API_KEY`、Webhook 密钥等秘密。
+- 实际生产环境文件及其中的 `N8N_API_KEY`、模型凭据等秘密。
 
 GitHub 仓库是唯一源码；安装脚本会在 `~/ai-worker/services/video-autoworker-n8n/releases/<git-commit>/` 中按锁文件构建不可变运行版本，再将 `current` 软链接原子切到通过校验的新版本。控制脚本、工作流、依赖和清单都复制自同一个 Git 提交，不链接回仓库。这样 macOS LaunchAgent 不需要访问受隐私保护的 `Documents` 目录。默认运行数据位于 `~/ai-worker/state/n8n`，日志位于 `~/ai-worker/logs/n8n`，PID 位于 `~/ai-worker/run/n8n`，备份位于 `~/ai-worker/backups/n8n`。这些目录均在仓库外，可在外部环境文件中修改。
 
@@ -34,8 +38,12 @@ GitHub 仓库是唯一源码；安装脚本会在 `~/ai-worker/services/video-au
 | `ops/n8n/workflows/aiworker-video-analysis.json` | `Webhook -> 视频预处理 -> 音频/画面独立无状态分支 -> 合并` 的视频分析闭环 |
 | `ops/model-routing/model-routes.example.json` | 无密钥的本地/云端模型注册表示例 |
 | `scripts/install-model-routes.sh` | 在仓库外初始化并保留模型注册表 |
-| `scripts/install-platform-env.sh` | 在仓库外初始化并保留 Video AutoWorker 与 n8n 共享密钥 |
+| `scripts/install-platform-env.sh` | 在仓库外初始化并保留 Video AutoWorker 平台环境 |
 | `scripts/install-aiworker-task-flow-skill.sh` | 备份后安装 OpenClaw 任务提交技能 |
+
+`scripts/install-platform-env.sh` 会迁移删除普通、带前置空白以及 `export N8N_WEBHOOK_SECRET=...`
+形式的停用字段。该字段不再生成、转发或验证；任务一致性继续由幂等键、owner、lease、fencing、
+CAS 和发布锁保证。
 
 ## 首次安装
 
@@ -307,7 +315,7 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 
 每个节点会建立独立、可幂等查询的子任务记录，记录实际 `routeId`、本地/云端位置、传输方式和模型名。模型执行一旦产生错误不会自动重放，以免工具或外部 API 产生重复副作用；n8n 重复同一个节点 HTTP 请求只会读取已经持久化的结果。旧版 `/api/n8n/execute` 仅供显式 `legacy-v1` 任务在非 slot 旧运行时兼容使用；它拒绝 `slot-v1` 任务，不能作为蓝绿发布期间的回退入口。
 
-两条样例只使用 Webhook、Edit Fields、Respond to Webhook、HTTP Request 和 Merge 内置节点，不依赖 Python Task Runner。共享密钥只存在仓库外的 Video AutoWorker 环境文件中：控制台发给 n8n，n8n 从入站 Header 原样转给回环执行接口，工作流 JSON 本身不保存密钥。原生 macOS 启动时若提示缺少内部 Python runner，对这两条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
+两条样例只使用 Webhook、Edit Fields、Respond to Webhook、HTTP Request 和 Merge 内置节点，不依赖 Python Task Runner。3017 与 n8n 之间固定使用 `127.0.0.1` HTTP 回环通道，不再生成、转发或校验第二套 Webhook 共享密钥；工作流只携带任务身份、execution owner 和幂等信息。原生 macOS 启动时若提示缺少内部 Python runner，对这两条工作流不构成阻塞；后续真正加入 Python Code 节点前，应按 n8n 官方要求单独部署 external task runner。
 
 ### 视频分析任务链
 
@@ -362,7 +370,7 @@ bash "$runtime/scripts/n8n-stop.sh"
 
 ## Video AutoWorker 配置
 
-先在真实生产仓库根目录初始化外部平台环境，再重启 3017 服务。脚本为现有文件补齐空的共享密钥，但保留已有非空值；密钥不会打印到终端：
+先在真实生产仓库根目录初始化外部平台环境，再重启 3017 服务。脚本会保留既有平台配置，并清理已经停用的旧 Webhook 共享密钥字段：
 
 ```bash
 bash scripts/install-platform-env.sh
@@ -379,14 +387,13 @@ chmod 600 "$HOME/.config/video-autoworker/model-routes.json"
 N8N_BASE_URL="http://127.0.0.1:5678"
 N8N_DEFAULT_WEBHOOK_PATH="webhook/aiworker-task"
 N8N_API_KEY="<完成所有者初始化后在 n8n UI 创建的 API key>"
-N8N_WEBHOOK_SECRET="<安装脚本生成的随机共享密钥>"
 AIWORKER_MODEL_ROUTES_FILE="$HOME/.config/video-autoworker/model-routes.json"
 AIWORKER_FFMPEG_BIN="$HOME/ai-worker/bin/ffmpeg"
 AIWORKER_MEDIA_INGEST_DIR="$HOME/ai-worker/state/video-autoworker/media-inbox"
 AIWORKER_MEDIA_WORK_DIR="$HOME/ai-worker/state/video-autoworker/media-tasks"
 ```
 
-`N8N_API_KEY` 只用于控制台读取 n8n 管理 API，未配置时不阻塞 Webhook 执行闭环。`N8N_WEBHOOK_SECRET` 是 n8n 回调模型执行接口的必需认证信息，不能留空。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存本地回环地址或云端 `apiKeyEnv` 变量名。默认优先让无需工具的规划、执行和审核节点使用 `local-qwen36-direct`，避免每个节点重复加载完整 OpenClaw Agent、工具和会话上下文；只有确实需要 OpenClaw 工具或最终会话回投时才选 `local-qwen36`。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
+`N8N_API_KEY` 只用于控制台读取 n8n 自带的管理 API，未配置时不阻塞 Webhook 执行闭环。外部用户身份和权限统一由 OpenClaw 处理；3017、n8n 与导演脑之间不再叠加请求 Token 或长期共享鉴权密钥。任务 ID、execution owner、lease、fencing、幂等键和发布锁继续承担任务一致性与防重放职责，不属于第二套用户鉴权。模型注册表可以同时登记 `openclaw` 与 `openai-compatible` 路由；前者引用外部 OpenClaw profile，后者只保存本地回环地址或云端 `apiKeyEnv` 变量名。默认优先让无需工具的规划、执行和审核节点使用 `local-qwen36-direct`，避免每个节点重复加载完整 OpenClaw Agent、工具和会话上下文；只有确实需要 OpenClaw 工具或最终会话回投时才选 `local-qwen36`。云端 API Key 本身必须放在 `platform.env` 或其他受管外部环境中，不能写入注册表、SQLite、n8n 工作流或 Git。直接 API 路由不负责手机回投，因此带回投的最终审核节点必须选择 OpenClaw 路由。
 
 模型注册表中的 `resourceId` 与 `resourceLabel` 描述物理生成模型资源，`id` 仍表示任务链实际调用的访问路由。同一台本地 Qwen 可以把直连路由和 OpenClaw Agent 路由登记到同一个 `resourceId`；模型集群页面会聚合显示为一个模型，并展开各条路由。顶层 `resources` 登记 Whisper、embedding、reranker 等辅助模型：`production=true` 表示已有专用生产链路调用，`production=false` 只表示本机安装文件经过检测、尚未分配生产任务。两类辅助资源都不会被误列成通用文本节点。n8n 任务链只保存路由 `id`，不会保存物理地址之外的凭据，也不会把供应商实现写死在流程节点中。
 

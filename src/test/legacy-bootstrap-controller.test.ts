@@ -15,11 +15,12 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   projectOfflineQueue,
   scanOfflineDurableBatchStates,
@@ -1148,6 +1149,147 @@ process.stdout.write('{"sha":"one","sha":"two"}')
     const orphanBackup = makeRoot()
     writeFileSync(join(orphanBackup, `${stateName(0)}.bak`), '{}\n', { mode: 0o600 })
     expect(() => scanOfflineDurableBatchStates(orphanBackup)).toThrow(/no authoritative primary/u)
+  })
+
+  it('accepts only a live bound guardian pair and paired one-level terminal history', () => {
+    const makeRoot = () => {
+      const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-bootstrap-runtime-root.')))
+      roots.push(root)
+      chmodSync(root, 0o700)
+      return root
+    }
+    const writeGuardianPair = (root: string) => {
+      const markerPath = join(root, '.worker-launch.lock')
+      const createdAt = new Date().toISOString()
+      const token = 'a'.repeat(64)
+      const markerSource = `${canonicalJson({
+        schema: 'video-autoworker-worker-launch-guardian/v2',
+        pid: process.pid,
+        createdAt,
+        token,
+      })}\n`
+      writeFileSync(markerPath, markerSource, { mode: 0o600 })
+      const marker = statSync(markerPath, { bigint: true })
+      writeFileSync(join(root, '.worker-launch.lock.owner'), `${canonicalJson({
+        schema: 'video-autoworker-worker-launch-guardian-owner/v1',
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+        marker: {
+          path: markerPath,
+          dev: marker.dev.toString(),
+          ino: marker.ino.toString(),
+          tokenSha256: hash(token),
+          createdAt,
+          sourceSha256: hash(markerSource),
+        },
+      })}\n`, { mode: 0o600 })
+      return markerPath
+    }
+    const writeTerminalHistory = (root: string, status = 'succeeded') => {
+      const history = join(root, '2026-08-27-retest')
+      mkdirSync(history, { mode: 0o700 })
+      const name = `${'b'.repeat(64)}.json`
+      const source = `${JSON.stringify({
+        schemaVersion: 2,
+        batchId: 'terminal-history',
+        status,
+        items: [{ taskId: 'terminal-task', status }],
+      })}\n`
+      writeFileSync(join(history, name), source, { mode: 0o600 })
+      writeFileSync(join(history, `${name}.bak`), source, { mode: 0o600 })
+      return history
+    }
+
+    const valid = makeRoot()
+    writeGuardianPair(valid)
+    writeTerminalHistory(valid)
+    expect(scanOfflineDurableBatchStates(valid)).toEqual([])
+
+    const incompleteGuardian = makeRoot()
+    writeFileSync(join(incompleteGuardian, '.worker-launch.lock'), '{}\n', { mode: 0o600 })
+    expect(() => scanOfflineDurableBatchStates(incompleteGuardian)).toThrow(/guardian pair is incomplete/u)
+
+    const staleGuardian = makeRoot()
+    const staleMarker = writeGuardianPair(staleGuardian)
+    utimesSync(staleMarker, new Date(0), new Date(0))
+    expect(() => scanOfflineDurableBatchStates(staleGuardian)).toThrow(/guardian pair is stale/u)
+
+    const driftedGuardian = makeRoot()
+    writeGuardianPair(driftedGuardian)
+    const ownerPath = join(driftedGuardian, '.worker-launch.lock.owner')
+    const owner = JSON.parse(readFileSync(ownerPath, 'utf8')) as {
+      marker: { sourceSha256: string }
+    }
+    owner.marker.sourceSha256 = 'f'.repeat(64)
+    writeFileSync(ownerPath, `${JSON.stringify(owner)}\n`)
+    expect(() => scanOfflineDurableBatchStates(driftedGuardian)).toThrow(/pair contract is invalid/u)
+
+    const activeHistory = makeRoot()
+    writeTerminalHistory(activeHistory, 'running')
+    expect(() => scanOfflineDurableBatchStates(activeHistory)).toThrow(/active primary/u)
+
+    const unpairedHistory = makeRoot()
+    const directory = writeTerminalHistory(unpairedHistory)
+    rmSync(join(directory, `${'b'.repeat(64)}.json.bak`))
+    expect(() => scanOfflineDurableBatchStates(unpairedHistory)).toThrow(/primary has no backup/u)
+
+    const deepHistory = makeRoot()
+    const deep = join(deepHistory, '2026-08-27-retest')
+    mkdirSync(join(deep, 'nested'), { recursive: true, mode: 0o700 })
+    expect(() => scanOfflineDurableBatchStates(deepHistory)).toThrow(/unrecognized artifact/u)
+
+    const linkedHistory = makeRoot()
+    const linked = writeTerminalHistory(linkedHistory)
+    const backup = join(linked, `${'b'.repeat(64)}.json.bak`)
+    rmSync(backup)
+    symlinkSync(join(linked, `${'b'.repeat(64)}.json`), backup)
+    expect(() => scanOfflineDurableBatchStates(linkedHistory)).toThrow(/unrecognized artifact/u)
+
+    const concurrentInsert = makeRoot()
+    writeGuardianPair(concurrentInsert)
+    writeTerminalHistory(concurrentInsert)
+    let insertCheck = 0
+    const insertKill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      insertCheck += 1
+      if (insertCheck === 1) {
+        writeFileSync(join(concurrentInsert, `${'c'.repeat(64)}.json`), `${JSON.stringify({
+          schemaVersion: 2,
+          batchId: 'concurrent-insert',
+          status: 'queued',
+          items: [{ taskId: 'concurrent-insert', status: 'queued' }],
+        })}\n`, { mode: 0o600 })
+      }
+      return true
+    })
+    try {
+      expect(() => scanOfflineDurableBatchStates(concurrentInsert)).toThrow(/changed during projection/u)
+    } finally {
+      insertKill.mockRestore()
+    }
+
+    const concurrentReplace = makeRoot()
+    writeGuardianPair(concurrentReplace)
+    const replaceHistory = writeTerminalHistory(concurrentReplace)
+    const replacePrimary = join(replaceHistory, `${'b'.repeat(64)}.json`)
+    const originalIdentity = lstatSync(replacePrimary, { bigint: true })
+    let replaceCheck = 0
+    const replaceKill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      replaceCheck += 1
+      if (replaceCheck === 2) {
+        const replacement = join(replaceHistory, `${'b'.repeat(64)}.replacement`)
+        writeFileSync(replacement, readFileSync(replacePrimary), { mode: 0o600 })
+        renameSync(replacement, replacePrimary)
+      }
+      return true
+    })
+    try {
+      expect(() => scanOfflineDurableBatchStates(concurrentReplace)).toThrow(
+        /directory or file projection changed between samples/u,
+      )
+      expect(lstatSync(replacePrimary, { bigint: true }).ino).not.toBe(originalIdentity.ino)
+    } finally {
+      replaceKill.mockRestore()
+    }
   })
 
   it('refuses disaster authorization on pending, database, or recovery-attempt ABA drift', () => {

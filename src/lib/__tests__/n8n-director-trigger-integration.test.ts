@@ -45,7 +45,6 @@ vi.mock('@/lib/n8n', () => ({
       tenant_id: 3,
     },
   }),
-  isN8nWebhookSecretConfigured: () => true,
   validateN8nWebhookDispatchConfiguration: vi.fn(),
   triggerN8nWebhook: mocks.triggerN8nWebhook,
   isN8nWebhookDispatchError: () => false,

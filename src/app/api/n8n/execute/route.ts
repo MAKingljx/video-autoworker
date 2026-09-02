@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { NextRequest, NextResponse } from 'next/server'
 import { runOpenClaw } from '@/lib/command'
 import { getDatabase } from '@/lib/db'
-import { verifyN8nWebhookSecret } from '@/lib/n8n'
+import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
 import {
   checkN8nCallbackAdmission,
   N8N_LEGACY_CALLBACK_PROTOCOL,
@@ -140,10 +140,8 @@ async function executeRun(run: N8nTaskRun): Promise<Record<string, unknown>> {
 }
 
 export async function POST(request: NextRequest) {
-  if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
-    return NextResponse.json({ error: 'n8n 执行回调认证失败' }, { status: 401 })
-  }
-
+  const channel = checkOpenClawN8nCallbackRequest(request, '/api/n8n/execute')
+  if (!channel.allowed) return NextResponse.json({ error: channel.error }, { status: channel.status })
   const body = await request.json().catch(() => null) as Record<string, unknown> | null
   const taskIdResult = n8nTaskIdentitySchema.safeParse(body?.taskId)
   const idempotencyResult = n8nTaskIdentitySchema.safeParse(body?.idempotencyKey)

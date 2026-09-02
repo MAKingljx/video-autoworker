@@ -3,6 +3,13 @@ import { getDatabase } from './db'
 import { hashPassword, verifyPassword, verifyPasswordWithRehashCheck } from './password'
 import { logSecurityEvent } from './security-events'
 import { parseMcSessionCookieHeader } from './session-cookie'
+import {
+  getOpenClawLoopbackScope,
+  isLoopbackHttpRequest,
+  isOpenClawLoopbackAuthMode,
+  isOpenClawN8nGlobalReleaseRequest,
+  isOpenClawN8nOperatorRequest,
+} from './openclaw-loopback-auth'
 
 // Trusted IPs for proxy auth header (comma-separated)
 const PROXY_AUTH_TRUSTED_IPS = new Set(
@@ -134,7 +141,7 @@ export function getLocalDesktopUserFromRequest(request: Request): User | null {
     id: 0,
     username: 'local-desktop',
     display_name: 'OpenClaw Desktop',
-    role: 'viewer',
+    role: 'admin',
     provider: 'local',
     email: null,
     avatar_url: null,
@@ -148,6 +155,7 @@ export function getLocalDesktopUserFromRequest(request: Request): User | null {
 }
 
 export function getDefaultWorkspaceContext(): { workspaceId: number; tenantId: number } {
+  if (isOpenClawLoopbackAuthMode()) return getOpenClawLoopbackScope()
   try {
     const db = getDatabase()
     const row = db.prepare(`
@@ -461,6 +469,31 @@ export function getUserFromRequest(request: Request): User | null {
   // Extract agent identity header (optional, for attribution)
   const agentName = (request.headers.get('x-agent-name') || '').trim() || null
 
+  // Production OpenClaw mode is intentionally a separate, fail-closed branch.
+  // It never falls through to cookies, proxy headers, global keys, agent keys,
+  // desktop mode, or plugin auth. Plain loopback receives read-only access;
+  // narrow internal operations use the helpers below.
+  if (isOpenClawLoopbackAuthMode()) {
+    if (!isLoopbackHttpRequest(request)) return null
+    const scope = getOpenClawLoopbackScope()
+    return {
+      id: 0,
+      username: 'openclaw-loopback',
+      display_name: 'OpenClaw Loopback',
+      role: 'viewer',
+      provider: 'local',
+      email: null,
+      avatar_url: null,
+      workspace_id: scope.workspaceId,
+      tenant_id: scope.tenantId,
+      is_approved: 1,
+      created_at: 0,
+      updated_at: 0,
+      last_login_at: null,
+      agent_name: agentName,
+    }
+  }
+
   const localDesktopUser = getLocalDesktopUserFromRequest(request)
   if (localDesktopUser) return { ...localDesktopUser, agent_name: agentName }
 
@@ -597,6 +630,41 @@ export function getUserFromRequest(request: Request): User | null {
   }
 
   return null
+}
+
+function openClawLoopbackServiceUser(
+  request: Request,
+  purpose: 'n8n-operator' | 'n8n-global-release',
+): User | null {
+  const allowed = purpose === 'n8n-operator'
+    ? isOpenClawN8nOperatorRequest(request)
+    : isOpenClawN8nGlobalReleaseRequest(request)
+  if (!allowed) return null
+  const scope = getOpenClawLoopbackScope()
+  return {
+    id: 0,
+    username: `openclaw-loopback:${purpose}`,
+    display_name: 'OpenClaw Internal',
+    role: 'admin',
+    provider: 'local',
+    email: null,
+    avatar_url: null,
+    workspace_id: scope.workspaceId,
+    tenant_id: scope.tenantId,
+    is_approved: 1,
+    created_at: 0,
+    updated_at: 0,
+    last_login_at: null,
+    agent_name: null,
+  }
+}
+
+export function getOpenClawN8nOperatorUser(request: Request): User | null {
+  return openClawLoopbackServiceUser(request, 'n8n-operator')
+}
+
+export function getOpenClawN8nGlobalReleaseUser(request: Request): User | null {
+  return openClawLoopbackServiceUser(request, 'n8n-global-release')
 }
 
 /**

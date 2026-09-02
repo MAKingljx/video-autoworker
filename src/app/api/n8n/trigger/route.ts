@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import {
   isN8nWebhookDispatchError,
-  isN8nWebhookSecretConfigured,
   requireN8nRole,
   triggerN8nWebhook,
   validateN8nWebhookDispatchConfiguration,
@@ -238,12 +237,6 @@ export async function POST(request: NextRequest) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return NextResponse.json({ error: 'input 必须是 JSON 对象' }, { status: 400 })
   }
-  if (!isN8nWebhookSecretConfigured()) {
-    return NextResponse.json({
-      error: '尚未配置 N8N_WEBHOOK_SECRET，无法安全触发 n8n 工作流',
-    }, { status: 503 })
-  }
-
   const db = getDatabase()
   const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
   const binding = getN8nWorkflowBinding(db, bindingId, scope)

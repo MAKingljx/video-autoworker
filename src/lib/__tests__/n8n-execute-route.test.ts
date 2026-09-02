@@ -5,7 +5,6 @@ import { NextRequest } from 'next/server'
 const mocks = vi.hoisted(() => ({
   runOpenClaw: vi.fn(),
   getDatabase: vi.fn(),
-  verifyN8nWebhookSecret: vi.fn(),
   getN8nTaskRunByTaskId: vi.fn(),
   claimN8nTaskRun: vi.fn(),
   completeN8nTaskRun: vi.fn(),
@@ -15,7 +14,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/command', () => ({ runOpenClaw: mocks.runOpenClaw }))
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
-vi.mock('@/lib/n8n', () => ({ verifyN8nWebhookSecret: mocks.verifyN8nWebhookSecret }))
 vi.mock('@/lib/n8n-runtime-affinity', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/n8n-runtime-affinity')>()
   return {
@@ -65,12 +63,11 @@ const run = {
   updatedAt: 1,
 }
 
-function request(secret = 'shared-secret') {
+function request() {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/execute', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-AIWorker-Webhook-Secret': secret,
     },
     body: JSON.stringify({ taskId: 'task-1', idempotencyKey: 'idem-1' }),
   })
@@ -79,7 +76,6 @@ function request(secret = 'shared-secret') {
 describe('n8n local execution route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockReturnValue(run)
     mocks.checkN8nCallbackAdmission.mockReturnValue({ allowed: true, mode: 'legacy' })
@@ -107,15 +103,6 @@ describe('n8n local execution route', () => {
         code: 0,
       }
     })
-  })
-
-  it('rejects calls that do not present the configured shared secret', async () => {
-    mocks.verifyN8nWebhookSecret.mockReturnValue(false)
-
-    const response = await POST(request('wrong'))
-
-    expect(response.status).toBe(401)
-    expect(mocks.getDatabase).not.toHaveBeenCalled()
   })
 
   it('runs the configured local OpenClaw model without putting the prompt in argv', async () => {

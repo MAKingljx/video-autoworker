@@ -58,6 +58,7 @@ Usage:
   deploy-blue-green.sh switch <blue|green>
   deploy-blue-green.sh rollback
   deploy-blue-green.sh status
+  deploy-blue-green.sh attest-current
 
 The router remains on port 3017. Backends default to blue=3317 and green=3417.
 `stage` copies an already built and audited standalone artifact into a new,
@@ -3003,10 +3004,42 @@ show_status() {
   curl -fsS "http://$ROUTER_HOST:$ROUTER_PORT/__router/health"
 }
 
+attest_current() {
+  local active release_id release_root generation port readiness evidence verified_contract
+  prepare_run_dir
+  validate_state
+  assert_baseline >/dev/null
+  active="$(read_state_field active)"
+  release_id="$(read_state_slot_release "$active")"
+  generation="$(read_state_field generation)"
+  [[ "$release_id" != unbound-* ]] || fail "active slot is not bound to a release"
+  release_root="$(binding_values "$active" | sed -n '2p')" \
+    || fail "active slot binding is invalid"
+  [[ "$release_root" == /* ]] || fail "active slot release root is invalid"
+  port="$(slot_port "$active")"
+  probe_slot "$active" active >/dev/null
+  readiness="$(check_json_endpoint readiness \
+    "http://$ROUTER_HOST:$ROUTER_PORT$READINESS_PATH" "$active" "$release_id" \
+    "$port" "" "" "$generation")" \
+    || fail "active routed release is not final-ready"
+  verified_contract="$(verify_director_video_release_chain \
+    "$release_id" "$release_root" ancestor)" \
+    || fail "active director/video release chain is incompatible"
+  [[ "$verified_contract" == "$(printf '%s\n' "$readiness" | sed -n '3p')" ]] \
+    || fail "active routed projection contract differs from its release payload"
+  evidence="$(capture_transition_release_evidence "$active" "$release_id" \
+    "$readiness" "$active" "$release_id" "$generation")" \
+    || fail "unable to capture current routed release evidence"
+  verify_captured_transition_release_evidence \
+    "$evidence" "$active" "$release_id" "$generation" 0 >/dev/null \
+    || fail "current routed release evidence changed during capture"
+  printf '%s\n' "$evidence"
+}
+
 command="${1:-}"
 shift || true
 case "$command" in
-  init|bootstrap|stage|bind|retire|switch|rollback|status)
+  init|bootstrap|stage|bind|retire|switch|rollback|status|attest-current)
     assert_bootstrap_operation_gate "$command" "$@"
     ;;
 esac
@@ -3020,6 +3053,7 @@ case "$command" in
   switch) switch_slot "$@" ;;
   rollback) rollback_state "$@" ;;
   status) show_status "$@" ;;
+  attest-current) attest_current "$@" ;;
   -h|--help|help|'') usage ;;
   *) usage >&2; exit 2 ;;
 esac

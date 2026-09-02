@@ -66,6 +66,8 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
+    'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
   for (const [member, content] of Object.entries(requiredRuntimeFiles)) {

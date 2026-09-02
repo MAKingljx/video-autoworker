@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getDatabase } from '@/lib/db'
-import { getDetectedGatewayPort, getDetectedGatewayToken } from '@/lib/gateway-runtime'
+import { getDetectedGatewayCredentialStatus, getDetectedGatewayPort } from '@/lib/gateway-runtime'
 
 interface GatewayEntry {
   id: number
   name: string
   host: string
   port: number
-  token: string
+  token?: string
   is_primary: number
   status: string
   last_seen: number | null
@@ -18,6 +18,11 @@ interface GatewayEntry {
   created_at: number
   updated_at: number
 }
+
+const PUBLIC_GATEWAY_COLUMNS = `
+  id, name, host, port, is_primary, status, last_seen, latency,
+  sessions_count, agents_count, created_at, updated_at
+`
 
 function ensureTable(db: ReturnType<typeof getDatabase>) {
   db.exec(`
@@ -49,20 +54,18 @@ export async function GET(request: NextRequest) {
   const db = getDatabase()
   ensureTable(db)
 
-  const gateways = db.prepare('SELECT * FROM gateways ORDER BY is_primary DESC, name ASC').all() as GatewayEntry[]
+  const gateways = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways ORDER BY is_primary DESC, name ASC`).all() as GatewayEntry[]
 
   // If no gateways exist, seed defaults from environment
   if (gateways.length === 0) {
     const name = String(process.env.MC_DEFAULT_GATEWAY_NAME || 'primary')
     const host = String(process.env.OPENCLAW_GATEWAY_HOST || '127.0.0.1')
     const mainPort = getDetectedGatewayPort() || parseInt(process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789')
-    const mainToken = getDetectedGatewayToken()
-
     db.prepare(`
       INSERT INTO gateways (name, host, port, token, is_primary) VALUES (?, ?, ?, ?, 1)
-    `).run(name, host, mainPort, mainToken)
+    `).run(name, host, mainPort, '')
 
-    const seeded = db.prepare('SELECT * FROM gateways ORDER BY is_primary DESC, name ASC').all() as GatewayEntry[]
+    const seeded = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways ORDER BY is_primary DESC, name ASC`).all() as GatewayEntry[]
     return NextResponse.json({ gateways: redactTokens(seeded) })
   }
 
@@ -85,6 +88,9 @@ export async function POST(request: NextRequest) {
   if (!name || !host || !port) {
     return NextResponse.json({ error: 'name, host, and port are required' }, { status: 400 })
   }
+  if (token) {
+    return NextResponse.json({ error: 'Gateway credentials are managed by OpenClaw' }, { status: 400 })
+  }
 
   try {
     // If marking as primary, unset other primaries
@@ -94,7 +100,7 @@ export async function POST(request: NextRequest) {
 
     const result = db.prepare(`
       INSERT INTO gateways (name, host, port, token, is_primary) VALUES (?, ?, ?, ?, ?)
-    `).run(name, host, port, token || '', is_primary ? 1 : 0)
+    `).run(name, host, port, '', is_primary ? 1 : 0)
 
     // Auto-register agents reported by the gateway (k8s sidecar support)
     let agentsRegistered = 0
@@ -125,7 +131,7 @@ export async function POST(request: NextRequest) {
       )
     } catch { /* audit might not exist */ }
 
-    const gw = db.prepare('SELECT * FROM gateways WHERE id = ?').get(result.lastInsertRowid) as GatewayEntry
+    const gw = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways WHERE id = ?`).get(result.lastInsertRowid) as GatewayEntry
     return NextResponse.json({ gateway: redactToken(gw), agents_registered: agentsRegistered }, { status: 201 })
   } catch (err: any) {
     if (err.message?.includes('UNIQUE')) {
@@ -149,15 +155,20 @@ export async function PUT(request: NextRequest) {
 
   if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
 
-  const existing = db.prepare('SELECT * FROM gateways WHERE id = ?').get(id) as GatewayEntry | undefined
+  const existing = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways WHERE id = ?`).get(id) as GatewayEntry | undefined
   if (!existing) return NextResponse.json({ error: 'Gateway not found' }, { status: 404 })
+
+  if ('token' in updates) {
+    return NextResponse.json({ error: 'Gateway credentials are managed by OpenClaw' }, { status: 400 })
+  }
 
   // If setting as primary, unset others
   if (updates.is_primary) {
     db.prepare('UPDATE gateways SET is_primary = 0').run()
+    db.prepare("UPDATE gateways SET token = '', updated_at = (unixepoch()) WHERE id = ?").run(id)
   }
 
-  const allowed = ['name', 'host', 'port', 'token', 'is_primary', 'status', 'last_seen', 'latency', 'sessions_count', 'agents_count']
+  const allowed = ['name', 'host', 'port', 'is_primary', 'status', 'last_seen', 'latency', 'sessions_count', 'agents_count']
   const sets: string[] = []
   const values: any[] = []
 
@@ -199,7 +210,7 @@ export async function PUT(request: NextRequest) {
     }
   }
 
-  const updated = db.prepare('SELECT * FROM gateways WHERE id = ?').get(id) as GatewayEntry
+  const updated = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways WHERE id = ?`).get(id) as GatewayEntry
   return NextResponse.json({ gateway: redactToken(updated), agents_registered: agentsRegistered })
 }
 
@@ -217,7 +228,7 @@ export async function DELETE(request: NextRequest) {
 
   if (!id) return NextResponse.json({ error: 'id is required' }, { status: 400 })
 
-  const gw = db.prepare('SELECT * FROM gateways WHERE id = ?').get(id) as GatewayEntry | undefined
+  const gw = db.prepare(`SELECT ${PUBLIC_GATEWAY_COLUMNS} FROM gateways WHERE id = ?`).get(id) as GatewayEntry | undefined
   if (gw?.is_primary) {
     return NextResponse.json({ error: 'Cannot delete the primary gateway' }, { status: 400 })
   }
@@ -233,8 +244,27 @@ export async function DELETE(request: NextRequest) {
   return NextResponse.json({ deleted: result.changes > 0 })
 }
 
-function redactToken(gw: GatewayEntry): GatewayEntry & { token_set: boolean } {
-  return { ...gw, token: gw.token ? '--------' : '', token_set: !!gw.token }
+function redactToken(gw: GatewayEntry): Omit<GatewayEntry, 'token'> & {
+  token_set: boolean
+  credential_source: string
+  server_managed: boolean
+} {
+  const { token: _credential, ...publicGateway } = gw
+  if (gw.is_primary === 1) {
+    const credential = getDetectedGatewayCredentialStatus()
+    return {
+      ...publicGateway,
+      token_set: credential.configured,
+      credential_source: credential.source,
+      server_managed: true,
+    }
+  }
+  return {
+    ...publicGateway,
+    token_set: false,
+    credential_source: 'none',
+    server_managed: true,
+  }
 }
 
 function redactTokens(gws: GatewayEntry[]) {

@@ -7,7 +7,15 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 BRANCH="${BRANCH:-$(git -C "$PROJECT_ROOT" branch --show-current)}"
 PORT="${PORT:-3000}"
-LISTEN_HOST="${MC_HOSTNAME:-127.0.0.1}"
+if [[ -n "${MC_HOSTNAME:-}" && "$MC_HOSTNAME" != "127.0.0.1" ]]; then
+  printf 'MC_HOSTNAME must remain 127.0.0.1 for OpenClaw loopback mode\n' >&2
+  exit 1
+fi
+LISTEN_HOST="127.0.0.1"
+export MC_AUTH_MODE="openclaw-loopback"
+export MC_DESKTOP_MODE="0"
+export MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-1}"
+export MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-1}"
 LOG_PATH="${LOG_PATH:-/tmp/mc.log}"
 VERIFY_HOST="${VERIFY_HOST:-127.0.0.1}"
 SOURCE_DATA_DIR="$PROJECT_ROOT/.data"
@@ -562,6 +570,9 @@ restart_old_server_after_migration_failure() {
     MISSION_CONTROL_DB_PATH="$RECOVERY_DB_PATH" \
     MISSION_CONTROL_TOKENS_PATH="$RECOVERY_TOKENS_PATH" \
     AIWORKER_RUN_DIR="$SOURCE_RUN_DIR" \
+    MC_AUTH_MODE="openclaw-loopback" MC_DESKTOP_MODE="0" \
+    MC_OPENCLAW_WORKSPACE_ID="$MC_OPENCLAW_WORKSPACE_ID" \
+    MC_OPENCLAW_TENANT_ID="$MC_OPENCLAW_TENANT_ID" \
     PORT="$PORT" HOSTNAME="$LISTEN_HOST" \
     "$RECOVERY_LAUNCHER" "$RECOVERY_STANDALONE_ROOT" "$RECOVERY_AUDITOR" "${NODE_BIN:-node}" \
     >"$LOG_PATH" 2>&1 &
@@ -745,6 +756,9 @@ echo "==> starting standalone server"
 load_env
 configure_runtime_paths
 
+MC_AUTH_MODE="openclaw-loopback" MC_DESKTOP_MODE="0" \
+MC_OPENCLAW_WORKSPACE_ID="$MC_OPENCLAW_WORKSPACE_ID" \
+MC_OPENCLAW_TENANT_ID="$MC_OPENCLAW_TENANT_ID" \
 PORT="$PORT" HOSTNAME="$LISTEN_HOST" nohup bash "$PROJECT_ROOT/scripts/start-standalone.sh" >"$LOG_PATH" 2>&1 &
 new_pid=$!
 write_server_pid "$new_pid"
@@ -769,16 +783,7 @@ fi
 # which would strand queued video tasks even though the web page is healthy.
 n8n_probe_code="$(curl -sS -o /dev/null -w "%{http_code}" "http://$VERIFY_HOST:$PORT/api/n8n/workflows" || true)"
 if [[ "$n8n_probe_code" != 2?? ]]; then
-  echo "error: loopback task-flow API probe returned HTTP $n8n_probe_code; check MC_DESKTOP_MODE and listen host" >&2
-  exit 1
-fi
-
-n8n_status_payload="$(curl -fsS "http://$VERIFY_HOST:$PORT/api/n8n/status")"
-if ! node -e '
-  const payload = JSON.parse(process.argv[1]);
-  if (payload?.config?.webhookSecretConfigured !== true) process.exit(1);
-' "$n8n_status_payload"; then
-  echo "error: N8N_WEBHOOK_SECRET is not loaded by the standalone runtime" >&2
+  echo "error: loopback task-flow API probe returned HTTP $n8n_probe_code; check MC_AUTH_MODE and listen host" >&2
   exit 1
 fi
 

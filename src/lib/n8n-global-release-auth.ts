@@ -1,9 +1,11 @@
 import {
   getDefaultWorkspaceContext,
   getLocalDesktopUserFromRequest,
+  getOpenClawN8nGlobalReleaseUser,
   requireRole,
   type User,
 } from '@/lib/auth'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 type AuthError = { user?: never; error: string; status: 401 | 403 }
 type GlobalReleaseAccess = { user: User; canManage: boolean; error?: never; status?: never }
@@ -12,13 +14,18 @@ type GlobalReleaseAccess = { user: User; canManage: boolean; error?: never; stat
  * Authenticate a release-control reader and determine whether the identity may
  * operate process-wide n8n release controls.
  *
- * Tenant admins are deliberately not global admins. Only the trusted local
- * desktop, the global API key (id=0), or a normal admin in the default owner
- * tenant/workspace may inspect or mutate process-wide release state.
+ * OpenClaw-only production permits only the exact loopback release-control
+ * routes. Legacy deployments retain the original owner-workspace boundary.
  */
 export function getN8nGlobalReleaseAccess(
   request: Request,
 ): GlobalReleaseAccess | AuthError {
+  if (isOpenClawLoopbackAuthMode()) {
+    const internal = getOpenClawN8nGlobalReleaseUser(request)
+    if (!internal) return { error: 'OpenClaw loopback release control required', status: 403 }
+    return { user: internal, canManage: true }
+  }
+
   const localDesktop = getLocalDesktopUserFromRequest(request)
   if (localDesktop) return { user: localDesktop, canManage: true }
 
@@ -26,7 +33,6 @@ export function getN8nGlobalReleaseAccess(
   if (auth.user === undefined) {
     return { error: auth.error, status: auth.status }
   }
-
   const { user } = auth
   if (user.id < 0) return { user, canManage: false }
   if (user.id === 0) return { user, canManage: true }

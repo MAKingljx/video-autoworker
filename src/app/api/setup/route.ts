@@ -4,6 +4,7 @@ import { createUser, createSession } from '@/lib/auth'
 import { logAuditEvent } from '@/lib/db'
 import { getMcSessionCookieName, getMcSessionCookieOptions, isRequestSecure } from '@/lib/session-cookie'
 import { logger } from '@/lib/logger'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 const INSECURE_PASSWORDS = new Set([
   'admin',
@@ -14,10 +15,16 @@ const INSECURE_PASSWORDS = new Set([
 ])
 
 export async function GET() {
+  if (isOpenClawLoopbackAuthMode()) {
+    return NextResponse.json({ needsSetup: false, authProvider: 'openclaw' })
+  }
   return NextResponse.json({ needsSetup: needsFirstTimeSetup() })
 }
 
 export async function POST(request: Request) {
+  if (isOpenClawLoopbackAuthMode()) {
+    return NextResponse.json({ error: 'OpenClaw is the only authentication provider' }, { status: 403 })
+  }
   try {
     // Only allow setup when no users exist
     if (!needsFirstTimeSetup()) {

@@ -71,6 +71,19 @@ load_runtime_env() {
 
 load_runtime_env
 
+if [[ -n "${MC_HOSTNAME:-}" && "$MC_HOSTNAME" != "127.0.0.1" ]]; then
+  printf 'MC_HOSTNAME must remain 127.0.0.1 for OpenClaw loopback mode\n' >&2
+  exit 1
+fi
+if [[ -n "${MC_AUTH_MODE:-}" && "$MC_AUTH_MODE" != "openclaw-loopback" ]]; then
+  printf 'MC_AUTH_MODE must be openclaw-loopback for standalone production\n' >&2
+  exit 1
+fi
+export MC_AUTH_MODE="openclaw-loopback"
+export MC_DESKTOP_MODE="0"
+export MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-1}"
+export MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-1}"
+
 resolve_physical_path() {
   local candidate="$1"
 
@@ -166,6 +179,8 @@ required_files=(
   "$STANDALONE_DIR/package.json"
   "$STANDALONE_DIR/scripts/verify-shared-runtime-install-gate.mjs"
   "$STANDALONE_DIR/scripts/lib/runtime-safe-offline-queue.mjs"
+  "$STANDALONE_DIR/scripts/lib/openclaw-secret-reference.mjs"
+  "$STANDALONE_DIR/scripts/lib/shared-deployment-lock.mjs"
   "$STANDALONE_DIR/scripts/lib/shared-deployment-lock.sh"
 )
 required_directories=(
@@ -224,14 +239,7 @@ assert_runtime_path_outside_standalone "MISSION_CONTROL_TOKENS_PATH" "$MISSION_C
 assert_runtime_path_outside_standalone "PID_FILE" "$PID_FILE"
 
 cd "$STANDALONE_DIR"
-# Next.js standalone server reads HOSTNAME to decide bind address.
-# Bash auto-populates HOSTNAME with the machine name, so prefer MC_HOSTNAME
-# and otherwise fall back to loopback for standalone deployments. The local
-# desktop auth boundary intentionally depends on the request remaining local.
-machine_hostname="$(hostname 2>/dev/null || true)"
-if [[ -n "${MC_HOSTNAME:-}" ]]; then
-  export HOSTNAME="$MC_HOSTNAME"
-elif [[ -z "${HOSTNAME:-}" || "$HOSTNAME" == "$machine_hostname" ]]; then
-  export HOSTNAME="127.0.0.1"
-fi
+# OpenClaw is the only external auth boundary; the application listener never
+# accepts a hostname override or a non-loopback bind.
+export HOSTNAME="127.0.0.1"
 exec "${NODE_BIN:-node}" server.js

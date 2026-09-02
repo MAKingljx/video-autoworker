@@ -152,10 +152,17 @@ describe('transactional director-brain OpenClaw installer', () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-deployment-lock-'))
     try {
       const fixture = await createFixture(root)
-      await mkdir(resolve(fixture.deploymentRunDir, '.deployment.lock'), {
+      const deploymentLockDir = resolve(fixture.deploymentRunDir, '.deployment.lock')
+      await mkdir(deploymentLockDir, {
         recursive: true,
         mode: 0o700,
       })
+      await writeFile(resolve(deploymentLockDir, 'pid'), `${JSON.stringify({
+        schema: 'video-autoworker-shared-deployment-lock-owner/v1',
+        pid: process.pid,
+        nonce: 'a'.repeat(64),
+        createdAt: new Date().toISOString(),
+      })}\n`, { mode: 0o600 })
       await chmod(fixture.deploymentRunDir, 0o700)
       await expect(runInstaller(fixture, '--apply')).rejects.toThrow()
       expect(await exists(fixture.backupRoot)).toBe(false)

@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
-import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import { checkN8nCallbackAdmission } from '@/lib/n8n-runtime-affinity'
+import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
 import {
   claimScopedN8nTaskRun,
   getN8nTaskRunByTaskId,
@@ -22,10 +22,8 @@ const claimRequestSchema = z.object({
 }).strict()
 
 export async function POST(request: NextRequest) {
-  if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
-    return NextResponse.json({ error: 'n8n 父任务认领认证失败' }, { status: 401 })
-  }
-
+  const channel = checkOpenClawN8nCallbackRequest(request, '/api/n8n/claim')
+  if (!channel.allowed) return NextResponse.json({ error: channel.error }, { status: channel.status })
   const body = await request.json().catch(() => null)
   const parsed = claimRequestSchema.safeParse(body)
   if (!parsed.success) {

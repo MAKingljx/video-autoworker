@@ -47,6 +47,19 @@ load_env_file "$PROJECT_ROOT/.env"
 load_env_file "$PROJECT_ROOT/.env.local"
 load_env_file "$PLATFORM_ENV_FILE"
 
+if [[ -n "${MC_HOSTNAME:-}" && "$MC_HOSTNAME" != "127.0.0.1" ]]; then
+  printf 'MC_HOSTNAME must remain 127.0.0.1 for OpenClaw loopback mode\n' >&2
+  exit 1
+fi
+if [[ -n "${MC_AUTH_MODE:-}" && "$MC_AUTH_MODE" != "openclaw-loopback" ]]; then
+  printf 'MC_AUTH_MODE must be openclaw-loopback for standalone slots\n' >&2
+  exit 1
+fi
+export MC_AUTH_MODE="openclaw-loopback"
+export MC_DESKTOP_MODE="0"
+export MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-1}"
+export MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-1}"
+
 BINDING_FILE="$RUN_DIR/slots/$SLOT.json"
 [[ -f "$BINDING_FILE" && ! -L "$BINDING_FILE" ]] || {
   printf 'slot binding is missing or unsafe: %s\n' "$BINDING_FILE" >&2

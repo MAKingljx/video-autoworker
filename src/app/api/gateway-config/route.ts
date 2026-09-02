@@ -5,7 +5,7 @@ import { logAuditEvent } from '@/lib/db'
 import { config } from '@/lib/config'
 import { validateBody, gatewayConfigUpdateSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
-import { getDetectedGatewayToken } from '@/lib/gateway-runtime'
+import { withDetectedGatewayAuthorization } from '@/lib/gateway-runtime'
 
 function getConfigPath(): string | null {
   return config.openclawConfigPath || null
@@ -16,10 +16,7 @@ function gatewayUrl(path: string): string {
 }
 
 function gatewayHeaders(): Record<string, string> {
-  const token = getDetectedGatewayToken()
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  return headers
+  return withDetectedGatewayAuthorization({ 'Content-Type': 'application/json' })
 }
 
 function computeHash(raw: string): string {

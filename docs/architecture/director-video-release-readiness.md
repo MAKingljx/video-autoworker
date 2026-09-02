@@ -98,3 +98,11 @@ legacy 主库尚无 052/057 表时，不接受环境变量布尔绕过；只能�
 源码提交和 `<commit>-runtime` 的 bootstrap attempt，实时复核 freeze guard、evidence、rollback
 proof 和双采样归零证据后安装。fresh `PREPARED` 可承载三项安装，120 秒的 current-confirm 留给
 最终 transition；confirmed/shutdown 阶段只接受同一 attempt 的恢复。
+
+durable batch 根允许保留 runtime guard 自身的 `.worker-launch.lock` 与
+`.worker-launch.lock.owner`，但两者必须完整成对、权限与 schema 正确、marker 的 inode/摘要/token
+和 owner 绑定一致、owner PID 仍存活且 marker 在 15 秒刷新窗内；它们只代表发布期间阻断新 worker
+的 guardian，不计为 durable work。根下也可保留 runtime guard 已接受的一层终态历史目录：目录必须
+为物理 `0700`，且只包含成对的 `<64hex>.json` 与 `.json.bak` 普通文件，主状态及其 item 全部终态。
+缺任一 guardian 成员、绑定漂移、陈旧 guardian、活跃主状态、孤立备份、未知成员、软链接或更深目录
+都会让共享安装门失败关闭。

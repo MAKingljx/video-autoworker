@@ -12,6 +12,8 @@ interface Gateway {
   host: string
   port: number
   token_set: boolean
+  credential_source: string
+  server_managed: boolean
   is_primary: number
   status: string
   last_seen: number | null
@@ -160,15 +162,6 @@ export function MultiGatewayPanel() {
     fetchHistory()
   }
 
-  const updateToken = async (gw: Gateway, token: string) => {
-    await fetch('/api/gateways', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: gw.id, token }),
-    })
-    fetchGateways()
-  }
-
   const connectTo = async (gw: Gateway) => {
     try {
       const res = await fetch('/api/gateways/connect', {
@@ -179,12 +172,15 @@ export function MultiGatewayPanel() {
       if (!res.ok) return
       const payload = await res.json()
 
+      // The primary credential remains server-side. A browser must never
+      // receive it merely to establish a direct WebSocket.
+      if (payload?.server_managed) return
+
       // Use server-resolved URL only — it respects NEXT_PUBLIC_GATEWAY_URL,
       // Tailscale Serve, and reverse-proxy configurations.
       const wsUrl = payload?.ws_url
       if (!wsUrl) return
-      const token = String(payload?.token || '')
-      connect(wsUrl, token)
+      connect(wsUrl)
     } catch {
       // ignore: connection status will remain disconnected
     }
@@ -294,7 +290,6 @@ export function MultiGatewayPanel() {
               onDelete={() => deleteGateway(gw.id)}
               onConnect={() => connectTo(gw)}
               onProbe={() => probeGateway(gw)}
-              onUpdateToken={(token) => updateToken(gw, token)}
             />
           ))}
         </div>
@@ -447,7 +442,7 @@ export function MultiGatewayPanel() {
   )
 }
 
-function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurrentlyConnected, onSetPrimary, onDelete, onConnect, onProbe, onUpdateToken }: {
+function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurrentlyConnected, onSetPrimary, onDelete, onConnect, onProbe }: {
   gateway: Gateway
   health?: GatewayHealthProbe
   historyEntries?: GatewayHealthLogEntry[]
@@ -457,11 +452,8 @@ function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurren
   onDelete: () => void
   onConnect: () => void
   onProbe: () => void
-  onUpdateToken: (token: string) => void
 }) {
   const t = useTranslations('multiGateway')
-  const [editingToken, setEditingToken] = useState(false)
-  const [tokenInput, setTokenInput] = useState('')
   const statusColors: Record<string, string> = {
     online: 'bg-green-500',
     offline: 'bg-red-500',
@@ -500,54 +492,10 @@ function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurren
           </div>
           <div className="flex items-center gap-4 mt-1.5 text-xs text-muted-foreground">
             <span className="font-mono">{gateway.host}:{gateway.port}</span>
-            <button
-              onClick={() => { setEditingToken(!editingToken); setTokenInput('') }}
-              className="hover:text-foreground transition-colors cursor-pointer"
-              title={gateway.token_set ? 'Change gateway token' : 'Set gateway token'}
-            >
-              {t('token')}: {gateway.token_set ? t('tokenSet') : t('tokenNone')} [edit]
-            </button>
+            <span>{t('token')}: {gateway.token_set ? t('tokenSet') : t('tokenNone')} (OpenClaw)</span>
             {gateway.latency != null && <span>{t('latency')}: {gateway.latency}ms</span>}
             <span>{t('last')}: {lastSeen}</span>
           </div>
-          {editingToken && (
-            <div className="mt-2 flex items-center gap-2">
-              <input
-                type="password"
-                value={tokenInput}
-                onChange={e => setTokenInput(e.target.value)}
-                placeholder="Paste gateway token..."
-                className="flex-1 px-2 py-1 text-xs bg-secondary border border-border rounded font-mono"
-                autoFocus
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && tokenInput.trim()) {
-                    onUpdateToken(tokenInput.trim())
-                    setEditingToken(false)
-                    setTokenInput('')
-                  } else if (e.key === 'Escape') {
-                    setEditingToken(false)
-                    setTokenInput('')
-                  }
-                }}
-              />
-              <Button
-                onClick={() => { onUpdateToken(tokenInput.trim()); setEditingToken(false); setTokenInput('') }}
-                disabled={!tokenInput.trim()}
-                size="xs"
-                className="text-2xs"
-              >
-                Save
-              </Button>
-              <Button
-                onClick={() => { setEditingToken(false); setTokenInput('') }}
-                variant="ghost"
-                size="xs"
-                className="text-2xs"
-              >
-                Cancel
-              </Button>
-            </div>
-          )}
           {health?.gateway_version && (
             <div className="mt-1 text-2xs text-muted-foreground">
               {t('gatewayVersion')}: <span className="font-mono text-foreground/80">{health.gateway_version}</span>
@@ -591,7 +539,7 @@ function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurren
           >
             {isProbing ? t('probing') : t('probe')}
           </Button>
-          {!isCurrentlyConnected && (
+          {!isCurrentlyConnected && !gateway.server_managed && (
             <Button
               onClick={onConnect}
               size="xs"
@@ -633,7 +581,7 @@ function GatewayCard({ gateway, health, historyEntries = [], isProbing, isCurren
 
 function AddGatewayForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const t = useTranslations('multiGateway')
-  const [form, setForm] = useState({ name: '', host: '127.0.0.1', port: '18789', token: '' })
+  const [form, setForm] = useState({ name: '', host: '127.0.0.1', port: '18789' })
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
@@ -650,7 +598,6 @@ function AddGatewayForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: 
           name: form.name,
           host: form.host,
           port: parseInt(form.port),
-          token: form.token,
           is_primary: false,
         }),
       })
@@ -671,7 +618,7 @@ function AddGatewayForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: 
     <form onSubmit={handleSubmit} className="bg-card border border-primary/20 rounded-lg p-4 space-y-3">
       <h3 className="text-sm font-semibold text-foreground">{t('addGatewayTitle')}</h3>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div>
           <label className="block text-2xs text-muted-foreground mb-1">{t('name')}</label>
           <input
@@ -701,16 +648,6 @@ function AddGatewayForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: 
             onChange={e => setForm({ ...form, port: e.target.value })}
             className="w-full h-8 px-2.5 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             required
-          />
-        </div>
-        <div>
-          <label className="block text-2xs text-muted-foreground mb-1">{t('token')}</label>
-          <input
-            type="password"
-            value={form.token}
-            onChange={e => setForm({ ...form, token: e.target.value })}
-            placeholder={t('optional')}
-            className="w-full h-8 px-2.5 rounded-md bg-secondary border border-border text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
           />
         </div>
       </div>

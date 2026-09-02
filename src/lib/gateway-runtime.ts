@@ -1,18 +1,27 @@
 import fs from 'node:fs'
 import { config } from '@/lib/config'
 import { logger } from '@/lib/logger'
+import {
+  isValidExecSecretReference,
+  resolveOpenClawGatewaySecret,
+  type ExecSecretProvider,
+  type ExecSecretReference,
+} from '@/lib/secret-reference'
 
 interface OpenClawGatewayConfig {
   gateway?: {
     auth?: {
       mode?: 'token' | 'password'
-      token?: string
+      token?: string | ExecSecretReference
       password?: string
     }
     port?: number
     controlUi?: {
       allowedOrigins?: string[]
     }
+  }
+  secrets?: {
+    providers?: Record<string, ExecSecretProvider>
   }
 }
 
@@ -86,7 +95,7 @@ export function registerMcAsDashboard(mcUrl: string): { registered: boolean; alr
  * Env overrides: OPENCLAW_GATEWAY_TOKEN, GATEWAY_TOKEN, OPENCLAW_GATEWAY_PASSWORD, GATEWAY_PASSWORD.
  * From config: uses gateway.auth.token when mode is "token", gateway.auth.password when mode is "password".
  */
-export function getDetectedGatewayToken(): string {
+function getDetectedGatewayCredential(): string {
   const envToken = (process.env.OPENCLAW_GATEWAY_TOKEN || process.env.GATEWAY_TOKEN || '').trim()
   if (envToken) return envToken
   
@@ -96,14 +105,61 @@ export function getDetectedGatewayToken(): string {
   const parsed = readOpenClawConfig()
   const auth = parsed?.gateway?.auth
   const mode = auth?.mode === 'password' ? 'password' : 'token'
-  const credential =
-    mode === 'password'
-      ? String(auth?.password ?? '').trim()
-      : String(auth?.token ?? '').trim()
+  const configuredCredential = mode === 'password' ? auth?.password : auth?.token
+  const credential = typeof configuredCredential === 'string'
+    ? configuredCredential.trim()
+    : mode === 'token'
+      ? resolveOpenClawGatewaySecret(configuredCredential, parsed?.secrets?.providers)
+      : ''
   if (credential) {
     logger.debug('Gateway token loaded from openclaw.json (set OPENCLAW_GATEWAY_TOKEN env var to override)')
   }
   return credential
+}
+
+export function withDetectedGatewayAuthorization(
+  input: Record<string, string> = {},
+): Record<string, string> {
+  const credential = getDetectedGatewayCredential()
+  return credential
+    ? { ...input, Authorization: `Bearer ${credential}` }
+    : { ...input }
+}
+
+export function withDetectedGatewayProcessEnvironment(
+  input: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const credential = getDetectedGatewayCredential()
+  return credential
+    ? { ...input, OPENCLAW_GATEWAY_TOKEN: credential }
+    : { ...input }
+}
+
+export function getDetectedGatewayCredentialStatus(): {
+  configured: boolean
+  source: 'environment' | 'inline-config' | 'exec-reference' | 'none'
+} {
+  const environment = (process.env.OPENCLAW_GATEWAY_TOKEN
+    || process.env.GATEWAY_TOKEN
+    || process.env.OPENCLAW_GATEWAY_PASSWORD
+    || process.env.GATEWAY_PASSWORD
+    || '').trim()
+  if (environment) return { configured: true, source: 'environment' }
+
+  const parsed = readOpenClawConfig()
+  const auth = parsed?.gateway?.auth
+  const mode = auth?.mode === 'password' ? 'password' : 'token'
+  const configuredCredential = mode === 'password' ? auth?.password : auth?.token
+  if (typeof configuredCredential === 'string') {
+    return { configured: Boolean(configuredCredential.trim()), source: 'inline-config' }
+  }
+  if (mode === 'token' && configuredCredential) {
+    return {
+      configured: isValidExecSecretReference(configuredCredential, parsed?.secrets?.providers),
+      source: 'exec-reference',
+    }
+  }
+  return { configured: false, source: 'none' }
 }
 
 export function getDetectedGatewayPort(): number | null {

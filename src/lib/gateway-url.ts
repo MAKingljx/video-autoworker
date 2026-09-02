@@ -15,12 +15,9 @@ function normalizeProtocol(protocol: string): 'ws:' | 'wss:' {
 
 const DEFAULT_GATEWAY_WS_PATH = '/gateway-ws'
 
-function preserveTokenQuery(parsed: URL): void {
-  const token = parsed.searchParams.get('token')
+function stripQuery(parsed: URL): void {
+  // Gateway credentials must never be transported in browser-visible URLs.
   parsed.search = ''
-  if (token) {
-    parsed.searchParams.set('token', token)
-  }
 }
 
 function normalizeGatewayPath(pathname: string): string {
@@ -54,6 +51,7 @@ export function buildGatewayPathFallbackUrls(rawUrl: string): string[] {
   if (normalizedPath !== '/') return []
 
   const fallbacks = ['/gateway-ws', '/gw']
+  stripQuery(parsed)
   const seen = new Set<string>([formatWebSocketUrl(parsed)])
   const urls: string[] = []
 
@@ -98,11 +96,12 @@ export function buildGatewayWebSocketUrl(input: {
       parsed.protocol = isLocalHost(parsed.hostname) ? 'ws:' : normalizeProtocol(parsed.protocol)
       // Keep explicit proxy paths (e.g. /gw), but collapse known dashboard/session routes to root.
       parsed.pathname = normalizeGatewayPath(parsed.pathname)
-      preserveTokenQuery(parsed)
+      stripQuery(parsed)
       parsed.hash = ''
       return formatWebSocketUrl(parsed)
     } catch {
-      return prefixed
+      // Even malformed pasted URLs must not carry browser-visible secrets.
+      return prefixed.replace(/[?#].*$/u, '')
     }
   }
 

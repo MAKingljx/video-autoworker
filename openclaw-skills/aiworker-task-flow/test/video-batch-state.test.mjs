@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto'
 import {
   createBatchState,
   createSingleVideoState,
+  acquireGlobalBatchLock,
   batchStateBackupPath,
   batchStatePath,
   cleanupBatchItemStagedMedia,
@@ -19,6 +20,7 @@ import {
   sourceFingerprintFromIdentity,
   verifyBatchItemSource,
   writeBatchState,
+  globalBatchLockPath,
 } from '../lib/video-batch-state.mjs'
 
 function identityFromStat(details) {
@@ -66,6 +68,47 @@ function bindItem(stagingRecovery) {
     idempotencyKey: stagingRecovery.idempotencyKey,
   }
 }
+
+test('global lock release quarantines by lease inode and preserves a canonical successor', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'aiworker-global-lock-successor-')))
+  const statePath = join(root, 'state.json')
+  const lockPath = globalBatchLockPath(statePath)
+  const displaced = `${lockPath}.displaced`
+  try {
+    const first = await acquireGlobalBatchLock(statePath)
+    assert.equal(first.acquired, true)
+    await rename(lockPath, displaced)
+    const successor = await acquireGlobalBatchLock(statePath)
+    assert.equal(successor.acquired, true)
+    const successorSource = await readFile(lockPath, 'utf8')
+
+    await assert.rejects(first.release(), /视频队列锁在释放前已被替换/u)
+    assert.equal(await readFile(lockPath, 'utf8'), successorSource)
+    await successor.release()
+    await assert.rejects(access(lockPath), error => error?.code === 'ENOENT')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('global lock reclaims a stable dead owner through quarantine', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'aiworker-global-lock-stale-')))
+  const statePath = join(root, 'state.json')
+  const lockPath = globalBatchLockPath(statePath)
+  try {
+    await writeFile(lockPath, `${JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000000',
+      createdAt: '2026-09-01T00:00:00.000Z',
+    })}\n`, { mode: 0o600 })
+    const lease = await acquireGlobalBatchLock(statePath)
+    assert.equal(lease.acquired, true)
+    assert.equal(JSON.parse(await readFile(lockPath, 'utf8')).pid, process.pid)
+    await lease.release()
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 
 test('state writes keep a durable backup and recover a damaged primary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aiworker-task-flow-state-backup-'))

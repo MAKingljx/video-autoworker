@@ -40,9 +40,9 @@ describe('bundled n8n model pipeline', () => {
     expect(JSON.stringify(modelNodes[2].parameters)).toContain('finalizeParent: true')
   })
 
-  it('references the inbound shared secret without embedding a credential', () => {
+  it('uses the loopback task channel without embedding or forwarding credentials', () => {
     const serialized = JSON.stringify(workflow)
-    expect(serialized).toContain("headers['x-aiworker-webhook-secret']")
+    expect(serialized).not.toContain('x-aiworker-webhook-secret')
     expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{12,}/)
     expect(serialized).not.toContain('DASHSCOPE_API_KEY')
   })
@@ -138,7 +138,7 @@ describe('bundled stateless video pipeline', () => {
     }
   })
 
-  it('uses only the authenticated media callback and declares stateless stages', () => {
+  it('uses only the loopback media callback and declares stateless stages', () => {
     const serialized = JSON.stringify(workflow)
     expect(serialized).toContain('body.routing.mediaCallbackUrl')
     expect(serialized).toContain('body.routing.claimCallbackUrl')
@@ -146,7 +146,7 @@ describe('bundled stateless video pipeline', () => {
     expect(serialized).toContain("stage: 'audio'")
     expect(serialized).toContain("stage: 'vision'")
     expect(serialized).toContain("stage: 'finalize'")
-    expect(serialized).toContain("headers['x-aiworker-webhook-secret']")
+    expect(serialized).not.toContain('x-aiworker-webhook-secret')
     expect(serialized).not.toContain('/api/n8n/node-execute')
     expect(serialized).not.toContain('127.0.0.1:3017')
     expect(serialized).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{12,}/)

@@ -229,10 +229,15 @@ describe('transactional AI-worker task-flow installer', () => {
       await mkdir(workspace)
       await createExistingInstallation(workspace)
       const agentsBefore = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
-      await mkdir(resolve(root, '.blue-green-run/.deployment.lock'), {
-        recursive: true,
-        mode: 0o700,
-      })
+      const deploymentRunDir = resolve(root, '.blue-green-run')
+      const deploymentLockDir = resolve(deploymentRunDir, '.deployment.lock')
+      await mkdir(deploymentLockDir, { recursive: true, mode: 0o700 })
+      await writeFile(resolve(deploymentLockDir, 'pid'), `${JSON.stringify({
+        schema: 'video-autoworker-shared-deployment-lock-owner/v1',
+        pid: process.pid,
+        nonce: 'a'.repeat(64),
+        createdAt: new Date().toISOString(),
+      })}\n`, { mode: 0o600 })
       await expect(runInstaller(workspace, backupRoot)).rejects.toThrow()
       expect(await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')).toBe(agentsBefore)
       expect(await pathExists(backupRoot)).toBe(false)

@@ -62,7 +62,7 @@ const handshakeCompleteRef: { current: boolean } = { current: false }
 const reconnectAttemptsRef: { current: number } = { current: 0 }
 const manualDisconnectRef: { current: boolean } = { current: false }
 const nonRetryableErrorRef: { current: string | null } = { current: null }
-const connectRef: { current: (url: string, token?: string) => void } = { current: () => {} }
+const connectRef: { current: (url: string) => void } = { current: () => {} }
 const lastWebSocketErrorRef: { current: { message: string; at: number } | null } = { current: null }
 const pingCounterRef: { current: number } = { current: 0 }
 const pingSentTimestamps: { current: Map<string, number> } = { current: new Map() }
@@ -687,20 +687,15 @@ export function useWebSocket() {
     return false
   }, [])
 
-  const connect = useCallback((url: string, token?: string) => {
+  const connect = useCallback((url: string) => {
     const state = wsRef.current?.readyState
     if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) {
       return // Already connected or connecting
     }
 
-    let urlToken = ''
-    try {
-      const parsedInput = new URL(url, window.location.origin)
-      urlToken = parsedInput.searchParams.get('token') || ''
-    } catch {
-      urlToken = ''
-    }
-    authTokenRef.current = token || urlToken || ''
+    // Browser connections never carry a Gateway token. Authentication is
+    // handled by OpenClaw's server-managed path and device identity.
+    authTokenRef.current = ''
 
     const normalizedUrl = normalizeWebSocketUrl(url)
     if (reconnectUrl.current !== normalizedUrl) {
@@ -769,7 +764,7 @@ export function useWebSocket() {
               message: `Handshake failed on root path. Retrying WebSocket via ${new URL(fallback).pathname}.`,
             })
             reconnectTimeoutRef.current = setTimeout(() => {
-              connectRef.current(fallback, authTokenRef.current)
+              connectRef.current(fallback)
             }, 250)
             return
           }
@@ -791,7 +786,7 @@ export function useWebSocket() {
           reconnectAttemptsRef.current = attempts + 1
           setConnection({ reconnectAttempts: attempts + 1 })
           reconnectTimeoutRef.current = setTimeout(() => {
-            connectRef.current(reconnectUrl.current, authTokenRef.current)
+            connectRef.current(reconnectUrl.current)
           }, timeout)
         } else {
           log.error('Max reconnection attempts reached')
@@ -878,7 +873,7 @@ export function useWebSocket() {
   const reconnect = useCallback(() => {
     disconnect()
     if (reconnectUrl.current) {
-      setTimeout(() => connect(reconnectUrl.current, authTokenRef.current), 1000)
+      setTimeout(() => connect(reconnectUrl.current), 1000)
     }
   }, [connect, disconnect])
 

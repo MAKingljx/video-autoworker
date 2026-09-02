@@ -8,6 +8,7 @@ import { config } from '@/lib/config'
 import { getDatabase } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { FIX_SAFETY, runSecurityScan, type FixSafety } from '@/lib/security-scan'
+import { isValidExecSecretReference } from '@/lib/secret-reference'
 
 export interface FixResult {
   id: string
@@ -228,13 +229,18 @@ export async function POST(request: NextRequest) {
       if (shouldFix('gateway_auth')) {
         if (!ocConfig.gateway) ocConfig.gateway = {}
         if (!ocConfig.gateway.auth) ocConfig.gateway.auth = {}
-        if (ocConfig.gateway.auth.mode !== 'token') {
-          ocConfig.gateway.auth.mode = 'token'
-          if (!ocConfig.gateway.auth.token) {
-            ocConfig.gateway.auth.token = crypto.randomBytes(32).toString('hex')
-          }
-          configChanged = true
-          results.push({ id: 'gateway_auth', name: 'Gateway authentication', fixed: true, detail: 'Set auth.mode to "token" with generated token', fixSafety: FIX_SAFETY['gateway_auth'] })
+        const gatewayAuth = ocConfig.gateway.auth
+        const secretRefConfigured = isValidExecSecretReference(gatewayAuth.token, ocConfig.secrets?.providers)
+        if (gatewayAuth.mode !== 'token' || !secretRefConfigured) {
+          // Gateway credentials are owned by OpenClaw's external SecretRef
+          // provider. Never generate or persist an inline token from the UI.
+          results.push({
+            id: 'gateway_auth',
+            name: 'Gateway authentication',
+            fixed: false,
+            detail: 'Gateway auth is not auto-fixed: configure a valid OpenClaw token SecretRef in Keychain/external secret storage.',
+            fixSafety: FIX_SAFETY['gateway_auth'],
+          })
         }
       }
 

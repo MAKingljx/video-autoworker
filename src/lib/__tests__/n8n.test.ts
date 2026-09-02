@@ -3,13 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   checkN8nHealth,
   getN8nRuntimeConfig,
-  isN8nWebhookSecretConfigured,
   listN8nExecutions,
   listN8nRemoteWorkflows,
   normalizeN8nBaseUrl,
   normalizeN8nWebhookPath,
   triggerN8nWebhook,
-  verifyN8nWebhookSecret,
 } from '@/lib/n8n'
 import {
   claimScopedN8nVideoTaskRun,
@@ -42,8 +40,6 @@ import { runMigrations } from '@/lib/migrations'
 const ENV_KEYS = [
   'N8N_BASE_URL',
   'N8N_API_KEY',
-  'N8N_WEBHOOK_SECRET',
-  'N8N_ALLOW_PRIVATE_REMOTE',
   'N8N_DEFAULT_WEBHOOK_PATH',
 ] as const
 
@@ -71,16 +67,11 @@ describe('n8n endpoint validation', () => {
       .toBe('http://localhost:5678/n8n')
   })
 
-  it('rejects non-loopback and non-http endpoints by default', () => {
-    expect(() => normalizeN8nBaseUrl('http://10.0.0.9:5678')).toThrow(/回环地址/)
-    expect(() => normalizeN8nBaseUrl('file:///tmp/n8n')).toThrow(/http 或 https/)
-  })
-
-  it('allows an explicitly configured private endpoint', () => {
-    process.env.N8N_ALLOW_PRIVATE_REMOTE = '1'
-    expect(normalizeN8nBaseUrl('https://10.0.0.9:5678/')).toBe('https://10.0.0.9:5678')
-    expect(normalizeN8nBaseUrl('http://heisenbergs-1.local:5678/')).toBe('http://heisenbergs-1.local:5678')
-    expect(() => normalizeN8nBaseUrl('https://n8n.example.com')).toThrow(/只允许.*私网地址/)
+  it('rejects every non-loopback or non-HTTP endpoint', () => {
+    expect(() => normalizeN8nBaseUrl('http://10.0.0.9:5678')).toThrow(/回环 HTTP/)
+    expect(() => normalizeN8nBaseUrl('http://heisenbergs-1.local:5678/')).toThrow(/回环 HTTP/)
+    expect(() => normalizeN8nBaseUrl('https://127.0.0.1:5678/')).toThrow(/回环 HTTP/)
+    expect(() => normalizeN8nBaseUrl('file:///tmp/n8n')).toThrow(/回环 HTTP/)
   })
 
   it('accepts only n8n webhook paths without traversal or URL injection', () => {
@@ -91,15 +82,11 @@ describe('n8n endpoint validation', () => {
     expect(() => normalizeN8nWebhookPath('https://example.test/webhook/a')).toThrow(/无效/)
   })
 
-  it('validates the execution callback secret without accepting an empty configuration', () => {
-    expect(isN8nWebhookSecretConfigured()).toBe(false)
-    expect(getN8nRuntimeConfig().webhookSecretConfigured).toBe(false)
-    expect(verifyN8nWebhookSecret('anything')).toBe(false)
-    process.env.N8N_WEBHOOK_SECRET = 'shared-secret'
-    expect(isN8nWebhookSecretConfigured()).toBe(true)
-    expect(getN8nRuntimeConfig().webhookSecretConfigured).toBe(true)
-    expect(verifyN8nWebhookSecret('shared-secret')).toBe(true)
-    expect(verifyN8nWebhookSecret('wrong-secret')).toBe(false)
+  it('keeps the task channel on the configured loopback base URL', () => {
+    expect(getN8nRuntimeConfig()).toMatchObject({
+      baseUrl: 'http://127.0.0.1:5678',
+      apiKeyConfigured: false,
+    })
   })
 })
 
@@ -142,8 +129,7 @@ describe('n8n HTTP integration', () => {
     expect(fetchMock.mock.calls[1][0]).toContain('limit=100')
   })
 
-  it('sends idempotency and webhook-secret headers with the trigger payload', async () => {
-    process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
+  it('sends idempotency without adding a second request credential', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ accepted: true }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
@@ -162,12 +148,11 @@ describe('n8n HTTP integration', () => {
     const headers = new Headers(init.headers)
     expect(url).toBe('http://127.0.0.1:5678/webhook/aiworker-task')
     expect(headers.get('X-AIWorker-Idempotency-Key')).toBe('task-1')
-    expect(headers.get('X-AIWorker-Webhook-Secret')).toBe('webhook-secret')
+    expect(headers.has('X-AIWorker-Webhook-Secret')).toBe(false)
     expect(JSON.parse(String(init.body))).toEqual({ taskId: 'task-1' })
   })
 
   it('classifies an explicit 4xx webhook rejection as terminally rejected', async () => {
-    process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
       JSON.stringify({ message: 'workflow inactive' }),
       { status: 404, headers: { 'Content-Type': 'application/json' } },
@@ -186,7 +171,6 @@ describe('n8n HTTP integration', () => {
   it.each([408, 425, 429, 503])(
     'classifies HTTP %s as an outcome-unknown webhook delivery',
     async statusCode => {
-      process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
       vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
         JSON.stringify({ message: 'retry later' }),
         { status: statusCode, headers: { 'Content-Type': 'application/json' } },
@@ -202,7 +186,6 @@ describe('n8n HTTP integration', () => {
   )
 
   it('classifies a timeout or connection loss as outcome unknown', async () => {
-    process.env.N8N_WEBHOOK_SECRET = 'webhook-secret'
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')))
 
     await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-reset' }))
@@ -215,14 +198,6 @@ describe('n8n HTTP integration', () => {
       })
   })
 
-  it('refuses to call n8n when the webhook secret is missing', async () => {
-    const fetchMock = vi.fn()
-    vi.stubGlobal('fetch', fetchMock)
-
-    await expect(triggerN8nWebhook('webhook/aiworker-task', { taskId: 'task-no-secret' }))
-      .rejects.toThrow(/N8N_WEBHOOK_SECRET/)
-    expect(fetchMock).not.toHaveBeenCalled()
-  })
 })
 
 describe('n8n workflow binding persistence', () => {

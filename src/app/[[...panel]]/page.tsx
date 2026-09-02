@@ -58,6 +58,7 @@ import { useMissionControl } from '@/store'
 interface GatewaySummary {
   id: number
   is_primary: number
+  server_managed?: boolean
 }
 
 const STEP_KEYS = ['auth', 'capabilities', 'config', 'connect', 'agents', 'sessions', 'projects', 'memory', 'skills'] as const
@@ -218,11 +219,13 @@ export default function Home() {
         if (!connectRes.ok) return { attempted: true, connected: false }
 
         const payload = await connectRes.json().catch(() => ({}))
+        if (payload?.server_managed) {
+          return { attempted: true, connected: true }
+        }
         const wsUrl = typeof payload?.ws_url === 'string' ? payload.ws_url : ''
-        const wsToken = typeof payload?.token === 'string' ? payload.token : ''
         if (!wsUrl) return { attempted: true, connected: false }
 
-        connect(wsUrl, wsToken)
+        connect(wsUrl)
         return { attempted: true, connected: true }
       } catch {
         return { attempted: false, connected: false }

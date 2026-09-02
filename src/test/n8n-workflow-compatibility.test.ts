@@ -59,8 +59,11 @@ afterEach(() => {
 })
 
 function currentWorkflows(): WorkflowDefinition[] {
+  // The verifier binds published content to the immutable expected commit.
+  // Read that same commit here so candidate-only workflow edits do not make
+  // otherwise unrelated identity fixtures fail before their intended checks.
   return ['aiworker-task-intake.json', 'aiworker-video-analysis.json'].map(file =>
-    JSON.parse(readFileSync(join(workflowDir, file), 'utf8')) as WorkflowDefinition)
+    JSON.parse(gitSource(`ops/n8n/workflows/${file}`).toString('utf8')) as WorkflowDefinition)
 }
 
 function legacyShapedWorkflows(): WorkflowDefinition[] {

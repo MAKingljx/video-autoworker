@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { NextRequest } from 'next/server'
 
 function setNodeEnv(value: string) {
   ;(process.env as Record<string, string | undefined>).NODE_ENV = value
@@ -174,5 +175,36 @@ describe('proxy host matching', () => {
     } as any
 
     expect(proxy(request).status).toBe(401)
+  })
+
+  it('fails non-loopback closed in OpenClaw-only mode even when other host settings are permissive', async () => {
+    vi.resetModules()
+    const { proxy } = await import('./proxy')
+    process.env.MC_AUTH_MODE = 'openclaw-loopback'
+    process.env.MC_ALLOW_ANY_HOST = '1'
+
+    const response = proxy(new NextRequest('http://app.example.test/api/tasks', {
+      headers: { 'x-api-key': 'legacy-key' },
+    }))
+    expect(response.status).toBe(403)
+    delete process.env.MC_AUTH_MODE
+    delete process.env.MC_ALLOW_ANY_HOST
+  })
+
+  it('disables local login endpoints but lets loopback requests reach route-level roles', async () => {
+    vi.resetModules()
+    const { proxy } = await import('./proxy')
+    process.env.MC_AUTH_MODE = 'openclaw-loopback'
+
+    const login = proxy(new NextRequest('http://127.0.0.1:3017/api/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    }))
+    expect(login.status).toBe(403)
+
+    const api = proxy(new NextRequest('http://127.0.0.1:3017/api/tasks'))
+    expect(api.status).not.toBe(401)
+    delete process.env.MC_AUTH_MODE
   })
 })

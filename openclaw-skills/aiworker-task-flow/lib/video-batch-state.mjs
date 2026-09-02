@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
 import {
@@ -1751,6 +1751,143 @@ async function pidIsAlive(pid) {
   }
 }
 
+function sameLockSample(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
+    && left.mode === right.mode && left.nlink === right.nlink && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+    && left.source === right.source && left.pid === right.pid && left.token === right.token
+}
+
+async function readLockSample(lockPath) {
+  const entry = await lstat(lockPath, { bigint: true })
+  if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1n
+    || (entry.mode & 0o7777n) !== 0o600n || entry.size <= 0n || entry.size > 4_096n
+    || (typeof process.getuid === 'function' && entry.uid !== BigInt(process.getuid()))) {
+    throw new Error('视频队列锁身份无效')
+  }
+  const descriptor = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = await descriptor.stat({ bigint: true })
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size
+      || opened.nlink !== entry.nlink || opened.mode !== entry.mode) {
+      throw new Error('视频队列锁在读取前已变化')
+    }
+    const source = await descriptor.readFile({ encoding: 'utf8' })
+    const after = await descriptor.stat({ bigint: true })
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.nlink !== opened.nlink || after.mtimeNs !== opened.mtimeNs
+      || after.ctimeNs !== opened.ctimeNs || Buffer.byteLength(source) !== Number(opened.size)) {
+      throw new Error('视频队列锁在读取时已变化')
+    }
+    const trimmed = source.trim()
+    let pid = /^\d+$/u.test(trimmed) ? Number(trimmed) : null
+    let token = null
+    try {
+      const parsed = JSON.parse(trimmed)
+      pid = Number.isInteger(parsed?.pid) ? parsed.pid : null
+      token = typeof parsed?.token === 'string' ? parsed.token : null
+    } catch { /* legacy PID-only lock */ }
+    return {
+      dev: opened.dev, ino: opened.ino, uid: opened.uid, mode: opened.mode,
+      nlink: opened.nlink, size: opened.size, mtimeNs: opened.mtimeNs, ctimeNs: opened.ctimeNs,
+      source, pid, token,
+    }
+  } finally { await descriptor.close() }
+}
+
+async function quarantineStaleLock(lockPath, expected) {
+  const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`
+  await rename(lockPath, quarantine)
+  const moved = await readLockSample(quarantine)
+  const sameMovedObject = moved.dev === expected.dev && moved.ino === expected.ino
+    && moved.uid === expected.uid && moved.mode === expected.mode && moved.nlink === expected.nlink
+    && moved.size === expected.size && moved.source === expected.source
+    && moved.pid === expected.pid && moved.token === expected.token
+  if (!sameMovedObject) {
+    try {
+      await link(quarantine, lockPath)
+      await rm(quarantine)
+    } catch {
+      // Preserve the displaced object under its unique name if a new lock won
+      // the canonical path; never delete an object that failed the stale CAS.
+    }
+    throw new Error('视频队列锁在隔离前已被替换')
+  }
+  await rm(quarantine)
+  await syncDirectory(dirname(lockPath))
+}
+
+async function restoreQuarantinedLockFile(quarantine, lockPath) {
+  try {
+    const entry = await lstat(quarantine, { bigint: true })
+    if (!entry.isFile() || entry.isSymbolicLink()) return false
+    await link(quarantine, lockPath)
+    await rm(quarantine)
+    await syncDirectory(dirname(lockPath))
+    return true
+  } catch (error) {
+    if (error?.code === 'EEXIST') return false
+    throw error
+  }
+}
+
+function sameCreatedObject(entry, expected) {
+  return entry.dev === expected.dev && entry.ino === expected.ino
+    && entry.uid === expected.uid && entry.mode === expected.mode
+}
+
+async function cleanupFailedLockCreate(lockPath, expected) {
+  if (!expected) return
+  const quarantine = `${lockPath}.partial-${process.pid}-${randomUUID()}`
+  try {
+    await rename(lockPath, quarantine)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  await syncDirectory(dirname(lockPath))
+  let moved
+  try {
+    moved = await lstat(quarantine, { bigint: true })
+  } catch (error) {
+    throw new Error('视频队列锁创建失败后无法验证隔离对象', { cause: error })
+  }
+  if (!sameCreatedObject(moved, expected)) {
+    await restoreQuarantinedLockFile(quarantine, lockPath).catch(() => false)
+    throw new Error('视频队列锁创建失败后路径已被替换')
+  }
+  await rm(quarantine)
+  await syncDirectory(dirname(lockPath))
+}
+
+async function releaseOwnedLock(lockPath, expected) {
+  const quarantine = `${lockPath}.release-${process.pid}-${randomUUID()}`
+  try {
+    await rename(lockPath, quarantine)
+  } catch (error) {
+    if (error?.code === 'ENOENT') throw new Error('视频队列锁在释放前已消失')
+    throw error
+  }
+  await syncDirectory(dirname(lockPath))
+  let moved
+  try {
+    moved = await readLockSample(quarantine)
+  } catch (error) {
+    await restoreQuarantinedLockFile(quarantine, lockPath).catch(() => false)
+    throw new Error('视频队列锁在释放隔离后无效', { cause: error })
+  }
+  const sameMovedObject = moved.dev === expected.dev && moved.ino === expected.ino
+    && moved.uid === expected.uid && moved.mode === expected.mode && moved.nlink === expected.nlink
+    && moved.size === expected.size && moved.source === expected.source
+    && moved.pid === expected.pid && moved.token === expected.token
+  if (!sameMovedObject) {
+    await restoreQuarantinedLockFile(quarantine, lockPath).catch(() => false)
+    throw new Error('视频队列锁在释放前已被替换')
+  }
+  await rm(quarantine)
+  await syncDirectory(dirname(lockPath))
+}
+
 export async function acquireBatchLock(statePath) {
   return acquireFileLock(`${resolve(statePath)}.lock`)
 }
@@ -1765,39 +1902,56 @@ async function acquireFileLock(lockPath) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const token = randomUUID()
     let handle
+    let createdIdentity
     try {
       handle = await open(lockPath, 'wx', 0o600)
+      createdIdentity = await handle.stat({ bigint: true })
+      if (!createdIdentity.isFile() || createdIdentity.nlink !== 1n
+        || (createdIdentity.mode & 0o7777n) !== 0o600n
+        || (typeof process.getuid === 'function' && createdIdentity.uid !== BigInt(process.getuid()))) {
+        throw new Error('视频队列锁创建身份无效')
+      }
       const ownership = JSON.stringify({ pid: process.pid, token, createdAt: new Date().toISOString() })
-      await handle.writeFile(`${ownership}\n`)
+      const ownershipSource = `${ownership}\n`
+      await handle.writeFile(ownershipSource)
       await handle.sync()
+      const sealed = await readLockSample(lockPath)
+      const openedAfterSeal = await handle.stat({ bigint: true })
+      if (!sameCreatedObject(openedAfterSeal, createdIdentity)
+        || sealed.dev !== openedAfterSeal.dev || sealed.ino !== openedAfterSeal.ino
+        || sealed.source !== ownershipSource || sealed.pid !== process.pid || sealed.token !== token) {
+        throw new Error('视频队列锁发布后身份不一致')
+      }
+      let released = false
       return {
         acquired: true,
         async release() {
+          if (released) return
           await handle.close().catch(() => undefined)
-          const current = await readFile(lockPath, 'utf8').catch(() => '')
-          let currentToken = null
-          try { currentToken = JSON.parse(current).token } catch { currentToken = null }
-          if (currentToken === token) await rm(lockPath, { force: true }).catch(() => undefined)
+          await releaseOwnedLock(lockPath, sealed)
+          released = true
         },
       }
     } catch (error) {
       await handle?.close().catch(() => undefined)
-      // If the exclusive create succeeded, this process owns the path even if
-      // writing its metadata failed. Never leave a half-written marker behind.
-      if (handle) await rm(lockPath, { force: true }).catch(() => undefined)
+      // If exclusive create succeeded, quarantine the pathname and verify its
+      // inode before deleting it. A successor that replaced canonical is never
+      // removed as cleanup for this failed create.
+      if (handle) await cleanupFailedLockCreate(lockPath, createdIdentity)
       if (error?.code !== 'EEXIST') throw error
-      const lockText = String(await readFile(lockPath, 'utf8').catch(() => '')).trim()
-      let pid = /^\d+$/u.test(lockText) ? Number(lockText) : null
-      try {
-        const parsedLock = JSON.parse(lockText)
-        pid = Number.isInteger(parsedLock?.pid) ? parsedLock.pid : null
-      } catch { /* legacy PID-only lock or an owner still writing the lock */ }
+      const first = await readLockSample(lockPath).catch(() => null)
+      const pid = first?.pid ?? null
       if (await pidIsAlive(pid)) return { acquired: false, release: async () => undefined }
-      const lockStat = await stat(lockPath).catch(() => null)
+      const lockStat = first ? null : await stat(lockPath).catch(() => null)
       if ((!Number.isInteger(pid) || pid <= 0) && lockStat && Date.now() - lockStat.mtimeMs < 30_000) {
         return { acquired: false, release: async () => undefined }
       }
-      await rm(lockPath, { force: true })
+      if (!first) throw new Error('视频队列锁无法安全读取')
+      const second = await readLockSample(lockPath)
+      if (!sameLockSample(first, second) || await pidIsAlive(second.pid)) {
+        return { acquired: false, release: async () => undefined }
+      }
+      await quarantineStaleLock(lockPath, second)
     }
   }
   return { acquired: false, release: async () => undefined }

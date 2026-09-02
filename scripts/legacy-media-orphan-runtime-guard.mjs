@@ -23,6 +23,15 @@ import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { acquireSharedDeploymentLockSync } from './lib/shared-deployment-lock.mjs'
+import {
+  inspectWorkerLaunchAuthorizationStateSync,
+  issueWorkerLaunchAuthorizationSync,
+  removeWorkerLaunchAuthorizationArtifactSync,
+  verifyWorkerLaunchAuthorizationSync,
+  workerLaunchAuthorizationClaimPath,
+  workerLaunchAuthorizationPath,
+} from '../openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const REPOSITORY_ROOT = realpathSync(join(dirname(SCRIPT_PATH), '..'))
@@ -34,6 +43,10 @@ const INTENT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-intent/v1'
 const RECEIPT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-receipt/v1'
 const RESTORE_INTENT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-restore-intent/v1'
 const RESTORE_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-restore/v1'
+const RETIRE_INTENT_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-retire-intent/v1'
+const RETIRE_SCHEMA = 'video-autoworker-legacy-media-orphan-runtime-retire/v1'
+const FINAL_READINESS_SCHEMA = 'video-autoworker-legacy-retire-final-readiness/v1'
+const FINAL_READINESS_VERIFY_SCHEMA = 'video-autoworker-legacy-retire-final-readiness-verification/v1'
 const GUARDIAN_SCHEMA = 'video-autoworker-worker-launch-guardian/v2'
 const GUARDIAN_OWNER_SCHEMA = 'video-autoworker-worker-launch-guardian-owner/v1'
 // This exact predecessor can leave an intent after correctly stopping the lane
@@ -42,6 +55,13 @@ const GUARDIAN_OWNER_SCHEMA = 'video-autoworker-worker-launch-guardian-owner/v1'
 const RECOVERABLE_PREDECESSOR_TOOL_SHA256 = new Set([
   '95a873283b6f0c7c473354791eb9d57807735556de81fe27c1abb1aa035b6384',
 ])
+// This exact production tool created the held post-quarantine receipt before
+// the four-field CAS. It may authorize only `retire`; status, restore, and
+// SIGKILL recovery keep requiring their own exact tool contracts.
+const RETIRABLE_PREDECESSOR_TOOL_SHA256 = new Set([
+  '61eb99581f2c0123634790e7667e04166f61b8115de16de282c9657208a84391',
+])
+const RECONCILED_ERROR = '[LEGACY_MEDIA_ORPHAN_RECONCILED] 历史媒体子记录已在父任务和对应执行终态、无运行资源时受管收敛'
 const SHA256 = /^[a-f0-9]{64}$/u
 const TASK_ID = /^[A-Za-z0-9._:-]{1,120}$/u
 const ACTIVE_MEDIA = new Set(['queued', 'accepted', 'running'])
@@ -60,6 +80,7 @@ const WAIT_MILLISECONDS = TEST_MODE ? 5 : 200
 const HANDOFF_WAIT_ATTEMPTS = TEST_MODE ? 200 : 50
 const HANDOFF_WAIT_MILLISECONDS = TEST_MODE ? 10 : 200
 const GUARDIAN_REFRESH_MILLISECONDS = TEST_MODE ? 250 : 5_000
+const FINAL_READINESS_VERIFIER = join(REPOSITORY_ROOT, 'scripts', 'verify-legacy-retire-final-readiness.mjs')
 
 function fail(message) {
   throw new Error(`legacy media orphan runtime guard failed: ${message}`)
@@ -83,10 +104,12 @@ function sha256(value) {
 
 function parseArguments(argv) {
   const command = argv[0]
-  if (!['prepare', 'status', 'restore', 'recover'].includes(command)) fail('unknown command')
+  if (!['prepare', 'status', 'restore', 'recover', 'retire'].includes(command)) fail('unknown command')
   const allowed = command === 'prepare'
     ? new Set(['--run-root', '--quarantine-root', '--minimum-age-seconds', '--hold-guardian'])
-    : new Set([command === 'recover' ? '--intent' : '--receipt'])
+    : new Set(command === 'retire'
+      ? ['--receipt', '--final-readiness']
+      : [command === 'recover' ? '--intent' : '--receipt'])
   const values = {}
   for (let index = 1; index < argv.length; index += 2) {
     const name = argv[index]
@@ -110,6 +133,14 @@ function parseArguments(argv) {
       quarantineRoot: normalizedAbsolute(values['--quarantine-root'], 'quarantine root'),
       minimumAgeSeconds,
       holdGuardian: values['--hold-guardian'] === 'yes',
+    }
+  }
+  if (command === 'retire') {
+    if (Object.keys(values).length !== 2) fail('required arguments are missing')
+    return {
+      command,
+      pathname: normalizedAbsolute(values['--receipt'], 'receipt'),
+      finalReadiness: normalizedAbsolute(values['--final-readiness'], 'final readiness'),
     }
   }
   if (Object.keys(values).length !== 1) fail('required arguments are missing')
@@ -184,6 +215,18 @@ function fsyncDirectory(pathname) {
   recordTestEvent(`fsync-directory:${basename(pathname)}`)
   const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
   try { fsyncSync(descriptor) } finally { closeSync(descriptor) }
+}
+
+function acquireSharedDeploymentLock() {
+  const runDirectory = normalizedAbsolute(
+    process.env.AIWORKER_BG_RUN_DIR || join(REPOSITORY_ROOT, '.run', 'blue-green'),
+    'blue-green run directory',
+  )
+  try {
+    return acquireSharedDeploymentLockSync({ runDirectory })
+  } catch (error) {
+    fail(error instanceof Error ? error.message : 'shared deployment lock acquisition failed')
+  }
 }
 
 function immutableJson(pathname, value) {
@@ -458,11 +501,12 @@ function workerPids() {
   return result.status === 1 ? [] : result.stdout.trim().split(/\s+/u).filter(Boolean).map(Number)
 }
 
-function batchProjection(batchRoot, lockPath) {
+function batchProjection(batchRoot, lockPath, authorizationContext = null) {
   safeEntry(batchRoot, 'video batch root', 'directory', 0o700)
   const active = []
   let journals = 0
   const members = []
+  let launchControlChecked = false
   const projectState = (pathname, memberPath, backup = false) => {
     const entry = safeEntry(pathname, 'video batch state', 'file')
     if (entry.size > 8n * 1024n * 1024n) fail('video batch state is too large')
@@ -512,6 +556,65 @@ function batchProjection(batchRoot, lockPath) {
   for (const name of names.sort()) {
     if (join(batchRoot, name) === lockPath
       || name === '.worker-launch.lock' || name === '.worker-launch.lock.owner') continue
+    if (name === '.worker-launch.lock.authorization'
+      || name === '.worker-launch.lock.authorization.claim'
+      || name === '.worker-launch.lock.authorization.pending') {
+      if (launchControlChecked) continue
+      launchControlChecked = true
+      if (!authorizationContext
+        || !Number.isSafeInteger(authorizationContext.workerPid)
+        || authorizationContext.workerPid <= 0
+        || typeof authorizationContext.finalReadinessPath !== 'string') {
+        fail('video batch root contains an unauthorized worker launch authorization')
+      }
+      const state = inspectWorkerLaunchAuthorizationStateSync({ batchRoot })
+      if (state.pending && (state.authorization || state.claim)) {
+        fail('video batch root contains conflicting worker launch authorization artifacts')
+      }
+      const currentLock = lockState(batchRoot, authorizationContext.workerPid)
+      const readiness = readImmutableJson(
+        authorizationContext.finalReadinessPath,
+        'claimed worker final-readiness report',
+      )
+      const bindsCurrentSuccessor = control => {
+        const value = control.value
+        return value.workerPid === authorizationContext.workerPid
+          && value.globalLock.path === currentLock.path
+          && value.globalLock.dev === currentLock.dev && value.globalLock.ino === currentLock.ino
+          && value.globalLock.sourceSha256 === currentLock.contentSha256
+          && value.globalLock.tokenSha256 === currentLock.tokenSha256
+          && value.finalReadiness.path === readiness.identity.path
+          && value.finalReadiness.dev === readiness.identity.dev
+          && value.finalReadiness.ino === readiness.identity.ino
+          && value.finalReadiness.sha256 === readiness.sha256
+      }
+      const assertRecoverablePredecessor = (control, label) => {
+        if (bindsCurrentSuccessor(control)) return false
+        const oldPid = control.value.workerPid
+        if (pidExists(oldPid, `old worker launch ${label} owner`)) {
+          fail(`old worker launch ${label} PID is still live or was reused`)
+        }
+        const oldLock = control.value.globalLock
+        if (oldLock.dev === currentLock.dev && oldLock.ino === currentLock.ino
+          && oldLock.tokenSha256 === currentLock.tokenSha256) {
+          fail(`old worker launch ${label} lock was not replaced`)
+        }
+        return true
+      }
+      if (state.authorization) {
+        if (!assertRecoverablePredecessor(state.authorization, 'authorization')) {
+          verifyWorkerLaunchAuthorizationSync({
+            batchRoot,
+            workerPid: authorizationContext.workerPid,
+            finalReadinessPath: authorizationContext.finalReadinessPath,
+          })
+        }
+      }
+      if (state.claim) {
+        assertRecoverablePredecessor(state.claim, 'claim')
+      }
+      continue
+    }
     if (/\.material-handoff\.json$/u.test(name)) fail('video batch root still contains a material handoff journal')
     const pathname = join(batchRoot, name)
     const candidate = lstatSync(pathname, { bigint: true })
@@ -576,7 +679,7 @@ function lockState(batchRoot, expectedPid = null) {
   }
 }
 
-function laneSnapshot(batchRoot, plistPath, phase) {
+function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null) {
   const service = launchState()
   const disabled = disabledState()
   const workers = workerPids()
@@ -592,7 +695,10 @@ function laneSnapshot(batchRoot, plistPath, phase) {
     if (realpathSync(argumentsValue[0]) !== executable.path && realpathSync(argumentsValue[0]) !== realpathSync(executable.path)) fail('video worker executable differs from the installed LaunchAgent plist')
     const workingDirectory = run(command('PLUTIL', '/usr/bin/plutil'), ['-extract', 'WorkingDirectory', 'raw', '-o', '-', plistPath], 'video-lane WorkingDirectory query').trim()
     if (realpathSync(workingDirectory) !== worker.cwd.path) fail('video worker cwd differs from the installed LaunchAgent plist')
-    const projection = batchProjection(batchRoot, lock.path)
+    const projection = batchProjection(batchRoot, lock.path, authorizationContext ? {
+      ...authorizationContext,
+      workerPid: workers[0],
+    } : null)
     if (projection.runnable !== 0 || projection.journals !== 0) fail('video lane still has runnable or journal work')
     return { service, disabled, workers, worker, lock, plist, projection }
   }
@@ -805,6 +911,278 @@ async function captureSnapshot(minimumAgeSeconds, phase) {
     return value
   }
   return productionSnapshot(minimumAgeSeconds, phase)
+}
+
+function postCasDatabaseState(chain, missionIdentity, n8nIdentity) {
+  const missionHandle = openBoundReadonlyDatabase(missionIdentity, 'Mission Control database')
+  let n8nHandle
+  try {
+    n8nHandle = openBoundReadonlyDatabase(n8nIdentity, 'n8n database')
+    const mission = missionHandle.db
+    const n8n = n8nHandle.db
+    quickCheck(mission, 'Mission Control database')
+    quickCheck(n8n, 'n8n database')
+    const before = chain.value.runtimeBefore.orphan
+    const child = mission.prepare('SELECT * FROM n8n_task_runs WHERE id = ? AND task_id = ?')
+      .get(before.child.id, before.child.taskId)
+    let routing
+    try { routing = JSON.parse(child?.routing) } catch { fail('reconciled media child routing is invalid') }
+    if (!child || child.source !== 'n8n-media-node' || child.status !== 'failed'
+      || child.error !== RECONCILED_ERROR || child.completed_at !== child.updated_at
+      || !Number.isSafeInteger(child.updated_at) || child.updated_at <= before.child.updatedAt
+      || routing?.mediaStage !== before.child.stage
+      || child.task_id !== mediaChildTaskId(before.parent.taskId, before.child.stage)) {
+      fail('reconciled media child does not match the controlled four-field CAS terminal state')
+    }
+    const parent = mission.prepare('SELECT * FROM n8n_task_runs WHERE id = ? AND task_id = ?')
+      .get(before.parent.id, before.parent.taskId)
+    if (!parent || parent.status !== before.parent.status
+      || sha256(canonicalJson(parent)) !== before.parent.digest) {
+      fail('media parent changed after the controlled CAS')
+    }
+    const mediaActive = Number(mission.prepare(
+      "SELECT COUNT(*) count FROM n8n_task_runs WHERE source = 'n8n-media-node' AND status IN ('queued','accepted','running')",
+    ).get().count)
+    if (mediaActive !== 0) fail('Mission Control still has active media work after CAS')
+    const leaseTable = mission.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='n8n_child_execution_leases'",
+    ).get()
+    if (leaseTable && mission.prepare('SELECT 1 FROM n8n_child_execution_leases WHERE task_id=?')
+      .get(before.child.taskId)) fail('reconciled media child regained an execution lease')
+    const executionRows = n8n.prepare(`
+      SELECT e.id,e.status,e.stoppedAt,d.data
+      FROM execution_entity e JOIN execution_data d ON d.executionId=e.id
+      WHERE e.id=? AND e.workflowId='aiworker-video-analysis-v1'
+    `).all(before.execution.id)
+    if (executionRows.length !== 1) fail('terminal n8n execution is no longer unique')
+    const execution = executionRows[0]
+    if (execution.status !== before.execution.status || execution.stoppedAt === null
+      || sha256(execution.data) !== before.execution.digest
+      || !executionOwnsParent(execution.data, before.parent.taskId)) {
+      fail('terminal n8n execution changed after the controlled CAS')
+    }
+    const n8nActive = Number(n8n.prepare(
+      "SELECT COUNT(*) count FROM execution_entity WHERE status IN ('new','running','waiting') AND stoppedAt IS NULL",
+    ).get().count)
+    if (n8nActive !== 0) fail('n8n regained an active execution after CAS')
+    revalidateDatabaseConnection(missionHandle, 'Mission Control database')
+    revalidateDatabaseConnection(n8nHandle, 'n8n database')
+    return {
+      child: {
+        id: child.id,
+        taskId: child.task_id,
+        source: child.source,
+        stage: before.child.stage,
+        status: child.status,
+        error: child.error,
+        completedAt: child.completed_at,
+        updatedAt: child.updated_at,
+      },
+      parent: before.parent,
+      execution: before.execution,
+      mediaActive,
+      n8nActive,
+    }
+  } finally {
+    if (n8nHandle) closeBoundReadonlyDatabase(n8nHandle, 'n8n database')
+    closeBoundReadonlyDatabase(missionHandle, 'Mission Control database')
+  }
+}
+
+function finalReadinessVerifierPath() {
+  if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_FINAL_READINESS_VERIFIER) {
+    return testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_FINAL_READINESS_VERIFIER', '')
+  }
+  const pathname = FINAL_READINESS_VERIFIER
+  const entry = safeEntry(pathname, 'managed final-readiness verifier', 'file')
+  if (entry.size > BigInt(MAX_JSON_BYTES)) fail('managed final-readiness verifier is too large')
+  return pathname
+}
+
+function verifyFinalReadiness(finalReadinessPath, preparedReceiptPath) {
+  const loaded = readImmutableJson(finalReadinessPath, 'final-readiness report')
+  if (loaded.value?.schema !== FINAL_READINESS_SCHEMA) fail('final-readiness report schema is invalid')
+  const verifier = finalReadinessVerifierPath()
+  const args = [
+    'verify-live', '--report', finalReadinessPath, '--prepared-receipt', preparedReceiptPath,
+  ]
+  const source = verifier === FINAL_READINESS_VERIFIER
+    ? run(process.execPath, [verifier, ...args], 'managed final-readiness verification')
+    : run(verifier, args, 'test final-readiness verification')
+  let result
+  try { result = JSON.parse(source) } catch { fail('final-readiness verification result is not JSON') }
+  const reference = result?.report
+  const expectedSize = Buffer.byteLength(loaded.source)
+  if (result?.schema !== FINAL_READINESS_VERIFY_SCHEMA || result.ok !== true
+    || !reference || reference.path !== loaded.identity.path
+    || reference.dev !== loaded.identity.dev || reference.ino !== loaded.identity.ino
+    || reference.uid !== loaded.identity.uid || reference.mode !== loaded.identity.mode
+    || reference.nlink !== 1 || reference.size !== expectedSize
+    || reference.sha256 !== loaded.sha256 || !SHA256.test(result.snapshotSha256 || '')
+    || !result.snapshot || sha256(canonicalJson(result.snapshot)) !== result.snapshotSha256) {
+    fail('final-readiness verification result contract is invalid')
+  }
+  const current = readImmutableJson(finalReadinessPath, 'final-readiness report')
+  if (current.sha256 !== loaded.sha256 || !sameIdentity(current.identity, loaded.identity)) {
+    fail('final-readiness report changed during live verification')
+  }
+  return {
+    report: {
+      path: loaded.identity.path,
+      dev: loaded.identity.dev,
+      ino: loaded.identity.ino,
+      uid: loaded.identity.uid,
+      mode: loaded.identity.mode,
+      size: expectedSize,
+      sha256: loaded.sha256,
+    },
+    snapshotSha256: result.snapshotSha256,
+  }
+}
+
+function retireInvariantProjection(snapshot) {
+  return {
+    finalReadiness: snapshot.finalReadiness,
+    unchangedPids: snapshot.unchangedPids,
+    mission: snapshot.mission,
+    n8nDatabase: snapshot.n8nDatabase,
+    queue: snapshot.queue,
+    batchRoot: snapshot.batchRoot,
+    plistPath: snapshot.plistPath,
+    lane: {
+      plist: snapshot.lane?.plist,
+      projection: snapshot.lane?.projection,
+    },
+    postCas: snapshot.postCas,
+  }
+}
+
+function unchangedProtectedPids(before, current) {
+  if (!before || !current || typeof before !== 'object' || typeof current !== 'object') {
+    fail('post-CAS protected listener set is invalid')
+  }
+  const values = {}
+  for (const port of ['18091', '18789', '18989']) {
+    const pid = current[port]
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid !== before[port]) {
+      fail(`post-CAS protected listener identity changed on port ${port}`)
+    }
+    values[port] = pid
+  }
+  return values
+}
+
+function validateRetireSnapshot(chain, snapshot, phase) {
+  const before = chain.value.runtimeBefore
+  if (!snapshot || typeof snapshot !== 'object' || !snapshot.lane || !snapshot.postCas
+    || !snapshot.finalReadiness
+    || snapshot.batchRoot !== before.batchRoot || snapshot.plistPath !== before.plistPath
+    || snapshot.queue?.waiting !== 0 || snapshot.queue?.running !== 0) {
+    fail('post-CAS runtime snapshot contract is invalid')
+  }
+  assertStable(
+    unchangedProtectedPids(before.protectedPids, snapshot.protectedPids),
+    snapshot.unchangedPids,
+    'post-CAS unchanged listener identities',
+  )
+  assertStable(before.mission, snapshot.mission, 'post-CAS Mission Control database identity')
+  assertStable(before.n8nDatabase, snapshot.n8nDatabase, 'post-CAS n8n database identity')
+  if (snapshot.lane.projection?.runnable !== 0 || snapshot.lane.projection?.journals !== 0) {
+    fail('post-CAS video batch projection is not idle')
+  }
+  const postCas = snapshot.postCas
+  const orphan = before.orphan
+  if (postCas.mediaActive !== 0 || postCas.n8nActive !== 0
+    || postCas.child?.id !== orphan.child.id || postCas.child.taskId !== orphan.child.taskId
+    || postCas.child.source !== 'n8n-media-node' || postCas.child.stage !== orphan.child.stage
+    || postCas.child.status !== 'failed' || postCas.child.error !== RECONCILED_ERROR
+    || postCas.child.completedAt !== postCas.child.updatedAt
+    || !Number.isSafeInteger(postCas.child.updatedAt)
+    || postCas.child.updatedAt <= orphan.child.updatedAt
+    || canonicalJson(postCas.parent) !== canonicalJson(orphan.parent)
+    || canonicalJson(postCas.execution) !== canonicalJson(orphan.execution)) {
+    fail('post-CAS terminal evidence does not match the prepared orphan identity')
+  }
+  const lane = snapshot.lane
+  if (phase === 'quiesced') {
+    if (lane.service?.loaded || !lane.disabled || lane.workers?.length !== 0 || lane.lock?.present) {
+      fail('post-CAS video lane is not disabled, unloaded, worker-free, and lock-free')
+    }
+  } else if (!lane.service?.loaded || lane.disabled || lane.workers?.length !== 1
+    || lane.service.pid !== lane.workers[0] || lane.worker?.pid !== lane.workers[0]
+    || !lane.lock?.present || lane.lock.ownerPid !== lane.workers[0]) {
+    fail('retired video lane is not owned by one LaunchAgent worker and its global lock')
+  }
+  return snapshot
+}
+
+async function productionRetireSnapshot(chain, phase, finalReadiness, finalReadinessPath) {
+  const before = chain.value.runtimeBefore
+  const protectedPids = protectedListeners()
+  const mission = before.mission || before.legacy?.database
+  const n8nDatabase = before.n8nDatabase || before.n8n?.database
+  const postCas = postCasDatabaseState(chain, mission, n8nDatabase)
+  const queue = await queueState()
+  const lane = laneSnapshot(before.batchRoot, before.plistPath, phase, phase === 'active' ? {
+    workerPid: null,
+    finalReadinessPath,
+  } : null)
+  const snapshot = {
+    protectedPids,
+    unchangedPids: unchangedProtectedPids(before.protectedPids, protectedPids),
+    finalReadiness,
+    mission,
+    n8nDatabase,
+    queue,
+    batchRoot: before.batchRoot,
+    plistPath: before.plistPath,
+    lane,
+    postCas,
+  }
+  return validateRetireSnapshot(chain, snapshot, phase)
+}
+
+async function captureRetireSnapshot(chain, phase, finalReadinessPath) {
+  const finalReadiness = verifyFinalReadiness(finalReadinessPath, chain.loaded.identity.path)
+  if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RETIRE_SNAPSHOT_COMMAND) {
+    const source = run(
+      testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RETIRE_SNAPSHOT_COMMAND', ''),
+      [phase],
+      'test post-CAS snapshot',
+    )
+    let snapshot
+    try { snapshot = JSON.parse(source) } catch { fail('test post-CAS snapshot is not JSON') }
+    if (process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_REAL_BATCH_PROJECTION === '1') {
+      snapshot.lane.projection = batchProjection(
+        snapshot.batchRoot,
+        snapshot.lane.lock.path,
+        phase === 'active' ? {
+          workerPid: snapshot.lane.workers?.[0],
+          finalReadinessPath,
+        } : null,
+      )
+    }
+    snapshot.finalReadiness = finalReadiness
+    snapshot.unchangedPids = unchangedProtectedPids(
+      chain.value.runtimeBefore.protectedPids,
+      snapshot.protectedPids,
+    )
+    return validateRetireSnapshot(chain, snapshot, phase)
+  }
+  return productionRetireSnapshot(chain, phase, finalReadiness, finalReadinessPath)
+}
+
+async function waitForRetireSnapshot(chain, phase, finalReadinessPath, expected = null) {
+  let lastError
+  for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
+    try {
+      const snapshot = await captureRetireSnapshot(chain, phase, finalReadinessPath)
+      if (expected) assertStable(expected, retireInvariantProjection(snapshot), 'post-CAS retire evidence')
+      return snapshot
+    } catch (error) { lastError = error }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, WAIT_MILLISECONDS)
+  }
+  throw lastError || new Error('post-CAS snapshot wait failed')
 }
 
 function validateSnapshotShape(value, phase) {
@@ -1541,6 +1919,10 @@ function supportedToolSha256(value) {
   return value === toolSha256() || RECOVERABLE_PREDECESSOR_TOOL_SHA256.has(value)
 }
 
+function retirableToolSha256(value) {
+  return value === toolSha256() || RETIRABLE_PREDECESSOR_TOOL_SHA256.has(value)
+}
+
 function heldGuardianSample(plan, requireLive, allowMissingOwner = false) {
   const marker = readGuardianRecord(plan.path, 'held video worker launch guardian')
   const current = marker.identity
@@ -1826,13 +2208,20 @@ async function prepare(values) {
   }
 }
 
-function validateReceipt(pathname, allowReplacementLock = false, requireAnchor = true) {
+function validateReceipt(
+  pathname,
+  allowReplacementLock = false,
+  requireAnchor = true,
+  allowRetirablePredecessor = false,
+) {
   const loaded = readImmutableJson(pathname, 'runtime guard receipt')
   const value = loaded.value
   if (value?.schema !== RECEIPT_SCHEMA || !SHA256.test(value.toolSha256) || !value.intent?.path
     || !value.source?.path || !value.target?.path || !value.tree?.digest || !value.deadLock || !value.launchGuardian
     || value.intent.sha256 === undefined) fail('runtime guard receipt contract is invalid')
-  if (value.toolSha256 !== toolSha256()) fail('runtime guard tool changed after prepare')
+  if (allowRetirablePredecessor
+    ? !retirableToolSha256(value.toolSha256)
+    : value.toolSha256 !== toolSha256()) fail('runtime guard tool changed after prepare')
   if (dirname(pathname) !== dirname(value.intent.path) || basename(pathname) !== 'receipt.json'
     || basename(value.intent.path) !== 'intent.json') fail('runtime guard receipt path binding is invalid')
   const intent = readImmutableJson(value.intent.path, 'runtime guard intent')
@@ -1857,6 +2246,68 @@ function restoreReceiptPath(receiptPath) {
 
 function restoreIntentPath(receiptPath) {
   return join(dirname(receiptPath), 'restore-intent.json')
+}
+
+function retireReceiptPath(receiptPath) {
+  return join(dirname(receiptPath), 'retire.json')
+}
+
+function retireIntentPath(receiptPath) {
+  return join(dirname(receiptPath), 'retire-intent.json')
+}
+
+function retireAnchorPath(receiptPath) {
+  return join(dirname(receiptPath), 'retire.anchor.json')
+}
+
+function hasRetireArtifact(receiptPath) {
+  return [retireIntentPath(receiptPath), retireReceiptPath(receiptPath), retireAnchorPath(receiptPath)]
+    .some(pathname => Boolean(optionalEntry(pathname)))
+}
+
+function hasRestoreArtifact(receiptPath) {
+  return [restoreIntentPath(receiptPath), restoreReceiptPath(receiptPath), join(dirname(receiptPath), 'restore.anchor.json')]
+    .some(pathname => Boolean(optionalEntry(pathname)))
+}
+
+function validateRetireIntent(pathname, chain, finalReadinessPath) {
+  const loaded = readImmutableJson(pathname, 'runtime guard retire intent')
+  const value = loaded.value
+  const preparedPlan = chain.intent.value.launchGuardian
+  if (value?.schema !== RETIRE_INTENT_SCHEMA || value.nonce !== chain.value.nonce
+    || value.toolSha256 !== toolSha256() || value.preparedReceiptPath !== chain.loaded.identity.path
+    || value.preparedReceiptSha256 !== chain.loaded.sha256
+    || canonicalJson(value.launchGuardian) !== canonicalJson(preparedPlan)
+    || value.finalReadiness?.report?.path !== finalReadinessPath
+    || !value.evidence || !value.quarantine?.identity || !value.quarantine?.tree) {
+    fail('retire intent contract is invalid')
+  }
+  const current = verifyFinalReadiness(finalReadinessPath, chain.loaded.identity.path)
+  assertStable(value.finalReadiness, current, 'retire intent final-readiness identity')
+  return loaded
+}
+
+function validateRetireReceipt(pathname, chain, retireIntent, requireAnchor = true) {
+  const loaded = readImmutableJson(pathname, 'runtime guard retire receipt')
+  const value = loaded.value
+  if (value?.schema !== RETIRE_SCHEMA || value.nonce !== chain.value.nonce
+    || value.toolSha256 !== toolSha256() || value.preparedReceiptPath !== chain.loaded.identity.path
+    || value.preparedReceiptSha256 !== chain.loaded.sha256
+    || value.retireIntent?.path !== retireIntent.identity.path
+    || value.retireIntent.sha256 !== retireIntent.sha256
+    || !sameIdentity(value.retireIntent, retireIntent.identity) || !value.runtimeActive) {
+    fail('retire receipt contract is invalid')
+  }
+  validateRetireSnapshot(chain, value.runtimeActive, 'active')
+  assertStable(
+    retireIntent.value.evidence,
+    retireInvariantProjection(value.runtimeActive),
+    'retire receipt post-CAS evidence',
+  )
+  if (requireAnchor) {
+    validateAnchor(retireAnchorPath(chain.loaded.identity.path), 'retire', loaded, chain.intent.sha256)
+  }
+  return loaded
 }
 
 async function validatePrepared(receiptPath, chain, activeGuardian = null) {
@@ -1942,6 +2393,209 @@ async function restoredRuntimeState(value) {
   }
 }
 
+async function retireRuntimeState(chain, finalReadinessPath, expected) {
+  let quiescedError
+  try {
+    return {
+      mode: 'quiesced',
+      snapshot: await captureRetireSnapshot(chain, 'quiesced', finalReadinessPath),
+    }
+  } catch (error) { quiescedError = error }
+  try {
+    const snapshot = await captureRetireSnapshot(chain, 'active', finalReadinessPath)
+    if (expected) assertStable(expected, retireInvariantProjection(snapshot), 'post-CAS retire evidence')
+    return { mode: 'active', snapshot }
+  } catch (activeError) {
+    fail(`retire runtime is neither quiesced nor active: ${quiescedError?.message}; ${activeError?.message}`)
+  }
+}
+
+function testFailAfter(name) {
+  if (TEST_MODE && process.env[`AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_FAIL_AFTER_${name}`] === '1') {
+    fail(`injected failure after ${name}`)
+  }
+}
+
+function waitForConsumedGuardian(pathname, authorizationPath, claimPath) {
+  for (let attempt = 0; attempt < HANDOFF_WAIT_ATTEMPTS; attempt += 1) {
+    if (!optionalEntry(pathname) && !optionalEntry(authorizationPath) && !optionalEntry(claimPath)) return
+    Atomics.wait(
+      new Int32Array(new SharedArrayBuffer(4)), 0, 0, HANDOFF_WAIT_MILLISECONDS,
+    )
+  }
+  fail('video worker did not consume the launch handoff marker')
+}
+
+function launchControlBindsActive(control, active, finalReadinessPath) {
+  const workerPid = active.lane.workers[0]
+  const lock = active.lane.lock
+  const value = control?.value
+  return value?.workerPid === workerPid
+    && value.globalLock?.path === lock.path
+    && value.globalLock?.dev === lock.dev
+    && value.globalLock?.ino === lock.ino
+    && value.globalLock?.sourceSha256 === lock.contentSha256
+    && value.globalLock?.tokenSha256 === lock.tokenSha256
+    && value.finalReadiness?.path === finalReadinessPath
+}
+
+function reconcileWorkerLaunchControl(before, active, finalReadinessPath, markerPresent) {
+  let state = inspectWorkerLaunchAuthorizationStateSync({ batchRoot: before.batchRoot })
+  if (state.pending && (!markerPresent || state.authorization || state.claim)) {
+    fail('incomplete worker launch authorization conflicts with handoff state')
+  }
+  for (const [kind, control] of [['authorization', state.authorization], ['claim', state.claim]]) {
+    if (!control || launchControlBindsActive(control, active, finalReadinessPath)) continue
+    const oldPid = control.value.workerPid
+    if (pidExists(oldPid, `old worker launch ${kind} owner`)) {
+      fail(`old worker launch ${kind} PID is still live or was reused`)
+    }
+    const oldLock = control.value.globalLock
+    const currentLock = active.lane.lock
+    if (oldLock.dev === currentLock.dev && oldLock.ino === currentLock.ino
+      && oldLock.tokenSha256 === currentLock.tokenSha256) {
+      fail(`old worker launch ${kind} lock was not replaced`)
+    }
+    removeWorkerLaunchAuthorizationArtifactSync({
+      batchRoot: before.batchRoot,
+      kind,
+      expected: control,
+    })
+  }
+  state = inspectWorkerLaunchAuthorizationStateSync({ batchRoot: before.batchRoot })
+  if (!markerPresent && (state.authorization || state.pending)) {
+    fail('worker launch authorization remains after guardian consumption')
+  }
+  return state
+}
+
+async function completeRetireWorkerHandoff(
+  chain,
+  finalReadinessPath,
+  expected,
+  active,
+  handoffCleanup,
+) {
+  const before = chain.value.runtimeBefore
+  const workerPid = active.lane.workers[0]
+  const authorizationPath = workerLaunchAuthorizationPath(before.batchRoot)
+  const claimPath = workerLaunchAuthorizationClaimPath(before.batchRoot)
+  testKillAfter('RETIRE_SUCCESSOR_ACTIVE_BEFORE_AUTHORIZATION')
+  testFailAfter('RETIRE_SUCCESSOR_ACTIVE_BEFORE_AUTHORIZATION')
+  let control = reconcileWorkerLaunchControl(before, active, finalReadinessPath, true)
+  if (!control.authorization && !control.claim) {
+    issueWorkerLaunchAuthorizationSync({
+      batchRoot: before.batchRoot,
+      workerPid,
+      finalReadinessPath,
+    })
+    control = reconcileWorkerLaunchControl(before, active, finalReadinessPath, true)
+  }
+  testKillAfter('RETIRE_WORKER_AUTHORIZATION')
+  testFailAfter('RETIRE_WORKER_AUTHORIZATION')
+  if (control.authorization && TEST_MODE
+    && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_CONSUME_AUTHORIZATION_COMMAND) {
+    const result = runStatus(
+      testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_CONSUME_AUTHORIZATION_COMMAND', ''),
+      [before.batchRoot, String(workerPid)],
+    )
+    if (result.error || result.signal || result.status !== 0) {
+      fail(`test worker launch authorization consumption failed: ${result.stderr?.trim() || 'unknown error'}`)
+    }
+  }
+  waitForConsumedGuardian(chain.intent.value.launchGuardian.path, authorizationPath, claimPath)
+  // At this point the only admitted successor is the LaunchAgent worker whose
+  // PID also owns the global lock. Intake is deliberately untouched.
+  testKillAfter('RETIRE_MARKER_CONSUMED_BEFORE_OWNER_CLEANUP')
+  testFailAfter('RETIRE_MARKER_CONSUMED_BEFORE_OWNER_CLEANUP')
+  handoffCleanup()
+  if (optionalEntry(launchGuardianOwnerPath(before.batchRoot))) {
+    fail('video worker launch guardian owner remains after retire handoff')
+  }
+  active = await waitForRetireSnapshot(chain, 'active', finalReadinessPath, expected)
+  return active
+}
+
+async function enableAndStartAfterRetire(chain, finalReadinessPath, expected, handoffCleanup) {
+  const before = chain.value.runtimeBefore
+  const domain = `gui/${process.getuid()}`
+  action(['enable', `${domain}/${LABEL}`], 'video-lane enable')
+  if (!launchState().loaded) action(['bootstrap', domain, before.plistPath], 'video-lane bootstrap')
+  const active = await waitForRetireSnapshot(chain, 'active', finalReadinessPath, expected)
+  return completeRetireWorkerHandoff(
+    chain,
+    finalReadinessPath,
+    expected,
+    active,
+    handoffCleanup,
+  )
+}
+
+async function resumeActiveRetireHandoff(chain, finalReadinessPath, expected, active) {
+  const before = chain.value.runtimeBefore
+  const markerPath = chain.intent.value.launchGuardian.path
+  const authorizationPath = workerLaunchAuthorizationPath(before.batchRoot)
+  const claimPath = workerLaunchAuthorizationClaimPath(before.batchRoot)
+  const ownerPath = launchGuardianOwnerPath(before.batchRoot)
+  if (!optionalEntry(markerPath)) {
+    const state = reconcileWorkerLaunchControl(before, active, finalReadinessPath, false)
+    if (state.claim) {
+      if (launchControlBindsActive(state.claim, active, finalReadinessPath)) {
+        waitForConsumedGuardian(markerPath, authorizationPath, claimPath)
+      } else {
+        fail('stale worker launch claim could not be reconciled')
+      }
+    }
+    if (optionalEntry(ownerPath)) {
+      removeDetachedGuardianOwner(before.batchRoot, chain.intent.value.launchGuardian)
+    }
+    if (optionalEntry(ownerPath)) fail('detached launch guardian owner remains after cleanup')
+    return waitForRetireSnapshot(chain, 'active', finalReadinessPath, expected)
+  }
+
+  const initialControl = reconcileWorkerLaunchControl(before, active, finalReadinessPath, true)
+  let handoffCleanup
+  if (initialControl.authorization || initialControl.claim || initialControl.pending) {
+    const held = heldGuardianSample(chain.intent.value.launchGuardian, false)
+    if (pidExists(held.owner.value.pid, 'guardian owner')) {
+      fail('an active successor has a live competing launch guardian owner')
+    }
+    handoffCleanup = () => {
+      if (optionalEntry(ownerPath)) {
+        removeDetachedGuardianOwner(before.batchRoot, chain.intent.value.launchGuardian)
+      }
+    }
+  } else {
+    let guardian = takeoverRetireGuardian(chain, dirname(chain.loaded.identity.path))
+    guardian.verify()
+    handoffCleanup = guardian.handoff()
+    guardian = null
+  }
+
+  try {
+    return await completeRetireWorkerHandoff(
+      chain,
+      finalReadinessPath,
+      expected,
+      active,
+      handoffCleanup,
+    )
+  } catch (error) {
+    // An already-authorized worker may win the race with a recovering
+    // controller. Once both one-shot files are gone, only the exact dead owner
+    // record remains and can be removed under the same immutable plan.
+    if (!optionalEntry(markerPath) && !optionalEntry(authorizationPath) && !optionalEntry(claimPath)) {
+      if (optionalEntry(ownerPath)) {
+        removeDetachedGuardianOwner(before.batchRoot, chain.intent.value.launchGuardian)
+      }
+      if (!optionalEntry(ownerPath)) {
+        return waitForRetireSnapshot(chain, 'active', finalReadinessPath, expected)
+      }
+    }
+    throw error
+  }
+}
+
 function testKillAfter(name) {
   if (TEST_MODE && process.env[`AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_${name}`] === '1') {
     process.kill(process.pid, 'SIGKILL')
@@ -1949,6 +2603,7 @@ function testKillAfter(name) {
 }
 
 async function status(values) {
+  if (hasRetireArtifact(values.pathname)) fail('retire artifacts require the retire command')
   const restorePath = restoreReceiptPath(values.pathname)
   const intentPath = restoreIntentPath(values.pathname)
   const anchorPath = join(dirname(values.pathname), 'restore.anchor.json')
@@ -1981,6 +2636,7 @@ async function status(values) {
 }
 
 async function restore(values) {
+  if (hasRetireArtifact(values.pathname)) fail('retire artifacts block workspace restore')
   const restorePath = restoreReceiptPath(values.pathname)
   const intentPath = restoreIntentPath(values.pathname)
   const anchorPath = join(dirname(values.pathname), 'restore.anchor.json')
@@ -2114,7 +2770,207 @@ async function restore(values) {
   }
 }
 
+function retireQuarantineProjection(placement) {
+  return {
+    identity: placement.current,
+    tree: {
+      digest: placement.tree.digest,
+      entries: placement.tree.entries,
+      bytes: placement.tree.bytes,
+    },
+  }
+}
+
+function validateRetireQuarantine(chain, retireIntent) {
+  const placement = workspacePlacement(chain.intent.value.source, chain.value.target.path)
+  if (placement.mode !== 'target') fail('retire never restores the quarantined workspace')
+  const current = retireQuarantineProjection(placement)
+  if (retireIntent
+    && canonicalJson(current) !== canonicalJson(retireIntent.value.quarantine)) {
+    fail('quarantined workspace changed after retire intent')
+  }
+  return current
+}
+
+function takeoverRetireGuardian(chain, attemptDirectory) {
+  const plan = chain.intent.value.launchGuardian
+  if (!optionalEntry(plan.path)) fail('post-CAS launch guardian is missing before worker handoff')
+  const ownerPath = launchGuardianOwnerPath(chain.value.runtimeBefore.batchRoot)
+  if (optionalEntry(ownerPath)) {
+    const sample = heldGuardianSample(plan, false)
+    if (pidExists(sample.owner.value.pid, 'guardian owner')) {
+      if (!chain.value.holdGuardian) fail('a live guardian is not authorized for retire handoff')
+      requestHeldGuardianHandoff(plan)
+    }
+  }
+  return openLaunchGuardian(
+    chain.value.runtimeBefore.batchRoot,
+    attemptDirectory,
+    plan,
+    true,
+  )
+}
+
+async function retireLocked(values, initialChain) {
+  const chain = validateReceipt(values.pathname, true, true, true)
+  if (chain.loaded.sha256 !== initialChain.loaded.sha256
+    || !sameIdentity(chain.loaded.identity, initialChain.loaded.identity)) {
+    fail('prepared receipt changed after shared deployment lock acquisition')
+  }
+  if (!chain.value.holdGuardian) fail('retire requires one held post-CAS launch guardian')
+  if (hasRestoreArtifact(values.pathname)) fail('restore artifacts block post-CAS retire')
+  const attemptDirectory = dirname(values.pathname)
+  const intentPath = retireIntentPath(values.pathname)
+  const receiptPath = retireReceiptPath(values.pathname)
+  const anchorPath = retireAnchorPath(values.pathname)
+  const hasIntent = Boolean(optionalEntry(intentPath))
+  const hasReceipt = Boolean(optionalEntry(receiptPath))
+  const hasAnchor = Boolean(optionalEntry(anchorPath))
+  if (hasAnchor && !hasReceipt) fail('retire commit marker exists without its receipt')
+  if ((hasReceipt || hasAnchor) && !hasIntent) fail('retire artifacts exist without a retire intent')
+
+  let retireIntent
+  if (hasIntent) {
+    retireIntent = validateRetireIntent(intentPath, chain, values.finalReadiness)
+    validateRetireQuarantine(chain, retireIntent)
+  } else {
+    if (hasReceipt || hasAnchor) fail('retire artifact ordering is invalid')
+    const first = await captureRetireSnapshot(chain, 'quiesced', values.finalReadiness)
+    const second = await captureRetireSnapshot(chain, 'quiesced', values.finalReadiness)
+    assertStable(first, second, 'post-CAS quiesced snapshot')
+    const quarantine = validateRetireQuarantine(chain, null)
+    const plan = chain.intent.value.launchGuardian
+    const held = heldGuardianSample(plan, false)
+    if (!held.owner) fail('post-CAS launch guardian owner is missing')
+    if (pidExists(held.owner.value.pid, 'guardian owner')) validateHeldGuardian(plan)
+    retireIntent = immutableJson(intentPath, {
+      schema: RETIRE_INTENT_SCHEMA,
+      createdAt: Math.floor(Date.now() / 1000),
+      nonce: chain.value.nonce,
+      toolSha256: toolSha256(),
+      preparedReceiptPath: chain.loaded.identity.path,
+      preparedReceiptSha256: chain.loaded.sha256,
+      launchGuardian: plan,
+      finalReadiness: second.finalReadiness,
+      quarantine,
+      evidence: retireInvariantProjection(second),
+    })
+    testKillAfter('RETIRE_INTENT')
+    testFailAfter('RETIRE_INTENT')
+  }
+
+  const expected = retireIntent.value.evidence
+  if (hasReceipt) {
+    const receipt = validateRetireReceipt(receiptPath, chain, retireIntent, hasAnchor)
+    if (!hasAnchor) {
+      if (optionalEntry(chain.intent.value.launchGuardian.path)
+        || optionalEntry(launchGuardianOwnerPath(chain.value.runtimeBefore.batchRoot))) {
+        fail('retire receipt exists while launch guardian artifacts remain')
+      }
+      const active = await waitForRetireSnapshot(
+        chain, 'active', values.finalReadiness, expected,
+      )
+      assertStable(receipt.value.runtimeActive, active, 'retire active runtime snapshot')
+      writeAnchor(anchorPath, 'retire', receipt, chain.intent.sha256)
+    } else {
+      if (optionalEntry(chain.intent.value.launchGuardian.path)
+        || optionalEntry(launchGuardianOwnerPath(chain.value.runtimeBefore.batchRoot))) {
+        fail('committed retire still has launch guardian artifacts')
+      }
+      const active = await waitForRetireSnapshot(
+        chain, 'active', values.finalReadiness, expected,
+      )
+      assertStable(receipt.value.runtimeActive, active, 'retire active runtime snapshot')
+    }
+    return {
+      mode: 'retired',
+      receipt: values.pathname,
+      retireReceiptSha256: receipt.sha256,
+    }
+  }
+
+  const runtime = await retireRuntimeState(chain, values.finalReadiness, expected)
+  let active
+  if (runtime.mode === 'quiesced') {
+    assertStable(expected, retireInvariantProjection(runtime.snapshot), 'post-CAS retire evidence')
+    let guardian = takeoverRetireGuardian(chain, attemptDirectory)
+    try {
+      const beforeHandoff = await captureRetireSnapshot(
+        chain, 'quiesced', values.finalReadiness,
+      )
+      assertStable(expected, retireInvariantProjection(beforeHandoff), 'post-CAS retire evidence')
+      validateRetireQuarantine(chain, retireIntent)
+      guardian.verify()
+      const handoffCleanup = guardian.handoff()
+      guardian = null
+      testKillAfter('RETIRE_GUARDIAN_HANDOFF')
+      testFailAfter('RETIRE_GUARDIAN_HANDOFF')
+      active = await enableAndStartAfterRetire(
+        chain, values.finalReadiness, expected, handoffCleanup,
+      )
+    } catch (error) {
+      // Never restore the quarantined workspace or reopen intake. Before
+      // handoff the owned marker remains; after handoff either that marker or
+      // the successor worker's global lock remains the safety barrier.
+      throw error
+    }
+  } else {
+    active = await resumeActiveRetireHandoff(
+      chain,
+      values.finalReadiness,
+      expected,
+      runtime.snapshot,
+    )
+  }
+  validateRetireQuarantine(chain, retireIntent)
+  const receipt = immutableJson(receiptPath, {
+    schema: RETIRE_SCHEMA,
+    createdAt: Math.floor(Date.now() / 1000),
+    nonce: chain.value.nonce,
+    toolSha256: toolSha256(),
+    preparedReceiptPath: chain.loaded.identity.path,
+    preparedReceiptSha256: chain.loaded.sha256,
+    retireIntent: { path: intentPath, sha256: retireIntent.sha256, ...retireIntent.identity },
+    runtimeActive: active,
+  })
+  testKillAfter('RETIRE_RECEIPT')
+  testFailAfter('RETIRE_RECEIPT')
+  writeAnchor(anchorPath, 'retire', receipt, chain.intent.sha256)
+  testKillAfter('RETIRE_ANCHOR')
+  return {
+    mode: 'retired',
+    receipt: values.pathname,
+    retireReceiptSha256: receipt.sha256,
+  }
+}
+
+async function retire(values) {
+  if (hasRestoreArtifact(values.pathname)) fail('restore artifacts block post-CAS retire')
+  const initialChain = validateReceipt(values.pathname, true, true, true)
+  const deploymentLock = acquireSharedDeploymentLock()
+  const attemptDirectory = dirname(values.pathname)
+  let output
+  try {
+    testKillAfter('DEPLOYMENT_LOCK_SEALED')
+    testFailAfter('DEPLOYMENT_LOCK_SEALED')
+    chmodSync(attemptDirectory, 0o700)
+    fsyncDirectory(attemptDirectory)
+    output = await retireLocked(values, initialChain)
+  } finally {
+    try {
+      chmodSync(attemptDirectory, 0o500)
+      fsyncDirectory(attemptDirectory)
+      fsyncDirectory(dirname(attemptDirectory))
+    } finally {
+      deploymentLock.release()
+    }
+  }
+  process.stdout.write(`${JSON.stringify(output)}\n`)
+}
+
 async function recover(values) {
+  const preparedReceipt = join(dirname(values.pathname), 'receipt.json')
+  if (hasRetireArtifact(preparedReceipt)) fail('retire artifacts block SIGKILL recovery')
   const intent = readImmutableJson(values.pathname, 'runtime guard intent')
   const value = intent.value
   if (value?.schema !== INTENT_SCHEMA || !value.source?.root?.path || !value.target || !value.runtime
@@ -2239,7 +3095,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (values.command === 'prepare') return prepare(values)
   if (values.command === 'status') return status(values)
   if (values.command === 'restore') return restore(values)
-  return recover(values)
+  if (values.command === 'recover') return recover(values)
+  return retire(values)
 }
 
 // Exported for the real-FD regression harness; the CLI remains the only

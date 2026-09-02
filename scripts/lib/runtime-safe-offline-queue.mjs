@@ -155,7 +155,7 @@ function safeEntry(pathname, label, kind, options = {}) {
   return entry
 }
 
-function readJson(pathname, label, options = {}) {
+function readJsonRecord(pathname, label, options = {}) {
   const maximumBytes = options.maximumBytes ?? MAX_JSON_BYTES
   const entry = safeEntry(pathname, label, 'file', {
     mode: options.mode,
@@ -173,9 +173,161 @@ function readJson(pathname, label, options = {}) {
       || after.ino !== opened.ino || after.size !== opened.size || after.nlink !== 1n) {
       fail(`${label} changed during read`)
     }
-    return strictJson(source, label, maximumBytes)
+    return {
+      value: strictJson(source, label, maximumBytes),
+      source,
+      entry: after,
+    }
   } finally {
     closeSync(descriptor)
+  }
+}
+
+function exactKeys(value, expected, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || canonicalJson(Object.keys(value).sort()) !== canonicalJson([...expected].sort())) {
+    fail(`${label} contract is invalid`)
+  }
+}
+
+function sameFileRecord(left, right) {
+  return left.source === right.source
+    && left.entry.dev === right.entry.dev
+    && left.entry.ino === right.entry.ino
+    && left.entry.uid === right.entry.uid
+    && left.entry.mode === right.entry.mode
+    && left.entry.nlink === right.entry.nlink
+    && left.entry.size === right.entry.size
+}
+
+function entryProjection(entry, includeTimes = true) {
+  const projection = {
+    dev: entry.dev.toString(),
+    ino: entry.ino.toString(),
+    uid: entry.uid.toString(),
+    mode: entry.mode.toString(),
+    nlink: entry.nlink.toString(),
+    size: entry.size.toString(),
+  }
+  if (includeTimes) {
+    projection.mtimeNs = entry.mtimeNs.toString()
+    projection.ctimeNs = entry.ctimeNs.toString()
+  }
+  return projection
+}
+
+function sameProjection(left, right) {
+  return canonicalJson(left) === canonicalJson(right)
+}
+
+function directoryProjection(pathname, label, options = {}) {
+  const entry = safeEntry(pathname, label, 'directory', options)
+  if (realpathSync(pathname) !== pathname) fail(`${label} is not physical`)
+  return entryProjection(entry)
+}
+
+function livePid(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function validateRuntimeGuardianPair(root, names) {
+  const markerName = '.worker-launch.lock'
+  const ownerName = '.worker-launch.lock.owner'
+  const markerPresent = names.has(markerName)
+  const ownerPresent = names.has(ownerName)
+  if (markerPresent !== ownerPresent) fail('bootstrap resume video batch guardian pair is incomplete')
+  if (!markerPresent) return null
+
+  const markerPath = join(root, markerName)
+  const ownerPath = join(root, ownerName)
+  const loadPair = () => {
+    const marker = readJsonRecord(markerPath, 'bootstrap resume video batch guardian marker', {
+      mode: 0o600,
+      maximumBytes: 16 * 1024,
+    })
+    const owner = readJsonRecord(ownerPath, 'bootstrap resume video batch guardian owner', {
+      mode: 0o600,
+      maximumBytes: 16 * 1024,
+    })
+    exactKeys(marker.value, ['createdAt', 'pid', 'schema', 'token'], 'bootstrap resume video batch guardian marker')
+    exactKeys(owner.value, ['createdAt', 'marker', 'pid', 'schema'], 'bootstrap resume video batch guardian owner')
+    exactKeys(
+      owner.value.marker,
+      ['createdAt', 'dev', 'ino', 'path', 'sourceSha256', 'tokenSha256'],
+      'bootstrap resume video batch guardian owner marker',
+    )
+    const markerCreatedAt = Date.parse(marker.value.createdAt)
+    const ownerCreatedAt = Date.parse(owner.value.createdAt)
+    const token = marker.value.token
+    const markerSha256 = sha256(marker.source)
+    if (marker.value.schema !== 'video-autoworker-worker-launch-guardian/v2'
+      || !Number.isSafeInteger(marker.value.pid) || marker.value.pid <= 0
+      || typeof marker.value.createdAt !== 'string' || !Number.isFinite(markerCreatedAt)
+      || typeof token !== 'string' || !/^[a-f0-9]{64}$/u.test(token)
+      || owner.value.schema !== 'video-autoworker-worker-launch-guardian-owner/v1'
+      || !Number.isSafeInteger(owner.value.pid) || owner.value.pid <= 0
+      || typeof owner.value.createdAt !== 'string' || !Number.isFinite(ownerCreatedAt)
+      || owner.value.marker.path !== markerPath
+      || owner.value.marker.dev !== marker.entry.dev.toString()
+      || owner.value.marker.ino !== marker.entry.ino.toString()
+      || owner.value.marker.createdAt !== marker.value.createdAt
+      || owner.value.marker.tokenSha256 !== sha256(token)
+      || owner.value.marker.sourceSha256 !== markerSha256) {
+      fail('bootstrap resume video batch guardian pair contract is invalid')
+    }
+    return { marker, owner }
+  }
+
+  const first = loadPair()
+  const second = loadPair()
+  const markerMtimeMilliseconds = Number(second.marker.entry.mtimeNs / 1_000_000n)
+  if (!sameFileRecord(first.marker, second.marker)
+    || !sameFileRecord(first.owner, second.owner)
+    || second.marker.entry.mtimeNs < first.marker.entry.mtimeNs
+    || !livePid(second.owner.value.pid)
+    || Math.abs(Date.now() - markerMtimeMilliseconds) > 15_000) {
+    fail('bootstrap resume video batch guardian pair is stale or changed')
+  }
+  return second
+}
+
+function finalGuardianProjection(root, expected) {
+  const markerPath = join(root, '.worker-launch.lock')
+  const ownerPath = join(root, '.worker-launch.lock.owner')
+  if (!expected) {
+    for (const pathname of [markerPath, ownerPath]) {
+      try {
+        lstatSync(pathname, { bigint: true })
+        fail('bootstrap resume video batch guardian appeared after projection')
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error
+      }
+    }
+    return
+  }
+
+  const marker = readJsonRecord(markerPath, 'bootstrap resume video batch final guardian marker', {
+    mode: 0o600,
+    maximumBytes: 16 * 1024,
+  })
+  const owner = readJsonRecord(ownerPath, 'bootstrap resume video batch final guardian owner', {
+    mode: 0o600,
+    maximumBytes: 16 * 1024,
+  })
+  if (!sameFileRecord(expected.marker, marker) || !sameFileRecord(expected.owner, owner)) {
+    fail('bootstrap resume video batch guardian changed after projection')
+  }
+  const finalMarker = lstatSync(markerPath, { bigint: true })
+  const finalOwner = lstatSync(ownerPath, { bigint: true })
+  if (!sameProjection(entryProjection(marker.entry, false), entryProjection(finalMarker, false))
+    || !sameProjection(entryProjection(owner.entry, false), entryProjection(finalOwner, false))) {
+    fail('bootstrap resume video batch guardian identity changed after final read')
   }
 }
 
@@ -225,33 +377,6 @@ export function scanOfflineDurableBatchStates(batchRoot) {
   const maximumItems = 20_000
   const primaryPattern = /^[a-f0-9]{64}\.json$/u
   const backupPattern = /^[a-f0-9]{64}\.json\.bak$/u
-  const primary = []
-  const backups = new Set()
-  let seenEntries = 0
-  const directory = opendirSync(root)
-  try {
-    for (;;) {
-      const entry = directory.readSync()
-      if (!entry) break
-      seenEntries += 1
-      if (seenEntries > maximumDirectoryEntries) {
-        fail('bootstrap resume video batch directory exceeds the bounded entry limit')
-      }
-      if (!entry.isFile()) fail('bootstrap resume video batch directory contains a non-file artifact')
-      if (primaryPattern.test(entry.name)) primary.push(entry.name)
-      else if (backupPattern.test(entry.name)) backups.add(entry.name.slice(0, -4))
-      else fail('bootstrap resume video batch directory contains an unrecognized artifact')
-    }
-  } finally {
-    directory.closeSync()
-  }
-  if (primary.length > maximumStateFiles) {
-    fail('bootstrap resume video batch state count exceeds the bounded limit')
-  }
-  const primarySet = new Set(primary)
-  for (const pathname of backups) {
-    if (!primarySet.has(pathname)) fail('bootstrap resume video batch backup has no authoritative primary')
-  }
   const activeStatuses = new Set([
     'queued', 'staging', 'submitted', 'accepted', 'running', 'waiting', 'recovering', 'paused',
   ])
@@ -259,63 +384,209 @@ export function scanOfflineDurableBatchStates(batchRoot) {
   const batchStatuses = new Set([
     ...activeStatuses, 'succeeded', 'completed_with_errors', 'failed', 'cancelled', 'attention',
   ])
-  const durable = new Map()
-  let visited = 0
-  let totalBytes = 0
-  for (const name of primary.sort()) {
-    const pathname = join(root, name)
-    const stateEntry = safeEntry(pathname, 'bootstrap resume video batch state', 'file', {
-      maximumBytes: maximumStateBytes,
-      nonempty: true,
-    })
-    totalBytes += Number(stateEntry.size)
-    if (totalBytes > maximumTotalStateBytes) {
-      fail('bootstrap resume video batch states exceed the bounded byte limit')
+
+  const takeSample = () => {
+    const rootBefore = directoryProjection(root, 'bootstrap resume video batch root')
+    const primary = []
+    const backups = []
+    const histories = []
+    const names = new Set()
+    const rootEntries = []
+    let seenEntries = 0
+    const directory = opendirSync(root)
+    try {
+      for (;;) {
+        const entry = directory.readSync()
+        if (!entry) break
+        seenEntries += 1
+        if (seenEntries > maximumDirectoryEntries) {
+          fail('bootstrap resume video batch directory exceeds the bounded entry limit')
+        }
+        names.add(entry.name)
+        const kind = entry.isFile() ? 'file' : entry.isDirectory() ? 'directory' : 'other'
+        rootEntries.push({ name: entry.name, kind })
+        if (entry.name === '.worker-launch.lock' || entry.name === '.worker-launch.lock.owner') continue
+        if (entry.isFile() && primaryPattern.test(entry.name)) primary.push(join(root, entry.name))
+        else if (entry.isFile() && backupPattern.test(entry.name)) backups.push(join(root, entry.name))
+        else if (entry.isDirectory()) histories.push(join(root, entry.name))
+        else fail('bootstrap resume video batch directory contains an unrecognized artifact')
+      }
+    } finally {
+      directory.closeSync()
     }
-    const state = readJson(pathname, 'bootstrap resume video batch state', {
-      maximumBytes: maximumStateBytes,
-    })
-    if (![1, 2].includes(state?.schemaVersion) || !Array.isArray(state.items)
-      || typeof state.status !== 'string' || !batchStatuses.has(state.status)) {
-      fail('bootstrap resume video batch state contract is invalid')
-    }
-    let activeItems = 0
-    for (const item of state.items) {
-      visited += 1
-      if (visited > maximumItems) {
-        fail('bootstrap resume video batch items exceed the bounded limit')
+    const guardian = validateRuntimeGuardianPair(root, names)
+
+    const historyFiles = []
+    const historyProjections = []
+    for (const historyPath of histories.sort()) {
+      const historyBefore = directoryProjection(
+        historyPath, 'bootstrap resume video batch terminal history', { mode: 0o700 },
+      )
+      const historyEntries = []
+      const historyDirectory = opendirSync(historyPath)
+      try {
+        for (;;) {
+          const entry = historyDirectory.readSync()
+          if (!entry) break
+          seenEntries += 1
+          if (seenEntries > maximumDirectoryEntries) {
+            fail('bootstrap resume video batch directory exceeds the bounded entry limit')
+          }
+          const kind = entry.isFile() ? 'file' : entry.isDirectory() ? 'directory' : 'other'
+          historyEntries.push({ name: entry.name, kind })
+          if (!entry.isFile() || (!primaryPattern.test(entry.name) && !backupPattern.test(entry.name))) {
+            fail('bootstrap resume video batch terminal history contains an unrecognized artifact')
+          }
+        }
+      } finally {
+        historyDirectory.closeSync()
       }
-      if (!item || typeof item !== 'object' || Array.isArray(item)) {
-        fail('bootstrap resume video batch item contract is invalid')
+      if (historyEntries.length === 0) fail('bootstrap resume video batch terminal history is empty')
+      const historyNameSet = new Set(historyEntries.map(entry => entry.name))
+      for (const { name } of historyEntries) {
+        if (primaryPattern.test(name) && !historyNameSet.has(`${name}.bak`)) {
+          fail('bootstrap resume video batch terminal history primary has no backup')
+        }
+        if (backupPattern.test(name) && !historyNameSet.has(name.slice(0, -4))) {
+          fail('bootstrap resume video batch terminal history backup has no primary')
+        }
+        historyFiles.push({
+          pathname: join(historyPath, name),
+          primary: primaryPattern.test(name),
+        })
       }
-      const taskId = typeof item.taskId === 'string' ? item.taskId.trim() : ''
-      const itemStatus = typeof item.status === 'string' ? item.status : ''
-      if (!/^[A-Za-z0-9._:-]{1,120}$/u.test(taskId)
-        || (!activeStatuses.has(itemStatus) && !terminalStatuses.has(itemStatus))) {
-        fail('bootstrap resume video batch item contract is invalid')
-      }
-      let status = itemStatus
-      if (state.status === 'paused' && !['submitted', 'accepted', 'running'].includes(status)
-        && !terminalStatuses.has(status)) status = 'paused'
-      else if (state.status === 'recovering' && status === 'queued') status = 'recovering'
-      if (!activeStatuses.has(status)) continue
-      activeItems += 1
-      if (durable.has(taskId)) fail('bootstrap resume video batch task identity is duplicated')
-      durable.set(taskId, { taskId, status, origin: 'durable' })
-    }
-    if (activeStatuses.has(state.status) && activeItems === 0) {
-      const batchId = typeof state.batchId === 'string' ? state.batchId.trim() : ''
-      if (!/^[A-Za-z0-9._:-]{1,80}$/u.test(batchId)) {
-        fail('bootstrap resume active video batch has no valid durable identity')
-      }
-      const taskId = `batch:${batchId}`
-      if (durable.has(taskId)) fail('bootstrap resume video batch identity is duplicated')
-      durable.set(taskId, {
-        taskId,
-        status: state.status === 'running' ? 'running' : 'waiting',
-        origin: 'durable-batch',
+      historyProjections.push({
+        pathname: relative(root, historyPath),
+        identity: historyBefore,
+        entries: historyEntries.sort((left, right) => left.name.localeCompare(right.name)),
       })
     }
+
+    const historyPrimaryCount = historyFiles.filter(item => item.primary).length
+    if (primary.length + historyPrimaryCount > maximumStateFiles) {
+      fail('bootstrap resume video batch state count exceeds the bounded limit')
+    }
+    const primarySet = new Set(primary)
+    for (const pathname of backups) {
+      if (!primarySet.has(pathname.slice(0, -4))) {
+        fail('bootstrap resume video batch backup has no authoritative primary')
+      }
+    }
+
+    const durable = new Map()
+    const fileProjections = []
+    let visited = 0
+    let totalBytes = 0
+    const readState = (pathname, terminalHistoryPrimary = false) => {
+      const record = readJsonRecord(pathname, 'bootstrap resume video batch state', {
+        maximumBytes: maximumStateBytes,
+      })
+      totalBytes += Number(record.entry.size)
+      if (totalBytes > maximumTotalStateBytes) {
+        fail('bootstrap resume video batch states exceed the bounded byte limit')
+      }
+      fileProjections.push({
+        pathname: relative(root, pathname),
+        identity: entryProjection(record.entry),
+        sourceSha256: sha256(record.source),
+      })
+      const state = record.value
+      if (![1, 2].includes(state?.schemaVersion) || !Array.isArray(state.items)
+        || typeof state.status !== 'string' || !batchStatuses.has(state.status)) {
+        fail('bootstrap resume video batch state contract is invalid')
+      }
+      let activeItems = 0
+      const active = []
+      for (const item of state.items) {
+        visited += 1
+        if (visited > maximumItems) {
+          fail('bootstrap resume video batch items exceed the bounded limit')
+        }
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          fail('bootstrap resume video batch item contract is invalid')
+        }
+        const taskId = typeof item.taskId === 'string' ? item.taskId.trim() : ''
+        const itemStatus = typeof item.status === 'string' ? item.status : ''
+        if (!/^[A-Za-z0-9._:-]{1,120}$/u.test(taskId)
+          || (!activeStatuses.has(itemStatus) && !terminalStatuses.has(itemStatus))) {
+          fail('bootstrap resume video batch item contract is invalid')
+        }
+        let status = itemStatus
+        if (state.status === 'paused' && !['submitted', 'accepted', 'running'].includes(status)
+          && !terminalStatuses.has(status)) status = 'paused'
+        else if (state.status === 'recovering' && status === 'queued') status = 'recovering'
+        if (!activeStatuses.has(status)) continue
+        activeItems += 1
+        active.push({ taskId, status, origin: 'durable' })
+      }
+      if (activeStatuses.has(state.status) && activeItems === 0) {
+        const batchId = typeof state.batchId === 'string' ? state.batchId.trim() : ''
+        if (!/^[A-Za-z0-9._:-]{1,80}$/u.test(batchId)) {
+          fail('bootstrap resume active video batch has no valid durable identity')
+        }
+        const taskId = `batch:${batchId}`
+        active.push({
+          taskId,
+          status: state.status === 'running' ? 'running' : 'waiting',
+          origin: 'durable-batch',
+        })
+      }
+      if (terminalHistoryPrimary && active.length > 0) {
+        fail('bootstrap resume video batch terminal history contains an active primary')
+      }
+      return active
+    }
+
+    for (const pathname of primary.sort()) {
+      for (const item of readState(pathname)) {
+        if (durable.has(item.taskId)) fail('bootstrap resume video batch task identity is duplicated')
+        durable.set(item.taskId, item)
+      }
+    }
+    for (const pathname of backups.sort()) readState(pathname)
+    for (const item of historyFiles.sort((left, right) => left.pathname.localeCompare(right.pathname))) {
+      readState(item.pathname, item.primary)
+    }
+
+    for (const history of historyProjections) {
+      const after = directoryProjection(
+        join(root, history.pathname), 'bootstrap resume video batch terminal history', { mode: 0o700 },
+      )
+      if (!sameProjection(history.identity, after)) {
+        fail('bootstrap resume video batch terminal history changed during projection')
+      }
+    }
+    const rootAfter = directoryProjection(root, 'bootstrap resume video batch root')
+    if (!sameProjection(rootBefore, rootAfter)) {
+      fail('bootstrap resume video batch root changed during projection')
+    }
+    return {
+      durable: [...durable.values()],
+      guardian,
+      projection: {
+        root: rootAfter,
+        entries: rootEntries.sort((left, right) => left.name.localeCompare(right.name)),
+        histories: historyProjections,
+        files: fileProjections.sort((left, right) => left.pathname.localeCompare(right.pathname)),
+        guardian: guardian ? {
+          marker: {
+            identity: entryProjection(guardian.marker.entry, false),
+            sourceSha256: sha256(guardian.marker.source),
+          },
+          owner: {
+            identity: entryProjection(guardian.owner.entry, false),
+            sourceSha256: sha256(guardian.owner.source),
+          },
+        } : null,
+      },
+    }
   }
-  return [...durable.values()]
+
+  const first = takeSample()
+  const second = takeSample()
+  if (!sameProjection(first.projection, second.projection)) {
+    fail('bootstrap resume video batch directory or file projection changed between samples')
+  }
+  finalGuardianProjection(root, second.guardian)
+  return second.durable
 }

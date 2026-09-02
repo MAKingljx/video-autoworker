@@ -49,6 +49,8 @@ describe('requireRole', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv, API_KEY: 'test-api-key-secret' }
+    delete process.env.MC_DESKTOP_MODE
+    delete process.env.MC_AUTH_MODE
   })
 
   afterEach(() => {
@@ -66,6 +68,24 @@ describe('requireRole', () => {
     expect(result.status).toBe(401)
     expect(result.error).toBe('Authentication required')
     expect(result.user).toBeUndefined()
+  })
+
+  it('treats the explicit loopback desktop identity as the local administrator', () => {
+    process.env.MC_DESKTOP_MODE = '1'
+    const result = requireRole(makeRequest(), 'admin')
+
+    expect(result.user).toMatchObject({
+      id: 0,
+      username: 'local-desktop',
+      role: 'admin',
+    })
+  })
+
+  it('does not extend desktop identity to a non-loopback request', () => {
+    process.env.MC_DESKTOP_MODE = '1'
+    const result = requireRole(new Request('https://app.example.test/api/test'), 'viewer')
+
+    expect(result).toMatchObject({ status: 401, error: 'Authentication required' })
   })
 
   it('returns 401 when API key is wrong', () => {
@@ -123,5 +143,34 @@ describe('requireRole', () => {
     )
     expect(result.status).toBe(401)
     expect(result.user).toBeUndefined()
+  })
+
+  it('uses a fixed read-only identity and ignores every legacy credential in OpenClaw mode', () => {
+    process.env.MC_AUTH_MODE = 'openclaw-loopback'
+    process.env.MC_DESKTOP_MODE = '1'
+    process.env.MC_PROXY_AUTH_HEADER = 'x-auth-user'
+    process.env.MC_OPENCLAW_WORKSPACE_ID = '7'
+    process.env.MC_OPENCLAW_TENANT_ID = '9'
+
+    const request = makeRequest({
+      'x-api-key': 'test-api-key-secret',
+      'x-auth-user': 'administrator',
+      cookie: '__Host-mc-session=legacy-session',
+    })
+    expect(requireRole(request, 'viewer').user).toMatchObject({
+      username: 'openclaw-loopback',
+      role: 'viewer',
+      workspace_id: 7,
+      tenant_id: 9,
+    })
+    expect(requireRole(request, 'admin')).toMatchObject({ status: 403 })
+  })
+
+  it('fails closed for non-loopback and HTTPS requests in OpenClaw mode', () => {
+    process.env.MC_AUTH_MODE = 'openclaw-loopback'
+    expect(requireRole(new Request('http://app.example.test/api/test', {
+      headers: { 'x-api-key': 'test-api-key-secret' },
+    }), 'viewer')).toMatchObject({ status: 401 })
+    expect(requireRole(new Request('https://127.0.0.1/api/test'), 'viewer')).toMatchObject({ status: 401 })
   })
 })

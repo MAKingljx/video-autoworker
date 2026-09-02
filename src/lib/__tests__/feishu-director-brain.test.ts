@@ -137,6 +137,8 @@ async function prepareRequiredStandaloneFixture(
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
+    'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
   for (const [member, content] of Object.entries(files)) {
@@ -974,6 +976,14 @@ describe('Feishu director brain contract', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('declares the OpenClaw SecretRef helper in the standalone include and contract lists', async () => {
+    const helper = 'scripts/lib/openclaw-secret-reference.mjs'
+    const nextConfig = await readFile(resolve(process.cwd(), 'next.config.js'), 'utf8')
+    const artifactChecker = await readFile(resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs'), 'utf8')
+    expect(nextConfig).toContain(`'./${helper}'`)
+    expect(artifactChecker.split(helper).length - 1).toBeGreaterThanOrEqual(2)
   })
 
   it('fails a standalone artifact containing private, development, or runtime files', async () => {

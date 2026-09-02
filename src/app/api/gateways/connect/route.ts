@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { getDatabase } from '@/lib/db'
 import { buildGatewayWebSocketUrl } from '@/lib/gateway-url'
-import { getDetectedGatewayToken } from '@/lib/gateway-runtime'
+import { getDetectedGatewayCredentialStatus } from '@/lib/gateway-runtime'
 import {
   isTailscaleServe,
   refreshTailscaleCache,
@@ -15,7 +15,6 @@ interface GatewayEntry {
   id: number
   host: string
   port: number
-  token: string
   is_primary: number
 }
 
@@ -121,7 +120,7 @@ function ensureTable(db: ReturnType<typeof getDatabase>) {
 
 /**
  * POST /api/gateways/connect
- * Resolves websocket URL and token for a selected gateway without exposing tokens in list payloads.
+ * Resolves browser-safe gateway metadata. Credentials never cross into JSON.
  */
 export async function POST(request: NextRequest) {
   // Any authenticated dashboard user may initiate a gateway websocket connect.
@@ -145,7 +144,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'id is required' }, { status: 400 })
   }
 
-  const gateway = db.prepare('SELECT id, host, port, token, is_primary FROM gateways WHERE id = ?').get(id) as GatewayEntry | undefined
+  const gateway = db.prepare('SELECT id, host, port, is_primary FROM gateways WHERE id = ?').get(id) as GatewayEntry | undefined
   if (!gateway) {
     return NextResponse.json({ error: 'Gateway not found' }, { status: 404 })
   }
@@ -157,30 +156,28 @@ export async function POST(request: NextRequest) {
 
   // When gateway host is localhost but the browser is remote (e.g. Tailscale),
   // resolve the correct browser-accessible WebSocket URL.
-  const remoteUrl = explicitBrowserWsUrl || resolveRemoteGatewayUrl(gateway, request)
+  const remoteUrl = explicitBrowserWsUrl
+    ? buildGatewayWebSocketUrl({
+        host: explicitBrowserWsUrl,
+        port: gateway.port,
+        browserProtocol: inferBrowserProtocol(request),
+      })
+    : resolveRemoteGatewayUrl(gateway, request)
   const ws_url = remoteUrl || buildGatewayWebSocketUrl({
     host: gateway.host,
     port: gateway.port,
     browserProtocol: inferBrowserProtocol(request),
   })
 
-  const dbToken = (gateway.token || '').trim()
-  const detectedToken = gateway.is_primary === 1 ? getDetectedGatewayToken() : ''
-  const token = detectedToken || dbToken
-
-  // Keep runtime DB aligned with detected OpenClaw gateway token for primary gateway.
-  if (gateway.is_primary === 1 && detectedToken && detectedToken !== dbToken) {
-    try {
-      db.prepare('UPDATE gateways SET token = ?, updated_at = (unixepoch()) WHERE id = ?').run(detectedToken, gateway.id)
-    } catch {
-      // Non-fatal: connect still succeeds with detected token even if persistence fails.
-    }
-  }
+  const detected = gateway.is_primary === 1
+    ? getDetectedGatewayCredentialStatus()
+    : { configured: false, source: 'none' }
 
   return NextResponse.json({
     id: gateway.id,
     ws_url,
-    token,
-    token_set: token.length > 0,
+    token_set: detected.configured,
+    credential_source: detected.source,
+    server_managed: true,
   })
 }

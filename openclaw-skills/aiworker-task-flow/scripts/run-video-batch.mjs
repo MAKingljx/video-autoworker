@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { rm } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { lstat, open, rm } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import {
   createPlatformClient,
@@ -23,6 +24,10 @@ import {
   verifyBatchItemSource,
   writeBatchState,
 } from '../lib/video-batch-state.mjs'
+import {
+  consumeWorkerLaunchAuthorizationSync,
+  WORKER_LAUNCH_GUARDIAN_SCHEMA,
+} from '../lib/worker-launch-authorization.mjs'
 
 const args = process.argv.slice(2)
 
@@ -50,6 +55,91 @@ const RECONCILE_INTERVAL_MS = Number.isFinite(configuredReconcileInterval)
   : 60_000
 const RECOVERY_BACKOFF_MS = Math.max(1_000, Math.min(5 * 60_000,
   Number(process.env.AIWORKER_VIDEO_RECOVERY_BACKOFF_MS || 30_000)))
+const configuredGuardianAuthorizationTimeout = Number(
+  process.env.AIWORKER_VIDEO_WORKER_GUARDIAN_AUTH_TIMEOUT_MS || 120_000,
+)
+const GUARDIAN_AUTHORIZATION_TIMEOUT_MS = Number.isFinite(configuredGuardianAuthorizationTimeout)
+  && configuredGuardianAuthorizationTimeout >= 250
+  && configuredGuardianAuthorizationTimeout <= 5 * 60_000
+  ? configuredGuardianAuthorizationTimeout
+  : 120_000
+
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.uid === right.uid
+    && left.mode === right.mode
+    && left.nlink === right.nlink
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+}
+
+async function consumeLaunchMarker(pathname, { guardianAllowed }) {
+  let entry
+  try {
+    entry = await lstat(pathname, { bigint: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1n
+    || (entry.mode & 0o7777n) !== 0o600n || entry.size <= 0n || entry.size > 4_096n
+    || (typeof process.getuid === 'function' && entry.uid !== BigInt(process.getuid()))) {
+    throw new Error('视频队列启动标记身份无效，拒绝自动清理')
+  }
+  const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  let value
+  try {
+    const opened = await handle.stat({ bigint: true })
+    if (!sameFileIdentity(opened, entry)) throw new Error('视频队列启动标记在读取前已变化')
+    const source = await handle.readFile({ encoding: 'utf8' })
+    const after = await handle.stat({ bigint: true })
+    if (!sameFileIdentity(after, opened)) throw new Error('视频队列启动标记在读取时已变化')
+    try { value = JSON.parse(source) } catch { throw new Error('视频队列启动标记不是有效 JSON') }
+  } finally {
+    await handle.close()
+  }
+  const keys = value && typeof value === 'object' && !Array.isArray(value)
+    ? Object.keys(value).sort().join(',')
+    : ''
+  const ordinary = keys === 'createdAt,pid'
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+  const guardian = keys === 'createdAt,pid,schema,token'
+    && value.schema === WORKER_LAUNCH_GUARDIAN_SCHEMA
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.token === 'string' && /^[a-f0-9]{64}$/u.test(value.token)
+  if (!ordinary && !(guardianAllowed && guardian)) {
+    if (guardian && !guardianAllowed) return
+    throw new Error('视频队列启动标记类型不受支持，拒绝自动清理')
+  }
+  if (guardian) {
+    const deadline = Date.now() + GUARDIAN_AUTHORIZATION_TIMEOUT_MS
+    while (true) {
+      try {
+        consumeWorkerLaunchAuthorizationSync({
+          batchRoot: dirname(pathname),
+          workerPid: process.pid,
+        })
+        return
+      } catch (error) {
+        if (error?.code !== 'EWORKERLAUNCHAUTHPENDING') throw error
+        if (Date.now() >= deadline) {
+          throw new Error('等待 guardian 授权超时，拒绝启动视频队列')
+        }
+        await sleep(Math.min(100, Math.max(1, deadline - Date.now())))
+      }
+    }
+  }
+  // Revalidate all identity and mutation metadata immediately before removal.
+  // Node's path-based rm cannot bind unlink to the already-open descriptor, so
+  // callers must still keep the containing 0700 runtime directory controlled.
+  const current = await lstat(pathname, { bigint: true })
+  if (!sameFileIdentity(current, entry)) throw new Error('视频队列启动标记在清理前已变化')
+  await rm(pathname)
+}
 
 async function persist(statePath, state) {
   state.worker = { pid: process.pid, heartbeatAt: new Date().toISOString() }
@@ -500,22 +590,43 @@ async function main() {
     ? resolve(serveRoot, '.serve-root-anchor')
     : option('--state-file')
   const persistent = Boolean(serveRoot || serve)
-  // The launch marker only protects the short parent-to-worker handoff. Clear
-  // it before acquiring the long-lived lane lock so startup failures cannot
-  // strand future submissions behind a stale semaphore.
-  await rm(resolve(dirname(statePath), '.worker-launch.lock'), { force: true }).catch(() => undefined)
+  const launchMarker = resolve(dirname(statePath), '.worker-launch.lock')
   const lock = await acquireGlobalBatchLock(statePath)
   // One current worker already owns the global lane and will discover every
-  // persisted queued job. Exit instead of accumulating detached waiters.
-  if (!lock.acquired) return
+  // persisted queued job. Only a validated ordinary launcher semaphore may be
+  // cleared in this branch; a runtime guardian must remain until a new worker
+  // owns the global lock and the post-CAS controller verifies the handoff.
+  if (!lock.acquired) {
+    await consumeLaunchMarker(launchMarker, { guardianAllowed: false })
+    return
+  }
+  let primaryFailure = null
   try {
+    // Global ownership alone is not sufficient for a guardian handoff. The
+    // controller must additionally attest this exact PID/lock and immutable
+    // final-readiness report before the worker may consume the guardian and
+    // begin draining persisted work.
+    await consumeLaunchMarker(launchMarker, { guardianAllowed: true })
     do {
       await drainQueue(statePath)
       if (!persistent) break
       await sleep(RECOVERY_BACKOFF_MS)
     } while (true)
+  } catch (error) {
+    primaryFailure = error
+    throw error
   } finally {
-    await lock.release()
+    try {
+      await lock.release()
+    } catch (releaseError) {
+      // Preserve the original authorization/worker failure. The release error
+      // remains attached for diagnostics, but must not replace the causal
+      // failure that made the handoff fail closed.
+      if (!primaryFailure) throw releaseError
+      if (primaryFailure instanceof Error && primaryFailure.cause === undefined) {
+        primaryFailure.cause = releaseError
+      }
+    }
   }
 }
 

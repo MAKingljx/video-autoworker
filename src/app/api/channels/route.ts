@@ -2,16 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { config } from '@/lib/config'
 import { logger } from '@/lib/logger'
-import { getDetectedGatewayToken } from '@/lib/gateway-runtime'
+import { withDetectedGatewayAuthorization } from '@/lib/gateway-runtime'
 import { callOpenClawGateway } from '@/lib/openclaw-gateway'
 
 const gatewayInternalUrl = `http://${config.gatewayHost}:${config.gatewayPort}`
 
 function gatewayHeaders(): Record<string, string> {
-  const token = getDetectedGatewayToken()
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  if (token) headers['Authorization'] = `Bearer ${token}`
-  return headers
+  return withDetectedGatewayAuthorization({ 'Content-Type': 'application/json' })
 }
 
 type GatewayData = unknown

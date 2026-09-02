@@ -2,11 +2,11 @@ import { createHash } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getDatabase } from '@/lib/db'
-import { verifyN8nWebhookSecret } from '@/lib/n8n'
 import { checkN8nCallbackAdmission, resolveN8nRuntimeInstanceId } from '@/lib/n8n-runtime-affinity'
 import { executeN8nModelRoute } from '@/lib/n8n-model-execution'
 import { resolveN8nNodeRoute } from '@/lib/n8n-model-routing'
 import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
+import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
 import {
   completeN8nChildExecution,
   completeN8nTaskRun,
@@ -51,9 +51,8 @@ function nodeSessionKey(
 }
 
 export async function POST(request: NextRequest) {
-  if (!verifyN8nWebhookSecret(request.headers.get('X-AIWorker-Webhook-Secret'))) {
-    return NextResponse.json({ error: 'n8n 节点回调认证失败' }, { status: 401 })
-  }
+  const channel = checkOpenClawN8nCallbackRequest(request, '/api/n8n/node-execute')
+  if (!channel.allowed) return NextResponse.json({ error: channel.error }, { status: channel.status })
   const body = await request.json().catch(() => null)
   const parsed = nodeRequestSchema.safeParse(body)
   if (!parsed.success) {

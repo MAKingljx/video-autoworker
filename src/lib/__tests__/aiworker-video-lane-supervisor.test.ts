@@ -22,6 +22,8 @@ const execFileAsync = promisify(execFile)
 const sourceRoot = process.cwd()
 const sourceInstaller = resolve(sourceRoot, 'scripts/install-aiworker-video-lane-supervisor.sh')
 const sourceValidator = resolve(sourceRoot, 'scripts/validate-aiworker-video-lane-supervisor.mjs')
+const sourceSharedDeploymentLock = resolve(sourceRoot, 'scripts/lib/shared-deployment-lock.sh')
+const sourceSharedDeploymentLockNode = resolve(sourceRoot, 'scripts/lib/shared-deployment-lock.mjs')
 const sourceTemplate = resolve(
   sourceRoot,
   'ops/video-lane/launchd/ai.aiworker.video-lane-supervisor.plist.template',
@@ -50,8 +52,11 @@ async function fixture() {
   const batchRoot = join(home, 'ai-worker', 'state', 'video-autoworker', 'video-batches')
   const logDir = join(home, 'Library', 'Logs', 'aiworker-video-lane')
   const backupRoot = join(home, 'ai-worker', 'backups', 'video-lane-supervisor')
+  const deploymentRunDir = join(root, 'blue-green-run')
   const installer = join(repo, 'scripts', 'install-aiworker-video-lane-supervisor.sh')
   const validator = join(repo, 'scripts', 'validate-aiworker-video-lane-supervisor.mjs')
+  const sharedDeploymentLock = join(repo, 'scripts', 'lib', 'shared-deployment-lock.sh')
+  const sharedDeploymentLockNode = join(repo, 'scripts', 'lib', 'shared-deployment-lock.mjs')
   const template = join(repo, 'ops', 'video-lane', 'launchd', 'ai.aiworker.video-lane-supervisor.plist.template')
   const nodeBinary = await realpath(process.execPath)
   const launchState = join(root, 'launch-state.json')
@@ -61,6 +66,7 @@ async function fixture() {
   await Promise.all([
     mkdir(bin, { recursive: true, mode: 0o700 }),
     mkdir(dirname(installer), { recursive: true, mode: 0o700 }),
+    mkdir(dirname(sharedDeploymentLock), { recursive: true, mode: 0o700 }),
     mkdir(dirname(template), { recursive: true, mode: 0o700 }),
     mkdir(join(repo, 'openclaw-skills'), { recursive: true, mode: 0o700 }),
     mkdir(join(workspace, 'skills'), { recursive: true, mode: 0o700 }),
@@ -70,6 +76,8 @@ async function fixture() {
   await Promise.all([
     cp(sourceInstaller, installer),
     cp(sourceValidator, validator),
+    cp(sourceSharedDeploymentLock, sharedDeploymentLock),
+    cp(sourceSharedDeploymentLockNode, sharedDeploymentLockNode),
     cp(sourceTemplate, template),
     cp(sourceSkill, join(repo, 'openclaw-skills', 'aiworker-task-flow'), { recursive: true }),
     cp(sourceSkill, installedSkill, { recursive: true }),
@@ -83,6 +91,7 @@ async function fixture() {
   ])
   await chmod(installer, 0o755)
   await chmod(validator, 0o755)
+  await chmod(sharedDeploymentLock, 0o600)
   await chmod(join(installedSkill, 'SKILL.md'), 0o600)
   for (const name of await readdir(join(installedSkill, 'lib'))) {
     await chmod(join(installedSkill, 'lib', name), 0o600)
@@ -102,7 +111,7 @@ async function fixture() {
   ))}\n`, { mode: 0o600 })
   await executable(join(bin, 'id'), `#!/bin/sh
 if [ "$1" = "-un" ]; then printf '%s\\n' "${process.env.USER || 'fixture'}"; exit 0; fi
-if [ "$1" = "-u" ]; then printf '501\\n'; exit 0; fi
+if [ "$1" = "-u" ]; then printf '${process.getuid?.() ?? 501}\\n'; exit 0; fi
 exit 2
 `)
   await executable(join(bin, 'hostname'), '#!/bin/sh\nprintf "fixture-host.local\\n"\n')
@@ -139,6 +148,7 @@ if (args[0] === 'print') {
   process.exit(0)
 }
 if (args[0] === 'bootstrap') {
+  if (process.env.FAKE_BOOTSTRAP_FAIL === '1') process.exit(5)
   const state = read()
   if (state.disabled) process.exit(5)
   save({ ...state, loaded: true, pid: 4242 })
@@ -167,7 +177,7 @@ if (args[0] === 'bootout') {
 process.exit(2)
 `)
 
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
     PATH: `${bin}:${process.env.PATH}`,
@@ -179,6 +189,7 @@ process.exit(2)
     AIWORKER_VIDEO_LANE_LOG_DIR: logDir,
     AIWORKER_LAUNCH_AGENTS_DIR: launchAgents,
     AIWORKER_VIDEO_LANE_BACKUP_ROOT: backupRoot,
+    AIWORKER_BG_RUN_DIR: deploymentRunDir,
     FAKE_BATCH_ROOT: batchRoot,
     FAKE_LAUNCH_STATE: launchState,
     FAKE_LISTENERS: listenerState,
@@ -193,6 +204,7 @@ process.exit(2)
     batchRoot,
     logDir,
     backupRoot,
+    deploymentRunDir,
     plist: join(launchAgents, 'ai.aiworker.video-lane-supervisor.plist'),
     launchState,
     qwenConfig,
@@ -264,7 +276,7 @@ describe('persistent global video-lane supervisor', () => {
     const dryRun = await run(entry, '--dry-run')
 
     expect(dryRun.stdout).toContain('No LaunchAgent, queue state')
-  })
+  }, 20_000)
 
   it('enables a disabled service before bootstrapping it', async () => {
     const entry = await fixture()
@@ -278,6 +290,59 @@ describe('persistent global video-lane supervisor', () => {
       loaded: true,
       pid: 4242,
     })
+  }, 20_000)
+
+  it('fails closed when another runtime operation holds the canonical deployment lock', async () => {
+    const entry = await fixture()
+    const lockDirectory = join(entry.deploymentRunDir, '.deployment.lock')
+    await mkdir(lockDirectory, { recursive: true, mode: 0o700 })
+    const ownerSource = `${JSON.stringify({
+      schema: 'video-autoworker-shared-deployment-lock-owner/v1',
+      pid: process.pid,
+      nonce: 'b'.repeat(64),
+      createdAt: new Date().toISOString(),
+    })}\n`
+    await writeFile(join(lockDirectory, 'pid'), ownerSource, { mode: 0o600 })
+
+    await expect(run(entry, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        'shared deployment lock failed: another shared deployment operation is active',
+      ),
+    })
+    await expect(stat(entry.plist)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(lockDirectory, 'pid'), 'utf8')).toBe(ownerSource)
+  })
+
+  it('releases the canonical deployment lock after success and after rollback', async () => {
+    const successful = await fixture()
+    await run(successful, '--apply')
+    await expect(stat(join(successful.deploymentRunDir, '.deployment.lock'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+
+    const failed = await fixture()
+    await expect(run({
+      ...failed,
+      env: { ...failed.env, FAKE_BOOTSTRAP_FAIL: '1' },
+    }, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining(
+        'Video-lane supervisor change failed; exact prior LaunchAgent state was restored.',
+      ),
+    })
+    await expect(stat(join(failed.deploymentRunDir, '.deployment.lock'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+    await expect(stat(failed.plist)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 20_000)
+
+  it('fails closed when the canonical shared-lock helper is unavailable', async () => {
+    const entry = await fixture()
+    await rm(join(dirname(entry.installer), 'lib', 'shared-deployment-lock.sh'))
+
+    await expect(run(entry, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining('Shared deployment lock helper is unavailable.'),
+    })
+    await expect(stat(entry.plist)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('keeps at most two verified backups without deleting unrelated evidence', async () => {

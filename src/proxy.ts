@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import { buildMissionControlCsp, buildNonceRequestHeaders } from '@/lib/csp'
 import { MC_SESSION_COOKIE_NAME, LEGACY_MC_SESSION_COOKIE_NAME } from '@/lib/session-cookie'
+import { isLoopbackHttpRequest, isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 
 /** Constant-time string comparison using Node.js crypto. */
 function safeCompare(a: string, b: string): boolean {
@@ -171,6 +172,11 @@ function extractApiKeyFromRequest(request: NextRequest): string {
 }
 
 export function proxy(request: NextRequest) {
+  const openClawLoopbackMode = isOpenClawLoopbackAuthMode()
+  if (openClawLoopbackMode && !isLoopbackHttpRequest(request)) {
+    return addSecurityHeaders(new NextResponse('Forbidden', { status: 403 }), request)
+  }
+
   // Network access control.
   // In production: default-deny unless explicitly allowed.
   // In dev/test: allow all hosts unless overridden.
@@ -209,6 +215,23 @@ export function proxy(request: NextRequest) {
         return addSecurityHeaders(NextResponse.json({ error: 'CSRF origin mismatch' }, { status: 403 }), request)
       }
     }
+  }
+
+  if (openClawLoopbackMode) {
+    if (pathname === '/login' || pathname === '/setup') {
+      const profilesUrl = request.nextUrl.clone()
+      profilesUrl.pathname = '/profiles'
+      profilesUrl.search = ''
+      return addSecurityHeaders(NextResponse.redirect(profilesUrl), request)
+    }
+
+    const isReadOnlyIdentity = pathname === '/api/auth/me' && method === 'GET'
+    if ((pathname.startsWith('/api/auth/') && !isReadOnlyIdentity) || pathname === '/api/setup') {
+      return addSecurityHeaders(NextResponse.json({ error: 'OpenClaw is the only authentication provider' }, { status: 403 }), request)
+    }
+
+    const { response, nonce } = nextResponseWithNonce(request)
+    return addSecurityHeaders(response, request, nonce)
   }
 
   // Allow login, setup, auth API, docs, and container health probe without session

@@ -2,15 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
-  verifyN8nWebhookSecret: vi.fn(),
   getDatabase: vi.fn(),
   getN8nTaskRunByTaskId: vi.fn(),
   claimScopedN8nTaskRun: vi.fn(),
   checkN8nCallbackAdmission: vi.fn(),
-}))
-
-vi.mock('@/lib/n8n', () => ({
-  verifyN8nWebhookSecret: mocks.verifyN8nWebhookSecret,
 }))
 
 vi.mock('@/lib/db', () => ({
@@ -41,12 +36,11 @@ const payload = {
   executionOwner: 'n8n-execution:12345',
 }
 
-function request(body: unknown, secret = 'shared-secret') {
+function request(body: unknown) {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/claim', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-AIWorker-Webhook-Secret': secret,
     },
     body: JSON.stringify(body),
   })
@@ -55,7 +49,6 @@ function request(body: unknown, secret = 'shared-secret') {
 describe('n8n video parent claim route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    mocks.verifyN8nWebhookSecret.mockReturnValue(true)
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockReturnValue({ taskId: payload.taskId, routing: {} })
     mocks.checkN8nCallbackAdmission.mockReturnValue({ allowed: true, mode: 'legacy' })
@@ -65,11 +58,10 @@ describe('n8n video parent claim route', () => {
     })
   })
 
-  it('authenticates and claims the exact scoped video parent', async () => {
+  it('claims the exact scoped video parent on the loopback task channel', async () => {
     const response = await POST(request(payload))
 
     expect(response.status).toBe(200)
-    expect(mocks.verifyN8nWebhookSecret).toHaveBeenCalledWith('shared-secret')
     expect(mocks.claimScopedN8nTaskRun).toHaveBeenCalledWith(
       {},
       { taskId: payload.taskId, idempotencyKey: payload.idempotencyKey, bindingId: 7, executionOwner: payload.executionOwner },
@@ -95,17 +87,6 @@ describe('n8n video parent claim route', () => {
 
     expect(response.status).toBe(409)
     expect(await response.json()).toMatchObject({ code: 'runtime_affinity_mismatch' })
-    expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
-  })
-
-  it('rejects an invalid secret before reading the database', async () => {
-    mocks.verifyN8nWebhookSecret.mockReturnValue(false)
-
-    const response = await POST(request(payload, 'wrong-secret'))
-
-    expect(response.status).toBe(401)
-    expect(mocks.getDatabase).not.toHaveBeenCalled()
-    expect(mocks.getN8nTaskRunByTaskId).not.toHaveBeenCalled()
     expect(mocks.claimScopedN8nTaskRun).not.toHaveBeenCalled()
   })
 

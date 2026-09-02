@@ -1,4 +1,5 @@
 import { runOpenClaw } from './command'
+import { withDetectedGatewayProcessEnvironment } from './gateway-runtime'
 
 export function parseGatewayJsonOutput(raw: string): unknown | null {
   const trimmed = String(raw || '').trim()
@@ -53,7 +54,10 @@ export async function callOpenClawGateway<T = unknown>(
       JSON.stringify(params ?? {}),
       '--json',
     ],
-    { timeoutMs: timeoutMs + 2000 },
+    {
+      timeoutMs: timeoutMs + 2000,
+      env: withDetectedGatewayProcessEnvironment(),
+    },
   )
 
   const payload = parseGatewayJsonOutput(result.stdout)

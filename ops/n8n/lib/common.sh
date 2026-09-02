@@ -90,6 +90,10 @@ n8n_load_environment() {
   N8N_HOST="${N8N_HOST:-127.0.0.1}"
   N8N_PORT="${N8N_PORT:-5678}"
   N8N_PROTOCOL="${N8N_PROTOCOL:-http}"
+  if [[ "$N8N_LISTEN_ADDRESS" != "127.0.0.1" || "$N8N_HOST" != "127.0.0.1" || "$N8N_PROTOCOL" != "http" ]]; then
+    printf 'n8n must remain on the local HTTP loopback channel (127.0.0.1).\n' >&2
+    return 1
+  fi
   # n8n 2.31.6 can exceed Node's roughly 4 GiB default heap while loading the
   # production node registry, including for offline workflow CLI commands.
   # Keep this externally overridable while giving both CLI and LaunchAgent

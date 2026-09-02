@@ -27,10 +27,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -210,10 +206,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -242,10 +234,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -274,10 +262,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
@@ -318,10 +302,6 @@
             {
               "name": "Content-Type",
               "value": "application/json"
-            },
-            {
-              "name": "X-AIWorker-Webhook-Secret",
-              "value": "={{ $('AI-worker Video Webhook').item.json.headers['x-aiworker-webhook-secret'] }}"
             }
           ]
         },
