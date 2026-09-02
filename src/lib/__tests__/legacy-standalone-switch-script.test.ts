@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -39,11 +39,19 @@ start_release() {
   if [[ "$1" == "$NEW_RELEASE_ROOT" ]]; then LAST_LAUNCHED_PID=202; else LAST_LAUNCHED_PID=303; fi
 }
 wait_and_verify_runtime() { printf 'verify:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
-write_runtime_markers() { printf 'markers:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
+write_runtime_markers() {
+  printf 'markers:%s:%s\\n' "$1" "$2" >> "$trace_file"
+  printf '%s\\n' "$1" > "$RUNTIME_DIR/RUNNING_COMMIT"
+  printf '%s\\n' "$2" > "$RUNTIME_DIR/video-autoworker-3017.pid"
+  printf '%s\\n' "$2" > "$RUNTIME_DIR/video-autoworker.pid"
+}
 assert_runtime_identity() { printf 'identity:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
 assert_protected_unchanged() { printf 'protected\\n' >> "$trace_file"; return 0; }
+assert_live_database_unchanged() { return 0; }
 assert_live_tokens_unchanged() { return 0; }
 live_tokens_state() { printf 'present:fixture\\n'; }
+live_tokens_identity=present:fixture
+old_runtime_still_live() { return 1; }
 kill() { [[ "$1" == -0 && "\${2:-}" == 202 ]]; }
 ${body}
 `
@@ -281,9 +289,133 @@ write_runtime_markers ${commit} 4242
         expect(readFileSync(pathname, 'utf8').trim()).toBe(value)
         expect(statSync(pathname).mode & 0o777).toBe(0o600)
       }
+      expect(script).toContain('&& fsync_path "$temporary"')
+      expect(script).toContain('&& fsync_path "$RUNTIME_DIR"')
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
+  })
+
+  it('completes the happy path with the candidate runtime and one coherent marker bundle', () => {
+    const { result, trace, markers } = runFailureScenario(`
+trap on_exit EXIT
+trap on_signal INT TERM HUP
+perform_live_switch
+trap - EXIT INT TERM HUP
+`)
+    expect(result.status).toBe(0)
+    expect(trace).toEqual([
+      'stop:legacy runtime:101',
+      'start:/new:3017:/state/live.db:/secrets/live-tokens.json',
+      'verify:candidate runtime:202',
+      'protected',
+      'markers:0000000000000000000000000000000000000002:202',
+      'identity:committed candidate runtime:202',
+      'protected',
+    ])
+    expect(markers).toEqual({
+      commit: '0000000000000000000000000000000000000002',
+      portPid: '202',
+      genericPid: '202',
+    })
+  })
+
+  it('treats a verified legacy listener as already restored when stop was never requested', () => {
+    const { result, trace, markers } = runFailureScenario(`
+old_runtime_still_live() { printf 'old-live\\n' >> "$trace_file"; return 0; }
+transition_started=1
+old_stop_requested=0
+trap on_exit EXIT
+exit 17
+`)
+    expect(result.status).toBe(17)
+    expect(trace).toEqual([
+      'old-live',
+      'markers:0000000000000000000000000000000000000001:101',
+      'protected',
+    ])
+    expect(markers).toEqual({
+      commit: '0000000000000000000000000000000000000001',
+      portPid: '101',
+      genericPid: '101',
+    })
+  })
+
+  it('finishes stopping a legacy listener after HUP arrives in the SIGTERM window', () => {
+    const { result, trace } = runFailureScenario(`
+old_runtime_still_live() { printf 'old-stopping\\n' >> "$trace_file"; return 0; }
+transition_started=1
+old_stop_requested=1
+trap on_exit EXIT
+trap on_signal INT TERM HUP
+/bin/kill -HUP $$
+`)
+    expect(result.status).toBe(130)
+    expect(trace).toEqual([
+      'old-stopping',
+      'stop:partially stopping legacy runtime:101',
+      'start:/old:3017:/state/live.db:/secrets/live-tokens.json',
+      'verify:restored legacy runtime:303',
+      'markers:0000000000000000000000000000000000000001:303',
+      'protected',
+    ])
+  })
+
+  it('rejects an atomic live database pathname replacement', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-database-race-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const oldDatabase = resolve(directory, 'mission-control.old.db')
+    try {
+      writeFileSync(liveDatabase, 'old')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+prepare_live_database_contract
+mv "$LIVE_DB_PATH" ${JSON.stringify(oldDatabase)}
+printf 'new' > "$LIVE_DB_PATH"
+assert_live_database_unchanged
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('live database identity changed during the 3017 switch')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a group-writable or multiply linked live database', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-database-mode-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const linkedDatabase = resolve(directory, 'mission-control-linked.db')
+    try {
+      writeFileSync(liveDatabase, '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+prepare_live_database_contract
+`
+      chmodSync(liveDatabase, 0o666)
+      const writable = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(writable.status).not.toBe(0)
+      expect(writable.stderr).toContain('live database is group/other writable')
+
+      chmodSync(liveDatabase, 0o644)
+      linkSync(liveDatabase, linkedDatabase)
+      const linked = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(linked.status).not.toBe(0)
+      expect(linked.stderr).toContain('live database link count is unsafe')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rechecks the live database around probes and both sides of marker publication', () => {
+    const mainStart = script.indexOf('main() {')
+    const transitionStart = script.indexOf('perform_live_switch() {')
+    const mainBody = script.slice(mainStart)
+    const transitionBody = script.slice(transitionStart, mainStart)
+    expect(mainBody.match(/assert_live_database_unchanged/g)?.length).toBeGreaterThanOrEqual(4)
+    expect(transitionBody.match(/assert_live_database_unchanged/g)?.length).toBeGreaterThanOrEqual(3)
   })
 
   it('atomically restores the old release when candidate verification fails', () => {
@@ -352,7 +484,7 @@ perform_live_switch
     expect(trace).toContain('markers:0000000000000000000000000000000000000001:303')
   })
 
-  it('prioritizes restoring legacy with a changed but independently safe token state', () => {
+  it('warns and restores legacy with a changed but independently safe token state', () => {
     const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-rollback-token-state-test-'))
     const tracePath = resolve(directory, 'trace.log')
     try {
@@ -368,6 +500,7 @@ RUNTIME_DIR=${JSON.stringify(directory)}
 PORT=3017
 live_tokens_identity=missing:original-parent
 listener_pids() { return 0; }
+assert_live_database_unchanged() { return 0; }
 live_tokens_state() {
   printf 'tokens-state:safe-current\\n' >> "$trace_file"
   printf 'present:safe-current\\n'
@@ -388,9 +521,14 @@ rollback_live
         'tokens-state:safe-current',
         'start:/old:3017:/state/live.db:/state/mission-control-tokens.json',
         'verify:restored legacy runtime:303',
+        'tokens-state:safe-current',
         'markers:0000000000000000000000000000000000000001:303',
         'protected',
       ])
+      expect(result.stderr).toContain(
+        'WARNING: live tokens identity changed during the 3017 switch; using the independently validated safe state only for rollback',
+      )
+      expect(result.stderr).not.toContain('safe-current')
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
@@ -410,6 +548,8 @@ LIVE_TOKENS_PATH=/state/mission-control-tokens.json
 RUNTIME_DIR=${JSON.stringify(directory)}
 PORT=3017
 listener_pids() { return 0; }
+assert_live_database_unchanged() { return 0; }
+live_tokens_identity=missing:original-parent
 live_tokens_state() { printf 'tokens-state:unsafe\\n' >> "$trace_file"; return 1; }
 start_release() { printf 'UNSAFE-START\\n' >> "$trace_file"; }
 rollback_live
@@ -459,6 +599,10 @@ assert_private_file() { return 0; }
 assert_release() { return 0; }
 assert_ui_only_diff() { return 0; }
 physical_path() { printf '%s\\n' "$1"; }
+live_tokens_state() {
+  [[ ! -e "$LIVE_TOKENS_PATH" && ! -L "$LIVE_TOKENS_PATH" ]] || return 1
+  printf 'missing:fixture-parent\\n'
+}
 assert_live_legacy_identity() { printf 'live-identity\\n' >> "$trace_file"; }
 capture_protected_listeners() { printf 'protected'; }
 assert_protected_unchanged() { printf 'protected-unchanged\\n' >> "$trace_file"; }
@@ -467,7 +611,7 @@ perform_live_switch() { printf 'LIVE-SWITCH\\n' >> "$trace_file"; }
 main
 `
       const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
-      expect(result.status).toBe(0)
+      expect(result.status, result.stderr).toBe(0)
       expect(readFileSync(tracePath, 'utf8').trim().split('\n')).toEqual([
         'live-identity',
         'probe:legacy-rollback',

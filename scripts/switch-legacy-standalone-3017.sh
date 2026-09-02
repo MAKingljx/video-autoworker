@@ -29,11 +29,13 @@ PROTECTED_PORTS="${AIWORKER_LEGACY_SWITCH_PROTECTED_PORTS:-5678 5679 18789 18889
 
 transition_started=0
 switch_complete=0
+old_stop_requested=0
 old_pid=""
 new_pid=""
 old_process_start=""
 protected_before=""
 live_tokens_identity=""
+live_database_identity=""
 LAST_LAUNCHED_PID=""
 
 usage() {
@@ -88,8 +90,44 @@ assert_safe_directory() {
 }
 
 stat_identity() {
-  stat -f '%d:%i:%Lp:%u' "$1" 2>/dev/null \
-    || stat -c '%d:%i:%a:%u' "$1"
+  stat -f '%d:%i:%u:%Lp:%l' "$1" 2>/dev/null \
+    || stat -c '%d:%i:%u:%a:%h' "$1"
+}
+
+live_database_state() {
+  local first second database_dev database_ino database_uid database_mode database_nlink
+  [[ -f "$LIVE_DB_PATH" && ! -L "$LIVE_DB_PATH" && -O "$LIVE_DB_PATH" ]] \
+    || { fail "live database is missing or unsafe"; return 1; }
+  first="$(stat_identity "$LIVE_DB_PATH")" \
+    || { fail "live database identity is unavailable"; return 1; }
+  IFS=: read -r database_dev database_ino database_uid database_mode database_nlink <<< "$first"
+  [[ -n "$database_dev" && -n "$database_ino" && -n "$database_uid" \
+    && "$database_mode" =~ ^[0-7]{3,4}$ && "$database_nlink" =~ ^[0-9]+$ ]] \
+    || { fail "live database identity is invalid"; return 1; }
+  (( (8#$database_mode & 8#022) == 0 )) \
+    || { fail "live database is group/other writable"; return 1; }
+  [[ "$database_nlink" == 1 ]] \
+    || { fail "live database link count is unsafe"; return 1; }
+  [[ -f "$LIVE_DB_PATH" && ! -L "$LIVE_DB_PATH" && -O "$LIVE_DB_PATH" ]] \
+    || { fail "live database changed during validation"; return 1; }
+  second="$(stat_identity "$LIVE_DB_PATH")" \
+    || { fail "live database identity is unavailable"; return 1; }
+  [[ "$first" == "$second" ]] \
+    || { fail "live database identity changed during validation"; return 1; }
+  printf '%s\n' "$first"
+}
+
+prepare_live_database_contract() {
+  live_database_identity="$(live_database_state)" || return 1
+  [[ -n "$live_database_identity" ]] \
+    || { fail "live database identity is unavailable"; return 1; }
+}
+
+assert_live_database_unchanged() {
+  local current
+  current="$(live_database_state)" || return 1
+  [[ "$current" == "$live_database_identity" ]] \
+    || { fail "live database identity changed during the 3017 switch"; return 1; }
 }
 
 live_tokens_state() {
@@ -144,6 +182,16 @@ assert_live_tokens_unchanged() {
   current="$(live_tokens_state)" || return 1
   [[ "$current" == "$live_tokens_identity" ]] \
     || { fail "live tokens presence or identity changed during the 3017 switch"; return 1; }
+}
+
+assert_live_tokens_safe_for_rollback() {
+  local current
+  current="$(live_tokens_state)" \
+    || { fail "cannot restore legacy runtime with unsafe live tokens state"; return 1; }
+  if [[ "$current" != "$live_tokens_identity" ]]; then
+    printf '%s\n' \
+      'WARNING: live tokens identity changed during the 3017 switch; using the independently validated safe state only for rollback' >&2
+  fi
 }
 
 assert_full_commit() {
@@ -358,13 +406,23 @@ stop_exact_runtime() {
   fail "$label did not stop"
 }
 
+fsync_path() {
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const descriptor = fs.openSync(process.argv[1], fs.constants.O_RDONLY)
+    try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
+  ' "$1"
+}
+
 atomic_write_marker() {
   local pathname="$1" value="$2" temporary
   temporary="$pathname.tmp.$$"
   [[ ! -e "$temporary" && ! -L "$temporary" ]] || fail "marker temporary path already exists"
   if printf '%s\n' "$value" > "$temporary" \
     && chmod 600 "$temporary" \
-    && mv -f "$temporary" "$pathname"; then
+    && fsync_path "$temporary" \
+    && mv -f "$temporary" "$pathname" \
+    && fsync_path "$RUNTIME_DIR"; then
     return
   fi
   /bin/rm -f -- "$temporary"
@@ -404,15 +462,42 @@ probe_release() {
   [[ -z "$(listener_pids "$PROBE_PORT")" ]] || fail "$label probe left a listener behind"
 }
 
+old_runtime_still_live() {
+  local listener actual_cwd expected_cwd current_start
+  [[ "$old_pid" =~ ^[1-9][0-9]*$ && -n "$old_process_start" ]] || return 1
+  kill -0 "$old_pid" 2>/dev/null || return 1
+  listener="$(listener_pids "$PORT")"
+  [[ "$listener" == "$old_pid" ]] || return 1
+  expected_cwd="$(physical_path "$(release_standalone_root "$OLD_RELEASE_ROOT")")" \
+    || return 1
+  actual_cwd="$(process_cwd "$old_pid")"
+  [[ "$actual_cwd" == "$expected_cwd" ]] || return 1
+  current_start="$(process_start_identity "$old_pid")"
+  [[ "$current_start" == "$old_process_start" ]] || return 1
+  process_has_database "$old_pid" "$LIVE_DB_PATH" || return 1
+}
+
 rollback_live() {
   local rollback_pid rollback_start
   if [[ -n "$new_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
     stop_exact_runtime "failed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" || return 1
   fi
+  assert_live_database_unchanged || return 1
+  assert_live_tokens_safe_for_rollback || return 1
+  if (( old_stop_requested == 0 )) && old_runtime_still_live; then
+    write_runtime_markers "$OLD_COMMIT" "$old_pid" || return 1
+    assert_live_database_unchanged || return 1
+    assert_live_tokens_safe_for_rollback || return 1
+    assert_protected_unchanged || return 1
+    printf 'Legacy 3017 release %s remained active with PID %s\n' "$OLD_COMMIT" "$old_pid" >&2
+    return
+  fi
+  if (( old_stop_requested == 1 )) && old_runtime_still_live; then
+    stop_exact_runtime "partially stopping legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" \
+      "$PORT" "$old_process_start" || return 1
+  fi
   [[ -z "$(listener_pids "$PORT")" ]] \
     || { fail "cannot restore legacy runtime while port $PORT is occupied"; return 1; }
-  live_tokens_state >/dev/null \
-    || { fail "cannot restore legacy runtime with unsafe live tokens state"; return 1; }
   start_release "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" "$LIVE_TOKENS_PATH" live \
     "$RUNTIME_DIR/video-autoworker-3017-rollback.log"
   rollback_pid="$LAST_LAUNCHED_PID"
@@ -420,6 +505,8 @@ rollback_live() {
     || return 1
   rollback_start="$(process_start_identity "$rollback_pid")"
   [[ -n "$rollback_start" ]] || return 1
+  assert_live_database_unchanged || return 1
+  assert_live_tokens_safe_for_rollback || return 1
   write_runtime_markers "$OLD_COMMIT" "$rollback_pid" || return 1
   assert_protected_unchanged || return 1
   printf 'Restored legacy 3017 release %s with PID %s\n' "$OLD_COMMIT" "$rollback_pid" >&2
@@ -427,7 +514,8 @@ rollback_live() {
 
 on_exit() {
   local status=$?
-  trap - EXIT INT TERM
+  trap - EXIT
+  trap '' INT TERM HUP
   if (( transition_started == 1 && switch_complete == 0 )); then
     if ! rollback_live; then
       printf 'CRITICAL: automatic legacy 3017 restoration failed\n' >&2
@@ -443,8 +531,10 @@ on_signal() {
 
 perform_live_switch() {
   local candidate_start
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   transition_started=1
+  old_stop_requested=1
   stop_exact_runtime "legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$old_process_start"
   [[ -z "$(listener_pids "$PORT")" ]] || fail "port $PORT did not become free"
   start_release "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" "$LIVE_TOKENS_PATH" live \
@@ -453,10 +543,12 @@ perform_live_switch() {
   wait_and_verify_runtime "candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH"
   candidate_start="$(process_start_identity "$new_pid")"
   [[ -n "$candidate_start" ]] || fail "candidate process start identity is unavailable"
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   assert_protected_unchanged
   write_runtime_markers "$NEW_COMMIT" "$new_pid"
   assert_runtime_identity "committed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH"
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   assert_protected_unchanged
   switch_complete=1
@@ -518,6 +610,7 @@ main() {
   [[ -f "$PROBE_DATA_DIR/mission-control.db" && ! -L "$PROBE_DATA_DIR/mission-control.db" ]] \
     || fail "probe database snapshot is unavailable or unsafe"
   LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+  prepare_live_database_contract
   prepare_live_tokens_contract
   [[ "$(physical_path "$PROBE_DATA_DIR/mission-control.db")" != "$LIVE_DB_PATH" ]] \
     || fail "probe database must not be the live database"
@@ -525,12 +618,16 @@ main() {
   assert_release "candidate release" "$NEW_RELEASE_ROOT" "$NEW_COMMIT"
   assert_ui_only_diff
   assert_live_legacy_identity
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   protected_before="$(capture_protected_listeners)"
+  assert_live_database_unchanged
   probe_release "legacy-rollback" "$OLD_RELEASE_ROOT"
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   probe_release "candidate" "$NEW_RELEASE_ROOT"
   assert_live_legacy_identity
+  assert_live_database_unchanged
   assert_live_tokens_unchanged
   assert_protected_unchanged
   if (( APPLY == 0 )); then
@@ -538,9 +635,9 @@ main() {
     return
   fi
   trap on_exit EXIT
-  trap on_signal INT TERM
+  trap on_signal INT TERM HUP
   perform_live_switch
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM HUP
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
