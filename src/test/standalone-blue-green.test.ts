@@ -664,6 +664,41 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     expect(result.stderr).toContain('environment file must have mode 0600')
   })
 
+  it('defaults slot material access to local Python while preserving explicit overrides', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-slot-material-env-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const launcher = readFileSync(resolve(process.cwd(), 'scripts/start-standalone-slot.sh'), 'utf8')
+    const prefix = launcher.slice(0, launcher.indexOf('\nBINDING_FILE='))
+    const harness = join(root, 'material-env-harness.sh')
+    writeFileSync(harness, `${prefix}
+printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+
+    const run = (overrides: NodeJS.ProcessEnv = {}) => spawnSync('/bin/bash', [harness, 'blue', 'probe'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: root,
+        AIWORKER_PLATFORM_ENV_FILE: join(root, 'missing-platform.env'),
+        MC_OPENCLAW_PROFILE_TARGET: '',
+        MC_MATERIALS_REMOTE_PYTHON: '',
+        ...overrides,
+      },
+    })
+
+    const defaults = run()
+    expect(defaults.status, defaults.stderr).toBe(0)
+    expect(defaults.stdout.trim().split('\n')).toEqual(['local', '/usr/bin/python3'])
+
+    const explicit = run({
+      MC_OPENCLAW_PROFILE_TARGET: 'ssh',
+      MC_MATERIALS_REMOTE_PYTHON: '/opt/custom/python3',
+    })
+    expect(explicit.status, explicit.stderr).toBe(0)
+    expect(explicit.stdout.trim().split('\n')).toEqual(['ssh', '/opt/custom/python3'])
+  })
+
   it('refuses to switch to a probe runtime even when its attestation matches the slot binding', () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-switch-probe-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))

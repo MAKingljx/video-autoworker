@@ -47,6 +47,11 @@ load_env_file "$PROJECT_ROOT/.env"
 load_env_file "$PROJECT_ROOT/.env.local"
 load_env_file "$PLATFORM_ENV_FILE"
 
+# A production slot runs on the same host as the managed OpenClaw workspace.
+# Keep explicit environment settings available for isolated or remote probes.
+export MC_OPENCLAW_PROFILE_TARGET="${MC_OPENCLAW_PROFILE_TARGET:-local}"
+export MC_MATERIALS_REMOTE_PYTHON="${MC_MATERIALS_REMOTE_PYTHON:-/usr/bin/python3}"
+
 if [[ -n "${MC_HOSTNAME:-}" && "$MC_HOSTNAME" != "127.0.0.1" ]]; then
   printf 'MC_HOSTNAME must remain 127.0.0.1 for OpenClaw loopback mode\n' >&2
   exit 1
