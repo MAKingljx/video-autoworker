@@ -71,14 +71,32 @@ def fail_errno(value):
     sys.stderr.write(f'errno={code} strerror={summary}\\n')
     raise SystemExit(82)
 
-root, source, destination = sys.argv[1:]
+root, source, destination, expected_dev, expected_ino, expected_uid, expected_nlink = sys.argv[1:]
 if '/' in source or '/' in destination or source in ('.', '..') or destination in ('.', '..'):
     raise SystemExit(80)
 try:
     descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 except OSError as error:
     fail_errno(error.errno or errno.EIO)
+source_descriptor = None
 try:
+    try:
+        source_descriptor = os.open(
+            source,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=descriptor,
+        )
+        source_identity = os.fstat(source_descriptor)
+    except OSError as error:
+        fail_errno(error.errno or errno.EIO)
+    if (
+        str(source_identity.st_dev) != expected_dev
+        or str(source_identity.st_ino) != expected_ino
+        or str(source_identity.st_uid) != expected_uid
+        or str(source_identity.st_nlink) != expected_nlink
+        or (source_identity.st_mode & 0o7777) != 0o500
+    ):
+        fail_errno(errno.ESTALE)
     try:
         if sys.platform == 'darwin':
             libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
@@ -92,6 +110,14 @@ try:
             raise SystemExit(81)
     except (AttributeError, OSError) as error:
         fail_errno(getattr(error, 'errno', None) or errno.ENOSYS)
+    # macOS 15 requires the source directory itself to be owner-writable for
+    # renameatx_np(RENAME_EXCL). Keep this permission window on the already
+    # verified directory FD, then restore the sealed mode before returning.
+    try:
+        os.fchmod(source_descriptor, 0o700)
+        os.fsync(source_descriptor)
+    except OSError as error:
+        fail_errno(error.errno or errno.EIO)
     operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     operation.restype = ctypes.c_int
     result = operation(
@@ -102,12 +128,31 @@ try:
         flags,
     )
     if result != 0:
-        fail_errno(ctypes.get_errno())
+        operation_errno = ctypes.get_errno()
+        try:
+            os.fchmod(source_descriptor, 0o500)
+            os.fsync(source_descriptor)
+        except OSError as error:
+            fail_errno(error.errno or errno.EIO)
+        fail_errno(operation_errno)
     try:
+        os.fchmod(source_descriptor, 0o500)
+        os.fsync(source_descriptor)
+        published_identity = os.fstat(source_descriptor)
+        if (
+            str(published_identity.st_dev) != expected_dev
+            or str(published_identity.st_ino) != expected_ino
+            or str(published_identity.st_uid) != expected_uid
+            or str(published_identity.st_nlink) != expected_nlink
+            or (published_identity.st_mode & 0o7777) != 0o500
+        ):
+            fail_errno(errno.ESTALE)
         os.fsync(descriptor)
     except OSError as error:
         fail_errno(error.errno or errno.EIO)
 finally:
+    if source_descriptor is not None:
+        os.close(source_descriptor)
     os.close(descriptor)
 `.trim()
 
@@ -1081,7 +1126,7 @@ function fsyncDirectory(pathname) {
   }
 }
 
-function renameDirectoryExclusive(root, source, destination) {
+function renameDirectoryExclusive(root, source, destination, sourceIdentity) {
   const sourceName = basename(source)
   const destinationName = basename(destination)
   if (dirname(source) !== root || dirname(destination) !== root
@@ -1091,6 +1136,8 @@ function renameDirectoryExclusive(root, source, destination) {
   }
   run('/usr/bin/python3', [
     '-I', '-S', '-c', EXCLUSIVE_RENAME_HELPER, root, sourceName, destinationName,
+    sourceIdentity.dev.toString(), sourceIdentity.ino.toString(), sourceIdentity.uid.toString(),
+    sourceIdentity.nlink.toString(),
   ], 'exclusive directory rename', 'errno')
 }
 
@@ -1360,7 +1407,7 @@ async function createPrepare(Database, input, evidence) {
     fail('final backup destination appeared before publish')
   }
   occupyFinalDestinationForTest(backup.finalDir)
-  renameDirectoryExclusive(backup.backupRoot, backup.backupDir, backup.finalDir)
+  renameDirectoryExclusive(backup.backupRoot, backup.backupDir, backup.finalDir, pendingIdentity)
   const finalIdentity = safeEntry(backup.finalDir, 'published prepare directory', 'directory', 0o500)
   if (finalIdentity.dev !== pendingIdentity.dev || finalIdentity.ino !== pendingIdentity.ino
     || finalIdentity.nlink !== pendingIdentity.nlink) {
