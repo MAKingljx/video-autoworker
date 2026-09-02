@@ -550,6 +550,10 @@ describe('managed legacy media orphan reconciliation', () => {
       )
       expect(result.status).not.toBe(0)
       expect(result.stdout).toBe('')
+      expect(result.stderr.trim()).toMatch(
+        /^legacy media orphan reconciliation failed: exclusive directory rename failed: errno=\d{1,5} strerror=[\p{L}\p{N} .,:'()_-]{1,120}$/u,
+      )
+      expect(result.stderr).not.toContain(fixture.root)
       const entries = readdirSync(fixture.backupRoot).sort()
       expect(entries).toHaveLength(2)
       const pending = entries.find(name => name.startsWith('.pending-'))

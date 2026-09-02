@@ -58,23 +58,40 @@ const FINAL_BACKUP_DIRECTORY = /^\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
 const PENDING_BACKUP_DIRECTORY = /^\.pending-\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
 const EXCLUSIVE_RENAME_HELPER = `
 import ctypes
+import errno
 import os
 import sys
+
+def fail_errno(value):
+    code = int(value or 0)
+    try:
+        summary = os.strerror(code)
+    except (OverflowError, ValueError):
+        summary = 'Unknown error'
+    sys.stderr.write(f'errno={code} strerror={summary}\\n')
+    raise SystemExit(82)
 
 root, source, destination = sys.argv[1:]
 if '/' in source or '/' in destination or source in ('.', '..') or destination in ('.', '..'):
     raise SystemExit(80)
-descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 try:
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == 'darwin':
-        operation = libc.renameatx_np
-        flags = 0x00000004  # RENAME_EXCL
-    elif sys.platform.startswith('linux'):
-        operation = libc.renameat2
-        flags = 0x00000001  # RENAME_NOREPLACE
-    else:
-        raise SystemExit(81)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+except OSError as error:
+    fail_errno(error.errno or errno.EIO)
+try:
+    try:
+        if sys.platform == 'darwin':
+            libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            operation = libc.renameatx_np
+            flags = 0x00000004  # RENAME_EXCL
+        elif sys.platform.startswith('linux'):
+            libc = ctypes.CDLL(None, use_errno=True)
+            operation = libc.renameat2
+            flags = 0x00000001  # RENAME_NOREPLACE
+        else:
+            raise SystemExit(81)
+    except (AttributeError, OSError) as error:
+        fail_errno(getattr(error, 'errno', None) or errno.ENOSYS)
     operation.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     operation.restype = ctypes.c_int
     result = operation(
@@ -85,8 +102,11 @@ try:
         flags,
     )
     if result != 0:
-        raise SystemExit(82)
-    os.fsync(descriptor)
+        fail_errno(ctypes.get_errno())
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        fail_errno(error.errno or errno.EIO)
 finally:
     os.close(descriptor)
 `.trim()
@@ -392,11 +412,24 @@ function testPath(name, production) {
   return process.env[name]
 }
 
-function run(command, args, label) {
+function errnoDiagnostic(error) {
+  const stderr = error && typeof error === 'object' && 'stderr' in error
+    ? String(error.stderr || '').trim()
+    : ''
+  const match = stderr.match(/^errno=(\d{1,5}) strerror=([\p{L}\p{N} .,:'()_-]{1,120})$/u)
+  return match ? `errno=${match[1]} strerror=${match[2]}` : 'errno=0 strerror=unavailable'
+}
+
+function run(command, args, label, diagnostic = 'none') {
   try {
-    return execFileSync(command, args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
-  } catch {
-    fail(`${label} failed`)
+    return execFileSync(command, args, {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    const detail = diagnostic === 'errno' ? `: ${errnoDiagnostic(error)}` : ''
+    fail(`${label} failed${detail}`)
   }
 }
 
@@ -1058,7 +1091,7 @@ function renameDirectoryExclusive(root, source, destination) {
   }
   run('/usr/bin/python3', [
     '-I', '-S', '-c', EXCLUSIVE_RENAME_HELPER, root, sourceName, destinationName,
-  ], 'exclusive directory rename')
+  ], 'exclusive directory rename', 'errno')
 }
 
 function writeImmutableJson(pathname, value, mode = 0o400) {
