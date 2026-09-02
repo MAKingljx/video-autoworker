@@ -33,6 +33,7 @@ old_pid=""
 new_pid=""
 old_process_start=""
 protected_before=""
+live_tokens_identity=""
 LAST_LAUNCHED_PID=""
 
 usage() {
@@ -84,6 +85,65 @@ assert_safe_directory() {
   [[ -d "$pathname" && ! -L "$pathname" && -O "$pathname" ]] || fail "$label is missing or unsafe"
   mode="$(stat -f '%Lp' "$pathname" 2>/dev/null || stat -c '%a' "$pathname")"
   (( (8#$mode & 8#022) == 0 )) || fail "$label is group/other writable"
+}
+
+stat_identity() {
+  stat -f '%d:%i:%Lp:%u' "$1" 2>/dev/null \
+    || stat -c '%d:%i:%a:%u' "$1"
+}
+
+live_tokens_state() {
+  local expected_default parent first second
+  if [[ -e "$LIVE_TOKENS_PATH" || -L "$LIVE_TOKENS_PATH" ]]; then
+    assert_private_file "live tokens" "$LIVE_TOKENS_PATH" || return 1
+    first="$(stat_identity "$LIVE_TOKENS_PATH")" \
+      || { fail "live tokens identity is unavailable"; return 1; }
+    assert_private_file "live tokens" "$LIVE_TOKENS_PATH" || return 1
+    second="$(stat_identity "$LIVE_TOKENS_PATH")" \
+      || { fail "live tokens identity is unavailable"; return 1; }
+    [[ "$first" == "$second" ]] \
+      || { fail "live tokens identity changed during validation"; return 1; }
+    printf 'present:%s\n' "$first"
+    return
+  fi
+
+  expected_default="$(dirname "$LIVE_DB_PATH")/mission-control-tokens.json"
+  [[ "$LIVE_TOKENS_PATH" == "$expected_default" ]] \
+    || { fail "missing live tokens is allowed only at the data directory default path"; return 1; }
+  [[ ! -L "$LIVE_TOKENS_PATH" ]] \
+    || { fail "missing live tokens path must not be a symlink"; return 1; }
+  parent="$(dirname "$LIVE_TOKENS_PATH")"
+  assert_safe_directory "live tokens parent directory" "$parent" || return 1
+  [[ "$(physical_path "$parent")" == "$parent" ]] \
+    || { fail "live tokens parent directory must use its physical path"; return 1; }
+  first="$(stat_identity "$parent")" \
+    || { fail "live tokens parent identity is unavailable"; return 1; }
+  [[ ! -e "$LIVE_TOKENS_PATH" && ! -L "$LIVE_TOKENS_PATH" ]] \
+    || { fail "live tokens appeared during validation"; return 1; }
+  assert_safe_directory "live tokens parent directory" "$parent" || return 1
+  second="$(stat_identity "$parent")" \
+    || { fail "live tokens parent identity is unavailable"; return 1; }
+  [[ "$first" == "$second" ]] \
+    || { fail "live tokens parent identity changed during validation"; return 1; }
+  printf 'missing:%s\n' "$first"
+}
+
+prepare_live_tokens_contract() {
+  if [[ -e "$LIVE_TOKENS_PATH" || -L "$LIVE_TOKENS_PATH" ]]; then
+    assert_private_file "live tokens" "$LIVE_TOKENS_PATH" || return 1
+    LIVE_TOKENS_PATH="$(physical_path "$LIVE_TOKENS_PATH")" \
+      || { fail "live tokens path cannot be resolved"; return 1; }
+  fi
+  live_tokens_identity="$(live_tokens_state)" || return 1
+  [[ -n "$live_tokens_identity" ]] \
+    || { fail "live tokens identity is unavailable"; return 1; }
+}
+
+assert_live_tokens_unchanged() {
+  local current
+  current="$(live_tokens_state)" || return 1
+  [[ "$current" == "$live_tokens_identity" ]] \
+    || { fail "live tokens presence or identity changed during the 3017 switch"; return 1; }
 }
 
 assert_full_commit() {
@@ -349,7 +409,10 @@ rollback_live() {
   if [[ -n "$new_pid" ]] && kill -0 "$new_pid" 2>/dev/null; then
     stop_exact_runtime "failed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" || return 1
   fi
-  [[ -z "$(listener_pids "$PORT")" ]] || fail "cannot restore legacy runtime while port $PORT is occupied"
+  [[ -z "$(listener_pids "$PORT")" ]] \
+    || { fail "cannot restore legacy runtime while port $PORT is occupied"; return 1; }
+  live_tokens_state >/dev/null \
+    || { fail "cannot restore legacy runtime with unsafe live tokens state"; return 1; }
   start_release "$OLD_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH" "$LIVE_TOKENS_PATH" live \
     "$RUNTIME_DIR/video-autoworker-3017-rollback.log"
   rollback_pid="$LAST_LAUNCHED_PID"
@@ -380,6 +443,7 @@ on_signal() {
 
 perform_live_switch() {
   local candidate_start
+  assert_live_tokens_unchanged
   transition_started=1
   stop_exact_runtime "legacy runtime" "$old_pid" "$OLD_RELEASE_ROOT" "$PORT" "$old_process_start"
   [[ -z "$(listener_pids "$PORT")" ]] || fail "port $PORT did not become free"
@@ -389,9 +453,11 @@ perform_live_switch() {
   wait_and_verify_runtime "candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH"
   candidate_start="$(process_start_identity "$new_pid")"
   [[ -n "$candidate_start" ]] || fail "candidate process start identity is unavailable"
+  assert_live_tokens_unchanged
   assert_protected_unchanged
   write_runtime_markers "$NEW_COMMIT" "$new_pid"
   assert_runtime_identity "committed candidate runtime" "$new_pid" "$NEW_RELEASE_ROOT" "$PORT" "$LIVE_DB_PATH"
+  assert_live_tokens_unchanged
   assert_protected_unchanged
   switch_complete=1
   printf 'Switched only 3017 to %s with PID %s\n' "$NEW_COMMIT" "$new_pid"
@@ -448,22 +514,24 @@ main() {
   assert_safe_directory "source app directory" "$SOURCE_APP_DIR"
   assert_safe_directory "runtime directory" "$RUNTIME_DIR"
   assert_safe_directory "probe data directory" "$PROBE_DATA_DIR"
-  assert_private_file "live tokens" "$LIVE_TOKENS_PATH"
   [[ -f "$LIVE_DB_PATH" && ! -L "$LIVE_DB_PATH" ]] || fail "live database is unavailable or unsafe"
   [[ -f "$PROBE_DATA_DIR/mission-control.db" && ! -L "$PROBE_DATA_DIR/mission-control.db" ]] \
     || fail "probe database snapshot is unavailable or unsafe"
   LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
-  LIVE_TOKENS_PATH="$(physical_path "$LIVE_TOKENS_PATH")"
+  prepare_live_tokens_contract
   [[ "$(physical_path "$PROBE_DATA_DIR/mission-control.db")" != "$LIVE_DB_PATH" ]] \
     || fail "probe database must not be the live database"
   assert_release "legacy release" "$OLD_RELEASE_ROOT" "$OLD_COMMIT"
   assert_release "candidate release" "$NEW_RELEASE_ROOT" "$NEW_COMMIT"
   assert_ui_only_diff
   assert_live_legacy_identity
+  assert_live_tokens_unchanged
   protected_before="$(capture_protected_listeners)"
   probe_release "legacy-rollback" "$OLD_RELEASE_ROOT"
+  assert_live_tokens_unchanged
   probe_release "candidate" "$NEW_RELEASE_ROOT"
   assert_live_legacy_identity
+  assert_live_tokens_unchanged
   assert_protected_unchanged
   if (( APPLY == 0 )); then
     printf 'Legacy 3017 switch preflight passed; live runtime was not changed\n'

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -42,6 +42,8 @@ wait_and_verify_runtime() { printf 'verify:%s:%s\\n' "$1" "$2" >> "$trace_file";
 write_runtime_markers() { printf 'markers:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
 assert_runtime_identity() { printf 'identity:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
 assert_protected_unchanged() { printf 'protected\\n' >> "$trace_file"; return 0; }
+assert_live_tokens_unchanged() { return 0; }
+live_tokens_state() { printf 'present:fixture\\n'; }
 kill() { [[ "$1" == -0 && "\${2:-}" == 202 ]]; }
 ${body}
 `
@@ -111,6 +113,152 @@ printf '%s' "$NODE_BIN"
     const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
     expect(result.status).toBe(0)
     expect(result.stdout.startsWith('/')).toBe(true)
+  })
+
+  it('accepts a safely missing token file only at the data directory default path', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-missing-tokens-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(realpathSync(directory), 'mission-control-tokens.json')
+    try {
+      chmodSync(directory, 0o700)
+      writeFileSync(liveDatabase, '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+NODE_BIN=${JSON.stringify(process.execPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
+LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+prepare_live_tokens_contract
+assert_live_tokens_unchanged
+printf '%s\\n' "$live_tokens_identity"
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toMatch(/^missing:/)
+      expect(() => statSync(liveTokens)).toThrow()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a missing token file outside the data directory default path', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-wrong-tokens-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(directory, 'other-tokens.json')
+    try {
+      chmodSync(directory, 0o700)
+      writeFileSync(liveDatabase, '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+NODE_BIN=${JSON.stringify(process.execPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
+LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+prepare_live_tokens_contract
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('missing live tokens is allowed only at the data directory default path')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a missing default token path with an unsafe parent or a dangling symlink', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-unsafe-tokens-test-'))
+    const unsafeDirectory = resolve(directory, 'unsafe')
+    const liveDatabase = resolve(unsafeDirectory, 'mission-control.db')
+    try {
+      mkdirSync(unsafeDirectory, { mode: 0o700 })
+      const liveTokens = resolve(realpathSync(unsafeDirectory), 'mission-control-tokens.json')
+      writeFileSync(liveDatabase, '')
+      chmodSync(unsafeDirectory, 0o777)
+      const unsafeParentSource = `
+source ${JSON.stringify(scriptPath)}
+NODE_BIN=${JSON.stringify(process.execPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
+LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+prepare_live_tokens_contract
+`
+      const unsafeParent = spawnSync('/bin/bash', ['-c', unsafeParentSource], { encoding: 'utf8' })
+      expect(unsafeParent.status).not.toBe(0)
+      expect(unsafeParent.stderr).toContain('live tokens parent directory is group/other writable')
+
+      chmodSync(unsafeDirectory, 0o700)
+      symlinkSync(resolve(unsafeDirectory, 'absent-target'), liveTokens)
+      const danglingSymlink = spawnSync('/bin/bash', ['-c', unsafeParentSource], { encoding: 'utf8' })
+      expect(danglingSymlink.status).not.toBe(0)
+      expect(danglingSymlink.stderr).toContain('live tokens is missing or unsafe')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the existing token file owner, type and mode contract', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-existing-tokens-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(directory, 'custom-tokens.json')
+    try {
+      chmodSync(directory, 0o700)
+      writeFileSync(liveDatabase, '')
+      writeFileSync(liveTokens, '[]\n', { mode: 0o600 })
+      const source = `
+source ${JSON.stringify(scriptPath)}
+NODE_BIN=${JSON.stringify(process.execPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
+LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+prepare_live_tokens_contract
+assert_live_tokens_unchanged
+printf '%s\\n' "$live_tokens_identity"
+`
+      const accepted = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(accepted.status).toBe(0)
+      expect(accepted.stdout).toMatch(/^present:/)
+
+      chmodSync(liveTokens, 0o644)
+      const rejected = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(rejected.status).not.toBe(0)
+      expect(rejected.stderr).toContain('live tokens must have mode 0600')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('detects a token file appearing after a safely missing snapshot', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-token-race-test-'))
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(realpathSync(directory), 'mission-control-tokens.json')
+    try {
+      chmodSync(directory, 0o700)
+      writeFileSync(liveDatabase, '')
+      const source = `
+source ${JSON.stringify(scriptPath)}
+NODE_BIN=${JSON.stringify(process.execPath)}
+LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
+LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
+LIVE_DB_PATH="$(physical_path "$LIVE_DB_PATH")"
+prepare_live_tokens_contract
+printf '[]\\n' > "$LIVE_TOKENS_PATH"
+chmod 600 "$LIVE_TOKENS_PATH"
+assert_live_tokens_unchanged
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('live tokens presence or identity changed during the 3017 switch')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('rechecks token identity around probe and live transition boundaries', () => {
+    const mainStart = script.indexOf('main() {')
+    const transitionStart = script.indexOf('perform_live_switch() {')
+    const mainBody = script.slice(mainStart)
+    const transitionBody = script.slice(transitionStart, mainStart)
+    expect(mainBody.match(/assert_live_tokens_unchanged/g)?.length).toBeGreaterThanOrEqual(3)
+    expect(transitionBody.match(/assert_live_tokens_unchanged/g)?.length).toBeGreaterThanOrEqual(3)
   })
 
   it('writes and verifies the complete marker bundle with private modes', () => {
@@ -204,17 +352,87 @@ perform_live_switch
     expect(trace).toContain('markers:0000000000000000000000000000000000000001:303')
   })
 
+  it('prioritizes restoring legacy with a changed but independently safe token state', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-rollback-token-state-test-'))
+    const tracePath = resolve(directory, 'trace.log')
+    try {
+      const source = `
+source ${JSON.stringify(scriptPath)}
+trace_file=${JSON.stringify(tracePath)}
+new_pid=''
+OLD_RELEASE_ROOT=/old
+OLD_COMMIT=0000000000000000000000000000000000000001
+LIVE_DB_PATH=/state/live.db
+LIVE_TOKENS_PATH=/state/mission-control-tokens.json
+RUNTIME_DIR=${JSON.stringify(directory)}
+PORT=3017
+live_tokens_identity=missing:original-parent
+listener_pids() { return 0; }
+live_tokens_state() {
+  printf 'tokens-state:safe-current\\n' >> "$trace_file"
+  printf 'present:safe-current\\n'
+}
+start_release() {
+  printf 'start:%s:%s:%s:%s\\n' "$1" "$2" "$3" "$4" >> "$trace_file"
+  LAST_LAUNCHED_PID=303
+}
+wait_and_verify_runtime() { printf 'verify:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
+process_start_identity() { printf 'restored-start\\n'; }
+write_runtime_markers() { printf 'markers:%s:%s\\n' "$1" "$2" >> "$trace_file"; return 0; }
+assert_protected_unchanged() { printf 'protected\\n' >> "$trace_file"; return 0; }
+rollback_live
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).toBe(0)
+      expect(readFileSync(tracePath, 'utf8').trim().split('\n')).toEqual([
+        'tokens-state:safe-current',
+        'start:/old:3017:/state/live.db:/state/mission-control-tokens.json',
+        'verify:restored legacy runtime:303',
+        'markers:0000000000000000000000000000000000000001:303',
+        'protected',
+      ])
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('does not restart legacy when the current token state is unsafe', () => {
+    const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-unsafe-rollback-token-test-'))
+    const tracePath = resolve(directory, 'trace.log')
+    try {
+      const source = `
+source ${JSON.stringify(scriptPath)}
+trace_file=${JSON.stringify(tracePath)}
+new_pid=''
+OLD_RELEASE_ROOT=/old
+LIVE_DB_PATH=/state/live.db
+LIVE_TOKENS_PATH=/state/mission-control-tokens.json
+RUNTIME_DIR=${JSON.stringify(directory)}
+PORT=3017
+listener_pids() { return 0; }
+live_tokens_state() { printf 'tokens-state:unsafe\\n' >> "$trace_file"; return 1; }
+start_release() { printf 'UNSAFE-START\\n' >> "$trace_file"; }
+rollback_live
+`
+      const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
+      expect(result.status).not.toBe(0)
+      expect(readFileSync(tracePath, 'utf8').trim()).toBe('tokens-state:unsafe')
+      expect(result.stderr).toContain('cannot restore legacy runtime with unsafe live tokens state')
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('does not enter the live stop path in preflight-only mode', () => {
     const directory = mkdtempSync(resolve(tmpdir(), 'legacy-3017-preflight-test-'))
     const tracePath = resolve(directory, 'trace.log')
-    const liveDatabase = resolve(directory, 'live.db')
-    const liveTokens = resolve(directory, 'live-tokens.json')
+    const liveDatabase = resolve(directory, 'mission-control.db')
+    const liveTokens = resolve(directory, 'mission-control-tokens.json')
     const probeDirectory = resolve(directory, 'probe')
     const probeDatabase = resolve(probeDirectory, 'mission-control.db')
     try {
       mkdirSync(probeDirectory)
       writeFileSync(liveDatabase, '')
-      writeFileSync(liveTokens, '{}\n')
       writeFileSync(probeDatabase, '')
       const source = `
 source ${JSON.stringify(scriptPath)}
@@ -257,6 +475,7 @@ main
         'live-identity',
         'protected-unchanged',
       ])
+      expect(() => statSync(liveTokens)).toThrow()
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
