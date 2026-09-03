@@ -3,10 +3,13 @@ import { expect, test, type Page } from '@playwright/test'
 const TEST_USER = process.env.AUTH_USER || 'testadmin'
 const TEST_PASS = process.env.AUTH_PASS || 'testpass1234!'
 
-function sessionFixture(index: number) {
+function sessionFixture(index: number, longKey = false) {
+  const key = longKey
+    ? `gateway-overflow-probe-${'x'.repeat(240)}`
+    : `overview-session-${index}`
   return {
     id: `overview-session-${index}`,
-    key: `overview-session-${index}`,
+    key,
     agent: `agent-${index}`,
     kind: 'openclaw',
     age: `${index + 1}m`,
@@ -19,9 +22,12 @@ function sessionFixture(index: number) {
 }
 
 async function login(page: Page) {
+  const testId = test.info().testId
+  let ipHash = 0
+  for (const character of testId) ipHash = ((ipHash * 31) + character.charCodeAt(0)) >>> 0
   const response = await page.request.post('/api/auth/login', {
     data: { username: TEST_USER, password: TEST_PASS },
-    headers: { 'x-real-ip': '10.88.93.1' },
+    headers: { 'x-real-ip': `10.88.${((ipHash >>> 8) % 254) + 1}.${(ipHash % 254) + 1}` },
   })
   expect(response.status()).toBe(200)
 }
@@ -72,7 +78,10 @@ async function installDashboardRoutes(
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
-        sessions: Array.from({ length: sessionCount() }, (_, index) => sessionFixture(index)),
+        sessions: Array.from(
+          { length: sessionCount() },
+          (_, index) => sessionFixture(index, mode === 'gateway' && index === 0),
+        ),
       }),
     })
   })
@@ -175,6 +184,58 @@ test.describe('dashboard overview card frames', () => {
     }
   })
 
+  test('lets the page reflow while each card fills its row at intermediate widths', async ({ page }) => {
+    await installDashboardRoutes(page, () => 4)
+    await login(page)
+    await page.setViewportSize({ width: 900, height: 1000 })
+    await page.goto('/')
+
+    const rows = page.locator('[data-dashboard-widget-row]')
+    await expect(rows.first()).toBeVisible()
+
+    for (let rowIndex = 0; rowIndex < await rows.count(); rowIndex += 1) {
+      const row = rows.nth(rowIndex)
+      const rowBox = await row.boundingBox()
+      expect(rowBox).not.toBeNull()
+
+      const cards = row.locator(':scope > [data-dashboard-widget]')
+      for (let cardIndex = 0; cardIndex < await cards.count(); cardIndex += 1) {
+        const cardBox = await cards.nth(cardIndex).boundingBox()
+        expect(cardBox).not.toBeNull()
+        expect(Math.abs(cardBox!.x - rowBox!.x)).toBeLessThanOrEqual(1)
+        expect(Math.abs(cardBox!.width - rowBox!.width)).toBeLessThanOrEqual(1)
+        expect(cardBox!.height).toBeCloseTo(320, 0)
+      }
+    }
+  })
+
+  test('keeps gateway cards inside the overview at narrow widths', async ({ page }) => {
+    await installDashboardRoutes(page, () => 10, 'gateway')
+    await login(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+
+    const main = page.locator('#main-content')
+    await expect(main).toBeVisible()
+    const overflow = await main.evaluate((element) => element.scrollWidth - element.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(1)
+
+    const mainBox = await main.boundingBox()
+    expect(mainBox).not.toBeNull()
+
+    const panels = page.locator('[data-dashboard-widget-frame="fixed"] > .panel')
+    await expect(panels.first()).toBeVisible()
+    await expect(page.locator('[data-dashboard-widget="session-workbench"]')).toContainText('gateway-overflow-probe')
+    expect(await panels.count()).toBe(GATEWAY_FIXED_WIDGETS.length)
+    for (let index = 0; index < await panels.count(); index += 1) {
+      const box = await panels.nth(index).boundingBox()
+      expect(box).not.toBeNull()
+      expect(box!.x).toBeGreaterThanOrEqual(mainBox!.x - 1)
+      expect(box!.x + box!.width).toBeLessThanOrEqual(mainBox!.x + mainBox!.width + 1)
+      expect(box!.height).toBeCloseTo(320, 0)
+    }
+  })
+
   test('keeps gateway-only cards on the same fixed frame contract', async ({ page }) => {
     await installDashboardRoutes(page, () => 4, 'gateway')
     await login(page)
@@ -190,5 +251,18 @@ test.describe('dashboard overview card frames', () => {
     for (const box of boxes.slice(0, 3)) {
       expect(Math.abs(box.y - boxes[0].y)).toBeLessThanOrEqual(1)
     }
+
+    const maintenanceFill = await page
+      .locator('[data-dashboard-widget="maintenance"]')
+      .evaluate((element) => {
+        const card = element.getBoundingClientRect()
+        const row = element.parentElement!.getBoundingClientRect()
+        return {
+          leftGap: card.left - row.left,
+          rightGap: row.right - card.right,
+        }
+      })
+    expect(Math.abs(maintenanceFill.leftGap)).toBeLessThanOrEqual(1)
+    expect(Math.abs(maintenanceFill.rightGap)).toBeLessThanOrEqual(1)
   })
 })

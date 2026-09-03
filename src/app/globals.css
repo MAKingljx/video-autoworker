@@ -256,7 +256,7 @@
 
   /* Dashboard cards keep a stable frame while their live content scrolls inside. */
   .dashboard-widget-frame {
-    @apply h-80 min-h-0;
+    @apply h-80 min-h-0 min-w-0;
   }
 
   .dashboard-widget-frame > .panel {
