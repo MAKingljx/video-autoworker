@@ -12,21 +12,23 @@ export function SessionWorkbenchWidget({ data }: { data: DashboardData }) {
         <h3 className="text-sm font-semibold">{isLocal ? '会话工作台' : '会话路由'}</h3>
         <span className="text-2xs text-muted-foreground font-mono-tight">{visibleSessions.length}</span>
       </div>
-      <div className="divide-y divide-border/50 max-h-80 overflow-y-auto">
+      <div className="dashboard-widget-scroll divide-y divide-border/50">
         {visibleSessions.length === 0 ? (
-          <div className="px-4 py-8 text-center">
-            <p className="text-xs text-muted-foreground">
-              {isSessionsLoading
-                ? '正在加载会话...'
-                : isLocal
-                  ? '暂无活跃会话'
-                  : '暂无网关会话'}
-            </p>
-            <p className="text-2xs text-muted-foreground/60 mt-1">
-              {isLocal
-                ? 'OpenClaw 或本地千问会话会显示在这里。'
-                : '网关智能体连接后，会话会显示在这里。'}
-            </p>
+          <div className="flex min-h-full items-center justify-center px-4 py-8 text-center">
+            <div>
+              <p className="text-xs text-muted-foreground">
+                {isSessionsLoading
+                  ? '正在加载会话...'
+                  : isLocal
+                    ? '暂无活跃会话'
+                    : '暂无网关会话'}
+              </p>
+              <p className="text-2xs text-muted-foreground/60 mt-1">
+                {isLocal
+                  ? 'OpenClaw 或本地千问会话会显示在这里。'
+                  : '网关智能体连接后，会话会显示在这里。'}
+              </p>
+            </div>
           </div>
         ) : (
           visibleSessions.slice(0, 10).map((session) => {
