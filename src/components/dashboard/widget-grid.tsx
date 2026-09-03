@@ -153,7 +153,11 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
     const flushRow = () => {
       if (rowWidgets.length === 0) return
       elements.push(
-        <section key={`row-${elements.length}`} className="grid xl:grid-cols-12 gap-4">
+        <section
+          key={`row-${elements.length}`}
+          className="grid gap-4 xl:grid-cols-12"
+          data-dashboard-widget-row
+        >
           {rowWidgets.map(({ id, size }) => renderWidget(id, SIZE_CLASSES[size] || 'xl:col-span-4'))}
         </section>
       )
@@ -190,11 +194,14 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
 
     const isDragging = dragId === widgetId
     const isDragOver = dragOverId === widgetId
+    const hasFixedFrame = widget.defaultSize !== 'full'
 
     return (
       <div
         key={widgetId}
-        className={`${colClass} relative ${customizing ? 'cursor-grab' : ''} ${
+        data-dashboard-widget={widgetId}
+        data-dashboard-widget-frame={hasFixedFrame ? 'fixed' : 'fluid'}
+        className={`${colClass} relative ${hasFixedFrame ? 'dashboard-widget-frame' : ''} ${customizing ? 'cursor-grab' : ''} ${
           isDragging ? 'opacity-40' : ''
         } ${isDragOver ? 'ring-2 ring-primary/50 rounded-lg' : ''}`}
         draggable={customizing}
