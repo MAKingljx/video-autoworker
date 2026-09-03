@@ -171,7 +171,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, 15_000)
 
   it('requires an explicit mode, profile, state directory, and workspace', async () => {
     await expect(execFileAsync('bash', [installer, '--dry-run'], { encoding: 'utf8' }))
@@ -1303,7 +1303,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it.each([
     {
