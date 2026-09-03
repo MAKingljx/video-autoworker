@@ -30,12 +30,36 @@ const WIDGET_COMPONENTS: Record<string, React.ComponentType<{ data: DashboardDat
   'quick-actions': QuickActionsWidget,
 }
 
-// Map widget defaultSize to CSS grid column spans
-const SIZE_CLASSES: Record<string, string> = {
-  sm: 'xl:col-span-6',
-  md: 'xl:col-span-4',
-  lg: 'xl:col-span-8',
-  full: 'xl:col-span-12',
+const SIZE_SPANS: Record<string, number> = {
+  sm: 6,
+  md: 4,
+  lg: 8,
+}
+
+const SPAN_CLASSES: Record<number, string> = {
+  1: 'xl:col-span-1',
+  2: 'xl:col-span-2',
+  3: 'xl:col-span-3',
+  4: 'xl:col-span-4',
+  5: 'xl:col-span-5',
+  6: 'xl:col-span-6',
+  7: 'xl:col-span-7',
+  8: 'xl:col-span-8',
+  9: 'xl:col-span-9',
+  10: 'xl:col-span-10',
+  11: 'xl:col-span-11',
+  12: 'xl:col-span-12',
+}
+
+function fillAvailableColumns(spans: number[]): number[] {
+  if (spans.length === 0) return spans
+
+  const remaining = 12 - spans.reduce((total, span) => total + span, 0)
+  if (remaining <= 0) return spans
+
+  const shared = Math.floor(remaining / spans.length)
+  const remainder = remaining % spans.length
+  return spans.map((span, index) => span + shared + (index < remainder ? 1 : 0))
 }
 
 export function WidgetGrid({ data }: { data: DashboardData }) {
@@ -152,13 +176,18 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
 
     const flushRow = () => {
       if (rowWidgets.length === 0) return
+      const filledSpans = fillAvailableColumns(
+        rowWidgets.map(({ size }) => SIZE_SPANS[size] || 4),
+      )
       elements.push(
         <section
           key={`row-${elements.length}`}
           className="grid gap-4 xl:grid-cols-12"
           data-dashboard-widget-row
         >
-          {rowWidgets.map(({ id, size }) => renderWidget(id, SIZE_CLASSES[size] || 'xl:col-span-4'))}
+          {rowWidgets.map(({ id }, index) => (
+            renderWidget(id, SPAN_CLASSES[filledSpans[index]] || 'xl:col-span-4')
+          ))}
         </section>
       )
       rowWidgets = []
@@ -176,7 +205,7 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
         flushRow()
         elements.push(renderWidget(widgetId, ''))
       } else {
-        const span = widget.defaultSize === 'sm' ? 6 : widget.defaultSize === 'md' ? 4 : 8
+        const span = SIZE_SPANS[widget.defaultSize] || 4
         if (rowSpan + span > 12) flushRow()
         rowWidgets.push({ id: widgetId, size: widget.defaultSize })
         rowSpan += span
