@@ -11,8 +11,8 @@ PORT=3017
 PROBE_PORT=3018
 APPLY=0
 ROLLBACK=0
-EXPECTED_OLD_COMMIT=542eebdd871f0d960d972e879310bec7a3d15cca
-EXPECTED_NEW_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138
+EXPECTED_OLD_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138
+EXPECTED_NEW_COMMIT=57f6e6cd671245c45d15439de7e39630869cc0ff
 OLD_RELEASE_ROOT=""
 OLD_COMMIT=""
 NEW_RELEASE_ROOT=""
@@ -26,7 +26,7 @@ PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/
 NODE_BIN="${NODE_BIN:-node}"
 LSOF_BIN="${LSOF_BIN:-/usr/sbin/lsof}"
 CURL_BIN="${CURL_BIN:-/usr/bin/curl}"
-PROTECTED_PORTS="${AIWORKER_LEGACY_SWITCH_PROTECTED_PORTS:-5678 5679 18789 18889 18989 18091 18094 11434}"
+PROTECTED_PORTS="${AIWORKER_LEGACY_SWITCH_PROTECTED_PORTS:-5678 5679 18789 18889 18989 18091 18092 18094 11434}"
 
 transition_started=0
 switch_complete=0
@@ -58,8 +58,8 @@ Usage: switch-legacy-standalone-3017.sh [--rollback] [--apply] \
 Without --apply the script performs the full identity, rollback-start and
 candidate-start preflight, then exits without stopping the live 3017 process.
 The probe directory must already contain a non-production mission-control.db.
-Use --rollback without --apply to preflight d3ca02e -> 542eebd, then repeat
-the exact command with --apply to perform that rollback. The old/new arguments
+Use --rollback without --apply to preflight the responsive UI release ->
+d3ca02e, then repeat the exact command with --apply to perform that rollback. The old/new arguments
 always retain their fixed release meanings and must not be exchanged.
 EOF
 }
@@ -252,20 +252,21 @@ assert_release() {
 }
 
 assert_ui_only_diff() {
-  local path changed_paths
+  local changed_paths expected_paths
   /usr/bin/git -C "$SOURCE_APP_DIR" merge-base --is-ancestor "$OLD_COMMIT" "$NEW_COMMIT" \
     || { fail "new release is not a descendant of the old release"; return 1; }
   changed_paths="$(/usr/bin/git -C "$SOURCE_APP_DIR" diff --name-only "$OLD_COMMIT..$NEW_COMMIT")" \
     || { fail "release diff cannot be read"; return 1; }
-  while IFS= read -r path; do
-    [[ -n "$path" ]] || continue
-    case "$path" in
-      docs/*|tests/*|src/lib/__tests__/*|src/components/panels/*|src/components/ui/*|\
-      package.json|pnpm-lock.yaml|tailwind.config.js|\
-      scripts/install-aiworker-video-lane-supervisor.sh) ;;
-      *) fail "release diff is not 3017 UI-only: $path"; return 1 ;;
-    esac
-  done <<< "$changed_paths"
+  expected_paths="$(printf '%s\n' \
+    docs/operations/2026/2026-09-03.md \
+    src/app/globals.css \
+    src/components/dashboard/widget-grid.tsx \
+    src/components/dashboard/widgets/event-stream-widget.tsx \
+    src/components/dashboard/widgets/session-workbench-widget.tsx \
+    tests/dashboard-overview-layout.spec.ts)" \
+    || { fail "expected release path set cannot be built"; return 1; }
+  [[ "$changed_paths" == "$expected_paths" ]] \
+    || { fail "release diff is not the exact verified 3017 overview UI patch"; return 1; }
 
   for path in \
     src/lib/db.ts \

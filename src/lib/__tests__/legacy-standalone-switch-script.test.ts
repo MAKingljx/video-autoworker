@@ -75,9 +75,10 @@ ${body}
 describe('legacy 3017 standalone switch bridge', () => {
   it('is restricted to UI-only compatible releases and exact runtime identity', () => {
     expect(script).toContain('[[ "$PORT" == 3017 ]]')
-    expect(script).toContain('EXPECTED_OLD_COMMIT=542eebdd871f0d960d972e879310bec7a3d15cca')
-    expect(script).toContain('EXPECTED_NEW_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138')
-    expect(script).toContain('release diff is not 3017 UI-only')
+    expect(script).toContain('EXPECTED_OLD_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138')
+    expect(script).toContain('EXPECTED_NEW_COMMIT=57f6e6cd671245c45d15439de7e39630869cc0ff')
+    expect(script).toContain('release diff is not the exact verified 3017 overview UI patch')
+    expect(script).toContain('18091 18092 18094')
     expect(script).toContain('runtime contract changed: $path')
     expect(script).toContain('$label cwd does not match its release')
     expect(script).toContain('$label does not hold the expected database FD')
@@ -920,9 +921,9 @@ probe_release() { printf 'probe:%s:%s\\n' "$1" "$2" >> "$trace_file"; }
 perform_live_switch() { printf 'LIVE-SWITCH\\n' >> "$trace_file"; }
 main --rollback \\
   --old-release-root ${JSON.stringify(oldRelease)} \\
-  --old-commit 542eebdd871f0d960d972e879310bec7a3d15cca \\
+  --old-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
   --new-release-root ${JSON.stringify(newRelease)} \\
-  --new-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
+  --new-commit 57f6e6cd671245c45d15439de7e39630869cc0ff \\
   --live-db ${JSON.stringify(liveDatabase)} \\
   --live-tokens ${JSON.stringify(liveTokens)} \\
   --probe-data-dir ${JSON.stringify(probeDirectory)} \\
@@ -933,13 +934,13 @@ main --rollback \\
       const result = spawnSync('/bin/bash', ['-c', source], { encoding: 'utf8' })
       expect(result.status, result.stderr).toBe(0)
       expect(readFileSync(tracePath, 'utf8').trim().split('\n')).toEqual([
-        `release:legacy release:${oldRelease}:542eebdd871f0d960d972e879310bec7a3d15cca`,
-        `release:candidate release:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        `release:legacy release:${oldRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        `release:candidate release:${newRelease}:57f6e6cd671245c45d15439de7e39630869cc0ff`,
         'ui-diff',
-        `identity:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        `identity:${newRelease}:57f6e6cd671245c45d15439de7e39630869cc0ff`,
         `probe:current-ui:${newRelease}`,
         `probe:legacy-rollback:${oldRelease}`,
-        `identity:${newRelease}:d3ca02ecdcbffb778c9c65d540e1095bffea7138`,
+        `identity:${newRelease}:57f6e6cd671245c45d15439de7e39630869cc0ff`,
         'protected-unchanged',
       ])
       expect(readFileSync(tracePath, 'utf8')).not.toContain('LIVE-SWITCH')
@@ -961,9 +962,9 @@ configure_directional_roles() { printf 'CONFIGURED\\n' >> "$trace_file"; }
 assert_release() { printf 'RELEASE\\n' >> "$trace_file"; }
 main --rollback \\
   --old-release-root ${JSON.stringify(resolve(directory, 'new'))} \\
-  --old-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
+  --old-commit 57f6e6cd671245c45d15439de7e39630869cc0ff \\
   --new-release-root ${JSON.stringify(resolve(directory, 'old'))} \\
-  --new-commit 542eebdd871f0d960d972e879310bec7a3d15cca \\
+  --new-commit d3ca02ecdcbffb778c9c65d540e1095bffea7138 \\
   --live-db ${JSON.stringify(resolve(directory, 'mission-control.db'))} \\
   --live-tokens ${JSON.stringify(resolve(directory, 'mission-control-tokens.json'))} \\
   --probe-data-dir ${JSON.stringify(resolve(directory, 'probe'))} \\
@@ -1007,9 +1008,9 @@ trace_file=${JSON.stringify(tracePath)}
 parse_args() {
   APPLY=0
   OLD_RELEASE_ROOT=/old
-  OLD_COMMIT=542eebdd871f0d960d972e879310bec7a3d15cca
+  OLD_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138
   NEW_RELEASE_ROOT=/new
-  NEW_COMMIT=d3ca02ecdcbffb778c9c65d540e1095bffea7138
+  NEW_COMMIT=57f6e6cd671245c45d15439de7e39630869cc0ff
   LIVE_DB_PATH=${JSON.stringify(liveDatabase)}
   LIVE_TOKENS_PATH=${JSON.stringify(liveTokens)}
   PROBE_DATA_DIR=${JSON.stringify(probeDirectory)}
