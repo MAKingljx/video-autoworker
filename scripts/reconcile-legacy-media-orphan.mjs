@@ -19,18 +19,25 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs'
-import { createRequire } from 'node:module'
+import { createRequire, isBuiltin, registerHooks } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const REPOSITORY_ROOT = realpathSync(join(dirname(SCRIPT_PATH), '..'))
+const SUBMISSION_LOCK_MODULE_PATH = join(
+  REPOSITORY_ROOT,
+  'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+)
 const BACKUP_SCHEMA = 'video-autoworker-legacy-media-orphan-backup/v2'
-const PREPARE_SCHEMA = 'video-autoworker-legacy-media-orphan-prepare/v1'
-const CONFIRMATION_SCHEMA = 'video-autoworker-legacy-media-orphan-confirmation/v2'
+const PREPARE_SCHEMA = 'video-autoworker-legacy-media-orphan-prepare/v3'
+const CONFIRMATION_SCHEMA = 'video-autoworker-legacy-media-orphan-confirmation/v3'
 const ERROR_CODE = 'LEGACY_MEDIA_ORPHAN_RECONCILED'
+const PARENT_ERROR_CODE = 'VIDEO_CALLBACK_LEASE_EXPIRED'
 const VIDEO_LANE_LABEL = 'ai.aiworker.video-lane-supervisor'
 const N8N_LABEL = 'com.video-autoworker.n8n'
+const QWEN_CURRENT_LABEL = 'ai.openclaw.qwen-current'
+const QWEN_CURRENT_GATEWAY_PORT = 18889
 const TASK_ID = /^[A-Za-z0-9._:-]{1,120}$/u
 const RELEASE_ID = /^[a-f0-9]{7,40}(?:-runtime)?$/u
 const SHA256 = /^[a-f0-9]{64}$/u
@@ -38,10 +45,13 @@ const TERMINAL_PARENT = new Set(['succeeded', 'failed', 'cancelled'])
 const TERMINAL_EXECUTION = new Set(['success', 'error', 'crashed', 'canceled', 'cancelled'])
 const ELIGIBLE_CHILD = new Set(['queued', 'accepted', 'running'])
 const ELIGIBLE_STAGE = new Set(['prepare', 'audio', 'vision'])
+const PARENT_STALE_SECONDS = 24 * 60 * 60
 const TEST_MODE = process.env.NODE_ENV === 'test'
   && process.env.AIWORKER_TEST_LEGACY_ORPHAN === '1'
 const MAX_JSON_BYTES = 16 * 1024 * 1024
 const MAX_DATABASE_BYTES = 64 * 1024 * 1024 * 1024
+const MAX_TOOL_CLOSURE_BYTES = 32 * 1024 * 1024
+const MAX_TOOL_CLOSURE_MEMBERS = 128
 const PREPARE_TTL_SECONDS = 10 * 60
 const BACKUP_MEMBER_NAMES = [
   'mission-control.db',
@@ -380,7 +390,7 @@ function occupyFinalDestinationForTest(pathname) {
 }
 
 function parseArguments(argv) {
-  const booleanNames = new Set(['--prepare', '--apply'])
+  const booleanNames = new Set(['--prepare', '--apply', '--parent-pre-media'])
   const valueNames = new Set([
     '--backup-root', '--child-row-id', '--child-task-id', '--confirm-token', '--execution-id',
     '--expected-status', '--expected-updated-at', '--minimum-age-seconds', '--parent-task-id',
@@ -419,6 +429,33 @@ function parseArguments(argv) {
   if (Object.hasOwn(values, '--prepare-manifest') || Object.hasOwn(values, '--confirm-token')) {
     fail('--prepare-manifest and --confirm-token are valid only with --apply')
   }
+  const parentPreMedia = values['--parent-pre-media'] === true
+  if (parentPreMedia) {
+    const allowed = new Set([
+      '--parent-pre-media', '--minimum-age-seconds',
+      ...(prepare ? ['--prepare', '--backup-root'] : []),
+    ])
+    if (Object.keys(values).some(name => !allowed.has(name))) {
+      fail('parent pre-media mode does not accept business identifiers')
+    }
+    if (!Object.hasOwn(values, '--minimum-age-seconds')) {
+      fail('parent pre-media mode requires --minimum-age-seconds')
+    }
+    if (prepare ? !values['--backup-root'] : Object.hasOwn(values, '--backup-root')) {
+      fail(prepare ? '--prepare requires --backup-root' : '--backup-root is valid only with --prepare')
+    }
+    const minimumAgeSeconds = positiveInteger(values['--minimum-age-seconds'], 'minimum age')
+    if (minimumAgeSeconds < PARENT_STALE_SECONDS || minimumAgeSeconds > 30 * 24 * 60 * 60) {
+      fail('parent minimum age must be between 86400 and 2592000 seconds')
+    }
+    if (prepare) assertAbsolute(values['--backup-root'], 'backup root')
+    return {
+      mode: prepare ? 'prepare' : 'dry-run',
+      targetKind: 'parent-pre-media',
+      backupRoot: values['--backup-root'] || null,
+      minimumAgeSeconds,
+    }
+  }
   const required = [
     '--child-row-id', '--child-task-id', '--execution-id', '--expected-status',
     '--expected-updated-at', '--minimum-age-seconds', '--parent-task-id', '--stage',
@@ -439,6 +476,7 @@ function parseArguments(argv) {
   if (prepare) assertAbsolute(values['--backup-root'], 'backup root')
   return {
     mode: prepare ? 'prepare' : 'dry-run',
+    targetKind: 'media-child',
     backupRoot: values['--backup-root'] || null,
     childRowId: positiveInteger(values['--child-row-id'], 'child row ID'),
     childTaskId: values['--child-task-id'],
@@ -576,6 +614,21 @@ function listenerPid(port) {
   return pids[0]
 }
 
+function absentListenerState(port) {
+  const result = runStatus(command('LSOF', '/usr/sbin/lsof'), [
+    '-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-Fp',
+  ])
+  if (result.error || result.signal || ![0, 1].includes(result.status)
+    || typeof result.stdout !== 'string') {
+    fail(`${port} listener absence query failed`)
+  }
+  const pids = [...new Set(result.stdout.split('\n')
+    .filter(line => /^p[1-9][0-9]*$/u.test(line))
+    .map(line => Number(line.slice(1))))]
+  if (pids.length !== 0) fail(`port ${port} still has a listener`)
+  return { absent: true, port }
+}
+
 function openRecords(pid) {
   return parseLsof(run(command('LSOF', '/usr/sbin/lsof'), [
     '-a', '-p', String(pid), '-FfDin',
@@ -640,7 +693,49 @@ function launchPid(label) {
   return Number(matches[0][1])
 }
 
-function supervisorState() {
+function legacyIngressFreezeState() {
+  const launchctl = runStatus(command('LAUNCHCTL', '/bin/launchctl'), [
+    'print', `gui/${process.getuid()}/${QWEN_CURRENT_LABEL}`,
+  ])
+  if (launchctl.error || launchctl.signal || !Number.isInteger(launchctl.status)) {
+    fail('qwen-current Gateway LaunchAgent absence query failed')
+  }
+  if (launchctl.status === 0) fail('qwen-current Gateway LaunchAgent is still loaded')
+  if (![1, 113].includes(launchctl.status)) {
+    fail('qwen-current Gateway LaunchAgent absence query failed')
+  }
+  const listener = absentListenerState(QWEN_CURRENT_GATEWAY_PORT)
+  const source = run(command('PS', '/bin/ps'), [
+    '-axo', 'pid=,ppid=,command=',
+  ], 'legacy ingress process inventory')
+  const matchingGatewayPids = []
+  const submissionPids = []
+  for (const line of source.split('\n')) {
+    const match = line.match(/^\s*([1-9][0-9]*)\s+([0-9]+)\s+(.*)$/u)
+    if (!match) continue
+    const pid = Number(match[1])
+    const commandLine = match[3]
+    if (/(?:openclaw|gateway)/iu.test(commandLine)
+      && /(?:qwen-current|\.openclaw-qwen-current|(?:^|\D)18889(?:\D|$))/u.test(commandLine)) {
+      matchingGatewayPids.push(pid)
+    }
+    if (/(?:^|[/\s])submit-task\.mjs(?:\s|$)|material-handoff(?:\.mjs)?(?:\s|$)/u.test(commandLine)) {
+      submissionPids.push(pid)
+    }
+  }
+  if (matchingGatewayPids.length !== 0) fail('qwen-current Gateway process is still running')
+  if (submissionPids.length !== 0) fail('video submission or material-handoff process is still running')
+  return {
+    mode: 'legacy-gateway-freeze',
+    label: QWEN_CURRENT_LABEL,
+    launchAgentAbsent: true,
+    listener,
+    matchingGatewayPids,
+    submissionPids,
+  }
+}
+
+function supervisorState(requireLegacyIngressFreeze = false) {
   const launchctl = command('LAUNCHCTL', '/bin/launchctl')
   const service = `gui/${process.getuid()}/${VIDEO_LANE_LABEL}`
   const loaded = runStatus(launchctl, ['print', service]).status === 0
@@ -652,11 +747,17 @@ function supervisorState() {
     `"?${escaped}"?\\s*=>\\s*(?:true|disabled)`,
     'u',
   ).test(disabledSource)
-  const batchRoot = testPath(
+  const configuredBatchRoot = testPath(
     'AIWORKER_TEST_LEGACY_ORPHAN_BATCH_ROOT',
     join(process.env.HOME, 'ai-worker/state/video-autoworker/video-batches'),
   )
-  const lockPath = join(batchRoot, '.global-video-worker.lock')
+  let batchRootIdentity = null
+  if (requireLegacyIngressFreeze) {
+    safeEntry(configuredBatchRoot, 'video batch root', 'directory', 0o700)
+    const batchRoot = realpathSync(configuredBatchRoot)
+    batchRootIdentity = identity(batchRoot, 'video batch root', 'directory')
+  }
+  const lockPath = join(configuredBatchRoot, '.global-video-worker.lock')
   let lockAbsent = false
   try {
     if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_LSTAT_ERROR_PATH === lockPath) {
@@ -678,7 +779,15 @@ function supervisorState() {
     || workerPids.length !== 0) {
     fail('video-lane supervisor is not disabled, unloaded, worker-free, and lock-free')
   }
-  return { disabled, loaded, lockAbsent, workerPids }
+  return {
+    disabled,
+    loaded,
+    lockAbsent,
+    workerPids,
+    ...(requireLegacyIngressFreeze
+      ? { batchRoot: batchRootIdentity, legacyIngress: legacyIngressFreezeState() }
+      : {}),
+  }
 }
 
 function workerPidsFromPgrep(status, stdout, error = null) {
@@ -730,14 +839,115 @@ async function queueState() {
   const waiting = nonNegativeInteger(value.counts.waiting, 'queue waiting')
   const running = nonNegativeInteger(value.counts.running, 'queue running')
   if (waiting !== 0 || running !== 0) fail('persistent queue still has waiting or running work')
-  return { attention, waiting, running, total: value.queue.length, digest: sha256(canonicalJson(projection)) }
+  const items = value.queue.map((item, index) => ({
+    ...projection[index],
+    queueOrigin: item?.queueOrigin === undefined ? null : String(item.queueOrigin),
+  }))
+  return {
+    attention,
+    waiting,
+    running,
+    total: value.queue.length,
+    digest: sha256(canonicalJson(projection)),
+    items,
+  }
+}
+
+class BuiltinDatabase {
+  constructor(pathname, options = {}) {
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_OPEN_CANARY) {
+      writeFileSync(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_OPEN_CANARY', ''),
+        'database-opened\n',
+        { mode: 0o600, flag: 'wx' },
+      )
+    }
+    if (options.fileMustExist !== true) fail('SQLite connections must require an existing database')
+    const databaseUrl = pathToFileURL(pathname)
+    databaseUrl.searchParams.set('mode', options.readonly === true ? 'ro' : 'rw')
+    this.database = new DatabaseSync(databaseUrl.href, {
+      readOnly: options.readonly === true,
+      timeout: 5_000,
+    })
+  }
+
+  prepare(source) {
+    return this.database.prepare(source)
+  }
+
+  exec(source) {
+    return this.database.exec(source)
+  }
+
+  pragma(source, options = {}) {
+    const rows = this.database.prepare(`PRAGMA ${source}`).all()
+    if (!options.simple) return rows
+    return rows.length === 0 ? undefined : Object.values(rows[0])[0]
+  }
+
+  backup(pathname) {
+    return sqliteBackup(this.database, pathname)
+  }
+
+  close() {
+    return this.database.close()
+  }
+}
+
+let sqliteBackup = null
+let DatabaseSync = null
+
+function validateSqliteCapabilities(sqlite) {
+  if (!sqlite || typeof sqlite !== 'object'
+    || typeof sqlite.DatabaseSync !== 'function'
+    || typeof sqlite.StatementSync !== 'function'
+    || typeof sqlite.backup !== 'function') {
+    fail('node:sqlite does not provide the required reconciliation capabilities')
+  }
+  for (const name of ['close', 'exec', 'prepare']) {
+    if (typeof sqlite.DatabaseSync.prototype[name] !== 'function') {
+      fail('node:sqlite does not provide the required reconciliation capabilities')
+    }
+  }
+  for (const name of ['all', 'get', 'run']) {
+    if (typeof sqlite.StatementSync.prototype[name] !== 'function') {
+      fail('node:sqlite does not provide the required reconciliation capabilities')
+    }
+  }
+  let probe = null
+  try {
+    probe = new sqlite.DatabaseSync(':memory:')
+    probe.exec('BEGIN IMMEDIATE; CREATE TABLE capability_probe (value INTEGER NOT NULL); COMMIT')
+    const statement = probe.prepare('SELECT 1 AS value')
+    if (Number(statement.get()?.value) !== 1
+      || probe.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') {
+      fail('node:sqlite reconciliation capability probe failed')
+    }
+  } catch {
+    fail('node:sqlite reconciliation capability probe failed')
+  } finally {
+    try { probe?.close() } catch {}
+  }
 }
 
 function loadDatabase() {
-  try {
-    const scopedRequire = createRequire(import.meta.url)
-    return scopedRequire(scopedRequire.resolve('better-sqlite3', { paths: [REPOSITORY_ROOT] }))
-  } catch { fail('better-sqlite3 is unavailable') }
+  if (!DatabaseSync || !sqliteBackup) {
+    const originalEmitWarning = process.emitWarning
+    process.emitWarning = (warning, type, ...args) => {
+      if (warning === 'SQLite is an experimental feature and might change at any time'
+        && type === 'ExperimentalWarning') return
+      return Reflect.apply(originalEmitWarning, process, [warning, type, ...args])
+    }
+    try {
+      const sqlite = createRequire(import.meta.url)('node:sqlite')
+      validateSqliteCapabilities(sqlite)
+      sqliteBackup = sqlite.backup
+      DatabaseSync = sqlite.DatabaseSync
+    } finally {
+      process.emitWarning = originalEmitWarning
+    }
+  }
+  return BuiltinDatabase
 }
 
 function openDatabase(Database, pathname, readonly = true) {
@@ -751,6 +961,15 @@ function openDatabase(Database, pathname, readonly = true) {
   }
   const expected = { path: pathname, dev: verifier.dev.toString(), ino: verifier.ino.toString() }
   const before = openRecords(process.pid)
+  const databaseOpenHookName = !readonly
+    ? 'AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_WRITABLE_DATABASE_OPEN_COMMAND'
+    : 'AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_DATABASE_OPEN_COMMAND'
+  if (TEST_MODE && process.env[databaseOpenHookName]) {
+    run(
+      testPath(databaseOpenHookName, ''), [],
+      'test pre-database-open hook',
+    )
+  }
   const db = new Database(pathname, { readonly, fileMustExist: true })
   try {
     const connectionDescriptor = validateNewDatabaseConnection(
@@ -817,6 +1036,17 @@ function rowDigest(row) {
   return sha256(canonicalJson(row))
 }
 
+function tableExists(db, table) {
+  return Boolean(db.prepare(
+    'SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = ?',
+  ).get(table))
+}
+
+function requireTable(db, table, columns) {
+  if (!tableExists(db, table)) fail(`${table} schema is unavailable`)
+  tableColumns(db, table, columns)
+}
+
 function validateMissionTarget(db, input, now) {
   tableColumns(db, 'n8n_task_runs', [
     'id', 'task_id', 'binding_id', 'status', 'source', 'routing', 'error', 'output', 'attempt_count',
@@ -876,6 +1106,150 @@ function validateMissionTarget(db, input, now) {
     parentDigest: rowDigest(parent),
     othersDigest: rowDigest(others),
   }
+}
+
+function parentAncillaryState(db, parent, childTaskIds) {
+  requireTable(db, 'n8n_parent_execution_claims', ['task_id', 'tenant_id', 'workspace_id'])
+  requireTable(db, 'n8n_task_dispatch_leases', ['task_id', 'tenant_id', 'workspace_id'])
+  requireTable(db, 'n8n_child_execution_leases', ['task_id', 'tenant_id', 'workspace_id'])
+  requireTable(db, 'n8n_media_cleanup_debts', ['task_id'])
+  requireTable(db, 'n8n_director_evidence_outbox', ['task_id'])
+  const placeholders = childTaskIds.map(() => '?').join(', ')
+  const values = {
+    parentClaims: Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM n8n_parent_execution_claims
+      WHERE task_id = ?
+    `).get(parent.task_id).count),
+    dispatchLeases: Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM n8n_task_dispatch_leases
+      WHERE task_id = ?
+    `).get(parent.task_id).count),
+    childLeases: Number(db.prepare(`
+      SELECT COUNT(*) AS count FROM n8n_child_execution_leases
+      WHERE task_id IN (${placeholders})
+    `).get(...childTaskIds).count),
+    cleanupDebts: Number(db.prepare(
+      'SELECT COUNT(*) AS count FROM n8n_media_cleanup_debts WHERE task_id = ?',
+    ).get(parent.task_id).count),
+    directorOutbox: Number(db.prepare(
+      'SELECT COUNT(*) AS count FROM n8n_director_evidence_outbox WHERE task_id = ?',
+    ).get(parent.task_id).count),
+  }
+  if (Object.values(values).some(count => count !== 0)) {
+    fail('parent still has a claim, lease, cleanup debt, or director outbox record')
+  }
+  return values
+}
+
+function parentIntakeState(db) {
+  if (!tableExists(db, 'n8n_intake_controls')) {
+    return { mode: 'legacy-gateway-freeze', intakeTablePresent: false }
+  }
+  requireTable(db, 'n8n_intake_controls', [
+    'control_id', 'accepting', 'reason', 'changed_by_id', 'changed_by_name',
+    'changed_at', 'revision',
+  ])
+  const rows = db.prepare('SELECT * FROM n8n_intake_controls ORDER BY control_id').all()
+  if (rows.length !== 1 || rows[0].control_id !== 1 || rows[0].accepting !== 0
+    || !Number.isSafeInteger(rows[0].revision) || rows[0].revision < 1) {
+    fail('global n8n intake is not paused')
+  }
+  return {
+    mode: 'legacy-gateway-freeze',
+    intakeTablePresent: true,
+    rowDigest: rowDigest(rows[0]),
+    revision: rows[0].revision,
+  }
+}
+
+function validateParentQueue(queue) {
+  if (queue.attention !== 1 || queue.waiting !== 0 || queue.running !== 0
+    || queue.total !== 1 || queue.items.length !== 1) {
+    fail('parent pre-media mode requires exactly one attention record and no other queue work')
+  }
+  const item = queue.items[0]
+  if (item.status !== 'accepted' || item.stale !== true || item.sourceAvailable !== null
+    || item.queueOrigin !== 'n8n') {
+    fail('attention record is not one stale non-durable accepted parent')
+  }
+  return item
+}
+
+function validateParentTarget(db, input, now, queue = null, expected = null) {
+  tableColumns(db, 'n8n_task_runs', [
+    'id', 'task_id', 'idempotency_key', 'binding_id', 'status', 'source', 'routing', 'input',
+    'delivery', 'output', 'error', 'attempt_count', 'max_attempts', 'workspace_id', 'tenant_id',
+    'created_at', 'accepted_at', 'started_at', 'completed_at', 'updated_at',
+  ])
+  tableColumns(db, 'n8n_workflow_bindings', ['id', 'task_type', 'workspace_id', 'tenant_id'])
+  const queueItem = queue ? validateParentQueue(queue) : null
+  const expectedTaskId = expected?.parent?.task_id || queueItem?.taskId
+  if (!TASK_ID.test(expectedTaskId || '')) fail('parent task identity is unavailable')
+  const parent = db.prepare('SELECT * FROM n8n_task_runs WHERE task_id = ?').get(expectedTaskId)
+  let routing
+  let delivery
+  try {
+    routing = parseObject(parent?.routing, 'parent routing')
+    delivery = parseObject(parent?.delivery, 'parent delivery')
+  } catch { fail('parent routing or delivery is invalid') }
+  const binding = parent ? db.prepare(`
+    SELECT task_type FROM n8n_workflow_bindings
+    WHERE id = ? AND workspace_id = ? AND tenant_id = ?
+  `).get(parent.binding_id, parent.workspace_id, parent.tenant_id) : null
+  if (!parent || parent.status !== 'accepted'
+    || !['openclaw', 'video-autoworker'].includes(parent.source)
+    || routing.taskType !== 'video-analysis' || binding?.task_type !== 'video-analysis'
+    || parent.idempotency_key !== parent.task_id
+    || parent.accepted_at === null || parent.started_at !== null || parent.completed_at !== null
+    || parent.attempt_count !== 0 || parent.max_attempts < 1
+    || parent.error !== null || parent.output !== null || delivery.mode !== 'none'
+    || now - parent.updated_at < Math.max(PARENT_STALE_SECONDS, input.minimumAgeSeconds)
+    || (queueItem && queueItem.updatedAt !== parent.updated_at)) {
+    fail('parent is not the exact stale accepted pre-media video-analysis record')
+  }
+  const activeTopLevel = db.prepare(`
+    SELECT id FROM n8n_task_runs
+    WHERE source IN ('openclaw', 'video-autoworker')
+      AND status IN ('queued', 'accepted', 'running')
+    ORDER BY id
+  `).all()
+  if (activeTopLevel.length !== 1 || activeTopLevel[0].id !== parent.id) {
+    fail('another active top-level task exists')
+  }
+  const childTaskIds = ['prepare', 'audio', 'vision', 'finalize']
+    .map(stage => mediaChildTaskId(parent.task_id, stage))
+  const placeholders = childTaskIds.map(() => '?').join(', ')
+  const children = db.prepare(`
+    SELECT id FROM n8n_task_runs WHERE task_id IN (${placeholders})
+  `).all(...childTaskIds)
+  if (children.length !== 0) fail('parent already has a deterministic media child')
+  const activeMedia = Number(db.prepare(`
+    SELECT COUNT(*) AS count FROM n8n_task_runs
+    WHERE source = 'n8n-media-node' AND status IN ('queued', 'accepted', 'running')
+  `).get().count)
+  const activeModel = Number(db.prepare(`
+    SELECT COUNT(*) AS count FROM n8n_task_runs
+    WHERE source = 'n8n-node' AND status IN ('queued', 'accepted', 'running')
+  `).get().count)
+  if (activeMedia !== 0 || activeModel !== 0) fail('Mission Control still has active media or model work')
+  const intake = parentIntakeState(db)
+  const ancillary = parentAncillaryState(db, parent, childTaskIds)
+  const others = db.prepare('SELECT * FROM n8n_task_runs WHERE id <> ? ORDER BY id').all(parent.id)
+  const result = {
+    kind: 'parent-pre-media',
+    parent,
+    parentDigest: rowDigest(parent),
+    othersDigest: rowDigest(others),
+    childTaskIdsDigest: rowDigest(childTaskIds),
+    ancillary,
+    intake,
+    activeMedia,
+    activeModel,
+  }
+  if (expected && canonicalJson(result) !== canonicalJson(expected)) {
+    fail('parent database identity changed after prepare')
+  }
+  return result
 }
 
 function flattedReference(table, value, label) {
@@ -962,14 +1336,30 @@ function n8nWebhookOwner(source, input) {
   return { owner: owners[0], digest: sha256(canonicalJson(table)) }
 }
 
-function validateN8n(db, input) {
+function validateN8nIdle(db) {
   tableColumns(db, 'execution_entity', ['id', 'workflowId', 'status', 'stoppedAt'])
-  tableColumns(db, 'execution_data', ['executionId', 'data'])
+  const executionDigest = createHash('sha256')
+  let executionCount = 0
+  for (const row of db.prepare('SELECT * FROM execution_entity ORDER BY id').iterate()) {
+    executionDigest.update(canonicalJson(row))
+    executionDigest.update('\n')
+    executionCount += 1
+  }
   const active = Number(db.prepare(`
     SELECT COUNT(*) AS count FROM execution_entity
     WHERE status IN ('new', 'running', 'waiting') AND "stoppedAt" IS NULL
   `).get().count)
   if (active !== 0) fail('n8n still has active executions')
+  return {
+    activeExecutionCount: active,
+    executionCount,
+    executionDigest: executionDigest.digest('hex'),
+  }
+}
+
+function validateN8n(db, input) {
+  const idle = validateN8nIdle(db)
+  tableColumns(db, 'execution_data', ['executionId', 'data'])
   const execution = db.prepare(`
     SELECT id, workflowId, status, "stoppedAt" AS stoppedAt
     FROM execution_entity WHERE id = ?
@@ -984,14 +1374,21 @@ function validateN8n(db, input) {
   }
   const binding = n8nWebhookOwner(dataRows[0].data, input)
   return {
+    ...idle,
     ...execution,
     executionDataDigest: binding.digest,
     parentBindingCount: 1,
   }
 }
 
-function activeProcessGuard(input, missionPath) {
-  const workspaceDigest = sha256(input.parentTaskId)
+function activeProcessGuard(input, missionPath, target = null) {
+  const parentTaskId = input.parentTaskId || target?.parent?.task_id
+  if (!TASK_ID.test(parentTaskId || '')) fail('target parent identity is unavailable')
+  const childTaskIds = input.targetKind === 'parent-pre-media'
+    ? ['prepare', 'audio', 'vision', 'finalize'].map(stage => mediaChildTaskId(parentTaskId, stage))
+    : [input.childTaskId]
+  const taskReferences = [parentTaskId, ...childTaskIds]
+  const workspaceDigest = sha256(parentTaskId)
   const workspace = join(dirname(missionPath), 'media-tasks', workspaceDigest)
   try {
     if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_LSTAT_ERROR_PATH === workspace) {
@@ -1020,14 +1417,14 @@ function activeProcessGuard(input, missionPath) {
     const match = line.match(/^\s*([1-9][0-9]*)\s+([0-9]+)\s+(.*)$/u)
     if (!match || excluded.has(Number(match[1]))) continue
     const commandLine = match[3]
-    if ([input.childTaskId, input.parentTaskId, workspaceDigest].some(value => commandLine.includes(value))) {
+    if ([...taskReferences, workspaceDigest].some(value => commandLine.includes(value))) {
       fail('a live process still references the target task')
     }
   }
   return workspaceDigest
 }
 
-async function capturePlatform() {
+async function capturePlatform(input) {
   const pid3017 = listenerPid(3017)
   const n8nPid = listenerPid(5678)
   const legacyRecords = openRecords(pid3017)
@@ -1040,7 +1437,7 @@ async function capturePlatform() {
   if (n8nProcess.ppid !== n8nLaunchPid) {
     fail('n8n listener is not the direct child of its LaunchAgent')
   }
-  const supervisor = supervisorState()
+  const supervisor = supervisorState(input?.targetKind === 'parent-pre-media')
   const queue = await queueState()
   return {
     legacy: { ...legacy, port: 3017, database: mission },
@@ -1153,30 +1550,470 @@ function writeImmutableJson(pathname, value, mode = 0o400) {
   return { path: pathname, source: verified.source, sha256: sha256(verified.source) }
 }
 
-function currentToolSha256() {
-  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA) {
-    if (!SHA256.test(process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA)) fail('test tool SHA is invalid')
-    return process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA
+function readVerifiedToolSource(pathname, label = 'reconciliation tool dependency') {
+  const entry = safeEntry(pathname, label, 'file')
+  const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size
+      || opened.uid !== entry.uid || opened.mode !== entry.mode || opened.nlink !== entry.nlink) {
+      fail(`${label} changed before open`)
+    }
+    const source = readFileSync(descriptor)
+    const closed = fstatSync(descriptor, { bigint: true })
+    if (closed.dev !== opened.dev || closed.ino !== opened.ino || closed.size !== opened.size
+      || closed.uid !== opened.uid || closed.mode !== opened.mode || closed.nlink !== opened.nlink
+      || BigInt(source.byteLength) !== opened.size) {
+      fail(`${label} changed during read`)
+    }
+    return {
+      source,
+      bytes: source.byteLength,
+      sha256: sha256(source),
+      identity: {
+        dev: opened.dev.toString(),
+        ino: opened.ino.toString(),
+        size: opened.size.toString(),
+        uid: opened.uid.toString(),
+        mode: opened.mode.toString(),
+        nlink: opened.nlink.toString(),
+      },
+    }
+  } finally { closeSync(descriptor) }
+}
+
+function fileBinding(pathname, fingerprint) {
+  return {
+    path: pathname,
+    bytes: fingerprint.bytes,
+    sha256: fingerprint.sha256,
+    identity: fingerprint.identity,
   }
-  return sha256(readFileSync(SCRIPT_PATH))
+}
+
+function validateFileBinding(value, label) {
+  exactKeys(value, ['bytes', 'identity', 'path', 'sha256'], label)
+  exactKeys(value.identity, ['dev', 'ino', 'mode', 'nlink', 'size', 'uid'], `${label} identity`)
+  assertAbsolute(value.path, `${label} path`)
+  if (!Number.isSafeInteger(value.bytes) || value.bytes < 0 || !SHA256.test(value.sha256)
+    || Object.values(value.identity).some(item => !/^[0-9]{1,30}$/u.test(item))) {
+    fail(`${label} is invalid`)
+  }
+  return value
+}
+
+function readVerifiedRuntimeFile(pathname, label) {
+  const entry = safeEntry(pathname, label, 'file')
+  const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size
+      || opened.uid !== entry.uid || opened.mode !== entry.mode || opened.nlink !== entry.nlink) {
+      fail(`${label} changed before open`)
+    }
+    const digest = createHash('sha256')
+    const buffer = Buffer.allocUnsafe(1024 * 1024)
+    let bytes = 0
+    for (;;) {
+      const count = readSync(descriptor, buffer, 0, buffer.length, null)
+      if (count === 0) break
+      digest.update(buffer.subarray(0, count))
+      bytes += count
+      if (bytes > 256 * 1024 * 1024) fail(`${label} is too large`)
+    }
+    const closed = fstatSync(descriptor, { bigint: true })
+    if (closed.dev !== opened.dev || closed.ino !== opened.ino || closed.size !== opened.size
+      || closed.uid !== opened.uid || closed.mode !== opened.mode || closed.nlink !== opened.nlink
+      || BigInt(bytes) !== opened.size) {
+      fail(`${label} changed during read`)
+    }
+    return {
+      bytes,
+      sha256: digest.digest('hex'),
+      identity: {
+        dev: opened.dev.toString(),
+        ino: opened.ino.toString(),
+        size: opened.size.toString(),
+        uid: opened.uid.toString(),
+        mode: opened.mode.toString(),
+        nlink: opened.nlink.toString(),
+      },
+    }
+  } finally { closeSync(descriptor) }
+}
+
+let databaseRuntimeBindingCache = null
+
+function currentDatabaseRuntimeBinding() {
+  if (databaseRuntimeBindingCache) return databaseRuntimeBindingCache
+  if (!/^v\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(process.version)
+    || typeof process.versions.sqlite !== 'string'
+    || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(process.versions.sqlite)) {
+    fail('Node/SQLite runtime version is unavailable')
+  }
+  const executablePath = realpathSync(process.execPath)
+  const executable = fileBinding(
+    executablePath,
+    readVerifiedRuntimeFile(executablePath, 'Node database runtime executable'),
+  )
+  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_RUNTIME_SHA) {
+    if (!SHA256.test(process.env.AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_RUNTIME_SHA)) {
+      fail('test database runtime SHA is invalid')
+    }
+    executable.sha256 = process.env.AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_RUNTIME_SHA
+  }
+  databaseRuntimeBindingCache = {
+    kind: 'node:sqlite',
+    nodeVersion: process.version,
+    sqliteVersion: process.versions.sqlite,
+    executable,
+  }
+  return databaseRuntimeBindingCache
+}
+
+function validateDatabaseRuntimeBinding(value) {
+  exactKeys(value, ['executable', 'kind', 'nodeVersion', 'sqliteVersion'], 'database runtime binding')
+  validateFileBinding(value.executable, 'database runtime executable binding')
+  if (value.kind !== 'node:sqlite' || value.nodeVersion !== process.version
+    || value.sqliteVersion !== process.versions.sqlite
+    || value.executable.path !== realpathSync(process.execPath)) {
+    fail('database runtime binding is invalid for this Node process')
+  }
+  if (canonicalJson(value) !== canonicalJson(currentDatabaseRuntimeBinding())) {
+    fail('database runtime changed after prepare')
+  }
+}
+
+function validateParserBinding(value) {
+  exactKeys(value, ['bytes', 'identity', 'path', 'sha256', 'version'], 'TypeScript parser binding')
+  validateFileBinding({
+    path: value.path,
+    bytes: value.bytes,
+    sha256: value.sha256,
+    identity: value.identity,
+  }, 'TypeScript parser file binding')
+  if (typeof value.version !== 'string' || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(value.version)) {
+    fail('TypeScript parser binding is invalid')
+  }
+  return value
+}
+
+function configuredParserPath() {
+  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_PARSER_PATH) {
+    return testPath('AIWORKER_TEST_LEGACY_ORPHAN_PARSER_PATH', '')
+  }
+  const scopedRequire = createRequire(import.meta.url)
+  try {
+    return realpathSync(scopedRequire.resolve('typescript', { paths: [REPOSITORY_ROOT] }))
+  } catch { fail('TypeScript parser is unavailable') }
+}
+
+function withVerifiedToolParser(expectedBinding, callback) {
+  const parserPath = expectedBinding
+    ? validateParserBinding(expectedBinding).path
+    : configuredParserPath()
+  const captured = readVerifiedToolSource(parserPath, 'TypeScript parser')
+  const capturedFileBinding = fileBinding(parserPath, captured)
+  if (expectedBinding && canonicalJson(capturedFileBinding) !== canonicalJson({
+    path: expectedBinding.path,
+    bytes: expectedBinding.bytes,
+    sha256: expectedBinding.sha256,
+    identity: expectedBinding.identity,
+  })) {
+    fail('TypeScript parser changed after prepare')
+  }
+  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_PARSER_SNAPSHOT_CHECK_COMMAND) {
+    run(
+      testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_PARSER_SNAPSHOT_CHECK_COMMAND', ''), [],
+      'test post-parser-snapshot-check hook',
+    )
+  }
+  const parserUrl = pathToFileURL(parserPath).href
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier === parserPath || specifier === parserUrl) {
+        return { url: parserUrl, format: 'commonjs', shortCircuit: true }
+      }
+      if (isBuiltin(specifier)) return nextResolve(specifier, context)
+      throw new Error('unverified TypeScript parser dependency requested')
+    },
+    load(url, context, nextLoad) {
+      if (url === parserUrl) {
+        return { format: 'commonjs', source: captured.source, shortCircuit: true }
+      }
+      if (url.startsWith('node:')) return nextLoad(url, context)
+      throw new Error('unverified TypeScript parser source requested')
+    },
+  })
+  try {
+    let parser
+    try { parser = createRequire(import.meta.url)(parserPath) } catch (error) {
+      fail(`verified TypeScript parser could not be loaded: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (typeof parser?.createSourceFile !== 'function' || typeof parser?.forEachChild !== 'function'
+      || typeof parser?.version !== 'string'
+      || (expectedBinding && parser.version !== expectedBinding.version)) {
+      fail('verified TypeScript parser has an invalid API or version')
+    }
+    const result = callback(parser, {
+      ...capturedFileBinding,
+      version: parser.version,
+    })
+    const after = readVerifiedToolSource(parserPath, 'TypeScript parser')
+    if (after.sha256 !== captured.sha256
+      || canonicalJson(after.identity) !== canonicalJson(captured.identity)) {
+      fail('TypeScript parser changed after verified parsing')
+    }
+    return result
+  } finally { hooks.deregister() }
+}
+
+function staticToolSpecifiers(parser, pathname, source, isEntry) {
+  const sourceFile = parser.createSourceFile(
+    pathname,
+    source.toString('utf8'),
+    parser.ScriptTarget.Latest,
+    true,
+    parser.ScriptKind.JS,
+  )
+  if ((sourceFile.parseDiagnostics || []).length !== 0) {
+    fail('reconciliation tool dependency contains invalid JavaScript syntax')
+  }
+  const specifiers = []
+  const visit = node => {
+    if (!isEntry && parser.isMetaProperty(node)
+      && node.keywordToken === parser.SyntaxKind.ImportKeyword) {
+      fail('runtime import.meta module loading is unsupported')
+    }
+    if (!isEntry && parser.isCallExpression(node)) {
+      const expression = node.expression
+      const name = parser.isIdentifier(expression)
+        ? expression.text
+        : parser.isPropertyAccessExpression(expression) ? expression.name.text : ''
+      if (name === 'require' || name === 'createRequire') {
+        fail('runtime require/createRequire module loading is unsupported')
+      }
+    }
+    if (parser.isCallExpression(node) && node.expression?.kind === parser.SyntaxKind.ImportKeyword) {
+      fail('dynamic reconciliation tool dependencies are unsupported')
+    }
+    if (parser.isImportEqualsDeclaration(node)) {
+      fail('import-equals reconciliation tool dependencies are unsupported')
+    }
+    if (parser.isImportDeclaration(node)
+      || (parser.isExportDeclaration(node) && node.moduleSpecifier)) {
+      const moduleSpecifier = node.moduleSpecifier
+      if (!moduleSpecifier || !parser.isStringLiteralLike(moduleSpecifier)) {
+        fail('reconciliation tool dependency specifier is unsupported')
+      }
+      if (!isEntry && moduleSpecifier.text === 'node:module') {
+        fail('runtime createRequire module loading is unsupported')
+      }
+      specifiers.push(moduleSpecifier.text)
+    }
+    parser.forEachChild(node, visit)
+  }
+  visit(sourceFile)
+  return specifiers
+}
+
+function toolClosureConfiguration() {
+  const entryPath = TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT
+    ? testPath('AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT', '')
+    : SCRIPT_PATH
+  const runtimePath = TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_RUNTIME_ROOT
+    ? testPath('AIWORKER_TEST_LEGACY_ORPHAN_TOOL_RUNTIME_ROOT', '')
+    : SUBMISSION_LOCK_MODULE_PATH
+  const entryRoot = entryPath === SCRIPT_PATH ? REPOSITORY_ROOT : dirname(entryPath)
+  const runtimeRoot = runtimePath === SUBMISSION_LOCK_MODULE_PATH ? REPOSITORY_ROOT : dirname(runtimePath)
+  const roots = []
+  const addRoot = (pathname, preferredLabel) => {
+    const normalized = resolve(pathname)
+    const existing = roots.find(item => item.path === normalized)
+    if (existing) return existing
+    const root = { path: normalized, label: preferredLabel }
+    roots.push(root)
+    return root
+  }
+  return {
+    entry: { path: resolve(entryPath), root: addRoot(entryRoot, entryRoot === REPOSITORY_ROOT ? 'repository' : 'entry') },
+    runtime: {
+      path: resolve(runtimePath),
+      root: addRoot(runtimeRoot, runtimeRoot === REPOSITORY_ROOT ? 'repository' : 'runtime'),
+    },
+  }
+}
+
+function createToolSnapshot(expectedParserBinding = null) {
+  return withVerifiedToolParser(expectedParserBinding, (parser, parserBinding) => {
+    const configuration = toolClosureConfiguration()
+    const pending = [configuration.entry, configuration.runtime]
+    const members = new Map()
+    let totalBytes = 0
+    while (pending.length > 0) {
+      const request = pending.pop()
+      const pathname = resolve(request.path)
+      const relativePath = relative(request.root.path, pathname)
+      if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+        fail('reconciliation tool dependency escapes its closure root')
+      }
+      if (members.has(pathname)) continue
+      if (members.size >= MAX_TOOL_CLOSURE_MEMBERS) fail('reconciliation tool dependency closure is too large')
+      if (!/\.(?:js|mjs)$/u.test(pathname)) {
+        fail('reconciliation tool dependency type is unsupported')
+      }
+      const loaded = readVerifiedToolSource(pathname)
+      if (loaded.bytes > MAX_TOOL_CLOSURE_BYTES - totalBytes) {
+        fail('reconciliation tool dependency closure is too large')
+      }
+      totalBytes += loaded.bytes
+      const member = {
+        pathname,
+        url: pathToFileURL(pathname).href,
+        logicalPath: `${request.root.label}/${relativePath}`,
+        root: request.root,
+        edges: new Map(),
+        ...loaded,
+      }
+      members.set(pathname, member)
+      for (const specifier of staticToolSpecifiers(
+        parser,
+        pathname,
+        loaded.source,
+        pathname === configuration.entry.path,
+      )) {
+        if (specifier.startsWith('node:')) {
+          if (!isBuiltin(specifier)) fail('reconciliation tool builtin dependency is invalid')
+          continue
+        }
+        if (!specifier.startsWith('./') && !specifier.startsWith('../')) {
+          fail('reconciliation tool dependency specifier is unsupported')
+        }
+        if (specifier.includes('?') || specifier.includes('#')) {
+          fail('reconciliation tool dependency specifier is unsupported')
+        }
+        const dependencyPath = resolve(dirname(pathname), specifier)
+        const dependencyRelative = relative(request.root.path, dependencyPath)
+        if (!dependencyRelative || dependencyRelative.startsWith('..') || isAbsolute(dependencyRelative)) {
+          fail('reconciliation tool dependency escapes its closure root')
+        }
+        member.edges.set(specifier, dependencyPath)
+        pending.push({ path: dependencyPath, root: request.root })
+      }
+    }
+    const runtime = members.get(configuration.runtime.path)
+    if (!runtime) fail('submission-lock runtime is absent from the verified tool closure')
+    const digest = sha256(canonicalJson({
+      parser: { version: parserBinding.version, bytes: parserBinding.bytes,
+        sha256: parserBinding.sha256 },
+      members: [...members.values()].map(member => ({
+        path: member.logicalPath,
+        bytes: member.bytes,
+        sha256: member.sha256,
+      })).sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0),
+    }))
+    const override = TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA
+    if (override && !SHA256.test(override)) fail('test tool SHA is invalid')
+    return {
+      digest: override || digest,
+      runtimePath: configuration.runtime.path,
+      members,
+      parserBinding,
+    }
+  })
+}
+
+function assertToolSnapshotCurrent(snapshot) {
+  const parser = readVerifiedToolSource(snapshot.parserBinding.path, 'TypeScript parser')
+  if (canonicalJson(fileBinding(snapshot.parserBinding.path, parser)) !== canonicalJson({
+    path: snapshot.parserBinding.path,
+    bytes: snapshot.parserBinding.bytes,
+    sha256: snapshot.parserBinding.sha256,
+    identity: snapshot.parserBinding.identity,
+  })) {
+    fail('TypeScript parser changed after tool closure verification')
+  }
+  for (const member of snapshot.members.values()) {
+    const current = readVerifiedToolSource(member.pathname)
+    if (current.sha256 !== member.sha256
+      || canonicalJson(current.identity) !== canonicalJson(member.identity)) {
+      fail('reconciliation tool changed after closure verification')
+    }
+  }
+}
+
+async function acquireVerifiedSubmissionLock(snapshot, batchRoot) {
+  assertToolSnapshotCurrent(snapshot)
+  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_TOOL_SNAPSHOT_CHECK_COMMAND) {
+    run(
+      testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_TOOL_SNAPSHOT_CHECK_COMMAND', ''), [],
+      'test post-tool-snapshot-check hook',
+    )
+  }
+  const byUrl = new Map([...snapshot.members.values()].map(member => [member.url, member]))
+  const runtimeUrl = pathToFileURL(snapshot.runtimePath).href
+  const hooks = registerHooks({
+    resolve(specifier, context, nextResolve) {
+      if (specifier.startsWith('node:')) return nextResolve(specifier, context)
+      if (specifier === snapshot.runtimePath || specifier === runtimeUrl) {
+        return { url: runtimeUrl, format: 'module', shortCircuit: true }
+      }
+      const parent = byUrl.get(context.parentURL || '')
+      const dependencyPath = parent?.edges.get(specifier)
+      const dependency = dependencyPath ? snapshot.members.get(dependencyPath) : null
+      if (!dependency) throw new Error('unverified reconciliation runtime dependency requested')
+      return { url: dependency.url, format: 'module', shortCircuit: true }
+    },
+    load(url, context, nextLoad) {
+      if (url.startsWith('node:')) return nextLoad(url, context)
+      const member = byUrl.get(url)
+      if (!member) throw new Error('unverified reconciliation runtime source requested')
+      return { format: 'module', source: member.source, shortCircuit: true }
+    },
+  })
+  let submissionLock = null
+  try {
+    const namespace = createRequire(import.meta.url)(snapshot.runtimePath)
+    if (typeof namespace?.acquireVideoSubmissionLock !== 'function') {
+      fail('verified submission-lock runtime export is invalid')
+    }
+    submissionLock = await namespace.acquireVideoSubmissionLock(batchRoot)
+    if (!submissionLock?.acquired || typeof submissionLock.release !== 'function') {
+      fail('video submission lock could not be acquired')
+    }
+    assertToolSnapshotCurrent(snapshot)
+    return submissionLock
+  } catch (error) {
+    if (submissionLock) {
+      try { await submissionLock.release() } catch {}
+    }
+    if (error instanceof Error && error.message.startsWith('legacy media orphan reconciliation failed:')) {
+      throw error
+    }
+    fail(`verified submission-lock runtime could not be loaded or invoked: ${error instanceof Error ? error.message : String(error)}`)
+  } finally { hooks.deregister() }
 }
 
 async function inspectLiveState(Database, input) {
-  const platform = await capturePlatform()
+  const platform = await capturePlatform(input)
   const missionHandle = openDatabase(Database, platform.legacy.database.path, true)
   const n8nHandle = openDatabase(Database, platform.n8n.database.path, true)
   try {
     const now = Math.floor(Date.now() / 1_000)
-    const target = validateMissionTarget(missionHandle.db, input, now)
-    const execution = validateN8n(n8nHandle.db, input)
-    const workspaceDigest = activeProcessGuard(input, platform.legacy.database.path)
+    const target = input.targetKind === 'parent-pre-media'
+      ? validateParentTarget(missionHandle.db, input, now, platform.queue)
+      : validateMissionTarget(missionHandle.db, input, now)
+    const execution = input.targetKind === 'parent-pre-media'
+      ? validateN8nIdle(n8nHandle.db)
+      : validateN8n(n8nHandle.db, input)
+    const workspaceDigest = activeProcessGuard(input, platform.legacy.database.path, target)
     return {
       legacy: platform.legacy,
       n8n: platform.n8n,
       mission: { database: platform.legacy.database, verifier: missionHandle.verifier },
       queue: platform.queue,
       supervisor: platform.supervisor,
-      target: {
+      target: input.targetKind === 'parent-pre-media' ? target : {
         child: target.child,
         parentDigest: target.parentDigest,
         othersDigest: target.othersDigest,
@@ -1260,10 +2097,17 @@ async function createRollbackBackup(Database, evidence, input) {
   fsyncFile(snapshotPath)
   const backupDb = openDatabase(Database, snapshotPath, true)
   try {
-    const backupTarget = validateMissionTarget(backupDb.db, input, Math.floor(Date.now() / 1_000))
-    if (rowDigest(backupTarget.child) !== rowDigest(evidence.target.child)
-      || backupTarget.parentDigest !== evidence.target.parentDigest
-      || backupTarget.othersDigest !== evidence.target.othersDigest) {
+    const backupTarget = input.targetKind === 'parent-pre-media'
+      ? validateParentTarget(
+        backupDb.db, input, Math.floor(Date.now() / 1_000), null, evidence.target,
+      )
+      : validateMissionTarget(backupDb.db, input, Math.floor(Date.now() / 1_000))
+    const targetMatches = input.targetKind === 'parent-pre-media'
+      ? canonicalJson(backupTarget) === canonicalJson(evidence.target)
+      : rowDigest(backupTarget.child) === rowDigest(evidence.target.child)
+        && backupTarget.parentDigest === evidence.target.parentDigest
+        && backupTarget.othersDigest === evidence.target.othersDigest
+    if (!targetMatches) {
       fail('authoritative rollback snapshot does not match prepared state')
     }
   } finally { closeDatabase(backupDb) }
@@ -1276,14 +2120,7 @@ async function createRollbackBackup(Database, evidence, input) {
     schema: BACKUP_SCHEMA,
     createdAt: Math.floor(Date.now() / 1_000),
     nonce: backupNonce,
-    target: {
-      childRowId: input.childRowId,
-      childTaskId: input.childTaskId,
-      parentTaskId: input.parentTaskId,
-      stage: input.stage,
-      status: input.expectedStatus,
-      updatedAt: input.expectedUpdatedAt,
-    },
+    target: backupManifestTarget(input, evidence),
     members: copied.map((item, index) => ({
       name: item.name,
       bytes: item.bytes,
@@ -1317,7 +2154,31 @@ async function createRollbackBackup(Database, evidence, input) {
   }
 }
 
+function backupManifestTarget(input, evidence) {
+  if (input.targetKind === 'parent-pre-media') {
+    return {
+      targetKind: input.targetKind,
+      parentRowId: evidence.target.parent.id,
+      parentTaskId: evidence.target.parent.task_id,
+      status: evidence.target.parent.status,
+      updatedAt: evidence.target.parent.updated_at,
+      parentDigest: evidence.target.parentDigest,
+    }
+  }
+  return {
+    childRowId: input.childRowId,
+    childTaskId: input.childTaskId,
+    parentTaskId: input.parentTaskId,
+    stage: input.stage,
+    status: input.expectedStatus,
+    updatedAt: input.expectedUpdatedAt,
+  }
+}
+
 function manifestInput(input) {
+  if (input.targetKind === 'parent-pre-media') {
+    return { targetKind: input.targetKind, minimumAgeSeconds: input.minimumAgeSeconds }
+  }
   return {
     childRowId: input.childRowId,
     childTaskId: input.childTaskId,
@@ -1331,6 +2192,12 @@ function manifestInput(input) {
 }
 
 function validateManifestInput(value) {
+  if (value?.targetKind === 'parent-pre-media') {
+    exactKeys(value, ['minimumAgeSeconds', 'targetKind'], 'prepare input')
+    return parseArguments([
+      '--parent-pre-media', '--minimum-age-seconds', String(value.minimumAgeSeconds),
+    ])
+  }
   exactKeys(value, [
     'childRowId', 'childTaskId', 'executionId', 'expectedStatus', 'expectedUpdatedAt',
     'minimumAgeSeconds', 'parentTaskId', 'stage',
@@ -1368,11 +2235,16 @@ function confirmationToken(prepareSha256, backupSha256, manifest) {
 }
 
 async function createPrepare(Database, input, evidence) {
+  const toolSnapshot = createToolSnapshot()
+  const toolSha256 = toolSnapshot.digest
+  const databaseRuntimeBinding = currentDatabaseRuntimeBinding()
   const backup = await createRollbackBackup(Database, evidence, input)
   const createdAt = Math.floor(Date.now() / 1_000)
   const manifest = {
     schema: PREPARE_SCHEMA,
-    toolSha256: currentToolSha256(),
+    toolSha256,
+    parserBinding: toolSnapshot.parserBinding,
+    databaseRuntimeBinding,
     createdAt,
     expiresAt: createdAt + PREPARE_TTL_SECONDS,
     nonce: randomBytes(32).toString('hex'),
@@ -1394,7 +2266,7 @@ async function createPrepare(Database, input, evidence) {
   chmodSync(backup.backupDir, 0o500)
   fsyncDirectory(backup.backupDir)
   assertExactDirectoryMembers(backup.backupDir, PREPARE_DIRECTORY_MEMBERS, 'prepare directory')
-  const staged = loadPreparedArtifact(Database, preparePath, true)
+  const staged = loadPreparedArtifact(preparePath, true)
   if (staged.prepareSha256 !== written.sha256
     || staged.backup.sha256 !== backup.manifestSha256
     || canonicalJson(staged.manifest) !== canonicalJson(manifest)) {
@@ -1421,7 +2293,7 @@ async function createPrepare(Database, input, evidence) {
   triggerPrepareFailpoint('after-publish')
 
   const finalPreparePath = join(backup.finalDir, 'prepare-manifest.json')
-  const published = loadPreparedArtifact(Database, finalPreparePath)
+  const published = loadPreparedArtifact(finalPreparePath)
   if (published.prepareSha256 !== written.sha256
     || published.backup.sha256 !== backup.manifestSha256
     || canonicalJson(published.manifest) !== canonicalJson(manifest)) {
@@ -1458,17 +2330,27 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
     || manifest.quickCheck !== 'ok' || !Number.isSafeInteger(manifest.createdAt)) {
     fail('backup manifest identity is invalid')
   }
-  exactKeys(manifest.target, [
-    'childRowId', 'childTaskId', 'parentTaskId', 'stage', 'status', 'updatedAt',
-  ], 'backup target')
-  if (canonicalJson(manifest.target) !== canonicalJson({
-    childRowId: input.childRowId,
-    childTaskId: input.childTaskId,
-    parentTaskId: input.parentTaskId,
-    stage: input.stage,
-    status: input.expectedStatus,
-    updatedAt: input.expectedUpdatedAt,
-  })) fail('backup target does not match prepare input')
+  const expectedBackupTarget = input.targetKind === 'parent-pre-media'
+    ? {
+        targetKind: input.targetKind,
+        parentRowId: prepared.target.parent.id,
+        parentTaskId: prepared.target.parent.task_id,
+        status: prepared.target.parent.status,
+        updatedAt: prepared.target.parent.updated_at,
+        parentDigest: prepared.target.parentDigest,
+      }
+    : {
+        childRowId: input.childRowId,
+        childTaskId: input.childTaskId,
+        parentTaskId: input.parentTaskId,
+        stage: input.stage,
+        status: input.expectedStatus,
+        updatedAt: input.expectedUpdatedAt,
+      }
+  exactKeys(manifest.target, Object.keys(expectedBackupTarget), 'backup target')
+  if (canonicalJson(manifest.target) !== canonicalJson(expectedBackupTarget)) {
+    fail('backup target does not match prepare input')
+  }
   if (!Array.isArray(manifest.members) || manifest.members.length !== 4) fail('backup members are invalid')
   const expectedNames = new Set(BACKUP_MEMBER_NAMES)
   let authoritative = null
@@ -1495,10 +2377,15 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
     if (String(snapshot.db.pragma('journal_mode', { simple: true })).toLowerCase() !== 'delete') {
       fail('authoritative rollback snapshot journal mode is not self-contained')
     }
-    const target = validateMissionTarget(snapshot.db, input, prepared.createdAt)
-    if (rowDigest(target.child) !== rowDigest(prepared.target.child)
-      || target.parentDigest !== prepared.target.parentDigest
-      || target.othersDigest !== prepared.target.othersDigest) {
+    const target = input.targetKind === 'parent-pre-media'
+      ? validateParentTarget(snapshot.db, input, prepared.createdAt, null, prepared.target)
+      : validateMissionTarget(snapshot.db, input, prepared.createdAt)
+    const targetMatches = input.targetKind === 'parent-pre-media'
+      ? canonicalJson(target) === canonicalJson(prepared.target)
+      : rowDigest(target.child) === rowDigest(prepared.target.child)
+        && target.parentDigest === prepared.target.parentDigest
+        && target.othersDigest === prepared.target.othersDigest
+    if (!targetMatches) {
       fail('authoritative rollback snapshot state changed')
     }
   } finally { closeDatabase(snapshot) }
@@ -1507,7 +2394,7 @@ function validateBackupManifest(Database, directory, prepared, backupReference, 
   return { manifest, pathname, sha256: backupReference.sha256 }
 }
 
-function loadPreparedArtifact(Database, pathname, allowPending = false) {
+function loadPreparedArtifact(pathname, allowPending = false, suppliedToken = null) {
   if (basename(pathname) !== 'prepare-manifest.json') fail('prepare manifest filename is invalid')
   const directory = dirname(pathname)
   const directoryName = basename(directory)
@@ -1519,9 +2406,9 @@ function loadPreparedArtifact(Database, pathname, allowPending = false) {
   const loaded = readJsonFile(pathname, 'prepare manifest', 0o400)
   const manifest = loaded.value
   exactKeys(manifest, [
-    'backupManifest', 'createdAt', 'execution', 'expiresAt', 'handoffNonce', 'input', 'legacy',
-    'mission', 'n8n', 'nonce', 'queue', 'schema', 'supervisor', 'target', 'toolSha256', 'uid',
-    'workspaceDigest',
+    'backupManifest', 'createdAt', 'databaseRuntimeBinding', 'execution', 'expiresAt',
+    'handoffNonce', 'input', 'legacy', 'mission', 'n8n', 'nonce', 'parserBinding', 'queue',
+    'schema', 'supervisor', 'target', 'toolSha256', 'uid', 'workspaceDigest',
   ], 'prepare manifest')
   const now = Math.floor(Date.now() / 1_000)
   if (manifest.schema !== PREPARE_SCHEMA || !SHA256.test(manifest.toolSha256)
@@ -1531,45 +2418,245 @@ function loadPreparedArtifact(Database, pathname, allowPending = false) {
     || manifest.expiresAt !== manifest.createdAt + PREPARE_TTL_SECONDS || now > manifest.expiresAt) {
     fail('prepare manifest is invalid or expired')
   }
-  if (manifest.toolSha256 !== currentToolSha256()) fail('reconciliation tool changed after prepare')
-  const input = validateManifestInput(manifest.input)
-  const backup = validateBackupManifest(Database, directory, manifest, manifest.backupManifest, input)
-  const prepareSha256 = sha256(loaded.source)
-  return { manifest, input, backup, prepareSha256 }
-}
-
-function loadPreparedApply(Database, pathname, suppliedToken) {
-  const prepared = loadPreparedArtifact(Database, pathname)
-  const expectedToken = confirmationToken(
-    prepared.prepareSha256,
-    prepared.backup.sha256,
-    prepared.manifest,
+  exactKeys(manifest.backupManifest, ['name', 'sha256'], 'backup manifest reference')
+  if (manifest.backupManifest.name !== 'backup-manifest.json'
+    || !SHA256.test(manifest.backupManifest.sha256)) {
+    fail('backup manifest reference is invalid')
+  }
+  validateParserBinding(manifest.parserBinding)
+  exactKeys(
+    manifest.databaseRuntimeBinding,
+    ['executable', 'kind', 'nodeVersion', 'sqliteVersion'],
+    'database runtime binding',
   )
-  if (suppliedToken !== expectedToken) fail('confirmation token does not match immutable prepare evidence')
-  return { ...prepared, expectedToken }
+  validateFileBinding(
+    manifest.databaseRuntimeBinding.executable,
+    'database runtime executable binding',
+  )
+  const prepareSha256 = sha256(loaded.source)
+  let expectedToken = null
+  if (suppliedToken !== null) {
+    expectedToken = confirmationToken(
+      prepareSha256,
+      manifest.backupManifest.sha256,
+      manifest,
+    )
+    if (suppliedToken !== expectedToken) {
+      fail('confirmation token does not match immutable prepare evidence')
+    }
+  }
+  validateDatabaseRuntimeBinding(manifest.databaseRuntimeBinding)
+  const toolSnapshot = createToolSnapshot(manifest.parserBinding)
+  if (manifest.toolSha256 !== toolSnapshot.digest) {
+    fail('reconciliation tool changed after prepare (entry or dependency closure)')
+  }
+  const input = validateManifestInput(manifest.input)
+  const Database = loadDatabase()
+  const backup = validateBackupManifest(Database, directory, manifest, manifest.backupManifest, input)
+  return { manifest, input, backup, prepareSha256, toolSnapshot, expectedToken, Database }
 }
 
-function reconcileInsideImmediate(Database, evidence, input) {
+function loadPreparedApply(pathname, suppliedToken) {
+  return loadPreparedArtifact(pathname, false, suppliedToken)
+}
+
+async function reconcileParentInsideImmediate(Database, evidence, input, toolSnapshot) {
+  let submissionLock = null
+  let missionHandle = null
+  let mission = null
+  let n8nHandle = null
+  let missionLocked = false
+  let n8nLocked = false
+  let committed = false
+  try {
+    const batchRoot = evidence.supervisor?.batchRoot
+    if (!batchRoot || canonicalJson(identity(batchRoot.path, 'video batch root', 'directory'))
+      !== canonicalJson(batchRoot)) {
+      fail('video batch root identity changed before submission lock')
+    }
+    safeEntry(batchRoot.path, 'video batch root', 'directory', 0o700)
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_SUBMISSION_LOCK_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_SUBMISSION_LOCK_COMMAND', ''), [],
+        'test pre-submission-lock hook',
+      )
+    }
+    submissionLock = await acquireVerifiedSubmissionLock(toolSnapshot, batchRoot.path)
+    if (canonicalJson(identity(batchRoot.path, 'video batch root', 'directory'))
+      !== canonicalJson(batchRoot)) {
+      fail('video batch root identity changed while acquiring submission lock')
+    }
+    missionHandle = openDatabase(Database, evidence.mission.database.path, false)
+    mission = missionHandle.db
+    mission.pragma('busy_timeout = 5000')
+    mission.exec('BEGIN IMMEDIATE')
+    missionLocked = true
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND', ''), [],
+        'test post-Mission-lock hook',
+      )
+    }
+    n8nHandle = openDatabase(Database, evidence.n8n.database.path, false)
+    n8nHandle.db.pragma('busy_timeout = 5000')
+    n8nHandle.db.exec('BEGIN IMMEDIATE')
+    n8nLocked = true
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND', ''), [],
+        'test post-dual-lock hook',
+      )
+    }
+
+    const firstQueue = await queueState()
+    if (canonicalJson(firstQueue) !== canonicalJson(evidence.queue)) {
+      fail('persistent queue changed inside the write boundary')
+    }
+    const now = Math.floor(Date.now() / 1_000)
+    const target = validateParentTarget(mission, input, now, firstQueue, evidence.target)
+    if (canonicalJson(target) !== canonicalJson(evidence.target)) {
+      fail('Mission Control state changed after confirmation')
+    }
+    if (canonicalJson(validateN8nIdle(n8nHandle.db)) !== canonicalJson(evidence.execution)) {
+      fail('n8n execution changed after confirmation')
+    }
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_BETWEEN_LOCKED_QUEUE_SAMPLES_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_BETWEEN_LOCKED_QUEUE_SAMPLES_COMMAND', ''), [],
+        'test locked-queue race hook',
+      )
+    }
+    const secondQueue = await queueState()
+    if (canonicalJson(secondQueue) !== canonicalJson(firstQueue)) {
+      fail('persistent queue changed between locked write-boundary samples')
+    }
+    const secondTarget = validateParentTarget(mission, input, now, secondQueue, evidence.target)
+    if (canonicalJson(secondTarget) !== canonicalJson(target)) {
+      fail('parent target changed between locked write-boundary samples')
+    }
+    activeProcessGuard(input, evidence.mission.database.path, secondTarget)
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_LOCKED_QUEUE_SAMPLES_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_LOCKED_QUEUE_SAMPLES_COMMAND', ''), [],
+        'test post-locked-queue-samples hook',
+      )
+    }
+
+    const parent = evidence.target.parent
+    const error = `[${PARENT_ERROR_CODE}] n8n 视频任务已受理，但在 ${input.minimumAgeSeconds} 秒内未建立媒体处理阶段`
+    const result = mission.prepare(`
+      UPDATE n8n_task_runs
+      SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+      WHERE id = ? AND task_id = ? AND source = ? AND status = ? AND updated_at = ?
+        AND routing = ? AND binding_id = ? AND workspace_id = ? AND tenant_id = ?
+        AND idempotency_key = ?
+    `).run(
+      error, now, now,
+      parent.id, parent.task_id, parent.source, parent.status, parent.updated_at,
+      parent.routing, parent.binding_id, parent.workspace_id, parent.tenant_id,
+      parent.idempotency_key,
+    )
+    if (result.changes !== 1) fail('parent compare-and-swap update did not affect exactly one row')
+    const updated = mission.prepare('SELECT * FROM n8n_task_runs WHERE id = ?').get(parent.id)
+    const others = mission.prepare('SELECT * FROM n8n_task_runs WHERE id <> ? ORDER BY id').all(parent.id)
+    const childTaskIds = ['prepare', 'audio', 'vision', 'finalize']
+      .map(stage => mediaChildTaskId(parent.task_id, stage))
+    const placeholders = childTaskIds.map(() => '?').join(', ')
+    const children = mission.prepare(`
+      SELECT id FROM n8n_task_runs WHERE task_id IN (${placeholders})
+    `).all(...childTaskIds)
+    const activeMedia = Number(mission.prepare(`
+      SELECT COUNT(*) AS count FROM n8n_task_runs
+      WHERE source = 'n8n-media-node' AND status IN ('queued', 'accepted', 'running')
+    `).get().count)
+    const activeModel = Number(mission.prepare(`
+      SELECT COUNT(*) AS count FROM n8n_task_runs
+      WHERE source = 'n8n-node' AND status IN ('queued', 'accepted', 'running')
+    `).get().count)
+    const intake = parentIntakeState(mission)
+    const ancillary = parentAncillaryState(mission, parent, childTaskIds)
+    if (!updated || updated.status !== 'failed' || updated.error !== error
+      || updated.completed_at !== now || updated.updated_at !== now
+      || children.length !== 0 || activeMedia !== 0 || activeModel !== 0
+      || rowDigest(others) !== evidence.target.othersDigest
+      || canonicalJson(intake) !== canonicalJson(evidence.target.intake)
+      || canonicalJson(ancillary) !== canonicalJson(evidence.target.ancillary)) {
+      fail('write-back verification detected an unexpected parent or related-state change')
+    }
+    const unchanged = {
+      ...updated,
+      status: parent.status,
+      error: parent.error,
+      completed_at: parent.completed_at,
+      updated_at: parent.updated_at,
+    }
+    if (rowDigest(unchanged) !== evidence.target.parentDigest) {
+      fail('fields outside the controlled parent transition changed')
+    }
+    if (mission.pragma('quick_check', { simple: true }) !== 'ok') fail('post-write quick_check failed')
+    mission.exec('COMMIT')
+    committed = true
+    missionLocked = false
+    n8nHandle.db.exec('ROLLBACK')
+    n8nLocked = false
+    return updated
+  } finally {
+    if (n8nLocked) {
+      try { n8nHandle.db.exec('ROLLBACK') } catch {}
+    }
+    if (missionLocked && !committed && mission) {
+      try { mission.exec('ROLLBACK') } catch {}
+    }
+    try {
+      if (n8nHandle) closeDatabase(n8nHandle)
+    } finally {
+      try {
+        if (missionHandle) closeDatabase(missionHandle)
+      } finally {
+        if (submissionLock) await submissionLock.release()
+      }
+    }
+  }
+}
+
+function reconcileChildInsideImmediate(Database, evidence, input) {
   const missionHandle = openDatabase(Database, evidence.mission.database.path, false)
   const mission = missionHandle.db
+  let n8nHandle = null
+  let missionLocked = false
+  let n8nLocked = false
   let committed = false
   try {
     mission.pragma('busy_timeout = 5000')
     mission.exec('BEGIN IMMEDIATE')
+    missionLocked = true
     const now = Math.floor(Date.now() / 1_000)
-    activeProcessGuard(input, evidence.mission.database.path)
     const target = validateMissionTarget(mission, input, now)
-    if (rowDigest(target.child) !== rowDigest(evidence.target.child)
-      || target.parentDigest !== evidence.target.parentDigest
-      || target.othersDigest !== evidence.target.othersDigest) {
-      fail('Mission Control state changed after confirmation')
+    activeProcessGuard(input, evidence.mission.database.path, target)
+    const targetMatches = rowDigest(target.child) === rowDigest(evidence.target.child)
+      && target.parentDigest === evidence.target.parentDigest
+      && target.othersDigest === evidence.target.othersDigest
+    if (!targetMatches) fail('Mission Control state changed after confirmation')
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND', ''), [],
+        'test post-Mission-Control-lock hook',
+      )
     }
-    const n8n = openDatabase(Database, evidence.n8n.database.path, true)
-    try {
-      if (canonicalJson(validateN8n(n8n.db, input)) !== canonicalJson(evidence.execution)) {
-        fail('n8n execution changed after confirmation')
-      }
-    } finally { closeDatabase(n8n) }
+    n8nHandle = openDatabase(Database, evidence.n8n.database.path, false)
+    n8nHandle.db.pragma('busy_timeout = 5000')
+    n8nHandle.db.exec('BEGIN IMMEDIATE')
+    n8nLocked = true
+    const execution = validateN8n(n8nHandle.db, input)
+    if (canonicalJson(execution) !== canonicalJson(evidence.execution)) {
+      fail('n8n execution changed after confirmation')
+    }
+    if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND) {
+      run(
+        testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND', ''), [],
+        'test post-dual-lock hook',
+      )
+    }
     const error = `[${ERROR_CODE}] 历史媒体子记录已在父任务和对应执行终态、无运行资源时受管收敛`
     const result = mission.prepare(`
       UPDATE n8n_task_runs
@@ -1603,16 +2690,30 @@ function reconcileInsideImmediate(Database, evidence, input) {
     if (mission.pragma('quick_check', { simple: true }) !== 'ok') fail('post-write quick_check failed')
     mission.exec('COMMIT')
     committed = true
+    missionLocked = false
+    n8nHandle.db.exec('ROLLBACK')
+    n8nLocked = false
     return updated
   } finally {
-    if (!committed) {
+    if (n8nLocked) {
+      try { n8nHandle.db.exec('ROLLBACK') } catch {}
+    }
+    if (missionLocked && !committed) {
       try { mission.exec('ROLLBACK') } catch {}
     }
-    closeDatabase(missionHandle)
+    try {
+      if (n8nHandle) closeDatabase(n8nHandle)
+    } finally { closeDatabase(missionHandle) }
   }
 }
 
-function verifyPostCommitZero(Database, platform, input) {
+async function reconcileInsideImmediate(Database, evidence, input, toolSnapshot) {
+  return input.targetKind === 'parent-pre-media'
+    ? reconcileParentInsideImmediate(Database, evidence, input, toolSnapshot)
+    : reconcileChildInsideImmediate(Database, evidence, input)
+}
+
+function verifyPostCommitZero(Database, platform, input, target) {
   const mission = openDatabase(Database, platform.legacy.database.path, true)
   const n8n = openDatabase(Database, platform.n8n.database.path, true)
   try {
@@ -1621,8 +2722,17 @@ function verifyPostCommitZero(Database, platform, input) {
       WHERE source = 'n8n-media-node' AND status IN ('queued', 'accepted', 'running')
     `).get().count)
     if (mediaActive !== 0) fail('post-commit media active count did not reach zero')
-    validateN8n(n8n.db, input)
-    activeProcessGuard(input, platform.legacy.database.path)
+    if (input.targetKind === 'parent-pre-media') {
+      const modelActive = Number(mission.db.prepare(`
+        SELECT COUNT(*) AS count FROM n8n_task_runs
+        WHERE source = 'n8n-node' AND status IN ('queued', 'accepted', 'running')
+      `).get().count)
+      if (modelActive !== 0) fail('post-commit model active count did not reach zero')
+      validateN8nIdle(n8n.db)
+    } else {
+      validateN8n(n8n.db, input)
+    }
+    activeProcessGuard(input, platform.legacy.database.path, target)
   } finally {
     closeDatabase(mission)
     closeDatabase(n8n)
@@ -1632,38 +2742,43 @@ function verifyPostCommitZero(Database, platform, input) {
 async function main() {
   const argumentsValue = parseArguments(process.argv.slice(2))
   safeEntry(REPOSITORY_ROOT, 'repository root', 'directory')
-  const Database = loadDatabase()
   if (argumentsValue.mode !== 'apply') {
+    const Database = loadDatabase()
     const evidence = await stableLiveState(Database, argumentsValue)
     if (argumentsValue.mode === 'dry-run') {
-      process.stdout.write(`${JSON.stringify({
-        mode: 'dry-run',
-        eligible: true,
-        childRowId: argumentsValue.childRowId,
-        stage: argumentsValue.stage,
-        prepareRequired: true,
-      })}\n`)
+      const output = argumentsValue.targetKind === 'parent-pre-media'
+        ? { mode: 'dry-run', eligible: true, targetKind: 'parent-pre-media', prepareRequired: true }
+        : {
+            mode: 'dry-run',
+            eligible: true,
+            childRowId: argumentsValue.childRowId,
+            stage: argumentsValue.stage,
+            prepareRequired: true,
+          }
+      process.stdout.write(`${JSON.stringify(output)}\n`)
       return
     }
     const prepared = await createPrepare(Database, argumentsValue, evidence)
-    process.stdout.write(`${JSON.stringify({
+    const output = {
       mode: 'prepare',
       eligible: true,
-      childRowId: argumentsValue.childRowId,
-      stage: argumentsValue.stage,
+      ...(argumentsValue.targetKind === 'parent-pre-media'
+        ? { targetKind: 'parent-pre-media' }
+        : { childRowId: argumentsValue.childRowId, stage: argumentsValue.stage }),
       expiresAt: prepared.manifest.expiresAt,
       prepareManifest: prepared.path,
       prepareManifestSha256: prepared.sha256,
       backupManifestSha256: prepared.backup.manifestSha256,
       confirmationToken: prepared.token,
-    })}\n`)
+    }
+    process.stdout.write(`${JSON.stringify(output)}\n`)
     return
   }
   const prepared = loadPreparedApply(
-    Database,
     argumentsValue.prepareManifest,
     argumentsValue.confirmToken,
   )
+  const Database = prepared.Database
   const expected = preparedEvidence(prepared.manifest)
   const live = await stableLiveState(Database, prepared.input)
   if (canonicalJson(live) !== canonicalJson(expected)) {
@@ -1672,7 +2787,7 @@ async function main() {
   if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_WRITE_COMMAND) {
     run(testPath('AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_WRITE_COMMAND', ''), [], 'test pre-write hook')
   }
-  const finalPlatform = await capturePlatform()
+  const finalPlatform = await capturePlatform(prepared.input)
   if (canonicalJson({
     legacy: finalPlatform.legacy,
     n8n: finalPlatform.n8n,
@@ -1684,35 +2799,54 @@ async function main() {
     queue: expected.queue,
     supervisor: expected.supervisor,
   })) fail('runtime or external gate state changed immediately before write')
-  const updated = reconcileInsideImmediate(Database, expected, prepared.input)
-  const postPlatform = await capturePlatform()
+  const updated = await reconcileInsideImmediate(
+    Database,
+    expected,
+    prepared.input,
+    prepared.toolSnapshot,
+  )
+  if (TEST_MODE && process.env.AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND) {
+    run(testPath('AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND', ''), [], 'test post-commit hook')
+  }
+  const postPlatform = await capturePlatform(prepared.input)
   if (canonicalJson({ legacy: finalPlatform.legacy, n8n: finalPlatform.n8n,
     supervisor: finalPlatform.supervisor }) !== canonicalJson({
     legacy: postPlatform.legacy, n8n: postPlatform.n8n, supervisor: postPlatform.supervisor,
   })) fail('runtime identity changed after commit')
-  verifyPostCommitZero(Database, postPlatform, prepared.input)
+  if (prepared.input.targetKind === 'parent-pre-media'
+    && (postPlatform.queue.attention !== 0 || postPlatform.queue.waiting !== 0
+      || postPlatform.queue.running !== 0 || postPlatform.queue.total !== 0)) {
+    fail('post-commit parent queue state did not reach zero')
+  }
+  verifyPostCommitZero(Database, postPlatform, prepared.input, expected.target)
   const post = openDatabase(Database, finalPlatform.legacy.database.path, true)
   try {
+    const rowId = prepared.input.targetKind === 'parent-pre-media'
+      ? expected.target.parent.id
+      : prepared.input.childRowId
+    const errorCode = prepared.input.targetKind === 'parent-pre-media' ? PARENT_ERROR_CODE : ERROR_CODE
     const row = post.db.prepare('SELECT status, error, completed_at, updated_at FROM n8n_task_runs WHERE id = ?')
-      .get(prepared.input.childRowId)
-    if (!row || row.status !== 'failed' || !String(row.error || '').startsWith(`[${ERROR_CODE}]`)
+      .get(rowId)
+    if (!row || row.status !== 'failed' || !String(row.error || '').startsWith(`[${errorCode}]`)
       || row.completed_at === null || row.updated_at !== updated.updated_at
       || post.db.pragma('quick_check', { simple: true }) !== 'ok') {
-      fail('committed child state or quick_check could not be verified')
+      fail('committed target state or quick_check could not be verified')
     }
   } finally { closeDatabase(post) }
-  process.stdout.write(`${JSON.stringify({
+  const output = {
     mode: 'apply',
     reconciled: true,
-    childRowId: prepared.input.childRowId,
-    stage: prepared.input.stage,
+    ...(prepared.input.targetKind === 'parent-pre-media'
+      ? { targetKind: 'parent-pre-media' }
+      : { childRowId: prepared.input.childRowId, stage: prepared.input.stage }),
     handoffNonce: prepared.manifest.handoffNonce,
     postApplyQueueDigestSha256: postPlatform.queue.digest,
     backupManifestSha256: prepared.backup.sha256,
     othersDigest: prepared.manifest.target.othersDigest,
     handoffReady: false,
     releaseDecision: 'NO-GO',
-  })}\n`)
+  }
+  process.stdout.write(`${JSON.stringify(output)}\n`)
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {

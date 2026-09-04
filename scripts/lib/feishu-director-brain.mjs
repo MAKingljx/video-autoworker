@@ -242,9 +242,36 @@ const LONG_PROPOSAL_TEXT_FIELDS = new Set([
   'narrative_plans:故事脚本',
   'skills_techniques:执行方法',
 ])
-const LEARNING_CONTEXT_MAX_RECORDS_PER_TABLE = 200
-const LEARNING_CONTEXT_MAX_RECORDS = 600
 const LEARNING_CONTEXT_MAX_OUTPUT_BYTES = 240 * 1024
+const LEARNING_CONTEXT_MAX_CANDIDATES_PER_TABLE = 8
+const LEARNING_CONTEXT_QUERY_PAGE_SIZE = 50
+const LEARNING_CONTEXT_MAX_QUERY_PAGES = 2
+const LEARNING_CONTEXT_MAX_OBJECTIVE_TERMS = 4
+const LEARNING_CONTEXT_MAX_REMOTE_REQUESTS = 48
+const LEARNING_CONTEXT_REFERENCE_BATCH_SIZE = 20
+const LEARNING_CONTEXT_PHASE_PLAN = Object.freeze({
+  perception: { work: [], project: [], requireIntent: false },
+  understanding: {
+    work: ['people_profiles', 'story_nodes'], project: [], requireIntent: false,
+  },
+  judgment: {
+    work: [
+      'people_profiles', 'story_nodes', 'story_relations', 'material_judgments',
+      'narrative_plans',
+    ],
+    project: ['skills_techniques'],
+    requireIntent: true,
+  },
+  case: {
+    work: ['story_relations', 'material_judgments', 'narrative_plans', 'director_cases'],
+    project: [],
+    requireIntent: false,
+  },
+  technique: {
+    work: ['director_cases'], project: ['director_cases', 'skills_techniques'],
+    requireIntent: false,
+  },
+})
 const MAX_SEARCH_QUERY_LENGTH = 240
 const MAX_SEARCH_LIMIT = 20
 const MAX_OPERATION_BATCH_ITEMS = 20
@@ -2414,6 +2441,71 @@ export function exactRecordFilter(fieldName, value) {
   return 'CurrentValue.[' + fieldName + ']="' + filterLiteral(value) + '"'
 }
 
+function formulaAnd(parts) {
+  const values = parts.filter(Boolean)
+  if (!values.length) throw new Error('learning_context_filter_empty')
+  return values.length === 1 ? values[0] : 'AND(' + values.join(',') + ')'
+}
+
+function formulaOr(parts) {
+  const values = parts.filter(Boolean)
+  if (!values.length) throw new Error('learning_context_filter_empty')
+  return values.length === 1 ? values[0] : 'OR(' + values.join(',') + ')'
+}
+
+function learningObjectiveTerms(value) {
+  const normalized = String(value || '').normalize('NFKC').toLocaleLowerCase('zh-CN').trim()
+  if (!normalized) return []
+  const ignored = new Set(['提炼', '整理', '复核', '候选', '导演', '知识', '素材'])
+  const segmented = normalized.replace(
+    /寻找|发现|分析|判断|当前|如何|面对|关于|相关|其中|这个|这些|一种|一段|是否|为什么|怎么|时|的/gu,
+    ' ',
+  )
+  const tokens = segmented.match(/[\p{L}\p{N}]{2,24}/gu) || []
+  const terms = []
+  for (const token of tokens) {
+    if (ignored.has(token) || terms.includes(token)) continue
+    terms.push(token)
+    if (terms.length >= LEARNING_CONTEXT_MAX_OBJECTIVE_TERMS) return terms
+  }
+  return terms
+}
+
+function learningTextFields(table) {
+  const preferred = new Set([
+    '意图名称', '核心主题', '导演态度', '人物名称', '身份', '目标', '欲望', '恐惧',
+    '矛盾', '情绪变化', '人物弧光', '节点名称', '节点类型', '节点内容', '变化',
+    '关系名称', '关系类型', '判断理由', '判断名称', '使用理由', '建议位置',
+    '方案名称', '人物线', '事件线', '情绪线', '主题线', '冲突线', '结构说明',
+    '案例名称', '上下文', '导演动作', '判断原因', '知识名称', '知识类型',
+    '知识分类', '适用条件', '执行方法', '为什么有效', '例外情况',
+  ])
+  return table.fields
+    .filter(field => Number(field.type) === 1 && preferred.has(field.name))
+    .map(field => field.name)
+}
+
+function reviewedStateFilter(table) {
+  const stateField = statusFieldForTable(table)
+  const states = [...(REVIEWED_STATUSES_BY_TABLE[table.key] || [])]
+  if (!stateField || !states.length) throw new Error('learning_context_review_state_missing:' + table.key)
+  return formulaOr(states.map(state => exactRecordFilter(stateField.name, state)))
+}
+
+export function learningContextCandidateFilter({ table, projectId, workId, terms = [] }) {
+  const scope = [exactRecordFilter('项目 ID', projectId), reviewedStateFilter(table)]
+  if (workId) scope.push(exactRecordFilter('作品 ID', workId))
+  if (terms.length) {
+    const fields = learningTextFields(table)
+    if (fields.length) {
+      scope.push(formulaOr(terms.flatMap(term => fields.map(field => (
+        'SEARCH("' + filterLiteral(term) + '",CurrentValue.[' + field + '])>0'
+      )))))
+    }
+  }
+  return formulaAnd(scope)
+}
+
 function assertNoSecrets(fields) {
   for (const [name, value] of Object.entries(fields)) {
     if (SECRET_FIELD_PATTERN.test(name)) throw new Error('secret_field_forbidden:' + name)
@@ -3243,10 +3335,201 @@ function sortedOperationRecords(records) {
   return [...records].sort((left, right) => left.stableId.localeCompare(right.stableId))
 }
 
-function assertLearningContextTableLimit(tableKey, records) {
-  if (records.length > LEARNING_CONTEXT_MAX_RECORDS_PER_TABLE) {
-    throw new Error('learning_context_table_limit_exceeded:' + tableKey)
+function learningRequestBudget() {
+  let used = 0
+  return {
+    get used() { return used },
+    async run(maximum, action) {
+      if (!Number.isSafeInteger(maximum) || maximum < 1
+        || used + maximum > LEARNING_CONTEXT_MAX_REMOTE_REQUESTS) {
+        throw new Error('learning_context_request_budget_exceeded')
+      }
+      const result = await action()
+      const observed = Number(result?.requestCount)
+      if (!Number.isSafeInteger(observed) || observed < 1 || observed > maximum) {
+        throw new Error('learning_context_request_count_invalid')
+      }
+      used += observed
+      return result
+    },
   }
+}
+
+function learningRecordRelevance(record, terms) {
+  if (!terms.length) return 0
+  const text = JSON.stringify(record.fields).normalize('NFKC').toLocaleLowerCase('zh-CN')
+  return terms.reduce((score, term) => score + (text.includes(term) ? term.length : 0), 0)
+}
+
+function rankLearningCandidates(records, terms) {
+  const previousIds = new Set(records.map(record => String(record.fields['上一版本 ID'] || '').trim())
+    .filter(Boolean))
+  return [...records].sort((left, right) => (
+    Number(!previousIds.has(right.stableId)) - Number(!previousIds.has(left.stableId))
+    || learningRecordRelevance(right, terms) - learningRecordRelevance(left, terms)
+    || Number(right.fields['更新时间'] || 0) - Number(left.fields['更新时间'] || 0)
+    || left.stableId.localeCompare(right.stableId)
+  ))
+}
+
+async function loadLearningCandidates({
+  context, dependencies, budget, tableKey, workId, terms, limit,
+}) {
+  const table = operationTable(context.schema, tableKey)
+  const { tableId } = tableContext(context.schema, context.catalog, table.key)
+  const query = async queryTerms => budget.run(LEARNING_CONTEXT_MAX_QUERY_PAGES, () => (
+    dependencies.queryLearning({
+      context, table, tableId, workId, terms: queryTerms,
+    })
+  ))
+  let result = await query(terms)
+  if (!Array.isArray(result.records)) throw new Error('operation_dependency_result_invalid')
+  if (terms.length && result.records.length === 0) result = await query([])
+  if (!Array.isArray(result.records)) throw new Error('operation_dependency_result_invalid')
+  const normalized = result.records.map(record => operationRecord(table, record))
+  assertUniqueOperationStableIds(table, normalized)
+  for (const record of normalized) assertOperationRecordScope(context, table, record, workId)
+  return rankLearningCandidates(normalized.filter(record => record.reviewed), terms).slice(0, limit)
+}
+
+function learningRecordReferences(tableKey, record) {
+  const rule = tableKey === 'material_evidence'
+    ? { optional: { previousEvidenceId: ['material_evidence', '上一版本 ID'] } }
+    : (PROPOSAL_REFERENCE_RULES[tableKey] || {})
+  const references = []
+  for (const groupName of ['required', 'optional']) {
+    for (const [, [targetTable, fieldName]] of Object.entries(rule[groupName] || {})) {
+      const stableId = String(record.fields[fieldName] || '').trim()
+      if (stableId) references.push([targetTable, stableId])
+    }
+  }
+  for (const groupName of ['requiredMany', 'optionalMany']) {
+    for (const [, [targetTable, fieldName]] of Object.entries(rule[groupName] || {})) {
+      references.push(...splitStoredReferences(record.fields[fieldName])
+        .map(stableId => [targetTable, stableId]))
+    }
+  }
+  return references
+}
+
+async function loadLearningReferenceClosure({ context, dependencies, budget, seeds }) {
+  const cache = new Map()
+  const pending = new Map()
+  const enqueue = (tableKey, stableId) => {
+    const key = tableKey + ':' + stableId
+    if (cache.has(key)) return
+    if (!pending.has(tableKey)) pending.set(tableKey, new Set())
+    pending.get(tableKey).add(stableId)
+  }
+  const remember = (tableKey, record) => {
+    const key = tableKey + ':' + record.stableId
+    const previous = cache.get(key)
+    if (previous && canonicalJson(previous) !== canonicalJson(record)) {
+      throw new Error('duplicate_stable_record_id:' + tableKey + ':' + record.stableId)
+    }
+    cache.set(key, record)
+    for (const [targetTable, stableId] of learningRecordReferences(tableKey, record)) {
+      enqueue(targetTable, stableId)
+    }
+  }
+  for (const [tableKey, records] of Object.entries(seeds)) {
+    for (const record of records) remember(tableKey, record)
+  }
+  while ([...pending.values()].some(stableIds => stableIds.size > 0)) {
+    const [tableKey, stableIds] = [...pending.entries()]
+      .find(([, values]) => values.size > 0)
+    const requested = [...stableIds].filter(stableId => !cache.has(tableKey + ':' + stableId))
+    stableIds.clear()
+    if (!requested.length) continue
+    const table = operationTable(context.schema, tableKey)
+    const { tableId } = tableContext(context.schema, context.catalog, table.key)
+    const maximum = Math.ceil(requested.length / LEARNING_CONTEXT_REFERENCE_BATCH_SIZE)
+    const result = await budget.run(maximum, () => dependencies.findMany({
+      context, table, tableId, stableIds: requested,
+    }))
+    if (!Array.isArray(result.records)) throw new Error('operation_dependency_result_invalid')
+    const normalized = result.records.map(record => operationRecord(table, record))
+    assertUniqueOperationStableIds(table, normalized)
+    const requestedSet = new Set(requested)
+    for (const record of normalized) {
+      if (!requestedSet.has(record.stableId)) {
+        throw new Error('learning_context_reference_result_unexpected:' + tableKey)
+      }
+      assertOperationRecordScope(context, table, record)
+      remember(tableKey, record)
+    }
+  }
+  return cache
+}
+
+function learningReferenceWorkIsValid(sourceTableKey, sourceRecord, targetTableKey, targetRecord) {
+  if (sourceTableKey === 'works' && targetTableKey === 'works') return true
+  if (GLOBAL_KNOWLEDGE_TABLES.has(sourceTableKey)) {
+    if (sourceTableKey === 'skills_techniques' && targetTableKey === 'director_cases') {
+      const sourceWorkIds = splitStoredReferences(sourceRecord.fields['来源作品 ID'])
+      const targetWorkId = String(targetRecord.fields['作品 ID'] || '').trim()
+      return Boolean(targetWorkId) && sourceWorkIds.includes(targetWorkId)
+    }
+    return GLOBAL_KNOWLEDGE_TABLES.has(targetTableKey)
+  }
+  if (GLOBAL_KNOWLEDGE_TABLES.has(targetTableKey)) return true
+  const sourceWorkId = String(sourceRecord.fields['作品 ID'] || '').trim()
+  const targetWorkId = targetTableKey === 'works'
+    ? targetRecord.stableId
+    : String(targetRecord.fields['作品 ID'] || '').trim()
+  return Boolean(sourceWorkId) && sourceWorkId === targetWorkId
+}
+
+function learningRecordWorkReferencesValid(tableKey, record, cache) {
+  const references = learningRecordReferences(tableKey, record)
+  for (const [targetTableKey, stableId] of references) {
+    const target = cache.get(targetTableKey + ':' + stableId)
+    if (target && !learningReferenceWorkIsValid(tableKey, record, targetTableKey, target)) {
+      return false
+    }
+  }
+  if (tableKey === 'skills_techniques') {
+    const caseIds = splitStoredReferences(record.fields['案例 ID'])
+    const cases = caseIds.map(stableId => cache.get('director_cases:' + stableId)).filter(Boolean)
+    if (cases.length === caseIds.length) {
+      const caseWorkIds = [...new Set(cases.map(candidate => String(
+        candidate.fields['作品 ID'] || '',
+      ).trim()))].filter(Boolean).sort()
+      if (!sameStableIdSet(
+        caseWorkIds,
+        splitStoredReferences(record.fields['来源作品 ID']).sort(),
+      )) return false
+    }
+  }
+  return true
+}
+
+function learningClosureTables(cache) {
+  const all = Object.fromEntries([
+    'works', 'director_intents', 'material_evidence', 'people_profiles', 'story_nodes',
+    'story_relations', 'material_judgments', 'narrative_plans', 'director_cases',
+    'skills_techniques',
+  ].map(tableKey => [tableKey, []]))
+  for (const [key, record] of cache) all[key.slice(0, key.indexOf(':'))].push(record)
+  return all
+}
+
+function validLearningTechniques(records, allRecords, validIds) {
+  return records.filter(record => {
+    if (!validIds.has(record.stableId)) return false
+    const caseIds = splitStoredReferences(record.fields['案例 ID']).sort()
+    if (!caseIds.length) return false
+    const cases = caseIds.map(caseId => allRecords.director_cases
+      .find(candidate => candidate.stableId === caseId && candidate.reviewed))
+    if (cases.some(recordValue => !recordValue)) return false
+    const sourceWorkIds = [...new Set(cases.map(recordValue => String(
+      recordValue.fields['作品 ID'] || '',
+    ).trim()))].filter(Boolean).sort()
+    return sameStableIdSet(
+      sourceWorkIds,
+      splitStoredReferences(record.fields['来源作品 ID']).sort(),
+    )
+  })
 }
 
 function previousVersionIsValid(record, historicalIds) {
@@ -3823,6 +4106,77 @@ async function findExactOperationRecords({ context, table, tableId, stableId }) 
   return exact
 }
 
+export async function queryLearningCandidates(
+  { context, table, tableId, workId, terms },
+  requester = requestJson,
+) {
+  const records = []
+  let pageToken = null
+  let requestCount = 0
+  let hasMore = false
+  const filter = learningContextCandidateFilter({
+    table,
+    projectId: context.schema.projectId,
+    workId,
+    terms,
+  })
+  do {
+    const response = await requester(
+      'GET',
+      '/bitable/v1/apps/' + context.catalog.appToken + '/tables/' + tableId + '/records',
+      {
+        accessToken: context.accessToken,
+        query: {
+          page_size: LEARNING_CONTEXT_QUERY_PAGE_SIZE,
+          filter,
+          sort: '["更新时间 DESC"]',
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      },
+    )
+    requestCount += 1
+    const data = response.data || {}
+    const items = Array.isArray(data.items) ? data.items : []
+    records.push(...items)
+    hasMore = data.has_more === true
+    if (!hasMore || requestCount >= LEARNING_CONTEXT_MAX_QUERY_PAGES) break
+    pageToken = data.page_token
+    if (!pageToken) throw new Error('feishu_page_token_missing')
+  } while (pageToken)
+  return {
+    records,
+    truncated: hasMore,
+    requestCount,
+  }
+}
+
+export async function findManyOperationRecords(
+  { context, table, tableId, stableIds },
+  requester = requestJson,
+) {
+  const records = []
+  let requestCount = 0
+  for (let offset = 0; offset < stableIds.length; offset += LEARNING_CONTEXT_REFERENCE_BATCH_SIZE) {
+    const batch = stableIds.slice(offset, offset + LEARNING_CONTEXT_REFERENCE_BATCH_SIZE)
+    const response = await requester(
+      'GET',
+      '/bitable/v1/apps/' + context.catalog.appToken + '/tables/' + tableId + '/records',
+      {
+        accessToken: context.accessToken,
+        query: {
+          page_size: LEARNING_CONTEXT_REFERENCE_BATCH_SIZE,
+          filter: formulaOr(batch.map(stableId => exactRecordFilter(table.stableId, stableId))),
+        },
+      },
+    )
+    requestCount += 1
+    const data = response.data || {}
+    records.push(...(Array.isArray(data.items) ? data.items : []))
+    if (data.has_more === true) throw new Error('learning_context_reference_batch_ambiguous')
+  }
+  return { records, requestCount }
+}
+
 async function searchOperationRecords({ context, table, tableId, query, status, limit, workId }) {
   const records = []
   const stableIds = new Set()
@@ -4306,6 +4660,8 @@ function operationDependencies(options) {
   return {
     connect: supplied.connect || connectedContext,
     findExact: supplied.findExact || findExactOperationRecords,
+    findMany: supplied.findMany || findManyOperationRecords,
+    queryLearning: supplied.queryLearning || queryLearningCandidates,
     search: supplied.search || searchOperationRecords,
     findByWork: supplied.findByWork || findOperationRecordsByWork,
     listAll: supplied.listAll || listAllOperationRecords,
@@ -5332,8 +5688,12 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     normalizeWorkflowObjective(request.objective)
   } else if (request.action === 'learning_context') {
     assertSafeOperationContent(request, 'request')
-    assertOperationKeys(request, new Set(['action', 'workId']))
+    assertOperationKeys(request, new Set(['action', 'workId', 'phase', 'objective']))
     validateOperationStableId(request.workId)
+    if (!Object.hasOwn(LEARNING_CONTEXT_PHASE_PLAN, request.phase)) {
+      throw new Error('learning_context_phase_invalid')
+    }
+    normalizeWorkflowObjective(request.objective)
   } else if (request.action === 'propose_batch') {
     validateProposalBatchRequest(request)
   } else {
@@ -5580,108 +5940,112 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
 
   if (request.action === 'learning_context') {
     const workId = validateOperationStableId(request.workId)
-    await loadReviewedReference(context, dependencies, 'works', workId, workId)
-
-    const workTableKeys = [
-      'director_intents', 'material_evidence', 'people_profiles', 'story_nodes',
-      'story_relations', 'material_judgments', 'narrative_plans', 'director_cases',
-    ]
-    const reviewedByWork = {}
-    const allByWork = {}
-    let scannedRecordCount = 0
-    for (const tableKey of workTableKeys) {
-      const table = operationTable(context.schema, tableKey)
-      const { tableId } = tableContext(context.schema, context.catalog, table.key)
-      const rawRecords = await dependencies.findByWork({ context, table, tableId, workId })
-      if (!Array.isArray(rawRecords)) throw new Error('operation_dependency_result_invalid')
-      assertLearningContextTableLimit(table.key, rawRecords)
-      scannedRecordCount += rawRecords.length
-      const records = rawRecords.map(record => operationRecord(table, record))
-      assertUniqueOperationStableIds(table, records)
-      for (const record of records) assertOperationRecordScope(context, table, record, workId)
-      allByWork[table.key] = records
-      reviewedByWork[table.key] = records.filter(record => record.reviewed)
+    const phase = String(request.phase || '')
+    const plan = LEARNING_CONTEXT_PHASE_PLAN[phase]
+    if (!plan) throw new Error('learning_context_phase_invalid')
+    const objective = normalizeWorkflowObjective(request.objective)
+    const terms = learningObjectiveTerms(objective)
+    const budget = learningRequestBudget()
+    const workRecords = await loadLearningCandidates({
+      context,
+      dependencies,
+      budget,
+      tableKey: 'works',
+      workId,
+      terms: [],
+      limit: 2,
+    })
+    if (workRecords.length !== 1 || workRecords[0].stableId !== workId) {
+      throw new Error('reference_record_missing:works:' + workId)
     }
-    // Techniques are validated separately at project scope. Keeping the table
-    // present here lets the existing fixed-point integrity checker validate all
-    // same-work reference chains without treating cross-work cases as local.
-    reviewedByWork.skills_techniques = []
-    allByWork.skills_techniques = []
-    const projectTables = {}
-    for (const tableKey of ['director_cases', 'skills_techniques']) {
-      const table = operationTable(context.schema, tableKey)
-      const { tableId } = tableContext(context.schema, context.catalog, table.key)
-      const rawRecords = await dependencies.listAll({ context, table, tableId })
-      if (!Array.isArray(rawRecords)) throw new Error('operation_dependency_result_invalid')
-      assertLearningContextTableLimit(table.key, rawRecords)
-      scannedRecordCount += rawRecords.length
-      const records = rawRecords.map(record => operationRecord(table, record))
-      assertUniqueOperationStableIds(table, records)
-      for (const record of records) assertOperationRecordScope(context, table, record)
-      projectTables[table.key] = records
-    }
-    if (scannedRecordCount > LEARNING_CONTEXT_MAX_RECORDS) {
-      throw new Error('learning_context_record_limit_exceeded')
-    }
-
-    const allProjectCases = projectTables.director_cases
-    const historicalCaseIds = new Set(allProjectCases
-      .filter(isHistoricallyReviewedRecord)
-      .map(record => record.stableId))
-    const caseChains = new Map()
-    for (const record of allProjectCases.filter(record => record.reviewed)) {
-      if (!previousVersionIsValid(record, historicalCaseIds)) continue
-      try {
-        caseChains.set(
-          record.stableId,
-          await loadReviewedDirectorCaseChain(context, dependencies, record.stableId),
-        )
-      } catch {
-        // A nominally reviewed case with a broken source chain is not a safe
-        // learning input. Exclude it; no partial chain reaches the caller.
+    const selectedWork = Object.fromEntries([
+      'director_intents', 'people_profiles', 'story_nodes', 'story_relations',
+      'material_judgments', 'narrative_plans', 'director_cases',
+    ].map(tableKey => [tableKey, []]))
+    const selectedProject = { director_cases: [], skills_techniques: [] }
+    if (plan.requireIntent) {
+      selectedWork.director_intents = await loadLearningCandidates({
+        context,
+        dependencies,
+        budget,
+        tableKey: 'director_intents',
+        workId,
+        terms: [],
+        limit: 2,
+      })
+      if (selectedWork.director_intents.length > 1) {
+        throw new Error('learning_context_active_intent_ambiguous')
       }
     }
-    const validProjectCases = sortedOperationRecords(
-      allProjectCases.filter(record => caseChains.has(record.stableId)),
-    )
-
-    const allProjectTechniques = projectTables.skills_techniques
-    const historicalTechniqueIds = new Set(allProjectTechniques
-      .filter(isHistoricallyReviewedRecord)
-      .map(record => record.stableId))
-    const validProjectTechniques = []
-    for (const record of allProjectTechniques.filter(record => record.reviewed)) {
-      if (!previousVersionIsValid(record, historicalTechniqueIds)) continue
-      const caseIds = splitStoredReferences(record.fields['案例 ID']).sort()
-      if (!caseIds.length || caseIds.some(caseId => !caseChains.has(caseId))) continue
-      const sourceWorkIds = [...new Set(caseIds.map(caseId => caseChains.get(caseId).caseWorkId))]
-        .sort()
-      const storedSourceWorkIds = splitStoredReferences(record.fields['来源作品 ID']).sort()
-      if (!sameStableIdSet(sourceWorkIds, storedSourceWorkIds)) continue
-      validProjectTechniques.push(record)
+    for (const tableKey of plan.work) {
+      selectedWork[tableKey] = await loadLearningCandidates({
+        context,
+        dependencies,
+        budget,
+        tableKey,
+        workId,
+        terms,
+        limit: LEARNING_CONTEXT_MAX_CANDIDATES_PER_TABLE,
+      })
     }
-
-    const workIntegrity = inspectWorkflowReferenceIntegrity(
-      reviewedByWork,
-      allByWork,
-      { skills_techniques: validProjectTechniques },
-    )
-    const validWork = workIntegrity.validRecords
-    const activeIntents = sortedOperationRecords(validWork.director_intents || [])
+    for (const tableKey of plan.project) {
+      selectedProject[tableKey] = await loadLearningCandidates({
+        context,
+        dependencies,
+        budget,
+        tableKey,
+        workId: null,
+        terms,
+        limit: LEARNING_CONTEXT_MAX_CANDIDATES_PER_TABLE,
+      })
+    }
+    const seeds = { works: workRecords }
+    for (const [tableKey, records] of Object.entries(selectedWork)) {
+      seeds[tableKey] = [...(seeds[tableKey] || []), ...records]
+    }
+    for (const [tableKey, records] of Object.entries(selectedProject)) {
+      seeds[tableKey] = [...(seeds[tableKey] || []), ...records]
+    }
+    const cache = await loadLearningReferenceClosure({
+      context, dependencies, budget, seeds,
+    })
+    const allRecords = learningClosureTables(cache)
+    const reviewedRecords = Object.fromEntries(Object.entries(allRecords).map(([tableKey, records]) => (
+      [tableKey, records.filter(record => (
+        record.reviewed && learningRecordWorkReferencesValid(tableKey, record, cache)
+      ))]
+    )))
+    const integrity = inspectWorkflowReferenceIntegrity(reviewedRecords, allRecords)
+    const validIds = Object.fromEntries(Object.entries(integrity.validRecords).map(([tableKey, records]) => (
+      [tableKey, new Set(records.map(record => record.stableId))]
+    )))
+    const activeIntents = sortedOperationRecords(selectedWork.director_intents
+      .filter(record => validIds.director_intents.has(record.stableId)))
     if (activeIntents.length > 1) throw new Error('learning_context_active_intent_ambiguous')
 
     const workContext = {
       activeIntent: activeIntents[0] || null,
-      people_profiles: sortedOperationRecords(validWork.people_profiles || []),
-      story_nodes: sortedOperationRecords(validWork.story_nodes || []),
-      story_relations: sortedOperationRecords(validWork.story_relations || []),
-      material_judgments: sortedOperationRecords(validWork.material_judgments || []),
-      narrative_plans: sortedOperationRecords(validWork.narrative_plans || []),
-      director_cases: sortedOperationRecords(validWork.director_cases || []),
+      people_profiles: sortedOperationRecords(selectedWork.people_profiles
+        .filter(record => validIds.people_profiles.has(record.stableId))),
+      story_nodes: sortedOperationRecords(selectedWork.story_nodes
+        .filter(record => validIds.story_nodes.has(record.stableId))),
+      story_relations: sortedOperationRecords(selectedWork.story_relations
+        .filter(record => validIds.story_relations.has(record.stableId))),
+      material_judgments: sortedOperationRecords(selectedWork.material_judgments
+        .filter(record => validIds.material_judgments.has(record.stableId))),
+      narrative_plans: sortedOperationRecords(selectedWork.narrative_plans
+        .filter(record => validIds.narrative_plans.has(record.stableId))),
+      director_cases: sortedOperationRecords(selectedWork.director_cases
+        .filter(record => validIds.director_cases.has(record.stableId))),
     }
     const projectContext = {
-      director_cases: validProjectCases,
-      skills_techniques: sortedOperationRecords(validProjectTechniques),
+      director_cases: sortedOperationRecords(selectedProject.director_cases
+        .filter(record => validIds.director_cases.has(record.stableId))),
+      skills_techniques: sortedOperationRecords(validLearningTechniques(
+        selectedProject.skills_techniques,
+        allRecords,
+        validIds.skills_techniques,
+      )),
     }
     const outputRecordCount = (workContext.activeIntent ? 1 : 0)
       + Object.entries(workContext)

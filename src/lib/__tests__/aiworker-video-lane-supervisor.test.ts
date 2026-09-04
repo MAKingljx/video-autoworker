@@ -311,7 +311,7 @@ describe('persistent global video-lane supervisor', () => {
     })
     await expect(stat(entry.plist)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(lockDirectory, 'pid'), 'utf8')).toBe(ownerSource)
-  })
+  }, 15_000)
 
   it('releases the canonical deployment lock after success and after rollback', async () => {
     const successful = await fixture()

@@ -108,6 +108,10 @@ describe('standalone deployment script', () => {
     const clearTrapIndex = script.indexOf('\ntrap - EXIT\n', verifiedIndex)
 
     expect(script).toContain('cp -pR "$standalone_root" "$RECOVERY_STANDALONE_ROOT"')
+    expect(script).toContain('auditor_closure_is_safe "$RECOVERY_WORK_ROOT"')
+    expect(script).toContain('install -m 600 "$current_sensitive_scanner"')
+    expect(script).toContain('install -m 600 "$current_value_scanner"')
+    expect(script).toContain('install -m 600 "$current_provenance"')
     expect(script).toContain('if ! restart_old_server_after_migration_failure; then')
     expect(script).toContain('if [[ "$old_server_was_running" != 1 ]]; then')
     expect(script).toContain('preserved recovery release at $RECOVERY_WORK_ROOT')
@@ -115,6 +119,54 @@ describe('standalone deployment script', () => {
     expect(trapIndex).toBeLessThan(stopIndex)
     expect(cleanupIndex).toBeGreaterThan(verifiedIndex)
     expect(clearTrapIndex).toBeGreaterThan(cleanupIndex)
+  })
+
+  it('rejects an incomplete recovery auditor closure before executing the auditor', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'deploy-standalone-recovery-closure-'))
+    try {
+      const scriptsDir = resolve(root, 'scripts')
+      const recoveryRoot = resolve(root, 'recovery')
+      const standaloneRoot = resolve(recoveryRoot, 'standalone')
+      const marker = resolve(root, 'auditor-ran')
+      const harness = resolve(scriptsDir, 'deploy-standalone.sh')
+      await mkdir(resolve(standaloneRoot, '.next'), { recursive: true })
+      await mkdir(resolve(recoveryRoot, 'lib'), { recursive: true })
+      await mkdir(scriptsDir, { recursive: true })
+      await writeFile(resolve(standaloneRoot, 'server.js'), 'process.exit(0)\n')
+      await writeFile(resolve(standaloneRoot, '.next/BUILD_ID'), 'build\n')
+      await writeFile(resolve(recoveryRoot, 'start-preserved-release.sh'), '#!/bin/bash\n', {
+        mode: 0o700,
+      })
+      await writeFile(resolve(recoveryRoot, 'check-standalone-artifact.mjs'), `
+import { writeFileSync } from 'node:fs'
+writeFileSync(process.env.AUDITOR_MARKER, 'ran')
+`)
+      await writeFile(resolve(recoveryRoot, 'lib/sensitive-value-scanner.mjs'), 'export {}\n')
+      await writeFile(
+        resolve(recoveryRoot, 'lib/director-extraction-release-provenance.mjs'),
+        'export {}\n',
+      )
+
+      const functionPrelude = script.slice(0, script.indexOf('\ncd "$PROJECT_ROOT"'))
+      await writeFile(harness, `${functionPrelude}
+RECOVERY_WORK_ROOT="${recoveryRoot}"
+RECOVERY_LAUNCHER="$RECOVERY_WORK_ROOT/start-preserved-release.sh"
+RECOVERY_AUDITOR="$RECOVERY_WORK_ROOT/check-standalone-artifact.mjs"
+RECOVERY_STANDALONE_ROOT="$RECOVERY_WORK_ROOT/standalone"
+RECOVERY_SERVER_SHA256="$(file_sha256 "$RECOVERY_STANDALONE_ROOT/server.js")"
+RECOVERY_BUILD_ID_SHA256="$(file_sha256 "$RECOVERY_STANDALONE_ROOT/.next/BUILD_ID")"
+RECOVERY_READY=1
+verify_recovery_release_identity
+`)
+
+      const failure = await execFileAsync('bash', [harness], {
+        env: { ...process.env, AUDITOR_MARKER: marker },
+      }).then(() => null, error => error as Error & { code?: number })
+      expect(failure?.code).not.toBe(0)
+      expect(await exists(marker)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('does not signal a reused or malformed PID that is not the verified old release', async () => {
@@ -191,7 +243,7 @@ stop_existing_server
       await mkdir(sourceDataDir)
       await mkdir(externalDataDir)
       await mkdir(runDir)
-      await mkdir(scriptsDir, { recursive: true })
+      await mkdir(resolve(scriptsDir, 'lib'), { recursive: true })
       await writeFile(sourceDb, 'source database\n')
       await writeFile(resolve(sourceDataDir, 'mission-control-tokens.json'), '{"source":true}\n')
       await writeFile(externalDb, 'external production database\n')
@@ -203,6 +255,12 @@ import { resolve } from 'node:path'
 accessSync(resolve(process.argv[2], 'server.js'))
 accessSync(resolve(process.argv[2], '.next/BUILD_ID'))
 `)
+      await writeFile(resolve(scriptsDir, 'check-sensitive-content.mjs'), 'export {}\n')
+      await writeFile(resolve(scriptsDir, 'lib/sensitive-value-scanner.mjs'), 'export {}\n')
+      await writeFile(
+        resolve(scriptsDir, 'lib/director-extraction-release-provenance.mjs'),
+        'export {}\n',
+      )
       await writeFile(resolve(standaloneRoot, 'server.js'), `
 const fs = require('node:fs')
 const http = require('node:http')

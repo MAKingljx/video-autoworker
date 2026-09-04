@@ -195,6 +195,10 @@ const TOOL_PARAMETERS = Object.freeze({
           type: 'array', minItems: 1, maxItems: 20, uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 160 },
         },
+        techniqueIds: {
+          type: 'array', minItems: 1, maxItems: 20, uniqueItems: true,
+          items: { type: 'string', minLength: 1, maxLength: 160 },
+        },
         peopleProfileIds: {
           type: 'array', minItems: 1, maxItems: 20, uniqueItems: true,
           items: { type: 'string', minLength: 1, maxLength: 160 },
@@ -259,7 +263,7 @@ const REFERENCE_STRING_KEYS = new Set([
   'intentVersionId',
   'judgmentId',
 ])
-const REFERENCE_LIST_KEYS = new Set(['evidenceIds', 'nodeIds', 'caseIds'])
+const REFERENCE_LIST_KEYS = new Set(['evidenceIds', 'nodeIds', 'caseIds', 'techniqueIds'])
 const ASSEMBLY_REFERENCE_LIST_KEYS = new Set([
   'evidenceIds',
   'peopleProfileIds',

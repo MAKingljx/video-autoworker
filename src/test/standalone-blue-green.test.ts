@@ -1898,6 +1898,8 @@ check_legacy_databases_quiescent "$1" "$2"
     )
     expect(sourceGate).toContain('scripts/deploy-blue-green.sh')
     expect(sourceGate).toContain('scripts/lib/shared-deployment-lock.mjs')
+    expect(sourceGate).toContain('scripts/check-sensitive-content.mjs')
+    expect(sourceGate).toContain('scripts/lib/sensitive-value-scanner.mjs')
     expect(sourceGate).toContain('GIT_OPTIONAL_LOCKS=0')
     const preShutdownReleaseGate = bootstrapBody.indexOf(
       'bootstrap_preflight_contract="$(verify_director_video_release_preflight',

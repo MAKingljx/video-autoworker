@@ -25,6 +25,15 @@ interface DirectorBrainModule {
     options?: Record<string, unknown>,
   ) => Promise<string>
   exactRecordFilter: (fieldName: string, value: string) => string
+  learningContextCandidateFilter: (input: Record<string, unknown>) => string
+  queryLearningCandidates: (
+    input: Record<string, unknown>,
+    requester: (...args: unknown[]) => Promise<Record<string, unknown>>,
+  ) => Promise<Record<string, unknown>>
+  findManyOperationRecords: (
+    input: Record<string, unknown>,
+    requester: (...args: unknown[]) => Promise<Record<string, unknown>>,
+  ) => Promise<Record<string, unknown>>
   executeDirectorBrainOperation: (
     request: Record<string, unknown>,
     options?: Record<string, unknown>,
@@ -221,6 +230,8 @@ function operationHarness(schema: LoadedSchema, initial: Record<string, Array<Re
   )
   const createCalls: Array<Record<string, unknown>> = []
   const updateCalls: Array<Record<string, unknown>> = []
+  const learningQueryCalls: Array<Record<string, unknown>> = []
+  const learningFindManyCalls: Array<Record<string, unknown>> = []
   const createLockTails = new Map<string, Promise<void>>()
   const context = {
     schema,
@@ -267,6 +278,47 @@ function operationHarness(schema: LoadedSchema, initial: Record<string, Array<Re
     }) => (records.get(table.key) || []).filter(record => (
       (record.fields as Record<string, unknown> | undefined)?.[table.stableId] === stableId
     )),
+    findMany: async ({ table, stableIds }: {
+      table: LoadedSchema['tables'][number]
+      stableIds: string[]
+    }) => {
+      learningFindManyCalls.push({ table: table.key, stableIds: [...stableIds] })
+      const requested = new Set(stableIds)
+      return {
+        records: (records.get(table.key) || []).filter(record => requested.has(String(
+          (record.fields as Record<string, unknown> | undefined)?.[table.stableId] || '',
+        ))),
+        requestCount: Math.max(1, Math.ceil(stableIds.length / 20)),
+      }
+    },
+    queryLearning: async ({ table, workId, terms }: {
+      table: LoadedSchema['tables'][number]
+      workId: string | null
+      terms: string[]
+    }) => {
+      learningQueryCalls.push({ table: table.key, workId, terms: [...terms] })
+      const found = (records.get(table.key) || []).filter(record => {
+        const fields = record.fields as Record<string, unknown>
+        if (fields['项目 ID'] !== schema.projectId) return false
+        if (workId) {
+          const observed = table.key === 'works' ? fields[table.stableId] : fields['作品 ID']
+          if (observed !== workId) return false
+        }
+        if (terms.length) {
+          const text = JSON.stringify(fields).normalize('NFKC').toLocaleLowerCase('zh-CN')
+          if (!terms.some(term => text.includes(term))) return false
+        }
+        return true
+      }).sort((left, right) => Number(
+        (right.fields as Record<string, unknown>)['更新时间'] || 0,
+      ) - Number((left.fields as Record<string, unknown>)['更新时间'] || 0))
+      const recordsInWindow = found.slice(0, 100)
+      return {
+        records: recordsInWindow,
+        truncated: found.length > recordsInWindow.length,
+        requestCount: found.length > 50 ? 2 : 1,
+      }
+    },
     search: async ({ table, query, status, limit, workId }: {
       table: LoadedSchema['tables'][number]
       query: string
@@ -335,6 +387,8 @@ function operationHarness(schema: LoadedSchema, initial: Record<string, Array<Re
     records,
     createCalls,
     updateCalls,
+    learningQueryCalls,
+    learningFindManyCalls,
     options: {
       dependencies,
       now: () => '2026-08-30T12:00:00+08:00',
@@ -2261,6 +2315,83 @@ describe('Feishu director brain OpenClaw operation service', () => {
     expect(JSON.stringify(result)).not.toMatch(/record_id|appToken|tableId|catalogPath|example\.invalid/u)
   })
 
+  it('builds server-side learning filters and follows only the bounded page-token window', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const table = schema.tables.find(item => item.key === 'people_profiles')!
+    const filter = directorBrain.learningContextCandidateFilter({
+      table,
+      projectId: schema.projectId,
+      workId: 'WORK-ICE-001',
+      terms: ['风险', '选择'],
+    })
+    expect(filter).toContain('CurrentValue.[项目 ID]="PROJ-VIDEO-AUTOWORKER"')
+    expect(filter).toContain('CurrentValue.[作品 ID]="WORK-ICE-001"')
+    expect(filter).toContain('CurrentValue.[状态]="已确认"')
+    expect(filter).toContain('SEARCH("风险",CurrentValue.[人物名称])>0')
+    const escaped = directorBrain.learningContextCandidateFilter({
+      table,
+      projectId: schema.projectId,
+      workId: 'WORK-ICE-001',
+      terms: ['风"险\\测试'],
+    })
+    expect(escaped).toContain('SEARCH("风\\"险\\\\测试",CurrentValue.[人物名称])>0')
+    const unfiltered = directorBrain.learningContextCandidateFilter({
+      table,
+      projectId: schema.projectId,
+      workId: 'WORK-ICE-001',
+      terms: [],
+    })
+    expect(unfiltered).not.toContain('SEARCH(')
+    expect(filter).not.toContain('CurrentValue.[置信度]')
+
+    const requester = vi.fn(async (_method: unknown, _path: unknown, options: any) => (
+      options.query.page_token
+        ? { data: { items: [{ record_id: 'rec_51', fields: {} }], has_more: true, page_token: '<fixture-page-3>' } }
+        : {
+            data: {
+              items: Array.from({ length: 50 }, (_, index) => ({
+                record_id: `rec_${index + 1}`, fields: {},
+              })),
+              has_more: true,
+              page_token: '<fixture-page-2>',
+            },
+          }
+    ))
+    const result = await directorBrain.queryLearningCandidates({
+      context: {
+        schema,
+        catalog: { appToken: 'environment', tables: { people_profiles: { tableId: 'table' } } },
+        accessToken: 'token',
+      },
+      table,
+      tableId: 'table',
+      workId: 'WORK-ICE-001',
+      terms: ['风险'],
+      limit: 8,
+    }, requester)
+    expect(result).toMatchObject({ requestCount: 2, truncated: true })
+    expect(result.records).toHaveLength(51)
+    expect(requester).toHaveBeenCalledTimes(2)
+    expect((requester.mock.calls[1][2] as any).query.page_token).toBe('<fixture-page-2>')
+    expect((requester.mock.calls[0][2] as any).query.sort).toBe('["更新时间 DESC"]')
+  })
+
+  it('batches stable-ID closure reads without one request per reference', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const table = schema.tables.find(item => item.key === 'material_evidence')!
+    const requester = vi.fn(async () => ({ data: { items: [], has_more: false } }))
+    const result = await directorBrain.findManyOperationRecords({
+      context: { catalog: { appToken: 'environment' }, accessToken: 'token' },
+      table,
+      tableId: 'table',
+      stableIds: Array.from({ length: 45 }, (_, index) => `EVIDENCE-${index}`),
+    }, requester)
+    expect(result).toEqual({ records: [], requestCount: 3 })
+    expect(requester).toHaveBeenCalledTimes(3)
+  })
+
   it('resolves one active work by exact title or alias and rejects ambiguity', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
@@ -2628,7 +2759,7 @@ describe('Feishu director brain OpenClaw operation service', () => {
     const harness = operationHarness(schema, initial)
 
     const first = await directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001',
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择',
     }, harness.options)
     expect(first).toMatchObject({
       ok: true,
@@ -2644,7 +2775,7 @@ describe('Feishu director brain OpenClaw operation service', () => {
           narrative_plans: [{ stableId: 'PLAN-REVIEWED-001' }],
         },
         project: {
-          director_cases: [{ stableId: 'CASE-DESERT-001' }, { stableId: 'CASE-REVIEWED-001' }],
+          director_cases: [],
           skills_techniques: [{ stableId: 'SKILL-REVIEWED-001' }],
         },
       },
@@ -2654,11 +2785,74 @@ describe('Feishu director brain OpenClaw operation service', () => {
     )
     for (const records of harness.records.values()) records.reverse()
     const second = await directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001',
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择',
     }, harness.options)
     expect(second).toEqual(first)
     expect(harness.createCalls).toHaveLength(0)
     expect(harness.updateCalls).toHaveLength(0)
+  })
+
+  it('selects relevant heads from a mature case library with bounded queries and one batched closure', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    const baseCase = structuredClone(initial.director_cases[0])
+    initial.director_cases.push(...Array.from({ length: 300 }, (_, index) => ({
+      ...structuredClone(baseCase),
+      record_id: `rec_mature_case_${index}`,
+      fields: {
+        ...structuredClone(baseCase.fields),
+        '案例名称': `无关的日常观察案例 ${index}`,
+        '案例 ID': `CASE-MATURE-${String(index).padStart(3, '0')}`,
+        '上下文': '与当前风险选择主题无关的日常观察',
+        '判断原因': '仅用于成熟案例库分页测试',
+      },
+    })))
+    initial.skills_techniques = [{
+      record_id: 'rec_skill_relevant',
+      fields: {
+        '知识名称': '风险选择前保留停顿', '知识 ID': 'SKILL-RISK-001',
+        '项目 ID': schema.projectId, '作用域': '跨作品', '来源作品 ID': 'WORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001', '知识类型': '技法', '知识分类': '人物选择',
+        '适用条件': '人物面对风险并即将选择', '执行方法': '保留停顿',
+        '为什么有效': '让风险成为可见的选择', '置信度': 0.91,
+        '状态': '已验证', ...reviewedMetadata(),
+      },
+    }, ...Array.from({ length: 300 }, (_, index) => ({
+      record_id: `rec_mature_skill_${index}`,
+      fields: {
+        '知识名称': `${index < 20 ? '风险' : ''}日常观察技法 ${index}`,
+        '知识 ID': `SKILL-MATURE-${String(index).padStart(3, '0')}`,
+        '项目 ID': schema.projectId, '作用域': '跨作品', '来源作品 ID': 'WORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001', '知识类型': '技法', '知识分类': '日常',
+        '适用条件': '平静的生活场景', '执行方法': '保持观察',
+        '为什么有效': '保留生活质感', '置信度': 0.8,
+        '状态': '已验证', ...reviewedMetadata({
+          '更新时间': index < 20 ? REVIEWED_AT + 1_000 : REVIEWED_AT,
+        }),
+      },
+    }))]
+    const harness = operationHarness(schema, initial)
+    harness.options.dependencies.listAll = async () => { throw new Error('list_all_forbidden') }
+    harness.options.dependencies.findExact = async () => { throw new Error('n_plus_one_forbidden') }
+
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context',
+      workId: 'WORK-ICE-001',
+      phase: 'judgment',
+      objective: '寻找人物面对风险时的选择',
+    }, harness.options)
+
+    const selectedTechniques = (result.snapshot as any).project.skills_techniques
+    expect(selectedTechniques).toHaveLength(8)
+    expect(selectedTechniques.map((record: any) => record.stableId)).toContain('SKILL-RISK-001')
+    expect(harness.learningQueryCalls.length).toBeLessThanOrEqual(14)
+    expect(harness.learningFindManyCalls.length).toBeLessThanOrEqual(8)
+    expect(harness.learningFindManyCalls.some(call => (
+      call.table === 'director_cases'
+        && Array.isArray(call.stableIds)
+        && call.stableIds.includes('CASE-REVIEWED-001')
+    ))).toBe(true)
   })
 
   it('excludes reviewed learning records whose source chain is broken', async () => {
@@ -2678,7 +2872,7 @@ describe('Feishu director brain OpenClaw operation service', () => {
     }]
     const harness = operationHarness(schema, initial)
     const result = await directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001',
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择',
     }, harness.options)
     expect(result).toMatchObject({
       snapshot: {
@@ -2688,19 +2882,57 @@ describe('Feishu director brain OpenClaw operation service', () => {
     })
   })
 
-  it('fails closed on learning-context limits, project corruption, and extra request fields', async () => {
+  it('excludes a work-scoped learning record whose reference crosses into another work', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.material_evidence.push({
+      ...structuredClone(initial.material_evidence[0]),
+      record_id: 'rec_evidence_other_work',
+      fields: {
+        ...structuredClone(initial.material_evidence[0].fields),
+        '证据名称': '其他作品的风险证据',
+        '证据 ID': 'EVIDENCE-OTHER-WORK-001',
+        '作品 ID': 'WORK-OTHER-001',
+      },
+    })
+    initial.story_nodes[0].fields['证据 ID'] = 'EVIDENCE-OTHER-WORK-001'
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context',
+      workId: 'WORK-ICE-001',
+      phase: 'understanding',
+      objective: '风险选择',
+    }, operationHarness(schema, initial).options)
+
+    expect(result).toMatchObject({
+      snapshot: {
+        work: {
+          story_nodes: [{ stableId: 'STORY-REVIEWED-002' }],
+        },
+      },
+    })
+  })
+
+  it('does not scan or fail on more than 200 evidence rows and rejects extra request fields', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
     const tooMany = reviewedFoundation()
-    tooMany.people_profiles = Array.from({ length: 201 }, (_, index) => ({
-      record_id: `rec_limit_${index}`,
-      fields: { '作品 ID': 'WORK-ICE-001' },
-    }))
+    tooMany.material_evidence.push(...Array.from({ length: 240 }, (_, index) => ({
+      ...structuredClone(tooMany.material_evidence[0]),
+      record_id: `rec_long_video_evidence_${index}`,
+      fields: {
+        ...structuredClone(tooMany.material_evidence[0].fields),
+        '证据 ID': `EVIDENCE-LONG-${String(index).padStart(3, '0')}`,
+      },
+    })))
+    const longVideoHarness = operationHarness(schema, tooMany)
     await expect(directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001',
-    }, operationHarness(schema, tooMany).options)).rejects.toThrow(
-      'learning_context_table_limit_exceeded:people_profiles',
-    )
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择',
+    }, longVideoHarness.options)).resolves.toMatchObject({ ok: true })
+    expect(longVideoHarness.learningQueryCalls.some(call => call.table === 'material_evidence')).toBe(false)
+    expect(longVideoHarness.learningFindManyCalls
+      .filter(call => call.table === 'material_evidence')
+      .flatMap(call => call.stableIds)).toEqual(['EVIDENCE-REVIEWED-001'])
 
     const wrongProject = reviewedFoundation()
     wrongProject.director_cases.push({
@@ -2712,16 +2944,35 @@ describe('Feishu director brain OpenClaw operation service', () => {
       },
     })
     await expect(directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001',
-    }, operationHarness(schema, wrongProject).options)).rejects.toThrow(
-      'record_project_mismatch:director_cases:CASE-WRONG-PROJECT-001',
-    )
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择',
+    }, operationHarness(schema, wrongProject).options)).resolves.not.toMatchObject({
+      snapshot: { project: { director_cases: [{ stableId: 'CASE-WRONG-PROJECT-001' }] } },
+    })
 
     const connect = vi.fn()
     await expect(directorBrain.executeDirectorBrainOperation({
-      action: 'learning_context', workId: 'WORK-ICE-001', extra: true,
+      action: 'learning_context', workId: 'WORK-ICE-001', phase: 'judgment', objective: '风险选择', extra: true,
     }, { dependencies: { connect } })).rejects.toThrow('operation_field_unexpected:extra')
     expect(connect).not.toHaveBeenCalled()
+  })
+
+  it('fails before remote closure reads when a malformed reference fan-out exceeds the request budget', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.material_judgments[0].fields['判断名称'] = '风险选择判断'
+    initial.material_judgments[0].fields['证据 ID'] = Array.from(
+      { length: 720 },
+      (_, index) => `E${index}`,
+    ).join('\n')
+    const harness = operationHarness(schema, initial)
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context',
+      workId: 'WORK-ICE-001',
+      phase: 'judgment',
+      objective: '风险',
+    }, harness.options)).rejects.toThrow('learning_context_request_budget_exceeded')
+    expect(harness.learningFindManyCalls).toHaveLength(0)
   })
 
   it('does not mark a layer ready when its reviewed record has a broken reference', async () => {

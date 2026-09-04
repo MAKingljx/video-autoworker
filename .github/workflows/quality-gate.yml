@@ -35,6 +35,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Scan versioned source for sensitive content
+        run: pnpm scan:sensitive:source
+
       - name: API contract parity
         run: pnpm api:parity
 
@@ -52,6 +55,9 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Audit standalone release artifact
+        run: pnpm audit:standalone
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps

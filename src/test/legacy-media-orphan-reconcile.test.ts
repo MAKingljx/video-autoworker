@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
+  copyFileSync,
+  existsSync,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -15,6 +17,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -95,6 +98,7 @@ function executable(pathname: string, source: string): void {
 }
 
 type Fixture = ReturnType<typeof createFixture>
+type ParentFixture = ReturnType<typeof createParentFixture>
 type PrepareOutput = {
   mode: 'prepare'
   prepareManifest: string
@@ -206,6 +210,8 @@ function createFixture() {
     missionReplacementPath,
     disabledStyle: 'words',
     supervisorLoaded: false,
+    qwenCurrentLoaded: false,
+    qwenCurrentListener: false,
     workers: [] as number[],
     pgrepStatus: 1,
     processInventory: '',
@@ -219,6 +225,10 @@ const state = JSON.parse(fs.readFileSync(process.env.FAKE_STATE, 'utf8'))
 const args = process.argv.slice(2)
 if (args.includes('-iTCP:3017')) { process.stdout.write('p1101\\n'); process.exit(0) }
 if (args.includes('-iTCP:5678')) { process.stdout.write('p2202\\n'); process.exit(0) }
+if (args.includes('-iTCP:18889')) {
+  if (state.qwenCurrentListener) { process.stdout.write('p3303\\n'); process.exit(0) }
+  process.exit(1)
+}
 const at = args.indexOf('-p')
 const pid = at >= 0 ? Number(args[at + 1]) : 0
 const record = (descriptor, pathname, overrideIno) => {
@@ -257,6 +267,9 @@ if (args[0] === 'print-disabled') {
 }
 const service = args[1] || ''
 if (service.endsWith('/com.video-autoworker.n8n')) { process.stdout.write('state = running\\npid = 2000\\n'); process.exit(0) }
+if (service.endsWith('/ai.openclaw.qwen-current') && state.qwenCurrentLoaded) {
+  process.stdout.write('state = running\\npid = 3303\\n'); process.exit(0)
+}
 if (service.endsWith('/ai.aiworker.video-lane-supervisor') && state.supervisorLoaded) {
   process.stdout.write('state = running\\npid = 3000\\n'); process.exit(0)
 }
@@ -326,9 +339,70 @@ process.stdout.write(state.executablePath + '\\n')
     writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 })
   }
   return {
-    root, backupRoot, queuePath, missionPath, missionData, mission, n8n,
+    root, backupRoot, queuePath, missionPath, missionData, n8nPath, mission, n8n,
     parentTaskId, mediaTaskId, childRowId, run, runRaw, writeState,
   }
+}
+
+function createParentFixture() {
+  const fixture = createFixture()
+  const staleUpdatedAt = Math.floor(Date.now() / 1_000) - 2 * 24 * 60 * 60
+  fixture.mission.prepare('DELETE FROM n8n_task_runs WHERE task_id = ?').run(fixture.mediaTaskId)
+  fixture.mission.prepare(`
+    UPDATE n8n_task_runs
+    SET idempotency_key = task_id, status = 'accepted', source = 'openclaw',
+        routing = '{"taskType":"video-analysis"}', input = '{"request":"private"}',
+        delivery = '{"mode":"none"}', output = NULL, error = NULL,
+        attempt_count = 0, max_attempts = 2, accepted_at = ?, started_at = NULL,
+        completed_at = NULL, updated_at = ?
+    WHERE task_id = ?
+  `).run(staleUpdatedAt - 60, staleUpdatedAt, fixture.parentTaskId)
+  fixture.mission.exec(`
+    CREATE TABLE n8n_parent_execution_claims (
+      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_task_dispatch_leases (
+      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_media_cleanup_debts (task_id TEXT PRIMARY KEY);
+    CREATE TABLE n8n_director_evidence_outbox (task_id TEXT PRIMARY KEY);
+  `)
+  writeFileSync(fixture.queuePath, JSON.stringify({
+    counts: { attention: 1, running: 0, waiting: 0 },
+    queue: [{
+      taskId: fixture.parentTaskId,
+      status: 'accepted',
+      updatedAt: staleUpdatedAt,
+      stale: true,
+      sourceAvailable: null,
+      queueOrigin: 'n8n',
+    }],
+    total: 1,
+  }), { mode: 0o600 })
+  const runParent = (extra: string[] = [], extraEnv: Partial<NodeJS.ProcessEnv> = {}) => (
+    fixture.runRaw(['--parent-pre-media', '--minimum-age-seconds', '86400', ...extra], extraEnv)
+  )
+  const clearQueueHook = join(fixture.root, 'clear-parent-queue')
+  executable(clearQueueHook, `#!${process.execPath}
+const fs = require('node:fs')
+fs.writeFileSync(${JSON.stringify(fixture.queuePath)}, JSON.stringify({
+  counts: { attention: 0, running: 0, waiting: 0 }, queue: [], total: 0,
+}), { mode: 0o600 })
+`)
+  return { ...fixture, staleUpdatedAt, runParent, clearQueueHook }
+}
+
+function createIntakeControl(fixture: ParentFixture, accepting = 0): void {
+  fixture.mission.exec(`
+    CREATE TABLE n8n_intake_controls (
+      control_id INTEGER PRIMARY KEY, accepting INTEGER NOT NULL, reason TEXT NOT NULL,
+      changed_by_id INTEGER NOT NULL, changed_by_name TEXT NOT NULL,
+      changed_at INTEGER NOT NULL, revision INTEGER NOT NULL
+    );
+  `)
+  fixture.mission.prepare(`
+    INSERT INTO n8n_intake_controls VALUES (1, ?, 'managed parent reconciliation', 1, 'tester', ?, 1)
+  `).run(accepting, Math.floor(Date.now() / 1_000))
 }
 
 function prepare(fixture: Fixture, extraEnv: Partial<NodeJS.ProcessEnv> = {}): PrepareOutput {
@@ -344,6 +418,15 @@ function apply(fixture: Fixture, prepared: PrepareOutput, extraEnv: Partial<Node
   ], extraEnv)
 }
 
+function prepareParent(
+  fixture: ParentFixture,
+  extraEnv: Partial<NodeJS.ProcessEnv> = {},
+): PrepareOutput {
+  const result = fixture.runParent(['--prepare', '--backup-root', fixture.backupRoot], extraEnv)
+  expect(result.status, result.stderr).toBe(0)
+  return JSON.parse(result.stdout) as PrepareOutput
+}
+
 function mutateImmutableJson(pathname: string, mutate: (value: Record<string, unknown>) => void): void {
   const directory = dirname(pathname)
   chmodSync(directory, 0o700)
@@ -353,6 +436,24 @@ function mutateImmutableJson(pathname: string, mutate: (value: Record<string, un
   writeFileSync(pathname, `${JSON.stringify(value)}\n`, { mode: 0o600 })
   chmodSync(pathname, 0o400)
   chmodSync(directory, 0o500)
+}
+
+function insertTaskFromParent(
+  fixture: ParentFixture,
+  taskId: string,
+  source: 'n8n-media-node' | 'n8n-node',
+  status = 'accepted',
+): void {
+  fixture.mission.prepare(`
+    INSERT INTO n8n_task_runs (
+      task_id, idempotency_key, binding_id, status, source, requested_by, routing, input,
+      delivery, output, error, attempt_count, max_attempts, workspace_id, tenant_id,
+      created_at, accepted_at, started_at, completed_at, updated_at
+    )
+    SELECT ?, ?, binding_id, ?, ?, requested_by, routing, input, delivery, NULL, NULL,
+      0, max_attempts, workspace_id, tenant_id, created_at, accepted_at, NULL, NULL, updated_at
+    FROM n8n_task_runs WHERE task_id = ?
+  `).run(taskId, `${taskId}-idem`, status, source, fixture.parentTaskId)
 }
 
 afterEach(() => {
@@ -386,11 +487,11 @@ describe('managed legacy media orphan reconciliation', () => {
     const prepareStart = source.indexOf('async function createPrepare')
     const prepareEnd = source.indexOf('\nfunction validateBackupManifest', prepareStart)
     const prepareImplementation = source.slice(prepareStart, prepareEnd)
-    expect(prepareImplementation.indexOf('loadPreparedArtifact(Database, preparePath, true)'))
+    expect(prepareImplementation.indexOf('loadPreparedArtifact(preparePath, true)'))
       .toBeLessThan(prepareImplementation.indexOf('renameDirectoryExclusive('))
     expect(prepareImplementation.indexOf('renameDirectoryExclusive('))
-      .toBeLessThan(prepareImplementation.indexOf('loadPreparedArtifact(Database, finalPreparePath)'))
-    expect(prepareImplementation.indexOf('loadPreparedArtifact(Database, finalPreparePath)'))
+      .toBeLessThan(prepareImplementation.indexOf('loadPreparedArtifact(finalPreparePath)'))
+    expect(prepareImplementation.indexOf('loadPreparedArtifact(finalPreparePath)'))
       .toBeLessThan(prepareImplementation.indexOf('confirmationToken('))
     const fsyncStart = source.indexOf('function fsyncDirectory')
     const fsyncEnd = source.indexOf('\nfunction writeImmutableJson', fsyncStart)
@@ -398,6 +499,11 @@ describe('managed legacy media orphan reconciliation', () => {
     expect(fsyncImplementation).toContain('constants.O_DIRECTORY')
     expect(fsyncImplementation).toContain('constants.O_NOFOLLOW')
     expect(fsyncImplementation).toContain('fstatSync(descriptor, { bigint: true })')
+    expect(source).toContain('function validateSqliteCapabilities(sqlite)')
+    expect(source).toContain("new sqlite.DatabaseSync(':memory:')")
+    expect(source).toContain("typeof sqlite.backup !== 'function'")
+    expect(source).not.toContain('REQUIRED_NODE_VERSION')
+    expect(source).not.toContain('REQUIRED_SQLITE_VERSION')
   })
 
   it('keeps default dry-run read-only and emits no token or backup', () => {
@@ -432,6 +538,24 @@ describe('managed legacy media orphan reconciliation', () => {
       expect(readdirSync(fixture.backupRoot)).toEqual([basename(directory)])
       expect(statSync(directory).mode & 0o777).toBe(0o500)
       expect(statSync(output.prepareManifest).mode & 0o777).toBe(0o400)
+      const prepareManifest = JSON.parse(readFileSync(output.prepareManifest, 'utf8'))
+      expect(prepareManifest.schema).toBe('video-autoworker-legacy-media-orphan-prepare/v3')
+      expect(prepareManifest.parserBinding).toMatchObject({
+        version: expect.stringMatching(/^\d+\.\d+\.\d+$/u),
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        identity: expect.objectContaining({ dev: expect.any(String), ino: expect.any(String) }),
+      })
+      expect(prepareManifest.databaseRuntimeBinding).toMatchObject({
+        kind: 'node:sqlite',
+        nodeVersion: process.version,
+        sqliteVersion: process.versions.sqlite,
+        executable: {
+          path: realpathSync(process.execPath),
+          bytes: expect.any(Number),
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          identity: expect.objectContaining({ dev: expect.any(String), ino: expect.any(String) }),
+        },
+      })
       const manifest = JSON.parse(readFileSync(join(directory, 'backup-manifest.json'), 'utf8'))
       expect(manifest.schema).toBe('video-autoworker-legacy-media-orphan-backup/v2')
       expect(manifest.members.filter((item: { role: string }) => item.role === 'forensic')).toHaveLength(3)
@@ -601,6 +725,47 @@ describe('managed legacy media orphan reconciliation', () => {
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
+  it('catches a completed n8n execution created before the child writer reservation', () => {
+    const fixture = createFixture()
+    try {
+      const prepared = prepare(fixture)
+      const hook = join(fixture.root, 'insert-child-gap-execution')
+      executable(hook, `#!/bin/sh
+/usr/bin/sqlite3 ${JSON.stringify(fixture.n8nPath)} "INSERT INTO execution_entity VALUES (66, 'other-workflow', 'success', '2026-09-04 20:00:00.000')"
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND: hook,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('n8n execution changed after confirmation')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('running')
+      expect((fixture.n8n.prepare('SELECT status FROM execution_entity WHERE id = 66')
+        .get() as { status: string }).status).toBe('success')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('holds the child n8n writer reservation until the Mission Control CAS commits', () => {
+    const fixture = createFixture()
+    try {
+      const prepared = prepare(fixture)
+      const hook = join(fixture.root, 'prove-child-n8n-writer-reservation')
+      executable(hook, `#!/bin/sh
+if /usr/bin/sqlite3 ${JSON.stringify(fixture.n8nPath)} "PRAGMA busy_timeout=100; INSERT INTO execution_entity VALUES (66, 'other-workflow', 'running', NULL)" >/dev/null 2>&1; then
+  exit 91
+fi
+exit 0
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND: hook,
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(fixture.n8n.prepare('SELECT id FROM execution_entity WHERE id = 66').get()).toBeUndefined()
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('failed')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
   it('rejects apply common arguments and forged confirmation tokens', () => {
     const fixture = createFixture()
     try {
@@ -619,6 +784,11 @@ describe('managed legacy media orphan reconciliation', () => {
   })
 
   it.each([
+    ['old prepare schema', (_fixture: Fixture, output: PrepareOutput) => mutateImmutableJson(
+      output.prepareManifest, value => {
+        value.schema = 'video-autoworker-legacy-media-orphan-prepare/v2'
+      },
+    ), 'invalid or expired'],
     ['expired prepare', (_fixture: Fixture, output: PrepareOutput) => mutateImmutableJson(
       output.prepareManifest, value => { value.createdAt = 1; value.expiresAt = 601 },
     ), 'invalid or expired'],
@@ -719,6 +889,144 @@ describe('managed legacy media orphan reconciliation', () => {
     } finally { rowFixture.mission.close(); rowFixture.n8n.close() }
   })
 
+  it('rejects an old prepare token when only a transitive local tool dependency changes', () => {
+    const fixture = createFixture()
+    try {
+      const toolEntry = join(fixture.root, 'tool-entry.mjs')
+      const directDependency = join(fixture.root, 'direct-dependency.mjs')
+      const transitiveDependency = join(fixture.root, 'transitive-dependency.mjs')
+      writeFileSync(toolEntry, "import './direct-dependency.mjs'\n", { mode: 0o600 })
+      writeFileSync(
+        directDependency,
+        "export { dependencyValue } from './transitive-dependency.mjs'\n",
+        { mode: 0o600 },
+      )
+      writeFileSync(transitiveDependency, 'export const dependencyValue = 1\n', { mode: 0o600 })
+      const toolEnvironment = { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry }
+      const prepared = prepare(fixture, toolEnvironment)
+      writeFileSync(transitiveDependency, 'export const dependencyValue = 2\n', { mode: 0o600 })
+      const result = apply(fixture, prepared, toolEnvironment)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('entry or dependency closure')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('running')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('hashes every static import when multiple imports share one source line', () => {
+    const fixture = createFixture()
+    try {
+      const toolEntry = join(fixture.root, 'same-line-entry.mjs')
+      const firstDependency = join(fixture.root, 'same-line-first.mjs')
+      const secondDependency = join(fixture.root, 'same-line-second.mjs')
+      writeFileSync(
+        toolEntry,
+        "import './same-line-first.mjs'; import './same-line-second.mjs'\n",
+        { mode: 0o600 },
+      )
+      writeFileSync(firstDependency, 'export const first = 1\n', { mode: 0o600 })
+      writeFileSync(secondDependency, 'export const second = 1\n', { mode: 0o600 })
+      const toolEnvironment = { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry }
+      const prepared = prepare(fixture, toolEnvironment)
+      writeFileSync(secondDependency, 'export const second = 2\n', { mode: 0o600 })
+      const result = apply(fixture, prepared, toolEnvironment)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('entry or dependency closure')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    'media-ingest.mjs',
+    'director-work-policy.mjs',
+    'media-policy.mjs',
+  ])('binds the real video-batch-state closure when only %s changes', dependencyName => {
+    const fixture = createFixture()
+    try {
+      const closureRoot = join(fixture.root, 'tool-closure')
+      mkdirSync(closureRoot, { mode: 0o700 })
+      const sourceRoot = join(repositoryRoot, 'openclaw-skills/aiworker-task-flow/lib')
+      for (const name of [
+        'video-batch-state.mjs',
+        'media-ingest.mjs',
+        'director-work-policy.mjs',
+        'media-policy.mjs',
+      ]) {
+        copyFileSync(join(sourceRoot, name), join(closureRoot, name))
+      }
+      const toolEntry = join(closureRoot, 'tool-entry.mjs')
+      writeFileSync(toolEntry, "import './video-batch-state.mjs'\n", { mode: 0o600 })
+      const toolEnvironment = { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry }
+      const prepared = prepare(fixture, toolEnvironment)
+      const dependencyPath = join(closureRoot, dependencyName)
+      writeFileSync(
+        dependencyPath,
+        `${readFileSync(dependencyPath, 'utf8')}\n// dependency-only drift\n`,
+      )
+      const result = apply(fixture, prepared, toolEnvironment)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('entry or dependency closure')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('running')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['comment-separated dynamic import', "await import/*comment*/('./dependency.mjs')\n", 'dynamic'],
+    ['query import', "import './dependency.mjs?variant=changed'\n", 'specifier'],
+  ])('fails closed for an unsupported %s in the tool closure', (_label, entrySource, expected) => {
+    const fixture = createFixture()
+    try {
+      const toolEntry = join(fixture.root, 'unsupported-tool-entry.mjs')
+      writeFileSync(toolEntry, entrySource, { mode: 0o600 })
+      writeFileSync(join(fixture.root, 'dependency.mjs'), 'export const value = 1\n', { mode: 0o600 })
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry },
+      )
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain(expected)
+      expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each(['absolute path', 'file URL'])('fails closed for a local %s import', kind => {
+    const fixture = createFixture()
+    try {
+      const toolEntry = join(fixture.root, 'unsupported-local-entry.mjs')
+      const dependency = join(fixture.root, 'unsupported-local-dependency.mjs')
+      const specifier = kind === 'file URL' ? pathToFileURL(dependency).href : dependency
+      writeFileSync(toolEntry, `import ${JSON.stringify(specifier)}\n`, { mode: 0o600 })
+      writeFileSync(dependency, 'export const value = 1\n', { mode: 0o600 })
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry },
+      )
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('specifier is unsupported')
+      expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects createRequire in a non-entry closure member before creating a backup', () => {
+    const fixture = createFixture()
+    try {
+      const toolEntry = join(fixture.root, 'runtime-loader-entry.mjs')
+      const dependency = join(fixture.root, 'runtime-loader-dependency.mjs')
+      writeFileSync(toolEntry, "import './runtime-loader-dependency.mjs'\n", { mode: 0o600 })
+      writeFileSync(dependency, `
+import { createRequire } from 'node:module'
+export const localRequire = createRequire(import.meta.url)
+`, { mode: 0o600 })
+      const result = fixture.run(
+        ['--prepare', '--backup-root', fixture.backupRoot],
+        { AIWORKER_TEST_LEGACY_ORPHAN_TOOL_CLOSURE_ROOT: toolEntry },
+      )
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('runtime createRequire module loading is unsupported')
+      expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
   it.each([
     ['substring execution binding', (fixture: Fixture) => fixture.n8n.prepare(
       'UPDATE execution_data SET data = ? WHERE executionId = 65',
@@ -785,6 +1093,69 @@ describe('managed legacy media orphan reconciliation', () => {
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
+  it('does not recreate any database-family member when the writable path disappears before open', () => {
+    const fixture = createFixture()
+    try {
+      const prepared = prepare(fixture)
+      const capturedPath = `${fixture.missionPath}.captured`
+      const capturedHash = sha256(readFileSync(fixture.missionPath))
+      const hook = join(fixture.root, 'remove-database-family-before-writable-open')
+      executable(hook, `#!${process.execPath}
+const fs = require('node:fs')
+const source = ${JSON.stringify(fixture.missionPath)}
+const captured = ${JSON.stringify(capturedPath)}
+for (const suffix of ['', '-wal', '-shm', '-journal']) {
+  if (fs.existsSync(source + suffix)) fs.renameSync(source + suffix, captured + suffix)
+}
+`)
+
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_WRITABLE_DATABASE_OPEN_COMMAND: hook,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('unable to open database file')
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        expect(existsSync(fixture.missionPath + suffix)).toBe(false)
+      }
+      expect(sha256(readFileSync(capturedPath))).toBe(capturedHash)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('running')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('leaves a replacement database and its sidecar set unchanged when writable identity changes', () => {
+    const fixture = createFixture()
+    try {
+      const prepared = prepare(fixture)
+      const replacementPath = join(fixture.missionData, 'mission-control-replacement.db')
+      const replacementHash = sha256(readFileSync(replacementPath))
+      const capturedPath = `${fixture.missionPath}.captured`
+      const hook = join(fixture.root, 'replace-database-before-writable-open')
+      executable(hook, `#!${process.execPath}
+const fs = require('node:fs')
+const source = ${JSON.stringify(fixture.missionPath)}
+const captured = ${JSON.stringify(capturedPath)}
+const replacement = ${JSON.stringify(replacementPath)}
+for (const suffix of ['', '-wal', '-shm', '-journal']) {
+  if (fs.existsSync(source + suffix)) fs.renameSync(source + suffix, captured + suffix)
+}
+fs.renameSync(replacement, source)
+`)
+
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_WRITABLE_DATABASE_OPEN_COMMAND: hook,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('precaptured identity')
+      expect(sha256(readFileSync(fixture.missionPath))).toBe(replacementHash)
+      expect(readdirSync(fixture.missionData).filter(name => (
+        name === 'mission-control.db' || name.startsWith('mission-control.db-')
+      ))).toEqual(['mission-control.db'])
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
+        .get(fixture.childRowId) as { status: string }).status).toBe('running')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
   it('fails closed for non-ENOENT workspace lstat and backup overlap', () => {
     const fixture = createFixture()
     try {
@@ -810,6 +1181,605 @@ describe('managed legacy media orphan reconciliation', () => {
       expect(result.stderr).toContain('workspace still exists')
       expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE id = ?')
         .get(fixture.childRowId) as { status: string }).status).toBe('running')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+})
+
+describe('managed stale parent pre-media reconciliation', () => {
+  it('auto-binds the sole parent without exposing a business identity in dry-run output', () => {
+    const fixture = createParentFixture()
+    try {
+      const result = fixture.runParent()
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toEqual({
+        mode: 'dry-run', eligible: true, targetKind: 'parent-pre-media', prepareRequired: true,
+      })
+      expect(result.stdout).not.toContain(fixture.parentTaskId)
+      expect(result.stdout).not.toContain(fixture.mediaTaskId)
+      expect(result.stdout).not.toContain('confirmationToken')
+      expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects every command-line business identifier in parent mode', () => {
+    const fixture = createParentFixture()
+    try {
+      for (const args of [
+        ['--parent-task-id', fixture.parentTaskId],
+        ['--child-task-id', fixture.mediaTaskId],
+        ['--child-row-id', '1'],
+        ['--execution-id', '65'],
+      ]) {
+        const result = fixture.runParent(args)
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain('does not accept business identifiers')
+      }
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('accepts a paused newer intake-control row as an additional legacy freeze gate', () => {
+    const fixture = createParentFixture()
+    try {
+      createIntakeControl(fixture)
+      const result = fixture.runParent()
+      expect(result.status, result.stderr).toBe(0)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['loaded qwen-current Gateway job', { qwenCurrentLoaded: true }],
+    ['qwen-current Gateway listener', { qwenCurrentListener: true }],
+    ['matching qwen-current Gateway process', {
+      processInventory: '3303 1 openclaw gateway --profile qwen-current --port 18889\n',
+    }],
+    ['active durable submit process', {
+      processInventory: '4404 1 node /installed/aiworker-task-flow/scripts/submit-task.mjs --video-file /private/input.mp4\n',
+    }],
+    ['active material handoff process', {
+      processInventory: '5505 1 node /installed/material-handoff.mjs --resume\n',
+    }],
+  ])('requires official legacy ingress freeze proof: %s', (_label, change) => {
+    const fixture = createParentFixture()
+    try {
+      fixture.writeState(change)
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['durable source', { sourceAvailable: true }],
+    ['non-n8n queue origin', { queueOrigin: 'other' }],
+  ])('rejects a parent queue item with %s', (_label, change) => {
+    const fixture = createParentFixture()
+    try {
+      const queue = JSON.parse(readFileSync(fixture.queuePath, 'utf8')) as {
+        queue: Array<Record<string, unknown>>
+      }
+      Object.assign(queue.queue[0], change)
+      writeFileSync(fixture.queuePath, JSON.stringify(queue), { mode: 0o600 })
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('stale non-durable accepted parent')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('prepares an authoritative old-row snapshot and applies exactly the four-field transition', () => {
+    const fixture = createParentFixture()
+    try {
+      const before = fixture.mission.prepare('SELECT * FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as Record<string, unknown>
+      const prepared = prepareParent(fixture)
+      expect(prepared.prepareManifest).not.toContain(fixture.parentTaskId)
+      const snapshot = new Database(join(dirname(prepared.prepareManifest), 'consistent-snapshot.db'), {
+        readonly: true,
+        fileMustExist: true,
+      })
+      const saved = snapshot.prepare('SELECT * FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId)
+      expect(saved).toEqual(before)
+      expect(snapshot.pragma('quick_check', { simple: true })).toBe('ok')
+      snapshot.close()
+
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND: fixture.clearQueueHook,
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).not.toContain(fixture.parentTaskId)
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        mode: 'apply', reconciled: true, targetKind: 'parent-pre-media',
+        handoffReady: false, releaseDecision: 'NO-GO',
+      })
+      const after = fixture.mission.prepare('SELECT * FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as Record<string, unknown>
+      expect(after.status).toBe('failed')
+      expect(after.error).toBe(
+        '[VIDEO_CALLBACK_LEASE_EXPIRED] n8n 视频任务已受理，但在 86400 秒内未建立媒体处理阶段',
+      )
+      expect(after.completed_at).toBe(after.updated_at)
+      const restored = {
+        ...after,
+        status: before.status,
+        error: before.error,
+        completed_at: before.completed_at,
+        updated_at: before.updated_at,
+      }
+      expect(restored).toEqual(before)
+      expect(JSON.parse(readFileSync(fixture.queuePath, 'utf8'))).toMatchObject({
+        counts: { attention: 0, waiting: 0, running: 0 }, total: 0,
+      })
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects runtime dependency drift before the changed module top level can execute', () => {
+    const fixture = createParentFixture()
+    try {
+      const runtimeModule = join(fixture.root, 'verified-submission-lock.mjs')
+      const canary = join(fixture.root, 'runtime-drift-canary')
+      writeFileSync(runtimeModule, `
+export async function acquireVideoSubmissionLock() {
+  return { acquired: true, async release() {} }
+}
+`, { mode: 0o600 })
+      const environment = {
+        AIWORKER_TEST_LEGACY_ORPHAN_TOOL_RUNTIME_ROOT: runtimeModule,
+      }
+      const prepared = prepareParent(fixture, environment)
+      const driftedSource = `
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(canary)}, 'executed\\n', { mode: 0o600 })
+export async function acquireVideoSubmissionLock() {
+  return { acquired: true, async release() {} }
+}
+`
+      const mutateRuntime = join(fixture.root, 'mutate-verified-submission-lock')
+      executable(mutateRuntime, `#!${process.execPath}
+const fs = require('node:fs')
+fs.writeFileSync(${JSON.stringify(runtimeModule)}, ${JSON.stringify(driftedSource)}, { mode: 0o600 })
+`)
+      const result = apply(fixture, prepared, {
+        ...environment,
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_TOOL_SNAPSHOT_CHECK_COMMAND: mutateRuntime,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('changed after closure verification')
+      expect(existsSync(canary)).toBe(false)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('loads the bound parser snapshot and never executes a raced parser top-level canary', () => {
+    const fixture = createParentFixture()
+    try {
+      const parserPath = join(fixture.root, 'typescript-parser.cjs')
+      const installedParser = realpathSync(join(
+        repositoryRoot,
+        'node_modules/typescript/lib/typescript.js',
+      ))
+      const canary = join(fixture.root, 'parser-race-canary')
+      copyFileSync(installedParser, parserPath)
+      chmodSync(parserPath, 0o600)
+      const environment = { AIWORKER_TEST_LEGACY_ORPHAN_PARSER_PATH: parserPath }
+      const prepared = prepareParent(fixture, environment)
+      const mutateParser = join(fixture.root, 'mutate-typescript-parser')
+      executable(mutateParser, `#!${process.execPath}
+const fs = require('node:fs')
+fs.writeFileSync(${JSON.stringify(parserPath)}, ${JSON.stringify(`
+require('node:fs').writeFileSync(${JSON.stringify(canary)}, 'executed\\n', { mode: 0o600 })
+module.exports = {}
+`)}, { mode: 0o600 })
+`)
+      const result = apply(fixture, prepared, {
+        ...environment,
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_PARSER_SNAPSHOT_CHECK_COMMAND: mutateParser,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('TypeScript parser changed after verified parsing')
+      expect(existsSync(canary)).toBe(false)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects a forged token before inspecting or executing a drifted parser', () => {
+    const fixture = createParentFixture()
+    try {
+      const parserPath = join(fixture.root, 'token-first-parser.cjs')
+      const installedParser = realpathSync(join(
+        repositoryRoot,
+        'node_modules/typescript/lib/typescript.js',
+      ))
+      const canary = join(fixture.root, 'token-first-parser-canary')
+      copyFileSync(installedParser, parserPath)
+      chmodSync(parserPath, 0o600)
+      const environment = { AIWORKER_TEST_LEGACY_ORPHAN_PARSER_PATH: parserPath }
+      const prepared = prepareParent(fixture, environment)
+      writeFileSync(parserPath, `
+require('node:fs').writeFileSync(${JSON.stringify(canary)}, 'executed\\n', { mode: 0o600 })
+module.exports = {}
+`, { mode: 0o600 })
+      const result = apply(fixture, {
+        ...prepared,
+        confirmationToken: `confirm-${'0'.repeat(64)}`,
+      }, environment)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('confirmation token')
+      expect(result.stderr).not.toContain('TypeScript parser changed')
+      expect(existsSync(canary)).toBe(false)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects Node database runtime drift before any SQLite database can open', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const canary = join(fixture.root, 'unexpected-database-open')
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_RUNTIME_SHA: 'f'.repeat(64),
+        AIWORKER_TEST_LEGACY_ORPHAN_DATABASE_OPEN_CANARY: canary,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('database runtime changed after prepare')
+      expect(existsSync(canary)).toBe(false)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('keeps the verified loader active while acquire rejects a delayed local require', () => {
+    const fixture = createParentFixture()
+    try {
+      const runtimeModule = join(fixture.root, 'delayed-require-submission-lock.mjs')
+      const lazyModule = join(fixture.root, 'delayed-lock-canary.cjs')
+      const canary = join(fixture.root, 'delayed-require-canary')
+      writeFileSync(lazyModule, `
+require('node:fs').writeFileSync(${JSON.stringify(canary)}, 'executed\\n', { mode: 0o600 })
+module.exports = true
+`, { mode: 0o600 })
+      writeFileSync(runtimeModule, `
+const moduleApi = process.getBuiltinModule('node:module')
+const delayedRequire = moduleApi['create' + 'Require'](new URL(${JSON.stringify(
+        pathToFileURL(runtimeModule).href,
+      )}))
+export async function acquireVideoSubmissionLock() {
+  delayedRequire('./delayed-lock-canary.cjs')
+  return { acquired: true, async release() {} }
+}
+`, { mode: 0o600 })
+      const environment = {
+        AIWORKER_TEST_LEGACY_ORPHAN_TOOL_RUNTIME_ROOT: runtimeModule,
+      }
+      const prepared = prepareParent(fixture, environment)
+      const result = apply(fixture, prepared, environment)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('unverified reconciliation runtime dependency requested')
+      expect(existsSync(canary)).toBe(false)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('fails closed after commit when attention does not disappear and never retries the CAS', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const first = apply(fixture, prepared)
+      expect(first.status).not.toBe(0)
+      expect(first.stderr).toContain('queue state did not reach zero')
+      const committed = fixture.mission.prepare('SELECT status, attempt_count FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string; attempt_count: number }
+      expect(committed).toEqual({ status: 'failed', attempt_count: 0 })
+      const second = apply(fixture, prepared)
+      expect(second.status).not.toBe(0)
+      expect((fixture.mission.prepare('SELECT attempt_count FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { attempt_count: number }).attempt_count).toBe(0)
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rechecks durable queue authority inside the dual-lock write boundary', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const hook = join(fixture.root, 'make-parent-durable')
+      executable(hook, `#!${process.execPath}
+const fs = require('node:fs')
+const path = ${JSON.stringify(fixture.queuePath)}
+const value = JSON.parse(fs.readFileSync(path, 'utf8'))
+value.queue[0].sourceAvailable = true
+value.queue[0].queueOrigin = 'durable+n8n'
+fs.writeFileSync(path, JSON.stringify(value), { mode: 0o600 })
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_BETWEEN_LOCKED_QUEUE_SAMPLES_COMMAND: hook,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('persistent queue changed between locked write-boundary samples')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('catches even a completed n8n execution created between the first samples and writer reservation', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const hook = join(fixture.root, 'insert-n8n-gap-execution')
+      executable(hook, `#!/bin/sh
+/usr/bin/sqlite3 ${JSON.stringify(fixture.n8nPath)} "INSERT INTO execution_entity VALUES (66, 'other-workflow', 'success', '2026-09-04 20:00:00.000')"
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_MISSION_LOCK_COMMAND: hook,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('n8n execution changed after confirmation')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+      expect((fixture.n8n.prepare('SELECT status FROM execution_entity WHERE id = 66')
+        .get() as { status: string }).status).toBe('success')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('holds the n8n writer reservation until the Mission Control CAS commits', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const hook = join(fixture.root, 'prove-n8n-writer-reservation')
+      executable(hook, `#!/bin/sh
+if /usr/bin/sqlite3 ${JSON.stringify(fixture.n8nPath)} "PRAGMA busy_timeout=100; INSERT INTO execution_entity VALUES (66, 'other-workflow', 'running', NULL)" >/dev/null 2>&1; then
+  exit 91
+fi
+exit 0
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_DUAL_LOCK_COMMAND: hook,
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND: fixture.clearQueueHook,
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(fixture.n8n.prepare('SELECT id FROM execution_entity WHERE id = 66').get()).toBeUndefined()
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('failed')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('waits behind a submission that already owns the shared lock and then sees its durable write', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const readyMarker = join(fixture.root, 'preexisting-submit-ready')
+      const holder = join(fixture.root, 'preexisting-submit.mjs')
+      const stateModule = pathToFileURL(join(
+        repositoryRoot,
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      executable(holder, `#!${process.execPath}
+import { readFileSync, writeFileSync } from 'node:fs'
+import { acquireVideoSubmissionLock } from ${JSON.stringify(stateModule)}
+const lock = await acquireVideoSubmissionLock(${JSON.stringify(join(fixture.root, 'batches'))})
+writeFileSync(${JSON.stringify(readyMarker)}, 'ready\\n', { mode: 0o600 })
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300)
+const queuePath = ${JSON.stringify(fixture.queuePath)}
+const queue = JSON.parse(readFileSync(queuePath, 'utf8'))
+queue.queue[0].sourceAvailable = true
+writeFileSync(queuePath, JSON.stringify(queue), { mode: 0o600 })
+await lock.release()
+`)
+      const startHolder = join(fixture.root, 'start-preexisting-submit')
+      executable(startHolder, `#!${process.execPath}
+const fs = require('node:fs')
+const { spawn } = require('node:child_process')
+const child = spawn(process.execPath, [${JSON.stringify(holder)}], { detached: true, stdio: 'ignore' })
+child.unref()
+const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const deadline = Date.now() + 2000
+while (!fs.existsSync(${JSON.stringify(readyMarker)}) && Date.now() < deadline) wait(20)
+if (!fs.existsSync(${JSON.stringify(readyMarker)})) process.exit(94)
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_BEFORE_SUBMISSION_LOCK_COMMAND: startHolder,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('persistent queue changed inside the write boundary')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('holds the shared durable-submission lock across both writer reservations and the CAS', () => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      const acquiredMarker = join(fixture.root, 'slow-submit-acquired')
+      const startedMarker = join(fixture.root, 'slow-submit-started')
+      const slowSubmit = join(fixture.root, 'slow-submit.mjs')
+      const stateModule = pathToFileURL(join(
+        repositoryRoot,
+        'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+      )).href
+      executable(slowSubmit, `#!${process.execPath}
+import { writeFileSync } from 'node:fs'
+import { acquireVideoSubmissionLock } from ${JSON.stringify(stateModule)}
+writeFileSync(${JSON.stringify(startedMarker)}, 'started\\n', { mode: 0o600 })
+const lock = await acquireVideoSubmissionLock(${JSON.stringify(join(fixture.root, 'batches'))})
+writeFileSync(${JSON.stringify(acquiredMarker)}, 'acquired-after-cas\\n', { mode: 0o600 })
+await lock.release()
+`)
+      const startSlowSubmit = join(fixture.root, 'start-slow-submit')
+      executable(startSlowSubmit, `#!${process.execPath}
+const fs = require('node:fs')
+const { spawn } = require('node:child_process')
+const child = spawn(process.execPath, [${JSON.stringify(slowSubmit)}], { detached: true, stdio: 'ignore' })
+child.unref()
+const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const deadline = Date.now() + 2000
+while (!fs.existsSync(${JSON.stringify(startedMarker)}) && Date.now() < deadline) wait(20)
+if (!fs.existsSync(${JSON.stringify(startedMarker)}) || fs.existsSync(${JSON.stringify(acquiredMarker)})) process.exit(91)
+wait(250)
+if (fs.existsSync(${JSON.stringify(acquiredMarker)})) process.exit(92)
+`)
+      const finishAfterCommit = join(fixture.root, 'finish-after-commit')
+      executable(finishAfterCommit, `#!${process.execPath}
+const fs = require('node:fs')
+const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+const deadline = Date.now() + 4000
+while (!fs.existsSync(${JSON.stringify(acquiredMarker)}) && Date.now() < deadline) wait(20)
+if (!fs.existsSync(${JSON.stringify(acquiredMarker)})) process.exit(93)
+fs.writeFileSync(${JSON.stringify(fixture.queuePath)}, JSON.stringify({
+  counts: { attention: 0, running: 0, waiting: 0 }, queue: [], total: 0,
+}), { mode: 0o600 })
+`)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_LOCKED_QUEUE_SAMPLES_COMMAND: startSlowSubmit,
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND: finishAfterCommit,
+      })
+      expect(result.status, result.stderr).toBe(0)
+      expect(readFileSync(acquiredMarker, 'utf8')).toBe('acquired-after-cas\n')
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('failed')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects parent-mode tool, token, and immutable manifest drift', () => {
+    const toolFixture = createParentFixture()
+    try {
+      const prepared = prepareParent(toolFixture, {
+        AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA: toolShaA,
+      })
+      const result = apply(toolFixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_TOOL_SHA: toolShaB,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('tool changed')
+    } finally { toolFixture.mission.close(); toolFixture.n8n.close() }
+
+    const tokenFixture = createParentFixture()
+    try {
+      const prepared = prepareParent(tokenFixture)
+      const result = apply(tokenFixture, {
+        ...prepared,
+        confirmationToken: `confirm-${'0'.repeat(64)}`,
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('confirmation token')
+    } finally { tokenFixture.mission.close(); tokenFixture.n8n.close() }
+
+    const manifestFixture = createParentFixture()
+    try {
+      const prepared = prepareParent(manifestFixture)
+      mutateImmutableJson(prepared.prepareManifest, value => {
+        value.handoffNonce = 'f'.repeat(64)
+      })
+      const result = apply(manifestFixture, prepared)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('confirmation token')
+    } finally { manifestFixture.mission.close(); manifestFixture.n8n.close() }
+  })
+
+  it.each([
+    ['wrong source', (fixture: ParentFixture) => fixture.mission.prepare(
+      'UPDATE n8n_task_runs SET source = ? WHERE task_id = ?',
+    ).run('manual', fixture.parentTaskId)],
+    ['wrong routing', (fixture: ParentFixture) => fixture.mission.prepare(
+      'UPDATE n8n_task_runs SET routing = ? WHERE task_id = ?',
+    ).run('{"taskType":"other"}', fixture.parentTaskId)],
+    ['wrong binding', (fixture: ParentFixture) => fixture.mission.prepare(
+      'UPDATE n8n_workflow_bindings SET task_type = ?',
+    ).run('other')],
+    ['non-accepted status', (fixture: ParentFixture) => fixture.mission.prepare(
+      'UPDATE n8n_task_runs SET status = ? WHERE task_id = ?',
+    ).run('running', fixture.parentTaskId)],
+    ['resumed optional global intake', (fixture: ParentFixture) => createIntakeControl(fixture, 1)],
+    ['deterministic child', (fixture: ParentFixture) => insertTaskFromParent(
+      fixture, childTaskId(fixture.parentTaskId, 'prepare'), 'n8n-media-node', 'failed',
+    )],
+    ['parent claim', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_parent_execution_claims VALUES (?, 1, 1)',
+    ).run(fixture.parentTaskId)],
+    ['dispatch lease', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_task_dispatch_leases VALUES (?, 1, 1)',
+    ).run(fixture.parentTaskId)],
+    ['child lease', (fixture: ParentFixture) => fixture.mission.prepare(`
+      INSERT INTO n8n_child_execution_leases VALUES (?, 1, 1, ?, ?, 1, 1, 1, 1, 1)
+    `).run(childTaskId(fixture.parentTaskId, 'audio'), 'a'.repeat(64), 'b'.repeat(64))],
+    ['cleanup debt', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_media_cleanup_debts VALUES (?)',
+    ).run(fixture.parentTaskId)],
+    ['director outbox', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_director_evidence_outbox VALUES (?)',
+    ).run(fixture.parentTaskId)],
+    ['media active', (fixture: ParentFixture) => insertTaskFromParent(
+      fixture, 'unrelated-media-active', 'n8n-media-node',
+    )],
+    ['model active', (fixture: ParentFixture) => insertTaskFromParent(
+      fixture, 'unrelated-model-active', 'n8n-node',
+    )],
+    ['n8n active', (fixture: ParentFixture) => fixture.n8n.prepare(
+      'INSERT INTO execution_entity VALUES (66, ?, ?, NULL)',
+    ).run('other-workflow', 'running')],
+    ['target workspace', (fixture: ParentFixture) => mkdirSync(
+      join(dirname(fixture.missionPath), 'media-tasks', sha256(fixture.parentTaskId)),
+      { recursive: true, mode: 0o700 },
+    )],
+    ['target process reference', (fixture: ParentFixture) => fixture.writeState({
+      processInventory: `9001 1 node worker ${fixture.parentTaskId}\n`,
+    })],
+  ])('refuses parent reconciliation with %s', (_label, mutate) => {
+    const fixture = createParentFixture()
+    try {
+      mutate(fixture)
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).toBe('')
+      expect(readdirSync(fixture.backupRoot)).toEqual([])
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['cross-scope deterministic child', (fixture: ParentFixture) => {
+      const taskId = childTaskId(fixture.parentTaskId, 'finalize')
+      insertTaskFromParent(fixture, taskId, 'n8n-media-node', 'failed')
+      fixture.mission.prepare(
+        'UPDATE n8n_task_runs SET tenant_id = 2, workspace_id = 2 WHERE task_id = ?',
+      ).run(taskId)
+    }],
+    ['cross-scope parent claim', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_parent_execution_claims VALUES (?, 2, 2)',
+    ).run(fixture.parentTaskId)],
+    ['cross-scope dispatch lease', (fixture: ParentFixture) => fixture.mission.prepare(
+      'INSERT INTO n8n_task_dispatch_leases VALUES (?, 2, 2)',
+    ).run(fixture.parentTaskId)],
+    ['cross-scope child lease', (fixture: ParentFixture) => fixture.mission.prepare(`
+      INSERT INTO n8n_child_execution_leases VALUES (?, 2, 2, ?, ?, 1, 1, 1, 1, 1)
+    `).run(childTaskId(fixture.parentTaskId, 'prepare'), 'a'.repeat(64), 'b'.repeat(64))],
+  ])('rejects %s by global task identity', (_label, mutate) => {
+    const fixture = createParentFixture()
+    try {
+      mutate(fixture)
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['parent row drift', (fixture: ParentFixture) => fixture.mission.prepare(
+      'UPDATE n8n_task_runs SET requested_by = ? WHERE task_id = ?',
+    ).run('drifted', fixture.parentTaskId)],
+    ['late deterministic child', (fixture: ParentFixture) => insertTaskFromParent(
+      fixture, childTaskId(fixture.parentTaskId, 'vision'), 'n8n-media-node', 'failed',
+    )],
+  ])('rejects %s after prepare without changing the parent', (_label, mutate) => {
+    const fixture = createParentFixture()
+    try {
+      const prepared = prepareParent(fixture)
+      mutate(fixture)
+      const result = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND: fixture.clearQueueHook,
+      })
+      expect(result.status).not.toBe(0)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 })

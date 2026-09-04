@@ -393,6 +393,20 @@ file_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
 }
 
+auditor_closure_is_safe() {
+  local root="$1"
+  [[ -d "$root" && ! -L "$root" \
+    && -d "$root/lib" && ! -L "$root/lib" \
+    && -f "$root/check-standalone-artifact.mjs" \
+    && ! -L "$root/check-standalone-artifact.mjs" \
+    && -f "$root/check-sensitive-content.mjs" \
+    && ! -L "$root/check-sensitive-content.mjs" \
+    && -f "$root/lib/sensitive-value-scanner.mjs" \
+    && ! -L "$root/lib/sensitive-value-scanner.mjs" \
+    && -f "$root/lib/director-extraction-release-provenance.mjs" \
+    && ! -L "$root/lib/director-extraction-release-provenance.mjs" ]]
+}
+
 cleanup_recovery_bundle() {
   local physical_run_dir=""
   if [[ -n "$RECOVERY_WORK_ROOT" ]]; then
@@ -420,8 +434,8 @@ verify_recovery_release_identity() {
   [[ "$RECOVERY_READY" == 1 ]] || return 1
   [[ -f "$RECOVERY_STANDALONE_ROOT/server.js" \
     && -f "$RECOVERY_STANDALONE_ROOT/.next/BUILD_ID" \
-    && -f "$RECOVERY_AUDITOR" \
     && -x "$RECOVERY_LAUNCHER" ]] || return 1
+  auditor_closure_is_safe "$RECOVERY_WORK_ROOT" || return 1
   [[ "$(file_sha256 "$RECOVERY_STANDALONE_ROOT/server.js")" == "$RECOVERY_SERVER_SHA256" \
     && "$(file_sha256 "$RECOVERY_STANDALONE_ROOT/.next/BUILD_ID")" == "$RECOVERY_BUILD_ID_SHA256" ]] \
     || return 1
@@ -454,8 +468,8 @@ adopt_running_recovery_bundle() {
   candidate_auditor="$candidate_root/check-standalone-artifact.mjs"
   [[ -f "$running_cwd/server.js" \
     && -f "$running_cwd/.next/BUILD_ID" \
-    && -f "$candidate_auditor" \
     && -x "$candidate_launcher" ]] || return 1
+  auditor_closure_is_safe "$candidate_root" || return 1
   candidate_server_sha256="$(file_sha256 "$running_cwd/server.js")" || return 1
   candidate_build_id_sha256="$(file_sha256 "$running_cwd/.next/BUILD_ID")" || return 1
   "${NODE_BIN:-node}" "$candidate_auditor" "$running_cwd" >/dev/null || return 1
@@ -473,6 +487,9 @@ adopt_running_recovery_bundle() {
 prepare_existing_server_recovery() {
   local standalone_root="$PROJECT_ROOT/.next/standalone"
   local current_auditor="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
+  local current_sensitive_scanner="$PROJECT_ROOT/scripts/check-sensitive-content.mjs"
+  local current_value_scanner="$PROJECT_ROOT/scripts/lib/sensitive-value-scanner.mjs"
+  local current_provenance="$PROJECT_ROOT/scripts/lib/director-extraction-release-provenance.mjs"
   local created_recovery_root=""
 
   if command -v lsof >/dev/null 2>&1 && adopt_running_recovery_bundle; then
@@ -480,10 +497,10 @@ prepare_existing_server_recovery() {
   fi
 
   if [[ ! -f "$standalone_root/server.js" \
-    || ! -f "$standalone_root/.next/BUILD_ID" \
-    || ! -f "$current_auditor" ]]; then
+    || ! -f "$standalone_root/.next/BUILD_ID" ]]; then
     return 0
   fi
+  auditor_closure_is_safe "$PROJECT_ROOT/scripts" || return 1
 
   created_recovery_root="$(mktemp -d "$AIWORKER_RUN_DIR/.deploy-recovery.XXXXXX")" || return 1
   RECOVERY_WORK_ROOT="$(cd "$created_recovery_root" && pwd -P)" \
@@ -494,7 +511,15 @@ prepare_existing_server_recovery() {
   RECOVERY_STANDALONE_ROOT="$RECOVERY_WORK_ROOT/standalone"
   cp -pR "$standalone_root" "$RECOVERY_STANDALONE_ROOT" \
     || { cleanup_recovery_bundle; return 1; }
+  mkdir -m 700 "$RECOVERY_WORK_ROOT/lib" \
+    || { cleanup_recovery_bundle; return 1; }
   install -m 600 "$current_auditor" "$RECOVERY_AUDITOR" \
+    || { cleanup_recovery_bundle; return 1; }
+  install -m 600 "$current_sensitive_scanner" "$RECOVERY_WORK_ROOT/check-sensitive-content.mjs" \
+    || { cleanup_recovery_bundle; return 1; }
+  install -m 600 "$current_value_scanner" "$RECOVERY_WORK_ROOT/lib/sensitive-value-scanner.mjs" \
+    || { cleanup_recovery_bundle; return 1; }
+  install -m 600 "$current_provenance" "$RECOVERY_WORK_ROOT/lib/director-extraction-release-provenance.mjs" \
     || { cleanup_recovery_bundle; return 1; }
   if ! printf '%s\n' \
     '#!/usr/bin/env bash' \

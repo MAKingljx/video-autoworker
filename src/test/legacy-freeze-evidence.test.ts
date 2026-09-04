@@ -25,9 +25,11 @@ import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 import {
+  captureQueueBeforeFreeze,
   captureProcessIdentity,
   classifyEvidencedLegacyProcess,
   hashFileStable,
+  queueState,
   revalidateDatabaseConnection,
   validateDatabaseBinding,
   validateNewDatabaseConnection,
@@ -232,6 +234,62 @@ function fixture() {
 }
 
 describe('managed legacy freeze evidence', () => {
+  it('fails before freeze attestation when a stale accepted run is attention', async () => {
+    let freezeAttestations = 0
+    const fetchQueue = async () => new Response(JSON.stringify({
+      counts: { attention: 1, running: 0, waiting: 0 },
+      queue: [{
+        taskId: 'stale-accepted', status: 'accepted', updatedAt: 1,
+        stale: true, sourceAvailable: null,
+      }],
+      total: 1,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+    await expect(captureQueueBeforeFreeze(
+      { path: '/private/mission-control.db' },
+      { path: '/private/database.sqlite' },
+      {
+        queueState: () => queueState(fetchQueue),
+        freezeGuard: () => {
+          freezeAttestations += 1
+          return { ready: true }
+        },
+      },
+    )).rejects.toThrow(/controlled CAS reconciliation before legacy bootstrap/u)
+    expect(freezeAttestations).toBe(0)
+  })
+
+  it('keeps the zero-attention queue and freeze path unchanged', async () => {
+    const calls: unknown[][] = []
+    const frozen = { schema: 'video-autoworker-legacy-freeze-guard/v1', ready: true }
+    const fetchQueue = async () => new Response(JSON.stringify({
+      counts: { attention: 0, running: 0, waiting: 0 }, queue: [], total: 0,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    const mission = { path: '/private/mission-control.db' }
+    const n8n = { path: '/private/database.sqlite' }
+
+    const result = await captureQueueBeforeFreeze(mission, n8n, {
+      queueState: () => queueState(fetchQueue),
+      freezeGuard: (...args: unknown[]) => {
+        calls.push(args)
+        return frozen
+      },
+    })
+
+    expect(result).toEqual({
+      queue: { waiting: 0, running: 0, digest: hash('[]') },
+      frozen,
+    })
+    expect(calls).toEqual([[mission, n8n]])
+  })
+
+  it.each([-1, 1.5, '1'])('rejects invalid queue attention count %j', async attention => {
+    const fetchQueue = async () => new Response(JSON.stringify({
+      counts: { attention, running: 0, waiting: 0 }, queue: [], total: 0,
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+    await expect(queueState(fetchQueue)).rejects.toThrow(/queue attention is invalid/u)
+  })
+
   it('treats a reused legacy PID as stopped only while port 3017 remains unclaimed', () => {
     const expected = {
       pid: 30170,

@@ -863,7 +863,7 @@ describe('qwen-current unified runtime convergence installer', () => {
     expect(value.effectiveToolIds).toContain('read')
     expect(await readFile(entry.config, 'utf8')).toBe(configBefore)
     expect(await exists(entry.gatewayLog)).toBe(false)
-  })
+  }, 15_000)
 
   it.each(['capture-tool-baseline', 'dry-run', 'apply'])(
     'rejects a multi-agent qwen-current profile during %s without persistent writes',

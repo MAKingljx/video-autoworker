@@ -17,7 +17,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { resolve } from 'node:path'
+import { delimiter, dirname, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import Database from 'better-sqlite3'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -26,6 +26,17 @@ const execFileAsync = promisify(execFile)
 const sourceRepository = process.cwd()
 let installerRepository = ''
 let installer = resolve(sourceRepository, 'scripts/install-aiworker-director-brain.sh')
+let commandFixtureRoot = ''
+let fakeCommandBin = ''
+let fakeOpenClawCallLog = ''
+
+type FakeOpenClawCall = {
+  argv: string[]
+  configPath: string
+  stateDir: string
+  activeConfigPath: string
+  staging: boolean
+}
 
 type InstallerProfile = {
   agents: {
@@ -86,12 +97,94 @@ async function initializeCleanInstallerRepository() {
   installer = resolve(installerRepository, 'scripts/install-aiworker-director-brain.sh')
 }
 
+async function initializeFakeOpenClaw() {
+  commandFixtureRoot = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-commands-'))
+  fakeCommandBin = resolve(commandFixtureRoot, 'bin')
+  fakeOpenClawCallLog = resolve(commandFixtureRoot, 'openclaw-calls.ndjson')
+  await mkdir(fakeCommandBin, { mode: 0o700 })
+  await writeFile(fakeOpenClawCallLog, '', { mode: 0o600 })
+  const fakeOpenClaw = resolve(fakeCommandBin, 'openclaw')
+  await writeFile(fakeOpenClaw, `#!${process.execPath}
+const fs = require('node:fs')
+const path = require('node:path')
+
+const argv = process.argv.slice(2)
+const callLog = process.env.AIWORKER_TEST_OPENCLAW_CALL_LOG
+const configPath = process.env.OPENCLAW_CONFIG_PATH
+const stateDir = process.env.OPENCLAW_STATE_DIR
+if (argv.length !== 3 || argv[0] !== 'config' || argv[1] !== 'validate' || argv[2] !== '--json') {
+  process.exit(91)
+}
+if (!callLog || !path.isAbsolute(callLog)
+  || !configPath || !path.isAbsolute(configPath)
+  || !stateDir || !path.isAbsolute(stateDir)
+  || !fs.statSync(stateDir).isDirectory()
+  || !fs.statSync(configPath).isFile()) {
+  process.exit(92)
+}
+JSON.parse(fs.readFileSync(configPath, 'utf8'))
+const activeConfigPath = path.join(stateDir, 'openclaw.json')
+const staging = path.resolve(configPath) !== path.resolve(activeConfigPath)
+fs.appendFileSync(callLog, JSON.stringify({
+  argv,
+  configPath,
+  stateDir,
+  activeConfigPath,
+  staging,
+}) + '\\n')
+if (!staging) process.exit(93)
+if (process.env.AIWORKER_TEST_OPENCLAW_VALIDATE_FAIL === '1') process.exit(94)
+process.stdout.write('{"valid":true}\\n')
+`, { mode: 0o755 })
+  await chmod(fakeOpenClaw, 0o755)
+}
+
+async function resetFakeOpenClawCalls() {
+  await writeFile(fakeOpenClawCallLog, '', { mode: 0o600 })
+}
+
+async function readFakeOpenClawCalls(): Promise<FakeOpenClawCall[]> {
+  const source = await readFile(fakeOpenClawCallLog, 'utf8')
+  return source.trim().length === 0
+    ? []
+    : source.trim().split('\n').map(line => JSON.parse(line) as FakeOpenClawCall)
+}
+
+function expectOfficialStagingValidation(calls: FakeOpenClawCall[], expectedCount: number) {
+  expect(calls).toHaveLength(expectedCount)
+  for (const call of calls) {
+    expect(call.argv).toEqual(['config', 'validate', '--json'])
+    expect(call.configPath).not.toBe(call.activeConfigPath)
+    expect(call.staging).toBe(true)
+  }
+}
+
+function installerTestEnvironment(
+  environment: Partial<NodeJS.ProcessEnv> = {},
+): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    AIWORKER_TEST_OPENCLAW_CALL_LOG: fakeOpenClawCallLog,
+    ...environment,
+    PATH: [
+      fakeCommandBin,
+      dirname(process.execPath),
+      '/usr/bin',
+      '/bin',
+      '/usr/sbin',
+      '/sbin',
+    ].join(delimiter),
+  }
+}
+
 beforeAll(async () => {
   await initializeCleanInstallerRepository()
+  await initializeFakeOpenClaw()
 })
 
 afterAll(async () => {
   if (installerRepository) await rm(installerRepository, { recursive: true, force: true })
+  if (commandFixtureRoot) await rm(commandFixtureRoot, { recursive: true, force: true })
 })
 
 async function createFixture(root: string) {
@@ -179,14 +272,13 @@ async function runInstaller(
     '--backup-root', fixture.backupRoot,
     ...extra,
   ], {
-    env: {
-      ...process.env,
+    env: installerTestEnvironment({
       AIWORKER_BG_RUN_DIR: fixture.deploymentRunDir,
       AIWORKER_BG_LIVE_DB_PATH: fixture.liveDbPath,
       AIWORKER_BG_N8N_DB_PATH: fixture.n8nDbPath,
       AIWORKER_VIDEO_BATCH_DIR: fixture.videoBatchRoot,
       ...environment,
-    },
+    }),
     encoding: 'utf8',
   })
 }
@@ -218,7 +310,10 @@ describe('transactional director-brain OpenClaw installer', () => {
   }, 15_000)
 
   it('requires an explicit mode, profile, state directory, and workspace', async () => {
-    await expect(execFileAsync('bash', [installer, '--dry-run'], { encoding: 'utf8' }))
+    await expect(execFileAsync('bash', [installer, '--dry-run'], {
+      encoding: 'utf8',
+      env: installerTestEnvironment(),
+    }))
       .rejects.toMatchObject({ code: 2 })
     const script = await readFile(installer, 'utf8')
     expect(script).not.toMatch(/\bssh\b|\bscp\b|gateway restart|launchctl|sqlite3|n8n-import/iu)
@@ -264,7 +359,10 @@ describe('transactional director-brain OpenClaw installer', () => {
         ],
       ]
       for (const attempt of attempts) {
-        await expect(execFileAsync('bash', [...base, ...attempt], { encoding: 'utf8' }))
+        await expect(execFileAsync('bash', [...base, ...attempt], {
+          encoding: 'utf8',
+          env: installerTestEnvironment(),
+        }))
           .rejects.toThrow(/overly broad directory/u)
       }
       expect(await exists(fixture.backupRoot)).toBe(false)
@@ -412,9 +510,11 @@ describe('transactional director-brain OpenClaw installer', () => {
     try {
       const fixture = await createFixture(root)
       const configBefore = await readFile(resolve(fixture.stateDir, 'openclaw.json'), 'utf8')
+      await resetFakeOpenClawCalls()
       const result = await runInstaller(fixture, '--dry-run')
 
       expect(result.stdout).toContain('installation dry-run passed')
+      expectOfficialStagingValidation(await readFakeOpenClawCalls(), 1)
       expect(await readFile(resolve(fixture.stateDir, 'openclaw.json'), 'utf8')).toBe(configBefore)
       expect(await readFile(resolve(fixture.stateDir, 'extensions/aiworker-director-brain/old.txt'), 'utf8'))
         .toBe('old plugin\n')
@@ -536,11 +636,13 @@ describe('transactional director-brain OpenClaw installer', () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-apply-'))
     try {
       const fixture = await createFixture(root)
+      await resetFakeOpenClawCalls()
       const first = await runInstaller(fixture, '--apply')
       const backups = await readdir(fixture.backupRoot)
 
       expect(first.stdout).toContain('Installed director-brain plugin, private shared runtime, and Skill')
       expect(first.stdout).toContain('Gateway was not restarted')
+      expectOfficialStagingValidation(await readFakeOpenClawCalls(), 2)
       expect(backups).toHaveLength(1)
       expect(await exists(resolve(
         fixture.stateDir,
@@ -602,6 +704,7 @@ describe('transactional director-brain OpenClaw installer', () => {
 
       const second = await runInstaller(fixture, '--apply')
       expect(second.stdout).toContain('already current')
+      expectOfficialStagingValidation(await readFakeOpenClawCalls(), 4)
       expect(await readdir(fixture.backupRoot)).toEqual(backups)
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -654,7 +757,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     }
   }, 15_000)
 
-  it('rejects plugin entry extensions that the official OpenClaw schema does not support', async () => {
+  it('fails closed when the official OpenClaw validator rejects the staging config', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-plugin-entry-'))
     try {
       const fixture = await createFixture(root)
@@ -676,11 +779,31 @@ describe('transactional director-brain OpenClaw installer', () => {
       await writeFile(configPath, JSON.stringify(config, null, 2) + '\n')
       await chmod(configPath, 0o600)
       const original = await readFile(configPath, 'utf8')
+      const originalPlugin = await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/old.txt',
+      ), 'utf8')
+      const originalSkill = await readFile(resolve(
+        fixture.workspace,
+        'skills/aiworker-director-brain/old.txt',
+      ), 'utf8')
+      await resetFakeOpenClawCalls()
 
-      await expect(runInstaller(fixture, '--apply'))
+      await expect(runInstaller(fixture, '--apply', [], {
+        AIWORKER_TEST_OPENCLAW_VALIDATE_FAIL: '1',
+      }))
         .rejects.toThrow(/Official OpenClaw staging config validation failed/u)
 
+      expectOfficialStagingValidation(await readFakeOpenClawCalls(), 1)
       expect(await readFile(configPath, 'utf8')).toBe(original)
+      expect(await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/old.txt',
+      ), 'utf8')).toBe(originalPlugin)
+      expect(await readFile(resolve(
+        fixture.workspace,
+        'skills/aiworker-director-brain/old.txt',
+      ), 'utf8')).toBe(originalSkill)
       expect(await exists(fixture.backupRoot)).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })

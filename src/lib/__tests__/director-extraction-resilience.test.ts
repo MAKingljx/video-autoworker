@@ -588,6 +588,8 @@ describe('director extraction deterministic and candidate boundaries', () => {
       'director_extraction_output_too_large',
       'director_extraction_phase_input_too_large',
       'director_extraction_seed_too_large',
+      'learning_context_output_too_large',
+      'learning_context_request_budget_exceeded',
     ]) {
       expect(isDirectorExtractionDeterministicConflict(code)).toBe(true)
     }

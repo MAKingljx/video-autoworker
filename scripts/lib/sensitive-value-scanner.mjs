@@ -100,14 +100,17 @@ const SENSITIVE_VALUE_PATTERNS = [
   },
 ]
 
+const RELEASE_CONTEXTUAL_PATTERN_TYPES = new Set(['credential_assignment'])
+
 function textValue(value) {
   return typeof value === 'string' ? value : String(value ?? '')
 }
 
-export function scanSensitiveValues(value) {
+function scanPatterns(value, includePattern) {
   const text = textValue(value)
   const matches = []
   for (const pattern of SENSITIVE_VALUE_PATTERNS) {
+    if (!includePattern(pattern)) continue
     pattern.regex.lastIndex = 0
     let match
     while ((match = pattern.regex.exec(text)) !== null) {
@@ -120,6 +123,23 @@ export function scanSensitiveValues(value) {
     }
   }
   return matches
+}
+
+export function scanSensitiveValues(value) {
+  return scanPatterns(value, () => true)
+}
+
+/**
+ * Release artifacts are arbitrary source, generated code, dependencies, and
+ * binary payloads. The broad assignment pattern is intentionally excluded
+ * here because code such as `token: string` is not credential material.
+ * Context-aware hard-coded assignment checks live in the release scanner.
+ */
+export function scanHighConfidenceSensitiveValues(value) {
+  return scanPatterns(
+    value,
+    pattern => !RELEASE_CONTEXTUAL_PATTERN_TYPES.has(pattern.type),
+  )
 }
 
 export function containsSensitiveValue(value) {

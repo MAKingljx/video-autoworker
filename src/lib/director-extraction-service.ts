@@ -245,6 +245,21 @@ function assertLockedActiveDirectorIntent(
   }
 }
 
+function directorLearningContextRequest(
+  job: DirectorExtractionJob,
+  objective: string,
+): Record<string, unknown> {
+  if (!job.workId || job.currentPhase === 'complete') {
+    throw new Error('director_extraction_work_not_registered')
+  }
+  return {
+    action: 'learning_context',
+    workId: job.workId,
+    phase: job.currentPhase,
+    objective,
+  }
+}
+
 async function buildPhaseInput(
   db: Database.Database,
   job: DirectorExtractionJob,
@@ -282,12 +297,12 @@ async function buildPhaseInput(
     ? await loadReviewedDirectorReferences(job.workId, cumulativeReferences, commandRunner)
     : {}
   const reviewedCandidates = reviewedCandidatesForInput(acceptedEntries, reviewedRecords)
+  const objective = job.objective || '提炼可复核的导演知识候选'
   const fullLearningContext = parseDirectorLearningContextResult(
     job.workId,
-    await commandRunner('operate', { action: 'learning_context', workId: job.workId }),
+    await commandRunner('operate', directorLearningContextRequest(job, objective)),
   )
   assertLockedActiveDirectorIntent(job, fullLearningContext)
-  const objective = job.objective || '提炼可复核的导演知识候选'
   const baseInput = {
     schemaVersion: 2,
     contract: DIRECTOR_EXTRACTION_CONTRACT,
@@ -446,7 +461,10 @@ async function revalidateStagedDependencies(
   }
   const learningContext = parseDirectorLearningContextResult(
     job.workId,
-    await commandRunner('operate', { action: 'learning_context', workId: job.workId }),
+    await commandRunner('operate', directorLearningContextRequest(
+      job,
+      String(stagedInput.objective || job.objective || '提炼可复核的导演知识候选'),
+    )),
   )
   assertLockedActiveDirectorIntent(job, learningContext)
   const frozenCatalog = learningRecordCatalog(job, stagedInput)

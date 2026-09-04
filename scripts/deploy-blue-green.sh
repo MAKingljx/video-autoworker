@@ -107,6 +107,8 @@ verify_deployment_source_gate() {
     scripts/lib/shared-deployment-lock.sh
     scripts/lib/shared-deployment-lock.mjs
     scripts/check-standalone-artifact.mjs
+    scripts/check-sensitive-content.mjs
+    scripts/lib/sensitive-value-scanner.mjs
     scripts/verify-director-video-release-readiness.mjs
     scripts/lib/director-extraction-release-provenance.mjs
     scripts/lib/openclaw-runtime-convergence.mjs

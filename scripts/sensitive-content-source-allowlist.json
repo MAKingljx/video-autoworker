@@ -1,0 +1,271 @@
+{
+  "schema": "video-autoworker-sensitive-content-source-allowlist/v1",
+  "entries": [
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/director-context-summary.test.mjs",
+      "type": "aws_access_key",
+      "fingerprint": "1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/director-context-summary.test.mjs",
+      "type": "github_token",
+      "fingerprint": "26c58bfde0c4ce6861aa5968ff78d6c1a86b7e06671af70210f5718e29c6a7d3",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/director-context-summary.test.mjs",
+      "type": "bearer_token",
+      "fingerprint": "b4c76981fe1caf41e41a36321458a760af39cf1542c8e881b76ef81f8238369d",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/director-context-summary.test.mjs",
+      "type": "openai_api_key",
+      "fingerprint": "fc429aaf6bd7b860d2e53ddcd86c2da1c093a5e9e7c9351fecdd987803ee626e",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/transcript-tool-result-projection.test.mjs",
+      "type": "bearer_token",
+      "fingerprint": "1da906e3b4cb850d44294761f1010c50e215488f48247ad41e4756df199f9629",
+      "occurrences": 5,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/transcript-tool-result-projection.test.mjs",
+      "type": "bearer_token",
+      "fingerprint": "0ce7d7685c532ee4566d8c8768ebbc3e2407f7f4c69e18362fce065c8605aaa6",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/transcript-tool-result-projection.test.mjs",
+      "type": "openai_api_key",
+      "fingerprint": "472bbfd2d118ff4707eff3539a38626cde88ba0f6b963cd54d2e00c1853736b5",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/lib/openclaw-session-resilience-test-matrix.mjs",
+      "type": "bearer_token",
+      "fingerprint": "b4c76981fe1caf41e41a36321458a760af39cf1542c8e881b76ef81f8238369d",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/lib/openclaw-session-resilience-test-matrix.mjs",
+      "type": "openai_api_key",
+      "fingerprint": "fc429aaf6bd7b860d2e53ddcd86c2da1c093a5e9e7c9351fecdd987803ee626e",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/lib/openclaw-session-resilience-test-matrix.mjs",
+      "type": "db_connection_string",
+      "fingerprint": "e986beca5a8100831882123d831269e1dae8e0e4b167ec5a0f2718af59a9e37a",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/test-openclaw-session-resilience-rich-canary.mjs",
+      "type": "bearer_token",
+      "fingerprint": "b4c76981fe1caf41e41a36321458a760af39cf1542c8e881b76ef81f8238369d",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/test-openclaw-session-resilience-rich-canary.mjs",
+      "type": "openai_api_key",
+      "fingerprint": "fc429aaf6bd7b860d2e53ddcd86c2da1c093a5e9e7c9351fecdd987803ee626e",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "scripts/test-openclaw-session-resilience-rich-canary.mjs",
+      "type": "db_connection_string",
+      "fingerprint": "86c6efd5541bb7a328ef54c765e67830c3d4a93310c2dfa060c55a4ff1cfabac",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/auth.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "218106415ea2e25dc870715bde0074b5745658614d5d10c8a26065e16fdf5cc0",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/director-extraction-seed.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "3f33517d98fb31f84c76d25a806a537e5f5aede2b2f9797b128959a18c527765",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/director-extraction-seed.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "368fd57e1d93d180668140b2d24e740581e0d716d95990254d2108f1667ba7c4",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/director-extraction-seed.test.ts",
+      "type": "jwt",
+      "fingerprint": "479f485832960ea3929fd5baf539dcbf7d594fba512bc1dfe6e4f2c76c0ff709",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/director-extraction-state.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "368fd57e1d93d180668140b2d24e740581e0d716d95990254d2108f1667ba7c4",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/director-extraction-state.test.ts",
+      "type": "jwt",
+      "fingerprint": "479f485832960ea3929fd5baf539dcbf7d594fba512bc1dfe6e4f2c76c0ff709",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "368fd57e1d93d180668140b2d24e740581e0d716d95990254d2108f1667ba7c4",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
+      "type": "jwt",
+      "fingerprint": "479f485832960ea3929fd5baf539dcbf7d594fba512bc1dfe6e4f2c76c0ff709",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/n8n-model-execution.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "171a315fc594aecdbfb2d39fc20ce5de8994fe193f1cfcff860caeff5348d4a4",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/operational-errors.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "31b03229dee8734241e465334988de2a645e9d4d629a4215a63b76afdb3e8575",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "aws_access_key",
+      "fingerprint": "1a5d44a2dca19669d72edf4c4f1c27c4c1ca4b4408fbb17f6ce4ad452d78ddb3",
+      "occurrences": 8,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "aws_secret_key",
+      "fingerprint": "18d34975332dca870a6658163a395d4ac861afa700374072ebcde12a96d61e79",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "bearer_token",
+      "fingerprint": "368fd57e1d93d180668140b2d24e740581e0d716d95990254d2108f1667ba7c4",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "jwt",
+      "fingerprint": "7f75367e7881255134e1375e723d1dea8ad5f6a4fdb79d938df1f1754a830606",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "private_key",
+      "fingerprint": "8bcac7908eb950419537b91e19adc83ce2c9cbfdacf4f81157fdadfec11f7017",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "db_connection_string",
+      "fingerprint": "3f40d22b5c6ce30996efd02c046e99420da5213beeb915fbe72ce2914b6c8315",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/scan-credentials.test.ts",
+      "type": "db_connection_string",
+      "fingerprint": "34d7e577e2d38cf96ded00c4577532227ae71a9d4685249b370bced8cdc12da8",
+      "occurrences": 1,
+      "reason": "Synthetic detector or redaction fixture"
+    },
+    {
+      "path": "src/lib/__tests__/auth.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "5e179de47cd13ded21b125506a6b3a92922a9dcec651c7454f2e4c7012c98806",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "ba144797198b8e402a1b0c249aa2b6d3704a2a5b0f546a5ab3d0ed18a9ab5a23",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "b654401266bf2f172515892879172dcace8af4184d525a1fd906a22253ab273a",
+      "occurrences": 5,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/lib/__tests__/n8n-model-execution.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "f0e5c0c3263588a1cfcd3acd0d16d150211f252099fa129096f470f419029d14",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/lib/__tests__/n8n-model-routing.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "20158224750041d653cd8c737d64c2fdce258d4280c9bf2a49fa1db0a7f9f3ac",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/lib/__tests__/n8n.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "6fc229132bf9e891e32fd70bf692f59cf0c4746bfbe8b0a1abf4dd7af5e699de",
+      "occurrences": 2,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "src/proxy.test.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "94eeb7bbe979dd0d2f0bb085172b76a1bc9e61789839480834a9bcb5aaf9c6ef",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    },
+    {
+      "path": "tests/timing-safe-auth.spec.ts",
+      "type": "hardcoded_credential",
+      "fingerprint": "5e179de47cd13ded21b125506a6b3a92922a9dcec651c7454f2e4c7012c98806",
+      "occurrences": 1,
+      "reason": "Synthetic contextual credential fixture"
+    }
+  ]
+}

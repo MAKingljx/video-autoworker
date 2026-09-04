@@ -24,6 +24,7 @@ import {
   STANDALONE_PROVENANCE_SCHEMA,
   writeDirectorExtractionProvenance,
 } from './lib/director-extraction-release-provenance.mjs'
+import { scanStandaloneSensitiveContent } from './check-sensitive-content.mjs'
 
 export const FORBIDDEN_STANDALONE_NAMES = new Set([
   '.phoenixbrain',
@@ -1088,11 +1089,16 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
   await assertStandaloneServerConfigSanitized(root)
   await assertStandaloneRequiredServerFilesSanitized(root)
   const releaseManifest = await verifyStandaloneReleaseManifest(root)
+  const sensitiveContent = scanStandaloneSensitiveContent(root)
   return {
     ok: true,
     root,
     forbiddenMembers: 0,
     artifactContent: releaseManifest.artifactContent,
+    sensitiveContent: {
+      filesScanned: sensitiveContent.filesScanned,
+      bytesScanned: sensitiveContent.bytesScanned,
+    },
   }
 }
 

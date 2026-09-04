@@ -453,10 +453,10 @@ function openDatabases(repositoryRoot, missionIdentity, n8nIdentity) {
   }
 }
 
-async function queueState() {
+export async function queueState(fetchImplementation = fetch) {
   let response
   try {
-    response = await fetch('http://127.0.0.1:3017/api/n8n/runs?view=queue', {
+    response = await fetchImplementation('http://127.0.0.1:3017/api/n8n/runs?view=queue', {
       cache: 'no-store',
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(8_000),
@@ -477,11 +477,23 @@ async function queueState() {
   if (projection.some(item => !item.taskId || !Number.isSafeInteger(item.updatedAt)
     || typeof item.stale !== 'boolean'
     || ![true, false, null].includes(item.sourceAvailable))) fail('persistent queue item is invalid')
+  const attention = nonNegativeInteger(value.counts.attention, 'queue attention')
+  if (attention !== 0) {
+    fail('persistent queue attention must be resolved by controlled CAS reconciliation before legacy bootstrap')
+  }
   return {
     waiting: nonNegativeInteger(value.counts.waiting, 'queue waiting'),
     running: nonNegativeInteger(value.counts.running, 'queue running'),
     digest: sha256(canonicalJson(projection)),
   }
+}
+
+export async function captureQueueBeforeFreeze(database, n8nDatabase, dependencies = {}) {
+  const readQueue = dependencies.queueState || queueState
+  const attestFreeze = dependencies.freezeGuard || freezeGuard
+  const queue = await readQueue()
+  const frozen = attestFreeze(database, n8nDatabase)
+  return { queue, frozen }
 }
 
 function supervisorState() {
@@ -552,8 +564,7 @@ export async function captureProduction(repositoryRoot = defaultRepositoryRoot) 
   const n8nLaunchPid = launchPid(N8N_LABEL)
   if (n8nProcess.ppid !== n8nLaunchPid) fail('n8n listener is not a direct child of its LaunchAgent')
   const databaseCounts = openDatabases(repositoryRoot, missionDatabase, n8nDatabase)
-  const queue = await queueState()
-  const frozen = freezeGuard(missionDatabase, n8nDatabase)
+  const { queue, frozen } = await captureQueueBeforeFreeze(missionDatabase, n8nDatabase)
   return {
     legacy: {
       ...legacyProcess,

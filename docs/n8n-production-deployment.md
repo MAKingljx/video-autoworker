@@ -170,9 +170,11 @@ importer/maintenance-lock/anchor/validator/restore 五项工具。
 
 #### 逐命令 runbook（首次迁移）
 
-本节是首迁执行清单，不是参数示例。只在已经暂停外部准入、四项活动量全部归零，并由两名运维人员
-复核路径和目标提交后执行。每个占位符都必须替换为本次维护计划中的绝对物理路径；不要把本节直接
-整段粘贴运行。首先建立本次私有目录并固定同一条 release 身份链：
+本节是首迁执行清单，不是参数示例。只在已经暂停外部准入、四项活动量以及队列 `attention` 全部归零，
+并由两名运维人员复核路径和目标提交后执行。`attention` 即使来自超过 24 小时的非 durable
+`queued/accepted/running` 记录，也不能在首次迁移中静默忽略；必须先走独立、受控、带备份与回读的
+CAS 收敛流程，再重新取得全零快照。每个占位符都必须替换为本次维护计划中的绝对物理路径；不要把
+本节直接整段粘贴运行。首先建立本次私有目录并固定同一条 release 身份链：
 
 ```bash
 set -euo pipefail
@@ -368,7 +370,7 @@ runtime convergence proof 与 projection contract；第二阶段 `full` 在新 b
 `quick_check` 与工作流 verifier；未得到完整通过结论前保持外部准入冻结。
 
 从旧单进程 3017 首次迁入 slot-v1 时，两条工作流也必须完成一次协议升级。该窗口必须先在
-外部停止新任务准入，并确认媒体节点、n8n 活跃 execution 和正式队列 waiting/running 全部
+外部停止新任务准入，并确认媒体节点、n8n 活跃 execution 和正式队列 waiting/running/attention 全部
 归零；随后备份 n8n 状态，停止 n8n，使用上述离线导入器发布当前 Git HEAD 的固定 ID 工作流，
 再启动 n8n。启动后必须用 `scripts/verify-n8n-blue-green-workflows.mjs` 核对真实 n8n PID 打开的
 SQLite 中 current/active/published version 的一致性和内容摘要，并用新 PID 重新生成引导证据，
@@ -385,6 +387,12 @@ Mission Control → n8n 的固定顺序对两份权威 SQLite 取得 `BEGIN IMME
 读探针继续工作，但两库新写会被阻塞或拒绝。guard 状态目录、proof/备份目录和 evidence 目录须
 预先由运维方建立为当前用户所有的 mode `0700` 独立物理目录，目标文件必须不存在。以下三个步骤
 必须保持同一个 guard 进程，并由 proof 固定绑定同一个 `guard_socket`：
+
+`generate-legacy-freeze-evidence.mjs` 会再次校验队列的 `attention` 为非负整数且必须等于零；非零时
+在生成 evidence 和停止 3017 之前失败，并明确要求先完成受控 CAS 收敛。它不会把 attention 改算为
+waiting，也不改变 evidence v3 schema。当前改动是首迁 fail-safe；UI、intake readiness、离线 durable
+projection 和部署 SQL 仍需在后续独立重构中收敛为唯一共享 projection，不能把本次早阻断解释为长期
+允许多套队列语义并存。
 
 ```bash
 guard_socket=/absolute/private-state/legacy-freeze/guard.sock

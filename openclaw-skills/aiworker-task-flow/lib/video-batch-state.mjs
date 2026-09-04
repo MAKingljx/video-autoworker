@@ -331,7 +331,7 @@ function duplicateSubmissionLockPath(root = defaultBatchRoot()) {
   return join(resolve(root), '.duplicate-submission.lock')
 }
 
-async function acquireDuplicateSubmissionLock(root) {
+export async function acquireVideoSubmissionLock(root) {
   const path = duplicateSubmissionLockPath(root)
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const lock = await acquireFileLock(path)
@@ -1010,7 +1010,7 @@ export async function createBatchState({
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    const duplicateLock = await acquireDuplicateSubmissionLock(batchRoot)
+    const duplicateLock = await acquireVideoSubmissionLock(batchRoot)
     try {
       const discovered = await discoverBatchVideos(requestedDirectory, { inboxRoot })
       const historical = await findHistoricalVideoMatches(
@@ -1176,7 +1176,7 @@ export async function createSingleVideoState(request) {
     } catch (error) {
       if (error?.code !== 'ENOENT') throw error
     }
-    const duplicateLock = await acquireDuplicateSubmissionLock(batchRoot)
+    const duplicateLock = await acquireVideoSubmissionLock(batchRoot)
     try {
       const historical = await findHistoricalVideoMatches(
         [{ path: inspected.sourcePath }],

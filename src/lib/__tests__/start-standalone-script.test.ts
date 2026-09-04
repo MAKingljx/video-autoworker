@@ -16,6 +16,11 @@ import { describe, expect, it } from 'vitest'
 
 const launcherPath = resolve(process.cwd(), 'scripts/start-standalone.sh')
 const artifactCheckerPath = resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs')
+const sensitiveContentCheckerPath = resolve(process.cwd(), 'scripts/check-sensitive-content.mjs')
+const sensitiveValueScannerPath = resolve(
+  process.cwd(),
+  'scripts/lib/sensitive-value-scanner.mjs',
+)
 const artifactProvenancePath = resolve(
   process.cwd(),
   'scripts/lib/director-extraction-release-provenance.mjs',
@@ -40,6 +45,14 @@ function createLauncherFixture(): LauncherFixture {
   mkdirSync(join(standaloneRoot, 'runtime'), { recursive: true })
   copyFileSync(launcherPath, join(projectRoot, 'scripts', 'start-standalone.sh'))
   copyFileSync(artifactCheckerPath, join(projectRoot, 'scripts', 'check-standalone-artifact.mjs'))
+  copyFileSync(
+    sensitiveContentCheckerPath,
+    join(projectRoot, 'scripts', 'check-sensitive-content.mjs'),
+  )
+  copyFileSync(
+    sensitiveValueScannerPath,
+    join(projectRoot, 'scripts', 'lib', 'sensitive-value-scanner.mjs'),
+  )
   copyFileSync(
     artifactProvenancePath,
     join(projectRoot, 'scripts', 'lib', 'director-extraction-release-provenance.mjs'),

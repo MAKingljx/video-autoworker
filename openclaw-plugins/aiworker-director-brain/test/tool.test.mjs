@@ -48,6 +48,10 @@ describe('director brain tool contract', () => {
       'health', 'explain', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
       'start_extraction', 'extraction_status', 'backfill_extraction',
     ])
+    expect(TOOL_PARAMETERS.properties.references.properties.techniqueIds).toEqual({
+      type: 'array', minItems: 1, maxItems: 20, uniqueItems: true,
+      items: { type: 'string', minLength: 1, maxLength: 160 },
+    })
   })
 
   it('grounds natural-language answers in returned fields and keeps internal IDs hidden', () => {
@@ -491,6 +495,27 @@ describe('director brain tool contract', () => {
       table: 'skills_techniques',
       fields: { '知识名称': '在决定前保留停顿' },
       references: { caseIds: ['CASE-1', 'CASE-2'] },
+    })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'propose',
+      workId: 'WORK-1',
+      table: 'material_judgments',
+      fields: { '判断名称': '保留风险前的停顿' },
+      references: {
+        intentVersionId: 'INTENT-1',
+        evidenceIds: ['EVIDENCE-1'],
+        techniqueIds: ['SKILL-1'],
+      },
+    })).toEqual({
+      action: 'propose',
+      workId: 'WORK-1',
+      table: 'material_judgments',
+      fields: { '判断名称': '保留风险前的停顿' },
+      references: {
+        intentVersionId: 'INTENT-1',
+        evidenceIds: ['EVIDENCE-1'],
+        techniqueIds: ['SKILL-1'],
+      },
     })
     expect(normalizeDirectorBrainToolRequest({
       action: 'propose',
