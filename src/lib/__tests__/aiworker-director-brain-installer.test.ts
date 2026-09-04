@@ -1,4 +1,6 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { watch } from 'node:fs'
 import {
   access,
   chmod,
@@ -11,16 +13,16 @@ import {
   readFile,
   readdir,
   rename,
-  rm,
+  rm as removeFileSystemPath,
   stat,
   symlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import Database from 'better-sqlite3'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
 const sourceRepository = process.cwd()
@@ -51,11 +53,292 @@ async function exists(pathname: string) {
   return access(pathname).then(() => true, () => false)
 }
 
-async function waitForPath(pathname: string, attempts = 400) {
-  for (let attempt = 0; attempt < attempts && !await exists(pathname); attempt += 1) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 10))
+type InstallerResult = {
+  stdout: string
+  stderr: string
+}
+
+type InstallerOutcome =
+  | { status: 'fulfilled'; value: InstallerResult }
+  | { status: 'rejected'; reason: unknown }
+
+type InstallerExecution = {
+  child: ChildProcess
+  fixtureRoot?: string
+  result: Promise<InstallerResult>
+  settled: Promise<InstallerOutcome>
+  syncDir?: string
+}
+
+type RawInstallerResult = {
+  schema: 'video-autoworker-installer-result/v1'
+  component: 'director-brain'
+  operation: 'apply' | 'rollback'
+  status: 'applied' | 'noop' | 'restored'
+  sourceCommit: string
+  targetReleaseId: string
+  beforeManifestSha256: string
+  afterManifestSha256: string
+  backup: null | { path: string; manifestSha256: string }
+  requiresFreshRestart: boolean
+  completedAt: number
+}
+
+async function readInstallerResult(pathname: string) {
+  return JSON.parse(await readFile(pathname, 'utf8')) as RawInstallerResult
+}
+
+async function sha256File(pathname: string) {
+  return createHash('sha256').update(await readFile(pathname)).digest('hex')
+}
+
+const activeInstallerAttempts = new Set<InstallerExecution>()
+
+async function rm(
+  pathname: string,
+  options?: Parameters<typeof removeFileSystemPath>[1],
+) {
+  const removalPath = resolve(pathname)
+  const affectedAttempts = [...activeInstallerAttempts].filter((attempt) => {
+    if (!attempt.fixtureRoot) return false
+    const fixtureFromRemoval = relative(removalPath, resolve(attempt.fixtureRoot))
+    return fixtureFromRemoval === ''
+      || (fixtureFromRemoval !== '..'
+        && !fixtureFromRemoval.startsWith(`..${sep}`)
+        && !isAbsolute(fixtureFromRemoval))
+  })
+  await Promise.all(affectedAttempts.map(attempt => (
+    settleInstallerBeforeFixtureRemoval(attempt, attempt.syncDir)
+  )))
+  return removeFileSystemPath(pathname, options)
+}
+
+const installerContinueMarkers = [
+  'prelock-continue',
+  'backup-root-continue',
+  'config-previous-continue',
+  'config-previous-postcheck-continue',
+  'config-retain-continue',
+  'plugin-active-continue',
+  'skill-active-continue',
+  'config-active-continue',
+  'config-final-continue',
+  'rollback-source-continue',
+]
+
+function observeInstallerResult(result: Promise<InstallerResult>): Promise<InstallerOutcome> {
+  return result.then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason }),
+  )
+}
+
+function startTrackedProcess(
+  command: string,
+  args: string[],
+  environment?: NodeJS.ProcessEnv,
+): InstallerExecution {
+  const child = spawn(command, args, {
+    detached: true,
+    env: environment,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  const stdout: string[] = []
+  const stderr: string[] = []
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => stdout.push(String(chunk)))
+  child.stderr.on('data', chunk => stderr.push(String(chunk)))
+  const result = new Promise<InstallerResult>((resolveResult, rejectResult) => {
+    let finished = false
+    child.once('error', (error) => {
+      if (finished) return
+      finished = true
+      Object.assign(error, { stdout: stdout.join(''), stderr: stderr.join('') })
+      rejectResult(error)
+    })
+    child.once('close', (code, signal) => {
+      if (finished) return
+      finished = true
+      const captured = { stdout: stdout.join(''), stderr: stderr.join('') }
+      if (code === 0) {
+        resolveResult(captured)
+        return
+      }
+      rejectResult(Object.assign(new Error(
+        `Command failed: ${command}\n${captured.stderr}`,
+      ), {
+        code,
+        signal,
+        ...captured,
+      }))
+    })
+  })
+  return {
+    child,
+    result,
+    settled: observeInstallerResult(result),
   }
-  expect(await exists(pathname)).toBe(true)
+}
+
+async function waitForInstallerPath(
+  pathname: string,
+  settledAttempt: Promise<InstallerOutcome>,
+  timeoutMs = 10_000,
+) {
+  if (await exists(pathname)) return
+
+  await new Promise<void>((resolveWait, rejectWait) => {
+    let finished = false
+    let checking = false
+    const watcher = watch(dirname(pathname), { persistent: false })
+    const timeout = setTimeout(() => {
+      void exists(pathname).then((present) => {
+        if (present) finish()
+        else finish(new Error(`Timed out waiting for installer synchronization path: ${pathname}`))
+      }, finish)
+    }, timeoutMs)
+    const fallbackPoll = setInterval(() => void checkPath(), 250)
+
+    const finish = (error?: unknown) => {
+      if (finished) return
+      finished = true
+      clearTimeout(timeout)
+      clearInterval(fallbackPoll)
+      watcher.close()
+      if (error) rejectWait(error)
+      else resolveWait()
+    }
+
+    const checkPath = async () => {
+      if (finished || checking) return
+      checking = true
+      try {
+        if (await exists(pathname)) finish()
+      } catch (error) {
+        finish(error)
+      } finally {
+        checking = false
+      }
+    }
+
+    watcher.on('change', () => void checkPath())
+    watcher.on('error', finish)
+    void checkPath()
+    void settledAttempt.then(async (outcome) => {
+      if (finished || await exists(pathname)) {
+        finish()
+        return
+      }
+      if (outcome.status === 'rejected') {
+        const detail = outcome.reason instanceof Error
+          ? outcome.reason.message
+          : String(outcome.reason)
+        finish(new Error(
+          `Installer failed before creating synchronization path ${pathname}: ${detail}`,
+          { cause: outcome.reason },
+        ))
+        return
+      }
+      finish(new Error(`Installer exited before creating synchronization path: ${pathname}`))
+    }).catch(finish)
+  })
+}
+
+async function waitForInstallerOutcome(
+  settledAttempt: Promise<InstallerOutcome>,
+  timeoutMs: number,
+) {
+  let timeout: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      settledAttempt,
+      new Promise<'timeout'>((resolveTimeout) => {
+        timeout = setTimeout(() => resolveTimeout('timeout'), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
+
+async function installerProcessTreePids(attempt: InstallerExecution) {
+  const rootPid = attempt.child.pid
+  if (!rootPid) return []
+  const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid='], { encoding: 'utf8' })
+  const childPids = new Map<number, number[]>()
+  for (const line of stdout.split('\n')) {
+    const [pidSource, parentPidSource] = line.trim().split(/\s+/u)
+    const pid = Number(pidSource)
+    const parentPid = Number(parentPidSource)
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) continue
+    const siblings = childPids.get(parentPid) ?? []
+    siblings.push(pid)
+    childPids.set(parentPid, siblings)
+  }
+
+  const discovered = [rootPid]
+  for (let index = 0; index < discovered.length; index += 1) {
+    discovered.push(...(childPids.get(discovered[index]) ?? []))
+  }
+  return discovered
+}
+
+async function signalInstallerProcessTree(
+  attempt: InstallerExecution,
+  signal: NodeJS.Signals,
+  previouslyDiscovered: number[] = [],
+) {
+  const rootPid = attempt.child.pid
+  if (!rootPid) return []
+  const discovered = [...new Set([
+    ...previouslyDiscovered,
+    ...await installerProcessTreePids(attempt),
+  ])]
+  try {
+    process.kill(-rootPid, signal)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+  }
+  for (const pid of discovered.reverse()) {
+    try {
+      process.kill(pid, signal)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+    }
+  }
+  return discovered
+}
+
+async function settleInstallerBeforeFixtureRemoval(
+  attempt: InstallerExecution | null,
+  syncDir?: string,
+  timeouts: { gracefulMs?: number; termMs?: number } = {},
+) {
+  if (!attempt) return
+
+  if (syncDir) {
+    await Promise.all(installerContinueMarkers.map(marker => (
+      writeFile(resolve(syncDir, marker), 'continue\n').catch(() => undefined)
+    )))
+  }
+  const firstOutcome = await waitForInstallerOutcome(
+    attempt.settled,
+    timeouts.gracefulMs ?? 5_000,
+  )
+  if (firstOutcome !== 'timeout') {
+    activeInstallerAttempts.delete(attempt)
+    return
+  }
+
+  const processTree = await signalInstallerProcessTree(attempt, 'SIGTERM')
+  await waitForInstallerOutcome(
+    attempt.settled,
+    timeouts.termMs ?? 2_000,
+  )
+  await signalInstallerProcessTree(attempt, 'SIGKILL', processTree)
+  await attempt.settled
+  activeInstallerAttempts.delete(attempt)
 }
 
 async function initializeGitRepository(pathname: string) {
@@ -183,12 +466,22 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  await Promise.all([...activeInstallerAttempts].map(attempt => (
+    settleInstallerBeforeFixtureRemoval(attempt, attempt.syncDir)
+  )))
   if (installerRepository) await rm(installerRepository, { recursive: true, force: true })
   if (commandFixtureRoot) await rm(commandFixtureRoot, { recursive: true, force: true })
 })
 
+afterEach(async () => {
+  await Promise.all([...activeInstallerAttempts].map(attempt => (
+    settleInstallerBeforeFixtureRemoval(attempt, attempt.syncDir)
+  )))
+}, 15_000)
+
 async function createFixture(root: string) {
   await mkdir(root, { recursive: true })
+  const isolatedTestRoot = await realpath(root)
   const stateDir = resolve(root, 'state')
   const workspace = resolve(root, 'workspace')
   const backupRoot = resolve(root, 'backups')
@@ -246,6 +539,8 @@ async function createFixture(root: string) {
   await chmod(n8nDbPath, 0o600)
   await mkdir(videoBatchRoot, { mode: 0o700 })
   return {
+    root: resolve(root),
+    isolatedTestRoot,
     stateDir,
     workspace,
     backupRoot,
@@ -256,13 +551,13 @@ async function createFixture(root: string) {
   }
 }
 
-async function runInstaller(
+function startInstaller(
   fixture: Awaited<ReturnType<typeof createFixture>>,
   mode: '--dry-run' | '--apply' | '--rollback',
   extra: string[] = [],
   environment: Partial<NodeJS.ProcessEnv> = {},
-) {
-  return execFileAsync('bash', [
+): InstallerExecution {
+  const attempt = startTrackedProcess('bash', [
     installer,
     mode,
     '--profile', 'dev-test',
@@ -271,19 +566,157 @@ async function runInstaller(
     '--agent', 'dev',
     '--backup-root', fixture.backupRoot,
     ...extra,
-  ], {
-    env: installerTestEnvironment({
-      AIWORKER_BG_RUN_DIR: fixture.deploymentRunDir,
-      AIWORKER_BG_LIVE_DB_PATH: fixture.liveDbPath,
-      AIWORKER_BG_N8N_DB_PATH: fixture.n8nDbPath,
-      AIWORKER_VIDEO_BATCH_DIR: fixture.videoBatchRoot,
-      ...environment,
-    }),
-    encoding: 'utf8',
-  })
+  ], installerTestEnvironment({
+    AIWORKER_INSTALLER_ISOLATED_TEST_ROOT: fixture.isolatedTestRoot,
+    NODE_ENV: 'test',
+    AIWORKER_BG_RUN_DIR: fixture.deploymentRunDir,
+    AIWORKER_BG_LIVE_DB_PATH: fixture.liveDbPath,
+    AIWORKER_BG_N8N_DB_PATH: fixture.n8nDbPath,
+    AIWORKER_VIDEO_BATCH_DIR: fixture.videoBatchRoot,
+    ...environment,
+  }))
+  attempt.fixtureRoot = fixture.root
+  attempt.syncDir = environment.AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR
+  activeInstallerAttempts.add(attempt)
+  return attempt
 }
 
+async function runInstaller(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  mode: '--dry-run' | '--apply' | '--rollback',
+  extra: string[] = [],
+  environment: Partial<NodeJS.ProcessEnv> = {},
+) {
+  return startInstaller(fixture, mode, extra, environment).result
+}
+
+describe('installer synchronization', () => {
+  it('observes a delayed marker through filesystem events', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-wait-helper-'))
+    const marker = resolve(root, 'ready')
+    let resolveInstaller!: (value: InstallerResult) => void
+    const result = new Promise<InstallerResult>((resolveResult) => {
+      resolveInstaller = resolveResult
+    })
+    const settled = observeInstallerResult(result)
+    const markerWrite = new Promise<void>((resolveWrite, rejectWrite) => {
+      setTimeout(() => {
+        void writeFile(marker, 'ready\n').then(resolveWrite, rejectWrite)
+      }, 30)
+    })
+
+    try {
+      await waitForInstallerPath(marker, settled, 1_000)
+      await markerWrite
+      expect(await exists(marker)).toBe(true)
+    } finally {
+      resolveInstaller({ stdout: '', stderr: '' })
+      await settled
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports an installer failure before the marker without waiting for the deadline', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-wait-failure-'))
+    const marker = resolve(root, 'never-created')
+    let rejectInstaller!: (reason: unknown) => void
+    const result = new Promise<InstallerResult>((_resolveResult, rejectResult) => {
+      rejectInstaller = rejectResult
+    })
+    const settled = observeInstallerResult(result)
+    const failureTimer = setTimeout(() => {
+      rejectInstaller(new Error('synthetic installer failure'))
+    }, 30)
+
+    try {
+      await expect(waitForInstallerPath(marker, settled, 1_000))
+        .rejects.toThrow(/synthetic installer failure/u)
+    } finally {
+      clearTimeout(failureTimer)
+      rejectInstaller(new Error('synthetic installer failure'))
+      await settled
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('kills a recorded descendant after the installer exits on TERM and the marker never appears', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-wait-timeout-'))
+    const syncDir = resolve(root, 'sync')
+    const childPidPath = resolve(root, 'child.pid')
+    await mkdir(syncDir)
+    const attempt = startTrackedProcess('bash', [
+      '-c',
+      '(trap "" TERM; exec >/dev/null 2>&1; sleep 60) & child_pid=$!; '
+        + 'printf "%s\\n" "$child_pid" > "$1"; wait',
+      'installer-cleanup-test',
+      childPidPath,
+    ])
+    const rootProcessId = attempt.child.pid
+    let descendantProcessId: number | null = null
+
+    try {
+      await waitForInstallerPath(childPidPath, attempt.settled, 1_000)
+      descendantProcessId = Number((await readFile(childPidPath, 'utf8')).trim())
+      await expect(waitForInstallerPath(
+        resolve(syncDir, 'never-created'),
+        attempt.settled,
+        30,
+      )).rejects.toThrow(/Timed out waiting/u)
+      await settleInstallerBeforeFixtureRemoval(attempt, syncDir, {
+        gracefulMs: 30,
+        termMs: 1_000,
+      })
+      expect(rootProcessId).toBeTruthy()
+      expect(Number.isSafeInteger(descendantProcessId)).toBe(true)
+      expect(() => process.kill(rootProcessId!, 0)).toThrow()
+      expect(() => process.kill(descendantProcessId!, 0)).toThrow()
+    } finally {
+      if (rootProcessId) {
+        try {
+          process.kill(-rootProcessId, 'SIGKILL')
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+      }
+      for (const pid of [descendantProcessId, rootProcessId]) {
+        if (!pid) continue
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+        }
+      }
+      await attempt.settled
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+})
+
 describe('transactional director-brain OpenClaw installer', () => {
+  it('settles an unawaited installer before recursively removing its fixture', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-unawaited-cleanup-'))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
+    try {
+      const fixture = await createFixture(root)
+      await mkdir(syncDir)
+      installAttempt = startInstaller(fixture, '--apply', [], {
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'after-plugin',
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
+      })
+
+      await rm(root, { recursive: true, force: true })
+
+      expect((await installAttempt.settled).status).toBe('rejected')
+      expect(activeInstallerAttempts.has(installAttempt)).toBe(false)
+      expect(await exists(root)).toBe(false)
+    } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
   it('does not create a backup while the shared deployment lock is held', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-deployment-lock-'))
     try {
@@ -319,6 +752,72 @@ describe('transactional director-brain OpenClaw installer', () => {
     expect(script).not.toMatch(/\bssh\b|\bscp\b|gateway restart|launchctl|sqlite3|n8n-import/iu)
     expect(script).not.toContain('test-catalog.json" "$plugin_destination')
   })
+
+  it('creates no backup, managed root, lock, or raw result when the shared gate rejects', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-gate-side-effect-'))
+    try {
+      const fixture = await createFixture(root)
+      const database = new Database(fixture.liveDbPath)
+      database.prepare('UPDATE n8n_intake_controls SET accepting = 1').run()
+      database.close()
+      const configBefore = await readFile(resolve(fixture.stateDir, 'openclaw.json'))
+      const pluginBefore = await readFile(resolve(
+        fixture.stateDir, 'extensions/aiworker-director-brain/old.txt',
+      ))
+      const skillBefore = await readFile(resolve(
+        fixture.workspace, 'skills/aiworker-director-brain/old.txt',
+      ))
+      const result = resolve(root, 'gate-rejected-result.json')
+      await expect(runInstaller(fixture, '--apply', ['--result-output', result]))
+        .rejects.toThrow()
+      expect(await readFile(resolve(fixture.stateDir, 'openclaw.json'))).toEqual(configBefore)
+      expect(await readFile(resolve(
+        fixture.stateDir, 'extensions/aiworker-director-brain/old.txt',
+      ))).toEqual(pluginBefore)
+      expect(await readFile(resolve(
+        fixture.workspace, 'skills/aiworker-director-brain/old.txt',
+      ))).toEqual(skillBefore)
+      expect(await exists(fixture.backupRoot)).toBe(false)
+      expect(await exists(resolve(
+        fixture.stateDir, '.aiworker-director-brain-install.lock',
+      ))).toBe(false)
+      expect(await exists(result)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers a real SIGKILL partial transaction through the fenced stale journal', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-sigkill-journal-'))
+    let attempt: InstallerExecution | null = null
+    try {
+      const fixture = await createFixture(root)
+      const syncDir = resolve(root, 'sync')
+      await mkdir(syncDir)
+      attempt = startInstaller(fixture, '--apply', [], {
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'sigkill-after-first-mutation',
+        AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
+      })
+      await waitForInstallerPath(resolve(syncDir, 'prelock-ready'), attempt.settled)
+      await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
+      await waitForInstallerPath(resolve(syncDir, 'sigkill-ready'), attempt.settled)
+      await signalInstallerProcessTree(attempt, 'SIGKILL')
+      await attempt.settled
+      activeInstallerAttempts.delete(attempt)
+      attempt = null
+      await runInstaller(fixture, '--apply')
+      expect(await readFile(resolve(
+        fixture.stateDir, 'extensions/aiworker-director-brain/openclaw.plugin.json',
+      ), 'utf8')).toContain('aiworker-director-brain')
+      expect(await exists(resolve(
+        fixture.stateDir, '.aiworker-director-brain-install.lock',
+      ))).toBe(false)
+    } finally {
+      await settleInstallerBeforeFixtureRemoval(attempt)
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 30_000)
 
   it('rejects a dirty canonical source before creating a rollback point', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-dirty-source-'))
@@ -470,9 +969,10 @@ describe('transactional director-brain OpenClaw installer', () => {
 
   it('rejects a missing backup ancestor replaced by a Git-worktree symlink before profile copy', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-backup-swap-'))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(resolve(root, 'fixture'))
-      const syncDir = resolve(root, 'sync')
       const backupParent = resolve(root, 'backup-parent')
       const missingAncestor = resolve(backupParent, 'missing')
       const gitTarget = resolve(root, 'git-target')
@@ -484,26 +984,28 @@ describe('transactional director-brain OpenClaw installer', () => {
         backupRoot: resolve(missingAncestor, 'backups'),
       }
 
-      const installAttempt = runInstaller(swappedFixture, '--apply', [], {
+      installAttempt = startInstaller(swappedFixture, '--apply', [], {
+        AIWORKER_INSTALLER_ISOLATED_TEST_ROOT: await realpath(root),
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'backup-root-ancestor-swap',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'prelock-ready'), 5_000)
+      await waitForInstallerPath(resolve(syncDir, 'prelock-ready'), installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
-      await waitForPath(resolve(syncDir, 'backup-root-ready'))
+      await waitForInstallerPath(resolve(syncDir, 'backup-root-ready'), installAttempt.settled)
       await symlink(gitTarget, missingAncestor)
       await writeFile(resolve(syncDir, 'backup-root-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toThrow(/backup_root_component_invalid/u)
+      await expect(installAttempt.result).rejects.toThrow(/backup_root_component_invalid/u)
       expect(await exists(resolve(gitTarget, 'backups'))).toBe(false)
       expect(await exists(resolve(gitTarget, 'openclaw.json'))).toBe(false)
       expect(await readFile(resolve(fixture.stateDir, 'openclaw.json'), 'utf8'))
         .not.toContain('aiworker-director-brain')
     } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('dry-runs without changing the profile, workspace, or backup root', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-dry-'))
@@ -711,6 +1213,149 @@ describe('transactional director-brain OpenClaw installer', () => {
     }
   }, 15_000)
 
+  it('writes immutable apply, no-op, and rollback machine evidence without profile secrets', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-result-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      const secretSentinel = 'fixture-token-must-not-enter-result'
+      config.privateFixture = { token: secretSentinel, body: 'private config body' }
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
+      const applyOutput = resolve(root, 'apply-result.json')
+      const noopOutput = resolve(root, 'noop-result.json')
+      const rollbackNoopOutput = resolve(root, 'rollback-noop-result.json')
+      const rollbackOutput = resolve(root, 'rollback-result.json')
+
+      await runInstaller(fixture, '--apply', ['--result-output', applyOutput])
+      const applied = await readInstallerResult(applyOutput)
+      expect((await stat(applyOutput)).mode & 0o777).toBe(0o600)
+      expect(applied).toMatchObject({
+        schema: 'video-autoworker-installer-result/v1',
+        component: 'director-brain',
+        operation: 'apply',
+        status: 'applied',
+        requiresFreshRestart: true,
+      })
+      expect(applied.sourceCommit).toMatch(/^[a-f0-9]{40}$/u)
+      expect(applied.targetReleaseId).toBe(`${applied.sourceCommit}-runtime`)
+      expect(applied.beforeManifestSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(applied.afterManifestSha256).toMatch(/^[a-f0-9]{64}$/u)
+      expect(applied.beforeManifestSha256).not.toBe(applied.afterManifestSha256)
+      expect(applied.backup).not.toBeNull()
+      expect(applied.backup?.manifestSha256).toBe(await sha256File(resolve(
+        applied.backup!.path,
+        'MANIFEST.sha256',
+      )))
+      const applySource = await readFile(applyOutput, 'utf8')
+      expect(applySource).not.toContain(secretSentinel)
+      expect(applySource).not.toContain('private config body')
+
+      await runInstaller(fixture, '--rollback', [
+        '--noop', '--result-output', rollbackNoopOutput,
+      ])
+      const rollbackNoop = await readInstallerResult(rollbackNoopOutput)
+      expect(rollbackNoop).toMatchObject({
+        component: 'director-brain', operation: 'rollback', status: 'restored',
+        backup: null, requiresFreshRestart: false,
+        beforeManifestSha256: applied.afterManifestSha256,
+        afterManifestSha256: applied.afterManifestSha256,
+      })
+
+      await runInstaller(fixture, '--apply', ['--result-output', noopOutput])
+      const noop = await readInstallerResult(noopOutput)
+      expect((await stat(noopOutput)).mode & 0o777).toBe(0o600)
+      expect(noop).toMatchObject({
+        component: 'director-brain',
+        operation: 'apply',
+        status: 'noop',
+        backup: null,
+        requiresFreshRestart: false,
+      })
+      expect(noop.beforeManifestSha256).toBe(noop.afterManifestSha256)
+      expect(noop.beforeManifestSha256).toBe(applied.afterManifestSha256)
+
+      await runInstaller(fixture, '--rollback', [
+        '--backup', applied.backup!.path,
+        '--result-output', rollbackOutput,
+      ])
+      const rolledBack = await readInstallerResult(rollbackOutput)
+      expect((await stat(rollbackOutput)).mode & 0o777).toBe(0o600)
+      expect(rolledBack).toMatchObject({
+        component: 'director-brain',
+        operation: 'rollback',
+        status: 'restored',
+        backup: applied.backup,
+        requiresFreshRestart: true,
+      })
+      expect(rolledBack.beforeManifestSha256).toBe(applied.afterManifestSha256)
+      expect(rolledBack.afterManifestSha256).toBe(applied.beforeManifestSha256)
+      expect(await readFile(configPath, 'utf8')).toContain(secretSentinel)
+      expect(await readFile(rollbackOutput, 'utf8')).not.toContain(secretSentinel)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('rejects relative, existing, and symlink result outputs before mutation', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-result-reject-'))
+    try {
+      const fixture = await createFixture(root)
+      const pluginPath = resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/old.txt',
+      )
+      const existing = resolve(root, 'existing-result.json')
+      const target = resolve(root, 'symlink-target.json')
+      const linked = resolve(root, 'linked-result.json')
+      await writeFile(existing, 'do not overwrite\n', { mode: 0o600 })
+      await writeFile(target, 'do not follow\n', { mode: 0o600 })
+      await symlink(target, linked)
+
+      for (const output of ['relative-result.json', existing, linked]) {
+        await expect(runInstaller(fixture, '--apply', ['--result-output', output]))
+          .rejects.toThrow()
+        expect(await readFile(pluginPath, 'utf8')).toBe('old plugin\n')
+      }
+      expect(await readFile(existing, 'utf8')).toBe('do not overwrite\n')
+      expect(await readFile(target, 'utf8')).toBe('do not follow\n')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('rejects production mutation when fake databases, batch root, and deployment lock are injected', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-fake-runtime-'))
+    try {
+      const fixture = await createFixture(root)
+      const pluginPath = resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/old.txt',
+      )
+      const resultOutput = resolve(root, 'fake-runtime-result.json')
+      await expect(runInstaller(fixture, '--apply', [
+        '--result-output', resultOutput,
+      ], {
+        AIWORKER_INSTALLER_ISOLATED_TEST_ROOT: '',
+        AIWORKER_VIDEO_BATCH_DIR: resolve(
+          process.env.HOME!, 'ai-worker/state/video-autoworker/video-batches',
+        ),
+        NODE_ENV: 'production',
+      })).rejects.toMatchObject({
+        stderr: expect.stringContaining(
+          'shared_runtime_install_not_ready:',
+        ),
+      })
+      expect(await readFile(pluginPath, 'utf8')).toBe('old plugin\n')
+      expect(await exists(fixture.backupRoot)).toBe(false)
+      expect(await exists(resolve(fixture.stateDir, '.aiworker-director-brain-install.lock')))
+        .toBe(false)
+      expect(await exists(resultOutput)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   it('preserves an intentionally non-production tool and compaction fixture across install and rollback', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-composed-policy-'))
     try {
@@ -873,24 +1518,22 @@ describe('transactional director-brain OpenClaw installer', () => {
     }
   }, 15_000)
 
-  it('fails closed when the profile config drifts between preflight and lock acquisition', async () => {
+  it('fails closed when the target drifts between reservation and the locked mutation', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-config-drift-'))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       await mkdir(syncDir)
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
 
       const readyPath = resolve(syncDir, 'prelock-ready')
-      for (let attempt = 0; attempt < 200 && !await exists(readyPath); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(readyPath)).toBe(true)
+      await waitForInstallerPath(readyPath, installAttempt.settled)
 
       const concurrentConfig = JSON.parse(await readFile(configPath, 'utf8'))
       concurrentConfig.concurrentWriter = { preserved: true }
@@ -899,7 +1542,8 @@ describe('transactional director-brain OpenClaw installer', () => {
       await chmod(configPath, 0o600)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toThrow(/changed between preflight and the locked install/u)
+      await expect(installAttempt.result).rejects
+        .toThrow(/Director-brain target changed between reservation and the locked mutation\./u)
       expect(await readFile(configPath, 'utf8')).toBe(concurrentContents)
       expect(await readFile(resolve(
         fixture.stateDir,
@@ -911,9 +1555,10 @@ describe('transactional director-brain OpenClaw installer', () => {
       ), 'utf8')).toBe('old skill\n')
       expect(await exists(fixture.backupRoot)).toBe(false)
     } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it.each(['after-plugin', 'after-skill', 'after-config'])(
     'restores every managed object after the %s failpoint',
@@ -1076,39 +1721,34 @@ describe('transactional director-brain OpenClaw installer', () => {
 
   it('restores an update written through a descriptor opened before the config move', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-open-fd-'))
+    const syncDir = resolve(root, 'sync')
     let configHandle: Awaited<ReturnType<typeof open>> | null = null
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const concurrentContents = '{"retained_descriptor_update":true}\n'
       await mkdir(syncDir)
       configHandle = await open(configPath, 'r+')
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'config-previous-open-fd',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
 
       const prelockReady = resolve(syncDir, 'prelock-ready')
-      for (let attempt = 0; attempt < 200 && !await exists(prelockReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(prelockReady)).toBe(true)
+      await waitForInstallerPath(prelockReady, installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
 
       const previousReady = resolve(syncDir, 'config-previous-ready')
-      for (let attempt = 0; attempt < 400 && !await exists(previousReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(previousReady)).toBe(true)
+      await waitForInstallerPath(previousReady, installAttempt.settled)
       await configHandle.truncate(0)
       await configHandle.writeFile(concurrentContents)
       await configHandle.sync()
       await writeFile(resolve(syncDir, 'config-previous-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toThrow(/retained file descriptor/u)
+      await expect(installAttempt.result).rejects.toThrow(/retained file descriptor/u)
       expect(await readFile(configPath, 'utf8')).toBe(concurrentContents)
       expect((await readdir(fixture.stateDir)).filter(
         (name) => name.startsWith('.openclaw.json.previous.'),
@@ -1123,45 +1763,41 @@ describe('transactional director-brain OpenClaw installer', () => {
       ), 'utf8')).toBe('old skill\n')
     } finally {
       await configHandle?.close()
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('retains a recoverable old inode when its open descriptor is written after final validation', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-postcheck-fd-'))
+    const syncDir = resolve(root, 'sync')
     let configHandle: Awaited<ReturnType<typeof open>> | null = null
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const concurrentContents = '{"postcheck_retained_descriptor_update":true}\n'
       await mkdir(syncDir)
       configHandle = await open(configPath, 'r+')
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'config-previous-postcheck-open-fd',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
 
       const prelockReady = resolve(syncDir, 'prelock-ready')
-      for (let attempt = 0; attempt < 200 && !await exists(prelockReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(prelockReady)).toBe(true)
+      await waitForInstallerPath(prelockReady, installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
 
       const postcheckReady = resolve(syncDir, 'config-previous-postcheck-ready')
-      for (let attempt = 0; attempt < 400 && !await exists(postcheckReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(postcheckReady)).toBe(true)
+      await waitForInstallerPath(postcheckReady, installAttempt.settled)
       await configHandle.truncate(0)
       await configHandle.writeFile(concurrentContents)
       await configHandle.sync()
       await writeFile(resolve(syncDir, 'config-previous-postcheck-continue'), 'continue\n')
 
-      const result = await installAttempt
+      const result = await installAttempt.result
       expect(result.stdout).toContain('Retained previous config inode for concurrent-writer recovery')
       expect(result.stdout).toContain('remove retired artifacts only after confirming every process')
       expect(result.stdout).toContain('may contain credentials')
@@ -1204,15 +1840,17 @@ describe('transactional director-brain OpenClaw installer', () => {
       expect(retainIndex).toBeGreaterThan(barrierIndex)
     } finally {
       await configHandle?.close()
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('rejects a previous-config symlink swap without chmod-following or losing rollback data', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-retain-symlink-'))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const configBefore = await readFile(configPath, 'utf8')
       const symlinkTarget = resolve(root, 'symlink-target.json')
@@ -1220,23 +1858,17 @@ describe('transactional director-brain OpenClaw installer', () => {
       await writeFile(symlinkTarget, '{"must_not_be_followed":true}\n')
       await chmod(symlinkTarget, 0o644)
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'config-retain-path-replace',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
       const prelockReady = resolve(syncDir, 'prelock-ready')
-      for (let attempt = 0; attempt < 200 && !await exists(prelockReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(prelockReady)).toBe(true)
+      await waitForInstallerPath(prelockReady, installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
 
       const retainReady = resolve(syncDir, 'config-retain-ready')
-      for (let attempt = 0; attempt < 400 && !await exists(retainReady); attempt += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 10))
-      }
-      expect(await exists(retainReady)).toBe(true)
+      await waitForInstallerPath(retainReady, installAttempt.settled)
       const previousName = (await readdir(fixture.stateDir))
         .find((name) => name.startsWith('.openclaw.json.previous.'))
       expect(previousName).toBeTruthy()
@@ -1246,7 +1878,8 @@ describe('transactional director-brain OpenClaw installer', () => {
       await symlink(symlinkTarget, previousPath)
       await writeFile(resolve(syncDir, 'config-retain-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toThrow(/Unable to retain the previous profile config inode/u)
+      await expect(installAttempt.result).rejects
+        .toThrow(/Unable to retain the previous profile config inode/u)
       expect(await readFile(configPath, 'utf8')).toBe(configBefore)
       expect((await lstat(previousPath)).isSymbolicLink()).toBe(true)
       expect(await readFile(symlinkTarget, 'utf8')).toBe('{"must_not_be_followed":true}\n')
@@ -1261,9 +1894,10 @@ describe('transactional director-brain OpenClaw installer', () => {
         'skills/aiworker-director-brain/old.txt',
       ), 'utf8')).toBe('old skill\n')
     } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('restores the safety backup when retained config mode verification fails after its move', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-retain-mode-drift-'))
@@ -1397,9 +2031,10 @@ describe('transactional director-brain OpenClaw installer', () => {
     continueName,
   ) => {
     const root = await mkdtemp(resolve(tmpdir(), `director-brain-installer-${kind}-replacement-`))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       await mkdir(syncDir)
       const target = kind === 'plugin'
         ? resolve(fixture.stateDir, 'extensions/aiworker-director-brain')
@@ -1409,21 +2044,21 @@ describe('transactional director-brain OpenClaw installer', () => {
         : resolve(fixture.workspace, 'skills')
       const displaced = `${target}.concurrent-displaced`
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: failpoint,
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'prelock-ready'), 200)
+      await waitForInstallerPath(resolve(syncDir, 'prelock-ready'), installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
-      await waitForPath(resolve(syncDir, readyName))
+      await waitForInstallerPath(resolve(syncDir, readyName), installAttempt.settled)
 
       await rename(target, displaced)
       await mkdir(target)
       await writeFile(resolve(target, 'concurrent.txt'), `${kind} concurrent replacement\n`)
       await writeFile(resolve(syncDir, continueName), 'continue\n')
 
-      await expect(installAttempt).rejects.toMatchObject({ code: 99 })
+      await expect(installAttempt.result).rejects.toMatchObject({ code: 99 })
       expect(await readFile(resolve(target, 'old.txt'), 'utf8'))
         .toBe(kind === 'plugin' ? 'old plugin\n' : 'old skill\n')
       expect(await exists(resolve(
@@ -1441,9 +2076,10 @@ describe('transactional director-brain OpenClaw installer', () => {
       expect(script).not.toContain('rm -rf -- "$INSTALLED_PLUGIN"')
       expect(script).not.toContain('rm -rf -- "$INSTALLED_SKILL"')
     } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('quarantines a concurrent rewrite after config activation before restoring the original', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-active-drift-'))
@@ -1479,23 +2115,24 @@ describe('transactional director-brain OpenClaw installer', () => {
 
   it('preserves a same-content atomic config replacement by inode and keeps later writer output reachable', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-config-same-content-replacement-'))
+    const syncDir = resolve(root, 'sync')
     let replacementHandle: Awaited<ReturnType<typeof open>> | null = null
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const replacementPath = resolve(fixture.stateDir, '.openclaw.json.concurrent-replacement')
       const configBefore = await readFile(configPath, 'utf8')
       await mkdir(syncDir)
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'config-active-replacement',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'prelock-ready'), 200)
+      await waitForInstallerPath(resolve(syncDir, 'prelock-ready'), installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
-      await waitForPath(resolve(syncDir, 'config-active-ready'))
+      await waitForInstallerPath(resolve(syncDir, 'config-active-ready'), installAttempt.settled)
 
       const activatedContents = await readFile(configPath, 'utf8')
       const activatedIdentity = `${(await stat(configPath)).dev}:${(await stat(configPath)).ino}`
@@ -1507,7 +2144,7 @@ describe('transactional director-brain OpenClaw installer', () => {
       await rename(replacementPath, configPath)
       await writeFile(resolve(syncDir, 'config-active-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toMatchObject({ code: 99 })
+      await expect(installAttempt.result).rejects.toMatchObject({ code: 99 })
       expect(await readFile(configPath, 'utf8')).toBe(configBefore)
 
       await replacementHandle.writeFile('post-failure-writer-update\n')
@@ -1522,28 +2159,30 @@ describe('transactional director-brain OpenClaw installer', () => {
         .toBe(`${activatedContents}post-failure-writer-update\n`)
     } finally {
       await replacementHandle?.close().catch(() => undefined)
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('fails normal finalization when a same-content config inode replaces the activated file', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-config-final-identity-'))
+    const syncDir = resolve(root, 'sync')
+    let installAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const replacementPath = resolve(fixture.stateDir, '.openclaw.json.final-replacement')
       const configBefore = await readFile(configPath, 'utf8')
       await mkdir(syncDir)
 
-      const installAttempt = runInstaller(fixture, '--apply', [], {
+      installAttempt = startInstaller(fixture, '--apply', [], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'config-final-check-barrier',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'prelock-ready'), 200)
+      await waitForInstallerPath(resolve(syncDir, 'prelock-ready'), installAttempt.settled)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
-      await waitForPath(resolve(syncDir, 'config-final-ready'))
+      await waitForInstallerPath(resolve(syncDir, 'config-final-ready'), installAttempt.settled)
 
       const activatedContents = await readFile(configPath, 'utf8')
       const activatedStat = await stat(configPath)
@@ -1554,7 +2193,7 @@ describe('transactional director-brain OpenClaw installer', () => {
       await rename(replacementPath, configPath)
       await writeFile(resolve(syncDir, 'config-final-continue'), 'continue\n')
 
-      await expect(installAttempt).rejects.toMatchObject({ code: 1 })
+      await expect(installAttempt.result).rejects.toMatchObject({ code: 1 })
       expect(await readFile(configPath, 'utf8')).toBe(configBefore)
       const driftRoots = (await readdir(fixture.stateDir))
         .filter((name) => name.startsWith('.openclaw.json.drift.'))
@@ -1562,9 +2201,10 @@ describe('transactional director-brain OpenClaw installer', () => {
       expect(await readFile(resolve(fixture.stateDir, driftRoots[0], 'openclaw.json'), 'utf8'))
         .toBe(activatedContents)
     } finally {
+      await settleInstallerBeforeFixtureRemoval(installAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('never overwrites a config recreated in the final activation window', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-final-window-'))
@@ -1603,8 +2243,9 @@ describe('transactional director-brain OpenClaw installer', () => {
       const fixture = await createFixture(root)
       const configPath = resolve(fixture.stateDir, 'openclaw.json')
       const configBefore = await readFile(configPath, 'utf8')
+      const resultOutput = resolve(root, 'failed-result.json')
 
-      await expect(runInstaller(fixture, '--apply', [], {
+      await expect(runInstaller(fixture, '--apply', ['--result-output', resultOutput], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'backup-plugin-copy-failed',
       })).rejects.toMatchObject({ code: 99 })
@@ -1620,6 +2261,7 @@ describe('transactional director-brain OpenClaw installer', () => {
       ), 'utf8')).toBe('old skill\n')
       expect(await exists(fixture.backupRoot)).toBe(true)
       expect(await readdir(fixture.backupRoot)).toEqual([])
+      expect(await exists(resultOutput)).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -1757,9 +2399,10 @@ describe('transactional director-brain OpenClaw installer', () => {
     'member symlink alias',
   ])('binds the rollback source before copy and rejects a concurrent %s', async (caseName) => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-rollback-source-race-'))
+    const syncDir = resolve(root, 'sync')
+    let rollbackAttempt: InstallerExecution | null = null
     try {
       const fixture = await createFixture(root)
-      const syncDir = resolve(root, 'sync')
       await mkdir(syncDir)
       await runInstaller(fixture, '--apply')
       const [backupName] = await readdir(fixture.backupRoot)
@@ -1782,12 +2425,12 @@ describe('transactional director-brain OpenClaw installer', () => {
         await writeFile(resolve(replacement, 'unmanifested.js'), 'symlink payload\n')
       }
 
-      const rollbackAttempt = runInstaller(fixture, '--rollback', ['--backup', backup], {
+      rollbackAttempt = startInstaller(fixture, '--rollback', ['--backup', backup], {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TESTING: '1',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'rollback-source-before-copy',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'rollback-source-ready'))
+      await waitForInstallerPath(resolve(syncDir, 'rollback-source-ready'), rollbackAttempt.settled)
 
       if (caseName === 'whole backup replacement') {
         await rename(backup, displaced)
@@ -1802,7 +2445,7 @@ describe('transactional director-brain OpenClaw installer', () => {
       }
       await writeFile(resolve(syncDir, 'rollback-source-continue'), 'continue\n')
 
-      await expect(rollbackAttempt).rejects.toMatchObject({ code: 1 })
+      await expect(rollbackAttempt.result).rejects.toMatchObject({ code: 1 })
       expect(await readFile(resolve(fixture.stateDir, 'openclaw.json'), 'utf8'))
         .toBe(installedConfig)
       expect((await readdir(fixture.backupRoot)).sort()).toEqual([backupName])
@@ -1813,9 +2456,10 @@ describe('transactional director-brain OpenClaw installer', () => {
       }
       expect(await exists(displaced)).toBe(true)
     } finally {
+      await settleInstallerBeforeFixtureRemoval(rollbackAttempt, syncDir)
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it.each([
     {

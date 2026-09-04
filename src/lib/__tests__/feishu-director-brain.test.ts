@@ -179,8 +179,37 @@ async function prepareRequiredStandaloneFixture(
     'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/package.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/index.js': 'export default {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/director-work-policy.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/dispatch-identity.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/duplicate-confirmation-store.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/json-command.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/qwen-before-dispatch.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/qwen-video-classifier.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/stable-message-key.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/video-path-policy.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/openclaw.plugin.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/package.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/scripts/validate-runtime-inspection.mjs': 'export {}\n',
     'openclaw-skills/aiworker-director-brain/SKILL.md': 'runtime\n',
     'openclaw-skills/aiworker-task-flow/SKILL.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/lib/director-brain-evidence.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/director-work-policy.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/media-ingest.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/media-policy.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/platform-client.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-task.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs': 'export {}\n',
     'ops/feishu-director-brain/schema.json': '{}\n',
     'ops/openclaw/qwen-current-runtime-convergence.manifest.json': '{}\n',
     'package.json': '{}\n',
@@ -188,12 +217,29 @@ async function prepareRequiredStandaloneFixture(
     'runtime/schema.sql': 'CREATE TABLE tasks (id TEXT, title TEXT, status TEXT);\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
     'scripts/apply-openclaw-runtime-convergence.sh': '#!/bin/sh\n',
+    'scripts/install-aiworker-task-flow-skill.sh': '#!/bin/sh\n',
+    'scripts/install-aiworker-video-command-plugin.sh': '#!/bin/sh\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
+    'scripts/check-standalone-artifact.mjs': 'export {}\n',
+    'scripts/check-sensitive-content.mjs': 'export {}\n',
+    'scripts/verify-director-video-release-readiness.mjs': 'export {}\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
+    'scripts/legacy-preinstall-orchestrator.mjs': 'export {}\n',
+    'scripts/legacy-preinstall-controller.mjs': 'export {}\n',
+    'scripts/legacy-bootstrap-controller.mjs': 'export {}\n',
+    'scripts/verify-n8n-blue-green-workflows.mjs': 'export {}\n',
+    'scripts/generate-legacy-freeze-evidence.mjs': 'export {}\n',
+    'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
+    'scripts/legacy-freeze-guard.mjs': 'export {}\n',
+    'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/openclaw-private-gateway-rpc.mjs': 'export {}\n',
     'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
+    'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
+    'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
+    'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
@@ -416,6 +462,15 @@ function completeIntentFields(overrides: Record<string, unknown> = {}) {
     '叙事方式': '从平静观察逐步进入危机',
     '节奏': '前缓后紧',
     '观众体验': '先理解人物，再感受选择压力',
+    ...overrides,
+  }
+}
+
+function completeDirectorCaseOutcomeFields(overrides: Record<string, unknown> = {}) {
+  return {
+    '最终使用': '是',
+    '成片位置': '第二幕人物作出选择前',
+    '最终效果': '让外部风险转化为可见的人物选择',
     ...overrides,
   }
 }
@@ -682,6 +737,7 @@ function reviewedFoundation(): FoundationFixture {
         '上下文': '人物在冰面裂缝前停下并观察同伴',
         '导演动作': '采用',
         '判断原因': '停顿让风险判断和人物关系同时可见',
+        ...completeDirectorCaseOutcomeFields(),
         '复核状态': '已确认',
         ...reviewedMetadata(),
       },
@@ -1921,6 +1977,7 @@ describe('Feishu director brain contract', () => {
         ok: true,
         root,
         forbiddenMembers: 0,
+        importClosure: { dynamicDependencies: 26 },
       })
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -1932,7 +1989,9 @@ describe('Feishu director brain contract', () => {
     const artifactChecker = await readFile(resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs'), 'utf8')
     for (const helper of [
       'scripts/lib/openclaw-secret-reference.mjs',
+      'scripts/lib/openclaw-private-gateway-rpc.mjs',
       'scripts/lib/openclaw-runtime-convergence.mjs',
+      'scripts/lib/render-managed-markdown-section.mjs',
       'scripts/lib/sensitive-value-scanner.mjs',
     ]) {
       expect(nextConfig).toContain(`'./${helper}'`)
@@ -2728,7 +2787,9 @@ describe('Feishu director brain OpenClaw operation service', () => {
           '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
           '判断 ID': 'JUDGMENT-DESERT-001', '证据 ID': 'EVIDENCE-DESERT-001',
           '上下文': '沙暴将至且人物尚未决定路线', '导演动作': '采用',
-          '判断原因': '停顿把风险转成可见的人物选择', '复核状态': '已确认',
+          '判断原因': '停顿把风险转成可见的人物选择',
+          ...completeDirectorCaseOutcomeFields({ '成片位置': '沙暴来临前' }),
+          '复核状态': '已确认',
           ...reviewedMetadata(),
         },
       },
@@ -2790,6 +2851,82 @@ describe('Feishu director brain OpenClaw operation service', () => {
     expect(second).toEqual(first)
     expect(harness.createCalls).toHaveLength(0)
     expect(harness.updateCalls).toHaveLength(0)
+  })
+
+  it('excludes historical confirmed cases with incomplete human outcomes from technique learning', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    delete initial.director_cases[0].fields['最终效果']
+    initial.skills_techniques = [{
+      record_id: 'rec_skill_incomplete_case',
+      fields: {
+        '知识名称': '不应学习的不完整案例技法',
+        '知识 ID': 'SKILL-INCOMPLETE-CASE-001',
+        '项目 ID': schema.projectId,
+        '作用域': '跨作品',
+        '来源作品 ID': 'WORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001',
+        '知识类型': '技法',
+        '知识分类': '人物选择',
+        '适用条件': '人物面对风险',
+        '执行方法': '保留停顿',
+        '为什么有效': '让选择可见',
+        '置信度': 0.9,
+        '状态': '已验证',
+        ...reviewedMetadata(),
+      },
+    }]
+
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+      phase: 'judgment', objective: '风险选择',
+    }, operationHarness(schema, initial).options)
+
+    expect(result).toMatchObject({
+      snapshot: {
+        work: { director_cases: [] },
+        project: { director_cases: [], skills_techniques: [] },
+      },
+    })
+  })
+
+  it('excludes historical confirmed cases whose final-use decision is still pending', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.director_cases[0].fields['最终使用'] = '待确认'
+    initial.skills_techniques = [{
+      record_id: 'rec_skill_pending_case',
+      fields: {
+        '知识名称': '不应学习的待确认案例技法',
+        '知识 ID': 'SKILL-PENDING-CASE-001',
+        '项目 ID': schema.projectId,
+        '作用域': '跨作品',
+        '来源作品 ID': 'WORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001',
+        '知识类型': '技法',
+        '知识分类': '人物选择',
+        '适用条件': '人物面对风险',
+        '执行方法': '保留停顿',
+        '为什么有效': '让选择可见',
+        '置信度': 0.9,
+        '状态': '已验证',
+        ...reviewedMetadata(),
+      },
+    }]
+
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+      phase: 'judgment', objective: '风险选择',
+    }, operationHarness(schema, initial).options)
+
+    expect(result).toMatchObject({
+      snapshot: {
+        work: { director_cases: [] },
+        project: { director_cases: [], skills_techniques: [] },
+      },
+    })
   })
 
   it('selects relevant heads from a mature case library with bounded queries and one batched closure', async () => {
@@ -3435,7 +3572,9 @@ describe('Feishu director brain OpenClaw operation service', () => {
         '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
         '判断 ID': 'JUDGMENT-DESERT-001', '证据 ID': 'EVIDENCE-DESERT-001',
         '上下文': '沙暴将至且人物尚未决定路线', '导演动作': '采用',
-        '判断原因': '停顿把风险转成可见的人物选择', '复核状态': '已确认',
+        '判断原因': '停顿把风险转成可见的人物选择',
+        ...completeDirectorCaseOutcomeFields({ '成片位置': '沙暴来临前' }),
+        '复核状态': '已确认',
         ...reviewedMetadata(),
       },
     })
@@ -4451,6 +4590,95 @@ describe('Feishu director brain administrator review lifecycle', () => {
     }, harness.options)
     expect(active).toMatchObject({ targetStatus: '生效', version: 'v0.2.2' })
     expect(harness.updateCalls).toHaveLength(2)
+  })
+
+  it('requires all human outcome fields before confirming a director case', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const foundation = reviewedFoundation()
+    const caseFields = {
+      '案例名称': '裂缝前停顿案例',
+      '项目 ID': schema.projectId,
+      '作品 ID': 'WORK-ICE-001',
+      '判断 ID': 'JUDGMENT-REVIEWED-001',
+      '证据 ID': 'EVIDENCE-REVIEWED-001',
+      '上下文': '人物发现裂缝后尚未作出决定',
+      '导演动作': '采用',
+      '判断原因': '停顿把风险转化为人物选择',
+      '复核状态': '待复核',
+      ...reviewedMetadata({ '版本': 'v0.2.1' }),
+    }
+    const missingOutcomeCases = ['最终使用', '成片位置', '最终效果'].map((field, index) => {
+      const outcomes = completeDirectorCaseOutcomeFields()
+      delete (outcomes as Record<string, unknown>)[field]
+      return {
+        record_id: `rec_case_outcome_missing_${index}`,
+        fields: {
+          ...caseFields,
+          '案例 ID': `CASE-OUTCOME-MISSING-${index}`,
+          ...outcomes,
+        },
+      }
+    })
+    foundation.director_cases = [
+      ...missingOutcomeCases,
+      {
+        record_id: 'rec_case_outcome_complete',
+        fields: {
+          ...caseFields,
+          '案例 ID': 'CASE-OUTCOME-COMPLETE',
+          ...completeDirectorCaseOutcomeFields(),
+        },
+      },
+    ]
+    const harness = operationHarness(schema, foundation)
+
+    for (const [index, field] of ['最终使用', '成片位置', '最终效果'].entries()) {
+      await expect(directorBrain.reviewDirectorBrainRecord({
+        table: 'director_cases', stableId: `CASE-OUTCOME-MISSING-${index}`,
+        workId: 'WORK-ICE-001', expectedVersion: 'v0.2.1', targetStatus: '已确认',
+        reviewer: '测试导演', reason: `尝试确认缺少${field}的案例`,
+      }, harness.options)).rejects.toThrow(
+        `review_required_field_missing:director_cases:${field}`,
+      )
+    }
+
+    await expect(directorBrain.reviewDirectorBrainRecord({
+      table: 'director_cases', stableId: 'CASE-OUTCOME-COMPLETE',
+      workId: 'WORK-ICE-001', expectedVersion: 'v0.2.1', targetStatus: '已确认',
+      reviewer: '测试导演', reason: '人工结果完整且引用有效',
+    }, harness.options)).resolves.toMatchObject({
+      targetStatus: '已确认',
+      record: {
+        reviewed: true,
+        fields: completeDirectorCaseOutcomeFields(),
+      },
+    })
+    expect(harness.updateCalls).toHaveLength(1)
+  })
+
+  it('rejects a director case whose final-use decision is still pending', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const foundation = reviewedFoundation()
+    foundation.director_cases = [{
+      record_id: 'rec_case_outcome_pending',
+      fields: {
+        ...foundation.director_cases[0].fields,
+        '案例 ID': 'CASE-OUTCOME-PENDING-001',
+        '复核状态': '待复核',
+        '最终使用': '待确认',
+        '版本': 'v0.2.1',
+      },
+    }]
+    const harness = operationHarness(schema, foundation)
+
+    await expect(directorBrain.reviewDirectorBrainRecord({
+      table: 'director_cases', stableId: 'CASE-OUTCOME-PENDING-001',
+      workId: 'WORK-ICE-001', expectedVersion: 'v0.2.1', targetStatus: '已确认',
+      reviewer: '测试导演', reason: '最终采用结果尚未确认',
+    }, harness.options)).rejects.toThrow('review_director_case_final_use_invalid')
+    expect(harness.updateCalls).toHaveLength(0)
   })
 
   it('rechecks every ordinary review target after reference validation before updating', async () => {

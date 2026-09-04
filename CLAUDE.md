@@ -16,25 +16,25 @@ pnpm install
 pnpm build
 ```
 
-Secrets (AUTH_SECRET, API_KEY) auto-generate on first run if not set.
-Visit `http://localhost:3000/setup` to create an admin account, or set `AUTH_USER`/`AUTH_PASS` in `.env` for headless/CI seeding.
+Production user identity and authorization terminate at OpenClaw. Do not create a
+separate Mission Control account, session, or user API key for the 3017 service.
 
 ## Run
 
 ```bash
 pnpm dev              # development (localhost:3000)
-pnpm start            # production
-node .next/standalone/server.js   # standalone mode (after build)
+pnpm start            # production; managed fail-closed standalone launcher
+pnpm start:standalone # explicit alias for the same launcher
 ```
 
-## Docker
+## Docker Build Check
 
 ```bash
-docker compose up                 # zero-config
-bash install.sh --docker          # full guided setup
+docker compose up                 # container-internal loopback health only
 ```
 
-Production hardening: `docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d`
+The compose file does not publish an application port. Docker is not a supported
+external production path for the single-host OpenClaw loopback architecture.
 
 ## Tests
 
@@ -72,34 +72,14 @@ Database path: `MISSION_CONTROL_DB_PATH` (defaults to `.data/mission-control.db`
 - **Icons**: No icon libraries -- use raw text/emoji in components
 - **Standalone output**: `next.config.js` sets `output: 'standalone'`
 
-## Agent Control Interfaces
+## Agent Control Interface
 
-Mission Control provides three interfaces for autonomous agents:
-
-### MCP Server (recommended for agents)
-```bash
-# Add to any Claude Code agent:
-claude mcp add mission-control -- node /path/to/mission-control/scripts/mc-mcp-server.cjs
-
-# Environment config:
-MC_URL=http://127.0.0.1:3000 MC_API_KEY=<key>
-```
-35 tools: agents, tasks, sessions, memory, soul, comments, tokens, skills, cron, status.
-See `docs/cli-agent-control.md` for full tool list.
-
-### CLI
-```bash
-pnpm mc agents list --json
-pnpm mc tasks queue --agent Aegis --max-capacity 2 --json
-pnpm mc events watch --types agent,task
-```
-
-### REST API
-OpenAPI spec: `openapi.json`. Interactive docs at `/docs` when running.
+Production user and agent requests enter through OpenClaw. Direct Mission
+Control MCP, CLI user-key, and browser REST authentication are legacy
+development interfaces and are not supported production entrypoints.
 
 ## Common Pitfalls
 
-- **Standalone mode**: Use `node .next/standalone/server.js`, not `pnpm start` (which requires full `node_modules`)
+- **Standalone mode**: Use `pnpm start` or `pnpm start:standalone`; never invoke `next start` or `server.js` directly.
 - **better-sqlite3**: Native addon -- needs rebuild when switching Node versions (`pnpm rebuild better-sqlite3`)
-- **AUTH_PASS with `#`**: Quote it (`AUTH_PASS="my#pass"`) or use `AUTH_PASS_B64` (base64-encoded)
 - **Gateway optional**: Set `NEXT_PUBLIC_GATEWAY_OPTIONAL=true` for standalone deployments without gateway connectivity

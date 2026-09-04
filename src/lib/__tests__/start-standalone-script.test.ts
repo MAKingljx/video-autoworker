@@ -4,13 +4,15 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
@@ -89,18 +91,64 @@ function createLauncherFixture(): LauncherFixture {
     'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/package.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/index.js': 'export default {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/director-work-policy.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/dispatch-identity.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/duplicate-confirmation-store.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/json-command.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/qwen-before-dispatch.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/qwen-video-classifier.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/stable-message-key.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/video-path-policy.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/openclaw.plugin.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/package.json': '{}\n',
+    'openclaw-plugins/aiworker-video-command/scripts/validate-runtime-inspection.mjs': 'export {}\n',
     'openclaw-skills/aiworker-director-brain/SKILL.md': 'runtime\n',
     'openclaw-skills/aiworker-task-flow/SKILL.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md': 'runtime\n',
+    'openclaw-skills/aiworker-task-flow/lib/director-brain-evidence.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/director-work-policy.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/media-ingest.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/media-policy.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/platform-client.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-task.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs': 'export {}\n',
     'ops/feishu-director-brain/schema.json': '{}\n',
     'ops/openclaw/qwen-current-runtime-convergence.manifest.json': '{}\n',
     'scripts/apply-openclaw-runtime-convergence.sh': '#!/bin/sh\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
+    'scripts/install-aiworker-task-flow-skill.sh': '#!/bin/sh\n',
+    'scripts/install-aiworker-video-command-plugin.sh': '#!/bin/sh\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
+    'scripts/check-standalone-artifact.mjs': 'export {}\n',
+    'scripts/check-sensitive-content.mjs': 'export {}\n',
+    'scripts/verify-director-video-release-readiness.mjs': 'export {}\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
+    'scripts/legacy-preinstall-orchestrator.mjs': 'export {}\n',
+    'scripts/legacy-preinstall-controller.mjs': 'export {}\n',
+    'scripts/legacy-bootstrap-controller.mjs': 'export {}\n',
+    'scripts/generate-legacy-freeze-evidence.mjs': 'export {}\n',
+    'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
+    'scripts/legacy-freeze-guard.mjs': 'export {}\n',
+    'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
+    'scripts/verify-n8n-blue-green-workflows.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/openclaw-private-gateway-rpc.mjs': 'export {}\n',
     'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
+    'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
+    'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
+    'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
@@ -119,6 +167,7 @@ require('node:fs').writeFileSync(process.env.LAUNCH_RESULT_PATH, JSON.stringify(
   dbPath: process.env.MISSION_CONTROL_DB_PATH,
   tokensPath: process.env.MISSION_CONTROL_TOKENS_PATH,
   pidFile: process.env.PID_FILE,
+  profilesNoAuth: process.env.MC_OPENCLAW_PROFILES_NO_AUTH,
 }))
 `)
 
@@ -156,6 +205,79 @@ function runLauncher(fixture: LauncherFixture, overrides: Partial<NodeJS.Process
 }
 
 describe('standalone runtime launcher', () => {
+  it('requires every runtime file consumed by the three OpenClaw installers', async () => {
+    const repositoryRoot = process.cwd()
+    const walk = (relativeRoot: string): string[] => {
+      const root = resolve(repositoryRoot, relativeRoot)
+      const files: string[] = []
+      const visit = (directory: string) => {
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          const pathname = join(directory, entry.name)
+          if (entry.isDirectory()) visit(pathname)
+          else if (entry.isFile()) files.push(relative(repositoryRoot, pathname))
+        }
+      }
+      visit(root)
+      return files
+    }
+    const expectedPayload = [
+      'openclaw-plugins/aiworker-director-brain/index.js',
+      'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json',
+      'openclaw-plugins/aiworker-director-brain/package.json',
+      ...walk('openclaw-plugins/aiworker-director-brain/lib'),
+      ...walk('openclaw-skills/aiworker-director-brain'),
+      'openclaw-plugins/aiworker-video-command/index.js',
+      'openclaw-plugins/aiworker-video-command/openclaw.plugin.json',
+      'openclaw-plugins/aiworker-video-command/package.json',
+      ...walk('openclaw-plugins/aiworker-video-command/lib'),
+      ...walk('openclaw-plugins/aiworker-video-command/scripts'),
+      'openclaw-skills/aiworker-task-flow/SKILL.md',
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+      'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+      ...walk('openclaw-skills/aiworker-task-flow/lib'),
+      ...walk('openclaw-skills/aiworker-task-flow/scripts'),
+      'scripts/feishu-director-brain.mjs',
+      'scripts/lib/feishu-director-brain.mjs',
+      'scripts/lib/sensitive-value-scanner.mjs',
+      'ops/feishu-director-brain/schema.json',
+    ]
+    const checker = await import(
+      `${pathToFileURL(artifactCheckerPath).href}?payload=${Date.now()}`
+    ) as { REQUIRED_STANDALONE_FILES: string[] }
+
+    for (const member of expectedPayload) {
+      expect(checker.REQUIRED_STANDALONE_FILES, member).toContain(member)
+    }
+  })
+
+  it('makes every supported production package entrypoint use the fail-closed launcher', () => {
+    const packageDocument = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>
+    }
+
+    expect(packageDocument.scripts?.start).toBe('pnpm run start:standalone')
+    expect(packageDocument.scripts?.['start:standalone'])
+      .toBe('pnpm run verify:node && bash scripts/start-standalone.sh')
+    expect(Object.values(packageDocument.scripts || {}))
+      .not.toContain(expect.stringContaining('next start --hostname 0.0.0.0'))
+  })
+
+  it('traces the single preinstall orchestrator and every managed executable into standalone', () => {
+    const nextConfig = readFileSync(resolve(process.cwd(), 'next.config.js'), 'utf8')
+    for (const member of [
+      './scripts/legacy-preinstall-orchestrator.mjs',
+      './scripts/legacy-preinstall-controller.mjs',
+      './scripts/install-aiworker-task-flow-skill.sh',
+      './scripts/install-aiworker-video-command-plugin.sh',
+      './scripts/install-aiworker-director-brain.sh',
+      './scripts/apply-openclaw-runtime-convergence.sh',
+      './scripts/lib/openclaw-private-gateway-rpc.mjs',
+      './scripts/lib/render-managed-markdown-section.mjs',
+    ]) {
+      expect(nextConfig).toContain(member)
+    }
+  })
+
   it('imports and audits the immutable artifact without a TypeScript runtime package', () => {
     const fixture = createLauncherFixture()
     try {
@@ -245,7 +367,25 @@ describe('standalone runtime launcher', () => {
         dbPath: join(fixture.projectRoot, '.data', 'mission-control.db'),
         tokensPath: join(fixture.projectRoot, '.data', 'mission-control-tokens.json'),
         pidFile: join(fixture.projectRoot, '.run', 'standalone.pid'),
+        profilesNoAuth: '0',
       })
+    } finally {
+      rmSync(fixture.projectRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('overrides a stale no-auth value loaded from checkout-local runtime settings', () => {
+    const fixture = createLauncherFixture()
+    try {
+      writeFileSync(
+        join(fixture.projectRoot, '.env.local'),
+        'MC_OPENCLAW_PROFILES_NO_AUTH=1\n',
+      )
+
+      const result = runLauncher(fixture, { MC_OPENCLAW_PROFILES_NO_AUTH: '1' })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(readFileSync(fixture.resultPath, 'utf8')).profilesNoAuth).toBe('0')
     } finally {
       rmSync(fixture.projectRoot, { recursive: true, force: true })
     }
@@ -300,6 +440,14 @@ describe('standalone runtime launcher', () => {
     ['runtime/schema.sql', 'file'],
     ['package.json', 'file'],
     ['openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js', 'file'],
+    ['openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js', 'file'],
+    ['openclaw-plugins/aiworker-video-command/scripts/validate-runtime-inspection.mjs', 'file'],
+    ['openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md', 'file'],
+    ['openclaw-skills/aiworker-task-flow/lib/video-task.mjs', 'file'],
+    ['openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs', 'file'],
+    ['scripts/legacy-preinstall-orchestrator.mjs', 'file'],
+    ['scripts/lib/openclaw-private-gateway-rpc.mjs', 'file'],
+    ['scripts/lib/render-managed-markdown-section.mjs', 'file'],
   ] as const)('refuses an artifact missing required %s', (relativePath, kind) => {
     const fixture = createLauncherFixture()
     try {
@@ -309,7 +457,11 @@ describe('standalone runtime launcher', () => {
       expect(result.status).toBe(1)
       if (relativePath === 'server.js') {
         expect(result.stderr).toContain('standalone server missing')
-      } else if (relativePath.includes('sensitive-narrative-text.js')) {
+      } else if (relativePath.startsWith('openclaw-plugins/')
+        || relativePath.startsWith('openclaw-skills/')
+        || relativePath === 'scripts/legacy-preinstall-orchestrator.mjs'
+        || relativePath === 'scripts/lib/openclaw-private-gateway-rpc.mjs'
+        || relativePath === 'scripts/lib/render-managed-markdown-section.mjs') {
         expect(result.stderr).toContain(`standalone_required_file_missing:${relativePath}`)
       } else {
         expect(result.stderr).toContain(`missing required ${kind}`)

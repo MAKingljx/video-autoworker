@@ -81,6 +81,7 @@ if [[ -n "${MC_AUTH_MODE:-}" && "$MC_AUTH_MODE" != "openclaw-loopback" ]]; then
 fi
 export MC_AUTH_MODE="openclaw-loopback"
 export MC_DESKTOP_MODE="0"
+export MC_OPENCLAW_PROFILES_NO_AUTH="0"
 export MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-1}"
 export MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-1}"
 

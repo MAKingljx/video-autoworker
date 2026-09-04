@@ -29,20 +29,82 @@ describe('docker-compose.yml schema', () => {
 
 describe('Dockerfile runtime stage', () => {
   const content = readFileSync(resolve(ROOT, 'Dockerfile'), 'utf-8')
+  const entrypoint = readFileSync(resolve(ROOT, 'docker-entrypoint.sh'), 'utf-8')
+  const artifactAuditor = readFileSync(
+    resolve(ROOT, 'scripts/check-standalone-artifact.mjs'),
+    'utf-8',
+  )
 
-  it('copies public directory to runtime stage', () => {
-    expect(content).toContain('COPY --from=build /app/public ./public')
+  it('copies the complete audited standalone tree into one release root', () => {
+    expect(content).toContain('COPY --from=build /app/.next/standalone ./release')
+    expect(content).not.toContain('COPY --from=build /app/public ./public')
+    expect(content).not.toContain('COPY --from=build /app/.next/static ./.next/static')
   })
 
-  it('copies standalone output', () => {
-    expect(content).toContain('COPY --from=build /app/.next/standalone ./')
+  it('audits and starts the server from the immutable release root', () => {
+    expect(entrypoint).toContain('node "$AUDITOR" /app/release')
+    expect(entrypoint).toContain('cd /app/release')
+    expect(entrypoint).toContain('exec node server.js')
   })
 
-  it('copies static assets', () => {
-    expect(content).toContain('COPY --from=build /app/.next/static ./.next/static')
+  it('keeps public and static assets inside the audited release', () => {
+    expect(content).toContain('/app/release/public/')
+    expect(artifactAuditor).toContain("'.next/static'")
+    expect(artifactAuditor).toContain("'public'")
   })
 
-  it('copies schema.sql for migrations', () => {
-    expect(content).toContain('schema.sql')
+  it('requires the runtime schema inside the audited release', () => {
+    expect(content).toContain('/app/release/runtime/')
+    expect(artifactAuditor).toContain("'runtime/schema.sql'")
+  })
+})
+
+describe('.dockerignore release boundary', () => {
+  const content = readFileSync(resolve(ROOT, '.dockerignore'), 'utf-8')
+  const patterns = new Set(
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#')),
+  )
+
+  it.each([
+    '.canary-results',
+    '**/.canary-results',
+    '.tmp',
+    '**/.tmp',
+    'test-results',
+    '**/test-results',
+    'backups',
+    '**/backups',
+    '*.db',
+    '**/*.db',
+    '*.db-wal',
+    '**/*.db-wal',
+    '*.db-shm',
+    '**/*.db-shm',
+    '*.sqlite',
+    '**/*.sqlite',
+    '*.sqlite-wal',
+    '**/*.sqlite-wal',
+    '*.sqlite-shm',
+    '**/*.sqlite-shm',
+    '*.sqlite3',
+    '**/*.sqlite3',
+    '*.log',
+    '**/*.log',
+    '*.pid',
+    '**/*.pid',
+  ])('excludes release-unsafe runtime artifact pattern %s', (pattern) => {
+    expect(patterns).toContain(pattern)
+  })
+
+  it('does not broadly exclude source, operations, or documentation', () => {
+    expect(patterns).not.toContain('scripts')
+    expect(patterns).not.toContain('**/scripts')
+    expect(patterns).not.toContain('ops')
+    expect(patterns).not.toContain('**/ops')
+    expect(patterns).not.toContain('*.md')
+    expect(patterns).not.toContain('**/*.md')
   })
 })

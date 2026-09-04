@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -25,8 +26,11 @@ import {
   projectOfflineQueue,
   scanOfflineDurableBatchStates,
 } from '../../scripts/legacy-bootstrap-controller.mjs'
+import { initializePreinstallArtifactRoot } from '../../scripts/legacy-preinstall-orchestrator.mjs'
 
 const controller = resolve(process.cwd(), 'scripts/legacy-bootstrap-controller.mjs')
+const preinstallController = resolve(process.cwd(), 'scripts/legacy-preinstall-controller.mjs')
+const preinstallOrchestrator = resolve(process.cwd(), 'scripts/legacy-preinstall-orchestrator.mjs')
 const transitionAnchor = resolve(process.cwd(), 'scripts/n8n-workflow-transition-anchor.mjs')
 const roots: string[] = []
 const BASE_NOW = 1_800_000_000
@@ -126,6 +130,9 @@ function fixture(options: { guardExpiresAt?: number, observedAt?: number } = {})
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     chmodSync(directory, 0o700)
   }
+  const preinstallDirectory = join(attempt, 'preinstall')
+  mkdirSync(preinstallDirectory, { mode: 0o700 })
+  chmodSync(preinstallDirectory, 0o700)
   const manifestPath = join(releaseRoot, 'release-manifest.json')
   const manifestSource = '{"schema":"test-release/v1"}\n'
   writeFileSync(manifestPath, manifestSource, { mode: 0o600 })
@@ -352,6 +359,42 @@ function fixture(options: { guardExpiresAt?: number, observedAt?: number } = {})
     },
   })}\n`, { mode: 0o400 })
   chmodSync(transitionClaim, 0o400)
+  const installAttemptId = '33333333-3333-4333-8333-333333333333'
+  const installVerificationPath = join(root, 'install-verification.json')
+  writeFileSync(installVerificationPath, `${JSON.stringify({
+    schema: 'video-autoworker-legacy-preinstall-verified/v1',
+    installAttemptId,
+    revision: 1,
+    verifiedAt: (options.observedAt ?? BASE_NOW) - 10,
+  })}\n`, { mode: 0o400 })
+  chmodSync(installVerificationPath, 0o400)
+  const runtimeConvergenceProofPath = join(root, 'runtime-convergence-proof.json')
+  writePrivate(runtimeConvergenceProofPath, {
+    schema: 'video-autoworker-openclaw-runtime-convergence-proof/v1',
+    observedAt: BASE_NOW,
+  })
+  const preinstallStatusPath = join(root, 'preinstall-status.json')
+  writeFileSync(preinstallStatusPath, `${JSON.stringify({
+    phase: 'INSTALL_VERIFIED',
+    expired: false,
+    installAttemptId,
+    revision: 1,
+    verification: reference(installVerificationPath),
+    terminal: null,
+    bindings: {
+      sourceCommit: SOURCE_COMMIT,
+      target,
+      databases: { mission: legacy.database, n8n: n8nProcess.database },
+      evidence: { sha256: '0'.repeat(64) },
+      proof: { sha256: '1'.repeat(64) },
+      transition: {
+        attestation: { sha256: hash(readFileSync(transitionAttestation)) },
+        committedJournalHeadSha256: 'c'.repeat(64),
+        liveCombinedSha256: workflowDigest,
+      },
+    },
+  })}\n`, { mode: 0o400 })
+  chmodSync(preinstallStatusPath, 0o400)
   const runtimeRelease = join(root, 'n8n', 'releases', SOURCE_COMMIT)
   const n8nModule = join(runtimeRelease, 'ops/n8n/node_modules/n8n')
   mkdirSync(n8nModule, { recursive: true, mode: 0o700 })
@@ -413,6 +456,9 @@ process.stdout.write(createHash('sha256').update(evidence).digest('hex') + '\\n'
     transitionJournal,
     transitionAttestation,
     transitionClaim,
+    installVerificationPath,
+    runtimeConvergenceProofPath,
+    preinstallStatusPath,
     workflowReportPath,
     workflowDigest,
   }
@@ -439,8 +485,15 @@ function run(
   })
 }
 
+function preinstallOverrides(entry: Fixture) {
+  return {
+    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    AIWORKER_TEST_LEGACY_BOOTSTRAP_PREINSTALL_STATUS: entry.preinstallStatusPath,
+  }
+}
+
 function prepare(entry: Fixture) {
-  return run([
+  const result = run([
     'prepare',
     '--attempt-dir', entry.attempt,
     '--evidence', entry.evidencePath,
@@ -456,15 +509,25 @@ function prepare(entry: Fixture) {
     '--transition-journal', entry.transitionJournal,
     '--transition-attestation', entry.transitionAttestation,
     '--transition-claim', entry.transitionClaim,
+    '--install-verification', entry.installVerificationPath,
+    '--runtime-convergence-proof', entry.runtimeConvergenceProofPath,
   ], BASE_NOW, {
     AIWORKER_TEST_LEGACY_BOOTSTRAP_VERIFIER: entry.verifierPath,
-    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    ...preinstallOverrides(entry),
   })
+  if (result.status === 0) {
+    const status = JSON.parse(readFileSync(entry.preinstallStatusPath, 'utf8'))
+    status.phase = 'BOOTSTRAP_HANDOFF'
+    chmodSync(entry.preinstallStatusPath, 0o600)
+    writeFileSync(entry.preinstallStatusPath, `${JSON.stringify(status)}\n`, { mode: 0o400 })
+    chmodSync(entry.preinstallStatusPath, 0o400)
+  }
+  return result
 }
 
 function confirm(entry: Fixture) {
   return run(['current-confirm', '--prepare', join(entry.attempt, 'prepare.receipt.json')], BASE_NOW, {
-    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    ...preinstallOverrides(entry),
   })
 }
 
@@ -474,7 +537,7 @@ function apply(entry: Fixture, now = BASE_NOW) {
     '--prepare', join(entry.attempt, 'prepare.receipt.json'),
     '--confirm', join(entry.attempt, 'current-confirm.receipt.json'),
     '--token', join(entry.attempt, 'current-confirm.token.json'),
-  ], now, { AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim })
+  ], now, preinstallOverrides(entry))
 }
 
 function deriveRestore(entry: Fixture, now = BASE_NOW) {
@@ -486,7 +549,7 @@ function deriveRestore(entry: Fixture, now = BASE_NOW) {
     '--package', entry.recoveryPackage,
     '--runtime-release', entry.runtimeRelease,
     '--database', entry.n8n,
-  ], now, { AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim })
+  ], now, preinstallOverrides(entry))
 }
 
 function createPendingV4(entry: Fixture) {
@@ -553,7 +616,7 @@ function deriveDisaster(entry: Fixture, pending: string, recoveryAttempt: string
     '--recovery-attempt-dir', recoveryAttempt,
   ], now, {
     AIWORKER_TEST_LEGACY_BOOTSTRAP_DISASTER_STOPPED: '1',
-    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    ...preinstallOverrides(entry),
   })
 }
 
@@ -570,7 +633,7 @@ function deriveResume(entry: Fixture, pending: string, recoveryAttempt: string, 
   ], now, {
     AIWORKER_TEST_LEGACY_BOOTSTRAP_RESUME: '1',
     AIWORKER_TEST_LEGACY_BOOTSTRAP_RESUME_SNAPSHOT: entry.resumeSnapshotPath,
-    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    ...preinstallOverrides(entry),
   })
 }
 
@@ -582,7 +645,7 @@ function verifyResume(entry: Fixture, recoveryAttempt: string, command: 'verify'
   ], now, {
     AIWORKER_TEST_LEGACY_BOOTSTRAP_RESUME: '1',
     AIWORKER_TEST_LEGACY_BOOTSTRAP_RESUME_SNAPSHOT: entry.resumeSnapshotPath,
-    AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+    ...preinstallOverrides(entry),
   })
 }
 
@@ -593,6 +656,232 @@ function mutateLive(entry: Fixture, mutate: (value: any) => void) {
 }
 
 describe('legacy bootstrap confirmation controller', () => {
+  it('accepts the real orchestrator managed artifact root during bootstrap prepare', () => {
+    const entry = fixture()
+    const artifactRoot = initializePreinstallArtifactRoot(entry.attempt)
+    writeFileSync(join(artifactRoot, 'protected-pids.before.json'), '{}\n', { mode: 0o600 })
+    const prepared = prepare(entry)
+    expect(prepared.status, prepared.stderr).toBe(0)
+    expect(readdirSync(entry.attempt).sort()).toEqual([
+      'preinstall', 'prepare.receipt.json',
+    ])
+  })
+
+  it('prepares bootstrap from the same attempt successfully handed off by the real orchestrator', () => {
+    const entry = fixture()
+    const attestation = JSON.parse(readFileSync(entry.transitionAttestation, 'utf8'))
+    chmodSync(entry.transitionAttestation, 0o600)
+    writeFileSync(entry.transitionAttestation, `${JSON.stringify({
+      ...attestation,
+      upgradeId: '22222222-2222-4222-8222-222222222222',
+      n8n: { sourceCommit: SOURCE_COMMIT },
+      targetApplicationRelease: {
+        slot: 'blue', releaseId: entry.releaseId, releaseRoot: { path: entry.releaseRoot },
+        manifest: { sha256: hash(readFileSync(entry.manifestPath)) },
+      },
+    })}\n`, { mode: 0o400 })
+    chmodSync(entry.transitionAttestation, 0o400)
+    const committedJournal = join(entry.transitionJournal, '000001-COMMITTED.json')
+    writeFileSync(committedJournal, '{"state":"COMMITTED"}\n', { mode: 0o400 })
+    chmodSync(committedJournal, 0o400)
+    const transitionClaimValue = JSON.parse(readFileSync(entry.transitionClaim, 'utf8'))
+    transitionClaimValue.transition.attestation = fullReference(entry.transitionAttestation)
+    transitionClaimValue.transition.committedJournalHeadSha256 = hash(readFileSync(committedJournal))
+    const transitionClaimSource = Buffer.from(`${JSON.stringify(transitionClaimValue)}\n`)
+    rmSync(entry.transitionClaim)
+
+    const bin = join(entry.root, 'preinstall-bin')
+    const home = join(entry.root, 'preinstall-home')
+    const profileStateRoot = join(home, '.openclaw-qwen-current')
+    const workspaceRoot = join(entry.root, 'preinstall-workspace')
+    const releasesRoot = join(entry.root, 'releases')
+    const taskBackupRoot = join(entry.root, 'task-backups')
+    const videoBackupRoot = join(home, 'ai-worker/backups/aiworker-video-command')
+    const directorBackupRoot = join(entry.root, 'director-backups')
+    const runtimeBackupRoot = join(entry.root, 'runtime-backups')
+    const deploymentRunRoot = join(entry.root, 'deployment-run')
+    const videoBatchRoot = join(entry.root, 'video-batches')
+    for (const pathname of [
+      bin, profileStateRoot, workspaceRoot, taskBackupRoot, videoBackupRoot,
+      directorBackupRoot, runtimeBackupRoot, deploymentRunRoot, videoBatchRoot,
+    ]) mkdirSync(pathname, { recursive: true, mode: 0o700 })
+
+    const executable = (name: string, source: string) => {
+      const pathname = join(bin, name)
+      writeFileSync(pathname, `#!/usr/bin/env node\n${source}`, { mode: 0o700 })
+      chmodSync(pathname, 0o700)
+      return pathname
+    }
+    const evidenceVerifier = executable('evidence-verifier.mjs',
+      "import{readFileSync}from'node:fs';import{createHash}from'node:crypto';process.stdout.write(createHash('sha256').update(readFileSync(3)).digest('hex')+'\\n')\n")
+    const transitionVerifier = executable('transition-verifier.mjs',
+      `import{readFileSync}from'node:fs';import{createHash}from'node:crypto';const p=${JSON.stringify(entry.transitionAttestation)};process.stdout.write(JSON.stringify({committed:true,attestationSha256:createHash('sha256').update(readFileSync(p)).digest('hex'),liveCombinedSha256:${JSON.stringify(entry.workflowDigest)},upgradeId:'22222222-2222-4222-8222-222222222222'})+'\\n')\n`)
+    const readinessVerifier = executable('readiness-verifier.mjs',
+      `process.stdout.write(JSON.stringify({schema:'video-autoworker-director-video-preflight/v1',phase:'pre-bootstrap',ok:true,commit:${JSON.stringify(SOURCE_COMMIT)},app:{releaseId:${JSON.stringify(entry.releaseId)},root:${JSON.stringify(entry.releaseRoot)},manifestSha256:${JSON.stringify(hash(readFileSync(entry.manifestPath)))}},contracts:{directorWork:true,outboxClosure:true,sessionScopedRuntimeConvergence:true},payloads:{videoCommand:{root:${JSON.stringify(join(profileStateRoot, 'plugins/aiworker-video-command'))},manifestSha256:'1'.repeat(64)},taskFlow:{root:${JSON.stringify(join(workspaceRoot, 'skills/aiworker-task-flow'))},manifestSha256:'2'.repeat(64)},directorBrain:{manifestSha256:'3'.repeat(64)}},runtimeConvergence:{schema:'video-autoworker-openclaw-runtime-convergence-proof/v1'}})+'\\n')\n`)
+    const finalGate = executable('final-gate.mjs',
+      `import{execFileSync}from'node:child_process';import{createHash}from'node:crypto';import{statSync}from'node:fs';const a=process.argv.slice(2),v=n=>a[a.indexOf(n)+1],c=x=>Array.isArray(x)?x.map(c):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,c(x[k])])):x,j=x=>JSON.stringify(c(x)),s=x=>createHash('sha256').update(x).digest('hex'),status=JSON.parse(execFileSync(process.execPath,[${JSON.stringify(preinstallController)},'status','--attempt-dir',v('--legacy-preinstall-attempt-dir')],{encoding:'utf8',env:process.env})),id=p=>{const e=statSync(p,{bigint:true});return{path:p,dev:e.dev.toString(),ino:e.ino.toString()}},activity={mission:id(v('--mission-control-db-path')),n8n:id(v('--n8n-db-path')),activeTasks:0,activeMediaNodes:0,activeN8nExecutions:0,waiting:0,running:0,attentionStale:0,pendingOutbox:0},identity={phase:status.phase,installAttemptId:status.installAttemptId,revision:status.revision,prepared:status.prepared,verification:status.verification,terminal:status.terminal,finalize:status.finalize,components:status.components,bindings:status.bindings};process.stdout.write(JSON.stringify({schema:'video-autoworker-shared-runtime-final-gate/v1',mode:'legacy-preinstall',installAttemptId:status.installAttemptId,revision:status.revision,sourceCommit:v('--expected-source-commit'),targetReleaseId:v('--expected-release-id'),observedAt:${BASE_NOW},statusIdentitySha256:s(j(identity)),activity:{...activity,snapshotSha256:s(j(activity)}})+'\\n')\n`)
+    writeFileSync(finalGate, `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { readFileSync, statSync } from 'node:fs'
+const args = process.argv.slice(2)
+const value = name => args[args.indexOf(name) + 1]
+const canonicalize = input => Array.isArray(input) ? input.map(canonicalize)
+  : input && typeof input === 'object'
+    ? Object.fromEntries(Object.keys(input).sort().map(key => [key, canonicalize(input[key])]))
+    : input
+const canonicalJson = input => JSON.stringify(canonicalize(input))
+const sha256 = input => createHash('sha256').update(input).digest('hex')
+const status = JSON.parse(execFileSync(process.execPath, [
+  ${JSON.stringify(preinstallController)}, 'status', '--attempt-dir',
+  value('--legacy-preinstall-attempt-dir'),
+], { encoding: 'utf8', env: process.env }))
+const databaseIdentity = pathname => {
+  const entry = statSync(pathname, { bigint: true })
+  return { path: pathname, dev: entry.dev.toString(), ino: entry.ino.toString() }
+}
+const fileReference = pathname => {
+  const entry = statSync(pathname, { bigint: true })
+  return {
+    path: pathname, dev: entry.dev.toString(), ino: entry.ino.toString(),
+    size: Number(entry.size), sha256: sha256(readFileSync(pathname)),
+  }
+}
+const activity = {
+  mission: databaseIdentity(value('--mission-control-db-path')),
+  n8n: databaseIdentity(value('--n8n-db-path')),
+  activeTasks: 0, activeMediaNodes: 0, activeN8nExecutions: 0,
+  waiting: 0, running: 0, attentionStale: 0, pendingOutbox: 0,
+}
+const identity = {
+  phase: status.phase, installAttemptId: status.installAttemptId, revision: status.revision,
+  prepared: status.prepared, verification: status.verification, terminal: status.terminal,
+  finalize: status.finalize, components: status.components, bindings: status.bindings,
+}
+process.stdout.write(JSON.stringify({
+  schema: 'video-autoworker-shared-runtime-final-gate/v1', mode: 'legacy-preinstall',
+  installAttemptId: status.installAttemptId, revision: status.revision,
+  sourceCommit: value('--expected-source-commit'), targetReleaseId: value('--expected-release-id'),
+  observedAt: ${BASE_NOW}, statusIdentitySha256: sha256(canonicalJson(identity)),
+  finalize: status.finalize, verifier: fileReference(process.argv[1]),
+  activity: { ...activity, snapshotSha256: sha256(canonicalJson(activity)) },
+}) + '\\n')
+`, { mode: 0o700 })
+    chmodSync(finalGate, 0o700)
+    const preinstallEnvironment = {
+      AIWORKER_TEST_LEGACY_PREINSTALL: '1',
+      AIWORKER_TEST_LEGACY_PREINSTALL_NOW: String(BASE_NOW),
+      AIWORKER_TEST_LEGACY_PREINSTALL_EVIDENCE_VERIFIER: evidenceVerifier,
+      AIWORKER_TEST_LEGACY_PREINSTALL_TRANSITION_ANCHOR: transitionVerifier,
+      AIWORKER_TEST_LEGACY_PREINSTALL_READINESS_VERIFIER: readinessVerifier,
+      AIWORKER_TEST_LEGACY_PREINSTALL_FINAL_GATE: finalGate,
+    }
+    const controllerWrapper = executable('controller-wrapper.mjs',
+      `import{spawnSync}from'node:child_process';const a=process.argv.slice(2);if(a[0]==='reserve-component'){const t=spawnSync('/bin/ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8'}).stdout.trim();a.push('--target-state-sha256','f'.repeat(64),'--installer-pid',String(process.pid),'--installer-start-token',t)}const r=spawnSync(process.execPath,[${JSON.stringify(preinstallController)},...a],{encoding:'utf8',env:{...process.env,NODE_ENV:'test',...${JSON.stringify(preinstallEnvironment)}}});process.stdout.write(r.stdout||'');process.stderr.write(r.stderr||'');process.exit(r.status??1)\n`)
+
+    const installerSource = (component: string) => `import{spawnSync}from'node:child_process';import{createHash}from'node:crypto';import{writeFileSync}from'node:fs';const a=process.argv.slice(2),v=n=>a[a.indexOf(n)+1],has=n=>a.includes(n);if(has('--dry-run'))process.exit(0);const attempt=process.env.AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR,status=JSON.parse(spawnSync(process.execPath,[${JSON.stringify(controllerWrapper)},'status','--attempt-dir',attempt],{encoding:'utf8',env:process.env}).stdout),c=x=>Array.isArray(x)?x.map(c):x&&typeof x==='object'?Object.fromEntries(Object.keys(x).sort().map(k=>[k,c(x[k])])):x,j=x=>JSON.stringify(c(x)),s=x=>createHash('sha256').update(x).digest('hex'),identity={phase:status.phase,installAttemptId:status.installAttemptId,revision:status.revision,prepared:status.prepared,verification:status.verification,terminal:status.terminal,finalize:status.finalize,components:status.components,bindings:status.bindings},activity={mission:status.bindings.databases.mission,n8n:status.bindings.databases.n8n,activeTasks:0,activeMediaNodes:0,activeN8nExecutions:0,waiting:0,running:0,attentionStale:0,pendingOutbox:0},output=v('--result-output'),reserve=spawnSync(process.execPath,[${JSON.stringify(controllerWrapper)},'reserve-component','--attempt-dir',attempt,'--install-attempt-id',status.installAttemptId,'--expected-revision',String(status.revision),'--operation','install','--component',${JSON.stringify(component)},'--raw-result-output',output,'--status-identity-sha256',s(j(identity)),'--active-tasks','0','--active-media-nodes','0','--active-n8n-executions','0','--waiting','0','--running','0','--attention-stale','0','--pending-outbox','0','--snapshot-sha256',s(j(activity))],{encoding:'utf8',env:process.env});if(reserve.status!==0){process.stderr.write(reserve.stderr);process.exit(1)}writeFileSync(output,JSON.stringify({schema:'video-autoworker-installer-result/v1',component:${JSON.stringify(component)},operation:'apply',status:'noop',sourceCommit:status.bindings.sourceCommit,targetReleaseId:status.bindings.target.releaseId,beforeManifestSha256:'4'.repeat(64),afterManifestSha256:'4'.repeat(64),backup:null,requiresFreshRestart:false,completedAt:${BASE_NOW}})+'\\n',{flag:'wx',mode:0o600})\n`
+    const taskInstaller = executable('task-installer.mjs', installerSource('task-flow'))
+    const videoInstaller = executable('video-installer.mjs', installerSource('video-command'))
+    const directorInstaller = executable('director-installer.mjs', installerSource('director-brain'))
+    const pids = join(entry.root, 'preinstall-pids.json')
+    writePrivate(pids, {
+      3017: 30170, 5678: 56780, 5679: 56790,
+      18091: 180910, 18092: 180920, 18094: 180940,
+      18789: 187890, 18889: 101, 18989: 189890, 11434: 114340,
+    })
+    const lsof = executable('lsof.mjs',
+      "import{readFileSync}from'node:fs';const p=process.argv.find(x=>x.startsWith('-iTCP:')).split(':')[1],v=JSON.parse(readFileSync(process.env.HANDOFF_TEST_PIDS,'utf8'));process.stdout.write(String(v[p])+'\\n')\n")
+    const pgrep = executable('pgrep.mjs', 'process.exit(1)\n')
+    const openclaw = executable('openclaw.mjs',
+      "import{readFileSync,writeFileSync}from'node:fs';const p=process.env.HANDOFF_TEST_PIDS,v=JSON.parse(readFileSync(p,'utf8'));v['18889']=102;writeFileSync(p,JSON.stringify(v),{mode:0o600});process.stdout.write('{}\\n')\n")
+    const convergenceProof = join(runtimeBackupRoot, 'runtime-convergence-proof.json')
+    const convergence = executable('convergence.mjs',
+      `import{writeFileSync}from'node:fs';const p=${JSON.stringify(convergenceProof)};writeFileSync(p,JSON.stringify({schema:'video-autoworker-openclaw-runtime-convergence-proof/v1',runtime:{gateway:{pid:102},toolInventory:{sha256:'7'.repeat(64)},effectiveToolInventory:{sha256:'8'.repeat(64)},plugins:[{id:'aiworker-director-brain',treeSha256:'9'.repeat(64)}]}})+'\\n',{flag:'wx',mode:0o600});process.stdout.write('Verified session-scoped runtime convergence proof: '+p+'\\n')\n`)
+    const toolBaseline = join(entry.root, 'tool-baseline.json')
+    writePrivate(toolBaseline, {})
+
+    const orchestrated = spawnSync(process.execPath, [preinstallOrchestrator,
+      '--attempt-dir', entry.attempt, '--evidence', entry.evidencePath, '--proof', entry.proofPath,
+      '--source-commit', SOURCE_COMMIT, '--transition-intent', entry.transitionIntent,
+      '--transition-confirmation', entry.transitionConfirmation, '--transition-journal', entry.transitionJournal,
+      '--transition-attestation', entry.transitionAttestation, '--transition-claim', entry.transitionClaim,
+      '--releases-root', releasesRoot, '--profile', 'qwen-current', '--profile-state-root', profileStateRoot,
+      '--workspace-root', workspaceRoot, '--agent-id', 'second-original', '--tool-baseline', toolBaseline,
+      '--task-flow-backup-root', taskBackupRoot, '--video-command-backup-root', videoBackupRoot,
+      '--director-brain-backup-root', directorBackupRoot, '--runtime-backup-root', runtimeBackupRoot,
+      '--deployment-run-dir', deploymentRunRoot, '--video-batch-root', videoBatchRoot,
+    ], {
+      cwd: process.cwd(), encoding: 'utf8',
+      env: {
+        ...process.env, NODE_ENV: 'test', AIWORKER_TEST_LEGACY_PREINSTALL_ORCHESTRATOR: '1',
+        AIWORKER_TEST_LEGACY_PREINSTALL_CONTROLLER: controllerWrapper,
+        AIWORKER_TEST_LEGACY_PREINSTALL_TASK_INSTALLER: taskInstaller,
+        AIWORKER_TEST_LEGACY_PREINSTALL_VIDEO_INSTALLER: videoInstaller,
+        AIWORKER_TEST_LEGACY_PREINSTALL_DIRECTOR_INSTALLER: directorInstaller,
+        AIWORKER_TEST_LEGACY_PREINSTALL_CONVERGENCE: convergence,
+        AIWORKER_TEST_LEGACY_PREINSTALL_OPENCLAW: openclaw,
+        AIWORKER_TEST_LEGACY_PREINSTALL_LSOF: lsof,
+        AIWORKER_TEST_LEGACY_PREINSTALL_PGREP: pgrep,
+        AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: 'isolated-handoff-test',
+        HANDOFF_TEST_PIDS: pids,
+      },
+    })
+    expect(orchestrated.status, orchestrated.stderr).toBe(0)
+
+    const realStatusResult = spawnSync(process.execPath, [
+      preinstallController, 'status', '--attempt-dir', entry.attempt,
+    ], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test', ...preinstallEnvironment } })
+    expect(realStatusResult.status, realStatusResult.stderr).toBe(0)
+    const realStatus = JSON.parse(realStatusResult.stdout)
+    expect(realStatus.phase).toBe('BOOTSTRAP_HANDOFF')
+    expect(realStatus.terminal?.path).toBe(join(entry.attempt, 'preinstall',
+      'install-terminal-claim.receipt.json'))
+
+    writeFileSync(entry.transitionClaim, transitionClaimSource, { mode: 0o400 })
+    chmodSync(entry.transitionClaim, 0o400)
+    const originalEvidence = JSON.parse(readFileSync(entry.evidencePath, 'utf8'))
+    const freshObservedAt = BASE_NOW + 10
+    const freshFrozen = { ...originalEvidence.frozen, expiresAt: freshObservedAt + 300 }
+    const freshProofPath = join(entry.root, 'fresh-bootstrap-proof.json')
+    const freshProof = JSON.parse(readFileSync(entry.proofPath, 'utf8'))
+    freshProof.createdAt = freshObservedAt
+    freshProof.guardSha256 = hash(canonicalJson(freshFrozen))
+    freshProof.runtimeIdentitySha256 = hash(canonicalJson({
+      legacy: originalEvidence.legacy, n8n: originalEvidence.n8n,
+      counts: originalEvidence.counts, queueDigestSha256: originalEvidence.queueDigestSha256,
+      supervisor: originalEvidence.supervisor, frozen: freshFrozen,
+    }))
+    writePrivate(freshProofPath, freshProof)
+    const freshEvidencePath = join(entry.root, 'fresh-bootstrap-evidence.json')
+    writePrivate(freshEvidencePath, {
+      ...originalEvidence, observedAt: freshObservedAt, frozen: freshFrozen,
+      rollback: { ...identity(freshProofPath), sha256: hash(readFileSync(freshProofPath)) },
+    })
+
+    const bootstrapPrepared = run([
+      'prepare', '--attempt-dir', entry.attempt, '--evidence', freshEvidencePath,
+      '--proof', freshProofPath, '--source-commit', SOURCE_COMMIT,
+      '--router-run-dir', entry.routerRunDirectory, '--router-state', entry.routerStatePath,
+      '--router-port', '3017', '--mission-db', entry.mission, '--n8n-db', entry.n8n,
+      '--transition-intent', entry.transitionIntent, '--transition-confirmation', entry.transitionConfirmation,
+      '--transition-journal', entry.transitionJournal, '--transition-attestation', entry.transitionAttestation,
+      '--transition-claim', entry.transitionClaim, '--install-verification', realStatus.verification.path,
+      '--runtime-convergence-proof', convergenceProof,
+    ], freshObservedAt, {
+      AIWORKER_TEST_LEGACY_BOOTSTRAP_VERIFIER: entry.verifierPath,
+      AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+      ...preinstallEnvironment,
+    })
+    expect(bootstrapPrepared.status, bootstrapPrepared.stderr).toBe(0)
+    const prepareReceipt = JSON.parse(readFileSync(join(entry.attempt, 'prepare.receipt.json'), 'utf8'))
+    expect(prepareReceipt.installation).toMatchObject({
+      installAttemptId: realStatus.installAttemptId,
+      revision: realStatus.revision,
+      verification: realStatus.verification,
+      terminal: realStatus.terminal,
+    })
+  })
+
   it('requires a completely empty bootstrap attempt before prepare', () => {
     const entry = fixture()
     writeFileSync(join(entry.attempt, 'transition-rollback-authorization.receipt.json'), '{}\n', {
@@ -600,7 +889,7 @@ describe('legacy bootstrap confirmation controller', () => {
     })
     const refused = prepare(entry)
     expect(refused.status).not.toBe(0)
-    expect(refused.stderr).toContain('attempt directory must be empty')
+    expect(refused.stderr).toContain('attempt directory must contain only the verified preinstall state')
     expect(existsSync(join(entry.attempt, 'prepare.receipt.json'))).toBe(false)
   })
 
@@ -637,7 +926,7 @@ describe('legacy bootstrap confirmation controller', () => {
     expect(lstatSync(shutdownPath).nlink).toBe(1)
 
     const status = run(['status', '--attempt-dir', entry.attempt], BASE_NOW, {
-      AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM: entry.transitionClaim,
+      ...preinstallOverrides(entry),
     })
     expect(status.status, status.stderr).toBe(0)
     expect(JSON.parse(status.stdout)).toMatchObject({

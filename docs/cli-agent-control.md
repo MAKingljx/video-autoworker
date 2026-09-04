@@ -1,5 +1,9 @@
 # Mission Control CLI for Agent-Complete Operations (v2)
 
+> Legacy development reference only. Direct Mission Control API-key profiles
+> are not a supported production entrypoint. Production identity and
+> authorization terminate at OpenClaw.
+
 This repository includes a first-party CLI at:
 
 - scripts/mc-cli.cjs

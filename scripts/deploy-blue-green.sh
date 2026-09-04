@@ -111,13 +111,21 @@ verify_deployment_source_gate() {
     scripts/lib/sensitive-value-scanner.mjs
     scripts/verify-director-video-release-readiness.mjs
     scripts/lib/director-extraction-release-provenance.mjs
+    scripts/lib/openclaw-private-gateway-rpc.mjs
     scripts/lib/openclaw-runtime-convergence.mjs
+    scripts/lib/render-managed-markdown-section.mjs
     scripts/manage-blue-green-services.sh
     scripts/install-blue-green-launch-agents.sh
     scripts/start-standalone-slot.sh
+    scripts/apply-openclaw-runtime-convergence.sh
+    scripts/install-aiworker-task-flow-skill.sh
+    scripts/install-aiworker-video-command-plugin.sh
+    scripts/install-aiworker-director-brain.sh
     scripts/generate-legacy-freeze-evidence.mjs
     scripts/generate-legacy-bootstrap-rollback-proof.mjs
     scripts/legacy-freeze-guard.mjs
+    scripts/legacy-preinstall-orchestrator.mjs
+    scripts/legacy-preinstall-controller.mjs
     scripts/legacy-bootstrap-controller.mjs
     scripts/verify-n8n-blue-green-workflows.mjs
     ops/n8n/workflows/aiworker-task-intake.json

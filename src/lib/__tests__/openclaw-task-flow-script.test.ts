@@ -618,6 +618,8 @@ globalThis.fetch = async (input, init = {}) => {
         cwd: process.cwd(),
         env: {
           ...process.env,
+          NODE_ENV: 'test',
+          AIWORKER_INSTALLER_ISOLATED_TEST_ROOT: realpathSync.native(root),
           AIWORKER_QWEN_WORKSPACE: workspace,
           AIWORKER_SKILL_BACKUP_ROOT: backupRoot,
           AIWORKER_BG_RUN_DIR: deploymentRunDir,

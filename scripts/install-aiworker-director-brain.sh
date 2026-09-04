@@ -19,8 +19,21 @@ DEPLOYMENT_RUN_DIR="${AIWORKER_BG_RUN_DIR:-$REPOSITORY_ROOT/.run/blue-green}"
 DEPLOYMENT_LOCK_DIR="$DEPLOYMENT_RUN_DIR/.deployment.lock"
 MISSION_CONTROL_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
 N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
-LEGACY_BOOTSTRAP_ATTEMPT_DIR="${AIWORKER_BG_LEGACY_BOOTSTRAP_ATTEMPT_DIR:-}"
-VIDEO_BATCH_ROOT="${AIWORKER_VIDEO_BATCH_DIR:-$HOME/ai-worker/state/video-autoworker/video-batches}"
+LEGACY_PREINSTALL_ATTEMPT_DIR="${AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR:-}"
+ISOLATED_TEST_ROOT="${AIWORKER_INSTALLER_ISOLATED_TEST_ROOT:-}"
+CANONICAL_VIDEO_BATCH_ROOT="$HOME/ai-worker/state/video-autoworker/video-batches"
+VIDEO_BATCH_ROOT="$CANONICAL_VIDEO_BATCH_ROOT"
+if [[ "${NODE_ENV:-}" == test && -n "$ISOLATED_TEST_ROOT" \
+  && -n "${AIWORKER_VIDEO_BATCH_DIR:-}" ]]; then
+  VIDEO_BATCH_ROOT="$AIWORKER_VIDEO_BATCH_DIR"
+elif [[ -n "${AIWORKER_VIDEO_BATCH_DIR:-}" \
+  && "$AIWORKER_VIDEO_BATCH_DIR" != "$CANONICAL_VIDEO_BATCH_ROOT" ]]; then
+  printf 'Production video batch root is fixed at %s; custom overrides are test-only.\n' \
+    "$CANONICAL_VIDEO_BATCH_ROOT" >&2
+  exit 2
+fi
+MUTATION_AUTHORIZATION=""
+SHARED_GATE_MODE=""
 
 [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
   printf 'Shared deployment lock helper is unavailable.\n' >&2
@@ -30,12 +43,18 @@ VIDEO_BATCH_ROOT="${AIWORKER_VIDEO_BATCH_DIR:-$HOME/ai-worker/state/video-autowo
 . "$SHARED_DEPLOYMENT_LOCK_HELPER"
 
 MODE=""
+ORIGINAL_ARGUMENTS=("$@")
 PROFILE=""
 STATE_DIR=""
 WORKSPACE=""
 AGENT_ID="$DEFAULT_AGENT_ID"
 BACKUP_ROOT=""
 ROLLBACK_BACKUP=""
+ROLLBACK_NOOP=0
+RESULT_OUTPUT=""
+RESERVATION_SHA256=""
+ROLLBACK_RESULT_BACKUP=""
+ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256=""
 ROLLBACK_SOURCE_ORIGINAL=""
 ROLLBACK_SOURCE_CLAIM=""
 ROLLBACK_SOURCE_CLAIM_ROOT=""
@@ -89,20 +108,24 @@ LOCKED_CONFIG_SHA256=""
 LOCKED_CONFIG_IDENTITY=""
 CONFIG_PREVIOUS_IDENTITY=""
 SAFETY_BACKUP=""
+BEFORE_MANIFEST_SHA256=""
 EXTENSIONS_CREATED=0
 SKILLS_CREATED=0
+LOCAL_LOCK_FENCE=""
+LOCAL_OWNER_START=""
+STALE_RECOVERED=0
 
 usage() {
   printf '%s\n' \
     "Usage:" \
     "  $0 --dry-run --profile <name> --state-dir <absolute-path> --workspace <absolute-path> [--agent <id>] [--backup-root <absolute-path>]" \
-    "  $0 --apply   --profile <name> --state-dir <absolute-path> --workspace <absolute-path> [--agent <id>] [--backup-root <absolute-path>]" \
-    "  $0 --rollback --profile <name> --state-dir <absolute-path> --workspace <absolute-path> --backup <absolute-path> [--agent <id>] [--backup-root <absolute-path>]"
+    "  $0 --apply   --profile <name> --state-dir <absolute-path> --workspace <absolute-path> [--agent <id>] [--backup-root <absolute-path>] [--result-output <absolute-path>]" \
+    "  $0 --rollback --profile <name> --state-dir <absolute-path> --workspace <absolute-path> (--backup <absolute-path>|--noop) [--agent <id>] [--backup-root <absolute-path>] [--result-output <absolute-path>]"
 }
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
-    --dry-run|--apply|--rollback)
+    --dry-run|--apply|--rollback|--probe-current-manifest)
       [[ -z "$MODE" ]] || { usage >&2; exit 2; }
       MODE="${1#--}"
       shift
@@ -137,6 +160,21 @@ while [[ "$#" -gt 0 ]]; do
       ROLLBACK_BACKUP="$2"
       shift 2
       ;;
+    --result-output)
+      [[ -z "$RESULT_OUTPUT" && "$#" -ge 2 ]] || { usage >&2; exit 2; }
+      RESULT_OUTPUT="$2"
+      shift 2
+      ;;
+    --reservation-sha256)
+      [[ -z "$RESERVATION_SHA256" && "$#" -ge 2 ]] || { usage >&2; exit 2; }
+      RESERVATION_SHA256="$2"
+      shift 2
+      ;;
+    --noop)
+      [[ "$ROLLBACK_NOOP" == 0 ]] || { usage >&2; exit 2; }
+      ROLLBACK_NOOP=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -165,7 +203,25 @@ case "$STATE_DIR:$WORKSPACE" in
   *) printf 'State directory and workspace must be absolute paths.\n' >&2; exit 2 ;;
 esac
 [[ "$MODE" == "rollback" || -z "$ROLLBACK_BACKUP" ]] || { usage >&2; exit 2; }
-[[ "$MODE" != "rollback" || "$ROLLBACK_BACKUP" == /* ]] || { usage >&2; exit 2; }
+[[ "$MODE" != "rollback" || "$ROLLBACK_NOOP" == 1 || "$ROLLBACK_BACKUP" == /* ]] || { usage >&2; exit 2; }
+[[ "$ROLLBACK_NOOP" == 0 || ( "$MODE" == rollback && -z "$ROLLBACK_BACKUP" ) ]] || { usage >&2; exit 2; }
+[[ -z "$RESULT_OUTPUT" || "$RESULT_OUTPUT" == /* ]] || { usage >&2; exit 2; }
+[[ "$MODE" != "dry-run" || -z "$RESULT_OUTPUT" ]] || { usage >&2; exit 2; }
+if [[ "$MODE" == "probe-current-manifest" \
+  && ( -z "$RESULT_OUTPUT" || ! "$RESERVATION_SHA256" =~ ^[a-f0-9]{64}$ ) ]]; then
+  usage >&2
+  exit 2
+fi
+[[ "$MODE" == "probe-current-manifest" || -z "$RESERVATION_SHA256" ]] || { usage >&2; exit 2; }
+if [[ "$MODE" != "dry-run" && "$MODE" != "probe-current-manifest" && -n "$LEGACY_PREINSTALL_ATTEMPT_DIR" \
+  && -z "$RESULT_OUTPUT" ]]; then
+  printf 'Legacy preinstall director-brain mutations require an immutable raw result output path.\n' >&2
+  exit 2
+fi
+if [[ -n "$RESULT_OUTPUT" && ( -e "$RESULT_OUTPUT" || -L "$RESULT_OUTPUT" ) ]]; then
+  printf 'Result output already exists; refusing to overwrite it: %s\n' "$RESULT_OUTPUT" >&2
+  exit 1
+fi
 
 for required_command in chmod cmp cp date diff env find git grep install ln mkdir mktemp mv node openclaw pwd readlink rm rmdir sed shasum stat; do
   command -v "$required_command" >/dev/null 2>&1 || {
@@ -679,7 +735,7 @@ if [[ ( -n "$TEST_FAILPOINT" || -n "$TEST_SYNC_DIR" ) \
   exit 1
 fi
 case "$TEST_FAILPOINT" in
-  ""|after-plugin|after-skill|after-config|backup-plugin-copy-failed|\
+  ""|after-plugin|after-skill|after-config|backup-plugin-copy-failed|sigkill-after-first-mutation|\
     plugin-old-move-failed|plugin-new-move-failed|\
     skill-old-move-failed|skill-new-move-failed|\
     config-old-move-failed|config-new-move-failed|\
@@ -1039,6 +1095,117 @@ write_backup_manifest() {
   local backup="$1" temporary="$WORK_ROOT/backup.$$.manifest"
   write_backup_tree_manifest "$backup" "$temporary" || return 1
   install -m 600 "$temporary" "$backup/MANIFEST.sha256" || return 1
+}
+
+target_manifest_sha256() {
+  node - "$INSTALLED_PLUGIN" "$INSTALLED_SKILL" "$PROFILE_CONFIG" <<'NODE'
+const { createHash } = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
+const [pluginRoot, skillRoot, configPath] = process.argv.slice(2)
+const sha256 = value => createHash('sha256').update(value).digest('hex')
+const tree = (root) => {
+  const rootStat = fs.lstatSync(root, { throwIfNoEntry: false })
+  if (rootStat === undefined) return null
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) process.exit(1)
+  const entries = []
+  const visit = (pathname, relative) => {
+    for (const entry of fs.readdirSync(pathname, { withFileTypes: true })) {
+      const child = path.join(pathname, entry.name)
+      const childRelative = path.posix.join(relative, entry.name)
+      if (entry.isSymbolicLink()) process.exit(1)
+      if (entry.isDirectory()) {
+        entries.push(['directory', childRelative])
+        visit(child, childRelative)
+      } else if (entry.isFile()) {
+        entries.push(['file', childRelative, sha256(fs.readFileSync(child))])
+      } else process.exit(1)
+    }
+  }
+  visit(root, '')
+  return entries
+}
+
+const configStat = fs.lstatSync(configPath)
+if (!configStat.isFile() || configStat.isSymbolicLink()) process.exit(1)
+const manifest = {
+  config: sha256(fs.readFileSync(configPath)),
+  plugin: tree(pluginRoot),
+  skill: tree(skillRoot),
+}
+process.stdout.write(sha256(JSON.stringify(manifest)))
+NODE
+}
+
+if [[ "$MODE" == "probe-current-manifest" ]]; then
+  probe_digest="$(target_manifest_sha256)" || exit 1
+  node - "$RESULT_OUTPUT" "$REPOSITORY_ROOT/scripts/install-aiworker-director-brain.sh" \
+    "$EXPECTED_SOURCE_COMMIT" "$EXPECTED_RELEASE_ID" "$RESERVATION_SHA256" "$probe_digest" <<'NODE'
+const { createHash } = require('node:crypto')
+const fs = require('node:fs')
+const [output, verifierPath, sourceCommit, targetReleaseId, reservationSha256,
+  targetStateSha256] = process.argv.slice(2)
+const sha256 = value => createHash('sha256').update(value).digest('hex')
+const stat = fs.lstatSync(verifierPath, { bigint: true })
+const value = {
+  schema: 'video-autoworker-component-target-probe/v1', component: 'director-brain', sourceCommit,
+  targetReleaseId, reservationSha256, targetStateSha256,
+  observedAt: Math.floor(Date.now() / 1000),
+  verifier: { path: verifierPath, dev: stat.dev.toString(), ino: stat.ino.toString(),
+    size: Number(stat.size), sha256: sha256(fs.readFileSync(verifierPath)) },
+}
+const fd = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT
+  | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+try { fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+NODE
+  exit 0
+fi
+
+write_install_result() {
+  local operation="$1" status="$2" before_digest="$3" after_digest="$4"
+  local backup_path="$5" backup_manifest_digest="$6" requires_fresh_restart="$7"
+  [[ -n "$RESULT_OUTPUT" ]] || return 0
+  node - "$RESULT_OUTPUT" "$operation" "$status" "$EXPECTED_SOURCE_COMMIT" \
+    "$EXPECTED_RELEASE_ID" "$before_digest" "$after_digest" "$backup_path" \
+    "$backup_manifest_digest" "$requires_fresh_restart" <<'NODE'
+const fs = require('node:fs')
+const [outputPath, operation, status, sourceCommit, targetReleaseId,
+  beforeManifestSha256, afterManifestSha256, backupPath,
+  backupManifestSha256, requiresFreshRestartSource] = process.argv.slice(2)
+const sha256 = /^[a-f0-9]{64}$/u
+if (!['apply', 'rollback'].includes(operation)
+  || !['applied', 'noop', 'restored'].includes(status)
+  || !/^[a-f0-9]{40}$/u.test(sourceCommit)
+  || targetReleaseId !== `${sourceCommit}-runtime`
+  || !sha256.test(beforeManifestSha256) || !sha256.test(afterManifestSha256)
+  || !['0', '1'].includes(requiresFreshRestartSource)
+  || ((backupPath === '') !== (backupManifestSha256 === ''))
+  || (backupManifestSha256 !== '' && !sha256.test(backupManifestSha256))) {
+  throw new Error('invalid installer result evidence')
+}
+const value = {
+  schema: 'video-autoworker-installer-result/v1',
+  component: 'director-brain',
+  operation,
+  status,
+  sourceCommit,
+  targetReleaseId,
+  beforeManifestSha256,
+  afterManifestSha256,
+  backup: backupPath === '' ? null : { path: backupPath, manifestSha256: backupManifestSha256 },
+  requiresFreshRestart: requiresFreshRestartSource === '1',
+  completedAt: Math.floor(Date.now() / 1000),
+}
+const handle = fs.openSync(outputPath, fs.constants.O_WRONLY | fs.constants.O_CREAT
+  | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+try {
+  fs.fchmodSync(handle, 0o600)
+  fs.writeFileSync(handle, `${JSON.stringify(value)}\n`, { encoding: 'utf8' })
+  fs.fsyncSync(handle)
+} finally {
+  fs.closeSync(handle)
+}
+NODE
 }
 
 verify_backup() {
@@ -1499,6 +1666,184 @@ restore_failed_commit() {
   return "$status"
 }
 
+process_start_token() {
+  /bin/ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+director_journal_field() {
+  node - "$LOCK_DIR/journal.json" "$1" <<'NODE'
+const fs = require('node:fs')
+const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const fields = {
+  phase: value.phase, fence: value.fence, before: value.beforeManifestSha256,
+  backupPath: value.backup?.path, backupIdentity: value.backup?.identity,
+  backupDigest: value.backup?.manifestSha256, workRoot: value.workRoot,
+  pluginPrevious: value.previous?.plugin, skillPrevious: value.previous?.skill,
+  configPrevious: value.previous?.config,
+}
+if (value?.schema !== 'video-autoworker-installer-journal/v1'
+  || value?.component !== 'director-brain' || !(process.argv[3] in fields)) process.exit(1)
+const result = fields[process.argv[3]]
+if (typeof result === 'string' && /[\r\n]/u.test(result)) process.exit(1)
+process.stdout.write(String(result))
+NODE
+}
+
+write_director_lock_owner() {
+  LOCAL_OWNER_START="$(process_start_token "$$")"
+  LOCAL_LOCK_FENCE="$(node -e "process.stdout.write(require('node:crypto').randomBytes(16).toString('hex'))")"
+  [[ -n "$LOCAL_OWNER_START" ]] || return 1
+  local stage="$LOCK_DIR.claim.$LOCAL_LOCK_FENCE"
+  mkdir -m 700 "$stage" || return 1
+  node - "$stage/owner.json" "$$" "$LOCAL_OWNER_START" "$LOCAL_LOCK_FENCE" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const [pathname, pid, start, fence] = process.argv.slice(2)
+const value = { schema: 'video-autoworker-installer-owner/v1',
+  component: 'director-brain', pid: Number(pid), start, fence }
+const fd = fs.openSync(pathname, fs.constants.O_WRONLY | fs.constants.O_CREAT
+  | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+try { fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); fs.fsyncSync(fd) }
+finally { fs.closeSync(fd) }
+const dirFd = fs.openSync(path.dirname(pathname), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+try { fs.fsyncSync(dirFd) } finally { fs.closeSync(dirFd) }
+NODE
+  if ! mv "$stage" "$LOCK_DIR" 2>/dev/null; then rm -rf -- "$stage"; return 1; fi
+  LOCK_OWNED=1
+}
+
+write_director_journal() {
+  local backup_digest backup_identity planned_plugin_previous planned_skill_previous planned_config_previous
+  backup_digest="$(path_sha256 "$SAFETY_BACKUP/MANIFEST.sha256")" || return 1
+  backup_identity="$(path_identity "$SAFETY_BACKUP")" || return 1
+  planned_plugin_previous="$STATE_DIR/extensions/.aiworker-director-brain.previous.$$"
+  planned_skill_previous="$WORKSPACE/skills/.aiworker-director-brain.previous.$$"
+  planned_config_previous="$STATE_DIR/.openclaw.json.previous.$$"
+  node - "$LOCK_DIR/journal.json" "$MODE" "$LOCAL_LOCK_FENCE" "$WORK_ROOT" \
+    "$BEFORE_MANIFEST_SHA256" "$SAFETY_BACKUP" "$backup_identity" "$backup_digest" \
+    "$planned_plugin_previous" "$planned_skill_previous" "$planned_config_previous" "$RESULT_OUTPUT" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const [pathname, operation, fence, workRoot, beforeManifestSha256, backupPath,
+  identity, manifestSha256, pluginPrevious, skillPrevious, configPrevious,
+  resultOutput] = process.argv.slice(2)
+const value = {
+  schema: 'video-autoworker-installer-journal/v1', component: 'director-brain',
+  operation, fence, phase: 'prepared', workRoot, beforeManifestSha256,
+  backup: { path: backupPath, identity, manifestSha256 },
+  previous: { plugin: pluginPrevious, skill: skillPrevious, config: configPrevious },
+  resultOutput: resultOutput || null,
+}
+const fd = fs.openSync(pathname, fs.constants.O_WRONLY | fs.constants.O_CREAT
+  | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+try { fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); fs.fsyncSync(fd) }
+finally { fs.closeSync(fd) }
+const dirFd = fs.openSync(path.dirname(pathname), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+try { fs.fsyncSync(dirFd) } finally { fs.closeSync(dirFd) }
+NODE
+}
+
+mark_director_journal_complete() {
+  local after="$1"
+  node - "$LOCK_DIR/journal.json" "$LOCAL_LOCK_FENCE" "$after" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const [pathname, fence, afterManifestSha256] = process.argv.slice(2)
+const value = JSON.parse(fs.readFileSync(pathname, 'utf8'))
+if (value?.fence !== fence || value?.phase !== 'prepared') process.exit(1)
+value.phase = 'complete'; value.afterManifestSha256 = afterManifestSha256
+const temporary = `${pathname}.complete.${fence}`
+const fd = fs.openSync(temporary, 'wx', 0o600)
+try { fs.writeFileSync(fd, `${JSON.stringify(value)}\n`); fs.fsyncSync(fd) }
+finally { fs.closeSync(fd) }
+fs.renameSync(temporary, pathname)
+const dirFd = fs.openSync(path.dirname(pathname), fs.constants.O_RDONLY | fs.constants.O_DIRECTORY)
+try { fs.fsyncSync(dirFd) } finally { fs.closeSync(dirFd) }
+NODE
+}
+
+recover_director_tree() {
+  local state_key="$1" backup_member="$2" target="$3" desired="$4" previous="$5"
+  local present
+  present="$(sed -n "s/^${state_key}=//p" "$SAFETY_BACKUP/STATE")"
+  if [[ "$present" == 1 ]]; then
+    if regular_directory "$target" && trees_equal "$target" "$SAFETY_BACKUP/$backup_member"; then
+      :
+    else
+      if [[ -e "$target" || -L "$target" ]]; then
+        regular_directory "$target" && regular_directory "$desired" \
+          && trees_equal "$target" "$desired" || return 1
+        rm -rf -- "$target" || return 1
+      fi
+      if regular_directory "$previous" \
+        && trees_equal "$previous" "$SAFETY_BACKUP/$backup_member"; then
+        mv "$previous" "$target" || return 1
+      else
+        copy_tree_preserve "$SAFETY_BACKUP/$backup_member" "$target" || return 1
+      fi
+    fi
+    trees_equal "$target" "$SAFETY_BACKUP/$backup_member"
+  else
+    if [[ -e "$target" || -L "$target" ]]; then
+      regular_directory "$target" && regular_directory "$desired" \
+        && trees_equal "$target" "$desired" || return 1
+      rm -rf -- "$target" || return 1
+    fi
+  fi
+}
+
+recover_stale_director_lock() {
+  local owner owner_pid owner_start owner_fence actual_start
+  owner="$(node - "$LOCK_DIR/owner.json" <<'NODE'
+const fs = require('node:fs')
+const value = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+if (value?.schema !== 'video-autoworker-installer-owner/v1'
+  || value?.component !== 'director-brain' || !Number.isSafeInteger(value?.pid)
+  || typeof value?.start !== 'string' || !/^[a-f0-9]{32}$/u.test(value?.fence || '')) process.exit(1)
+process.stdout.write(`${value.pid}\t${value.start}\t${value.fence}`)
+NODE
+)" || return 1
+  IFS=$'\t' read -r owner_pid owner_start owner_fence <<< "$owner"
+  actual_start="$(process_start_token "$owner_pid")"
+  if [[ -n "$actual_start" && "$actual_start" == "$owner_start" ]]; then
+    printf 'Another director-brain installation is already in progress.\n' >&2
+    return 1
+  fi
+  if [[ ! -f "$LOCK_DIR/journal.json" ]]; then
+    rm -f -- "$LOCK_DIR/owner.json" && rmdir "$LOCK_DIR"
+    return
+  fi
+  [[ "$(director_journal_field fence)" == "$owner_fence" ]] || return 1
+  local phase stale_work plugin_previous skill_previous config_previous
+  phase="$(director_journal_field phase)"
+  stale_work="$(director_journal_field workRoot)"
+  if [[ "$phase" == prepared ]]; then
+    SAFETY_BACKUP="$(director_journal_field backupPath)"
+    [[ "$(path_identity "$SAFETY_BACKUP")" == "$(director_journal_field backupIdentity)" \
+      && "$(path_sha256 "$SAFETY_BACKUP/MANIFEST.sha256")" == "$(director_journal_field backupDigest)" ]] \
+      || return 1
+    verify_backup "$SAFETY_BACKUP" || return 1
+    case "$stale_work" in /tmp/aiworker-director-brain-installer.*|/private/tmp/aiworker-director-brain-installer.*) ;; *) return 1 ;; esac
+    regular_directory "$stale_work" || return 1
+    plugin_previous="$(director_journal_field pluginPrevious)"
+    skill_previous="$(director_journal_field skillPrevious)"
+    config_previous="$(director_journal_field configPrevious)"
+    recover_director_tree plugin_present plugin "$INSTALLED_PLUGIN" "$stale_work/plugin" "$plugin_previous" || return 1
+    recover_director_tree skill_present skill "$INSTALLED_SKILL" "$stale_work/skill" "$skill_previous" || return 1
+    if ! cmp -s "$PROFILE_CONFIG" "$SAFETY_BACKUP/openclaw.json"; then
+      cmp -s "$PROFILE_CONFIG" "$stale_work/openclaw.json" || return 1
+      install -m 600 "$SAFETY_BACKUP/openclaw.json" "$PROFILE_CONFIG" || return 1
+    fi
+    [[ "$(target_manifest_sha256)" == "$(director_journal_field before)" ]] || return 1
+    [[ ! -e "$config_previous" ]] || { cmp -s "$config_previous" "$SAFETY_BACKUP/openclaw.json" && rm -f -- "$config_previous"; }
+  elif [[ "$phase" != complete ]]; then
+    return 1
+  fi
+  rm -rf -- "$stale_work"
+  rm -f -- "$LOCK_DIR/journal.json" "$LOCK_DIR/owner.json"
+  rmdir "$LOCK_DIR"
+}
+
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
@@ -1516,7 +1861,11 @@ cleanup() {
   [[ -z "$SKILL_NEXT" || ! -e "$SKILL_NEXT" ]] || rm -rf -- "$SKILL_NEXT"
   [[ -z "$CONFIG_NEXT" || ! -e "$CONFIG_NEXT" ]] || rm -f -- "$CONFIG_NEXT"
   [[ -z "$WORK_ROOT" || ! -d "$WORK_ROOT" ]] || rm -rf -- "$WORK_ROOT"
-  if [[ "$LOCK_OWNED" == 1 && -n "$LOCK_DIR" ]]; then rmdir "$LOCK_DIR" 2>/dev/null || true; fi
+  if [[ "$LOCK_OWNED" == 1 && -n "$LOCK_DIR" ]]; then
+    rm -f -- "$LOCK_DIR/journal.json" "$LOCK_DIR/owner.json" 2>/dev/null || true
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+    LOCK_OWNED=0
+  fi
   if [[ "$DEPLOYMENT_LOCK_OWNED" == 1 ]]; then
     if ! release_shared_deployment_lock; then status=70; fi
   fi
@@ -1531,20 +1880,103 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 verify_shared_install_gate() {
+  local gate_operation="install" gate_output gate_mode
+  [[ "$MODE" != "rollback" ]] || gate_operation="rollback"
   local -a gate_arguments=(
     --mission-control-db-path "$MISSION_CONTROL_DB_PATH"
     --n8n-db-path "$N8N_DB_PATH"
     --video-batch-root "$VIDEO_BATCH_ROOT"
     --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
     --expected-release-id "$EXPECTED_RELEASE_ID"
+    --operation "$gate_operation"
+    --component "director-brain"
+    --target-state-sha256 "$RESERVATION_TARGET_STATE_SHA256"
   )
-  if [[ -n "$LEGACY_BOOTSTRAP_ATTEMPT_DIR" ]]; then
-    gate_arguments+=(--legacy-attempt-dir "$LEGACY_BOOTSTRAP_ATTEMPT_DIR")
+  if [[ "$MUTATION_AUTHORIZATION" == production ]]; then
+    gate_arguments+=(--deployment-run-dir "$DEPLOYMENT_RUN_DIR")
   fi
-  node "$SHARED_INSTALL_GATE" "${gate_arguments[@]}" >/dev/null || {
+  if [[ -n "$LEGACY_PREINSTALL_ATTEMPT_DIR" ]]; then
+    gate_arguments+=(--legacy-preinstall-attempt-dir "$LEGACY_PREINSTALL_ATTEMPT_DIR")
+    gate_arguments+=(--raw-result-output "$RESULT_OUTPUT")
+  fi
+  gate_output="$(node "$SHARED_INSTALL_GATE" "${gate_arguments[@]}")" || {
     printf 'Shared director-brain replacement requires paused intake, zero active tasks, and zero pending director outbox rows.\n' >&2
     return 1
   }
+  if [[ "$MUTATION_AUTHORIZATION" == production ]]; then
+    gate_mode="$(printf '%s' "$gate_output" | node -e '
+      const fs = require("node:fs")
+      const value = JSON.parse(fs.readFileSync(0, "utf8"))
+      if (value?.mode === "legacy-preinstall" && value?.reservation?.path) {
+        process.stdout.write("legacy-preinstall")
+      } else if (value?.mode === "rolling") {
+        process.stdout.write("rolling")
+      } else process.exit(1)
+    ')" || {
+      printf 'Director-brain mutations require a recognized shared install gate authorization.\n' >&2
+      return 1
+    }
+    SHARED_GATE_MODE="$gate_mode"
+    if [[ "$gate_mode" == legacy-preinstall ]]; then
+      [[ -n "$LEGACY_PREINSTALL_ATTEMPT_DIR" ]] || {
+        printf 'Director-brain legacy mutations require a reserved preinstall attempt.\n' >&2
+        return 1
+      }
+    else
+      [[ -z "$LEGACY_PREINSTALL_ATTEMPT_DIR" ]] || {
+        printf 'Director-brain rolling mutations cannot carry a legacy preinstall attempt.\n' >&2
+        return 1
+      }
+    fi
+  fi
+}
+
+authorize_mutating_invocation() {
+  [[ "$MODE" == "dry-run" ]] && return 0
+  if [[ -z "$ISOLATED_TEST_ROOT" || "${NODE_ENV:-}" != test ]]; then
+    MUTATION_AUTHORIZATION=production
+    return 0
+  fi
+  node - "$ISOLATED_TEST_ROOT" "$STATE_DIR" "$WORKSPACE" "$BACKUP_ROOT" \
+    "$DEPLOYMENT_RUN_DIR" "$MISSION_CONTROL_DB_PATH" "$N8N_DB_PATH" \
+    "$VIDEO_BATCH_ROOT" "$RESULT_OUTPUT" <<'NODE'
+const fs = require('node:fs')
+const os = require('node:os')
+const path = require('node:path')
+const [rootInput, ...candidates] = process.argv.slice(2)
+const root = path.resolve(rootInput)
+const temporaryRoot = fs.realpathSync.native(os.tmpdir())
+const value = fs.lstatSync(root)
+if (rootInput !== root || fs.realpathSync.native(root) !== root || value.isSymbolicLink()
+  || !value.isDirectory() || value.uid !== process.getuid() || (value.mode & 0o077) !== 0
+  || (root !== temporaryRoot && !root.startsWith(`${temporaryRoot}${path.sep}`))) {
+  throw new Error('isolated_test_root_unsafe')
+}
+for (const input of candidates.filter(Boolean)) {
+  let candidate = path.resolve(input)
+  if (input !== candidate) throw new Error('isolated_test_path_not_normalized')
+  for (const alias of ['/var', '/tmp']) {
+    if (process.platform !== 'darwin'
+      || (candidate !== alias && !candidate.startsWith(`${alias}${path.sep}`))) continue
+    candidate = `${fs.realpathSync.native(alias)}${candidate.slice(alias.length)}`
+  }
+  if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
+    throw new Error('isolated_test_path_outside_root')
+  }
+  let cursor = candidate
+  while (!fs.existsSync(cursor)) {
+    const parent = path.dirname(cursor)
+    if (parent === cursor) throw new Error('isolated_test_path_unresolvable')
+    cursor = parent
+  }
+  while (cursor !== root) {
+    const entry = fs.lstatSync(cursor)
+    if (entry.isSymbolicLink()) throw new Error('isolated_test_path_symlink')
+    cursor = path.dirname(cursor)
+  }
+}
+NODE
+  MUTATION_AUTHORIZATION=isolated-test
 }
 
 defer_commit_signals() {
@@ -1573,6 +2005,35 @@ DESIRED_PLUGIN_PRESENT=1
 DESIRED_SKILL_PRESENT=1
 PREFLIGHT_CONFIG_SHA256="$(path_sha256 "$PROFILE_CONFIG")"
 
+if [[ "$MODE" != "dry-run" ]]; then
+  authorize_mutating_invocation
+  RESERVATION_TARGET_STATE_SHA256="$(target_manifest_sha256)" || {
+    printf 'Could not capture the pre-reservation director-brain target state.\n' >&2
+    exit 1
+  }
+  # This is the only mutating-phase gate. In legacy-preinstall mode it also
+  # creates or recovers the immutable component/result reservation. Keep it
+  # ahead of rollback claims, local/shared locks, backup roots, managed roots,
+  # target staging paths, and the raw result file.
+  verify_shared_install_gate
+fi
+
+if [[ "$MODE" == rollback && "$ROLLBACK_NOOP" == 1 ]]; then
+  BEFORE_MANIFEST_SHA256="$(target_manifest_sha256)" || exit 1
+  acquire_shared_deployment_lock
+  [[ "$(target_manifest_sha256)" == "$RESERVATION_TARGET_STATE_SHA256" ]] || {
+    printf 'Director-brain target changed between reservation and the locked mutation.\n' >&2
+    exit 1
+  }
+  if [[ "$SHARED_GATE_MODE" == rolling ]]; then
+    verify_shared_install_gate
+  fi
+  write_install_result rollback restored "$BEFORE_MANIFEST_SHA256" \
+    "$BEFORE_MANIFEST_SHA256" "" "" 0
+  printf 'Director-brain no-op compensation recorded without changing managed state.\n'
+  exit 0
+fi
+
 if [[ "$MODE" == "rollback" ]]; then
   BACKUP_ROOT="$(dirname "$ROLLBACK_BACKUP")"
   regular_directory "$BACKUP_ROOT" || { printf 'Rollback backup root is invalid.\n' >&2; exit 1; }
@@ -1588,6 +2049,9 @@ if [[ "$MODE" == "rollback" ]]; then
   validate_effective_backup_root 'Rollback backup root' "$BACKUP_ROOT" || exit 1
   validate_effective_rollback_backup "$ROLLBACK_BACKUP" || exit 1
   validate_rollback_copy_endpoints "$ROLLBACK_BACKUP" || exit 1
+  ROLLBACK_RESULT_BACKUP="$ROLLBACK_BACKUP"
+  ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256="$(path_sha256 "$ROLLBACK_BACKUP/MANIFEST.sha256")" \
+    || exit 1
   capture_rollback_source_identities "$ROLLBACK_BACKUP" \
     || { printf 'Rollback backup source identities could not be bound.\n' >&2; exit 1; }
   if [[ "$TEST_FAILPOINT" == "rollback-source-before-copy" ]]; then
@@ -1622,6 +2086,10 @@ if [[ "$MODE" == "rollback" ]]; then
   fi
   release_rollback_source_claim \
     || { printf 'Rollback backup source claim could not be restored.\n' >&2; exit 1; }
+  verify_backup "$ROLLBACK_RESULT_BACKUP" \
+    && [[ "$(path_sha256 "$ROLLBACK_RESULT_BACKUP/MANIFEST.sha256")" \
+      == "$ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256" ]] \
+    || { printf 'Rollback backup changed after its private source claim.\n' >&2; exit 1; }
 else
   assert_canonical_source_repository "$EXPECTED_SOURCE_COMMIT" >/dev/null
   build_source_payload "$DESIRED_PLUGIN" "$DESIRED_SKILL"
@@ -1646,6 +2114,10 @@ compare_desired_state() {
 }
 
 compare_desired_state
+BEFORE_MANIFEST_SHA256="$(target_manifest_sha256)" || {
+  printf 'Could not capture the pre-install target manifest.\n' >&2
+  exit 1
+}
 
 if [[ "$MODE" == "dry-run" ]]; then
   printf 'Director-brain installation dry-run passed for explicit profile %s (agent %s).\n' "$PROFILE" "$AGENT_ID"
@@ -1671,12 +2143,35 @@ if [[ -n "$TEST_SYNC_DIR" ]]; then
 fi
 
 acquire_shared_deployment_lock
+[[ "$(target_manifest_sha256)" == "$RESERVATION_TARGET_STATE_SHA256" ]] || {
+  printf 'Director-brain target changed between reservation and the locked mutation.\n' >&2
+  exit 1
+}
+if [[ "$SHARED_GATE_MODE" == rolling ]]; then
+  verify_shared_install_gate
+fi
 LOCK_DIR="$STATE_DIR/.aiworker-director-brain-install.lock"
-if ! mkdir -m 700 "$LOCK_DIR" 2>/dev/null; then
+if [[ -e "$LOCK_DIR" || -L "$LOCK_DIR" ]]; then
+  recover_stale_director_lock || {
+    printf 'Director-brain stale transaction could not be recovered safely.\n' >&2
+    exit 1
+  }
+  STALE_RECOVERED=1
+fi
+if [[ "$STALE_RECOVERED" == 1 ]]; then
+  release_shared_deployment_lock
+  trap - EXIT HUP INT TERM
+  rm -rf -- "$WORK_ROOT"
+  exec bash "$0" "${ORIGINAL_ARGUMENTS[@]}"
+fi
+write_director_lock_owner || {
   printf 'Another director-brain installation is already in progress.\n' >&2
   exit 1
-fi
-LOCK_OWNED=1
+}
+[[ "$(target_manifest_sha256)" == "$RESERVATION_TARGET_STATE_SHA256" ]] || {
+  printf 'Director-brain target changed before the locally locked mutation.\n' >&2
+  exit 1
+}
 
 regular_file "$PROFILE_CONFIG" || {
   printf 'OpenClaw profile config changed type before the locked install.\n' >&2
@@ -1708,6 +2203,19 @@ fi
 compare_desired_state
 
 if [[ "$same_plugin" == 1 && "$same_skill" == 1 && "$same_config" == 1 ]]; then
+  after_manifest_sha256="$(target_manifest_sha256)" || exit 1
+  [[ "$after_manifest_sha256" == "$BEFORE_MANIFEST_SHA256" ]] || {
+    printf 'Director-brain installation changed during no-op validation.\n' >&2
+    exit 1
+  }
+  if [[ "$MODE" == "rollback" ]]; then
+    write_install_result rollback restored "$BEFORE_MANIFEST_SHA256" \
+      "$after_manifest_sha256" "$ROLLBACK_RESULT_BACKUP" \
+      "$ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256" 0
+  else
+    write_install_result apply noop "$BEFORE_MANIFEST_SHA256" \
+      "$after_manifest_sha256" "" "" 0
+  fi
   printf 'Director-brain installation for profile %s is already current; no backup or write was created.\n' "$PROFILE"
   exit 0
 fi
@@ -1756,7 +2264,7 @@ if [[ "$(path_sha256 "$PROFILE_CONFIG")" != "$LOCKED_CONFIG_SHA256" ]]; then
   exit 1
 fi
 
-verify_shared_install_gate
+write_director_journal
 COMMIT_STARTED=1
 defer_commit_signals
 if [[ -d "$INSTALLED_PLUGIN" ]]; then
@@ -1766,6 +2274,9 @@ if [[ -d "$INSTALLED_PLUGIN" ]]; then
   plugin_old_identity="$(path_identity "$INSTALLED_PLUGIN")"
   move_status=0
   mv "$INSTALLED_PLUGIN" "$PLUGIN_PREVIOUS" || move_status=$?
+  if [[ "$TEST_FAILPOINT" == sigkill-after-first-mutation ]]; then
+    wait_for_test_barrier sigkill-ready sigkill-continue 'SIGKILL after first director-brain mutation'
+  fi
   [[ "$TEST_FAILPOINT" != "signal-after-plugin-old-move" ]] || kill -TERM "$$"
   [[ "$TEST_FAILPOINT" != "plugin-old-move-reported-failed" ]] || move_status=99
   if [[ ! -e "$INSTALLED_PLUGIN" && ! -L "$INSTALLED_PLUGIN" ]] \
@@ -2051,11 +2562,31 @@ if [[ -n "$SKILL_PREVIOUS" ]]; then
     exit 1
   fi
 
-  COMMIT_COMPLETE=1
-resume_immediate_signals
 PLUGIN_PREVIOUS=""
 SKILL_PREVIOUS=""
 CONFIG_PREVIOUS=""
+
+after_manifest_sha256="$(target_manifest_sha256)" || exit 1
+if [[ "$MODE" == "rollback" ]]; then
+  verify_backup "$ROLLBACK_RESULT_BACKUP" \
+    && [[ "$(path_sha256 "$ROLLBACK_RESULT_BACKUP/MANIFEST.sha256")" \
+      == "$ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256" ]] \
+    || { printf 'Rollback backup changed before result finalization.\n' >&2; exit 1; }
+  write_install_result rollback restored "$BEFORE_MANIFEST_SHA256" \
+    "$after_manifest_sha256" "$ROLLBACK_RESULT_BACKUP" \
+    "$ROLLBACK_RESULT_BACKUP_MANIFEST_SHA256" 1
+else
+  verify_backup "$SAFETY_BACKUP" || {
+    printf 'Verified rollback point changed before result finalization.\n' >&2
+    exit 1
+  }
+  safety_backup_manifest_sha256="$(path_sha256 "$SAFETY_BACKUP/MANIFEST.sha256")" || exit 1
+  write_install_result apply applied "$BEFORE_MANIFEST_SHA256" \
+    "$after_manifest_sha256" "$SAFETY_BACKUP" "$safety_backup_manifest_sha256" 1
+fi
+mark_director_journal_complete "$after_manifest_sha256"
+COMMIT_COMPLETE=1
+resume_immediate_signals
 
 printf 'Retained previous config inode for concurrent-writer recovery: %s\n' "$CONFIG_RETIRED_ARTIFACT"
 [[ -z "$PLUGIN_RETIRED_ARTIFACT" ]] \

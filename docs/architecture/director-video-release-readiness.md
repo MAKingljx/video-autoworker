@@ -18,6 +18,9 @@
 
 检查要求 canonical 仓库位于 `main`、工作树干净、remote 正确，release ID 精确解析到当前
 Git HEAD。standalone 必须位于声明的不可变 releases 根下，并通过已有 standalone 完整性审计。
+审计同时覆盖 Next standalone 的静态 import 闭包和 shell 运行时显式动态依赖闭包；被 shell helper
+按路径调用、但不可能被打包器静态追踪的脚本也必须进入 manifest、制品和来源证明。release 只能由
+最终干净提交构建，dirty 源树、缺失动态 helper 或仅在源码仓库中存在的依赖都不得进入发布门。
 最终制品采用无自引用的三方绑定：`release-provenance.json` 保存排除自身与
 `release-manifest.json` 后的完整 artifact content digest；manifest 保存同一 digest，并包含 provenance
 文件摘要。content digest 覆盖目录、全部服务端/可执行/静态普通文件的字节数与 SHA-256，以及符号
@@ -66,7 +69,21 @@ runner、投影契约构建与薄入口。transform 的 JSON 合同仍为 2 MiB�
 projection receipt 摘要、review receipt 摘要、后继 phase 的前置审核和 checkpoint 的投影版本。
 等待人工审核本身不是活跃执行；queued/running phase、断链、缺失回执或旧投影边界均阻断切换。
 
+readiness 只给统一 preinstall orchestrator 提供不可变只读判据。orchestrator 对每个组件维护
+append-only journal，以固定 component identity、备份、安装结果和补偿结果追加事件，不覆盖历史；
+terminal 状态只能由单次 finalize CAS 从未决状态推进。成功必须产出绑定同一 attempt、source commit、
+transition claim、runtime convergence proof 和 readiness 摘要的 handoff，bootstrap controller 只接受这
+个 handoff。失败或进程恢复只能续作同一 journal 分支，不得手填 success、复用其他 attempt 的证明或
+跳过逆序补偿。
+
 ## 发布顺序
+
+完整发布顺序为：从最终干净提交构建并审计 immutable standalone；在隔离端口验收页面、CSS、只读 API、
+两库 `quick_check` 与回滚点；执行飞书 v2 -> v3 的 dry-run、私有全表快照、独立 verify、仅新增 14 字段的
+apply、真实 API 回读和 rollback-dry-run；完成 n8n transition/attestation；捕获真实
+`second-original` 会话工具基线；运行统一 preinstall orchestrator；收到 terminal handoff 后再执行
+legacy controller 的 `prepare -> current-confirm -> apply`；最后才 bootstrap 并精确切换 3017。该检查
+不能代替隔离启动、飞书迁移、OpenClaw 自然对话、跨压缩恢复或真实视频闭环验收。
 
 ### 插件安装与数据库迁移边界
 
@@ -75,8 +92,8 @@ projection receipt 摘要、review receipt 摘要、后继 phase 的前置审核
 更新或回填导演提炼记录，也不会迁移飞书导演脑 catalog。当前真实测试 catalog 是 v2，随安装包
 携带的 schema v3 只是待迁移候选；在另行完成 v3 迁移和真实 API 回读前，加载 0.4.0 的运行时会
 对版本不匹配失败关闭。发布顺序应先用 `migrate --dry-run` 固定无破坏性计划，再由显式外部写入任务
-生成权限受控的全表备份、执行 v2 → v3 追加迁移并真实回读，最后才安装 0.4.0、fresh restart 目标
-Gateway；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现 058/059，也不能作为飞书
+生成权限受控的全表备份、执行 v2 → v3 追加迁移并真实回读，最后才由统一 preinstall orchestrator
+安装 0.4.0 并 fresh restart 目标 Gateway 一次；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现 058/059，也不能作为飞书
 v3 已就绪的证据。
 
 生产数据库对象只由新的 3017 application release 首次打开权威 Mission Control SQLite 时按既有

@@ -51,9 +51,7 @@ const EXTRACTION_HTTP_TIMEOUT_MS = 15_000
 export const DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL =
   'http://127.0.0.1:3017/api/n8n/director-extraction'
 const EXTRACTION_ACTIONS = new Set([
-  'start_extraction',
   'extraction_status',
-  'backfill_extraction',
 ])
 const BLUEPRINT_TOPIC_STABLE_IDS = new Map([
   ['architecture', 'DB-ARCH-6L'],
@@ -103,11 +101,9 @@ const TOOL_PARAMETERS = Object.freeze({
         'assemble',
         'workflow',
         'propose',
-        'start_extraction',
         'extraction_status',
-        'backfill_extraction',
       ],
-      description: 'health 检查连接；explain 直接读取已生效系统蓝图并回答架构、技法学习逻辑、最终目标、集成边界、数据边界或当前范围；resolve_work 用作品名或别名解析唯一作品；get/search 读取作品知识；assemble 组装已审核上下文；workflow 返回六层就绪度、案例与技法成熟度；propose 写入候选；start_extraction/extraction_status/backfill_extraction 通过共享应用服务启动、查询或补齐导演知识提炼。',
+      description: 'health 检查连接；explain 直接读取已生效系统蓝图并回答架构、技法学习逻辑、最终目标、集成边界、数据边界或当前范围；resolve_work 用作品名或别名解析唯一作品；get/search 读取作品知识；assemble 组装已审核上下文；workflow 返回六层就绪度、案例与技法成熟度；propose 写入候选；extraction_status 只读查询导演知识提炼进度。OpenClaw 对话不得启动、回填或重提提炼任务。',
     },
     topic: {
       type: 'string',
@@ -135,13 +131,7 @@ const TOOL_PARAMETERS = Object.freeze({
       type: 'string',
       minLength: 1,
       maxLength: 256,
-      description: 'resolve_work 使用完整作品名或别名；workflow 和三类 extraction 动作也使用该字段并由工具内部唯一解析；search 使用当前作品内的最小明确关键词。',
-    },
-    sourceQuery: {
-      type: 'string',
-      minLength: 1,
-      maxLength: 120,
-      description: '仅 start_extraction 可选：明确视频标题、文件名或季集信息；同作品存在多个来源时必须提供。backfill_extraction 会补齐该作品全部已成功来源，不接受此字段。',
+      description: 'resolve_work 使用完整作品名或别名；workflow 和只读 extraction_status 也使用该字段并由工具内部唯一解析；search 使用当前作品内的最小明确关键词。',
     },
     status: {
       type: 'string',
@@ -421,31 +411,6 @@ export function normalizeDirectorBrainToolRequest(value) {
     const query = safeString(value.query, 256)
     return query ? { action: 'extraction_status', query } : null
   }
-  if (value.action === 'backfill_extraction') {
-    if (!hasExactKeys(value, ['action', 'query'])) return null
-    const query = safeString(value.query, 256)
-    return query ? { action: 'backfill_extraction', query } : null
-  }
-  if (value.action === 'start_extraction') {
-    if (!hasExactKeys(value, ['action', 'query'], ['sourceQuery', 'objective'])) return null
-    const query = safeString(value.query, 256)
-    const sourceQuery = value.sourceQuery === undefined
-      ? undefined
-      : safeString(value.sourceQuery, 120)
-    const objective = value.objective === undefined
-      ? undefined
-      : safeString(value.objective, 500)
-    return query
-      && (value.sourceQuery === undefined || sourceQuery)
-      && (value.objective === undefined || objective)
-      ? {
-          action: value.action,
-          query,
-          ...(sourceQuery === undefined ? {} : { sourceQuery }),
-          ...(objective === undefined ? {} : { objective }),
-        }
-      : null
-  }
   if (value.action === 'propose') {
     if (!hasExactKeys(value, ['action', 'table', 'fields'], ['workId', 'references'])) return null
     const table = safeString(value.table, 64)
@@ -525,6 +490,12 @@ export function createDirectorBrainExtractionService({ fetchImpl = globalThis.fe
     throw new Error('director_brain_extraction_service_invalid')
   }
   return async operation => {
+    if (!operation || typeof operation !== 'object' || Array.isArray(operation)
+      || operation.action !== 'extraction_status'
+      || !hasExactKeys(operation, ['action', 'workId'])
+      || !safeString(operation.workId, 160)) {
+      throw new Error('director_brain_extraction_operation_forbidden')
+    }
     const response = await fetchImpl(DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -588,9 +559,6 @@ function mapDirectorBrainError(error, action) {
   }
   if (/proposal|secret|sensitive|unknown_record_field|forbidden/iu.test(code)) {
     return '候选内容不符合导演脑规则，本次未写入。'
-  }
-  if (action === 'start_extraction' || action === 'backfill_extraction') {
-    return '导演知识暂时无法开始整理，请稍后再试。'
   }
   if (action === 'extraction_status') return '导演知识进度暂时无法查询，请稍后再试。'
   return action === 'propose'
@@ -831,37 +799,6 @@ function extractionUserVisibleAnswer(value) {
   const context = value[USER_VISIBLE_CONTEXT] || {}
   const workName = safeWorkName(context.workName)
   const state = extractionState(value)
-  if (value.action === 'start_extraction') {
-    if (/conflict/iu.test(state)) return `《${workName}》的视频和作品关系发生了变化，已停止整理，请先检查。`
-    if (/awaiting_registration/iu.test(state)) return `《${workName}》还需要先完成作品登记，确认后才能继续整理。`
-    if (/awaiting_|complete|succeeded|done/iu.test(state)) {
-      return `《${workName}》已经有整理进度，可以直接问我当前状态。`
-    }
-    if (/already|active|running/iu.test(state)) return `《${workName}》已经在整理中，不会重复启动。`
-    if (/fail|error|reject/iu.test(state)) return `《${workName}》暂时无法开始整理，请稍后再试。`
-    return `已开始整理《${workName}》的导演知识。稍后直接问我进度就行。`
-  }
-  if (value.action === 'backfill_extraction') {
-    if (Number.isSafeInteger(value.rejected) && value.rejected > 0) {
-      const registered = Number.isSafeInteger(value.registered) ? value.registered : 0
-      const existing = Number.isSafeInteger(value.existing) ? value.existing : 0
-      return `《${workName}》素材补齐：新增 ${registered}，已有 ${existing}，未通过校验 ${value.rejected}。`
-    }
-    if (Number.isSafeInteger(value.registered) && value.registered > 0) {
-      return `已为《${workName}》补齐登记 ${value.registered} 个素材来源。稍后直接问我进度就行。`
-    }
-    if (Number.isSafeInteger(value.existing) && value.existing > 0 && value.rejected === 0) {
-      return `《${workName}》的全部素材来源都已登记，不会重复补齐。`
-    }
-    if (/conflict/iu.test(state)) return `《${workName}》的视频和作品关系发生了变化，已停止整理，请先检查。`
-    if (/awaiting_registration/iu.test(state)) return `《${workName}》还需要先完成作品登记，确认后才能继续补齐。`
-    if (/awaiting_|complete|succeeded|done/iu.test(state)) {
-      return `《${workName}》已经有补齐进度，可以直接问我当前状态。`
-    }
-    if (/already|active|running/iu.test(state)) return `《${workName}》已经在补齐中，不会重复启动。`
-    if (/fail|error|reject/iu.test(state)) return `《${workName}》暂时无法开始补齐，请稍后再试。`
-    return `已开始补齐《${workName}》缺少的导演知识。稍后直接问我进度就行。`
-  }
   if (value.found === false) return `《${workName}》还没有开始整理导演知识。`
   const aggregate = extractionAggregateSummary(value, workName)
   if (aggregate) return aggregate
@@ -1034,8 +971,6 @@ async function executeResolvedRequest(executeOperation, getExtractionService, re
   const operation = {
     action: request.action,
     workId,
-    ...(request.sourceQuery === undefined ? {} : { sourceQuery: request.sourceQuery }),
-    ...(request.objective === undefined ? {} : { objective: request.objective }),
   }
   const result = assertExtractionResult(await executeExtraction(operation), request.action)
   return {
@@ -1070,7 +1005,7 @@ export function createDirectorBrainTool({
   return {
     name: DIRECTOR_BRAIN_TOOL_NAME,
     label: 'AI-worker 导演脑',
-    description: '完整导演脑的唯一 OpenClaw 工具。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；启动、查询或补齐导演知识时分别调用 start_extraction、extraction_status、backfill_extraction，同样只传作品名 query。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow 和 extraction 动作返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得批准、删除、创建第二条任务链，或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
+    description: '完整导演脑的唯一 OpenClaw 工具。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；查询导演知识提炼进度时只调用 extraction_status，同样只传作品名 query。OpenClaw 对话不得启动、回填、重提提炼任务或触发素材投影。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow 和 extraction_status 返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得批准、删除、创建任务或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {

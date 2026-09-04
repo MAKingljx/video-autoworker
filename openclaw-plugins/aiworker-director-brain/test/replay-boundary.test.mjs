@@ -80,105 +80,18 @@ describe('director brain simulated replay boundary (not Gateway or channel E2E)'
     }
   })
 
-  it('does not retry a failed extraction internally and lets the next invocation recover once', async () => {
-    const service = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'resolve_work',
-      found: true,
-      work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
-    })
+  it('rejects replayed extraction mutations without resolving, dispatching, or retrying', async () => {
+    const service = vi.fn()
     const extractionService = vi.fn()
-      .mockRejectedValueOnce(new Error('simulated timeout RUN-HIDDEN'))
-      .mockResolvedValue({
-        ok: true,
-        action: 'start_extraction',
-        status: 'pending',
-        runId: 'RUN-HIDDEN',
-        sourceTaskId: 'SOURCE-HIDDEN',
-      })
-    const tool = createDirectorBrainTool({
-      context: targetContext,
-      service,
-      extractionService,
-    })
-    const request = { action: 'start_extraction', query: '冰原纪事' }
+    const tool = createDirectorBrainTool({ context: targetContext, service, extractionService })
 
-    const failedTurn = resultJson(await tool.execute('failed-simulated-turn', request))
-    expect(extractionService).toHaveBeenCalledTimes(1)
-    expectBoundedAnswer(failedTurn, { maxLength: 80 })
-    expect(failedTurn.responseContract.userVisibleAnswer).toBe(
-      '导演知识暂时无法开始整理，请稍后再试。',
-    )
-
-    const recoveredTurn = resultJson(await tool.execute('next-simulated-turn', request))
-    expect(extractionService).toHaveBeenCalledTimes(2)
-    expectBoundedAnswer(recoveredTurn, { maxLength: 80 })
-    expect(recoveredTurn.responseContract.userVisibleAnswer).toBe(
-      '已开始整理《冰原纪事》的导演知识。稍后直接问我进度就行。',
-    )
-  })
-
-  it('keeps concurrent replay attempts to one extraction call each and projects short replies', async () => {
-    const service = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'resolve_work',
-      found: true,
-      work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
-    })
-    const extractionService = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'start_extraction',
-      status: 'running',
-      runId: 'RUN-HIDDEN',
-      sourceTaskId: 'SOURCE-HIDDEN',
-    })
-    const tool = createDirectorBrainTool({
-      context: targetContext,
-      service,
-      extractionService,
-    })
-    const request = { action: 'start_extraction', query: '冰原纪事' }
-
-    const results = await Promise.all([
-      tool.execute('concurrent-replay-a', request),
-      tool.execute('concurrent-replay-b', request),
-    ])
-
-    expect(extractionService).toHaveBeenCalledTimes(2)
-    for (const rawResult of results) {
-      const result = resultJson(rawResult)
-      expectBoundedAnswer(result, { maxLength: 80 })
-      expect(result.responseContract.userVisibleAnswer).toBe(
-        '《冰原纪事》已经在整理中，不会重复启动。',
-      )
+    for (const action of ['start_extraction', 'backfill_extraction']) {
+      const first = await tool.execute(`first-${action}`, { action, query: '冰原纪事' })
+      const replayed = await tool.execute(`replayed-${action}`, { action, query: '冰原纪事' })
+      expect(first.content[0].text).toBe('导演脑请求参数无效。')
+      expect(replayed).toEqual(first)
     }
-  })
-
-  it('reports a changed extraction objective as a deterministic replay conflict', async () => {
-    const service = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'resolve_work',
-      found: true,
-      work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
-    })
-    const extractionService = vi.fn().mockRejectedValue(
-      new Error('director_extraction_objective_conflict'),
-    )
-    const tool = createDirectorBrainTool({
-      context: targetContext,
-      service,
-      extractionService,
-    })
-
-    const result = resultJson(await tool.execute('different-value-replay', {
-      action: 'start_extraction',
-      query: '冰原纪事',
-      objective: '改为提炼空间结构',
-    }))
-
-    expect(extractionService).toHaveBeenCalledTimes(1)
-    expectBoundedAnswer(result, { maxLength: 80 })
-    expect(result.responseContract.userVisibleAnswer)
-      .toBe('这次整理目标与已经开始的整理不一致，未重复启动。')
+    expect(service).not.toHaveBeenCalled()
+    expect(extractionService).not.toHaveBeenCalled()
   })
 })

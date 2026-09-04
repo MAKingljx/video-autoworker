@@ -214,21 +214,16 @@ describe('director brain human dialogue response contract', () => {
     expect(Object.keys(result).sort()).toEqual(['action', 'handled', 'ok', 'responseContract'])
   })
 
-  it('starts extraction with a short receipt', async () => {
-    const tool = createDirectorBrainTool({
-      context: targetContext,
-      service: vi.fn().mockResolvedValue({
-        ok: true, action: 'resolve_work', found: true,
-        work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
-      }),
-      extractionService: vi.fn().mockResolvedValue({
-        ok: true, action: 'start_extraction', state: 'pending', runId: 'RUN-HIDDEN',
-      }),
-    })
-    const result = resultJson(await tool.execute('start', {
-      action: 'start_extraction', query: '冰原纪事',
-    }))
-    expectHumanContract(result, '已开始整理《冰原纪事》的导演知识。稍后直接问我进度就行。')
+  it('does not expose extraction mutation actions to dialogue', async () => {
+    const service = vi.fn()
+    const extractionService = vi.fn()
+    const tool = createDirectorBrainTool({ context: targetContext, service, extractionService })
+    for (const action of ['start_extraction', 'backfill_extraction']) {
+      const result = await tool.execute(`reject-${action}`, { action, query: '冰原纪事' })
+      expect(result.content[0].text).toBe('导演脑请求参数无效。')
+    }
+    expect(service).not.toHaveBeenCalled()
+    expect(extractionService).not.toHaveBeenCalled()
   })
 
   it.each([

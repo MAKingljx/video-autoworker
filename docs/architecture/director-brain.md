@@ -28,7 +28,7 @@
 - API 临时记录创建、更新、删除均成功，清理后残留为零；
 - 凭据模式扫描和本地 schema 契约测试通过；
 - 独立 `aiworker-director-brain` 只注册一个可选工具 `aiworker_director_brain`；`0.4.0` 另注册一个仅作用于目标 Agent 的 `before_agent_reply` 系统问题硬路由，以及两个持久化 transcript 投影 hook，不增加业务工具、队列、定时任务、LaunchAgent 或 n8n workflow。远端已验收版本为 `0.3.0`，当前提炼候选版本为 `0.4.0`；
-- 单一工具实现 `health`、`explain`、`resolve_work`、`get`、`search`、`assemble`、`workflow`、`propose`、`start_extraction`、`extraction_status` 和 `backfill_extraction` 11 个动作；作品名称或别名先解析为唯一作品，后续作品业务严格绑定同一 `workId`，用户不需要看到内部 ID；
+- 单一工具实现 `health`、`explain`、`resolve_work`、`get`、`search`、`assemble`、`workflow`、`propose` 和 `extraction_status` 9 个动作；作品名称或别名先解析为唯一作品，后续作品业务严格绑定同一 `workId`，用户不需要看到内部 ID；OpenClaw 对话面只读查询提炼状态，不启动、回填、重提提炼任务或触发素材投影；
 - `get`/`search` 可受控读取 11 张表；系统蓝图与作品目录为项目级单表读取，另外 9 张作品业务表和跨表检索必须绑定作品。`search` 默认只返回满足完整审核契约的记录；按稳定业务 ID 显式 `get` 候选时必须保留 `reviewed=false`，不能把候选冒充事实；
 - `assemble` 只组装同一作品的已审核引用并验证关系完整性；`workflow` 接受稳定作品业务 ID 或作品名/别名查询，查询模式先在插件内部完成唯一作品解析，再只读计算六层就绪度、质量门槛和下一步建议，不创建任务或触发执行；
 - `propose` 可向“作品”及 8 张作品业务候选表提交候选，由服务端生成稳定业务 ID、项目与作品归属、版本、状态、来源、更新时间和引用字段；系统蓝图与素材证据始终只读，候选不能自行批准；
@@ -78,17 +78,18 @@ flowchart LR
 | 动作 | 当前能力 | 关键边界 |
 |---|---|---|
 | `health` | 核验导演脑连接、项目环境和表数量 | 只表示服务可读，不表示领域内容已审核或生产已部署 |
+| `explain` | 按稳定系统蓝图回答架构、学习逻辑、目标与边界 | 只读取已生效蓝图，不把系统问题误解析为作品 |
 | `resolve_work` | 用完整作品名或别名解析唯一作品 | 不要求用户提供 ID；无结果或歧义时不得猜测、串用其他作品 |
 | `get` | 按稳定业务 ID 精确读取指定表记录 | 作品业务必须同时匹配 `workId`；不接受飞书内部记录 ID |
 | `search` | 在单表或当前作品的 9 张业务表中检索 | 默认仅已审核；跨表检索必须绑定作品，候选必须保留 `reviewed=false` |
 | `assemble` | 组装同一作品的已审核导演上下文 | 必须有生效意图与已核验证据；缺失、跨作品或断链即失败 |
 | `workflow` | 以作品业务 ID 或作品名/别名查询返回六层就绪度、引用指标和下一步建议 | 查询必须唯一解析作品；只读诊断，不创建任务、不派发队列、不触发投影或剪辑 |
 | `propose` | 幂等提交作品或作品业务候选 | 不得写系统蓝图或素材证据；不能批准、拒绝、覆盖或删除记录 |
-| `start_extraction` | 从现有成功视频分析结果启动五阶段提炼 | 只经 3017 loopback 共享服务；不重新分析原片、不复制队列 |
 | `extraction_status` | 按作品名读取唯一活跃或最新提炼进度 | 只返回人类短答，不暴露任务、提炼或飞书记录 ID |
-| `backfill_extraction` | 对同一作品缺失的导演知识做有界补齐 | 复用唯一 task-run 链和不可变 checkpoint；不重提视频任务；按分钟轮转有界扫描页，旧坏源跨 tick 不会永久挡住后续合法源，也不创建第二套拒绝账本 |
 
-插件只对配置中唯一目标 Agent 注册工具，安装器不得把它加入全局工具授权或其他 Agent。返回结果只包含表键、稳定业务 ID、审核状态和经过字段白名单净化的领域数据；不得返回飞书 record ID、应用或表资源标识、资源 URL、访问令牌、App Secret、Cookie、本机路径、原始媒体、完整原始转写、日志或数据库内容。剪辑时间线命令、渲染、导出等执行控制字段不会通过运行时服务输出；导演案例中的“成片位置”仍属于可复核的导演经验字段，不代表剪辑执行能力。
+`start_extraction` 与 `backfill_extraction` 继续保留在 3017 内部 API 和后台 scheduler，复用唯一 task-run 链、不可变 checkpoint 与轮转有界扫描；它们不是 OpenClaw 工具动作，也不能由自然语言对话直接触发。
+
+插件只对配置中唯一目标 Agent 注册工具，安装器不得把它加入全局工具授权或其他 Agent。返回结果只包含表键、稳定业务 ID、审核状态和经过字段白名单净化的领域数据；不得返回飞书 record ID、应用或表资源标识、资源 URL、访问令牌、App Secret、Cookie、本机路径、原始媒体、完整原始转写、日志或数据库内容。剪辑时间线命令、渲染、导出等执行控制字段不会通过运行时服务输出；导演案例中的“成片位置”仍属于可复核的导演经验字段，不代表剪辑执行能力。导演案例只有在人工完整填写“最终使用”“成片位置”“最终效果”后才能进入“已确认”；历史上缺少任一字段的已确认记录也按未复核处理，不能进入技法学习。
 
 ## 六层导演认知模型
 
@@ -192,6 +193,15 @@ flowchart LR
 - 七项闭包与投影 schema 版本计算出的当前契约摘要，以及权威 Mission Control SQLite 中 pending 与不兼容 pending 数；不兼容 pending 必须为零。
 
 首次 legacy bootstrap 和后续 forward switch 都必须在切换前通过该门禁。source/target 契约一致时可保留在途任务热切换；普通 switch 与显式 rollback 不允许跨契约，即使两侧任务和旧摘要 pending 都已归零也不能绕过。forward switch 还必须把 HEAD 绑定静态 verifier 的契约摘要与 target runtime readiness 直接对账。切换前会封存 source/target 的不可变 release、readiness、runtime/router attestation 和路由元组证据；切换后和自动回滚后均按该证据复验，所以历史 source 不依赖当前 HEAD verifier。旧槽 callback 冻结静默后仍会复查，窗口内出现不兼容 pending 时拒绝退役；任何回滚证明失败都保持入口暂停和维护态。该门不能替代隔离启动、页面/API、SQLite、OpenClaw、飞书写入及真实视频验收。
+
+首次 legacy 发布还必须经过统一 preinstall 事务。orchestrator 绑定同一干净 Git 提交、bootstrap
+attempt、双库证据、工作流 transition/attestation/claim、真实会话工具基线和全部私有备份根；固定按
+`task-flow -> video-command -> director-brain -> 一次 qwen-current fresh restart -> runtime convergence -> readiness`
+执行。每个组件只追加 journal 事件，最终状态由单次 finalize CAS 决定；只有 terminal success 与完整
+handoff 同时成立，legacy bootstrap controller 才能读取该 attempt。失败时严格按
+`runtime convergence -> director-brain -> video-command -> task-flow` 逆序恢复；若前向阶段已经重启，
+磁盘恢复完成后只做一次 recovery restart。不得逐项手工拼装安装器，也不得把 standalone 中携带的
+控制源码误写成可脱离 canonical 干净 Git 仓库运行的发布入口。
 
 平台已有父任务与 finalize 原子终态能力；`finalize` 必须先确认 `prepare/audio/vision` 三项正式输出，再在同一 SQLite 事务内提交 finalize 子任务和父任务终态。运行中的 finalize 另有独立 `24` 小时 hard lease；超时后父子任务在同一事务中失败并阻断迟到回调，避免永久占用。已成功 finalize 可修复旧运行时遗留的父任务未完成状态。
 

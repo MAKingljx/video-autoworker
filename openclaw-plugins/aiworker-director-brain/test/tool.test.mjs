@@ -46,8 +46,9 @@ describe('director brain tool contract', () => {
     ])
     expect(TOOL_PARAMETERS.properties.action.enum).toEqual([
       'health', 'explain', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
-      'start_extraction', 'extraction_status', 'backfill_extraction',
+      'extraction_status',
     ])
+    expect(TOOL_PARAMETERS.properties).not.toHaveProperty('sourceQuery')
     expect(TOOL_PARAMETERS.properties.references.properties.techniqueIds).toEqual({
       type: 'array', minItems: 1, maxItems: 20, uniqueItems: true,
       items: { type: 'string', minLength: 1, maxLength: 160 },
@@ -69,7 +70,8 @@ describe('director brain tool contract', () => {
     expect(tool.description).toContain('无法合法组装就明确依据不足')
     expect(tool.description).toContain('必须逐字使用其中 userVisibleAnswer')
     expect(tool.description).toContain('不得回退到 read、exec、memory')
-    expect(tool.description).toContain('start_extraction、extraction_status、backfill_extraction')
+    expect(tool.description).toContain('查询导演知识提炼进度时只调用 extraction_status')
+    expect(tool.description).toContain('不得启动、回填、重提提炼任务或触发素材投影')
     expect(tool.description).toContain('skills_techniques 是由已确认案例支撑的跨作品全局技法库')
     expect(TOOL_PARAMETERS.properties.workId.description).toContain('全局 skills_techniques')
     expect(TOOL_PARAMETERS.properties.workId.description).toContain('来源作品过滤')
@@ -195,89 +197,21 @@ describe('director brain tool contract', () => {
     }
   })
 
-  it('resolves by work name and delegates extraction through the injected shared service', async () => {
-    const service = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'resolve_work',
-      found: true,
-      work: { workId: 'WORK-PRIVATE-1', name: '冰原纪事' },
-    })
-    const extractionService = vi.fn().mockResolvedValue({
-      ok: true,
-      action: 'start_extraction',
-      state: 'pending',
-      extractionId: 'EXTRACTION-MUST-STAY-HIDDEN',
-      debug: 'x'.repeat(80 * 1024),
-    })
+  it('rejects extraction mutations before resolving a work or calling the shared service', async () => {
+    const service = vi.fn()
+    const extractionService = vi.fn()
     const tool = createDirectorBrainTool({ context: targetContext, service, extractionService })
 
-    const result = JSON.parse(resultText(await tool.execute('call-extraction', {
-      action: 'start_extraction',
-      query: '《冰原纪事》',
-      sourceQuery: '第三季第二集.mov',
-      objective: '发现人物变化',
-    })))
-
-    expect(service).toHaveBeenCalledTimes(1)
-    expect(service).toHaveBeenCalledWith({ action: 'resolve_work', query: '《冰原纪事》' })
-    expect(extractionService).toHaveBeenCalledTimes(1)
-    expect(extractionService).toHaveBeenCalledWith({
-      action: 'start_extraction',
-      workId: 'WORK-PRIVATE-1',
-      sourceQuery: '第三季第二集.mov',
-      objective: '发现人物变化',
-    })
-    expect(result).toEqual({
-      ok: true,
-      action: 'start_extraction',
-      handled: true,
-      responseContract: {
-        mustQuoteUserVisibleAnswerExactly: true,
-        doNotAddFacts: true,
-        doNotExposeInternalIds: true,
-        handled: true,
-        stopAfterReply: true,
-        doNotUseFallbackSources: true,
-        userVisibleAnswer: '已开始整理《冰原纪事》的导演知识。稍后直接问我进度就行。',
-      },
-    })
-    expect(JSON.stringify(result)).not.toMatch(/WORK-PRIVATE|EXTRACTION-MUST|debug/iu)
-    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(48 * 1024)
-  })
-
-  it('stops after a missing or ambiguous work and never reaches the extraction service', async () => {
-    for (const scenario of [
-      {
-        service: vi.fn().mockResolvedValue({
-          ok: true, action: 'resolve_work', found: false,
-        }),
-        expected: '我没有找到这个作品。请告诉我更准确的完整作品名。',
-      },
-      {
-        service: vi.fn().mockRejectedValue(new Error('work_resolution_ambiguous')),
-        expected: '这个名称对应多个作品。请告诉我更准确的完整作品名。',
-      },
-    ]) {
-      const extractionService = vi.fn()
-      const tool = createDirectorBrainTool({
-        context: targetContext,
-        service: scenario.service,
-        extractionService,
-      })
-      const result = JSON.parse(resultText(await tool.execute('call-no-fallback', {
-        action: 'backfill_extraction', query: '冰原',
-      })))
-
-      expect(extractionService).not.toHaveBeenCalled()
-      expect(result.handled).toBe(true)
-      expect(result.responseContract).toMatchObject({
-        mustQuoteUserVisibleAnswerExactly: true,
-        stopAfterReply: true,
-        doNotUseFallbackSources: true,
-        userVisibleAnswer: scenario.expected,
-      })
-      expect(JSON.stringify(result)).not.toMatch(/workId|recordId|candidate/iu)
+    for (const action of ['start_extraction', 'backfill_extraction']) {
+      expect(normalizeDirectorBrainToolRequest({ action, query: '冰原纪事' })).toBeNull()
+      const result = resultText(await tool.execute(`reject-${action}`, {
+        action,
+        query: '冰原纪事',
+      }))
+      expect(result).toBe('导演脑请求参数无效。')
     }
+    expect(service).not.toHaveBeenCalled()
+    expect(extractionService).not.toHaveBeenCalled()
   })
 
   it('marks a direct unresolved work lookup as handled with no fallback', async () => {
@@ -336,7 +270,7 @@ describe('director brain tool contract', () => {
     expect(JSON.stringify(result)).not.toMatch(/WORK-HIDDEN|RUN-HIDDEN/iu)
   })
 
-  it('normalizes the eleven allowed actions and rejects extra or privileged operations', () => {
+  it('normalizes the nine allowed actions and rejects extra or privileged operations', () => {
     expect(normalizeDirectorBrainToolRequest({ action: 'health' })).toEqual({ action: 'health' })
     expect(normalizeDirectorBrainToolRequest({
       action: 'explain', topic: 'technique_learning',
@@ -427,15 +361,13 @@ describe('director brain tool contract', () => {
     })
     expect(normalizeDirectorBrainToolRequest({
       action: 'start_extraction', query: '《冰原纪事》', objective: '发现人物变化',
-    })).toEqual({
-      action: 'start_extraction',
-      query: '《冰原纪事》',
-      objective: '发现人物变化',
-    })
+    })).toBeNull()
     expect(normalizeDirectorBrainToolRequest({
       action: 'backfill_extraction',
       query: '《冰原纪事》',
-      sourceQuery: '第三季第二集.mov',
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'backfill_extraction', query: '《冰原纪事》', sourceQuery: '第三季第二集.mov',
     })).toBeNull()
     expect(normalizeDirectorBrainToolRequest({
       action: 'extraction_status', query: '《冰原纪事》',

@@ -658,6 +658,12 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
   it.each([
     ['self drift', 'scripts/deploy-blue-green.sh', false,
       'critical deployment source differs from Git HEAD: scripts/deploy-blue-green.sh'],
+    ['preinstall orchestrator drift', 'scripts/legacy-preinstall-orchestrator.mjs', false,
+      'critical deployment source differs from Git HEAD: scripts/legacy-preinstall-orchestrator.mjs'],
+    ['private Gateway RPC helper drift', 'scripts/lib/openclaw-private-gateway-rpc.mjs', false,
+      'critical deployment source differs from Git HEAD: scripts/lib/openclaw-private-gateway-rpc.mjs'],
+    ['managed Markdown renderer drift', 'scripts/lib/render-managed-markdown-section.mjs', false,
+      'critical deployment source differs from Git HEAD: scripts/lib/render-managed-markdown-section.mjs'],
     ['dirty worktree', 'scripts/standalone-router.mjs', false,
       'deployment source worktree and index must be clean'],
     ['dirty index', 'scripts/standalone-router.mjs', true,
@@ -1900,6 +1906,13 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(sourceGate).toContain('scripts/lib/shared-deployment-lock.mjs')
     expect(sourceGate).toContain('scripts/check-sensitive-content.mjs')
     expect(sourceGate).toContain('scripts/lib/sensitive-value-scanner.mjs')
+    expect(sourceGate).toContain('scripts/lib/openclaw-private-gateway-rpc.mjs')
+    expect(sourceGate).toContain('scripts/lib/render-managed-markdown-section.mjs')
+    expect(sourceGate).toContain('scripts/legacy-preinstall-orchestrator.mjs')
+    expect(sourceGate).toContain('scripts/install-aiworker-task-flow-skill.sh')
+    expect(sourceGate).toContain('scripts/install-aiworker-video-command-plugin.sh')
+    expect(sourceGate).toContain('scripts/install-aiworker-director-brain.sh')
+    expect(sourceGate).toContain('scripts/apply-openclaw-runtime-convergence.sh')
     expect(sourceGate).toContain('GIT_OPTIONAL_LOCKS=0')
     const preShutdownReleaseGate = bootstrapBody.indexOf(
       'bootstrap_preflight_contract="$(verify_director_video_release_preflight',

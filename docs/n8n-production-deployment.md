@@ -305,7 +305,18 @@ node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" attest-transi
 ```
 
 接着保持同一个 active freeze guard，按下文命令生成 `rollback_proof` 和 `evidence_file`。在 legacy
-仍在线、guard 状态为 active、两份数据库身份与活动量仍稳定时，建立 controller 收据链：
+仍在线、guard 状态为 active、两份数据库身份与活动量仍稳定时，先从真实
+`second-original` 入站会话捕获私有 `tools.catalog` / `tools.effective` 基线，再运行
+`legacy-preinstall-orchestrator.mjs`。完整参数和敏感值边界见
+`docs/operations/director-brain-openclaw-install.md`；它固定安装 task-flow、video-command、
+director-brain，只对 `qwen-current` fresh restart 一次，完成 runtime convergence/readiness，并生成
+terminal handoff。不得在这里逐项手工运行安装器，也不得把蓝绿脚本误当成 OpenClaw 安装器。
+统一 preinstall 会把 3017、5678、5679、18091、18092、18094、18789、18889、18989、11434
+纳入同一 PID 基线，并在每次阶段检查确认 video worker 进程集合为空；除事务内唯一允许变化的
+`qwen-current:18889` 外，任何 listener 漂移或 worker 出现都阻断发布和 handoff。
+
+确认 orchestrator journal 已 terminal success、handoff 与同一 attempt/commit/transition claim 完全
+一致后，才建立 controller 收据链：
 
 ```bash
 node scripts/legacy-bootstrap-controller.mjs prepare \
@@ -349,6 +360,13 @@ deploy 有两个明确的 release/readiness 门：第一阶段 `pre-bootstrap` �
 验证仓库/release 身份、不可变 standalone 内容、已安装 video-command/task-flow/director payload、
 runtime convergence proof 与 projection contract；第二阶段 `full` 在新 baseline 槽启动后读取 live DB，
 补验 outbox/extraction 完整性，并要求 projection digest 与第一阶段完全一致。任一门失败都不得继续。
+
+首次发布的完整顺序是：最终干净提交构建 standalone 并审计静态/动态闭包；先用额外的 3018 仅作
+隔离快照验收，再使用正式 blue/green 的 3317/3417 槽；执行飞书 v2 -> v3 dry-run、私有全表快照、
+独立 verify、仅新增字段 apply、真实 API 回读和 rollback-dry-run；完成 n8n transition/attestation；
+捕获真实工具基线并运行统一 preinstall；收到 handoff 后执行 controller
+`prepare -> current-confirm -> apply`；最后才 bootstrap 和精确切换 3017。3018 不是路由槽，不得与只
+适用于旧 UI 固定提交的 `switch-legacy-standalone-3017.sh` 混用。
 
 #### 回滚分支
 
@@ -447,7 +465,8 @@ argv：若该 PID 已被新 incarnation 复用且 3017 无 listener，才可认�
 正在监听 3017，或 3017 被其他 PID 占用，则失败关闭。同一 incarnation 的 executable、cwd 或
 数据库 FD 身份发生漂移也必须阻断，不得回收 guard 或继续 bootstrap。
 
-停止旧 3017 前还必须使用 `legacy-bootstrap-controller.mjs` 生成同一私有 attempt 目录中的
+统一 preinstall 已完成且 terminal handoff 通过校验后，停止旧 3017 前还必须使用
+`legacy-bootstrap-controller.mjs` 生成同一私有 attempt 目录中的
 prepare、当前状态复核和 `SHUTDOWN_REQUESTED` 收据，并把 attempt 目录作为 bootstrap 的最后一个参数。
 其中 `legacy-bootstrap-controller.mjs current-confirm --prepare ...` 只证明运行身份、活动量和绑定在
 该时刻仍然新鲜，不代表用户批准生产写入，也不能替代上文外部提供的 workflow transition token。
@@ -733,6 +752,8 @@ curl --fail-with-body \
 8. `git status --short` 不出现数据库、日志、PID、环境文件、模型注册表或备份。
 9. 视频链存在 `prepare`、`audio`、`vision`、`finalize` 四个子任务；音频与画面输出均显示 `memoryMode=none`，父任务合并结果一致，媒体临时目录已经清理。
 10. 从 OpenClaw 当前会话执行技能的 `--video-file ... --wait-seconds ...`，确认是 OpenClaw 发起、n8n 编排、本地模型实际完成，而不是直接调用测试接口冒充完整链路。
+11. 使用自然语言按作品名读取导演脑，确认外部用户鉴权只由 OpenClaw 完成，内部 loopback 没有第二套用户 Token。
+12. 用一段真实视频验收可信作品绑定、finalize/outbox、`project-evidence` 和五阶段提炼；该项实际完成前不得声明 schema v3、导演脑 `0.4.0` 或新 3017 已生产上线。
 
 ## 升级与回退
 

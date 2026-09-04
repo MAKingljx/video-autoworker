@@ -226,13 +226,12 @@ async function fetchAwesomeIndex(): Promise<RegistrySkill[]> {
     return awesomeCache.skills
   }
   try {
-    const res = await fetchWithTimeout(
+    const { response: res, text: markdown } = await fetchTextWithTimeout(
       AWESOME_OPENCLAW_README,
       {},
       AWESOME_FETCH_TIMEOUT,
     )
     if (!res.ok) throw new Error(`GitHub fetch failed (${res.status})`)
-    const markdown = await res.text()
     const skills = parseAwesomeReadme(markdown)
     awesomeCache = { skills, fetchedAt: now }
     return skills
@@ -256,17 +255,17 @@ async function searchAwesomeOpenclaw(query: string): Promise<RegistrySearchResul
 
 async function fetchAwesomeOpenclawSkill(slug: string): Promise<{ content: string }> {
   const url = `${AWESOME_OPENCLAW_RAW_BASE}/${slug}/SKILL.md`
-  const res = await fetchWithTimeout(url)
+  const { response: res, text: content } = await fetchTextWithTimeout(url)
   if (!res.ok) throw new Error(`Awesome OpenClaw skill fetch failed (${res.status})`)
-  const content = await res.text()
   return { content }
 }
 
-async function fetchWithTimeout(
+async function runFetchWithTimeout<T>(
   url: string,
-  options: RequestInit = {},
-  timeoutMs = FETCH_TIMEOUT,
-): Promise<Response> {
+  options: RequestInit,
+  timeoutMs: number,
+  consume: (response: Response) => Promise<T>,
+): Promise<T> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -276,16 +275,38 @@ async function fetchWithTimeout(
     }, timeoutMs)
   })
   try {
-    // Abort asks the transport to release its resources; Promise.race is the
-    // independent response deadline in case a runtime does not settle fetch
-    // promptly after aborting (observed behind the Next.js route in offline QA).
+    // Keep the independent deadline active through response consumption. Some
+    // transports resolve fetch() after headers and can then stall forever while
+    // text/json reads wait for a body that never finishes.
     return await Promise.race([
-      fetch(url, { ...options, signal: controller.signal }),
+      fetch(url, { ...options, signal: controller.signal }).then(consume),
       timeout,
     ])
   } finally {
     if (timer) clearTimeout(timer)
   }
+}
+
+async function fetchTextWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = FETCH_TIMEOUT,
+): Promise<{ response: Response; text: string }> {
+  return runFetchWithTimeout(url, options, timeoutMs, async response => ({
+    response,
+    text: response.ok ? await response.text() : '',
+  }))
+}
+
+async function fetchJsonWithTimeout<T>(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = FETCH_TIMEOUT,
+): Promise<{ response: Response; data: T | null }> {
+  return runFetchWithTimeout(url, options, timeoutMs, async response => ({
+    response,
+    data: response.ok ? await response.json() as T : null,
+  }))
 }
 
 async function searchClawdHub(query: string): Promise<RegistrySearchResult> {
@@ -298,13 +319,12 @@ async function searchClawdHub(query: string): Promise<RegistrySearchResult> {
 
   for (const url of urls) {
     try {
-      const res = await fetchWithTimeout(url)
+      const { response: res, data } = await fetchJsonWithTimeout<any>(url)
       if (!res.ok) {
         logger.warn({ status: res.status, url }, 'ClawdHub search request failed')
         continue
       }
 
-      const data = await res.json() as any
       const rows = data?.results || data?.skills || []
       const skills: RegistrySkill[] = rows.map((s: any) => ({
         slug: s.slug || s.id || s.name,
@@ -339,13 +359,12 @@ async function searchSkillsSh(query: string): Promise<RegistrySearchResult> {
 
   for (const url of urls) {
     try {
-      const res = await fetchWithTimeout(url)
+      const { response: res, data } = await fetchJsonWithTimeout<any>(url)
       if (!res.ok) {
         logger.warn({ status: res.status, url }, 'skills.sh search request failed')
         continue
       }
 
-      const data = await res.json() as any
       const rows = data?.skills || data?.results || []
       const skills: RegistrySkill[] = rows.map((s: any) => {
         const source = typeof s.source === 'string' ? s.source : 'unknown'
@@ -410,17 +429,15 @@ function getTargetDir(targetRoot: string): string {
 
 async function fetchClawdHubSkill(slug: string): Promise<{ content: string; hash?: string }> {
   const url = `${CLAWHUB_API}/skills/${encodeURIComponent(slug)}/content`
-  const res = await fetchWithTimeout(url)
+  const { response: res, data } = await fetchJsonWithTimeout<any>(url)
   if (!res.ok) throw new Error(`ClawdHub fetch failed (${res.status})`)
-  const data = await res.json() as any
   return { content: data.content || data.skill_md || '', hash: data.hash || data.sha256 }
 }
 
 async function fetchSkillsShSkill(slug: string): Promise<{ content: string }> {
   const url = `${SKILLS_SH_API}/skills/${encodeURIComponent(slug)}/raw`
-  const res = await fetchWithTimeout(url)
+  const { response: res, text: content } = await fetchTextWithTimeout(url)
   if (!res.ok) throw new Error(`skills.sh fetch failed (${res.status})`)
-  const content = await res.text()
   return { content }
 }
 

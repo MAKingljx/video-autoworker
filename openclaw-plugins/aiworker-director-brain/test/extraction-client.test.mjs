@@ -44,11 +44,12 @@ function expectHandledShortAnswer(result, expected) {
 }
 
 describe('director brain extraction loopback client', () => {
-  it('accepts a 202 start receipt through the fixed credential-free loopback', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(202, {
+  it('queries status through the fixed credential-free loopback', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, {
       ok: true,
-      action: 'start_extraction',
-      status: 'pending',
+      action: 'extraction_status',
+      found: true,
+      status: 'running',
       runId: 'RUN-INTERNAL',
       sourceTaskId: 'SOURCE-INTERNAL',
     }))
@@ -58,10 +59,9 @@ describe('director brain extraction loopback client', () => {
       extractionService: createDirectorBrainExtractionService({ fetchImpl }),
     })
 
-    const result = resultJson(await tool.execute('start', {
-      action: 'start_extraction',
+    const result = resultJson(await tool.execute('status', {
+      action: 'extraction_status',
       query: '冰原纪事',
-      sourceQuery: '第三季第二集.mov',
     }))
 
     expect(fetchImpl).toHaveBeenCalledTimes(1)
@@ -75,11 +75,10 @@ describe('director brain extraction loopback client', () => {
     })
     expect(init.headers).not.toHaveProperty('Authorization')
     expect(JSON.parse(init.body)).toEqual({
-      action: 'start_extraction',
+      action: 'extraction_status',
       workId: 'WORK-INTERNAL',
-      sourceQuery: '第三季第二集.mov',
     })
-    expect(result.responseContract.userVisibleAnswer).toContain('已开始整理《冰原纪事》')
+    expect(result.responseContract.userVisibleAnswer).toBe('《冰原纪事》正在整理导演知识。')
     expect(JSON.stringify(result)).not.toMatch(/WORK-INTERNAL|RUN-INTERNAL|SOURCE-INTERNAL/iu)
   })
 
@@ -137,65 +136,30 @@ describe('director brain extraction loopback client', () => {
     expect(JSON.stringify(result)).not.toContain('SOURCE-INTERNAL')
   })
 
-  it('accepts a 200 backfill result without returning run or candidate IDs', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, {
-      ok: true,
-      action: 'backfill_extraction',
-      status: 'pending',
-      runId: 'RUN-INTERNAL',
-      candidateIds: ['CANDIDATE-INTERNAL'],
-    }))
+  it('never calls the loopback client for extraction mutation actions', async () => {
+    const fetchImpl = vi.fn()
+    const service = vi.fn()
+    const client = createDirectorBrainExtractionService({ fetchImpl })
     const tool = createDirectorBrainTool({
       context: targetContext,
-      service: workService(),
-      extractionService: createDirectorBrainExtractionService({ fetchImpl }),
+      service,
+      extractionService: client,
     })
 
-    const result = resultJson(await tool.execute('backfill', {
-      action: 'backfill_extraction',
-      query: '冰原纪事',
-    }))
-
-    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({
-      action: 'backfill_extraction',
-      workId: 'WORK-INTERNAL',
-    })
-    expect(result.responseContract.userVisibleAnswer).toContain('已开始补齐《冰原纪事》')
-    expect(JSON.stringify(result)).not.toMatch(/WORK-INTERNAL|RUN-INTERNAL|CANDIDATE-INTERNAL/iu)
-  })
-
-  it('reports rejected backfill sources as a short count-only answer', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, {
-      ok: true,
-      action: 'backfill_extraction',
-      status: 'pending',
-      sourceCount: 5,
-      registered: 2,
-      existing: 2,
-      rejected: 1,
-      rejectedSourceTaskIds: ['SOURCE-INTERNAL'],
-    }))
-    const tool = createDirectorBrainTool({
-      context: targetContext,
-      service: workService(),
-      extractionService: createDirectorBrainExtractionService({ fetchImpl }),
-    })
-
-    const result = resultJson(await tool.execute('backfill-rejected', {
-      action: 'backfill_extraction', query: '冰原纪事',
-    }))
-
-    expectHandledShortAnswer(
-      result,
-      '《冰原纪事》素材补齐：新增 2，已有 2，未通过校验 1。',
-    )
-    expect(JSON.stringify(result)).not.toContain('SOURCE-INTERNAL')
+    for (const action of ['start_extraction', 'backfill_extraction']) {
+      const result = await tool.execute(`reject-${action}`, { action, query: '冰原纪事' })
+      expect(result.content[0].text).toBe('导演脑请求参数无效。')
+      await expect(client({ action, workId: 'WORK-INTERNAL' }))
+        .rejects.toThrow('director_brain_extraction_operation_forbidden')
+    }
+    expect(service).not.toHaveBeenCalled()
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it('maps a 4xx application error without leaking its internal payload', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(409, {
       ok: false,
-      code: 'director_extraction_source_ambiguous',
+      code: 'director_extraction_work_binding_conflict',
       error: 'internal path and candidate details must stay hidden',
       runId: 'RUN-INTERNAL',
     }))
@@ -206,11 +170,11 @@ describe('director brain extraction loopback client', () => {
     })
 
     const result = resultJson(await tool.execute('conflict', {
-      action: 'start_extraction', query: '冰原纪事',
+      action: 'extraction_status', query: '冰原纪事',
     }))
 
     expect(result.responseContract.userVisibleAnswer).toBe(
-      '匹配到多个视频分析。请告诉我更准确的视频标题或季集。',
+      '视频和作品的关系发生了变化，已停止整理，请先检查。',
     )
     expect(result.responseContract).toMatchObject({
       stopAfterReply: true,
@@ -221,8 +185,8 @@ describe('director brain extraction loopback client', () => {
 
   it('fails closed when 3017 returns the wrong action or an unknown state', async () => {
     for (const body of [
-      { ok: true, action: 'extraction_status', status: 'pending', runId: 'RUN-INTERNAL' },
-      { ok: true, action: 'start_extraction', status: 'mystery', runId: 'RUN-INTERNAL' },
+      { ok: true, action: 'start_extraction', status: 'pending', runId: 'RUN-INTERNAL' },
+      { ok: true, action: 'extraction_status', status: 'mystery', runId: 'RUN-INTERNAL' },
     ]) {
       const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, body))
       const tool = createDirectorBrainTool({
@@ -232,13 +196,13 @@ describe('director brain extraction loopback client', () => {
       })
 
       const result = resultJson(await tool.execute('invalid-receipt', {
-        action: 'start_extraction', query: '冰原纪事',
+        action: 'extraction_status', query: '冰原纪事',
       }))
 
       expect(result.responseContract.userVisibleAnswer).toBe(
-        '导演知识暂时无法开始整理，请稍后再试。',
+        '导演知识进度暂时无法查询，请稍后再试。',
       )
-      expect(JSON.stringify(result)).not.toMatch(/mystery|RUN-INTERNAL|extraction_status/iu)
+      expect(JSON.stringify(result)).not.toMatch(/mystery|RUN-INTERNAL|start_extraction/iu)
     }
   })
 
@@ -408,7 +372,7 @@ describe('director brain extraction loopback client', () => {
     })
 
     const result = resultJson(await tool.execute('unresolved-work', {
-      action: 'start_extraction', query: '冰原',
+      action: 'extraction_status', query: '冰原',
     }))
 
     expect(service).toHaveBeenCalledTimes(1)

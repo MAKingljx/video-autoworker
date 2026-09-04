@@ -113,21 +113,26 @@ profile，再另行评审和迁移，不能让默认策略静默扩散到新 Age
 
 ## 激活与发布顺序
 
-插件代码不是配置热更新。安装前必须先对真实既有会话保存工具基线；安装新插件树后只对
-`qwen-current` 做一次 fresh restart，再执行配置
-收敛：
+插件代码不是配置热更新。首次 legacy 发布由统一 preinstall orchestrator 编排，单组件安装命令只用于
+普通维护或显式恢复，不能在首次发布中人工串联。安装前必须先对真实既有会话保存工具基线；统一事务
+安装三项组件后只对 `qwen-current` 做一次 fresh restart，再执行配置收敛：
 
 1. 选取一个由真实入站建立且属于 `second-original` 的既有会话，同时保存全量 `tools.catalog` 与带该
    `sessionKey` 的 `tools.effective`；私有基线只保存会话键 SHA-256，不保存明文；
-2. 安装 `aiworker-director-brain 0.4.0`，确认安装包含 `director-context-summary.js` 与
-   `transcript-tool-result-projection.js`；
-3. fresh restart `qwen-current`；
+2. orchestrator 固定安装 task-flow、video-command、`aiworker-director-brain 0.4.0`，确认导演脑载荷
+   包含 `director-context-summary.js` 与 `transcript-tool-result-projection.js`；
+3. 由 orchestrator fresh restart `qwen-current`，整个前向发布只允许这一次 restart；
 4. 从真实 `18889` listener、`gateway status --deep --require-rpc`、插件 runtime inspection、全量
    `tools.catalog` 和同一真实会话的 `tools.effective` 建立一致证据；
 5. 确认 Gateway 启动时间严格晚于插件树最后变化后的下一整秒，三个 hook 均已加载；
 6. 对比跨 restart 基线：删除集合必须为空，新增只能是 `aiworker_director_brain`；
 7. 对 manifest 声明的有界配置 patch 先 dry-run，再以 inode、摘要和进程证据做 CAS；
 8. apply 后证明 listener PID、进程启动身份、插件树摘要、catalog 和 session-effective 工具集合逐项不变。
+
+成功时 orchestrator 追加 readiness 结果并以单次 finalize CAS 生成 terminal handoff；bootstrap controller
+只接受该 handoff。失败时先逆序回滚 runtime convergence、director-brain、video-command、task-flow；
+仅当第 3 步确实发生过前向 restart，才在磁盘恢复完成后做一次 recovery restart。普通维护直接运行某个
+安装器时也必须显式声明其范围和回滚点，但不能借此伪造首次发布 handoff。
 
 配置 patch 走 OpenClaw 官方热更新，不允许调用 Gateway start/stop/restart，也不允许触碰 n8n、3017、
 模型、video worker、任务、数据库或媒体文件。

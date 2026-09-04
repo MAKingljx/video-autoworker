@@ -9,7 +9,7 @@
     Mirrors the behaviour of install.sh for Linux/macOS.
 
 .PARAMETER Mode
-    Deployment mode: "local" (default) or "docker".
+    Deployment mode: "local". The former Docker deployment mode is retired.
 
 .PARAMETER Port
     Port the Next.js server listens on (default: 3000).
@@ -26,7 +26,6 @@
 .EXAMPLE
     .\install.ps1
     .\install.ps1 -Mode local -Port 8080
-    .\install.ps1 -Mode docker
 
 .NOTES
     PowerShell uses single-dash parameters: -Mode local, -Port 8080
@@ -54,7 +53,7 @@ $ErrorActionPreference = "Stop"
 if (-not $InstallDir) {
     $InstallDir = if ($env:MC_INSTALL_DIR) { $env:MC_INSTALL_DIR } else { Join-Path (Get-Location) "mission-control" }
 }
-$RepoUrl = "https://github.com/builderz-labs/mission-control.git"
+$RepoUrl = "https://github.com/MAKingljx/video-autoworker.git"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 function Write-MC   { param([string]$Msg) Write-Host "[MC] $Msg" -ForegroundColor Blue }
@@ -65,37 +64,9 @@ function Stop-WithError { param([string]$Msg) Write-Err $Msg; exit 1 }
 
 function Test-Command { param([string]$Name) $null -ne (Get-Command $Name -ErrorAction SilentlyContinue) }
 
-function Get-RandomPassword {
-    param([int]$Length = 24)
-    $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $bytes = New-Object byte[] $Length
-    $rng.GetBytes($bytes)
-    -join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] })
-}
-
-function Get-RandomHex {
-    param([int]$Length = 32)
-    $bytes = New-Object byte[] ($Length / 2)
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    ($bytes | ForEach-Object { $_.ToString("x2") }) -join ''
-}
-
 # ── Prerequisites ─────────────────────────────────────────────────────────────
 function Test-Prerequisites {
-    $hasDocker = $false
     $hasNode = $false
-
-    if (Test-Command "docker") {
-        docker info *>$null
-        if ($LASTEXITCODE -eq 0) {
-            $hasDocker = $true
-            $dockerVersion = (docker --version) -split "`n" | Select-Object -First 1
-            Write-Ok "Docker available ($dockerVersion)"
-        } else {
-            Write-Warn "Docker found but daemon is not running"
-        }
-    }
 
     if (Test-Command "node") {
         $nodeVersion = (node -v).TrimStart('v')
@@ -108,24 +79,16 @@ function Test-Prerequisites {
         }
     }
 
-    if (-not $hasDocker -and -not $hasNode) {
-        Stop-WithError "Either Docker or Node.js 22+ is required. Install one and retry."
+    if (-not $hasNode) {
+        Stop-WithError "Node.js 22+ is required. Install it and retry."
     }
 
-    # Auto-select deploy mode if not specified
     if (-not $script:Mode) {
-        if ($hasDocker) {
-            $script:Mode = "docker"
-            Write-MC "Auto-selected Docker deployment (use -Mode local to override)"
-        } else {
-            $script:Mode = "local"
-            Write-MC "Auto-selected local deployment (Docker not available)"
-        }
+        $script:Mode = "local"
     }
 
-    # Validate chosen mode
-    if ($script:Mode -eq "docker" -and -not $hasDocker) {
-        Stop-WithError "Docker deployment requested but Docker is not available"
+    if ($script:Mode -eq "docker") {
+        Stop-WithError "Docker deployment is retired; use Docker only for the isolated build check in docs/deployment.md"
     }
     if ($script:Mode -eq "local" -and -not $hasNode) {
         Stop-WithError "Local deployment requested but Node.js 22+ is not available"
@@ -133,7 +96,7 @@ function Test-Prerequisites {
     if ($script:Mode -eq "local" -and -not (Test-Command "pnpm")) {
         Write-MC "Installing pnpm via corepack..."
         corepack enable
-        corepack prepare pnpm@latest --activate
+        corepack prepare pnpm@10.33.0 --activate
         Write-Ok "pnpm installed"
     }
 }
@@ -180,17 +143,9 @@ function New-EnvFile {
         Stop-WithError ".env.example not found at $examplePath"
     }
 
-    Write-MC "Generating secure .env configuration..."
-
-    $authPass = Get-RandomPassword 24
-    $apiKey = Get-RandomHex 32
-    $authSecret = Get-RandomPassword 32
+    Write-MC "Creating OpenClaw-only loopback environment configuration..."
 
     $content = Get-Content $examplePath -Raw
-    $content = $content -replace '(?m)^# AUTH_USER=.*',   "AUTH_USER=admin"
-    $content = $content -replace '(?m)^# AUTH_PASS=.*',   "AUTH_PASS=$authPass"
-    $content = $content -replace '(?m)^# API_KEY=.*',     "API_KEY=$apiKey"
-    $content = $content -replace '(?m)^# AUTH_SECRET=.*',  "AUTH_SECRET=$authSecret"
 
     # Set port if non-default
     if ($script:Port -ne 3000) {
@@ -198,46 +153,12 @@ function New-EnvFile {
     }
 
     $content | Set-Content $envPath -NoNewline
-    Write-Ok "Secure .env generated"
-
-    Write-Host ""
-    Write-Host "  AUTH_USER: admin" -ForegroundColor Cyan
-    Write-Host "  AUTH_PASS: $authPass" -ForegroundColor Cyan
-    Write-Host "  API_KEY:   $apiKey" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  Save these credentials - they are not stored elsewhere." -ForegroundColor Yellow
-    Write-Host ""
+    Write-Ok "OpenClaw-only .env generated"
 }
 
 # ── Docker deployment ─────────────────────────────────────────────────────────
 function Deploy-Docker {
-    Write-MC "Starting Docker deployment..."
-
-    Push-Location $script:InstallDir
-    try {
-        $env:MC_PORT = $script:Port
-        docker compose up -d --build
-
-        Write-MC "Waiting for Mission Control to become healthy..."
-        $retries = 30
-        while ($retries -gt 0) {
-            try {
-                $response = Invoke-WebRequest -Uri "http://localhost:$($script:Port)/login" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-                if ($response.StatusCode -eq 200) { break }
-            } catch { }
-            Start-Sleep -Seconds 2
-            $retries--
-        }
-
-        if ($retries -eq 0) {
-            Write-Warn "Timeout waiting for health check - container may still be starting"
-            docker compose logs --tail 20
-        } else {
-            Write-Ok "Mission Control is running in Docker"
-        }
-    } finally {
-        Pop-Location
-    }
+    Stop-WithError "Docker deployment is retired; use the managed local standalone launcher"
 }
 
 # ── Local deployment ──────────────────────────────────────────────────────────
@@ -274,15 +195,28 @@ function Deploy-Local {
         Write-Ok "Static assets copied to standalone directory"
 
         Write-MC "Starting Mission Control..."
+        if ($env:MC_AUTH_MODE -and $env:MC_AUTH_MODE -ne "openclaw-loopback") {
+            Stop-WithError "MC_AUTH_MODE must be openclaw-loopback for production"
+        }
+        if ($env:MC_HOSTNAME -and $env:MC_HOSTNAME -ne "127.0.0.1") {
+            Stop-WithError "MC_HOSTNAME must remain 127.0.0.1 for production"
+        }
         $env:PORT = $script:Port
         $env:NODE_ENV = "production"
-        $env:HOSTNAME = "0.0.0.0"
+        $env:MC_AUTH_MODE = "openclaw-loopback"
+        $env:MC_DESKTOP_MODE = "0"
+        $env:MC_OPENCLAW_PROFILES_NO_AUTH = "0"
+        $env:MC_HOSTNAME = "127.0.0.1"
+        $env:HOSTNAME = "127.0.0.1"
         $dataPath = Join-Path $script:InstallDir ".data"
         $logPath = Join-Path $dataPath "mc.log"
         $errLogPath = Join-Path $dataPath "mc-err.log"
         $pidPath = Join-Path $dataPath "mc.pid"
 
         $serverJs = Join-Path $standaloneDir "server.js"
+        $artifactAuditor = Join-Path (Join-Path $script:InstallDir "scripts") "check-standalone-artifact.mjs"
+        & node $artifactAuditor $standaloneDir
+        if ($LASTEXITCODE -ne 0) { Stop-WithError "Standalone artifact integrity verification failed" }
         $process = Start-Process -FilePath "cmd.exe" `
             -ArgumentList "/c node `"$serverJs`" > `"$logPath`" 2> `"$errLogPath`"" `
             -WorkingDirectory $script:InstallDir `

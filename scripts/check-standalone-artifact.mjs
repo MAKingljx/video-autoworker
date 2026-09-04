@@ -144,12 +144,29 @@ const ALLOWED_NEXT_ROOT_FILES = new Set([
 const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/apply-openclaw-runtime-convergence.sh',
   'scripts/feishu-director-brain.mjs',
+  'scripts/install-aiworker-task-flow-skill.sh',
+  'scripts/install-aiworker-video-command-plugin.sh',
   'scripts/install-aiworker-director-brain.sh',
+  'scripts/check-standalone-artifact.mjs',
+  'scripts/check-sensitive-content.mjs',
+  'scripts/verify-director-video-release-readiness.mjs',
   'scripts/verify-shared-runtime-install-gate.mjs',
+  'scripts/legacy-preinstall-orchestrator.mjs',
+  'scripts/legacy-preinstall-controller.mjs',
+  'scripts/legacy-bootstrap-controller.mjs',
+  'scripts/verify-n8n-blue-green-workflows.mjs',
+  'scripts/generate-legacy-freeze-evidence.mjs',
+  'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
+  'scripts/legacy-freeze-guard.mjs',
+  'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/openclaw-private-gateway-rpc.mjs',
   'scripts/lib/openclaw-runtime-convergence.mjs',
+  'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
+  'scripts/lib/render-managed-markdown-section.mjs',
+  'scripts/lib/director-extraction-release-provenance.mjs',
   'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
@@ -186,7 +203,7 @@ const ALLOWED_FIRST_PARTY_RUNTIME_EXTENSIONS = new Set([
   '.mjs',
 ])
 
-const REQUIRED_STANDALONE_FILES = [
+export const REQUIRED_STANDALONE_FILES = [
   '.next/BUILD_ID',
   '.next/package.json',
   '.next/required-server-files.json',
@@ -199,8 +216,37 @@ const REQUIRED_STANDALONE_FILES = [
   'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js',
   'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json',
   'openclaw-plugins/aiworker-director-brain/package.json',
+  'openclaw-plugins/aiworker-video-command/index.js',
+  'openclaw-plugins/aiworker-video-command/lib/director-work-policy.js',
+  'openclaw-plugins/aiworker-video-command/lib/dispatch-identity.js',
+  'openclaw-plugins/aiworker-video-command/lib/duplicate-confirmation-store.js',
+  'openclaw-plugins/aiworker-video-command/lib/json-command.js',
+  'openclaw-plugins/aiworker-video-command/lib/qwen-before-dispatch.js',
+  'openclaw-plugins/aiworker-video-command/lib/qwen-video-classifier.js',
+  'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js',
+  'openclaw-plugins/aiworker-video-command/lib/stable-message-key.js',
+  'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js',
+  'openclaw-plugins/aiworker-video-command/lib/video-path-policy.js',
+  'openclaw-plugins/aiworker-video-command/openclaw.plugin.json',
+  'openclaw-plugins/aiworker-video-command/package.json',
+  'openclaw-plugins/aiworker-video-command/scripts/validate-runtime-inspection.mjs',
   'openclaw-skills/aiworker-director-brain/SKILL.md',
   'openclaw-skills/aiworker-task-flow/SKILL.md',
+  'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
+  'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
+  'openclaw-skills/aiworker-task-flow/lib/director-brain-evidence.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/director-work-policy.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/media-ingest.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/media-policy.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/platform-client.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/video-task.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs',
+  'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs',
+  'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs',
+  'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs',
   'ops/feishu-director-brain/schema.json',
   'ops/openclaw/qwen-current-runtime-convergence.manifest.json',
   'package.json',
@@ -208,12 +254,29 @@ const REQUIRED_STANDALONE_FILES = [
   'runtime/schema.sql',
   'scripts/feishu-director-brain.mjs',
   'scripts/apply-openclaw-runtime-convergence.sh',
+  'scripts/install-aiworker-task-flow-skill.sh',
+  'scripts/install-aiworker-video-command-plugin.sh',
   'scripts/install-aiworker-director-brain.sh',
+  'scripts/check-standalone-artifact.mjs',
+  'scripts/check-sensitive-content.mjs',
+  'scripts/verify-director-video-release-readiness.mjs',
   'scripts/verify-shared-runtime-install-gate.mjs',
+  'scripts/legacy-preinstall-orchestrator.mjs',
+  'scripts/legacy-preinstall-controller.mjs',
+  'scripts/legacy-bootstrap-controller.mjs',
+  'scripts/verify-n8n-blue-green-workflows.mjs',
+  'scripts/generate-legacy-freeze-evidence.mjs',
+  'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
+  'scripts/legacy-freeze-guard.mjs',
+  'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/openclaw-private-gateway-rpc.mjs',
   'scripts/lib/openclaw-runtime-convergence.mjs',
+  'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
+  'scripts/lib/render-managed-markdown-section.mjs',
+  'scripts/lib/director-extraction-release-provenance.mjs',
   'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
@@ -227,6 +290,49 @@ const REQUIRED_STANDALONE_DIRECTORIES = [
   'node_modules/.pnpm',
   'public',
 ]
+
+const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
+  ['scripts/legacy-preinstall-orchestrator.mjs', [
+    'scripts/legacy-preinstall-controller.mjs',
+    'scripts/install-aiworker-task-flow-skill.sh',
+    'scripts/install-aiworker-video-command-plugin.sh',
+    'scripts/install-aiworker-director-brain.sh',
+    'scripts/apply-openclaw-runtime-convergence.sh',
+  ]],
+  ['scripts/legacy-preinstall-controller.mjs', [
+    'scripts/generate-legacy-freeze-evidence.mjs',
+    'scripts/n8n-workflow-transition-anchor.mjs',
+    'scripts/verify-director-video-release-readiness.mjs',
+  ]],
+  ['scripts/legacy-bootstrap-controller.mjs', [
+    'scripts/generate-legacy-freeze-evidence.mjs',
+    'scripts/verify-n8n-blue-green-workflows.mjs',
+    'scripts/n8n-workflow-transition-anchor.mjs',
+  ]],
+  ['scripts/install-aiworker-task-flow-skill.sh', [
+    'scripts/lib/render-managed-markdown-section.mjs',
+    'scripts/verify-shared-runtime-install-gate.mjs',
+    'scripts/lib/shared-deployment-lock.sh',
+  ]],
+  ['scripts/install-aiworker-video-command-plugin.sh', [
+    'scripts/lib/openclaw-secret-reference.mjs',
+    'scripts/verify-shared-runtime-install-gate.mjs',
+    'scripts/lib/shared-deployment-lock.sh',
+  ]],
+  ['scripts/install-aiworker-director-brain.sh', [
+    'scripts/feishu-director-brain.mjs',
+    'scripts/lib/feishu-director-brain.mjs',
+    'scripts/lib/sensitive-value-scanner.mjs',
+    'scripts/verify-shared-runtime-install-gate.mjs',
+    'scripts/lib/shared-deployment-lock.sh',
+  ]],
+  ['scripts/apply-openclaw-runtime-convergence.sh', [
+    'scripts/lib/openclaw-private-gateway-rpc.mjs',
+    'scripts/lib/openclaw-runtime-convergence.mjs',
+    'scripts/lib/openclaw-secret-reference.mjs',
+    'scripts/lib/shared-deployment-lock.sh',
+  ]],
+])
 
 const RELEASE_MANIFEST_NAME = 'release-manifest.json'
 const RELEASE_MANIFEST_SCHEMA_VERSION = 2
@@ -823,6 +929,83 @@ export async function assertRequiredStandaloneMembers(rootPath = resolve('.next/
   return true
 }
 
+async function resolveStandaloneRelativeModule(importerPath, specifier) {
+  const base = resolve(dirname(importerPath), specifier)
+  for (const candidate of [base, `${base}.js`, `${base}.mjs`, resolve(base, 'index.js')]) {
+    const candidateStat = await lstat(candidate).catch(() => null)
+    if (candidateStat?.isFile() && !candidateStat.isSymbolicLink()) return candidate
+  }
+  return null
+}
+
+export async function assertStandaloneStaticImportClosure(
+  rootPath = resolve('.next/standalone'),
+) {
+  const { root, physicalRoot } = await assertStandalonePhysicalRoot(rootPath)
+  const firstPartyRoots = ['scripts', 'openclaw-plugins', 'openclaw-skills']
+  const queue = []
+  for (const firstPartyRoot of firstPartyRoots) {
+    const pathname = resolve(root, firstPartyRoot)
+    if ((await lstat(pathname).catch(() => null))?.isDirectory()) queue.push(pathname)
+  }
+  const files = []
+  while (queue.length > 0) {
+    const directory = queue.pop()
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const pathname = resolve(directory, entry.name)
+      if (entry.isSymbolicLink()) throw new Error(`standalone_import_symlink:${relative(root, pathname)}`)
+      if (entry.isDirectory()) {
+        queue.push(pathname)
+      } else if (entry.isFile() && ['.js', '.mjs', '.cjs'].includes(extname(entry.name))) {
+        files.push(pathname)
+      }
+    }
+  }
+
+  let staticImports = 0
+  for (const importer of files) {
+    const source = await readFile(importer, 'utf8')
+    const specifiers = new Set()
+    const patterns = [
+      /\b(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/gu,
+      /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/gu,
+      /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/gu,
+    ]
+    for (const pattern of patterns) {
+      for (const match of source.matchAll(pattern)) specifiers.add(match[1])
+    }
+    for (const specifier of specifiers) {
+      if (!specifier.startsWith('.')) continue
+      staticImports += 1
+      const resolvedModule = await resolveStandaloneRelativeModule(importer, specifier)
+      if (!resolvedModule) {
+        throw new Error(`standalone_import_missing:${relative(root, importer)}:${specifier}`)
+      }
+      const physicalModule = await realpath(resolvedModule)
+      if (!isPathInside(physicalRoot, physicalModule)) {
+        throw new Error(`standalone_import_boundary:${relative(root, importer)}:${specifier}`)
+      }
+    }
+  }
+
+  let dynamicDependencies = 0
+  for (const [importer, dependencies] of EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES) {
+    const importerStat = await lstat(resolve(root, importer)).catch(() => null)
+    if (!importerStat?.isFile() || importerStat.isSymbolicLink()) {
+      throw new Error(`standalone_dynamic_importer_missing:${importer}`)
+    }
+    for (const dependency of dependencies) {
+      const dependencyStat = await lstat(resolve(root, dependency)).catch(() => null)
+      if (!dependencyStat?.isFile() || dependencyStat.isSymbolicLink()
+        || !ALLOWED_STANDALONE_SCRIPT_PATHS.has(dependency)) {
+        throw new Error(`standalone_dynamic_dependency_missing:${importer}:${dependency}`)
+      }
+      dynamicDependencies += 1
+    }
+  }
+  return { files: files.length, staticImports, dynamicDependencies }
+}
+
 async function collectStandaloneTreeMembers(rootPath, excludedNames = new Set()) {
   const { root } = await assertStandalonePhysicalRoot(rootPath)
   const directories = []
@@ -1057,6 +1240,7 @@ export async function sanitizeStandaloneArtifact(
     options.buildSourceAnchor,
   )
   await assertRequiredStandaloneMembers(root)
+  const importClosure = await assertStandaloneStaticImportClosure(root)
   return {
     ok: true,
     root,
@@ -1071,6 +1255,7 @@ export async function sanitizeStandaloneArtifact(
     provenance: attestations.provenance,
     artifactContent: attestations.artifactContent,
     repairedPnpmLinks: repairedLinks.length,
+    importClosure,
     removedMembers: forbidden,
   }
 }
@@ -1088,6 +1273,7 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
   await assertRequiredStandaloneMembers(root)
   await assertStandaloneServerConfigSanitized(root)
   await assertStandaloneRequiredServerFilesSanitized(root)
+  const importClosure = await assertStandaloneStaticImportClosure(root)
   const releaseManifest = await verifyStandaloneReleaseManifest(root)
   const sensitiveContent = scanStandaloneSensitiveContent(root)
   return {
@@ -1099,6 +1285,7 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
       filesScanned: sensitiveContent.filesScanned,
       bytesScanned: sensitiveContent.bytesScanned,
     },
+    importClosure,
   }
 }
 

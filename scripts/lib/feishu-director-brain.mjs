@@ -2946,6 +2946,7 @@ function reviewedRecordContractValid(table, fields) {
     if (!/^v\d+\.\d+\.\d+$/u.test(String(fields['版本'] || ''))) return false
     if (definitions.has('审核时间') && Number(fields['审核时间']) <= 0) return false
     if (Number(fields['更新时间']) <= 0) return false
+    assertReviewedDirectorCaseOutcome(table, fields)
     if (table.key === 'material_evidence') {
       if (!/^[a-f0-9]{64}$/u.test(String(fields['校验摘要'] || ''))) return false
       assertEvidenceTimecode({ stableId: String(fields[table.stableId] || ''), fields })
@@ -2956,7 +2957,7 @@ function reviewedRecordContractValid(table, fields) {
   }
 }
 
-function operationRecord(table, record) {
+function operationRecord(table, record, { preserveUnreviewedHumanFields = false } = {}) {
   const fields = sanitizedRecordFields(table, record?.fields)
   const stableId = String(fields[table.stableId] || '').trim()
   if (!stableId) throw new Error('remote_stable_record_id_missing:' + table.key)
@@ -2966,7 +2967,9 @@ function operationRecord(table, record) {
   const reviewed = state !== null
     && REVIEWED_STATUSES_BY_TABLE[table.key]?.has(state) === true
     && reviewContractValid
-  if (table.key === 'director_cases' && !reviewed) delete fields['成片位置']
+  if (table.key === 'director_cases' && !reviewed && !preserveUnreviewedHumanFields) {
+    delete fields['成片位置']
+  }
   const operationRecordValue = {
     table: table.key,
     stableId,
@@ -4786,7 +4789,20 @@ function requiredReviewFields(table) {
       '证据摘要', '校验摘要', '分析版本', '置信度',
     )
   }
+  if (table.key === 'director_cases') {
+    common.push('最终使用', '成片位置', '最终效果')
+  }
   return [...new Set([...common, ...(PROPOSAL_REQUIRED_FIELDS[table.key] || [])])]
+}
+
+const REVIEWED_DIRECTOR_CASE_FINAL_USE = new Set(['是', '否'])
+
+function assertReviewedDirectorCaseOutcome(table, fields) {
+  if (table.key !== 'director_cases') return
+  const finalUse = String(fields['最终使用'] || '').trim()
+  if (!REVIEWED_DIRECTOR_CASE_FINAL_USE.has(finalUse)) {
+    throw new Error('review_director_case_final_use_invalid')
+  }
 }
 
 function assertReviewFieldsPresent(table, record) {
@@ -4797,6 +4813,7 @@ function assertReviewFieldsPresent(table, record) {
     }
   }
   normalizeCompleteOperationFields(table, record.fields)
+  assertReviewedDirectorCaseOutcome(table, record.fields)
   if (table.key === 'material_evidence') {
     assertEvidenceTimecode(record)
     if (!/^[a-f0-9]{64}$/u.test(String(record.fields['校验摘要'] || ''))) {
@@ -4879,7 +4896,9 @@ function assertExactReviewSnapshot(
   if (!Array.isArray(records) || records.length !== 1) {
     throw new Error('review_concurrent_change:' + stableId)
   }
-  const record = operationRecord(table, records[0])
+  const record = operationRecord(table, records[0], {
+    preserveUnreviewedHumanFields: true,
+  })
   if (!records[0]?.record_id || typeof records[0].record_id !== 'string'
     || record.stableId !== stableId
     || (expectedRecordId !== null && records[0].record_id !== expectedRecordId)
@@ -5314,7 +5333,9 @@ export async function reviewDirectorBrainRecord(requestValue, options = {}) {
       ? 'duplicate_stable_record_id:' + table.key
       : 'review_record_missing:' + table.key + ':' + stableId)
   }
-  const current = operationRecord(table, records[0])
+  const current = operationRecord(table, records[0], {
+    preserveUnreviewedHumanFields: true,
+  })
   assertOperationRecordScope(context, table, current, table.key === 'works' ? stableId : workId)
   if (String(current.fields['版本'] || '') !== expectedVersion) {
     throw new Error('review_expected_version_mismatch')

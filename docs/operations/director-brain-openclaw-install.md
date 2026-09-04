@@ -15,6 +15,69 @@ OpenClaw `2026.7.1-2` 不允许同一 Agent scope 同时设置 `tools.allow` 与
 历史显式 `allow`，会在任何备份或写入前失败关闭。把任意 allowlist 转换成 profile + deny 必须另做带真实
 `tools.effective` 基线的能力迁移，安装器不会猜测转换或缩减原有工具。
 
+## 首次 legacy 发布唯一入口
+
+首次从旧 3017 迁入新的 blue/green 基线时，禁止逐项手工执行 task-flow、video-command、
+director-brain 安装器。唯一入口是 canonical 干净 Git 仓库中的统一 preinstall orchestrator；它把
+bootstrap attempt、工作流 transition、真实会话工具基线、安装备份、唯一 Gateway restart、runtime
+convergence 和集中 readiness 绑定成一个可恢复事务。standalone 内携带的控制源码只用于来源与制品
+闭包，不能脱离该 Git 仓库单独执行 orchestrator。
+
+参数模板如下；全部目录和证明必须是当次私有、权限受控的绝对路径，不能把 Token、App Secret、
+明文 session key 或聊天标识写入 argv、文档、journal 或 handoff：
+
+```bash
+node scripts/legacy-preinstall-orchestrator.mjs \
+  --attempt-dir "$attempt_dir" \
+  --evidence "$evidence_file" \
+  --proof "$rollback_proof" \
+  --source-commit "$target_commit" \
+  --transition-intent "$transition_dir/upgrade-intent.json" \
+  --transition-confirmation "$transition_dir/current-confirmation.json" \
+  --transition-journal "$transition_dir/journal" \
+  --transition-attestation "$transition_dir/transition-attestation.json" \
+  --transition-claim "$transition_dir/bootstrap-claim.json" \
+  --releases-root "$releases_root" \
+  --profile qwen-current \
+  --profile-state-root "$profile_state_root" \
+  --workspace-root "$workspace_root" \
+  --agent-id second-original \
+  --tool-baseline "$tool_baseline" \
+  --task-flow-backup-root "$task_flow_backup_root" \
+  --video-command-backup-root "$video_command_backup_root" \
+  --director-brain-backup-root "$director_brain_backup_root" \
+  --runtime-backup-root "$runtime_backup_root" \
+  --deployment-run-dir "$deployment_run_dir" \
+  --video-batch-root "$video_batch_root"
+```
+
+固定前向顺序是 task-flow、video-command、director-brain、一次 `qwen-current` fresh restart、runtime
+convergence、readiness verify、terminal handoff。component journal 只追加事件，terminal 结论只由单次
+finalize CAS 产生；只有成功 handoff 后 bootstrap controller 才能继续。失败严格逆序恢复 runtime
+convergence、director-brain、video-command、task-flow；如果发生过前向 restart，磁盘恢复完成后只做
+一次 recovery restart。直接运行本页后续单组件安装命令仅适用于普通维护或显式恢复，不能替代首次
+发布事务，也不能生成 bootstrap handoff。
+
+orchestrator 的同一份受保护运行时合同覆盖 3017、n8n 5678、Task Broker 5679、Qwen3.6
+18091、Qwen3.8 文本 18092、Qwen3.8 视觉 18094、gpt-main 18789、qwen-current 18889、
+qwen-weixin 18989 和 Ollama 11434。每个端口都必须始终只有一个 listener；只有 18889 可在受控
+fresh/recovery restart 中发生预期 PID 变化，其余 PID 必须与事务基线完全一致。每次快照还固定使用
+`/usr/bin/pgrep -f 'run-video-batch\.mjs .*--serve-root'` 复核 video worker，结果必须始终为空；安装前
+已经存在 worker、安装中出现 worker、恢复阶段出现 worker，均立即失败关闭，不能继续 handoff。
+
+每个组件在调用真实安装器前先由 shared gate 创建 reservation；reservation 绑定目标全树摘要、原始结果
+路径和真实安装器进程的 PID/start token。安装器退出但尚未生成结果、生成不可解析结果或租约已经到期时，
+orchestrator 只能在同一 deployment lock 内调用该组件安装器的只读 target probe；目标摘要仍等于 reservation
+基线且原安装器已经退出时，controller 才追加 `cancel` 事件。有效安装结果必须走 record，目标漂移或安装器
+仍存活一律失败关闭。取消事件不计入 installed/rolledBack，但属于 append-only journal；后续 rollback finalize
+以首次 rollback 前的最新 journal head（包括 cancel）为基线。
+
+handoff 在生成 postverify action 前先持久化包含 verification、readiness、payload、transition binding、组件
+journal head、Gateway activation 和首次 final gate 的不可变 finalize claim。该 claim 一旦成功，分支即
+forward-only：同 attempt 重试会重新验证安装 payload、transition 和绑定 exact finalize SHA 的 final gate，
+然后补齐 postverify action 与 terminal；即使原 lease 随后到期也不得切换到 rollback。finalize 之前仍必须
+持有 fresh lease，不能用恢复规则绕过首次 handoff 门禁。
+
 ## 预检
 
 必须显式给出 profile 名、其 state 目录、agent workspace 和 agent ID。先执行 dry-run：

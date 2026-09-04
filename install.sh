@@ -3,9 +3,9 @@
 # The mothership for your OpenClaw fleet.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/builderz-labs/mission-control/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/MAKingljx/video-autoworker/main/install.sh | bash
 #   # or
-#   bash install.sh [--docker|--local] [--port PORT] [--data-dir DIR]
+#   bash install.sh [--local] [--port PORT] [--data-dir DIR]
 #
 # Installs Mission Control and optionally repairs/configures OpenClaw.
 
@@ -16,7 +16,7 @@ MC_PORT="${MC_PORT:-3000}"
 MC_DATA_DIR=""
 DEPLOY_MODE=""
 SKIP_OPENCLAW=false
-REPO_URL="https://github.com/builderz-labs/mission-control.git"
+REPO_URL="https://github.com/MAKingljx/video-autoworker.git"
 INSTALL_DIR="${MC_INSTALL_DIR:-$(pwd)/mission-control}"
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ while [[ $# -gt 0 ]]; do
     --skip-openclaw) SKIP_OPENCLAW=true; shift ;;
     --dir)          INSTALL_DIR="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: install.sh [--docker|--local] [--port PORT] [--data-dir DIR] [--dir INSTALL_DIR] [--skip-openclaw]"
+      echo "Usage: install.sh [--local] [--port PORT] [--data-dir DIR] [--dir INSTALL_DIR] [--skip-openclaw]"
       exit 0 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -65,49 +65,36 @@ detect_os() {
 }
 
 check_prerequisites() {
-  local has_docker=false has_node=false
-
-  if command_exists docker && docker info &>/dev/null 2>&1; then
-    has_docker=true
-    ok "Docker available ($(docker --version | head -1))"
-  fi
+  local has_node=false
 
   if command_exists node; then
     local node_major
     node_major=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [[ "$node_major" -ge 20 ]]; then
+    if [[ "$node_major" -ge 22 ]]; then
       has_node=true
       ok "Node.js $(node -v) available"
     else
-      warn "Node.js $(node -v) found but v20+ required"
+      warn "Node.js $(node -v) found but v22+ required"
     fi
   fi
 
-  if ! $has_docker && ! $has_node; then
-    die "Either Docker or Node.js 20+ is required. Install one and retry."
+  if ! $has_node; then
+    die "Node.js 22+ is required. Install it and retry."
   fi
 
-  # Auto-select deploy mode if not specified
   if [[ -z "$DEPLOY_MODE" ]]; then
-    if $has_docker; then
-      DEPLOY_MODE="docker"
-      info "Auto-selected Docker deployment (use --local to override)"
-    else
-      DEPLOY_MODE="local"
-      info "Auto-selected local deployment (Docker not available)"
-    fi
+    DEPLOY_MODE="local"
   fi
 
-  # Validate chosen mode
-  if [[ "$DEPLOY_MODE" == "docker" ]] && ! $has_docker; then
-    die "Docker deployment requested but Docker is not available"
+  if [[ "$DEPLOY_MODE" == "docker" ]]; then
+    die "Docker deployment is retired; use Docker only for the isolated build check in docs/deployment.md"
   fi
   if [[ "$DEPLOY_MODE" == "local" ]] && ! $has_node; then
-    die "Local deployment requested but Node.js 20+ is not available"
+    die "Local deployment requested but Node.js 22+ is not available"
   fi
   if [[ "$DEPLOY_MODE" == "local" ]] && ! command_exists pnpm; then
     info "Installing pnpm via corepack..."
-    corepack enable && corepack prepare pnpm@latest --activate
+    corepack enable && corepack prepare pnpm@10.33.0 --activate
     ok "pnpm installed"
   fi
 }
@@ -146,8 +133,8 @@ setup_env() {
     return
   fi
 
-  info "Generating secure .env configuration..."
-  bash "$INSTALL_DIR/scripts/generate-env.sh" "$INSTALL_DIR/.env"
+  info "Creating OpenClaw-only loopback environment configuration..."
+  cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
 
   # Set the port if non-default
   if [[ "$MC_PORT" != "3000" ]]; then
@@ -201,32 +188,7 @@ setup_env() {
 
 # ── Docker deployment ─────────────────────────────────────────────────────────
 deploy_docker() {
-  info "Starting Docker deployment..."
-
-  export MC_PORT
-  docker compose up -d --build
-
-  # Wait for healthy
-  info "Waiting for Mission Control to become healthy..."
-  local retries=30
-  while [[ $retries -gt 0 ]]; do
-    if docker compose ps --format json 2>/dev/null | grep -q '"Health":"healthy"'; then
-      break
-    fi
-    # Fallback: try HTTP check
-    if curl -sf "http://localhost:$MC_PORT/login" &>/dev/null; then
-      break
-    fi
-    sleep 2
-    ((retries--))
-  done
-
-  if [[ $retries -eq 0 ]]; then
-    warn "Timeout waiting for health check — container may still be starting"
-    docker compose logs --tail 20
-  else
-    ok "Mission Control is running in Docker"
-  fi
+  die "Docker deployment is retired; use the managed local standalone launcher"
 }
 
 # ── Local deployment ──────────────────────────────────────────────────────────
@@ -284,12 +246,18 @@ After=network.target
 Type=simple
 User=$user
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$node_path $INSTALL_DIR/.next/standalone/server.js
+ExecStart=/bin/bash $INSTALL_DIR/scripts/start-standalone.sh
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=PORT=$MC_PORT
 EnvironmentFile=$INSTALL_DIR/.env
+Environment=NODE_BIN=$node_path
+Environment=MC_AUTH_MODE=openclaw-loopback
+Environment=MC_DESKTOP_MODE=0
+Environment=MC_OPENCLAW_PROFILES_NO_AUTH=0
+Environment=MC_HOSTNAME=127.0.0.1
+Environment=HOSTNAME=127.0.0.1
 
 [Install]
 WantedBy=multi-user.target

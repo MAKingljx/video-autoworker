@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- **Node.js** >= 20 (LTS recommended)
-- **pnpm** (installed via corepack: `corepack enable && corepack prepare pnpm@latest --activate`)
+- **Node.js** >= 22 (use the latest stable version supported by the target runtime)
+- **pnpm** 10.33.0 (installed via corepack: `corepack enable && corepack prepare pnpm@10.33.0 --activate`)
 
 ### Ubuntu / Debian
 
@@ -30,9 +30,10 @@ pnpm install
 pnpm dev
 ```
 
-Open http://localhost:3000. Login with `AUTH_USER` / `AUTH_PASS` from your `.env.local`.
+Open http://127.0.0.1:3000. Development mode is local-only and is not a
+supported production entrypoint.
 
-## Production (Direct)
+## Production
 
 ```bash
 pnpm install --frozen-lockfile
@@ -40,7 +41,11 @@ pnpm build
 pnpm start
 ```
 
-The `pnpm start` script binds to `0.0.0.0:3005`. Override with:
+`pnpm start` delegates to the managed standalone launcher. The launcher fixes
+`MC_AUTH_MODE=openclaw-loopback`, binds only to `127.0.0.1`, audits the
+immutable artifact, and rejects conflicting host or authentication settings.
+OpenClaw remains the only external user authentication boundary. Override only
+the loopback port when necessary:
 
 ```bash
 PORT=3000 pnpm start
@@ -48,11 +53,10 @@ PORT=3000 pnpm start
 
 **Important:** The production build bundles platform-specific native binaries. You must run `pnpm install` and `pnpm build` on the same OS and architecture as the target server. A build created on macOS will not work on Linux.
 
-## Production (Standalone)
+## Explicit Standalone Alias
 
-Use this for bare-metal deployments that run Next's standalone server directly.
-This path is preferred over ad hoc `node .next/standalone/server.js` because it
-syncs `.next/static` and `public/` into the standalone bundle before launch.
+`pnpm start:standalone` is an explicit alias for the same supported launcher.
+Never run `next start` or `.next/standalone/server.js` directly.
 
 ```bash
 pnpm install --frozen-lockfile
@@ -74,65 +78,61 @@ What `deploy:standalone` does:
 - starts the standalone server through `scripts/start-standalone.sh`
 - verifies that the rendered login page references a CSS asset and that the CSS is served as `text/css`
 
-## Production (Docker)
+## Docker Development Image
+
+The Docker configuration is retained only for isolated build and container-
+internal health checks. It fixes `MC_AUTH_MODE=openclaw-loopback`, binds the
+application to the container loopback address, keeps runtime data outside the
+immutable release, and does not publish an application port. It is not a
+supported browser-facing or production exposure path.
 
 ```bash
-docker compose up          # with gateway connectivity
-docker compose --profile standalone up   # without gateway (standalone mode)
+docker compose up
+docker compose exec mission-control node /app/healthcheck.js
 ```
 
 Or build and run manually:
 
 ```bash
 docker build -t mission-control .
-docker run -p 3000:3000 \
-  -v mission-control-data:/app/.data \
-  -e AUTH_USER=admin \
-  -e AUTH_PASS=your-secure-password \
-  -e API_KEY=your-api-key \
+docker run --rm \
+  -v mission-control-data:/app/data \
   -e OPENCLAW_GATEWAY_HOST=host.docker.internal \
   --add-host=host.docker.internal:host-gateway \
   mission-control
 ```
 
 The Docker image:
-- Builds from `node:22-slim` with multi-stage build
+- Builds from the verified Node.js `22.22.3` and pnpm `10.33.0` baseline
+- excludes host Git metadata, `.PhoenixBrain`, `.run`, `.runtime`, and runtime data from the build context
+- creates a synthetic dirty Git identity inside the build stage, so its provenance is always ineligible for release
 - Compiles `better-sqlite3` natively inside the container (Linux x64)
-- Uses Next.js standalone output for minimal image size
+- audits the Next.js standalone artifact before every start
 - Runs as non-root user `nextjs`
-- Exposes port 3000 (override with `-e PORT=8080`)
+- rejects non-OpenClaw auth mode and non-loopback host overrides
 
 ### Gateway Connectivity from Docker
 
-MC inside Docker needs to reach the gateway running on the host. There are **two** connections:
-
-1. **Server-side** (MC backend → gateway): Set `OPENCLAW_GATEWAY_HOST=host.docker.internal`.
-   Docker Desktop (macOS/Windows) resolves this automatically. On Linux, `docker-compose.yml`
-   maps it via `extra_hosts`.
-
-2. **Browser-side** (user's browser → gateway WebSocket): When the gateway host is a
-   Docker-internal name (like `host.docker.internal`), MC automatically rewrites the WebSocket
-   URL to the browser's own hostname. No extra config needed for local Docker usage.
-   For remote access, set `NEXT_PUBLIC_GATEWAY_HOST` to the public hostname.
-
-If your gateway runs in **another container**, put both on the same Docker network and set
-`OPENCLAW_GATEWAY_HOST` to the gateway container name.
+`OPENCLAW_GATEWAY_HOST=host.docker.internal` is only for server-side diagnostic
+connectivity during an isolated check. The container is not a browser or API
+entrypoint. Do not add `ports:`, `-p`, a reverse proxy, or a public ingress.
 
 ### Persistent Data
 
-SQLite database is stored in `/app/.data/` inside the container. Mount a volume to persist data across restarts:
+Disposable check state is stored in `/app/data/`, outside `/app/release`:
 
 ```bash
-docker run -v /path/to/data:/app/.data ...
+docker run --rm -v /path/to/data:/app/data mission-control
 ```
 
-### Production Hardening
+### Additional Container Isolation
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.hardened.yml up -d
 ```
 
-This adds: JSON logging, strict hostname allowlist, secure cookies, HSTS, internal-only network.
+This adds bounded logging and an internal-only network. It does not turn Docker
+into a supported production exposure path.
 
 ## Environment Variables
 
@@ -140,93 +140,22 @@ See `.env.example` for the full list. Key variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AUTH_USER` | Yes | `admin` | Admin username (seeded on first run) |
-| `AUTH_PASS` | Yes | - | Admin password |
-| `AUTH_PASS_B64` | No | - | Base64-encoded admin password (overrides `AUTH_PASS` if set) |
-| `API_KEY` | Yes | - | API key for headless access |
-| `PORT` | No | `3005` (direct) / `3000` (Docker) | Server port |
+| `MC_AUTH_MODE` | Fixed | `openclaw-loopback` | Only supported production authentication mode |
+| `MC_HOSTNAME` | Fixed | `127.0.0.1` | Application listener trust boundary |
+| `PORT` | No | `3000` | Loopback listener port |
 | `OPENCLAW_HOME` | No | - | Path to OpenClaw installation |
 | `MC_ALLOWED_HOSTS` | No | `localhost,127.0.0.1` | Allowed hosts in production |
 
-## Kubernetes Sidecar Deployment
+## Unsupported Network Topologies
 
-When running Mission Control alongside a gateway as containers in the same pod (sidecar pattern), agents are not discovered via the filesystem. Instead, use the gateway's agent registration API.
-
-### Architecture
-
-```
-┌──────────────── Pod ────────────────┐
-│  ┌─────────┐     ┌───────────────┐  │
-│  │   MC    │◄───►│   Gateway     │  │
-│  │ :3000   │     │   :18789      │  │
-│  └─────────┘     └───────────────┘  │
-│       ▲                  ▲          │
-│       │ localhost         │          │
-│       └──────────────────┘          │
-└─────────────────────────────────────┘
-```
-
-### Required Configuration
-
-**Environment variables** for the MC container:
-
-```bash
-AUTH_USER=admin
-AUTH_PASS=<secure-password>
-API_KEY=<your-api-key>
-OPENCLAW_GATEWAY_HOST=127.0.0.1
-NEXT_PUBLIC_GATEWAY_PORT=18789
-```
-
-### Agent Registration
-
-The gateway must register its agents with MC on startup. Include the `agents` array in the gateway registration request:
-
-```bash
-curl -X POST http://localhost:3000/api/gateways \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "sidecar-gateway",
-    "host": "127.0.0.1",
-    "port": 18789,
-    "is_primary": true,
-    "agents": [
-      { "name": "developer-1", "role": "developer" },
-      { "name": "researcher-1", "role": "researcher" }
-    ]
-  }'
-```
-
-To update the agent list on reconnect, use `PUT /api/gateways` with the same `agents` field.
-
-Alternatively, each agent can register itself via the direct connection endpoint:
-
-```bash
-curl -X POST http://localhost:3000/api/connect \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tool_name": "openclaw-gateway",
-    "agent_name": "developer-1",
-    "agent_role": "developer"
-  }'
-```
-
-### Health Checks
-
-Agents must send heartbeats to stay visible:
-
-```bash
-curl http://localhost:3000/api/agents/<agent-id>/heartbeat \
-  -H "Authorization: Bearer <API_KEY>"
-```
-
-Without heartbeats, agents will be marked offline after 10 minutes (configurable via `general.agent_timeout_minutes` setting).
+Kubernetes ingress, public Docker port publication, reverse proxies, Tailscale
+Serve/Funnel, and cross-host direct access are intentionally unsupported. They
+would leave the controlled loopback trust boundary and require a new explicit
+authentication and migration decision before implementation.
 
 ## Troubleshooting
 
-### "Internal server error" on login / NODE_MODULE_VERSION mismatch
+### "Internal server error" / NODE_MODULE_VERSION mismatch
 
 `better-sqlite3` is a native addon compiled for a specific Node.js version.
 If you switch Node versions (e.g. via nvm), the compiled binary won't load.
@@ -246,7 +175,7 @@ rm -rf node_modules
 pnpm install
 ```
 
-### Docker: gateway unreachable / WebSocket not connecting
+### Docker: gateway unreachable
 
 **Checklist:**
 
@@ -266,21 +195,12 @@ pnpm install
    container. Environment variables take precedence over `openclaw.json`, so set
    `OPENCLAW_GATEWAY_HOST=host.docker.internal` in your `.env` or docker-compose.
 
-4. **Browser WebSocket**: MC automatically rewrites Docker-internal hostnames
-   (`host.docker.internal`, `host-gateway`) to the browser's hostname. If the browser
-   still can't connect, set `NEXT_PUBLIC_GATEWAY_HOST` to a hostname your browser can reach.
+4. Do not publish the container application port or configure a browser-facing
+   WebSocket URL. Docker remains a container-internal diagnostic path.
 
 5. **Linux-specific**: `host.docker.internal` requires Docker 20.10+. The `extra_hosts`
    entry in `docker-compose.yml` handles this. If using `docker run` directly, add
    `--add-host=host.docker.internal:host-gateway`.
-
-### AUTH_PASS with "#" is not working
-
-In dotenv files, `#` starts a comment unless the value is quoted.
-
-Use one of these:
-- `AUTH_PASS="my#password"`
-- `AUTH_PASS_B64=$(echo -n 'my#password' | base64)`
 
 ### "pnpm-lock.yaml not found" during Docker build
 

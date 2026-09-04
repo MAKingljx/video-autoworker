@@ -114,6 +114,17 @@ function writeControlled(pathname: string, source: string, mode = 0o600) {
   chmodSync(pathname, mode)
 }
 
+function immutableReference(pathname: string) {
+  const entry = statSync(pathname, { bigint: true })
+  return {
+    path: pathname,
+    dev: entry.dev.toString(),
+    ino: entry.ino.toString(),
+    size: Number(entry.size),
+    sha256: sha256(readFileSync(pathname)),
+  }
+}
+
 function rewriteRollbackManifest(fixture: Fixture, mutate: (value: Record<string, any>) => void) {
   const pathname = join(fixture.rollbackPackage, 'manifest.json')
   chmodSync(fixture.rollbackPackage, 0o700)
@@ -786,7 +797,115 @@ describe('n8n workflow transition dual anchor producer', () => {
     reachCommitted(fixture)
     const claimPath = join(fixture.state, 'bootstrap-claim.json')
     const preparePath = join(fixture.root, 'bootstrap-attempt', 'prepare.json')
-    mkdirSync(join(fixture.root, 'bootstrap-attempt'), { mode: 0o700 })
+    const preinstallRoot = join(fixture.root, 'bootstrap-attempt', 'preinstall')
+    mkdirSync(preinstallRoot, { recursive: true, mode: 0o700 })
+    const installAttemptId = '33333333-3333-4333-8333-333333333333'
+    const intent = JSON.parse(readFileSync(fixture.intent, 'utf8'))
+    const attestation = immutableReference(fixture.attestation)
+    const journalHeadName = readdirSync(fixture.journal)
+      .filter(name => /^\d{6}-/u.test(name)).sort().at(-1)!
+    const journalHeadSha256 = sha256(readFileSync(join(fixture.journal, journalHeadName)))
+    const live = JSON.parse(readFileSync(fixture.liveReport, 'utf8'))
+    const preparedPath = join(preinstallRoot, 'install-prepared.r000001.receipt.json')
+    writeControlled(preparedPath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-prepared/v1',
+      installAttemptId,
+      revision: 1,
+      sourceCommit: targetCommit,
+      target: {
+        slot: 'blue',
+        releaseId: `${targetCommit}-runtime`,
+        releaseRoot: fixture.appReleaseRoot,
+        manifestSha256: sha256(readFileSync(fixture.appManifest)),
+      },
+      databases: { n8n: intent.database[0] },
+      transition: {
+        attestation,
+        committedJournalHeadSha256: journalHeadSha256,
+        liveCombinedSha256: live.combinedSha256,
+      },
+    })}\n`, 0o400)
+    const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
+    const preparedReference = immutableReference(preparedPath)
+    writeControlled(verificationPath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-verified/v1',
+      installAttemptId,
+      revision: 1,
+      prepared: preparedReference,
+    })}\n`, 0o400)
+    const convergenceProof = join(preinstallRoot, 'runtime-convergence-proof.json')
+    writeControlled(convergenceProof, `${JSON.stringify({
+      schema: 'video-autoworker-openclaw-runtime-convergence-proof/v1',
+      observedAt: 1_800_000_000,
+    })}\n`, 0o600)
+    const componentJournalHead = join(preinstallRoot, 'install-component-event.000003.receipt.json')
+    writeControlled(componentJournalHead, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-component-event/v1',
+      installAttemptId,
+      operation: 'install',
+      component: 'director-brain',
+    })}\n`, 0o400)
+    const finalizePath = join(preinstallRoot, 'install-finalize-claim.receipt.json')
+    writeControlled(finalizePath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
+      choice: 'bootstrap-handoff',
+      installAttemptId,
+      revision: 1,
+      uid: process.getuid!(),
+      claimedAt: 1_800_000_000,
+      journalHead: immutableReference(componentJournalHead),
+    })}\n`, 0o400)
+    const handoffPath = join(preinstallRoot, 'install-postverify-action.r000001.claim.json')
+    const handoffPayload = {
+      finalize: immutableReference(finalizePath),
+      componentJournalHead: immutableReference(componentJournalHead),
+      verification: immutableReference(verificationPath),
+      readiness: immutableReference(verificationPath),
+      runtimeConvergenceProof: immutableReference(convergenceProof),
+      freshReadinessSha256: 'd'.repeat(64),
+      payloads: {
+        videoCommandManifestSha256: 'e'.repeat(64),
+        taskFlowManifestSha256: 'f'.repeat(64),
+        directorBrainManifestSha256: '0'.repeat(64),
+      },
+      binding: {
+        sourceCommit: targetCommit,
+        target: {
+          slot: 'blue',
+          releaseId: `${targetCommit}-runtime`,
+          releaseRoot: fixture.appReleaseRoot,
+          manifestSha256: sha256(readFileSync(fixture.appManifest)),
+        },
+        databases: { n8n: intent.database[0] },
+        transition: {
+          attestationSha256: attestation.sha256,
+          committedJournalHeadSha256: journalHeadSha256,
+          liveCombinedSha256: live.combinedSha256,
+        },
+      },
+    }
+    writeControlled(handoffPath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-postverify-action/v1',
+      choice: 'bootstrap-handoff',
+      installAttemptId,
+      revision: 1,
+      uid: process.getuid!(),
+      claimedAt: 1_800_000_000,
+      payload: handoffPayload,
+    })}\n`, 0o400)
+    const preinstallTerminal = join(preinstallRoot, 'install-terminal-claim.receipt.json')
+    writeControlled(preinstallTerminal, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-terminal-claim/v1',
+      choice: 'bootstrap-handoff',
+      installAttemptId,
+      revision: 1,
+      uid: process.getuid!(),
+      claimedAt: 1_800_000_000,
+      prepared: preparedReference,
+      verification: immutableReference(verificationPath),
+      handoff: immutableReference(handoffPath),
+      handoffPayloadSha256: sha256(canonicalJson(handoffPayload)),
+    })}\n`, 0o400)
     const args = [
       'claim-bootstrap',
       '--intent', fixture.intent,
@@ -798,6 +917,9 @@ describe('n8n workflow transition dual anchor producer', () => {
       '--release-id', `${targetCommit}-runtime`,
       '--release-root', fixture.appReleaseRoot,
       '--manifest-sha256', sha256(readFileSync(fixture.appManifest)),
+      '--preinstall-terminal', preinstallTerminal,
+      '--preinstall-handoff', handoffPath,
+      '--runtime-convergence-proof', convergenceProof,
       '--output', claimPath,
     ]
     const first = run(...args)

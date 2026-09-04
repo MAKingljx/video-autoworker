@@ -397,7 +397,20 @@ start_release() {
     load_env_file "$SOURCE_APP_DIR/.env" || exit 1
     load_env_file "$SOURCE_APP_DIR/.env.local" || exit 1
     load_env_file "$PLATFORM_ENV_FILE" || exit 1
+    if [[ -n "${MC_AUTH_MODE:-}" && "$MC_AUTH_MODE" != "openclaw-loopback" ]]; then
+      fail "MC_AUTH_MODE must be openclaw-loopback for the legacy switch"
+      exit 1
+    fi
+    if [[ -n "${MC_HOSTNAME:-}" && "$MC_HOSTNAME" != "127.0.0.1" ]]; then
+      fail "MC_HOSTNAME must remain 127.0.0.1 for the legacy switch"
+      exit 1
+    fi
     export AIWORKER_SOURCE_APP_DIR="$SOURCE_APP_DIR"
+    export MC_AUTH_MODE="openclaw-loopback"
+    export MC_DESKTOP_MODE="0"
+    export MC_OPENCLAW_PROFILES_NO_AUTH="0"
+    export MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-1}"
+    export MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-1}"
     export MC_HOSTNAME=127.0.0.1 HOSTNAME=127.0.0.1 PORT="$port"
     export MC_OPENCLAW_PROFILE_TARGET="${MC_OPENCLAW_PROFILE_TARGET:-local}"
     export MC_MATERIALS_REMOTE_PYTHON="${MC_MATERIALS_REMOTE_PYTHON:-/usr/bin/python3}"

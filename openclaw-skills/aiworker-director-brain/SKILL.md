@@ -15,7 +15,7 @@ description: Use the Video AutoWorker director brain to resolve a work, retrieve
 
 ## 先确认作品
 
-导演意图、素材证据、人物、故事、素材判断、叙事方案和导演案例这七类作品业务必须绑定唯一 `workId`。`skills_techniques` 是项目级跨作品全局知识，不绑定唯一作品。查询六层状态时，如果用户只说作品名称或别名而没有 ID，直接调用 `workflow` 并把原片名放入 `query`，工具会在内部先唯一解析作品再读取六层状态。启动、查询或补齐导演知识提炼时，分别调用 `start_extraction`、`extraction_status`、`backfill_extraction`，同样只把作品完整名称或明确别名放入 `query`，不要求用户提供 ID。其他作品业务先调用 `resolve_work`。
+导演意图、素材证据、人物、故事、素材判断、叙事方案和导演案例这七类作品业务必须绑定唯一 `workId`。`skills_techniques` 是项目级跨作品全局知识，不绑定唯一作品。查询六层状态时，如果用户只说作品名称或别名而没有 ID，直接调用 `workflow` 并把原片名放入 `query`，工具会在内部先唯一解析作品再读取六层状态。查询导演知识提炼进度时调用只读 `extraction_status`，同样只把作品完整名称或明确别名放入 `query`，不要求用户提供 ID。其他作品业务先调用 `resolve_work`。
 
 对需要作品上下文的动作，只有 `found=true` 且返回唯一 `work.workId` 时才能继续。直接读取全局 `skills_techniques` 不需要先解析作品。`found=false` 时说明没有匹配作品；名称或别名不唯一时请用户补充更准确的完整名称。工具返回带 `stopAfterReply=true` 的 `responseContract` 时，逐字回复其中的 `userVisibleAnswer` 并结束本轮，不得再尝试 `read`、`exec`、`memory`、聊天记录、SQLite、n8n、媒体目录或旧素材库。不得猜测作品 ID、沿用另一作品的 ID，或在非技法业务中把多个作品的知识混在一次读取、组装、工作流判断、提炼或候选写入中。
 
@@ -37,11 +37,9 @@ description: Use the Video AutoWorker director brain to resolve a work, retrieve
 
 ## 导演知识提炼
 
-用户明确要求从现有分析结果开始整理导演知识时，调用 `start_extraction`。`query` 传作品完整名称或明确别名；只有用户同时给出明确的视频标题、文件名或季集信息时才传 `sourceQuery`。省略 `sourceQuery` 时由共享服务按作品绑定选择唯一来源；同一作品存在多个来源时，请用户补充更准确的视频线索，不要截断或猜测。用户本轮的导演目标可放入不超过 500 字的 `objective`。
-
 用户询问整理进度时调用 `extraction_status`，只传 `query`。共享应用服务会按作品找到唯一活跃提炼或最新一次状态；不要要求用户提供任务号、提炼号或其他内部 ID。
 
-用户明确要求补齐缺失知识时调用 `backfill_extraction`，只传作品 `query`。它会在作品范围内有界扫描全部已成功且已绑定的素材来源，只登记尚未进入提炼链的来源；不要传 `sourceQuery` 或 `objective`，也不要把它当成单素材 start 的别名。三个动作都只是 3017 loopback 共享应用服务的薄入口，复用同一提炼状态机和同一导演脑；OpenClaw 不复制队列、状态判断、重试、投影或写入逻辑，也不直接读取数据库。
+OpenClaw 对话面不提供 `start_extraction` 或 `backfill_extraction`。用户要求启动、补齐、重提或触发素材投影时，不得创建任务或调用内部 3017 写入口；说明这些操作由现有视频任务链和后台 scheduler 按受控规则完成。`extraction_status` 只是 3017 loopback 共享应用服务的只读薄入口；OpenClaw 不复制队列、状态判断、重试、投影或写入逻辑，也不直接读取数据库。
 
 收到 `responseContract` 后逐字使用其中的短答并结束本轮，不增加解释，不回退其他工具或旧数据源，也不暴露作品 ID、提炼 ID、任务 ID、表记录 ID 或内部状态名。各人工确认门按以下方式理解：
 
@@ -79,7 +77,7 @@ description: Use the Video AutoWorker director brain to resolve a work, retrieve
 
 `system_blueprint` 与 `material_evidence` 始终只读。素材证据只能由现有视频任务链的受控事实投影产生，OpenClaw 不得提出或改写。
 
-服务会固定项目身份并生成稳定 ID，注入版本、候选状态、来源和更新时间。新记录只是草稿或候选，必须经过导演人工确认后才能作为事实或后续高层判断依据。
+服务会固定项目身份并生成稳定 ID，注入版本、候选状态、来源和更新时间。新记录只是草稿或候选，必须经过导演人工确认后才能作为事实或后续高层判断依据。导演案例进入“已确认”前，人工必须完整填写“最终使用”（采用、拒绝或待确认）、“成片位置”和“最终效果”；任一项缺失时不得确认，也不得用于技法学习。
 
 ## 禁止事项
 
@@ -87,7 +85,8 @@ description: Use the Video AutoWorker director brain to resolve a work, retrieve
 - 不得向 `system_blueprint` 或 `material_evidence` 提交候选。
 - 除 `skills_techniques` 按已确认案例聚合全局技法外，不得跨作品读取、引用、组装或写入；不得绕过 `resolve_work` 猜测自然语言作品名。
 - 不得把 `workflow` 变成任务状态机、队列、hook、派发器或重试器。
-- 不得在 OpenClaw 内实现提炼状态机；三个 extraction 动作只能调用 3017 loopback 共享应用服务。
+- 不得在 OpenClaw 内实现提炼状态机；只允许 `extraction_status` 调用 3017 loopback 共享应用服务进行只读查询。
+- 不得从 OpenClaw 对话启动、回填、重提导演提炼任务或触发素材投影。
 - 不得调用或设计剪辑、DaVinci、时间线、渲染、导出能力。
 - 不得把原始视频、逐帧图片、完整原始转写、向量、运行日志、凭据或本机路径写入导演脑。
 - 不得使用 `exec`、SQLite、n8n、聊天记录、媒体目录或旧素材库代替本工具读取导演知识。

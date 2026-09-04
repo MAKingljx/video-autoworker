@@ -46,6 +46,8 @@ output/
 src-tauri/target/
 *.log
 .runtime/
+.run/
+.PhoenixBrain
 *.pid
 *.bak-*
 

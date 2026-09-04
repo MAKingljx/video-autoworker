@@ -27,6 +27,10 @@ import {
   projectOfflineQueue,
   scanOfflineDurableBatchStates,
 } from './lib/runtime-safe-offline-queue.mjs'
+import {
+  claimBootstrapHandoff,
+  inspectPreinstallAttempt,
+} from './legacy-preinstall-controller.mjs'
 
 export { projectOfflineQueue, scanOfflineDurableBatchStates }
 
@@ -345,26 +349,47 @@ function verifierPath() {
   return managedVerifierPath
 }
 
-function assertManagedVerifierAtHead(pathname) {
-  if (testMode && pathname !== managedVerifierPath) return
-  if (pathname !== managedVerifierPath) fail('production live verifier path is not managed')
+function assertManagedRuntimeMember(pathname, relativePath, label) {
+  if (pathname !== join(repositoryRoot, relativePath)) fail(`${label} path is not managed`)
   let tracked
   let committed
   try {
     tracked = execFileSync('/usr/bin/git', [
-      '-C', repositoryRoot, 'ls-files', '--error-unmatch', '--',
-      'scripts/generate-legacy-freeze-evidence.mjs',
+      '-C', repositoryRoot, 'ls-files', '--error-unmatch', '--', relativePath,
     ], { encoding: 'utf8', maxBuffer: 64 * 1024 }).trim()
     committed = execFileSync('/usr/bin/git', [
-      '-C', repositoryRoot, 'show', 'HEAD:scripts/generate-legacy-freeze-evidence.mjs',
+      '-C', repositoryRoot, 'show', `HEAD:${relativePath}`,
     ], { maxBuffer: MAX_JSON_BYTES })
   } catch {
-    fail('managed live verifier is not tracked at HEAD')
+    const manifestPath = join(repositoryRoot, 'release-manifest.json')
+    let manifest
+    try {
+      manifest = readJson(manifestPath, 'standalone release manifest', {
+        maximumBytes: 32 * MAX_JSON_BYTES, nonempty: true,
+      }).value
+    } catch {
+      fail(`${label} has neither Git HEAD nor standalone release provenance`)
+    }
+    const member = Array.isArray(manifest?.files)
+      ? manifest.files.find(item => item?.path === relativePath) : null
+    if (manifest?.schemaVersion !== 2 || manifest?.algorithm !== 'sha256'
+      || !member || member.sha256 !== hashFileStable(pathname, label, {
+        maximumBytes: MAX_JSON_BYTES,
+      })) {
+      fail(`${label} differs from the standalone release manifest`)
+    }
+    return
   }
-  if (tracked !== 'scripts/generate-legacy-freeze-evidence.mjs'
-    || sha256(committed) !== hashFileStable(pathname, 'managed live verifier', { maximumBytes: MAX_JSON_BYTES })) {
-    fail('managed live verifier differs from HEAD')
+  if (tracked !== relativePath
+    || sha256(committed) !== hashFileStable(pathname, label, { maximumBytes: MAX_JSON_BYTES })) {
+    fail(`${label} differs from HEAD`)
   }
+}
+
+function assertManagedVerifierAtHead(pathname) {
+  if (testMode && pathname !== managedVerifierPath) return
+  assertManagedRuntimeMember(pathname, 'scripts/generate-legacy-freeze-evidence.mjs',
+    'managed live verifier')
 }
 
 function captureVerifierReference() {
@@ -378,26 +403,8 @@ function captureVerifierReference() {
 function assertManagedTransitionAnchorAtHead(pathname) {
   const override = process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM
   if (testMode && override !== undefined) return
-  if (pathname !== managedTransitionAnchorPath) fail('production workflow transition anchor path is not managed')
-  let tracked
-  let committed
-  try {
-    tracked = execFileSync('/usr/bin/git', [
-      '-C', repositoryRoot, 'ls-files', '--error-unmatch', '--',
-      'scripts/n8n-workflow-transition-anchor.mjs',
-    ], { encoding: 'utf8', maxBuffer: 64 * 1024 }).trim()
-    committed = execFileSync('/usr/bin/git', [
-      '-C', repositoryRoot, 'show', 'HEAD:scripts/n8n-workflow-transition-anchor.mjs',
-    ], { maxBuffer: MAX_JSON_BYTES })
-  } catch {
-    fail('managed workflow transition anchor is not tracked at HEAD')
-  }
-  if (tracked !== 'scripts/n8n-workflow-transition-anchor.mjs'
-    || sha256(committed) !== hashFileStable(pathname, 'managed workflow transition anchor', {
-      maximumBytes: MAX_JSON_BYTES,
-    })) {
-    fail('managed workflow transition anchor differs from HEAD')
-  }
+  assertManagedRuntimeMember(pathname, 'scripts/n8n-workflow-transition-anchor.mjs',
+    'managed workflow transition anchor')
 }
 
 function fullReference(pathname, label, mode = 0o400) {
@@ -489,7 +496,10 @@ function transitionAnchorEnvironment() {
   return environment
 }
 
-function invokeTransitionClaim(binding, target, database, preparePath) {
+function invokeTransitionClaim(
+  binding, target, database, preparePath, preinstallTerminalPath,
+  preinstallHandoffPath, runtimeConvergenceProofPath,
+) {
   const testClaim = process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM
   if (testClaim !== undefined) {
     if (!testMode) fail('workflow transition claim override is forbidden outside isolated tests')
@@ -512,6 +522,9 @@ function invokeTransitionClaim(binding, target, database, preparePath) {
     '--release-id', target.releaseId,
     '--release-root', target.releaseRoot,
     '--manifest-sha256', target.manifestSha256,
+    '--preinstall-terminal', preinstallTerminalPath,
+    '--preinstall-handoff', preinstallHandoffPath,
+    '--runtime-convergence-proof', runtimeConvergenceProofPath,
     '--output', binding.claim.path,
   ], {
     cwd: repositoryRoot,
@@ -544,7 +557,10 @@ function invokeTransitionClaim(binding, target, database, preparePath) {
   return { claim: loaded.reference, bootstrapAttemptId: output.bootstrapAttemptId }
 }
 
-function captureTransitionBinding(values, target, database, preparePath) {
+function captureTransitionBinding(
+  values, target, database, preparePath, preinstallTerminalPath,
+  preinstallHandoffPath, runtimeConvergenceProofPath,
+) {
   const intent = fullReference(values['--transition-intent'], 'workflow transition intent')
   const confirmation = fullReference(values['--transition-confirmation'], 'workflow transition confirmation')
   const attestation = fullReference(values['--transition-attestation'], 'workflow transition attestation')
@@ -560,7 +576,10 @@ function captureTransitionBinding(values, target, database, preparePath) {
     attestation,
     claim: { path: values['--transition-claim'] },
   }
-  const claimed = invokeTransitionClaim(base, target, database, preparePath)
+  const claimed = invokeTransitionClaim(
+    base, target, database, preparePath, preinstallTerminalPath,
+    preinstallHandoffPath, runtimeConvergenceProofPath,
+  )
   const claimLoaded = readJson(values['--transition-claim'], 'workflow transition bootstrap claim', {
     mode: 0o400, maximumBytes: MAX_JSON_BYTES,
   })
@@ -613,7 +632,31 @@ function validateTransitionBinding(value, target, database, preparePath) {
     || claim.transition.liveCombinedSha256 !== value.liveCombinedSha256) {
     fail('prepared workflow transition committed binding changed')
   }
-  const replay = invokeTransitionClaim(value, target, database, preparePath)
+  const preinstallTerminalPath = join(
+    dirname(preparePath), 'preinstall', 'install-terminal-claim.receipt.json',
+  )
+  let preinstallHandoffPath = preinstallTerminalPath
+  let runtimeConvergenceProofPath = preinstallTerminalPath
+  if (process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM === undefined) {
+    const terminal = readJson(preinstallTerminalPath, 'preinstall bootstrap handoff', {
+      mode: 0o400, maximumBytes: MAX_JSON_BYTES,
+    }).value
+    if (typeof terminal?.handoff?.path !== 'string') {
+      fail('prepared workflow transition handoff action is unavailable')
+    }
+    const handoff = readJson(terminal.handoff.path, 'preinstall bootstrap handoff action', {
+      mode: 0o400, maximumBytes: MAX_JSON_BYTES,
+    }).value
+    if (typeof handoff?.payload?.runtimeConvergenceProof?.path !== 'string') {
+      fail('prepared workflow transition convergence proof is unavailable')
+    }
+    preinstallHandoffPath = terminal.handoff.path
+    runtimeConvergenceProofPath = handoff.payload.runtimeConvergenceProof.path
+  }
+  const replay = invokeTransitionClaim(
+    value, target, database, preparePath, preinstallTerminalPath,
+    preinstallHandoffPath, runtimeConvergenceProofPath,
+  )
   if (replay.bootstrapAttemptId !== claim.bootstrap.attemptId
     || canonicalJson(replay.claim) !== canonicalJson(value.claim)) {
     fail('prepared workflow transition bootstrap claim changed')
@@ -676,7 +719,7 @@ function parseArguments(argv) {
       '--attempt-dir', '--evidence', '--proof', '--source-commit', '--router-run-dir',
       '--router-state', '--router-port', '--mission-db', '--n8n-db', '--transition-intent',
       '--transition-confirmation', '--transition-journal', '--transition-attestation',
-      '--transition-claim',
+      '--transition-claim', '--install-verification', '--runtime-convergence-proof',
     ],
     'current-confirm': ['--prepare'],
     apply: ['--prepare', '--confirm', '--token'],
@@ -715,6 +758,69 @@ function validateFileIdentity(value, label) {
   assertAbsolute(value.path, `${label} path`)
   if (!/^\d+$/u.test(value.dev) || !/^\d+$/u.test(value.ino)) fail(`${label} is invalid`)
   return value
+}
+
+function preinstallStatus(attemptDirectory) {
+  const override = process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_PREINSTALL_STATUS
+  if (override !== undefined) {
+    if (!testMode) fail('preinstall status override is forbidden outside isolated tests')
+    return readJson(override, 'test preinstall status', { mode: 0o400 }).value
+  }
+  return inspectPreinstallAttempt(attemptDirectory)
+}
+
+function validatePreinstallBinding(
+  attemptDirectory,
+  verificationPath,
+  expected,
+  { allowVerified = false, claimHandoff = false, requireFreshInstall = true } = {},
+) {
+  const status = preinstallStatus(attemptDirectory)
+  if (!['INSTALL_VERIFIED', 'BOOTSTRAP_HANDOFF'].includes(status?.phase)
+    || (status.phase === 'INSTALL_VERIFIED' && !allowVerified)
+    || (requireFreshInstall && status.expired !== false)
+    || !/^[a-f0-9-]{36}$/u.test(status.installAttemptId || '')
+    || !Number.isSafeInteger(status.revision) || status.revision < 1
+    || status.verification?.path !== verificationPath
+    || !SHA256.test(status.verification?.sha256 || '')
+    || status.bindings?.sourceCommit !== expected.sourceCommit
+    || canonicalJson(status.bindings?.target) !== canonicalJson(expected.target)
+    || canonicalJson(status.bindings?.databases) !== canonicalJson(expected.databases)
+    || status.bindings?.transition?.attestation?.sha256 !== expected.transition.attestation.sha256
+    || status.bindings?.transition?.committedJournalHeadSha256
+      !== expected.transition.committedJournalHeadSha256
+    || status.bindings?.transition?.liveCombinedSha256 !== expected.transition.liveCombinedSha256) {
+    fail('INSTALL_VERIFIED authorization is expired, changed, or bound to another operation')
+  }
+  const verification = readJson(verificationPath, 'preinstall verification receipt', { mode: 0o400 })
+  if (canonicalJson(verification.reference) !== canonicalJson(status.verification)
+    || verification.value?.installAttemptId !== status.installAttemptId
+    || verification.value?.revision !== status.revision
+    || !Number.isSafeInteger(verification.value?.verifiedAt)) {
+    fail('preinstall verification receipt changed')
+  }
+  if (expected.evidenceObservedAt !== undefined
+    && (expected.evidenceObservedAt <= verification.value.verifiedAt
+      || status.bindings.evidence?.sha256 === expected.evidenceSha256
+      || status.bindings.proof?.sha256 === expected.proofSha256)) {
+    fail('bootstrap prepare requires fresh post-install evidence and rollback proof')
+  }
+  if (claimHandoff && status.phase === 'INSTALL_VERIFIED') {
+    if (process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_PREINSTALL_STATUS !== undefined) {
+      return { status, verification: verification.reference, terminal: null }
+    }
+    const claimed = claimBootstrapHandoff({
+      attemptDirectory,
+      installAttemptId: status.installAttemptId,
+      expectedRevision: status.revision,
+    })
+    return {
+      status: inspectPreinstallAttempt(attemptDirectory),
+      verification: verification.reference,
+      terminal: claimed.state.terminal.reference,
+    }
+  }
+  return { status, verification: verification.reference, terminal: status.terminal }
 }
 
 function validateProcess(value, label, extraKeys) {
@@ -950,7 +1056,7 @@ function validatePrepareReceipt(loaded, requireFresh) {
   const value = loaded.value
   exactKeys(value, [
     'attemptId', 'createdAt', 'databases', 'evidence', 'evidenceExpiresAt', 'expiresAt', 'guard',
-    'prepareToolSha256', 'previousReceiptSha256', 'proof', 'routing', 'schema', 'sourceCommit',
+    'installation', 'prepareToolSha256', 'previousReceiptSha256', 'proof', 'routing', 'schema', 'sourceCommit',
     'runtimeSnapshotSha256', 'target', 'transition', 'uid', 'verifier',
   ], 'prepare receipt')
   if (value.schema !== PREPARE_SCHEMA || typeof value.attemptId !== 'string'
@@ -1001,6 +1107,52 @@ function validatePrepareReceipt(loaded, requireFresh) {
     value.databases.n8n,
     loaded.reference.path,
   )
+  exactKeys(value.installation, [
+    'freshReadinessSha256', 'installAttemptId', 'payloads', 'revision',
+    'runtimeConvergenceProof', 'terminal', 'verification',
+  ], 'prepared installation handoff')
+  if (!/^[a-f0-9-]{36}$/u.test(value.installation.installAttemptId || '')
+    || !Number.isSafeInteger(value.installation.revision) || value.installation.revision < 1) {
+    fail('prepared installation handoff is invalid')
+  }
+  verifyReference(value.installation.verification, 'preinstall verification receipt', {
+    mode: 0o400, maximumBytes: MAX_JSON_BYTES,
+  })
+  verifyReference(value.installation.runtimeConvergenceProof, 'bootstrap runtime convergence proof', {
+    mode: 0o600, maximumBytes: MAX_JSON_BYTES,
+  })
+  if (!SHA256.test(value.installation.freshReadinessSha256 || '')
+    || !Object.values(value.installation.payloads || {}).every(item => SHA256.test(item))) {
+    fail('prepared installation readiness binding is invalid')
+  }
+  if (value.installation.terminal !== null) {
+    verifyReference(value.installation.terminal, 'preinstall terminal handoff', {
+      mode: 0o400, maximumBytes: MAX_JSON_BYTES,
+    })
+  }
+  const installStatus = validatePreinstallBinding(
+    dirname(dirname(value.installation.verification.path)),
+    value.installation.verification.path,
+    {
+      sourceCommit: value.sourceCommit,
+      target: {
+        slot: value.target.slot,
+        releaseId: value.target.releaseId,
+        releaseRoot: value.target.releaseRoot,
+        manifestSha256: value.target.manifest.sha256,
+      },
+      databases: value.databases,
+      transition: value.transition,
+    },
+    { requireFreshInstall: false },
+  )
+  if (installStatus.status.installAttemptId !== value.installation.installAttemptId
+    || installStatus.status.revision !== value.installation.revision
+    || canonicalJson(installStatus.status.verification) !== canonicalJson(value.installation.verification)
+    || (value.installation.terminal !== null
+      && canonicalJson(installStatus.status.terminal) !== canonicalJson(value.installation.terminal))) {
+    fail('prepared installation handoff changed')
+  }
   if (canonicalJson(value.databases) !== canonicalJson({
     mission: evidence.value.legacy.database,
     n8n: evidence.value.n8n.database,
@@ -1026,7 +1178,10 @@ function validatePrepareReceipt(loaded, requireFresh) {
 function prepare(values) {
   const attemptDirectory = values['--attempt-dir']
   safeEntry(attemptDirectory, 'attempt directory', 'directory', { mode: 0o700 })
-  if (readdirSync(attemptDirectory).length !== 0) fail('attempt directory must be empty')
+  const initialMembers = readdirSync(attemptDirectory)
+  if (canonicalJson(initialMembers.sort()) !== canonicalJson(['preinstall'])) {
+    fail('attempt directory must contain only the verified preinstall state')
+  }
   const evidenceLoaded = readJson(values['--evidence'], 'freeze evidence', { mode: 0o600 })
   const now = currentTime()
   const evidence = validateEvidence(evidenceLoaded, now)
@@ -1051,6 +1206,70 @@ function prepare(values) {
   })
   const verifier = captureVerifierReference()
   const output = join(attemptDirectory, RECEIPTS.prepare)
+  const initialInstallStatus = preinstallStatus(attemptDirectory)
+  const installationExpected = {
+    sourceCommit,
+    target: {
+      slot: evidence.target.slot,
+      releaseId: evidence.target.releaseId,
+      releaseRoot: evidence.target.releaseRoot,
+      manifestSha256: evidence.target.manifest.sha256,
+    },
+    databases: {
+      mission: evidence.value.legacy.database,
+      n8n: evidence.value.n8n.database,
+    },
+    transition: initialInstallStatus?.bindings?.transition,
+    evidenceObservedAt: evidence.value.observedAt,
+    evidenceSha256: evidenceLoaded.reference.sha256,
+    proofSha256: proofLoaded.reference.sha256,
+  }
+  const installation = validatePreinstallBinding(
+    attemptDirectory,
+    values['--install-verification'],
+    installationExpected,
+    {
+      allowVerified: true,
+      claimHandoff: false,
+      requireFreshInstall: initialInstallStatus?.phase === 'INSTALL_VERIFIED',
+    },
+  )
+  let freshInstallationReadiness
+  if (process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_PREINSTALL_STATUS === undefined) {
+    const claimedHandoff = claimBootstrapHandoff({
+      attemptDirectory,
+      installAttemptId: installation.status.installAttemptId,
+      expectedRevision: installation.status.revision,
+      runtimeConvergenceProofPath: values['--runtime-convergence-proof'],
+    })
+    freshInstallationReadiness = claimedHandoff.readiness
+    installation.status = inspectPreinstallAttempt(attemptDirectory)
+    installation.terminal = claimedHandoff.state.terminal.reference
+    installation.handoff = claimedHandoff.state.currentPostverifyAction.reference
+    if (freshInstallationReadiness.installAttemptId !== installation.status.installAttemptId
+      || freshInstallationReadiness.revision !== installation.status.revision
+      || canonicalJson(freshInstallationReadiness.verification)
+        !== canonicalJson(installation.verification)
+      || canonicalJson(freshInstallationReadiness.terminal)
+        !== canonicalJson(installation.terminal)) {
+      fail('installed payload or runtime convergence proof changed before bootstrap claim')
+    }
+  } else {
+    freshInstallationReadiness = {
+      runtimeConvergenceProof: readJson(
+        values['--runtime-convergence-proof'], 'test runtime convergence proof', { mode: 0o600 },
+      ).reference,
+      freshReadinessSha256: sha256('test preinstall readiness'),
+      payloads: {
+        videoCommandManifestSha256: '1'.repeat(64),
+        taskFlowManifestSha256: '2'.repeat(64),
+        directorBrainManifestSha256: '3'.repeat(64),
+      },
+      verification: installation.verification,
+      terminal: installation.terminal,
+    }
+    installation.handoff = null
+  }
   const transition = captureTransitionBinding(
     values,
     {
@@ -1061,7 +1280,18 @@ function prepare(values) {
     },
     evidence.value.n8n.database,
     output,
+    installation.terminal?.path
+      ?? join(attemptDirectory, 'preinstall', 'install-terminal-claim.receipt.json'),
+    installation.handoff?.path
+      ?? join(attemptDirectory, 'preinstall', 'install-postverify-action.r000001.claim.json'),
+    values['--runtime-convergence-proof'],
   )
+  if (transition.attestation.sha256 !== installation.status.bindings.transition.attestation.sha256
+    || transition.committedJournalHeadSha256
+      !== installation.status.bindings.transition.committedJournalHeadSha256
+    || transition.liveCombinedSha256 !== installation.status.bindings.transition.liveCombinedSha256) {
+    fail('workflow transition changed between preinstall handoff and bootstrap claim')
+  }
   const transitionClaim = readJson(
     transition.claim.path,
     'workflow transition bootstrap claim',
@@ -1085,6 +1315,15 @@ function prepare(values) {
       n8n: evidence.value.n8n.database,
     },
     routing,
+    installation: {
+      installAttemptId: installation.status.installAttemptId,
+      revision: installation.status.revision,
+      verification: installation.verification,
+      terminal: installation.terminal,
+      runtimeConvergenceProof: freshInstallationReadiness.runtimeConvergenceProof,
+      freshReadinessSha256: freshInstallationReadiness.freshReadinessSha256,
+      payloads: freshInstallationReadiness.payloads,
+    },
     verifier,
     transition,
     guard: {

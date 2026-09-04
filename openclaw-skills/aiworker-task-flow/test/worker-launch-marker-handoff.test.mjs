@@ -299,7 +299,7 @@ test('authorization fails closed on every bound identity drift before consumptio
 
         const result = await waitForExit(running)
         assert.equal(result.code, 1)
-        assert.match(result.stderr, /(?:启动授权(?:与 marker、worker、全局锁或 final readiness 不匹配|在消费前发生漂移)|视频队列锁(?:发布后身份不一致|在读取时已变化))/u)
+        assert.match(result.stderr, /(?:启动授权(?:与 marker、worker、全局锁或 final readiness 不匹配|在消费前发生漂移)|视频队列启动标记在读取(?:前|时)已变化|视频队列锁(?:发布后身份不一致|在读取时已变化))/u)
         assert.equal(await pathExists(marker), true)
         assert.equal(await pathExists(authorization), true)
       } finally {

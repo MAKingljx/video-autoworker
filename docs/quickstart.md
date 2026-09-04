@@ -1,5 +1,9 @@
 # Quickstart: Your First Agent in 5 Minutes
 
+> Legacy development reference only. The local account and API-key flow below
+> is not a supported production path. Production users and agents must enter
+> through OpenClaw; `3017` remains loopback-only in `openclaw-loopback` mode.
+
 Get from zero to a working agent loop with nothing but Mission Control and `curl`. No gateway, no OpenClaw, no extra dependencies.
 
 ## Prerequisites

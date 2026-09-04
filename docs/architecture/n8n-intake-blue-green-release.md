@@ -208,14 +208,15 @@ TTL 到期或受管 revoke 会自动 rollback 并清理 socket/token，崩溃残
 证据只写入 mode `0700` 安全目录，以独占 hard-link publish 原子创建 mode `0600` 文件。bootstrap
 使用 Bash 3.2 兼容的固定 FD 9，并在 SIGTERM 紧前再次做完整双快照。
 
-停止 legacy 前还必须由 `legacy-bootstrap-controller.mjs` 完成 prepare → 当前状态复核 → apply；部署器
+统一 preinstall 已 terminal success 并交付同一 attempt 的 handoff 后，停止 legacy 前还必须由
+`legacy-bootstrap-controller.mjs` 完成 prepare → 当前状态复核 → apply；部署器
 只消费同一次 `SHUTDOWN_REQUESTED` 收据，并逐项绑定提交、release、manifest、evidence、proof、
 双库和 router 路径。legacy 停止后 guard 进入 `recovery-hold`：只释放 Mission Control 写锁供新槽
 迁移和启动，继续持有 n8n 写锁；新槽、暂停闸门、router 和最终工作流复核全部成功后才释放。
 `bootstrap.pending` 存在期间，init/stage/bind/retire/switch/rollback 全部失败关闭，只有只读 status
 和完整绑定的 bootstrap 恢复可进入。
 
-数据库迁移与 OpenClaw 插件安装是两条明确边界：导演脑 `0.4.0` 安装器不打开或迁移 Mission
+数据库迁移与 OpenClaw 插件安装是两条明确边界：统一 orchestrator 调用的导演脑 `0.4.0` 安装器不打开或迁移 Mission
 Control SQLite；058/059 只由目标 3017 release 的应用迁移器在受控 bootstrap 中创建。已发布的
 057 迁移块永久冻结，058/059 只允许静态 `CREATE TABLE/INDEX IF NOT EXISTS`，不更新、不回填、不删除
 既有行。首次迁移前的双库 online backup 属于 rollback proof；bootstrap 成功后旧
@@ -346,6 +347,14 @@ Git 提交校验实际文件。
 
 蓝绿脚本不自动安装或重启 OpenClaw。生产变更单必须显式列出 plugin、Skill、3017 的兼容矩阵
 与分项回滚顺序，不能把 release 内附带源码误当作 Gateway 已加载的新载荷。
+
+首次 legacy 发布的三项安装、唯一一次目标 Gateway fresh restart、runtime convergence 与集中
+readiness 必须由 `legacy-preinstall-orchestrator.mjs` 统一编排。orchestrator 从 canonical 干净 Git
+仓库执行，standalone 内的发布控制源码只用于来源与完整性闭包；它不是一个可脱离仓库独立运行的
+控制面。成功 terminal handoff 后才允许 bootstrap controller 进入 `prepare -> current-confirm -> apply`。
+任一组件失败时固定逆序恢复 runtime convergence、director-brain、video-command、task-flow；如果已经
+发生前向 restart，全部磁盘恢复后只做一次 recovery restart。不得为失败重启 n8n、3017、模型、
+video worker 或重提任务。
 
 video-command、task-flow 与 director-brain 三个共享安装器统一占用 blue/green 的
 `.deployment.lock`；入口 `drain`、`resume` 以及新 `directorWork` 从作品解析到任务准入也必须先以

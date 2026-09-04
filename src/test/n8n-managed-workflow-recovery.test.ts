@@ -489,12 +489,118 @@ function createTransitionBinding(options: {
     '--journal-dir', journal, '--live-report', options.workflowReport,
     '--verifier', workflowVerifier, '--output', attestation,
   )
+  const preinstallRoot = join(options.attempt, 'preinstall')
+  mkdirSync(preinstallRoot, { recursive: true, mode: 0o700 })
+  const installAttemptId = '33333333-3333-4333-8333-333333333333'
+  const intentValue = JSON.parse(readFileSync(intent, 'utf8')) as JsonRecord
+  const databaseFamily = intentValue.database as JsonRecord[]
+  const journalHeadName = readdirSync(journal)
+    .filter(name => /^\d{6}-/u.test(name)).sort().at(-1)!
+  const liveReportValue = JSON.parse(readFileSync(options.workflowReport, 'utf8')) as JsonRecord
+  const preparedPath = join(preinstallRoot, 'install-prepared.r000001.receipt.json')
+  const prepared = {
+    schema: 'video-autoworker-legacy-preinstall-prepared/v1',
+    installAttemptId,
+    revision: 1,
+    sourceCommit: commit,
+    target: {
+      slot: 'blue', releaseId: options.releaseId, releaseRoot: options.releaseRoot,
+      manifestSha256: options.manifestSha256,
+    },
+    databases: { n8n: databaseFamily[0] },
+    transition: {
+      attestation: fileReference(attestation),
+      committedJournalHeadSha256: sha256(readFileSync(join(journal, journalHeadName))),
+      liveCombinedSha256: liveReportValue.combinedSha256,
+    },
+  }
+  writeReferencedJson(preparedPath, prepared, 0o400)
+  const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
+  const preparedReference = fileReference(preparedPath)
+  writeReferencedJson(verificationPath, {
+    schema: 'video-autoworker-legacy-preinstall-verified/v1',
+    installAttemptId,
+    revision: 1,
+    prepared: preparedReference,
+  }, 0o400)
+  const convergenceProof = join(preinstallRoot, 'runtime-convergence-proof.json')
+  writeReferencedJson(convergenceProof, {
+    schema: 'video-autoworker-openclaw-runtime-convergence-proof/v1',
+    observedAt: 1_800_000_000,
+  }, 0o600)
+  const componentJournalHead = join(preinstallRoot, 'install-component-event.000003.receipt.json')
+  writeReferencedJson(componentJournalHead, {
+    schema: 'video-autoworker-legacy-preinstall-component-event/v1',
+    installAttemptId,
+    operation: 'install',
+    component: 'director-brain',
+  }, 0o400)
+  const finalizePath = join(preinstallRoot, 'install-finalize-claim.receipt.json')
+  writeReferencedJson(finalizePath, {
+    schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
+    choice: 'bootstrap-handoff',
+    installAttemptId,
+    revision: 1,
+    uid: process.getuid!(),
+    claimedAt: 1_800_000_000,
+    journalHead: fileReference(componentJournalHead),
+  }, 0o400)
+  const handoffPath = join(preinstallRoot, 'install-postverify-action.r000001.claim.json')
+  const handoffPayload = {
+    finalize: fileReference(finalizePath),
+    componentJournalHead: fileReference(componentJournalHead),
+    verification: fileReference(verificationPath),
+    readiness: fileReference(verificationPath),
+    runtimeConvergenceProof: fileReference(convergenceProof),
+    freshReadinessSha256: 'd'.repeat(64),
+    payloads: {
+      videoCommandManifestSha256: 'e'.repeat(64),
+      taskFlowManifestSha256: 'f'.repeat(64),
+      directorBrainManifestSha256: '0'.repeat(64),
+    },
+    binding: {
+      sourceCommit: commit,
+      target: prepared.target,
+      databases: prepared.databases,
+      transition: {
+        attestationSha256: fileReference(attestation).sha256,
+        committedJournalHeadSha256: prepared.transition.committedJournalHeadSha256,
+        liveCombinedSha256: prepared.transition.liveCombinedSha256,
+      },
+    },
+  }
+  writeReferencedJson(handoffPath, {
+    schema: 'video-autoworker-legacy-preinstall-postverify-action/v1',
+    choice: 'bootstrap-handoff',
+    installAttemptId,
+    revision: 1,
+    uid: process.getuid!(),
+    claimedAt: 1_800_000_000,
+    payload: handoffPayload,
+  }, 0o400)
+  const preinstallTerminal = join(preinstallRoot, 'install-terminal-claim.receipt.json')
+  writeReferencedJson(preinstallTerminal, {
+    schema: 'video-autoworker-legacy-preinstall-terminal-claim/v1',
+    choice: 'bootstrap-handoff',
+    installAttemptId,
+    revision: 1,
+    uid: process.getuid!(),
+    claimedAt: 1_800_000_000,
+    prepared: preparedReference,
+    verification: fileReference(verificationPath),
+    handoff: fileReference(handoffPath),
+    handoffPayloadSha256: sha256(canonicalJson(handoffPayload)),
+  }, 0o400)
   runTransition(
     'claim-bootstrap', '--intent', intent, '--confirmation', confirmation,
     '--journal-dir', journal, '--attestation', attestation,
     '--prepare-path', join(options.attempt, 'prepare.receipt.json'), '--slot', 'blue',
     '--release-id', options.releaseId, '--release-root', options.releaseRoot,
-    '--manifest-sha256', options.manifestSha256, '--output', claim,
+    '--manifest-sha256', options.manifestSha256,
+    '--preinstall-terminal', preinstallTerminal,
+    '--preinstall-handoff', handoffPath,
+    '--runtime-convergence-proof', convergenceProof,
+    '--output', claim,
   )
   const claimValue = JSON.parse(readFileSync(claim, 'utf8')) as JsonRecord
   const transition = child(claimValue, 'transition')

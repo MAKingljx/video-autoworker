@@ -34,9 +34,18 @@ execution chain.
   resolution, or installer rollback/commit from observing different shared component trees; exact
   idempotent replays remain available without contacting Feishu. The initial legacy migration can
   use only a fresh, database-and-target-bound bootstrap evidence chain.
+- External identity and authorization terminate at OpenClaw. Mission Control `3017`, n8n, and the
+  director brain communicate only over controlled loopback and do not add a second user token.
+- The first legacy release is installed through one mandatory preinstall orchestrator, not by
+  manually chaining the three component installers. It records an append-only component journal,
+  installs task-flow, video-command, and director-brain in that order, performs exactly one fresh
+  `qwen-current` restart, converges the runtime configuration, verifies readiness, and emits a
+  terminal handoff before the legacy bootstrap controller may continue. Failure compensates in
+  reverse component order and, only when a forward restart occurred, performs one recovery restart
+  after the on-disk state has been restored.
 
-The current candidate versions are director-brain `0.3.1` and video-command `0.5.14`. The remote
-OpenClaw read/query entry was previously accepted on director-brain `0.3.0`; the `0.3.1` projection
+The current candidate versions are director-brain `0.4.0` and video-command `0.5.14`. The remote
+OpenClaw read/query entry was previously accepted on director-brain `0.3.0`; the `0.4.0` projection
 chain must not be described as production until its immutable release is installed, switched, and
 verified against a real video. DaVinci integration, editing-software timelines, rendering, export,
 and every other editing side effect are intentionally outside the current scope.
@@ -75,6 +84,10 @@ pnpm install --frozen-lockfile
 pnpm build
 PORT=3017 MC_OPENCLAW_PROFILES_REBUILD=0 pnpm start
 ```
+
+`pnpm start` is the managed standalone entrypoint. It fails closed unless the
+application uses OpenClaw loopback authentication and binds to `127.0.0.1`.
+Do not launch `next start` or `.next/standalone/server.js` directly.
 
 ## Runtime Data
 
