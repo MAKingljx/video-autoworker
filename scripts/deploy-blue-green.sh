@@ -11,6 +11,7 @@ STATE_FILE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
 LOCK_DIR="$RUN_DIR/.deployment.lock"
 AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
 DIRECTOR_VIDEO_READINESS="$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs"
+SHARED_DEPLOYMENT_LOCK_SHELL="$PROJECT_ROOT/scripts/lib/shared-deployment-lock.sh"
 NODE_BIN="${NODE_BIN:-node}"
 ROUTER_HOST="${AIWORKER_BG_ROUTER_HOST:-127.0.0.1}"
 ROUTER_PORT="${AIWORKER_BG_ROUTER_PORT:-3017}"
@@ -30,6 +31,7 @@ LEADER_TIMEOUT_SECONDS="${AIWORKER_BG_LEADER_TIMEOUT_SECONDS:-90}"
 RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
 STAGING_WORK_ROOT=""
 BOOTSTRAP_MAINTENANCE=0
+DEPLOYMENT_SOURCE_GATE_COMPLETE=0
 
 cleanup_operation() {
   if [[ -n "$STAGING_WORK_ROOT" ]]; then
@@ -39,8 +41,10 @@ cleanup_operation() {
       "$physical_releases"/.staging-*) rm -rf -- "$STAGING_WORK_ROOT" ;;
     esac
   fi
-  rm -f -- "$LOCK_DIR/pid" 2>/dev/null || true
-  rmdir -- "$LOCK_DIR" 2>/dev/null || true
+  if [[ "${DEPLOYMENT_LOCK_OWNED:-0}" == 1 ]]; then
+    release_shared_deployment_lock \
+      || printf 'error: unable to release the shared deployment lock safely\n' >&2
+  fi
   if (( BOOTSTRAP_MAINTENANCE == 1 )); then
     printf 'error: bootstrap remains in externally frozen maintenance mode; do not reopen ingress\n' >&2
   fi
@@ -95,6 +99,61 @@ fail() {
   exit 1
 }
 
+verify_deployment_source_gate() {
+  (( DEPLOYMENT_SOURCE_GATE_COMPLETE == 0 )) || return 0
+  local invoked_path expected_path git_root head relative absolute worktree_blob head_blob status
+  local -a critical_paths=(
+    scripts/deploy-blue-green.sh
+    scripts/lib/shared-deployment-lock.sh
+    scripts/lib/shared-deployment-lock.mjs
+    scripts/check-standalone-artifact.mjs
+    scripts/verify-director-video-release-readiness.mjs
+    scripts/lib/director-extraction-release-provenance.mjs
+    scripts/lib/openclaw-runtime-convergence.mjs
+    scripts/manage-blue-green-services.sh
+    scripts/install-blue-green-launch-agents.sh
+    scripts/start-standalone-slot.sh
+    scripts/generate-legacy-freeze-evidence.mjs
+    scripts/generate-legacy-bootstrap-rollback-proof.mjs
+    scripts/legacy-freeze-guard.mjs
+    scripts/legacy-bootstrap-controller.mjs
+    scripts/verify-n8n-blue-green-workflows.mjs
+    ops/n8n/workflows/aiworker-task-intake.json
+    ops/n8n/workflows/aiworker-video-analysis.json
+  )
+  [[ ! -L "${BASH_SOURCE[0]}" ]] || fail "deploy entrypoint must not be a symbolic link"
+  invoked_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  expected_path="$PROJECT_ROOT/scripts/deploy-blue-green.sh"
+  [[ "$invoked_path" == "$expected_path" && -f "$expected_path" && ! -L "$expected_path" ]] \
+    || fail "deploy entrypoint path does not match the canonical repository script"
+  git_root="$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)" \
+    || fail "deployment source is not inside a Git worktree"
+  git_root="$(cd "$git_root" && pwd -P)"
+  [[ "$git_root" == "$PROJECT_ROOT" ]] \
+    || fail "deployment source Git root does not match the repository root"
+  head="$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
+    || fail "deployment source has no complete Git HEAD"
+  [[ "$head" =~ ^[a-f0-9]{40}$ ]] || fail "deployment source Git HEAD is invalid"
+  for relative in "${critical_paths[@]}"; do
+    absolute="$PROJECT_ROOT/$relative"
+    [[ -f "$absolute" && ! -L "$absolute" ]] \
+      || fail "critical deployment source is missing or unsafe: $relative"
+    GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" ls-files --error-unmatch -- "$relative" >/dev/null 2>&1 \
+      || fail "critical deployment source is not tracked: $relative"
+    head_blob="$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" rev-parse "HEAD:$relative" 2>/dev/null)" \
+      || fail "critical deployment source is absent from Git HEAD: $relative"
+    worktree_blob="$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" hash-object -- "$absolute" 2>/dev/null)" \
+      || fail "unable to hash critical deployment source: $relative"
+    [[ "$head_blob" =~ ^[a-f0-9]{40}$ && "$worktree_blob" == "$head_blob" ]] \
+      || fail "critical deployment source differs from Git HEAD: $relative"
+  done
+  status="$(GIT_OPTIONAL_LOCKS=0 git -C "$PROJECT_ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null)" \
+    || fail "unable to verify deployment source worktree state"
+  [[ -z "$status" ]] \
+    || fail "deployment source worktree and index must be clean before any blue-green mutation"
+  DEPLOYMENT_SOURCE_GATE_COMPLETE=1
+}
+
 verify_director_video_release_chain() {
   local release_id="$1"
   local release_root="$2"
@@ -110,7 +169,8 @@ verify_director_video_release_chain() {
     --release-id "$release_id" \
     --release-root "$release_root" \
     --live-db-path "$LIVE_DB_PATH" \
-    --repository-release-mode "$repository_release_mode")" \
+    --repository-release-mode "$repository_release_mode" \
+    --verification-phase full)" \
     || { printf 'error: 3017, video-command, task-flow, director-brain, or projection outbox is incompatible\n' >&2; return 1; }
   "$NODE_BIN" - "$report" "$release_id" <<'NODE' \
     || { printf 'error: director/video release-readiness verifier returned an invalid report\n' >&2; return 1; }
@@ -126,9 +186,89 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)
   || value?.projectionOutbox?.currentDigest !== digest
   || value?.projectionOutbox?.incompatiblePending !== 0
+  || value?.projectionOutbox?.deliveredWithoutValidReceipt !== 0
+  || value?.projectionOutbox?.outOfScopeOutbox !== 0
+  || value?.projectionOutbox?.outOfScopeExtraction !== 0
+  || value?.extraction?.schema !== 'video-autoworker-director-extraction-readiness/v1'
+  || value?.extraction?.expectedProjectionVersion !== 'feishu-candidate-projection-v2'
+  || value?.extraction?.activePhases !== 0
+  || value?.extraction?.sourcesWithoutPhase !== 0
+  || value?.extraction?.invalidPhaseBindings !== 0
+  || value?.extraction?.invalidCheckpoints !== 0
+  || value?.extraction?.invalidProjectionReceipts !== 0
+  || value?.extraction?.invalidReviewReceipts !== 0
+  || value?.extraction?.missingPredecessorReviews !== 0
+  || value?.extraction?.incompatibleProjectionBoundary !== 0
   || value?.contracts?.directorWork !== true
   || value?.contracts?.outboxClosure !== true
-  || value?.contracts?.projectionContractCompatible !== true) process.exit(3)
+  || value?.contracts?.extractionSourceProvenance !== true
+  || value?.contracts?.standaloneArtifactContentBound !== true
+  || value?.contracts?.projectionContractCompatible !== true
+  || value?.contracts?.extractionLifecycleComplete !== true
+  || value?.contracts?.sessionScopedRuntimeConvergence !== true
+  || value?.runtimeConvergence?.schema
+    !== 'video-autoworker-openclaw-runtime-convergence-proof/v1'
+  || value?.provenance?.schema !== 'video-autoworker-standalone-provenance/v2'
+  || value?.provenance?.gitCommit !== value.commit
+  || !Number.isSafeInteger(value?.provenance?.sourceFiles)
+  || value.provenance.sourceFiles < 1
+  || typeof value?.provenance?.sha256 !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.provenance.sha256)
+  || value?.provenance?.artifactContent?.schema
+    !== 'video-autoworker-standalone-artifact-content/v1'
+  || value?.provenance?.artifactContent?.algorithm !== 'sha256'
+  || typeof value?.provenance?.artifactContent?.digest !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.provenance.artifactContent.digest)
+  || !Number.isSafeInteger(value?.provenance?.artifactContent?.directories)
+  || value.provenance.artifactContent.directories < 0
+  || !Number.isSafeInteger(value?.provenance?.artifactContent?.files)
+  || value.provenance.artifactContent.files < 1
+  || !Number.isSafeInteger(value?.provenance?.artifactContent?.symlinks)
+  || value.provenance.artifactContent.symlinks < 0
+  || typeof value?.runtimeConvergence?.sessionKeySha256 !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.runtimeConvergence.sessionKeySha256)) process.exit(3)
+process.stdout.write(digest)
+NODE
+}
+
+verify_director_video_release_preflight() {
+  local release_id="$1"
+  local release_root="$2"
+  local report
+  [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
+    || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
+  report="$("$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
+    --repository-root "$PROJECT_ROOT" \
+    --releases-root "$RELEASES_DIR" \
+    --release-id "$release_id" \
+    --release-root "$release_root" \
+    --repository-release-mode head \
+    --verification-phase pre-bootstrap)" \
+    || { printf 'error: immutable release, installed payload, or runtime convergence preflight failed\n' >&2; return 1; }
+  "$NODE_BIN" - "$report" "$release_id" <<'NODE' \
+    || { printf 'error: director/video pre-bootstrap verifier returned an invalid report\n' >&2; return 1; }
+const [raw, releaseId] = process.argv.slice(2)
+let value
+try { value = JSON.parse(raw) } catch { process.exit(2) }
+const digest = value?.payloads?.projectionContract?.currentDigest
+const commitPrefix = releaseId.replace(/-runtime$/u, '')
+if (value?.schema !== 'video-autoworker-director-video-preflight/v1'
+  || value?.phase !== 'pre-bootstrap' || value?.ok !== true
+  || value?.app?.releaseId !== releaseId
+  || typeof value?.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.commit)
+  || !value.commit.startsWith(commitPrefix)
+  || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)
+  || value?.provenance?.schema !== 'video-autoworker-standalone-provenance/v2'
+  || value?.provenance?.gitCommit !== value.commit
+  || value?.provenance?.artifactContent?.schema
+    !== 'video-autoworker-standalone-artifact-content/v1'
+  || value?.runtimeConvergence?.schema
+    !== 'video-autoworker-openclaw-runtime-convergence-proof/v1'
+  || value?.contracts?.directorWork !== true
+  || value?.contracts?.outboxClosure !== true
+  || value?.contracts?.extractionSourceProvenance !== true
+  || value?.contracts?.standaloneArtifactContentBound !== true
+  || value?.contracts?.sessionScopedRuntimeConvergence !== true) process.exit(3)
 process.stdout.write(digest)
 NODE
 }
@@ -167,11 +307,9 @@ assert_safe_integer() {
   (( 10#$2 <= 65535 )) || fail "$1 exceeds 65535"
 }
 
-prepare_run_dir() {
+validate_run_configuration() {
   assert_absolute "AIWORKER_BG_RUN_DIR" "$RUN_DIR"
   assert_absolute "AIWORKER_BG_RELEASES_DIR" "$RELEASES_DIR"
-  mkdir -p "$RUN_DIR/slots" "$RELEASES_DIR"
-  chmod 700 "$RUN_DIR" "$RUN_DIR/slots"
   [[ "$PROBE_PATH" == /* && "$PROBE_PATH" != *[$'\r\n ']* ]] \
     || fail "AIWORKER_BG_PROBE_PATH must be one local absolute HTTP path"
   [[ "$READINESS_PATH" == /* && "$READINESS_PATH" != *[$'\r\n ']* ]] \
@@ -193,15 +331,31 @@ prepare_run_dir() {
     || fail "AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS must be between 30 and 14400"
 }
 
+prepare_run_dir() {
+  validate_run_configuration
+  mkdir -p "$RUN_DIR/slots" "$RELEASES_DIR"
+  chmod 700 "$RUN_DIR" "$RUN_DIR/slots"
+}
+
+assert_existing_run_layout() {
+  validate_run_configuration
+  [[ -d "$RUN_DIR" && ! -L "$RUN_DIR" ]] || fail "blue-green run directory does not exist"
+  [[ -d "$RUN_DIR/slots" && ! -L "$RUN_DIR/slots" ]] || fail "blue-green slots directory does not exist"
+  [[ -d "$RELEASES_DIR" && ! -L "$RELEASES_DIR" ]] || fail "blue-green releases directory does not exist"
+}
+
 acquire_lock() {
-  prepare_run_dir
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    fail "another blue-green operation holds $LOCK_DIR"
-  fi
-  chmod 700 "$LOCK_DIR"
-  printf '%s\n' "$$" > "$LOCK_DIR/pid"
-  chmod 600 "$LOCK_DIR/pid"
+  verify_deployment_source_gate
+  # Source only after its exact HEAD blob has passed the fail-closed gate.
+  # shellcheck source=scripts/lib/shared-deployment-lock.sh
+  source "$SHARED_DEPLOYMENT_LOCK_SHELL"
+  DEPLOYMENT_RUN_DIR="$RUN_DIR"
+  DEPLOYMENT_LOCK_DIR="$LOCK_DIR"
+  export DEPLOYMENT_RUN_DIR DEPLOYMENT_LOCK_DIR
+  acquire_shared_deployment_lock \
+    || fail "another blue-green operation holds $LOCK_DIR or its stale owner is unsafe"
   trap cleanup_operation EXIT
+  prepare_run_dir
 }
 
 validate_release_id() {
@@ -1287,7 +1441,7 @@ bootstrap_baseline() {
   local pending pending_payload binding_payload state_payload baseline_payload other_slot listeners deadline
   local evidence_max_age evidence_age pending_exists=0 manager installer intake_revision baseline_readiness baseline_epoch
   local workflow_compatibility workflow_compatibility_after workflow_compatibility_final workflow_digest source_commit
-  local workflow_report
+  local workflow_report bootstrap_preflight_contract baseline_verified_contract
   local evidence_fd=9 evidence_generator rollback_generator verified_evidence_sha guard_controller guard_socket guard_token
   local evidence_verify_mode=--verify-evidence-fd evidence_static_recovery=0 pending_probe pending_legacy_pid pending_evidence_sha
   local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status guard_mode
@@ -1449,6 +1603,14 @@ NODE
   physical_root="$(assert_release "$release_id" "$standalone_root")"
   manifest="$(release_manifest_sha "$physical_root")"
   source_commit="$(resolve_baseline_source_commit "$release_id")"
+  # Phase 1 is intentionally process-independent: the immutable application
+  # release, installed OpenClaw payloads, and runtime-convergence proof must all
+  # pass before any pending marker is written or the legacy PID can be stopped.
+  # The database/extraction half remains a phase-2 check after the new release
+  # has run its append-only migrations.
+  bootstrap_preflight_contract="$(verify_director_video_release_preflight \
+    "$release_id" "$physical_root")" \
+    || fail "baseline immutable release preflight failed before legacy shutdown"
   evidence_generator="$PROJECT_ROOT/scripts/generate-legacy-freeze-evidence.mjs"
   [[ -f "$evidence_generator" && ! -L "$evidence_generator" ]] \
     || fail "managed legacy freeze evidence generator is unavailable"
@@ -2036,8 +2198,10 @@ NODE
   baseline_epoch="$(printf '%s\n' "$baseline_readiness" | sed -n '2p')"
   verify_routed_release "$slot" "$release_id" 1 "$intake_revision" "$baseline_epoch" \
     || fail "baseline routed health, page, or read-only API verification failed"
-  verify_director_video_release_chain "$release_id" "$physical_root" >/dev/null \
+  baseline_verified_contract="$(verify_director_video_release_chain "$release_id" "$physical_root")" \
     || fail "baseline director/video release chain is incompatible"
+  [[ "$baseline_verified_contract" == "$bootstrap_preflight_contract" ]] \
+    || fail "post-migration projection contract differs from the pre-shutdown release preflight"
   "$manager" status "$slot" >/dev/null \
     && "$manager" status router >/dev/null \
     || fail "baseline processes are healthy but not under the expected service manager"
@@ -2508,7 +2672,7 @@ probe_slot() {
   slot="$(require_slot "${1:-}")"
   required_role="${2:-any}"
   [[ "$required_role" == any || "$required_role" == active ]] || fail "invalid required runtime role"
-  prepare_run_dir
+  assert_existing_run_layout
   values="$(binding_values "$slot")" || fail "$slot binding is invalid"
   release_id="$(printf '%s\n' "$values" | sed -n '1p')"
   release_root="$(printf '%s\n' "$values" | sed -n '2p')"
@@ -2983,7 +3147,7 @@ show_status() {
     ' "$pending" || fail "bootstrap recovery pending marker is invalid"
     return
   fi
-  prepare_run_dir
+  assert_existing_run_layout
   validate_state
   local active release_id generation
   active="$(read_state_field active)"
@@ -3006,7 +3170,7 @@ show_status() {
 
 attest_current() {
   local active release_id release_root generation port readiness evidence verified_contract
-  prepare_run_dir
+  assert_existing_run_layout
   validate_state
   assert_baseline >/dev/null
   active="$(read_state_field active)"

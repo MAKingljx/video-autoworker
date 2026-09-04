@@ -20,10 +20,12 @@ import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 import Database from 'better-sqlite3'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
-const installer = resolve(process.cwd(), 'scripts/install-aiworker-director-brain.sh')
+const sourceRepository = process.cwd()
+let installerRepository = ''
+let installer = resolve(sourceRepository, 'scripts/install-aiworker-director-brain.sh')
 
 type InstallerProfile = {
   agents: {
@@ -49,6 +51,48 @@ async function initializeGitRepository(pathname: string) {
   await mkdir(pathname, { recursive: true })
   await execFileAsync('git', ['init', '--quiet', pathname], { encoding: 'utf8' })
 }
+
+async function initializeCleanInstallerRepository() {
+  installerRepository = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-source-'))
+  const sources = [
+    'package.json',
+    'openclaw-plugins/aiworker-director-brain',
+    'openclaw-skills/aiworker-director-brain',
+    'ops/feishu-director-brain/schema.json',
+    'scripts/install-aiworker-director-brain.sh',
+    'scripts/feishu-director-brain.mjs',
+    'scripts/verify-shared-runtime-install-gate.mjs',
+    'scripts/lib/feishu-director-brain.mjs',
+    'scripts/lib/runtime-safe-offline-queue.mjs',
+    'scripts/lib/sensitive-value-scanner.mjs',
+    'scripts/lib/shared-deployment-lock.mjs',
+    'scripts/lib/shared-deployment-lock.sh',
+  ]
+  for (const relative of sources) {
+    const destination = resolve(installerRepository, relative)
+    await mkdir(resolve(destination, '..'), { recursive: true })
+    await cp(resolve(sourceRepository, relative), destination, { recursive: true })
+  }
+  await execFileAsync('git', ['init', '--quiet', installerRepository], { encoding: 'utf8' })
+  await execFileAsync('git', ['-C', installerRepository, 'add', '.'], { encoding: 'utf8' })
+  await execFileAsync('git', [
+    '-C', installerRepository,
+    '-c', 'user.name=installer-test',
+    '-c', 'user.email=installer-test@example.invalid',
+    'commit', '--quiet', '-m', 'isolated installer fixture',
+  ], { encoding: 'utf8' })
+  await writeFile(resolve(installerRepository, '.git/info/exclude'), 'node_modules\n')
+  await symlink(resolve(sourceRepository, 'node_modules'), resolve(installerRepository, 'node_modules'))
+  installer = resolve(installerRepository, 'scripts/install-aiworker-director-brain.sh')
+}
+
+beforeAll(async () => {
+  await initializeCleanInstallerRepository()
+})
+
+afterAll(async () => {
+  if (installerRepository) await rm(installerRepository, { recursive: true, force: true })
+})
 
 async function createFixture(root: string) {
   await mkdir(root, { recursive: true })
@@ -181,6 +225,27 @@ describe('transactional director-brain OpenClaw installer', () => {
     expect(script).not.toContain('test-catalog.json" "$plugin_destination')
   })
 
+  it('rejects a dirty canonical source before creating a rollback point', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-dirty-source-'))
+    const dirtySource = resolve(installerRepository, 'untracked-installer-input.txt')
+    try {
+      const fixture = await createFixture(root)
+      await writeFile(dirtySource, 'untracked\n')
+
+      await expect(runInstaller(fixture, '--apply'))
+        .rejects.toThrow(/source Git worktree is not clean/u)
+
+      expect(await exists(fixture.backupRoot)).toBe(false)
+      expect(await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/old.txt',
+      ), 'utf8')).toBe('old plugin\n')
+    } finally {
+      await rm(dirtySource, { force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects filesystem root, HOME, and repository root as managed paths', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-broad-path-'))
     try {
@@ -195,7 +260,7 @@ describe('transactional director-brain OpenClaw installer', () => {
         [
           '--state-dir', fixture.stateDir,
           '--workspace', fixture.workspace,
-          '--backup-root', process.cwd(),
+          '--backup-root', installerRepository,
         ],
       ]
       for (const attempt of attempts) {
@@ -326,7 +391,7 @@ describe('transactional director-brain OpenClaw installer', () => {
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT: 'backup-root-ancestor-swap',
         AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_SYNC_DIR: syncDir,
       })
-      await waitForPath(resolve(syncDir, 'prelock-ready'), 200)
+      await waitForPath(resolve(syncDir, 'prelock-ready'), 5_000)
       await writeFile(resolve(syncDir, 'prelock-continue'), 'continue\n')
       await waitForPath(resolve(syncDir, 'backup-root-ready'))
       await symlink(gitTarget, missingAncestor)
@@ -421,7 +486,7 @@ describe('transactional director-brain OpenClaw installer', () => {
     }
   })
 
-  it('creates a trust allowlist when the profile did not already have one', async () => {
+  it('preserves discovery mode when the profile did not already have an allowlist', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-trust-'))
     try {
       const fixture = await createFixture(root)
@@ -433,10 +498,13 @@ describe('transactional director-brain OpenClaw installer', () => {
 
       await runInstaller(fixture, '--apply')
       const installed = JSON.parse(await readFile(configPath, 'utf8'))
-      expect(installed.plugins.allow).toEqual([
-        'memory-core',
-        'aiworker-director-brain',
-      ])
+      expect(installed.plugins.allow).toBeUndefined()
+      expect(installed.plugins.entries['memory-core']).toEqual({ enabled: true })
+      expect(installed.plugins.entries['aiworker-director-brain']).toEqual({
+        enabled: true,
+        hooks: { allowConversationAccess: true },
+        config: { releaseReady: true, targetAgentId: 'dev' },
+      })
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -484,8 +552,34 @@ describe('transactional director-brain OpenClaw installer', () => {
       ))).toBe(true)
       expect(await exists(resolve(
         fixture.stateDir,
+        'extensions/aiworker-director-brain/runtime/scripts/lib/sensitive-value-scanner.mjs',
+      ))).toBe(true)
+      expect(await exists(resolve(
+        fixture.stateDir,
         'extensions/aiworker-director-brain/runtime/ops/feishu-director-brain/schema.json',
       ))).toBe(true)
+      expect(await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/lib/director-context-summary.js',
+      ), 'utf8')).toContain('buildDirectorContextSummary')
+      expect(await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/lib/sensitive-narrative-text.js',
+      ), 'utf8')).toContain('containsSensitiveNarrativeValue')
+      expect(await readFile(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/lib/transcript-tool-result-projection.js',
+      ), 'utf8')).toContain('projectAiworkerMessageForTargetAgent')
+      expect((await readdir(resolve(
+        fixture.stateDir,
+        'extensions/aiworker-director-brain/lib',
+      ))).toSorted()).toEqual([
+        'director-brain-tool.js',
+        'director-context-summary.js',
+        'director-system-question-router.js',
+        'sensitive-narrative-text.js',
+        'transcript-tool-result-projection.js',
+      ])
       expect(await exists(resolve(
         fixture.workspace,
         'skills/aiworker-director-brain/SKILL.md',
@@ -499,6 +593,7 @@ describe('transactional director-brain OpenClaw installer', () => {
       expect(config.plugins.allow).toEqual(['memory-core', 'aiworker-director-brain'])
       expect(config.plugins.entries['aiworker-director-brain']).toEqual({
         enabled: true,
+        hooks: { allowConversationAccess: true },
         config: { releaseReady: true, targetAgentId: 'dev' },
       })
       expect(config.agents.list[0].tools.alsoAllow).toEqual(['aiworker_director_brain'])
@@ -508,6 +603,148 @@ describe('transactional director-brain OpenClaw installer', () => {
       const second = await runInstaller(fixture, '--apply')
       expect(second.stdout).toContain('already current')
       expect(await readdir(fixture.backupRoot)).toEqual(backups)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('preserves an intentionally non-production tool and compaction fixture across install and rollback', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-composed-policy-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      // This counterexample proves the plugin installer does not own runtime
+      // convergence. It is deliberately different from the production policy.
+      config.agents.defaults = {
+        compaction: {
+          model: 'qwen36-tools-local/default_model',
+          mode: 'safeguard',
+          timeoutSeconds: 180,
+          truncateAfterCompaction: true,
+          maxActiveTranscriptBytes: 98304,
+          midTurnPrecheck: { enabled: true },
+        },
+      }
+      config.agents.list[0].tools = {
+        profile: 'minimal',
+        alsoAllow: ['aiworker_analyze_video'],
+        deny: ['exec', 'process', 'read', 'write', 'edit', 'apply_patch'],
+      }
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n')
+      await chmod(configPath, 0o600)
+      const original = await readFile(configPath, 'utf8')
+
+      const applied = await runInstaller(fixture, '--apply')
+      const backup = /Verified rollback point: (.+)$/mu.exec(applied.stdout)?.[1]
+      expect(backup).toBeTruthy()
+
+      const installed = JSON.parse(await readFile(configPath, 'utf8'))
+      expect(installed.agents.defaults.compaction).toEqual(config.agents.defaults.compaction)
+      expect(installed.agents.list[0].tools).toEqual({
+        profile: 'minimal',
+        alsoAllow: ['aiworker_analyze_video', 'aiworker_director_brain'],
+        deny: ['exec', 'process', 'read', 'write', 'edit', 'apply_patch'],
+      })
+
+      await runInstaller(fixture, '--rollback', ['--backup', backup as string])
+      expect(await readFile(configPath, 'utf8')).toBe(original)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('rejects plugin entry extensions that the official OpenClaw schema does not support', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-plugin-entry-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      config.plugins.entries['aiworker-director-brain'] = {
+        enabled: false,
+        futureTopLevel: { preserve: true },
+        hooks: {
+          allowConversationAccess: false,
+          futureHookPolicy: 'preserve',
+        },
+        config: {
+          releaseReady: false,
+          targetAgentId: 'legacy-agent',
+          futurePluginOption: 17,
+        },
+      }
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n')
+      await chmod(configPath, 0o600)
+      const original = await readFile(configPath, 'utf8')
+
+      await expect(runInstaller(fixture, '--apply'))
+        .rejects.toThrow(/Official OpenClaw staging config validation failed/u)
+
+      expect(await readFile(configPath, 'utf8')).toBe(original)
+      expect(await exists(fixture.backupRoot)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('adds only its optional grant while preserving a complete nested tool policy', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-complete-tools-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      config.agents.list[0].tools = {
+        profile: 'full',
+        alsoAllow: ['aiworker_analyze_video'],
+        deny: ['web_search'],
+        byProvider: { qwen38: { profile: 'full', allow: ['read', 'exec'] } },
+        toolsBySender: { trusted: { allow: ['exec', 'memory_search'] } },
+        sandbox: { tools: { allow: ['read', 'write'] } },
+        codeMode: true,
+        exec: { host: 'gateway' },
+        fs: { workspaceOnly: false },
+        elevated: { enabled: true },
+        loopDetection: { enabled: true, historySize: 24 },
+      }
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n')
+      await chmod(configPath, 0o600)
+      const original = await readFile(configPath, 'utf8')
+
+      const applied = await runInstaller(fixture, '--apply')
+      const backup = /Verified rollback point: (.+)$/mu.exec(applied.stdout)?.[1]
+      expect(backup).toBeTruthy()
+
+      const installed = JSON.parse(await readFile(configPath, 'utf8'))
+      expect(installed.agents.list[0].tools).toEqual({
+        ...config.agents.list[0].tools,
+        alsoAllow: [...config.agents.list[0].tools.alsoAllow, 'aiworker_director_brain'],
+      })
+
+      await runInstaller(fixture, '--rollback', ['--backup', backup as string])
+      expect(await readFile(configPath, 'utf8')).toBe(original)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('refuses to guess a capability-preserving migration for a legacy explicit allowlist', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-profile-expansion-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      config.agents.list[0].tools = {
+        profile: 'coding',
+        allow: ['read', 'aiworker_director_brain'],
+      }
+      await writeFile(configPath, JSON.stringify(config, null, 2) + '\n')
+      await chmod(configPath, 0o600)
+      const original = await readFile(configPath, 'utf8')
+
+      await expect(runInstaller(fixture, '--apply'))
+        .rejects.toThrow(/director_brain_explicit_allow_requires_capability_migration/u)
+      expect(await readFile(configPath, 'utf8')).toBe(original)
+      expect(await exists(fixture.backupRoot)).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

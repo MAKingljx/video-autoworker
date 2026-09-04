@@ -10,6 +10,7 @@ REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 SKILL_SOURCE="$REPOSITORY_ROOT/openclaw-skills/$PLUGIN_ID"
 SERVICE_SOURCE="$REPOSITORY_ROOT/scripts/lib/feishu-director-brain.mjs"
+SENSITIVE_VALUE_SCANNER_SOURCE="$REPOSITORY_ROOT/scripts/lib/sensitive-value-scanner.mjs"
 SERVICE_CLI_SOURCE="$REPOSITORY_ROOT/scripts/feishu-director-brain.mjs"
 SCHEMA_SOURCE="$REPOSITORY_ROOT/ops/feishu-director-brain/schema.json"
 SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
@@ -166,7 +167,7 @@ esac
 [[ "$MODE" == "rollback" || -z "$ROLLBACK_BACKUP" ]] || { usage >&2; exit 2; }
 [[ "$MODE" != "rollback" || "$ROLLBACK_BACKUP" == /* ]] || { usage >&2; exit 2; }
 
-for required_command in chmod cmp cp date diff env find git grep install ln mkdir mktemp mv node pwd readlink rm rmdir sed shasum stat; do
+for required_command in chmod cmp cp date diff env find git grep install ln mkdir mktemp mv node openclaw pwd readlink rm rmdir sed shasum stat; do
   command -v "$required_command" >/dev/null 2>&1 || {
     printf 'Required command is unavailable: %s\n' "$required_command" >&2
     exit 1
@@ -181,6 +182,57 @@ case "$GIT_COMMAND" in
   /*) ;;
   *) printf 'Git command must resolve to an absolute path.\n' >&2; exit 1 ;;
 esac
+OPENCLAW_COMMAND="$(command -v openclaw)"
+case "$OPENCLAW_COMMAND" in
+  /*) ;;
+  *) printf 'OpenClaw command must resolve to an absolute path.\n' >&2; exit 1 ;;
+esac
+
+run_repository_git() {
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
+    -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
+    "$GIT_COMMAND" -C "$REPOSITORY_ROOT" "$@"
+}
+
+assert_canonical_source_repository() {
+  local expected_commit="${1:-}" top_level current_commit status_output source_path relative
+  top_level="$(run_repository_git rev-parse --show-toplevel)" || {
+    printf 'Director-brain source is not in a canonical Git worktree.\n' >&2
+    return 1
+  }
+  [[ "$(cd "$top_level" && pwd -P)" == "$REPOSITORY_ROOT" ]] || {
+    printf 'Director-brain installer must run from the canonical Git worktree root.\n' >&2
+    return 1
+  }
+  current_commit="$(run_repository_git rev-parse --verify 'HEAD^{commit}')" || return 1
+  [[ "$current_commit" =~ ^[a-f0-9]{40}$ \
+    && ( -z "$expected_commit" || "$current_commit" == "$expected_commit" ) ]] || {
+    printf 'Director-brain source HEAD changed or is invalid.\n' >&2
+    return 1
+  }
+  run_repository_git diff-index --quiet HEAD -- || {
+    printf 'Director-brain source Git worktree has tracked changes.\n' >&2
+    return 1
+  }
+  status_output="$(run_repository_git status --porcelain=v1 --untracked-files=all)" || return 1
+  [[ -z "$status_output" ]] || {
+    printf 'Director-brain source Git worktree is not clean.\n' >&2
+    return 1
+  }
+  while IFS= read -r source_path; do
+    relative="${source_path#"$REPOSITORY_ROOT"/}"
+    [[ "$relative" != "$source_path" ]] \
+      && run_repository_git ls-files --error-unmatch -- "$relative" >/dev/null 2>&1 || {
+        printf 'Director-brain payload contains a non-canonical source file: %s\n' "$relative" >&2
+        return 1
+      }
+  done < <(find \
+    "$PLUGIN_SOURCE" "$SKILL_SOURCE" \
+    "$SERVICE_SOURCE" "$SENSITIVE_VALUE_SCANNER_SOURCE" "$SERVICE_CLI_SOURCE" \
+    "$SCHEMA_SOURCE" -type f -print)
+  printf '%s\n' "$current_commit"
+}
+
 EXPECTED_SOURCE_COMMIT="$(env \
   -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR -u GIT_INDEX_FILE \
   -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM \
@@ -193,6 +245,9 @@ EXPECTED_SOURCE_COMMIT="$(env \
   exit 1
 }
 EXPECTED_RELEASE_ID="$EXPECTED_SOURCE_COMMIT-runtime"
+if [[ "$MODE" != "rollback" ]]; then
+  assert_canonical_source_repository "$EXPECTED_SOURCE_COMMIT" >/dev/null
+fi
 
 regular_directory() {
   [[ -d "$1" && ! -L "$1" ]]
@@ -568,8 +623,13 @@ if [[ "$MODE" != "rollback" ]]; then
     "$PLUGIN_SOURCE/openclaw.plugin.json" \
     "$PLUGIN_SOURCE/package.json" \
     "$PLUGIN_SOURCE/lib/director-brain-tool.js" \
+    "$PLUGIN_SOURCE/lib/director-context-summary.js" \
+    "$PLUGIN_SOURCE/lib/director-system-question-router.js" \
+    "$PLUGIN_SOURCE/lib/sensitive-narrative-text.js" \
+    "$PLUGIN_SOURCE/lib/transcript-tool-result-projection.js" \
     "$SKILL_SOURCE/SKILL.md" \
     "$SERVICE_SOURCE" \
+    "$SENSITIVE_VALUE_SCANNER_SOURCE" \
     "$SERVICE_CLI_SOURCE" \
     "$SCHEMA_SOURCE"; do
     regular_file "$source_file" || {
@@ -585,8 +645,30 @@ if [[ "$MODE" != "rollback" ]]; then
   done
   node --check "$PLUGIN_SOURCE/index.js"
   node --check "$PLUGIN_SOURCE/lib/director-brain-tool.js"
+  node --check "$PLUGIN_SOURCE/lib/director-context-summary.js"
+  node --check "$PLUGIN_SOURCE/lib/director-system-question-router.js"
+  node --check "$PLUGIN_SOURCE/lib/sensitive-narrative-text.js"
+  node --check "$PLUGIN_SOURCE/lib/transcript-tool-result-projection.js"
   node --check "$SERVICE_CLI_SOURCE"
   node --check "$SERVICE_SOURCE"
+  node --check "$SENSITIVE_VALUE_SCANNER_SOURCE"
+  node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" <<'NODE'
+const fs = require('node:fs')
+const [manifestPath, packagePath] = process.argv.slice(2)
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
+const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+if (manifest?.id !== 'aiworker-director-brain'
+  || manifest?.version !== '0.4.0'
+  || manifest?.activation?.onStartup !== true
+  || !same(manifest?.activation?.onCapabilities, ['hook', 'tool'])
+  || !same(manifest?.contracts?.tools, ['aiworker_director_brain'])
+  || manifest?.toolMetadata?.aiworker_director_brain?.optional !== true
+  || packageManifest?.version !== '0.4.0'
+  || packageManifest?.peerDependencies?.openclaw !== '2026.7.1-2') {
+  throw new Error('director_brain_plugin_contract_mismatch')
+}
+NODE
 fi
 
 TEST_FAILPOINT="${AIWORKER_DIRECTOR_BRAIN_INSTALL_TEST_FAILPOINT:-}"
@@ -780,6 +862,7 @@ build_source_payload() {
   mkdir -m 700 -p "$plugin_destination/runtime/scripts/lib" "$plugin_destination/runtime/ops/feishu-director-brain"
   install -m 600 "$SERVICE_CLI_SOURCE" "$plugin_destination/runtime/scripts/feishu-director-brain.mjs"
   install -m 600 "$SERVICE_SOURCE" "$plugin_destination/runtime/scripts/lib/feishu-director-brain.mjs"
+  install -m 600 "$SENSITIVE_VALUE_SCANNER_SOURCE" "$plugin_destination/runtime/scripts/lib/sensitive-value-scanner.mjs"
   install -m 600 "$SCHEMA_SOURCE" "$plugin_destination/runtime/ops/feishu-director-brain/schema.json"
   copy_tree_exact "$SKILL_SOURCE" "$skill_destination"
 }
@@ -813,31 +896,55 @@ config.plugins.entries ??= {}
 if (config.plugins.allow !== undefined && !Array.isArray(config.plugins.allow)) {
   throw new Error('plugin_allowlist_invalid')
 }
-const explicitlyEnabled = Object.entries(config.plugins.entries)
-  .filter(([, entry]) => entry?.enabled === true)
-  .map(([id]) => id)
-if (config.plugins.allow === undefined) {
-  config.plugins.allow = [...new Set([...explicitlyEnabled, pluginId])]
-} else if (!config.plugins.allow.includes(pluginId)) {
+// An absent allowlist means OpenClaw is using discovery. Creating a new list
+// from config entries would silently exclude discovered plugins that have no
+// entry. Preserve absence; only extend an allowlist that already exists.
+if (Array.isArray(config.plugins.allow) && !config.plugins.allow.includes(pluginId)) {
   config.plugins.allow = [...config.plugins.allow, pluginId]
 }
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const previousEntry = config.plugins.entries[pluginId]
+if (previousEntry !== undefined && !isRecord(previousEntry)) {
+  throw new Error('director_brain_plugin_entry_invalid')
+}
+const previousHooks = previousEntry?.hooks
+if (previousHooks !== undefined && !isRecord(previousHooks)) {
+  throw new Error('director_brain_plugin_hooks_invalid')
+}
+const previousPluginConfig = previousEntry?.config
+if (previousPluginConfig !== undefined && !isRecord(previousPluginConfig)) {
+  throw new Error('director_brain_plugin_config_invalid')
+}
 config.plugins.entries[pluginId] = {
+  ...(previousEntry || {}),
   enabled: true,
+  hooks: {
+    ...(previousHooks || {}),
+    allowConversationAccess: true,
+  },
   config: {
+    ...(previousPluginConfig || {}),
     releaseReady: true,
     targetAgentId: agentId,
   },
 }
 const target = targets[0]
 target.tools ??= {}
-for (const key of ['allow', 'alsoAllow']) {
-  if (Array.isArray(target.tools[key])) {
-    target.tools[key] = target.tools[key].filter(value => value !== toolId)
-  }
+// OpenClaw 2026.7.1-2 rejects `allow` and `alsoAllow` in the same agent scope,
+// while an optional plugin tool placed only in `allow` cannot expand a named
+// profile. Converting an arbitrary explicit allowlist into profile + deny is a
+// separate capability-migration operation that requires a live tool baseline;
+// this offline installer must not guess it or silently reduce the tool set.
+if (Object.hasOwn(target.tools, 'allow')) {
+  throw new Error('director_brain_explicit_allow_requires_capability_migration')
 }
-const grantKey = Array.isArray(target.tools.allow) ? 'allow' : 'alsoAllow'
-target.tools[grantKey] ??= []
-target.tools[grantKey].push(toolId)
+if (Array.isArray(target.tools.alsoAllow)) {
+  target.tools.alsoAllow = target.tools.alsoAllow.filter(value => value !== toolId)
+} else if (target.tools.alsoAllow !== undefined) {
+  throw new Error('director_brain_tool_policy_invalid')
+}
+target.tools.alsoAllow ??= []
+target.tools.alsoAllow.push(toolId)
 fs.writeFileSync(output, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
 NODE
 }
@@ -849,18 +956,29 @@ const fs = require('node:fs')
 const [pathname, pluginId, toolId, agentId] = process.argv.slice(2)
 const config = JSON.parse(fs.readFileSync(pathname, 'utf8'))
 const entry = config?.plugins?.entries?.[pluginId]
-if (entry?.enabled !== true || entry?.config?.releaseReady !== true || entry?.config?.targetAgentId !== agentId) {
+if (entry?.enabled !== true
+  || entry?.hooks?.allowConversationAccess !== true
+  || entry?.config?.releaseReady !== true
+  || entry?.config?.targetAgentId !== agentId) {
   throw new Error('director_brain_plugin_config_invalid')
 }
-if (!Array.isArray(config?.plugins?.allow) || !config.plugins.allow.includes(pluginId)) {
+
+if (config?.plugins?.allow !== undefined
+  && (!Array.isArray(config.plugins.allow) || !config.plugins.allow.includes(pluginId))) {
   throw new Error('director_brain_plugin_allowlist_missing')
 }
 const agents = Array.isArray(config?.agents?.list) ? config.agents.list : []
 const target = agents.filter(agent => agent?.id === agentId)
 if (target.length !== 1) throw new Error('target_agent_must_exist_exactly_once')
-const grants = ['allow', 'alsoAllow'].flatMap(key =>
-  Array.isArray(target[0]?.tools?.[key]) ? target[0].tools[key].filter(value => value === toolId) : [])
-if (grants.length !== 1) throw new Error('director_brain_tool_grant_invalid')
+const allowGrants = Array.isArray(target[0]?.tools?.allow)
+  ? target[0].tools.allow.filter(value => value === toolId) : []
+const profileExpansionGrants = Array.isArray(target[0]?.tools?.alsoAllow)
+  ? target[0].tools.alsoAllow.filter(value => value === toolId) : []
+if (target[0]?.tools && Object.hasOwn(target[0].tools, 'allow')
+  || profileExpansionGrants.length !== 1
+  || allowGrants.length !== 0) {
+  throw new Error('director_brain_tool_grant_invalid')
+}
 for (const agent of agents) {
   if (agent?.id === agentId) continue
   if (['allow', 'alsoAllow'].some(key => Array.isArray(agent?.tools?.[key]) && agent.tools[key].includes(toolId))) {
@@ -868,6 +986,30 @@ for (const agent of agents) {
   }
 }
 NODE
+}
+
+validate_config_with_openclaw() {
+  local pathname="$1" plugin_path="${2:-}" validation_config validation_error
+  validation_config="$WORK_ROOT/openclaw.official-validation.json"
+  validation_error="$WORK_ROOT/openclaw.official-validation.stderr"
+  node - "$pathname" "$validation_config" "$plugin_path" <<'NODE'
+const fs = require('node:fs')
+const [input, output, pluginPath] = process.argv.slice(2)
+const config = JSON.parse(fs.readFileSync(input, 'utf8'))
+if (pluginPath) {
+  config.plugins ??= {}
+  config.plugins.load ??= {}
+  const existing = Array.isArray(config.plugins.load.paths) ? config.plugins.load.paths : []
+  config.plugins.load.paths = [pluginPath, ...existing.filter(value => value !== pluginPath)]
+}
+fs.writeFileSync(output, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+NODE
+  if ! env -u OPENCLAW_PROFILE -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
+    OPENCLAW_STATE_DIR="$STATE_DIR" OPENCLAW_CONFIG_PATH="$validation_config" \
+    "$OPENCLAW_COMMAND" config validate --json >/dev/null 2>"$validation_error"; then
+    printf 'Official OpenClaw staging config validation failed.\n' >&2
+    return 1
+  fi
 }
 
 write_backup_tree_manifest() {
@@ -1481,11 +1623,17 @@ if [[ "$MODE" == "rollback" ]]; then
   release_rollback_source_claim \
     || { printf 'Rollback backup source claim could not be restored.\n' >&2; exit 1; }
 else
+  assert_canonical_source_repository "$EXPECTED_SOURCE_COMMIT" >/dev/null
   build_source_payload "$DESIRED_PLUGIN" "$DESIRED_SKILL"
   render_config "$PROFILE_CONFIG" "$DESIRED_CONFIG"
   validate_config "$DESIRED_CONFIG"
 fi
 validate_agent_workspace "$DESIRED_CONFIG"
+if [[ "$DESIRED_PLUGIN_PRESENT" == 1 ]]; then
+  validate_config_with_openclaw "$DESIRED_CONFIG" "$DESIRED_PLUGIN"
+else
+  validate_config_with_openclaw "$DESIRED_CONFIG"
+fi
 
 compare_desired_state() {
   same_plugin=0
@@ -1544,10 +1692,18 @@ if ! regular_file "$PROFILE_CONFIG" \
 fi
 
 if [[ "$MODE" != "rollback" ]]; then
+  assert_canonical_source_repository "$EXPECTED_SOURCE_COMMIT" >/dev/null
   validate_agent_workspace "$PROFILE_CONFIG"
   render_config "$PROFILE_CONFIG" "$DESIRED_CONFIG"
   validate_config "$DESIRED_CONFIG"
   validate_agent_workspace "$DESIRED_CONFIG"
+  validate_config_with_openclaw "$DESIRED_CONFIG" "$DESIRED_PLUGIN"
+else
+  if [[ "$DESIRED_PLUGIN_PRESENT" == 1 ]]; then
+    validate_config_with_openclaw "$DESIRED_CONFIG" "$DESIRED_PLUGIN"
+  else
+    validate_config_with_openclaw "$DESIRED_CONFIG"
+  fi
 fi
 compare_desired_state
 

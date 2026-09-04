@@ -20,7 +20,7 @@
     "openclaw:profiles:server": "bash scripts/start-openclaw-profiles-server.sh",
     "openclaw:profiles:web": "bash scripts/start-openclaw-profiles-web.sh",
     "openclaw:profiles:desktop": "bash scripts/start-openclaw-profiles-desktop.sh",
-    "build": "pnpm run verify:node && next build && node scripts/check-standalone-artifact.mjs --sanitize && node scripts/check-standalone-artifact.mjs",
+    "build": "pnpm run verify:node && node scripts/build-standalone.mjs",
     "audit:standalone": "node scripts/check-standalone-artifact.mjs",
     "start": "pnpm run verify:node && next start --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:standalone": "pnpm run verify:node && bash scripts/start-standalone.sh",

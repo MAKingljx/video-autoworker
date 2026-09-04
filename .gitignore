@@ -64,6 +64,9 @@ ops/n8n/backups/
 /e2e-debug-*.png
 /e2e-channels-*.png
 
+# Local OpenClaw canary evidence (private runtime reports; never publish)
+/.canary-results/
+
 # Claude Code context files (root CLAUDE.md is committed for AI agent discovery)
 **/CLAUDE.md
 !/CLAUDE.md

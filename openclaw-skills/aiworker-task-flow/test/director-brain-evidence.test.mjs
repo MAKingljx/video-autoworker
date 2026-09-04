@@ -156,6 +156,130 @@ test('validates transcripts but never projects raw speech into evidence items', 
   )
 })
 
+test('projects bounded structured visual and governed sound perception without raw transcripts', () => {
+  const base = envelope()
+  const input = envelope({
+    output: {
+      ...base.output,
+      timeline: [{
+        ...base.output.timeline[0],
+        perception: {
+          summary: base.output.timeline[0].visualAnalysis,
+          people: ['向导'],
+          locations: ['结冰河面'],
+          actions: ['停下观察裂缝'],
+          objects: ['登山杖'],
+          environment: ['冰雪覆盖'],
+          ocr: ['警示牌：危险'],
+          shotTypes: ['中景'],
+          cameraMovement: ['固定镜头'],
+          composition: ['人物居中'],
+          emotion: ['谨慎'],
+        },
+        sound: {
+          speechSummary: '同行者讨论绕行方案',
+          ambientSound: '风声',
+          music: null,
+          emotion: '紧张克制',
+        },
+      }],
+    },
+  })
+
+  const result = buildDirectorBrainEvidenceProjection(input)
+  assert.equal(result.items.length, 2)
+  assert.deepEqual(result.items[1], {
+    '证据名称': 'WORK-ICE-001 时间片段 1',
+    '任务 ID': input.taskId,
+    '素材 ID': input.materialId,
+    '场景 ID': result.items[1]['场景 ID'],
+    '镜头 ID': result.items[1]['镜头 ID'],
+    '起始时间码': '00:00:00.000',
+    '结束时间码': '00:01:00.000',
+    '时间信息': 'timeline:1',
+    '人物信息': '向导',
+    '地点': '结冰河面',
+    '行为': '停下观察裂缝',
+    '物体信息': '登山杖',
+    '环境信息': '冰雪覆盖',
+    'OCR 信息': '警示牌：危险',
+    '镜头语言': '景别：中景\n运镜：固定镜头\n构图：人物居中',
+    '情绪信息': '谨慎',
+    '声音信息': '对白/旁白：同行者讨论绕行方案\n环境声：风声\n声音情绪：紧张克制',
+    '画面信息': '向导停下并观察冰面。',
+    '证据摘要': '向导停下并观察冰面。',
+    '分析版本': 'video-analysis-v1',
+    '置信度': 0.91,
+    '校验摘要': result.items[1]['校验摘要'],
+  })
+  assert.equal(JSON.stringify(result).includes(input.output.timeline[0].transcript), false)
+})
+
+test('projects a governed whole-video director perception onto the global evidence item', () => {
+  const base = envelope()
+  const input = envelope({
+    output: {
+      ...base.output,
+      directorPerception: {
+        summary: base.output.summary,
+        people: ['向导', '同行者'],
+        locations: ['冰川'],
+        actions: ['发现裂缝后绕行'],
+        objects: ['登山杖'],
+        environment: ['强风'],
+        ocr: [],
+        shotTypes: ['远景'],
+        cameraMovement: ['跟拍'],
+        composition: ['人物位于画面下方'],
+        emotion: ['紧张后释然'],
+        sound: {
+          speechSummary: '团队讨论路线风险',
+          ambientSound: '风声',
+          music: null,
+          emotion: '克制',
+        },
+      },
+    },
+  })
+
+  const result = buildDirectorBrainEvidenceProjection(input)
+  assert.match(result.items[0]['人物信息'], /向导\n同行者/u)
+  assert.equal(result.items[0]['地点'], '冰川')
+  assert.equal(result.items[0]['行为'], '发现裂缝后绕行')
+  assert.equal(result.items[0]['镜头语言'], '景别：远景\n运镜：跟拍\n构图：人物位于画面下方')
+  assert.equal(result.items[0]['声音信息'], '对白/旁白：团队讨论路线风险\n环境声：风声\n声音情绪：克制')
+})
+
+test('rejects malformed or inconsistent structured perception', () => {
+  const base = envelope()
+  const validPerception = {
+    summary: base.output.timeline[0].visualAnalysis,
+    people: [], locations: [], actions: [], objects: [], environment: [], ocr: [],
+    shotTypes: [], cameraMovement: [], composition: [], emotion: [],
+  }
+  assert.throws(
+    () => buildDirectorBrainEvidenceProjection(envelope({
+      output: {
+        ...base.output,
+        timeline: [{ ...base.output.timeline[0], perception: { ...validPerception, extra: [] } }],
+      },
+    })),
+    /director_evidence_timeline_perception:1_field_unexpected:extra/u,
+  )
+  assert.throws(
+    () => buildDirectorBrainEvidenceProjection(envelope({
+      output: {
+        ...base.output,
+        timeline: [{
+          ...base.output.timeline[0],
+          perception: { ...validPerception, summary: '与画面摘要不一致' },
+        }],
+      },
+    })),
+    /director_evidence_timeline_perception:1_summary_mismatch/u,
+  )
+})
+
 test('fails closed instead of accepting combinedText or chapter summary as the formal report', () => {
   const input = envelope({
     mediaDurationSeconds: 300,

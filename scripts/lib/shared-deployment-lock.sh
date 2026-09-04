@@ -65,6 +65,18 @@ acquire_shared_deployment_lock() {
   rm -f -- "$receipt" 2>/dev/null || true
 }
 
+assert_shared_deployment_lock_available() {
+  local node_bin node_helper
+  case "${DEPLOYMENT_RUN_DIR:-}:${DEPLOYMENT_LOCK_DIR:-}" in
+    /*:/*) ;;
+    *) printf 'AIWORKER_BG_RUN_DIR must be absolute for shared runtime installation.\n' >&2; return 1 ;;
+  esac
+  [[ "$DEPLOYMENT_LOCK_DIR" == "$DEPLOYMENT_RUN_DIR/.deployment.lock" ]] || return 1
+  node_bin="$(shared_deployment_lock_node_bin)" || return 1
+  node_helper="$(shared_deployment_lock_node_helper)" || return 1
+  (umask 077; exec "$node_bin" "$node_helper" inspect-shell "$DEPLOYMENT_RUN_DIR" "$$")
+}
+
 release_shared_deployment_lock() {
   local node_bin node_helper
   [[ "$DEPLOYMENT_LOCK_OWNED" == 1 ]] || return 0

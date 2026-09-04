@@ -14,6 +14,7 @@ import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInb
 import { spawnRecurringTasks } from './recurring-tasks'
 import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
 import { drainDirectorEvidenceOutbox } from './director-evidence-outbox'
+import { drainDirectorExtractionJobs } from './director-extraction-service'
 import {
   acquireOrRenewSchedulerLeadership,
   createSchedulerHolderId,
@@ -425,27 +426,56 @@ async function runMediaCleanupDebtJanitor(): Promise<{ ok: boolean; message: str
   }
 }
 
-/** Project successful, explicitly work-bound video results without affecting task state. */
-async function runDirectorEvidenceOutbox(): Promise<{ ok: boolean; message: string }> {
+/** Project evidence, then advance the same task-run extraction chain. */
+async function runDirectorEvidenceAndExtractionDrain(): Promise<{ ok: boolean; message: string }> {
+  const db = getDatabase()
+  const nowSeconds = Math.floor(Date.now() / 1_000)
+  let evidence: Awaited<ReturnType<typeof drainDirectorEvidenceOutbox>> | null = null
+  let extraction: Awaited<ReturnType<typeof drainDirectorExtractionJobs>> | null = null
+  let evidenceFailed = false
+  let extractionFailed = false
   try {
-    const result = await drainDirectorEvidenceOutbox(getDatabase(), { limit: 20 })
-    if (result.scanned > 0) {
+    evidence = await drainDirectorEvidenceOutbox(db, { limit: 20, nowSeconds })
+    if (evidence.scanned > 0) {
       try {
         logAuditEvent({
           action: 'n8n_director_evidence_projection',
           actor: 'scheduler',
-          detail: result,
+          detail: evidence,
         })
       } catch {
         // Projection state is already durable; audit failure must not replay it.
       }
     }
-    return {
-      ok: result.conflict === 0,
-      message: `Director evidence: ${result.delivered} delivered, ${result.pending} pending, ${result.conflict} conflict`,
+  } catch {
+    evidenceFailed = true
+  }
+  try {
+    extraction = await drainDirectorExtractionJobs(db, { limit: 5, nowSeconds })
+    if (extraction.processed > 0 || extraction.reviewsChecked > 0) {
+      try {
+        logAuditEvent({
+          action: 'n8n_director_extraction_drain',
+          actor: 'scheduler',
+          detail: extraction,
+        })
+      } catch {
+        // Extraction receipts are already durable; audit failure must not replay them.
+      }
     }
-  } catch (err: any) {
-    return { ok: false, message: `Director evidence outbox failed: ${err.message}` }
+  } catch {
+    extractionFailed = true
+  }
+  const evidenceMessage = evidence
+    ? `${evidence.delivered} delivered, ${evidence.pending} pending, ${evidence.conflict} conflict`
+    : 'failed'
+  const extractionMessage = extraction
+    ? `${extraction.processed} processed, ${extraction.resumed} resumed, ${extraction.failed} failed`
+    : 'failed'
+  return {
+    ok: !evidenceFailed && !extractionFailed
+      && evidence?.conflict === 0 && extraction?.failed === 0,
+    message: `Director evidence: ${evidenceMessage} | extraction: ${extractionMessage}`,
   }
 }
 
@@ -572,7 +602,7 @@ async function executeScheduledTask(
   if (taskId === 'auto_backup') return runBackup()
   if (taskId === 'auto_cleanup') return runCleanup()
   if (taskId === 'media_cleanup_debt') return runMediaCleanupDebtJanitor()
-  if (taskId === 'director_evidence_outbox') return runDirectorEvidenceOutbox()
+  if (taskId === 'director_evidence_outbox') return runDirectorEvidenceAndExtractionDrain()
   if (taskId === 'agent_heartbeat') return runHeartbeatCheck()
   if (taskId === 'webhook_retry') return processWebhookRetries()
   if (taskId === 'claude_session_scan') return syncClaudeSessions()
@@ -646,8 +676,9 @@ export function initScheduler() {
     running: false,
   })
 
+  // Keep the historical task ID as a settings/API compatibility alias.
   tasks.set('director_evidence_outbox', {
-    name: 'Director Evidence Outbox',
+    name: 'Director Evidence and Extraction Drain',
     intervalMs: TICK_MS,
     lastRun: null,
     nextRun: now + TICK_MS,
@@ -818,7 +849,7 @@ async function tick() {
       // begins another job after it observes that the router selected its peer.
       if (!reconcileSchedulerLeadership()) break
 
-      // Projection may wait on Feishu for much longer than a scheduler tick.
+      // Director evidence or extraction may wait on Feishu longer than a scheduler tick.
       // Keep it under the normal active-job lease/drain lifecycle, but do not
       // hold up heartbeat checks, webhook retries, or task dispatch behind it.
       if (id === 'director_evidence_outbox') {

@@ -188,6 +188,9 @@ describe('n8n blue/green runtime affinity', () => {
       contractDigest: 'a'.repeat(64),
       pending: 2,
       incompatiblePending: 0,
+      deliveredWithoutValidReceipt: 0,
+      outOfScopeOutbox: 0,
+      outOfScopeExtraction: 0,
     }
     expect(buildN8nReleaseReadiness(
       control,
@@ -212,7 +215,7 @@ describe('n8n blue/green runtime affinity', () => {
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '057_n8n_director_evidence_outbox',
+        latestMigration: '059_director_evidence_projection_receipts',
       },
       projection,
       retirement,
@@ -231,6 +234,20 @@ describe('n8n blue/green runtime affinity', () => {
       getN8nRollingDatabaseCompatibility(db),
       projection,
     )).toThrow(/does not match/)
+    for (const field of [
+      'deliveredWithoutValidReceipt',
+      'outOfScopeOutbox',
+      'outOfScopeExtraction',
+    ] as const) {
+      expect(() => buildN8nReleaseReadiness(
+        control,
+        runtime,
+        retirement,
+        scheduler,
+        getN8nRollingDatabaseCompatibility(db),
+        { ...projection, [field]: 1 },
+      )).toThrow(/projection readiness is blocked/)
+    }
   })
 
   it('blocks retirement while any owned parent or child is active', () => {

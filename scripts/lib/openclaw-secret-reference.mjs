@@ -13,34 +13,44 @@ function hasExactKeys(value, expected) {
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index])
 }
 
+function hasOnlyKeys(value, required, optional = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  const allowed = new Set([...required, ...optional])
+  return required.every(key => keys.includes(key)) && keys.every(key => allowed.has(key))
+}
+
 export function isValidExecSecretReference(reference, providers) {
   if (!hasExactKeys(reference, ['id', 'provider', 'source']) || reference.source !== 'exec') return false
   if (typeof reference.id !== 'string' || !reference.id) return false
   if (typeof reference.provider !== 'string' || !reference.provider) return false
   const provider = providers?.[reference.provider]
   return Boolean(provider
-    && hasExactKeys(provider, ['args', 'command', 'source'])
+    && hasOnlyKeys(provider, ['args', 'command', 'source'], ['timeoutMs'])
     && provider.source === 'exec'
     && typeof provider.command === 'string'
     && provider.command.startsWith('/')
     && Array.isArray(provider.args)
-    && provider.args.every(value => typeof value === 'string' && !/[\r\n\0]/u.test(value)))
+    && provider.args.every(value => typeof value === 'string' && !/[\r\n\0]/u.test(value))
+    && (provider.timeoutMs === undefined
+      || (Number.isSafeInteger(provider.timeoutMs) && provider.timeoutMs >= 1_000 && provider.timeoutMs <= 120_000)))
 }
 
 export function resolveExecSecretReference(reference, providers, {
   valuePattern = TOKEN_PATTERN,
   maxBuffer = MAX_OUTPUT_BYTES,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  timeoutMs,
 } = {}) {
   if (!isValidExecSecretReference(reference, providers)) return ''
   const provider = providers[reference.provider]
+  const effectiveTimeoutMs = timeoutMs ?? provider.timeoutMs ?? DEFAULT_TIMEOUT_MS
   let result
   try {
     result = spawnSync(provider.command, provider.args, {
       encoding: 'utf8',
       env: {},
       maxBuffer,
-      timeout: timeoutMs,
+      timeout: effectiveTimeoutMs,
       windowsHide: true,
     })
   } catch {

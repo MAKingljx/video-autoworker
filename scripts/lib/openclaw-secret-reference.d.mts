@@ -8,6 +8,7 @@ export interface ExecSecretProvider {
   source: 'exec'
   command: string
   args: string[]
+  timeoutMs?: number
 }
 
 export function isValidExecSecretReference(

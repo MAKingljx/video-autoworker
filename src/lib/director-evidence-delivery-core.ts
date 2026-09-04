@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
-import type { N8nTaskRun } from '@/lib/n8n-task-runs'
+import type { N8nTaskRun, N8nTaskScope } from '@/lib/n8n-task-runs'
 import {
   DIRECTOR_EVIDENCE_SOURCE_AUTHORITY,
   MAX_EVIDENCE_PROJECTION_INPUT_BYTES,
+  directorEvidenceDeliveryReceipt,
   directorEvidenceProjectionBatches,
   directorEvidenceProjectionResultCount,
   directorEvidenceTransformEnvelope,
+  parseDirectorEvidenceDeliveryReceipt,
+  type DirectorEvidenceDeliveryReceipt,
 } from '@/lib/director-evidence-projection-semantics'
 
 export const DIRECTOR_EVIDENCE_BINDING_AUTHORITY = 'director-brain-resolve-work-v1'
@@ -21,6 +24,7 @@ const MEBIBYTE = 1024 * 1024
 // output accounts for governed fields copied into multiple evidence columns.
 export const DIRECTOR_COMMAND_LIMITS = Object.freeze({
   operate: Object.freeze({ maxInputBytes: 32 * 1024, maxOutputBytes: 256 * 1024 }),
+  'propose-batch': Object.freeze({ maxInputBytes: 256 * 1024, maxOutputBytes: 512 * 1024 }),
   transform: Object.freeze({ maxInputBytes: (2 * MEBIBYTE) + 1, maxOutputBytes: 8 * MEBIBYTE }),
   'project-evidence': Object.freeze({
     maxInputBytes: MAX_EVIDENCE_PROJECTION_INPUT_BYTES,
@@ -55,6 +59,26 @@ export interface DirectorEvidenceOutbox {
   updatedAt: number
 }
 
+export interface DirectorEvidenceProjectionReceiptRecord {
+  taskId: string
+  sourceIdentitySha256: string
+  projectionContractDigest: string
+  receiptSha256: string
+  origin: 'delivery' | 'verified_read_recovery'
+  receipt: DirectorEvidenceDeliveryReceipt
+  createdAt: number
+}
+
+export interface DirectorEvidenceOutboxCounts {
+  pending: number
+  delivered: number
+  conflict: number
+  incompatiblePending: number
+  deliveredWithoutValidReceipt: number
+  outOfScopeOutbox: number
+  outOfScopeExtraction: number
+}
+
 type OutboxRow = {
   task_id: string
   binding_id: number
@@ -72,6 +96,16 @@ type OutboxRow = {
   delivered_at: number | null
   created_at: number
   updated_at: number
+}
+
+type ProjectionReceiptRow = {
+  task_id: string
+  source_identity_sha256: string
+  projection_contract_digest: string
+  receipt_json: string
+  receipt_sha256: string
+  origin: DirectorEvidenceProjectionReceiptRecord['origin']
+  created_at: number
 }
 
 export type DirectorCommandRunner = (
@@ -195,6 +229,25 @@ function immutableIdentityValues(item: DirectorEvidenceOutbox): unknown[] {
   ]
 }
 
+export function directorEvidenceSourceIdentityDigest(
+  item: Pick<DirectorEvidenceOutbox,
+    'taskId' | 'bindingId' | 'tenantId' | 'workspaceId' | 'workId' | 'queryDigest'
+    | 'projectionContractDigest' | 'idempotencyKey' | 'resultSha256'>,
+): string {
+  return directorEvidenceDigest({
+    authority: 'video-autoworker-director-evidence-source-identity-v1',
+    taskId: item.taskId,
+    bindingId: item.bindingId,
+    tenantId: item.tenantId,
+    workspaceId: item.workspaceId,
+    workId: item.workId,
+    queryDigest: item.queryDigest,
+    projectionContractDigest: item.projectionContractDigest,
+    idempotencyKey: item.idempotencyKey,
+    resultSha256: item.resultSha256,
+  })
+}
+
 function sameImmutableIdentity(
   item: DirectorEvidenceOutbox,
   identity: Omit<DirectorEvidenceOutbox,
@@ -220,23 +273,167 @@ export function getDirectorEvidenceOutboxCore(
   return row ? rowToOutbox(row) : null
 }
 
+function receiptRecord(
+  row: ProjectionReceiptRow,
+  item: DirectorEvidenceOutbox,
+): DirectorEvidenceProjectionReceiptRecord {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.receipt_json)
+  } catch {
+    throw new Error('director_evidence_projection_receipt_invalid')
+  }
+  const receipt = parseDirectorEvidenceDeliveryReceipt(parsed)
+  const sourceIdentitySha256 = directorEvidenceSourceIdentityDigest(item)
+  if (!receipt
+    || row.task_id !== item.taskId
+    || (row.origin !== 'delivery' && row.origin !== 'verified_read_recovery')
+    || row.source_identity_sha256 !== sourceIdentitySha256
+    || row.projection_contract_digest !== item.projectionContractDigest
+    || row.receipt_sha256 !== directorEvidenceDigest(receipt)
+    || receipt.sourceIdentitySha256 !== sourceIdentitySha256
+    || receipt.workId !== item.workId
+    || !Number.isSafeInteger(row.created_at) || row.created_at < 0) {
+    throw new Error('director_evidence_projection_receipt_invalid')
+  }
+  return {
+    taskId: row.task_id,
+    sourceIdentitySha256: row.source_identity_sha256,
+    projectionContractDigest: row.projection_contract_digest,
+    receiptSha256: row.receipt_sha256,
+    origin: row.origin,
+    receipt,
+    createdAt: row.created_at,
+  }
+}
+
+export function getDirectorEvidenceProjectionReceiptCore(
+  db: Database.Database,
+  item: DirectorEvidenceOutbox,
+): DirectorEvidenceProjectionReceiptRecord | null {
+  const row = db.prepare(`
+    SELECT * FROM n8n_director_evidence_projection_receipts WHERE task_id = ?
+  `).get(item.taskId) as ProjectionReceiptRow | undefined
+  return row ? receiptRecord(row, item) : null
+}
+
+function insertProjectionReceipt(
+  db: Database.Database,
+  item: DirectorEvidenceOutbox,
+  receipt: DirectorEvidenceDeliveryReceipt,
+  origin: DirectorEvidenceProjectionReceiptRecord['origin'],
+  createdAt: number,
+): void {
+  const sourceIdentitySha256 = directorEvidenceSourceIdentityDigest(item)
+  if (!Number.isSafeInteger(createdAt) || createdAt < 0
+    || receipt.sourceIdentitySha256 !== sourceIdentitySha256
+    || receipt.workId !== item.workId
+    || parseDirectorEvidenceDeliveryReceipt(receipt) === null) {
+    throw new Error('director_evidence_projection_receipt_invalid')
+  }
+  db.prepare(`
+    INSERT INTO n8n_director_evidence_projection_receipts (
+      task_id, source_identity_sha256, projection_contract_digest,
+      receipt_json, receipt_sha256, origin, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    item.taskId,
+    sourceIdentitySha256,
+    item.projectionContractDigest,
+    JSON.stringify(receipt),
+    directorEvidenceDigest(receipt),
+    origin,
+    createdAt,
+  )
+}
+
+export function persistRecoveredDirectorEvidenceProjectionReceiptCore(
+  db: Database.Database,
+  item: DirectorEvidenceOutbox,
+  receipt: DirectorEvidenceDeliveryReceipt,
+  nowSeconds: number,
+): DirectorEvidenceProjectionReceiptRecord {
+  if (!Number.isSafeInteger(nowSeconds) || nowSeconds < 0) {
+    throw new Error('director_evidence_projection_receipt_invalid')
+  }
+  return db.transaction(() => {
+    const current = getDirectorEvidenceOutboxCore(db, item.taskId)
+    if (!current || current.status !== 'delivered' || !sameImmutableIdentity(current, item)) {
+      throw new Error('director_evidence_outbox_state_changed')
+    }
+    const existing = getDirectorEvidenceProjectionReceiptCore(db, current)
+    if (existing) {
+      if (directorEvidenceDigest(existing.receipt) !== directorEvidenceDigest(receipt)) {
+        throw new Error('director_evidence_projection_receipt_conflict')
+      }
+      return existing
+    }
+    insertProjectionReceipt(db, current, receipt, 'verified_read_recovery', nowSeconds)
+    return getDirectorEvidenceProjectionReceiptCore(db, current)!
+  }).immediate()
+}
+
 export function getDirectorEvidenceOutboxCountsCore(
   db: Database.Database,
   currentProjectionContractDigest: string,
-): { pending: number; delivered: number; conflict: number; incompatiblePending: number } {
+  scope: N8nTaskScope,
+): DirectorEvidenceOutboxCounts {
   assertProjectionContractDigest(currentProjectionContractDigest)
+  if (!Number.isSafeInteger(scope.tenantId) || scope.tenantId < 1
+    || !Number.isSafeInteger(scope.workspaceId) || scope.workspaceId < 1) {
+    throw new Error('director_brain_scope_invalid')
+  }
   const rows = db.prepare(`
     SELECT status, COUNT(*) AS count
     FROM n8n_director_evidence_outbox
     GROUP BY status
   `).all() as Array<{ status: DirectorEvidenceOutbox['status']; count: number }>
-  const counts = { pending: 0, delivered: 0, conflict: 0, incompatiblePending: 0 }
+  const counts: DirectorEvidenceOutboxCounts = {
+    pending: 0,
+    delivered: 0,
+    conflict: 0,
+    incompatiblePending: 0,
+    deliveredWithoutValidReceipt: 0,
+    outOfScopeOutbox: 0,
+    outOfScopeExtraction: 0,
+  }
   for (const row of rows) counts[row.status] = Number(row.count)
   counts.incompatiblePending = Number((db.prepare(`
     SELECT COUNT(*) AS count
     FROM n8n_director_evidence_outbox
     WHERE status = 'pending' AND projection_contract_digest <> ?
   `).get(currentProjectionContractDigest) as { count: number }).count)
+  const deliveredRows = db.prepare(`
+    SELECT outbox.* FROM n8n_director_evidence_outbox outbox
+    WHERE outbox.status = 'delivered'
+  `).all() as OutboxRow[]
+  for (const row of deliveredRows) {
+    try {
+      if (!getDirectorEvidenceProjectionReceiptCore(db, rowToOutbox(row))) {
+        counts.deliveredWithoutValidReceipt++
+      }
+    } catch {
+      counts.deliveredWithoutValidReceipt++
+    }
+  }
+  counts.outOfScopeOutbox = Number((db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM n8n_director_evidence_outbox outbox
+    LEFT JOIN n8n_task_runs run ON run.task_id = outbox.task_id
+    WHERE run.task_id IS NULL
+      OR outbox.tenant_id <> ? OR outbox.workspace_id <> ?
+      OR run.tenant_id IS NOT outbox.tenant_id OR run.workspace_id IS NOT outbox.workspace_id
+      OR run.binding_id IS NOT outbox.binding_id
+      OR json_extract(run.input, '$.directorEvidence.workId') IS NOT outbox.work_id
+      OR json_extract(run.input, '$.directorEvidence.queryDigest') IS NOT outbox.query_digest
+  `).get(scope.tenantId, scope.workspaceId) as { count: number }).count)
+  counts.outOfScopeExtraction = Number((db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM n8n_task_runs
+    WHERE source = 'n8n-node' AND json_valid(input) = 1
+      AND json_extract(input, '$.childKind') = 'director-extraction'
+      AND (tenant_id <> ? OR workspace_id <> ?)
+  `).get(scope.tenantId, scope.workspaceId) as { count: number }).count)
   return counts
 }
 
@@ -380,7 +577,8 @@ async function deliverOutbox(
       ON binding.id = run.binding_id
      AND binding.tenant_id = run.tenant_id
      AND binding.workspace_id = run.workspace_id
-    WHERE run.task_id = ? AND run.binding_id = ? AND run.tenant_id = ? AND run.workspace_id = ?
+    WHERE run.task_id = ? AND run.binding_id = ?
+      AND run.tenant_id = ? AND run.workspace_id = ?
   `).get(item.taskId, item.bindingId, item.tenantId, item.workspaceId) as {
     status: string
     output: string | null
@@ -406,21 +604,25 @@ async function deliverOutbox(
   }
 
   let commandInputContractGuaranteed = false
+  let receipt: DirectorEvidenceDeliveryReceipt | null = null
   try {
     const transformInput = directorEvidenceTransformEnvelope(item, output)
     serializeDirectorCommandInput('transform', transformInput)
     commandInputContractGuaranteed = true
     const projection = await options.runner('transform', transformInput)
-    let projected = 0
     const batches = directorEvidenceProjectionBatches(projection, item.workId)
+    const results: Record<string, unknown>[] = []
     for (const batch of batches) {
       serializeDirectorCommandInput('project-evidence', batch)
       const result = await options.runner('project-evidence', batch)
-      projected += directorEvidenceProjectionResultCount(result, batch)
+      directorEvidenceProjectionResultCount(result, batch)
+      results.push(result)
     }
-    if (projected !== batches.reduce((count, batch) => count + batch.items.length, 0)) {
-      throw new Error('director_evidence_projection_result_invalid')
-    }
+    receipt = directorEvidenceDeliveryReceipt(
+      batches,
+      results,
+      directorEvidenceSourceIdentityDigest(item),
+    )
   } catch (error) {
     const code = safeErrorCode(error)
     const conflict = directorEvidenceDeliveryErrorIsDeterministic(code, {
@@ -442,15 +644,33 @@ async function deliverOutbox(
     if (transition.changes !== 1) throw new Error('director_evidence_outbox_state_changed')
     return conflict ? 'conflict' : 'pending'
   }
+  if (!receipt) throw new Error('director_evidence_projection_receipt_invalid')
   const settledAt = options.nowSeconds()
-  const transition = db.prepare(`
-    UPDATE n8n_director_evidence_outbox
-    SET status = 'delivered', delivered_at = ?, last_error_code = NULL, updated_at = ?
-    WHERE task_id = ? AND binding_id = ? AND tenant_id = ? AND workspace_id = ?
-      AND work_id = ? AND query_digest = ? AND projection_contract_digest = ?
-      AND idempotency_key = ? AND result_sha256 = ? AND status = 'pending'
-  `).run(settledAt, settledAt, ...pendingCasValues(item))
-  if (transition.changes !== 1) throw new Error('director_evidence_outbox_state_changed')
+  db.transaction(() => {
+    const current = getDirectorEvidenceOutboxCore(db, item.taskId)
+    if (!current || !sameImmutableIdentity(current, item)) {
+      throw new Error('director_evidence_outbox_state_changed')
+    }
+    const existing = getDirectorEvidenceProjectionReceiptCore(db, current)
+    if (existing
+      && directorEvidenceDigest(existing.receipt) !== directorEvidenceDigest(receipt)) {
+      throw new Error('director_evidence_projection_receipt_conflict')
+    }
+    if (current.status === 'delivered') {
+      if (!existing) throw new Error('director_evidence_outbox_state_changed')
+      return
+    }
+    if (current.status !== 'pending') throw new Error('director_evidence_outbox_state_changed')
+    if (!existing) insertProjectionReceipt(db, current, receipt!, 'delivery', settledAt)
+    const transition = db.prepare(`
+      UPDATE n8n_director_evidence_outbox
+      SET status = 'delivered', delivered_at = ?, last_error_code = NULL, updated_at = ?
+      WHERE task_id = ? AND binding_id = ? AND tenant_id = ? AND workspace_id = ?
+        AND work_id = ? AND query_digest = ? AND projection_contract_digest = ?
+        AND idempotency_key = ? AND result_sha256 = ? AND status = 'pending'
+    `).run(settledAt, settledAt, ...pendingCasValues(item))
+    if (transition.changes !== 1) throw new Error('director_evidence_outbox_state_changed')
+  }).immediate()
   return 'delivered'
 }
 
@@ -461,6 +681,7 @@ export async function drainDirectorEvidenceOutboxCore(
     nowSeconds?: number
     now?: () => number
     limit?: number
+    scope: N8nTaskScope
     runner: DirectorCommandRunner
   },
 ): Promise<{ scanned: number; delivered: number; pending: number; conflict: number }> {
@@ -473,11 +694,12 @@ export async function drainDirectorEvidenceOutboxCore(
   const limit = Number.isSafeInteger(options.limit)
     ? Math.max(1, Math.min(100, Number(options.limit))) : 20
   const rows = db.prepare(`
-    SELECT * FROM n8n_director_evidence_outbox
-    WHERE status = 'pending' AND next_attempt_at <= ?
-    ORDER BY next_attempt_at ASC, updated_at ASC, task_id ASC
+    SELECT outbox.* FROM n8n_director_evidence_outbox outbox
+    WHERE outbox.tenant_id = ? AND outbox.workspace_id = ?
+      AND outbox.status = 'pending' AND outbox.next_attempt_at <= ?
+    ORDER BY outbox.next_attempt_at ASC, outbox.updated_at ASC, outbox.task_id ASC
     LIMIT ?
-  `).all(nowSeconds(), limit) as OutboxRow[]
+  `).all(options.scope.tenantId, options.scope.workspaceId, nowSeconds(), limit) as OutboxRow[]
   const result = { scanned: rows.length, delivered: 0, pending: 0, conflict: 0 }
   for (const row of rows) {
     const outcome = await deliverOutbox(db, rowToOutbox(row), {

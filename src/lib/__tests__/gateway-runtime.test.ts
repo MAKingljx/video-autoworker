@@ -147,6 +147,65 @@ describe('registerMcAsDashboard', () => {
     expect(JSON.stringify(vi.mocked(logger.debug).mock.calls)).not.toContain(token)
   })
 
+  it('accepts and honors the OpenClaw exec provider timeout without widening provider keys', async () => {
+    const token = 'b'.repeat(64)
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        auth: {
+          mode: 'token',
+          token: { source: 'exec', provider: 'login-keychain', id: 'gateway-token' },
+        },
+      },
+      secrets: {
+        providers: {
+          'login-keychain': {
+            source: 'exec',
+            command: '/usr/bin/security',
+            args: ['find-generic-password', '-w', '-s', 'gateway-token'],
+            timeoutMs: 5_000,
+          },
+        },
+      },
+    }), 'utf-8')
+    spawnSyncMock.mockReturnValue({
+      error: undefined,
+      signal: null,
+      status: 0,
+      stdout: `${token}\n`,
+      stderr: '',
+    })
+
+    const { withDetectedGatewayProcessEnvironment } = await import('@/lib/gateway-runtime')
+
+    expect(withDetectedGatewayProcessEnvironment({ NODE_ENV: 'test' }).OPENCLAW_GATEWAY_TOKEN).toBe(token)
+    expect(spawnSyncMock).toHaveBeenCalledWith(
+      '/usr/bin/security',
+      ['find-generic-password', '-w', '-s', 'gateway-token'],
+      expect.objectContaining({ env: {}, maxBuffer: 4096, timeout: 5_000 }),
+    )
+  })
+
+  it.each([999, 120_001])('rejects an out-of-range exec provider timeout (%s)', async timeoutMs => {
+    writeFileSync(configPath, JSON.stringify({
+      gateway: {
+        auth: {
+          mode: 'token',
+          token: { source: 'exec', provider: 'provider', id: 'gateway-token' },
+        },
+      },
+      secrets: {
+        providers: {
+          provider: { source: 'exec', command: '/usr/bin/secret-provider', args: [], timeoutMs },
+        },
+      },
+    }), 'utf-8')
+
+    const { withDetectedGatewayProcessEnvironment } = await import('@/lib/gateway-runtime')
+
+    expect(withDetectedGatewayProcessEnvironment({ NODE_ENV: 'test' })).not.toHaveProperty('OPENCLAW_GATEWAY_TOKEN')
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+  })
+
   it('reports a valid SecretRef structurally without executing it for UI status', async () => {
     writeFileSync(configPath, JSON.stringify({
       gateway: {

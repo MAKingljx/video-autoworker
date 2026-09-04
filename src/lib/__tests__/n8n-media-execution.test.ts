@@ -10,6 +10,9 @@ import {
   mediaChildIdentity,
   mediaTaskWorkspace,
   mergeN8nMediaResults,
+  parseDirectorSynthesisAnswer,
+  parseVisualPerceptionAnswer,
+  synthesizeN8nMediaResults,
   videoModelGenerationProfile,
   visibleModelAnswer,
 } from '@/lib/n8n-media-execution'
@@ -31,6 +34,77 @@ describe('n8n stateless media helpers', () => {
     delete process.env.AIWORKER_MEDIA_INGEST_DIR
     await rm(root, { recursive: true, force: true })
   })
+
+  function perceptionJson(summary: string) {
+    return JSON.stringify({
+      summary,
+      people: ['向导'],
+      locations: ['冰面'],
+      actions: ['观察裂缝'],
+      objects: ['登山杖'],
+      environment: ['冰雪覆盖'],
+      ocr: [],
+      shotTypes: ['中景'],
+      cameraMovement: ['固定镜头'],
+      composition: ['人物居中'],
+      emotion: ['谨慎'],
+    })
+  }
+
+  function directorPerception(summary: string) {
+    return {
+      ...JSON.parse(perceptionJson(summary)),
+      sound: {
+        speechSummary: '同行者讨论安全路线',
+        ambientSound: '持续风声',
+        music: null,
+        emotion: '紧张克制',
+      },
+    }
+  }
+
+  function synthesisRouting() {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      resources: [],
+      routes: [{
+        id: 'final-summary-test', label: '全片汇总测试', description: '',
+        location: 'local', transport: 'openai-compatible', model: 'final-test-model',
+        baseUrl: 'http://127.0.0.1:18103/v1', enabled: true,
+        capabilities: ['text', 'vision'],
+      }],
+    })
+    return { config: { modelRouting: { nodes: { vision: { routeId: 'final-summary-test' } } } } }
+  }
+
+  async function seedSynthesisCheckpoints(
+    taskId: string,
+    finalSummary: Record<string, unknown>,
+  ) {
+    const checkpointRoot = join(mediaTaskWorkspace(taskId), 'checkpoints')
+    await mkdir(checkpointRoot, { recursive: true })
+    await writeFile(join(checkpointRoot, 'chapter-001.json'), JSON.stringify({
+      index: 1,
+      startTime: '00:00:00.000',
+      endTime: '00:01:00.000',
+      summary: '向导发现冰面裂缝并决定绕行。',
+      confidence: 0,
+    }))
+    await writeFile(join(checkpointRoot, 'final-summary.json'), JSON.stringify(finalSummary))
+    return checkpointRoot
+  }
+
+  function synthesisInput() {
+    return {
+      timeline: [{
+        timeRange: '00:00:00.000-00:01:00.000',
+        transcript: '前方冰面不安全。',
+        visualAnalysis: '向导观察裂缝后停下。',
+        confidence: 0,
+      }],
+      combinedText: '逐分钟证据',
+    }
+  }
 
   it('builds deterministic bounded child identities', () => {
     const first = mediaChildIdentity('task', 'video-parent-1', 'vision')
@@ -87,7 +161,7 @@ describe('n8n stateless media helpers', () => {
       segments,
     }))
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      choices: [{ message: { content: '可复核画面事实' } }],
+      choices: [{ message: { content: perceptionJson('可复核画面事实') } }],
     }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 
     const vision = await analyzeN8nVideoFrames(taskId, {
@@ -155,6 +229,156 @@ describe('n8n stateless media helpers', () => {
     expect(visibleModelAnswer('<think>internal reasoning</think>最终画面结论')).toBe('最终画面结论')
     expect(visibleModelAnswer('没有思考标记的结果')).toBe('没有思考标记的结果')
     expect(visibleModelAnswer('')).toBe('')
+  })
+
+  it('parses strict structured visual perception without inventing missing fields', () => {
+    const parsed = parseVisualPerceptionAnswer(`\`\`\`json\n${perceptionJson('人物停下观察')}\n\`\`\``)
+    expect(parsed).toMatchObject({
+      summary: '人物停下观察',
+      people: ['向导'],
+      locations: ['冰面'],
+      actions: ['观察裂缝'],
+      ocr: [],
+    })
+    expect(() => parseVisualPerceptionAnswer('只有自然语言')).toThrow('无法解析的结构化结果')
+    expect(() => parseVisualPerceptionAnswer(JSON.stringify({
+      summary: '缺少必需数组', people: [],
+    }))).toThrow('不符合结构化感知契约')
+  })
+
+  it('parses a bounded whole-video director perception with governed sound summaries', () => {
+    const parsed = parseDirectorSynthesisAnswer(JSON.stringify({
+      ...JSON.parse(perceptionJson('人物发现危险后选择绕行')),
+      sound: {
+        speechSummary: '同行者讨论安全路线',
+        ambientSound: '持续风声',
+        music: null,
+        emotion: '紧张克制',
+      },
+    }))
+    expect(parsed.summary).toBe('人物发现危险后选择绕行')
+    expect(parsed.sound).toEqual({
+      speechSummary: '同行者讨论安全路线',
+      ambientSound: '持续风声',
+      music: null,
+      emotion: '紧张克制',
+    })
+    expect(() => parseDirectorSynthesisAnswer(JSON.stringify({
+      ...JSON.parse(perceptionJson('缺少声音对象')),
+    }))).toThrow('不符合导演感知契约')
+
+    const longWholeVideoSummary = '全片叙事信息。'.repeat(1_000)
+    expect(parseDirectorSynthesisAnswer(JSON.stringify({
+      ...JSON.parse(perceptionJson(longWholeVideoSummary)),
+      sound: {
+        speechSummary: null,
+        ambientSound: null,
+        music: null,
+        emotion: null,
+      },
+    })).summary).toBe(longWholeVideoSummary)
+    expect(() => parseVisualPerceptionAnswer(
+      perceptionJson(longWholeVideoSummary),
+    )).toThrow('不符合结构化感知契约')
+  })
+
+  it('recomputes a legacy final-summary checkpoint that has no director perception', async () => {
+    const taskId = 'video-legacy-final-summary'
+    const checkpointRoot = await seedSynthesisCheckpoints(taskId, {
+      summary: '旧版只有文本汇总。',
+    })
+    const replacement = directorPerception('新版结构化导演感知。')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(replacement) } }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await synthesizeN8nMediaResults(
+      taskId,
+      synthesisRouting(),
+      { prompt: '保持事实边界' },
+      synthesisInput(),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result).toMatchObject({
+      summary: replacement.summary,
+      directorPerception: replacement,
+    })
+    const stored = JSON.parse(await readFile(join(checkpointRoot, 'final-summary.json'), 'utf8'))
+    expect(stored).toMatchObject({
+      schema: 'video-autoworker-final-summary-checkpoint',
+      version: 1,
+      summary: replacement.summary,
+      directorPerception: replacement,
+    })
+  })
+
+  it('recomputes a versioned final-summary checkpoint with incomplete director perception', async () => {
+    const taskId = 'video-incomplete-final-summary'
+    await seedSynthesisCheckpoints(taskId, {
+      schema: 'video-autoworker-final-summary-checkpoint',
+      version: 1,
+      summary: '结构版本正确但内容不完整。',
+      directorPerception: { summary: '结构版本正确但内容不完整。' },
+    })
+    const replacement = directorPerception('完整校验后自动重算。')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(replacement) } }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+
+    const result = await synthesizeN8nMediaResults(
+      taskId,
+      synthesisRouting(),
+      { prompt: '保持事实边界' },
+      synthesisInput(),
+    )
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(result.directorPerception).toEqual(replacement)
+  })
+
+  it('keeps the historical final-summary checkpoint intact when recomputation fails', async () => {
+    const taskId = 'video-failed-final-summary-recompute'
+    const legacy = { summary: '仍需保留的旧版汇总。' }
+    const checkpointRoot = await seedSynthesisCheckpoints(taskId, legacy)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      error: { message: '汇总模型暂时不可用' },
+    }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
+
+    await expect(synthesizeN8nMediaResults(
+      taskId,
+      synthesisRouting(),
+      { prompt: '保持事实边界' },
+      synthesisInput(),
+    )).rejects.toThrow()
+
+    await expect(readFile(join(checkpointRoot, 'final-summary.json'), 'utf8'))
+      .resolves.toBe(JSON.stringify(legacy))
+  })
+
+  it('reuses only a fully valid versioned final-summary checkpoint', async () => {
+    const taskId = 'video-valid-final-summary'
+    const perception = directorPerception('可安全复用的导演感知。')
+    await seedSynthesisCheckpoints(taskId, {
+      schema: 'video-autoworker-final-summary-checkpoint',
+      version: 1,
+      summary: perception.summary,
+      directorPerception: perception,
+    })
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+
+    const result = await synthesizeN8nMediaResults(
+      taskId,
+      synthesisRouting(),
+      { prompt: '保持事实边界' },
+      synthesisInput(),
+    )
+
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      summary: perception.summary,
+      directorPerception: perception,
+    })
   })
 
   it('uses stage-specific Qwen reasoning without spending deep reasoning on every frame', () => {
@@ -229,7 +453,7 @@ describe('n8n stateless media helpers', () => {
         return new Response(JSON.stringify({ error: { message: '主视觉服务不可用' } }), { status: 503 })
       }
       return new Response(JSON.stringify({
-        choices: [{ message: { content: '<think>内部推理</think>备用路由画面结果' } }],
+        choices: [{ message: { content: `<think>内部推理</think>${perceptionJson('备用路由画面结果')}` } }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
 
@@ -257,6 +481,68 @@ describe('n8n stateless media helpers', () => {
       .toEqual(['vision-fallback', 'vision-fallback'])
     expect(result.analysis).toContain('备用路由画面结果')
     expect(result.analysis).not.toContain('<think>')
+  })
+
+  it('uses the fallback when the primary returns HTTP 200 with invalid structured output', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      resources: [],
+      routes: [
+        {
+          id: 'vision-invalid-primary', label: '结构错误主路由', description: '',
+          location: 'local', transport: 'openai-compatible', model: 'primary',
+          baseUrl: 'http://127.0.0.1:18101/v1', enabled: true,
+          capabilities: ['text', 'vision'],
+        },
+        {
+          id: 'vision-valid-fallback', label: '结构正确备用路由', description: '',
+          location: 'local', transport: 'openai-compatible', model: 'fallback',
+          baseUrl: 'http://127.0.0.1:18102/v1', enabled: true,
+          capabilities: ['text', 'vision'],
+        },
+      ],
+    })
+    const taskId = 'video-structured-fallback-test'
+    const workspace = mediaTaskWorkspace(taskId)
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'frame-001.jpg'), 'frame-one')
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId,
+      kind: 'prepared-video',
+      durationSeconds: 60,
+      sourceBytes: 100,
+      audioAvailable: false,
+      frameCount: 1,
+      segmentCount: 1,
+      segmentSeconds: 60,
+      memoryMode: 'none',
+      preparedAt: new Date().toISOString(),
+      segments: [{
+        index: 1, startSeconds: 0, durationSeconds: 60,
+        audioFile: null, frameFiles: ['frame-001.jpg'],
+      }],
+    }))
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => (
+      String(input).includes(':18101/')
+        ? new Response(JSON.stringify({
+            choices: [{ message: { content: '这不是结构化 JSON' } }],
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+        : new Response(JSON.stringify({
+            choices: [{ message: { content: perceptionJson('备用路由修复结构错误') } }],
+          }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    ))
+
+    const result = await analyzeN8nVideoFrames(taskId, {
+      config: { modelRouting: { nodes: { vision: {
+        routeId: 'vision-invalid-primary', fallbackRouteIds: ['vision-valid-fallback'],
+      } } } },
+    }, { prompt: '验证结构化回退' })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({
+      routeId: 'vision-valid-fallback', fallbackUsed: true, model: 'fallback',
+    })
+    expect(result.analysis).toContain('备用路由修复结构错误')
   })
 
   it('accepts bounded stage overrides and the legacy synthesis token setting', () => {

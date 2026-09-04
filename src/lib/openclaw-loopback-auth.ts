@@ -12,6 +12,7 @@ const N8N_CALLBACK_PATHS = new Set([
 const N8N_OPENCLAW_OPERATOR_PATHS = new Set([
   ...N8N_CALLBACK_PATHS,
   '/api/n8n/trigger',
+  '/api/n8n/director-extraction',
 ])
 
 const N8N_GLOBAL_RELEASE_PATHS = new Set([

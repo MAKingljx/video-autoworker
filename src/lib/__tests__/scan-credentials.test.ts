@@ -83,6 +83,26 @@ describe('scanForSecrets', () => {
     expect(hits).toHaveLength(0)
   })
 
+  it('does not treat ordinary token and key terminology as a credential', () => {
+    const hits = scanForSecrets('The token budget and key narrative decision are reviewed together.')
+    expect(hits).toHaveLength(0)
+  })
+
+  it('detects bearer, all GitHub token families, Slack tokens, and assignments', () => {
+    const values = [
+      'Bearer bearer_value_12345',
+      `ghu_${'U'.repeat(24)}`,
+      `ghr_${'R'.repeat(24)}`,
+      `github_pat_${'P'.repeat(24)}`,
+      ['xoxb', '1234567890', 'abcdefghijklmnop'].join('-'),
+      'api_key=assigned-secret-12345',
+      'token: assigned-token-12345',
+    ]
+    for (const value of values) {
+      expect(scanForSecrets(value), value).not.toHaveLength(0)
+    }
+  })
+
   it('returns redactedPreview for each match', () => {
     const hits = scanForSecrets('AKIAIOSFODNN7EXAMPLE')
     expect(hits[0].redactedPreview).toContain('***')

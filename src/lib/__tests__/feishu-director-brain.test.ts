@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync } from 'node:child_process'
 import {
-  access, lstat, mkdtemp, mkdir, readFile, readdir, readlink, rm, rmdir, stat, symlink, utimes,
+  access, chmod, lstat, mkdtemp, mkdir, readFile, readdir, readlink, realpath, rm, rmdir, stat, symlink, utimes,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -29,6 +29,10 @@ interface DirectorBrainModule {
     request: Record<string, unknown>,
     options?: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>
+  executeDirectorBrainProposalBatch: (
+    request: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>
   projectDirectorBrainEvidence: (
     input: Record<string, unknown>,
     options?: Record<string, unknown>,
@@ -45,12 +49,19 @@ interface DirectorBrainModule {
     schemaVersion: number
     brainName: string
     projectId: string
+    environment: string
     keychainService: string
     tables: Array<{
       key: string
       name: string
       stableId: string
-      fields: Array<{ name: string; type: number; primary?: boolean; options?: string[] }>
+      fields: Array<{
+        name: string
+        type: number
+        primary?: boolean
+        options?: string[]
+        sinceVersion?: number
+      }>
     }>
   }>
   resolveBootstrapTableAssignments: (
@@ -67,6 +78,30 @@ interface DirectorBrainModule {
     catalog: unknown,
     schema: unknown,
   ) => Record<string, unknown>
+  writeMigrationBackup: (
+    accessToken: string,
+    catalogArtifact: Record<string, unknown>,
+    schema: unknown,
+    plan: unknown,
+    options?: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>
+  verifyMigrationBackupFile: (
+    receiptFile: string,
+    expectedSha256: string,
+  ) => Promise<Record<string, unknown>>
+  verifyMigrationRemoteSnapshot: (
+    accessToken: string,
+    catalog: Record<string, unknown>,
+    receipt: Record<string, unknown>,
+    dependencies: Record<string, unknown>,
+  ) => Promise<boolean>
+  withDirectorBrainMigrationLock: (
+    options: Record<string, unknown>,
+    action: (context: Record<string, unknown>) => Promise<unknown>,
+  ) => Promise<unknown>
+  migrateDirectorBrain: (
+    options?: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>
   validateDirectorBrainCatalogPath: (pathname: string, catalogRoot?: string) => string
   validateBootstrapTablePreflight: (
     table: unknown,
@@ -75,6 +110,11 @@ interface DirectorBrainModule {
   ) => boolean
   validateDirectorBrainSchema: (value: unknown) => unknown
   parseDirectorBrainArgs: (argv: string[]) => Record<string, unknown>
+  normalizeDirectorWorkTitle: (value: unknown) => string
+  deriveDirectorWorkNames: (
+    fields: Record<string, unknown>,
+    worksById?: Map<string, Record<string, unknown>>,
+  ) => string[]
   runDirectorBrainCli: (
     argv: string[],
     options?: Record<string, unknown>,
@@ -124,20 +164,28 @@ async function prepareRequiredStandaloneFixture(
     'openapi.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/index.js': 'export default {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-context-summary.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-system-question-router.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/package.json': '{}\n',
     'openclaw-skills/aiworker-director-brain/SKILL.md': 'runtime\n',
     'openclaw-skills/aiworker-task-flow/SKILL.md': 'runtime\n',
     'ops/feishu-director-brain/schema.json': '{}\n',
+    'ops/openclaw/qwen-current-runtime-convergence.manifest.json': '{}\n',
     'package.json': '{}\n',
     'public/favicon.ico': 'fixture\n',
     'runtime/schema.sql': 'CREATE TABLE tasks (id TEXT, title TEXT, status TEXT);\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
+    'scripts/apply-openclaw-runtime-convergence.sh': '#!/bin/sh\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
+    'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
@@ -244,8 +292,16 @@ function operationHarness(schema: LoadedSchema, initial: Record<string, Array<Re
       workId: string
     }) => (records.get(table.key) || []).filter(record => {
       const fields = record.fields as Record<string, unknown>
+      if (table.key === 'skills_techniques') {
+        return String(fields['来源作品 ID'] || fields['作品 ID'] || '')
+          .split('\n')
+          .includes(workId)
+      }
       return (table.key === 'works' ? fields[table.stableId] : fields['作品 ID']) === workId
     }),
+    listAll: async ({ table }: {
+      table: LoadedSchema['tables'][number]
+    }) => records.get(table.key) || [],
     resolveWork: async () => (
       (records.get('works') || []).filter(record => {
         const fields = record.fields as Record<string, unknown>
@@ -310,15 +366,157 @@ function completeIntentFields(overrides: Record<string, unknown> = {}) {
   }
 }
 
+async function migrationHarness(directorBrain: DirectorBrainModule) {
+  const schema = await directorBrain.loadDirectorBrainSchema()
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'director-brain-migration-v3-')))
+  await chmod(root, 0o700)
+  const catalogPath = join(root, 'catalog.json')
+  const receiptFile = join(root, 'migration.receipt.json')
+  const catalog = {
+    schemaVersion: 2,
+    brainName: schema.brainName,
+    projectId: schema.projectId,
+    environment: schema.environment,
+    keychainService: schema.keychainService,
+    appId: 'cli_test',
+    appToken: 'bascn_private_fixture',
+    url: 'https://example.invalid/private',
+    tables: Object.fromEntries(schema.tables.map(table => [table.key, {
+      name: table.name,
+      tableId: `table_${table.key}`,
+    }])),
+  }
+  const originalCatalogBytes = Buffer.from(JSON.stringify(catalog, null, 4) + '\n', 'utf8')
+  await writeFile(catalogPath, originalCatalogBytes, { mode: 0o600 })
+  await chmod(catalogPath, 0o600)
+  const remoteTables = schema.tables.map((table, index) => ({
+    table_id: `table_${table.key}`,
+    name: table.name,
+    revision: 100 + index,
+  }))
+  const remoteFields = new Map(schema.tables.map(table => [
+    table.key,
+    table.fields.filter(field => Number(field.sinceVersion || 1) <= 2).map((field, index) => ({
+      field_id: `field_${table.key}_${index}`,
+      field_name: field.name,
+      type: field.type,
+      is_primary: field.primary === true,
+      ...((field.type === 3 || field.type === 4) ? {
+        property: { options: (field.options || []).map((name, optionIndex) => ({
+          name, color: optionIndex,
+        })) },
+      } : {}),
+    })),
+  ]))
+  const remoteRecords = new Map(schema.tables.map(table => [table.key, [
+    { record_id: `blank_${table.key}`, fields: {} },
+    {
+      record_id: `record_${table.key}`,
+      fields: { [table.fields[0].name]: `${table.name}既有记录` },
+    },
+  ]]))
+  const createdFields: Array<{ tableKey: string; fieldName: string }> = []
+  const createFieldDependency: (
+    token: string,
+    appToken: string,
+    tableId: string,
+    field: LoadedSchema['tables'][number]['fields'][number],
+  ) => Promise<Record<string, unknown> | null> = async (
+    _token,
+    _appToken,
+    tableId,
+    field,
+  ) => {
+    const key = tableId.replace(/^table_/u, '')
+    const fields = remoteFields.get(key)
+    if (!fields) throw new Error('fixture_table_missing')
+    const createdField = {
+      field_id: `created_${key}_${createdFields.length}`,
+      field_name: field.name,
+      type: field.type,
+      is_primary: false,
+      ...((field.type === 3 || field.type === 4) ? {
+        property: { options: (field.options || []).map((name, optionIndex) => ({
+          name, color: optionIndex,
+        })) },
+      } : {}),
+    }
+    fields.push(createdField)
+    const remoteTable = remoteTables.find(item => item.table_id === tableId)
+    if (!remoteTable) throw new Error('fixture_remote_table_missing')
+    remoteTable.revision += 1
+    createdFields.push({ tableKey: key, fieldName: field.name })
+    return structuredClone(createdField)
+  }
+  const dependencies = {
+    accessToken: async () => 'tenant_access_token_fixture',
+    listTables: async () => structuredClone(remoteTables),
+    listFields: async (_token: string, _appToken: string, tableId: string) => {
+      const key = tableId.replace(/^table_/u, '')
+      return structuredClone(remoteFields.get(key) || [])
+    },
+    listRecords: async (_token: string, _appToken: string, tableId: string) => {
+      const key = tableId.replace(/^table_/u, '')
+      return structuredClone(remoteRecords.get(key) || [])
+    },
+    createField: createFieldDependency,
+  }
+  const options = {
+    catalogPath,
+    catalogRoot: root,
+    receiptFile,
+    migrationDependencies: dependencies,
+  }
+  const addField = (tableKey: string, fieldName: string, fieldId: string) => {
+    const table = schema.tables.find(item => item.key === tableKey)
+    const field = table?.fields.find(item => item.name === fieldName)
+    if (!field) throw new Error('fixture_field_missing')
+    remoteFields.get(tableKey)?.push({
+      field_id: fieldId,
+      field_name: field.name,
+      type: field.type,
+      is_primary: false,
+      ...((field.type === 3 || field.type === 4) ? {
+        property: { options: (field.options || []).map((name, optionIndex) => ({
+          name, color: optionIndex,
+        })) },
+      } : {}),
+    })
+    const remoteTable = remoteTables.find(item => item.table_id === `table_${tableKey}`)
+    if (!remoteTable) throw new Error('fixture_remote_table_missing')
+    remoteTable.revision += 1
+  }
+  return {
+    schema,
+    root,
+    catalog,
+    catalogPath,
+    receiptFile,
+    originalCatalogBytes,
+    remoteTables,
+    remoteFields,
+    remoteRecords,
+    createdFields,
+    dependencies,
+    options,
+    addField,
+  }
+}
+
 type FoundationTable = 'works' | 'director_intents' | 'material_evidence'
   | 'story_nodes' | 'material_judgments' | 'director_cases'
+type LearningContextTable = 'people_profiles' | 'story_relations'
+  | 'narrative_plans' | 'skills_techniques'
 
 interface FoundationRecord extends Record<string, unknown> {
   record_id: string
   fields: Record<string, unknown>
 }
 
-function reviewedFoundation(): Record<FoundationTable, FoundationRecord[]> {
+type FoundationFixture = Record<FoundationTable, FoundationRecord[]>
+  & Partial<Record<LearningContextTable, FoundationRecord[]>>
+
+function reviewedFoundation(): FoundationFixture {
   return {
     works: [{
       record_id: 'rec_work_reviewed',
@@ -767,7 +965,7 @@ describe('Feishu director brain contract', () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
     const catalog = {
-      schemaVersion: 2,
+      schemaVersion: schema.schemaVersion,
       brainName: '导演脑',
       projectId: 'PROJ-VIDEO-AUTOWORKER',
       environment: 'test',
@@ -804,7 +1002,7 @@ describe('Feishu director brain contract', () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
     const catalog = {
-      schemaVersion: 2,
+      schemaVersion: schema.schemaVersion,
       brainName: schema.brainName,
       projectId: schema.projectId,
       environment: 'test',
@@ -835,7 +1033,7 @@ describe('Feishu director brain contract', () => {
       .toThrow('catalog_table_ids_must_be_unique')
   })
 
-  it('accepts only the controlled v1 catalog shape for an additive v2 migration plan', async () => {
+  it('accepts controlled legacy catalogs for an additive, backed-up v3 migration plan', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
     const legacyCatalog = {
@@ -857,13 +1055,25 @@ describe('Feishu director brain contract', () => {
     )).toBe(legacyCatalog)
     expect(directorBrain.planDirectorBrainMigration(legacyCatalog, schema)).toMatchObject({
       fromVersion: 1,
-      toVersion: 2,
+      toVersion: 3,
       required: true,
       addTables: ['works'],
       destructiveChanges: [],
       addFields: {
         director_intents: expect.arrayContaining(['作品 ID', '审核人', '审核时间', '审核原因']),
-        material_evidence: expect.arrayContaining(['作品 ID', '版本', '上一版本 ID']),
+        material_evidence: expect.arrayContaining([
+          '作品 ID', '版本', '上一版本 ID', '人物信息', '物体信息', '环境信息', '情绪信息',
+        ]),
+        material_judgments: expect.arrayContaining(['技法 ID']),
+        narrative_plans: expect.arrayContaining(['技法 ID']),
+        works: expect.arrayContaining(['作品层级', '父作品 ID', '系列 ID', '季 ID']),
+        skills_techniques: expect.arrayContaining(['作用域', '来源作品 ID']),
+      },
+      rollback: {
+        required: true,
+        strategy: 'verified-private-backup-manual-recovery',
+        catalogVersion: 1,
+        automaticRestoreAvailable: false,
       },
     })
     const invalid = structuredClone(legacyCatalog)
@@ -871,6 +1081,691 @@ describe('Feishu director brain contract', () => {
     expect(() => directorBrain.validateDirectorBrainCatalog(
       invalid, schema, { allowLegacyV1: true },
     )).toThrow('legacy_catalog_table_set_invalid')
+  })
+
+  it('preflights the deployed v2 catalog as an additive and reversible v3 migration', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const catalog = {
+      schemaVersion: 2,
+      brainName: schema.brainName,
+      projectId: schema.projectId,
+      environment: schema.environment,
+      keychainService: schema.keychainService,
+      appId: 'cli_test',
+      appToken: 'bascn_test',
+      tables: Object.fromEntries(schema.tables.map(table => [table.key, {
+        name: table.name,
+        tableId: `table_${table.key}`,
+      }])),
+    }
+
+    expect(() => directorBrain.validateDirectorBrainCatalog(catalog, schema))
+      .toThrow('catalog_schema_version_mismatch')
+    expect(directorBrain.validateDirectorBrainCatalog(
+      catalog, schema, { allowLegacyV2: true },
+    )).toBe(catalog)
+    expect(directorBrain.planDirectorBrainMigration(catalog, schema)).toMatchObject({
+      fromVersion: 2,
+      toVersion: 3,
+      required: true,
+      addTables: [],
+      destructiveChanges: [],
+      rollback: {
+        required: true,
+        strategy: 'verified-private-backup-manual-recovery',
+        catalogVersion: 2,
+        automaticRestoreAvailable: false,
+      },
+      addFields: {
+        works: ['作品层级', '父作品 ID', '系列 ID', '季 ID', '季序号', '集序号'],
+        material_evidence: ['人物信息', '物体信息', '环境信息', '情绪信息'],
+        material_judgments: ['技法 ID'],
+        narrative_plans: ['技法 ID'],
+        skills_techniques: ['作用域', '来源作品 ID'],
+      },
+    })
+    expect(() => directorBrain.parseDirectorBrainArgs(['restore-private-backup']))
+      .toThrow('director_brain_command_invalid')
+  })
+
+  it('prepares and independently verifies a cross-process private v2 receipt with exact recovery bytes', async () => {
+    const directorBrain = await loadModule()
+    const fixture = await migrationHarness(directorBrain)
+    try {
+      await expect(directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        dryRun: true,
+      })).resolves.toMatchObject({
+        mode: 'dry-run',
+        scope: 'local-catalog-and-schema-only',
+        remoteVerified: false,
+      })
+      const prepared = await directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        prepare: true,
+      })
+      expect(prepared).toMatchObject({
+        ok: true,
+        mode: 'prepare',
+        remoteVerified: true,
+        fromVersion: 2,
+        toVersion: 3,
+        receiptSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        originalCatalogSha256: createHash('sha256')
+          .update(fixture.originalCatalogBytes).digest('hex'),
+        originalCatalogBytes: fixture.originalCatalogBytes.length,
+        tableCount: fixture.schema.tables.length,
+        recordCount: fixture.schema.tables.length * 2,
+      })
+      const addFields = prepared.addFields as Record<string, string[]>
+      expect(Object.values(addFields).flat()).toHaveLength(14)
+      expect(addFields).toEqual({
+        works: ['作品层级', '父作品 ID', '系列 ID', '季 ID', '季序号', '集序号'],
+        material_evidence: ['人物信息', '物体信息', '环境信息', '情绪信息'],
+        material_judgments: ['技法 ID'],
+        narrative_plans: ['技法 ID'],
+        skills_techniques: ['作用域', '来源作品 ID'],
+      })
+      const receipt = JSON.parse(await readFile(fixture.receiptFile, 'utf8'))
+      expect(receipt.originalCatalog).toMatchObject({
+        path: fixture.catalogPath,
+        physicalPath: fixture.catalogPath,
+        sha256: prepared.originalCatalogSha256,
+        bytes: fixture.originalCatalogBytes.length,
+        mode: 0o600,
+        uid: expect.any(Number),
+        gid: expect.any(Number),
+        nlink: 1,
+      })
+      expect(receipt.snapshot).toMatchObject({
+        sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        bytes: expect.any(Number),
+        mode: 0o600,
+        uid: expect.any(Number),
+        gid: expect.any(Number),
+        nlink: 1,
+      })
+      const snapshot = JSON.parse(await readFile(receipt.snapshot.path, 'utf8'))
+      expect(Buffer.from(snapshot.originalCatalogBase64, 'base64'))
+        .toEqual(fixture.originalCatalogBytes)
+      expect(snapshot.remoteSnapshot.tables.works.records).toEqual(
+        fixture.remoteRecords.get('works'),
+      )
+
+      const child = await execFileAsync(process.execPath, [
+        resolve(process.cwd(), 'scripts/feishu-director-brain.mjs'),
+        'migration-backup',
+        'verify',
+        '--receipt-file',
+        fixture.receiptFile,
+        '--expected-sha',
+        prepared.receiptSha256 as string,
+      ])
+      const childResult = JSON.parse(child.stdout)
+      expect(childResult).toMatchObject({
+        ok: true,
+        verified: true,
+        receiptSha256: prepared.receiptSha256,
+      })
+      expect(child.stdout).not.toMatch(/bascn_private_fixture|tenant_access_token_fixture/u)
+      await expect(directorBrain.verifyMigrationBackupFile(
+        fixture.receiptFile, '0'.repeat(64),
+      )).rejects.toThrow('migration_receipt_sha256_mismatch')
+      await expect(directorBrain.verifyMigrationBackupFile(
+        fixture.receiptFile, undefined as unknown as string,
+      )).rejects.toThrow('migration_expected_sha256_invalid')
+      expect(directorBrain.parseDirectorBrainArgs([
+        'migrate', '--prepare', '--receipt-file', fixture.receiptFile,
+      ])).toMatchObject({ prepare: true, receiptFile: fixture.receiptFile })
+      expect(directorBrain.parseDirectorBrainArgs([
+        'migration-backup', 'verify', '--receipt-file', fixture.receiptFile,
+        '--expected-sha', prepared.receiptSha256 as string,
+      ])).toMatchObject({
+        backupAction: 'verify', receiptFile: fixture.receiptFile,
+        expectedSha256: prepared.receiptSha256,
+      })
+      expect(() => directorBrain.parseDirectorBrainArgs(['migrate']))
+        .toThrow('migration_mode_required')
+      expect(() => directorBrain.parseDirectorBrainArgs([
+        'migration-backup', 'verify', '--receipt-file', fixture.receiptFile,
+      ])).toThrow('migration_expected_sha256_required')
+      expect(() => directorBrain.parseDirectorBrainArgs([
+        'migrate', '--rollback-dry-run', '--receipt-file', fixture.receiptFile,
+      ])).toThrow('migration_expected_sha256_required')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('applies only the 14 missing fields, safely continues partial work, and never deletes blank records', async () => {
+    const directorBrain = await loadModule()
+    const fixture = await migrationHarness(directorBrain)
+    try {
+      const blankRecordsBefore = structuredClone(Object.fromEntries(fixture.remoteRecords))
+      const prepared = await directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        prepare: true,
+      })
+      const createField = fixture.dependencies.createField
+      let createAttempts = 0
+      fixture.dependencies.createField = async (...args: Parameters<typeof createField>) => {
+        if (createAttempts === 2) throw new Error('fixture_create_field_interrupted')
+        createAttempts += 1
+        return createField(...args)
+      }
+      await expect(directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        apply: true,
+        expectedSha256: prepared.receiptSha256,
+      })).rejects.toThrow('fixture_create_field_interrupted')
+      expect(fixture.createdFields).toHaveLength(2)
+      expect(JSON.parse(await readFile(fixture.catalogPath, 'utf8')).schemaVersion).toBe(2)
+      fixture.dependencies.createField = createField
+      const applied = await directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        apply: true,
+        expectedSha256: prepared.receiptSha256,
+      })
+      expect(applied).toMatchObject({
+        ok: true,
+        mode: 'apply',
+        alreadyApplied: false,
+        fieldsCreatedThisRun: 12,
+        fieldsAdded: 14,
+        fieldsOwned: 14,
+      })
+      expect(fixture.createdFields).toHaveLength(14)
+      expect(Object.fromEntries(fixture.remoteRecords)).toEqual(blankRecordsBefore)
+      expect(JSON.parse(await readFile(fixture.catalogPath, 'utf8')).schemaVersion).toBe(3)
+
+      const reapplied = await directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        apply: true,
+        expectedSha256: prepared.receiptSha256,
+      })
+      expect(reapplied).toMatchObject({ alreadyApplied: true, fieldsAdded: 14 })
+      expect(fixture.createdFields).toHaveLength(14)
+
+      await expect(directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        rollbackDryRun: true,
+        expectedSha256: prepared.receiptSha256,
+      })).resolves.toMatchObject({
+        eligibleForManualRollback: true,
+        destructiveActionPerformed: false,
+        fieldsChecked: 14,
+        originalCatalogRecovery: {
+          sha256: createHash('sha256').update(fixture.originalCatalogBytes).digest('hex'),
+          bytes: fixture.originalCatalogBytes.length,
+        },
+      })
+      expect(Object.fromEntries(fixture.remoteRecords)).toEqual(blankRecordsBefore)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('never claims an ambiguously created or concurrent same-name field as rollback-owned', async () => {
+    const directorBrain = await loadModule()
+    const fixture = await migrationHarness(directorBrain)
+    try {
+      const prepared = await directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        prepare: true,
+      })
+      const createField = fixture.dependencies.createField
+      fixture.dependencies.createField = async (...args: Parameters<typeof createField>) => {
+        await createField(...args)
+        return null
+      }
+      await expect(directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        apply: true,
+        expectedSha256: prepared.receiptSha256,
+      })).rejects.toThrow('migration_create_field_response_missing')
+      fixture.dependencies.createField = createField
+      await expect(directorBrain.migrateDirectorBrain({
+        ...fixture.options,
+        apply: true,
+        expectedSha256: prepared.receiptSha256,
+      })).rejects.toThrow('director_brain_migration_remote_revision_changed:works')
+      expect(JSON.parse(await readFile(fixture.catalogPath, 'utf8')).schemaVersion).toBe(2)
+      await expect(access(fixture.receiptFile + '.applied.json')).rejects.toThrow()
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed on catalog or remote drift before migration writes', async () => {
+    const directorBrain = await loadModule()
+    const catalogFixture = await migrationHarness(directorBrain)
+    const remoteFixture = await migrationHarness(directorBrain)
+    const revisionFixture = await migrationHarness(directorBrain)
+    try {
+      const catalogPrepared = await directorBrain.migrateDirectorBrain({
+        ...catalogFixture.options,
+        prepare: true,
+      })
+      await writeFile(
+        catalogFixture.catalogPath,
+        Buffer.concat([catalogFixture.originalCatalogBytes, Buffer.from(' ')]),
+        { mode: 0o600 },
+      )
+      await expect(directorBrain.migrateDirectorBrain({
+        ...catalogFixture.options,
+        apply: true,
+        expectedSha256: catalogPrepared.receiptSha256,
+      })).rejects.toThrow('director_brain_migration_catalog_changed')
+      expect(catalogFixture.createdFields).toHaveLength(0)
+
+      const remotePrepared = await directorBrain.migrateDirectorBrain({
+        ...remoteFixture.options,
+        prepare: true,
+      })
+      remoteFixture.remoteRecords.get('works')?.push({
+        record_id: 'concurrent_record', fields: { 作品名称: '并发写入' },
+      })
+      await expect(directorBrain.migrateDirectorBrain({
+        ...remoteFixture.options,
+        apply: true,
+        expectedSha256: remotePrepared.receiptSha256,
+      })).rejects.toThrow('director_brain_migration_remote_records_changed:works')
+      expect(remoteFixture.createdFields).toHaveLength(0)
+
+      const revisionPrepared = await directorBrain.migrateDirectorBrain({
+        ...revisionFixture.options,
+        prepare: true,
+      })
+      revisionFixture.remoteTables[0].revision += 1
+      await expect(directorBrain.migrateDirectorBrain({
+        ...revisionFixture.options,
+        apply: true,
+        expectedSha256: revisionPrepared.receiptSha256,
+      })).rejects.toThrow('director_brain_migration_remote_revision_changed:system_blueprint')
+      expect(revisionFixture.createdFields).toHaveLength(0)
+    } finally {
+      await rm(catalogFixture.root, { recursive: true, force: true })
+      await rm(remoteFixture.root, { recursive: true, force: true })
+      await rm(revisionFixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses rollback dry-run after field use, business writes, or field identity drift', async () => {
+    const directorBrain = await loadModule()
+    const valueFixture = await migrationHarness(directorBrain)
+    const writeFixture = await migrationHarness(directorBrain)
+    const driftFixture = await migrationHarness(directorBrain)
+    const apply = async (fixture: Awaited<ReturnType<typeof migrationHarness>>) => {
+      const prepared = await directorBrain.migrateDirectorBrain({
+        ...fixture.options, prepare: true,
+      })
+      await directorBrain.migrateDirectorBrain({
+        ...fixture.options, apply: true, expectedSha256: prepared.receiptSha256,
+      })
+      return prepared.receiptSha256 as string
+    }
+    try {
+      const valueReceiptSha = await apply(valueFixture)
+      const valueRecord = valueFixture.remoteRecords.get('works')?.[0]
+      if (valueRecord) valueRecord.fields['父作品 ID'] = 'WORK-PARENT-001'
+      await expect(directorBrain.migrateDirectorBrain({
+        ...valueFixture.options, rollbackDryRun: true, expectedSha256: valueReceiptSha,
+      })).rejects.toThrow('migration_rollback_field_has_values:works:父作品 ID')
+
+      const writeReceiptSha = await apply(writeFixture)
+      writeFixture.remoteRecords.get('works')?.push({
+        record_id: 'post_migration_business_write', fields: { 作品名称: '新作品' },
+      })
+      await expect(directorBrain.migrateDirectorBrain({
+        ...writeFixture.options, rollbackDryRun: true, expectedSha256: writeReceiptSha,
+      })).rejects.toThrow('migration_rollback_business_writes_detected:works')
+
+      const driftReceiptSha = await apply(driftFixture)
+      const field = driftFixture.remoteFields.get('works')
+        ?.find(item => item.field_name === '父作品 ID')
+      if (field) field.field_id = 'field_identity_drifted'
+      await expect(directorBrain.migrateDirectorBrain({
+        ...driftFixture.options, rollbackDryRun: true, expectedSha256: driftReceiptSha,
+      })).rejects.toThrow('director_brain_migration_owned_field_missing')
+    } finally {
+      await rm(valueFixture.root, { recursive: true, force: true })
+      await rm(writeFixture.root, { recursive: true, force: true })
+      await rm(driftFixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('reenters only with its internal migration context and rejects another process', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const root = await mkdtemp(join(tmpdir(), 'director-brain-migration-lock-'))
+    const catalogPath = join(root, 'catalog.json')
+    const catalog = {
+      schemaVersion: 2,
+      brainName: schema.brainName,
+      projectId: schema.projectId,
+      environment: schema.environment,
+      keychainService: schema.keychainService,
+      appId: 'cli_test',
+      appToken: 'bascn_test',
+      tables: {},
+    }
+    const lockOptions = {
+      catalogPath,
+      catalog,
+      fromVersion: 2,
+      toVersion: 3,
+      receiptSha256: 'a'.repeat(64),
+    }
+    let release: (() => void) | undefined
+    let entered: (() => void) | undefined
+    const held = new Promise<void>(resolvePromise => { release = resolvePromise })
+    const acquired = new Promise<void>(resolvePromise => { entered = resolvePromise })
+
+    try {
+      const first = directorBrain.withDirectorBrainMigrationLock(
+        lockOptions,
+        async context => {
+          await expect(directorBrain.withDirectorBrainMigrationLock(
+            { ...lockOptions, lockContext: context },
+            async () => 'nested-ok',
+          )).resolves.toBe('nested-ok')
+          entered?.()
+          await held
+          return 'outer-ok'
+        },
+      )
+      await acquired
+
+      const moduleUrl = pathToFileURL(
+        resolve(process.cwd(), 'scripts/lib/feishu-director-brain.mjs'),
+      ).href
+      const childScript = `
+        const [moduleUrl, catalogPath, catalogJson] = process.argv.slice(1)
+        const directorBrain = await import(moduleUrl)
+        try {
+          await directorBrain.withDirectorBrainMigrationLock({
+            catalogPath,
+            catalog: JSON.parse(catalogJson),
+            fromVersion: 2,
+            toVersion: 3,
+            receiptSha256: 'a'.repeat(64),
+          }, async () => 'unexpected')
+          process.stdout.write('unexpected-success')
+        } catch (error) {
+          process.stdout.write(error.message)
+        }
+      `
+      const child = await execFileAsync(process.execPath, [
+        '--input-type=module',
+        '-e',
+        childScript,
+        moduleUrl,
+        catalogPath,
+        JSON.stringify(catalog),
+      ])
+      expect(child.stdout).toBe('director_brain_migration_lock_contended')
+      release?.()
+      await expect(first).resolves.toBe('outer-ok')
+      expect(await readdir(join(root, '.director-brain-migration-locks'))).toEqual([])
+    } finally {
+      release?.()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('recovers only a receipt-bound lock whose recorded process incarnation died', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'director-brain-dead-lock-')))
+    await chmod(root, 0o700)
+    const catalogPath = join(root, 'catalog.json')
+    const lockOptions = {
+      catalogPath,
+      catalog: {
+        schemaVersion: 2,
+        brainName: schema.brainName,
+        projectId: schema.projectId,
+        environment: schema.environment,
+        appToken: 'bascn_lock_fixture',
+      },
+      fromVersion: 2,
+      toVersion: 3,
+      receiptSha256: 'b'.repeat(64),
+    }
+    const moduleUrl = pathToFileURL(
+      resolve(process.cwd(), 'scripts/lib/feishu-director-brain.mjs'),
+    ).href
+    const childScript = `
+      const [moduleUrl, optionsJson] = process.argv.slice(1)
+      const directorBrain = await import(moduleUrl)
+      await directorBrain.withDirectorBrainMigrationLock(
+        JSON.parse(optionsJson),
+        async () => {
+          process.stdout.write('locked\\n')
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 60_000))
+        },
+      )
+    `
+    const child = spawn(process.execPath, [
+      '--input-type=module', '-e', childScript, moduleUrl, JSON.stringify(lockOptions),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    try {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(() => rejectPromise(new Error('child_lock_timeout')), 5_000)
+        child.once('error', rejectPromise)
+        child.stdout.once('data', chunk => {
+          clearTimeout(timeout)
+          if (String(chunk) !== 'locked\n') rejectPromise(new Error('child_lock_output_invalid'))
+          else resolvePromise()
+        })
+      })
+      child.kill('SIGKILL')
+      await new Promise<void>(resolvePromise => child.once('exit', () => resolvePromise()))
+      await expect(directorBrain.withDirectorBrainMigrationLock(
+        lockOptions,
+        async () => 'recovered',
+      )).resolves.toBe('recovered')
+      const lockRoot = join(root, '.director-brain-migration-locks')
+      expect((await readdir(lockRoot)).sort()).toEqual(['.recovered-stale'])
+      const recovered = await readdir(join(lockRoot, '.recovered-stale'))
+      expect(recovered).toHaveLength(1)
+      const recoveredLock = join(lockRoot, '.recovered-stale', recovered[0])
+      const ownerFiles = await readdir(recoveredLock)
+      expect(ownerFiles).toHaveLength(1)
+      const owner = JSON.parse(await readFile(join(recoveredLock, ownerFiles[0]), 'utf8'))
+      expect(owner).toMatchObject({ uid: process.getuid?.() })
+      expect(owner.processIncarnation).not.toContain('bascn_lock_fixture')
+    } finally {
+      if (child.exitCode === null) child.kill('SIGKILL')
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps a live migration owner locked across caller timezone and locale differences', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'director-brain-live-lock-locale-')))
+    await chmod(root, 0o700)
+    const lockOptions = {
+      catalogPath: join(root, 'catalog.json'),
+      catalog: {
+        schemaVersion: 2,
+        brainName: schema.brainName,
+        projectId: schema.projectId,
+        environment: schema.environment,
+        appToken: 'bascn_live_locale_fixture',
+      },
+      fromVersion: 2,
+      toVersion: 3,
+      receiptSha256: 'd'.repeat(64),
+    }
+    const moduleUrl = pathToFileURL(
+      resolve(process.cwd(), 'scripts/lib/feishu-director-brain.mjs'),
+    ).href
+    const ownerScript = `
+      const [moduleUrl, optionsJson] = process.argv.slice(1)
+      const directorBrain = await import(moduleUrl)
+      await directorBrain.withDirectorBrainMigrationLock(
+        JSON.parse(optionsJson),
+        async () => {
+          process.stdout.write('locked\\n')
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 60_000))
+        },
+      )
+    `
+    const contenderScript = `
+      const [moduleUrl, optionsJson] = process.argv.slice(1)
+      const directorBrain = await import(moduleUrl)
+      try {
+        await directorBrain.withDirectorBrainMigrationLock(
+          JSON.parse(optionsJson), async () => 'unexpected',
+        )
+        process.stdout.write('unexpected-success')
+      } catch (error) {
+        process.stdout.write(error.message)
+      }
+    `
+    const owner = spawn(process.execPath, [
+      '--input-type=module', '-e', ownerScript, moduleUrl, JSON.stringify(lockOptions),
+    ], {
+      env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    try {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(() => rejectPromise(new Error('child_lock_timeout')), 5_000)
+        owner.once('error', rejectPromise)
+        owner.stdout.once('data', chunk => {
+          clearTimeout(timeout)
+          if (String(chunk) !== 'locked\n') rejectPromise(new Error('child_lock_output_invalid'))
+          else resolvePromise()
+        })
+      })
+      const contender = await execFileAsync(process.execPath, [
+        '--input-type=module', '-e', contenderScript, moduleUrl, JSON.stringify(lockOptions),
+      ], {
+        env: { ...process.env, LC_ALL: 'zh_CN.UTF-8', TZ: 'America/New_York' },
+      })
+      expect(contender.stdout).toBe('director_brain_migration_lock_contended')
+      const otherReceipt = await execFileAsync(process.execPath, [
+        '--input-type=module', '-e', contenderScript, moduleUrl,
+        JSON.stringify({ ...lockOptions, receiptSha256: 'f'.repeat(64) }),
+      ])
+      expect(otherReceipt.stdout).toBe('director_brain_migration_lock_contended')
+      expect(owner.exitCode).toBeNull()
+    } finally {
+      if (owner.exitCode === null) owner.kill('SIGKILL')
+      await new Promise<void>(resolvePromise => {
+        if (owner.exitCode !== null) resolvePromise()
+        else owner.once('exit', () => resolvePromise())
+      })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('serializes high-contention stale recovery without moving a successor lock', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'director-brain-recovery-race-')))
+    await chmod(root, 0o700)
+    const markerPath = join(root, 'critical.marker')
+    const lockOptions = {
+      catalogPath: join(root, 'catalog.json'),
+      catalog: {
+        schemaVersion: 2,
+        brainName: schema.brainName,
+        projectId: schema.projectId,
+        environment: schema.environment,
+        appToken: 'bascn_recovery_race_fixture',
+      },
+      fromVersion: 2,
+      toVersion: 3,
+      receiptSha256: 'e'.repeat(64),
+    }
+    const moduleUrl = pathToFileURL(
+      resolve(process.cwd(), 'scripts/lib/feishu-director-brain.mjs'),
+    ).href
+    const ownerScript = `
+      const [moduleUrl, optionsJson] = process.argv.slice(1)
+      const directorBrain = await import(moduleUrl)
+      await directorBrain.withDirectorBrainMigrationLock(
+        JSON.parse(optionsJson), async () => {
+          process.stdout.write('locked\\n')
+          await new Promise(resolvePromise => setTimeout(resolvePromise, 60_000))
+        },
+      )
+    `
+    const contenderScript = `
+      const [moduleUrl, optionsJson, markerPath, contenderId, startAt] = process.argv.slice(1)
+      const { writeFile, unlink } = await import('node:fs/promises')
+      const directorBrain = await import(moduleUrl)
+      while (Date.now() < Number(startAt)) {
+        await new Promise(resolvePromise => setTimeout(resolvePromise, 2))
+      }
+      try {
+        await directorBrain.withDirectorBrainMigrationLock(
+          JSON.parse(optionsJson), async () => {
+            try {
+              await writeFile(markerPath, contenderId, { flag: 'wx' })
+            } catch (error) {
+              if (error.code === 'EEXIST') {
+                process.stdout.write('overlap:' + contenderId)
+                return
+              }
+              throw error
+            }
+            await new Promise(resolvePromise => setTimeout(resolvePromise, 200))
+            await unlink(markerPath)
+            process.stdout.write('entered:' + contenderId)
+          },
+        )
+      } catch (error) {
+        process.stdout.write('error:' + error.message)
+      }
+    `
+    const owner = spawn(process.execPath, [
+      '--input-type=module', '-e', ownerScript, moduleUrl, JSON.stringify(lockOptions),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    try {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        const timeout = setTimeout(() => rejectPromise(new Error('child_lock_timeout')), 5_000)
+        owner.once('error', rejectPromise)
+        owner.stdout.once('data', chunk => {
+          clearTimeout(timeout)
+          if (String(chunk) !== 'locked\n') rejectPromise(new Error('child_lock_output_invalid'))
+          else resolvePromise()
+        })
+      })
+      owner.kill('SIGKILL')
+      await new Promise<void>(resolvePromise => owner.once('exit', () => resolvePromise()))
+      const startAt = Date.now() + 250
+      const contenders = Array.from({ length: 12 }, (_, index) => spawn(process.execPath, [
+        '--input-type=module', '-e', contenderScript, moduleUrl,
+        JSON.stringify(lockOptions), markerPath, String(index), String(startAt),
+      ], { stdio: ['ignore', 'pipe', 'pipe'] }))
+      const outputs = await Promise.all(contenders.map(async child => {
+        const exited = new Promise<void>((resolvePromise, rejectPromise) => {
+          child.once('error', rejectPromise)
+          child.once('close', () => resolvePromise())
+        })
+        let output = ''
+        for await (const chunk of child.stdout) output += String(chunk)
+        await exited
+        return output
+      }))
+      expect(outputs.some(output => output.startsWith('entered:'))).toBe(true)
+      expect(outputs.some(output => output.startsWith('overlap:'))).toBe(false)
+      expect(outputs.every(output => (
+        output.startsWith('entered:')
+        || output === 'error:director_brain_migration_lock_contended'
+      ))).toBe(true)
+      const recoveryRoot = join(root, '.director-brain-migration-locks', '.recovered-stale')
+      expect(await readdir(recoveryRoot)).toHaveLength(1)
+    } finally {
+      if (owner.exitCode === null) owner.kill('SIGKILL')
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('rejects unexpected remote tables before bootstrap reconciliation', async () => {
@@ -955,7 +1850,7 @@ describe('Feishu director brain contract', () => {
     const artifactAudit = await import(/* @vite-ignore */ pathToFileURL(modulePath).href) as {
       auditStandaloneArtifact: (root: string) => Promise<{ ok: boolean, forbiddenMembers: number }>
       findForbiddenStandaloneMembers: (root: string) => Promise<string[]>
-      writeStandaloneReleaseManifest: (root: string) => Promise<unknown>
+      writeStandaloneReleaseAttestations: (root: string) => Promise<unknown>
     }
     const root = await mkdtemp(join(tmpdir(), 'video-autoworker-standalone-minimal-'))
     try {
@@ -965,10 +1860,10 @@ describe('Feishu director brain contract', () => {
       await mkdir(join(root, 'node_modules', 'legal-package', 'test'), { recursive: true })
       await writeFile(join(root, 'node_modules', 'legal-package', 'test', 'fixture.db'), 'fixture\n')
       await writeFile(join(root, 'node_modules', 'legal-package', 'debug.log'), 'fixture\n')
-      await artifactAudit.writeStandaloneReleaseManifest(root)
+      await artifactAudit.writeStandaloneReleaseAttestations(root)
 
       await expect(artifactAudit.findForbiddenStandaloneMembers(root)).resolves.toEqual([])
-      await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toEqual({
+      await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toMatchObject({
         ok: true,
         root,
         forbiddenMembers: 0,
@@ -978,12 +1873,17 @@ describe('Feishu director brain contract', () => {
     }
   })
 
-  it('declares the OpenClaw SecretRef helper in the standalone include and contract lists', async () => {
-    const helper = 'scripts/lib/openclaw-secret-reference.mjs'
+  it('declares shared security helpers in the standalone include and contract lists', async () => {
     const nextConfig = await readFile(resolve(process.cwd(), 'next.config.js'), 'utf8')
     const artifactChecker = await readFile(resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs'), 'utf8')
-    expect(nextConfig).toContain(`'./${helper}'`)
-    expect(artifactChecker.split(helper).length - 1).toBeGreaterThanOrEqual(2)
+    for (const helper of [
+      'scripts/lib/openclaw-secret-reference.mjs',
+      'scripts/lib/openclaw-runtime-convergence.mjs',
+      'scripts/lib/sensitive-value-scanner.mjs',
+    ]) {
+      expect(nextConfig).toContain(`'./${helper}'`)
+      expect(artifactChecker.split(helper).length - 1).toBeGreaterThanOrEqual(2)
+    }
   })
 
   it('fails a standalone artifact containing private, development, or runtime files', async () => {
@@ -1107,7 +2007,7 @@ describe('Feishu director brain contract', () => {
       await expect(access(join(root, 'public', 'favicon.ico'))).resolves.toBeUndefined()
       await expect(access(join(root, 'messages', 'zh.json'))).resolves.toBeUndefined()
       await expect(access(join(root, 'runtime', 'schema.sql'))).resolves.toBeUndefined()
-      await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toEqual({
+      await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toMatchObject({
         ok: true,
         root,
         forbiddenMembers: 0,
@@ -1146,6 +2046,7 @@ describe('Feishu director brain contract', () => {
       auditStandaloneArtifact: (root: string) => Promise<unknown>
       verifyStandaloneReleaseManifest: (root: string) => Promise<unknown>
       writeStandaloneReleaseManifest: (root: string) => Promise<unknown>
+      writeStandaloneReleaseAttestations: (root: string) => Promise<unknown>
     }
     const root = await mkdtemp(join(tmpdir(), 'video-autoworker-standalone-manifest-'))
     const incomplete = await mkdtemp(join(tmpdir(), 'video-autoworker-standalone-incomplete-'))
@@ -1155,15 +2056,53 @@ describe('Feishu director brain contract', () => {
         .rejects.toThrow('standalone_required_file_missing:.next/BUILD_ID')
 
       await prepareRequiredStandaloneFixture(root)
-      await artifactAudit.writeStandaloneReleaseManifest(root)
+      await artifactAudit.writeStandaloneReleaseAttestations(root)
       await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toMatchObject({ ok: true })
 
-      await writeFile(join(root, 'public', 'favicon.ico'), 'changed after build\n')
+      const favicon = join(root, 'public', 'favicon.ico')
+      const originalMode = (await stat(favicon)).mode & 0o777
+      await chmod(favicon, originalMode === 0o600 ? 0o644 : 0o600)
       await expect(artifactAudit.verifyStandaloneReleaseManifest(root))
-        .rejects.toThrow('standalone_release_manifest_mismatch')
+        .rejects.toThrow('standalone_release_provenance_artifact_mismatch')
+
+      await writeFile(join(root, 'public', 'favicon.ico'), 'changed after build\n')
+      await expect(artifactAudit.writeStandaloneReleaseManifest(root))
+        .rejects.toThrow('standalone_release_provenance_artifact_mismatch')
+      await expect(artifactAudit.verifyStandaloneReleaseManifest(root))
+        .rejects.toThrow('standalone_release_provenance_artifact_mismatch')
     } finally {
       await rm(root, { recursive: true, force: true })
       await rm(incomplete, { recursive: true, force: true })
+    }
+  })
+
+  it('fails closed when the standalone sensitive narrative filter is missing or drifts', async () => {
+    const modulePath = resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs')
+    const artifactAudit = await import(/* @vite-ignore */ pathToFileURL(modulePath).href) as {
+      auditStandaloneArtifact: (root: string) => Promise<unknown>
+      verifyStandaloneReleaseManifest: (root: string) => Promise<unknown>
+      writeStandaloneReleaseAttestations: (root: string) => Promise<unknown>
+    }
+    const root = await mkdtemp(join(tmpdir(), 'video-autoworker-sensitive-narrative-'))
+    const member = join(
+      root,
+      'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js',
+    )
+    try {
+      await prepareRequiredStandaloneFixture(root)
+      await rm(member)
+      await expect(artifactAudit.auditStandaloneArtifact(root))
+        .rejects.toThrow(
+          'standalone_required_file_missing:openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js',
+        )
+
+      await prepareRequiredStandaloneFixture(root)
+      await artifactAudit.writeStandaloneReleaseAttestations(root)
+      await writeFile(member, 'export const containsSensitiveNarrativeValue = () => false\n')
+      await expect(artifactAudit.verifyStandaloneReleaseManifest(root))
+        .rejects.toThrow('standalone_release_provenance_artifact_mismatch')
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 
@@ -1416,6 +2355,107 @@ describe('Feishu director brain OpenClaw operation service', () => {
     }, harness.options)).rejects.toThrow('work_resolution_ambiguous')
   })
 
+  it('resolves controlled series-season-episode names and still fails closed on alias collision', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const works = [
+      {
+        record_id: 'rec_series_earth',
+        fields: {
+          '作品名称': '地球之极', '作品 ID': 'WORK-EARTH',
+          '项目 ID': schema.projectId, '别名': '地球极境', '作品类型': '纪录片',
+          '作品层级': '系列', '系列 ID': 'WORK-EARTH', '状态': '生效',
+          ...reviewedMetadata(),
+        },
+      },
+      {
+        record_id: 'rec_season_earth_1',
+        fields: {
+          '作品名称': '第一季', '作品 ID': 'WORK-EARTH-S01',
+          '项目 ID': schema.projectId, '别名': 'S01', '作品类型': '纪录片季',
+          '作品层级': '季', '父作品 ID': 'WORK-EARTH', '系列 ID': 'WORK-EARTH',
+          '季序号': 1, '状态': '生效', ...reviewedMetadata(),
+        },
+      },
+      {
+        record_id: 'rec_episode_earth_1',
+        fields: {
+          '作品名称': '高原生命', '作品 ID': 'WORK-EARTH-S01E01',
+          '项目 ID': schema.projectId, '别名': '首集', '作品类型': '纪录片单集',
+          '作品层级': '集', '父作品 ID': 'WORK-EARTH-S01',
+          '系列 ID': 'WORK-EARTH', '季 ID': 'WORK-EARTH-S01', '集序号': 1,
+          '状态': '生效', ...reviewedMetadata(),
+        },
+      },
+    ]
+    const harness = operationHarness(schema, { works })
+
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'resolve_work', query: '地球之极 第一季 第一集',
+    }, harness.options)).resolves.toMatchObject({
+      found: true,
+      work: {
+        workId: 'WORK-EARTH-S01E01',
+        hierarchy: {
+          level: '集', parentWorkId: 'WORK-EARTH-S01',
+          seriesId: 'WORK-EARTH', seasonId: 'WORK-EARTH-S01', episodeNumber: 1,
+        },
+      },
+    })
+    expect(directorBrain.normalizeDirectorWorkTitle('地球之极 S01E01'))
+      .toBe(directorBrain.normalizeDirectorWorkTitle('地球之极 第一季 第一集'))
+
+    harness.records.get('works')?.push({
+      record_id: 'rec_episode_alias_collision',
+      fields: {
+        '作品名称': '另一集', '作品 ID': 'WORK-EARTH-COLLISION',
+        '项目 ID': schema.projectId, '别名': '地球之极 第一季 第一集',
+        '作品类型': '纪录片单集', '作品层级': '独立作品', '状态': '生效',
+        ...reviewedMetadata(),
+      },
+    })
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'resolve_work', query: '地球之极第一季第一集',
+    }, harness.options)).rejects.toThrow('work_resolution_ambiguous')
+  })
+
+  it('creates hierarchy links from reviewed parents without trusting caller-owned IDs', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const series = {
+      record_id: 'rec_series_parent',
+      fields: {
+        '作品名称': '地球之极', '作品 ID': 'WORK-EARTH', '项目 ID': schema.projectId,
+        '作品类型': '纪录片系列', '作品层级': '系列', '系列 ID': 'WORK-EARTH',
+        '状态': '生效', ...reviewedMetadata(),
+      },
+    }
+    const harness = operationHarness(schema, { works: [series] })
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'propose', table: 'works',
+      fields: {
+        '作品名称': '地球之极 第一季', '别名': '《地球之极 第一季》\n地球之极 S01',
+        '作品类型': '纪录片季', '作品层级': '季', '季序号': 1,
+      },
+      references: { parentWorkId: 'WORK-EARTH' },
+    }, harness.options)
+
+    expect(result).toMatchObject({
+      outcome: 'created',
+      record: { fields: {
+        '作品层级': '季', '父作品 ID': 'WORK-EARTH', '系列 ID': 'WORK-EARTH',
+        '季序号': 1, '别名': '地球之极 第一季\n地球之极 S01',
+      } },
+    })
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'propose', table: 'works',
+      fields: {
+        '作品名称': '错误单集', '作品类型': '纪录片单集', '作品层级': '集', '集序号': 1,
+      },
+      references: { parentWorkId: 'WORK-EARTH' },
+    }, harness.options)).rejects.toThrow('work_parent_level_invalid:集')
+  })
+
   it('reports six-layer readiness without editing or execution side effects', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()
@@ -1429,6 +2469,14 @@ describe('Feishu director brain OpenClaw operation service', () => {
         perception: true, people: false, story: false,
         judgment: true, narrative: false, intent: true,
       },
+      learningReadiness: { cases: true, techniques: false, complete: false },
+      caseCount: { total: 1, reviewed: 1, candidates: 0 },
+      techniqueCount: { total: 0, reviewed: 0, candidates: 0 },
+      stageCounts: {
+        perception: { total: 1, reviewed: 1, candidates: 0 },
+        cases: { total: 1, reviewed: 1, candidates: 0 },
+        techniques: { total: 0, reviewed: 0, candidates: 0 },
+      },
       metrics: {
         readyLayers: 3, totalLayers: 6, activeIntentCount: 1,
         referenceIntegrity: true, referenceIssueCount: 0,
@@ -1438,6 +2486,242 @@ describe('Feishu director brain OpenClaw operation service', () => {
     })
     expect(harness.createCalls).toHaveLength(0)
     expect(harness.updateCalls).toHaveLength(0)
+  })
+
+  it('builds one deterministic learning context from isolated work history and reviewed project knowledge', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.people_profiles = [
+      {
+        record_id: 'rec_person_reviewed',
+        fields: {
+          '人物名称': '阿明', '人物版本 ID': 'PEOPLE-REVIEWED-001', '人物 ID': 'PERSON-AMING',
+          '项目 ID': schema.projectId, '作品 ID': 'WORK-ICE-001',
+          '证据 ID': 'EVIDENCE-REVIEWED-001', '置信度': 0.92, '状态': '已确认',
+          ...reviewedMetadata(),
+        },
+      },
+      {
+        record_id: 'rec_person_candidate',
+        fields: {
+          '人物名称': '未审核人物', '人物版本 ID': 'PEOPLE-CANDIDATE-001', '人物 ID': 'PERSON-DRAFT',
+          '项目 ID': schema.projectId, '作品 ID': 'WORK-ICE-001',
+          '证据 ID': 'EVIDENCE-REVIEWED-001', '置信度': 0.5, '状态': '候选',
+          ...reviewedMetadata(),
+        },
+      },
+      {
+        record_id: 'rec_person_other_work',
+        fields: {
+          '人物名称': '另一作品人物', '人物版本 ID': 'PEOPLE-OTHER-001', '人物 ID': 'PERSON-OTHER',
+          '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+          '证据 ID': 'EVIDENCE-DESERT-001', '置信度': 0.9, '状态': '已确认',
+          ...reviewedMetadata(),
+        },
+      },
+    ]
+    initial.story_relations = [{
+      record_id: 'rec_relation_reviewed',
+      fields: {
+        '关系名称': '裂缝促成绕行', '关系 ID': 'RELATION-REVIEWED-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-ICE-001',
+        '源节点 ID': 'STORY-REVIEWED-001', '目标节点 ID': 'STORY-REVIEWED-002',
+        '证据 ID': 'EVIDENCE-REVIEWED-001', '关系类型': '因果',
+        '判断理由': '发现裂缝后人物决定绕行', '置信度': 0.9, '状态': '已确认',
+        ...reviewedMetadata(),
+      },
+    }]
+    initial.narrative_plans = [{
+      record_id: 'rec_plan_reviewed',
+      fields: {
+        '方案名称': '裂缝叙事方案', '方案 ID': 'PLAN-REVIEWED-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-ICE-001',
+        '意图版本 ID': 'INTENT-REVIEWED-001',
+        '节点 ID': 'STORY-REVIEWED-001\nSTORY-REVIEWED-002',
+        '证据 ID': 'EVIDENCE-REVIEWED-001',
+        '人物线': '阿明从独断到协作', '事件线': '发现裂缝后共同绕行',
+        '时间线': '发现、停顿、决定', '地点线': '冰面裂缝前后',
+        '情绪线': '平静转为紧张', '主题线': '风险中的共同选择',
+        '冲突线': '继续前进与安全绕行', '结构说明': '以裂缝事件形成转折',
+        '故事脚本': '人物发现裂缝后停下，并与同伴选择绕行。',
+        '状态': '已批准', ...reviewedMetadata(),
+      },
+    }]
+    initial.works.push({
+      record_id: 'rec_work_desert',
+      fields: {
+        '作品名称': '荒漠纪事', '作品 ID': 'WORK-DESERT-001',
+        '项目 ID': schema.projectId, '作品类型': '纪录片', '状态': '生效',
+        ...reviewedMetadata(),
+      },
+    })
+    initial.director_intents.push({
+      record_id: 'rec_intent_desert',
+      fields: {
+        ...completeIntentFields({ '意图名称': '荒漠风险意图' }),
+        '意图版本 ID': 'INTENT-DESERT-001', '项目 ID': schema.projectId,
+        '作品 ID': 'WORK-DESERT-001', '状态': '生效', ...reviewedMetadata(),
+      },
+    })
+    initial.material_evidence.push({
+      record_id: 'rec_evidence_desert',
+      fields: {
+        '证据名称': '沙暴前停顿', '证据 ID': 'EVIDENCE-DESERT-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+        '任务 ID': 'TASK-DESERT', '素材 ID': 'MATERIAL-DESERT',
+        '场景 ID': 'SCENE-DESERT', '镜头 ID': 'SHOT-DESERT',
+        '起始时间码': '00:00:05.000', '结束时间码': '00:00:09.000',
+        '证据摘要': '人物在沙暴来临前停止前进', '校验摘要': 'b'.repeat(64),
+        '分析版本': 'analysis-v1', '置信度': 0.9, '状态': '已核验',
+        ...reviewedMetadata(),
+      },
+    })
+    initial.material_judgments.push({
+      record_id: 'rec_judgment_desert',
+      fields: {
+        '判断名称': '沙暴停顿价值', '判断 ID': 'JUDGMENT-DESERT-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+        '证据 ID': 'EVIDENCE-DESERT-001', '意图版本 ID': 'INTENT-DESERT-001',
+        '故事价值': 88, '人物价值': 87, '情绪价值': 86, '信息价值': 80,
+        '视觉价值': 85, '稀缺性': 83, '叙事价值': 89,
+        '使用理由': '停顿显出人物面对风险的选择', '置信度': 0.9,
+        '状态': '已确认', ...reviewedMetadata(),
+      },
+    })
+    initial.director_cases.push(
+      {
+        record_id: 'rec_case_desert',
+        fields: {
+          '案例名称': '沙暴前停顿案例', '案例 ID': 'CASE-DESERT-001',
+          '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+          '判断 ID': 'JUDGMENT-DESERT-001', '证据 ID': 'EVIDENCE-DESERT-001',
+          '上下文': '沙暴将至且人物尚未决定路线', '导演动作': '采用',
+          '判断原因': '停顿把风险转成可见的人物选择', '复核状态': '已确认',
+          ...reviewedMetadata(),
+        },
+      },
+      {
+        record_id: 'rec_case_candidate',
+        fields: {
+          '案例名称': '未审核案例', '案例 ID': 'CASE-CANDIDATE-001',
+          '项目 ID': schema.projectId, '作品 ID': 'WORK-ICE-001',
+          '判断 ID': 'JUDGMENT-REVIEWED-001', '证据 ID': 'EVIDENCE-REVIEWED-001',
+          '上下文': '尚未复核', '导演动作': '待定', '判断原因': '尚未复核',
+          '复核状态': '待复核', ...reviewedMetadata(),
+        },
+      },
+    )
+    initial.skills_techniques = [{
+      record_id: 'rec_skill_reviewed',
+      fields: {
+        '知识名称': '风险决定前保留停顿', '知识 ID': 'SKILL-REVIEWED-001',
+        '项目 ID': schema.projectId, '作用域': '跨作品',
+        '来源作品 ID': 'WORK-DESERT-001\nWORK-ICE-001',
+        '案例 ID': 'CASE-DESERT-001\nCASE-REVIEWED-001',
+        '知识类型': '技法', '知识分类': '人物选择',
+        '适用条件': '人物面对风险并即将决定路线', '执行方法': '保留观察和停顿',
+        '为什么有效': '让环境压力转化为人物选择', '置信度': 0.91,
+        '状态': '已验证', ...reviewedMetadata(),
+      },
+    }]
+    const harness = operationHarness(schema, initial)
+
+    const first = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+    }, harness.options)
+    expect(first).toMatchObject({
+      ok: true,
+      action: 'learning_context',
+      workId: 'WORK-ICE-001',
+      digest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      snapshot: {
+        work: {
+          activeIntent: { stableId: 'INTENT-REVIEWED-001', reviewed: true },
+          people_profiles: [{ stableId: 'PEOPLE-REVIEWED-001' }],
+          story_nodes: [{ stableId: 'STORY-REVIEWED-001' }, { stableId: 'STORY-REVIEWED-002' }],
+          story_relations: [{ stableId: 'RELATION-REVIEWED-001' }],
+          narrative_plans: [{ stableId: 'PLAN-REVIEWED-001' }],
+        },
+        project: {
+          director_cases: [{ stableId: 'CASE-DESERT-001' }, { stableId: 'CASE-REVIEWED-001' }],
+          skills_techniques: [{ stableId: 'SKILL-REVIEWED-001' }],
+        },
+      },
+    })
+    expect(JSON.stringify(first)).not.toMatch(
+      /"record_id"|PEOPLE-OTHER-001|PEOPLE-CANDIDATE-001|CASE-CANDIDATE-001|"appToken"|"tableId"|"catalogPath"/u,
+    )
+    for (const records of harness.records.values()) records.reverse()
+    const second = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+    }, harness.options)
+    expect(second).toEqual(first)
+    expect(harness.createCalls).toHaveLength(0)
+    expect(harness.updateCalls).toHaveLength(0)
+  })
+
+  it('excludes reviewed learning records whose source chain is broken', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.material_judgments[0].fields['证据 ID'] = 'EVIDENCE-MISSING-001'
+    initial.skills_techniques = [{
+      record_id: 'rec_skill_broken',
+      fields: {
+        '知识名称': '断链技法', '知识 ID': 'SKILL-BROKEN-001',
+        '项目 ID': schema.projectId, '作用域': '跨作品', '来源作品 ID': 'WORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001', '知识类型': '技法', '知识分类': '测试',
+        '适用条件': '测试', '执行方法': '测试', '为什么有效': '测试', '置信度': 0.8,
+        '状态': '已验证', ...reviewedMetadata(),
+      },
+    }]
+    const harness = operationHarness(schema, initial)
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+    }, harness.options)
+    expect(result).toMatchObject({
+      snapshot: {
+        work: { material_judgments: [], director_cases: [] },
+        project: { director_cases: [], skills_techniques: [] },
+      },
+    })
+  })
+
+  it('fails closed on learning-context limits, project corruption, and extra request fields', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const tooMany = reviewedFoundation()
+    tooMany.people_profiles = Array.from({ length: 201 }, (_, index) => ({
+      record_id: `rec_limit_${index}`,
+      fields: { '作品 ID': 'WORK-ICE-001' },
+    }))
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+    }, operationHarness(schema, tooMany).options)).rejects.toThrow(
+      'learning_context_table_limit_exceeded:people_profiles',
+    )
+
+    const wrongProject = reviewedFoundation()
+    wrongProject.director_cases.push({
+      ...structuredClone(wrongProject.director_cases[0]),
+      record_id: 'rec_case_wrong_project',
+      fields: {
+        ...structuredClone(wrongProject.director_cases[0].fields),
+        '案例 ID': 'CASE-WRONG-PROJECT-001', '项目 ID': 'PROJ-OTHER',
+      },
+    })
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001',
+    }, operationHarness(schema, wrongProject).options)).rejects.toThrow(
+      'record_project_mismatch:director_cases:CASE-WRONG-PROJECT-001',
+    )
+
+    const connect = vi.fn()
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'learning_context', workId: 'WORK-ICE-001', extra: true,
+    }, { dependencies: { connect } })).rejects.toThrow('operation_field_unexpected:extra')
+    expect(connect).not.toHaveBeenCalled()
   })
 
   it('does not mark a layer ready when its reviewed record has a broken reference', async () => {
@@ -1846,6 +3130,188 @@ describe('Feishu director brain OpenClaw operation service', () => {
     })
     expect(replayed).toMatchObject({ outcome: 'unchanged', stableId: created.stableId })
     expect(harness.createCalls).toHaveLength(1)
+  })
+
+  it('stores reusable technique candidates globally while preserving reviewed source chains', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.works.push({
+      record_id: 'rec_work_desert',
+      fields: {
+        '作品名称': '荒漠纪事', '作品 ID': 'WORK-DESERT-001',
+        '项目 ID': schema.projectId, '作品类型': '纪录片', '状态': '生效',
+        ...reviewedMetadata(),
+      },
+    })
+    initial.director_intents.push({
+      record_id: 'rec_intent_desert',
+      fields: {
+        ...completeIntentFields({ '意图名称': '荒漠风险意图' }),
+        '意图版本 ID': 'INTENT-DESERT-001', '项目 ID': schema.projectId,
+        '作品 ID': 'WORK-DESERT-001', '状态': '生效', ...reviewedMetadata(),
+      },
+    })
+    initial.material_evidence.push({
+      record_id: 'rec_evidence_desert',
+      fields: {
+        '证据名称': '沙暴前停顿', '证据 ID': 'EVIDENCE-DESERT-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+        '任务 ID': 'TASK-DESERT', '素材 ID': 'MATERIAL-DESERT',
+        '场景 ID': 'SCENE-DESERT', '镜头 ID': 'SHOT-DESERT',
+        '起始时间码': '00:00:05.000', '结束时间码': '00:00:09.000',
+        '证据摘要': '人物在沙暴来临前停止前进', '校验摘要': 'b'.repeat(64),
+        '分析版本': 'analysis-v1', '置信度': 0.9, '状态': '已核验',
+        ...reviewedMetadata(),
+      },
+    })
+    initial.material_judgments.push({
+      record_id: 'rec_judgment_desert',
+      fields: {
+        '判断名称': '沙暴停顿价值', '判断 ID': 'JUDGMENT-DESERT-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+        '证据 ID': 'EVIDENCE-DESERT-001', '意图版本 ID': 'INTENT-DESERT-001',
+        '故事价值': 88, '人物价值': 87, '情绪价值': 86, '信息价值': 80,
+        '视觉价值': 85, '稀缺性': 83, '叙事价值': 89,
+        '使用理由': '停顿显出人物面对风险的选择', '置信度': 0.9,
+        '状态': '已确认', ...reviewedMetadata(),
+      },
+    })
+    initial.director_cases.push({
+      record_id: 'rec_case_desert',
+      fields: {
+        '案例名称': '沙暴前停顿案例', '案例 ID': 'CASE-DESERT-001',
+        '项目 ID': schema.projectId, '作品 ID': 'WORK-DESERT-001',
+        '判断 ID': 'JUDGMENT-DESERT-001', '证据 ID': 'EVIDENCE-DESERT-001',
+        '上下文': '沙暴将至且人物尚未决定路线', '导演动作': '采用',
+        '判断原因': '停顿把风险转成可见的人物选择', '复核状态': '已确认',
+        ...reviewedMetadata(),
+      },
+    })
+    const harness = operationHarness(schema, initial)
+
+    const result = await directorBrain.executeDirectorBrainOperation({
+      action: 'propose', table: 'skills_techniques',
+      fields: {
+        '知识名称': '风险决定前保留停顿', '知识类型': '技法', '知识分类': '人物选择',
+        '适用条件': '人物面对风险并即将决定路线', '执行方法': '保留观察和停顿的连续动作',
+        '为什么有效': '让环境压力转化为人物选择', '置信度': 0.91,
+      },
+      references: { caseIds: ['CASE-REVIEWED-001', 'CASE-DESERT-001'] },
+    }, harness.options)
+
+    expect(result).toMatchObject({
+      outcome: 'created',
+      record: { fields: {
+        '作用域': '跨作品',
+        '来源作品 ID': 'WORK-DESERT-001\nWORK-ICE-001',
+        '案例 ID': 'CASE-REVIEWED-001\nCASE-DESERT-001',
+        '状态': '候选',
+      } },
+    })
+    expect((result.record as { fields: Record<string, unknown> }).fields)
+      .not.toHaveProperty('作品 ID')
+  })
+
+  it('rejects a technique when a nominally reviewed case has a broken evidence chain', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const initial = reviewedFoundation()
+    initial.material_judgments[0].fields['证据 ID'] = 'EVIDENCE-MISSING'
+    const harness = operationHarness(schema, initial)
+
+    await expect(directorBrain.executeDirectorBrainOperation({
+      action: 'propose', table: 'skills_techniques',
+      fields: {
+        '知识名称': '不可建立的技法', '知识类型': '技法', '知识分类': '人物选择',
+        '适用条件': '测试', '执行方法': '测试', '为什么有效': '测试', '置信度': 0.8,
+      },
+      references: { caseIds: ['CASE-REVIEWED-001'] },
+    }, harness.options)).rejects.toThrow('technique_case_chain_incomplete')
+    expect(harness.createCalls).toHaveLength(0)
+  })
+
+  it('preflights and idempotently writes one candidate stage as a batch, then reads it in bulk', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const harness = operationHarness(schema, reviewedFoundation())
+    const request = {
+      action: 'propose_batch', table: 'director_cases', workId: 'WORK-ICE-001',
+      items: [
+        {
+          fields: {
+            '案例名称': '保留观察停顿', '上下文': '发现裂缝但尚未决定路线',
+            '导演动作': '采用', '判断原因': '停顿让风险判断可见',
+          },
+          references: {
+            judgmentId: 'JUDGMENT-REVIEWED-001', evidenceIds: ['EVIDENCE-REVIEWED-001'],
+          },
+        },
+        {
+          fields: {
+            '案例名称': '保留同伴靠近', '上下文': '主角停下后同伴进入画面',
+            '导演动作': '采用', '判断原因': '靠近动作把个人风险转化为关系变化',
+          },
+          references: {
+            judgmentId: 'JUDGMENT-REVIEWED-001', evidenceIds: ['EVIDENCE-REVIEWED-001'],
+          },
+        },
+      ],
+    }
+    const created = await directorBrain.executeDirectorBrainOperation(request, harness.options)
+    const replayed = await directorBrain.executeDirectorBrainOperation(request, harness.options)
+    const stableIds = (created.results as Array<Record<string, unknown>>).map(result => result.stableId)
+    const readback = await directorBrain.executeDirectorBrainOperation({
+      action: 'get_many', table: 'director_cases', workId: 'WORK-ICE-001', stableIds,
+    }, harness.options)
+
+    expect(created).toMatchObject({ count: 2, created: 2, unchanged: 0 })
+    expect(replayed).toMatchObject({ count: 2, created: 0, unchanged: 2 })
+    expect(readback).toMatchObject({ count: 2, missing: [] })
+    expect(harness.createCalls).toHaveLength(2)
+    await expect(directorBrain.executeDirectorBrainOperation({
+      ...request,
+      items: [request.items[0], structuredClone(request.items[0])],
+    }, harness.options)).rejects.toThrow('operation_batch_duplicate_identity:items')
+  })
+
+  it('projects legal 8K director fields losslessly only through the bounded proposal batch command', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const harness = operationHarness(schema, reviewedFoundation())
+    const structure = '结构'.repeat(4_000)
+    const script = '故事'.repeat(4_000)
+    const request = {
+      action: 'propose_batch', table: 'narrative_plans', workId: 'WORK-ICE-001',
+      items: [{
+        fields: {
+          '方案名称': '无损长叙事',
+          '人物线': '人物面对风险作出选择', '事件线': '发现裂缝后绕行',
+          '时间线': '当天', '地点线': '冰原', '情绪线': '平静转紧张',
+          '主题线': '判断与责任', '冲突线': '前进与安全',
+          '结构说明': structure, '故事脚本': script,
+        },
+        references: {
+          intentVersionId: 'INTENT-REVIEWED-001',
+          nodeIds: ['STORY-REVIEWED-001'],
+          evidenceIds: ['EVIDENCE-REVIEWED-001'],
+        },
+      }],
+    }
+
+    await expect(directorBrain.executeDirectorBrainOperation(request, harness.options))
+      .rejects.toThrow('operation_request_too_large')
+    const result = await directorBrain.runDirectorBrainCli(['propose-batch'], {
+      ...harness.options,
+      stdin: JSON.stringify(request),
+    })
+    const first = (result.results as Array<Record<string, unknown>>)[0]!
+    const fields = (first.record as { fields: Record<string, unknown> }).fields
+    expect(fields['结构说明']).toBe(structure)
+    expect(fields['故事脚本']).toBe(script)
+    expect(JSON.stringify(fields)).not.toContain('缩写')
+    expect(() => directorBrain.parseDirectorBrainArgs(['propose-batch', '--table', 'narrative_plans']))
+      .toThrow('propose_batch_accepts_stdin_only')
   })
 
   it('serializes concurrent candidate creation for the same stable ID with the file lock', async () => {
@@ -2434,6 +3900,23 @@ describe('Feishu director brain OpenClaw operation service', () => {
       workId: 'WORK-ICE-001',
       fields: completeIntentFields({ '意图名称': '敏感', '核心主题': { token: 'hidden' } }),
     }, harness.options)).rejects.toThrow('sensitive_key_forbidden')
+    for (const sensitiveValue of [
+      'Bearer bearer_value_12345',
+      'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.signature_value_123',
+      `ghu_${'U'.repeat(24)}`,
+      `ghr_${'R'.repeat(24)}`,
+      `github_pat_${'P'.repeat(24)}`,
+      ['xoxb', '1234567890', 'abcdefghijklmnop'].join('-'),
+      'api_key=assigned-secret-12345',
+      'token: assigned-token-12345',
+    ]) {
+      await expect(propose({ '意图名称': '敏感值', '核心主题': sensitiveValue }))
+        .rejects.toThrow('sensitive_value_forbidden')
+    }
+    await expect(propose({
+      '意图名称': '普通安全术语',
+      '核心主题': '讨论 token 预算与故事的 key moment。',
+    })).resolves.toMatchObject({ ok: true })
     await expect(directorBrain.executeDirectorBrainOperation({
       action: 'propose',
       table: 'director_intents',
@@ -2520,6 +4003,7 @@ describe('Feishu director brain OpenClaw operation service', () => {
     }
 
     await runOversized('operate', 32 * 1024 + 1, 'operate_stdin_too_large')
+    await runOversized('propose-batch', 256 * 1024 + 1, 'propose_batch_stdin_too_large')
     await runOversized('project-evidence', 256 * 1024 + 1, 'project_evidence_stdin_too_large')
   })
 

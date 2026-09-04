@@ -134,8 +134,8 @@ payload、投影闭包、standalone bundle 或 outbox 校验。
 
 `release-readiness` 不相信代码里的迁移常量，而是回读当前进程实际打开的 SQLite：
 
-- `schema_migrations` 中必须存在 052 至 057；
-- 七张新增表的关键列、类型、主键、非空约束和默认值必须匹配；导演证据 outbox
+- `schema_migrations` 中必须存在 052 至 059；
+- 十一张新增表的关键列、类型、主键、非空约束和默认值必须匹配；导演证据 outbox
   还必须精确保留幂等键唯一性、父任务级联外键，以及作品查询、结果和投影契约摘要的
   字段 CHECK 约束；
 - 必需索引的列顺序和升降序必须匹配；
@@ -162,7 +162,7 @@ switch/rollback 同时核对 binding、attestation、PID、监听进程 cwd、re
 
 ## 首次引导与后续发布
 
-既有单进程 `542eebd-runtime` 没有 callback affinity，所以首次迁入蓝绿结构仍需一次完整归零。
+既有单进程 `57f6e6c-runtime` 没有 callback affinity，所以首次迁入蓝绿结构仍需一次完整归零。
 仓库合同对比也已证明旧通用工作流缺少 claim，旧视频工作流的 claim/media 回调缺少
 `executionOwner`；如果直接切换，新 API 会按严格 schema 拒绝这些回调。因此首次迁移顺序固定为：
 
@@ -214,6 +214,13 @@ TTL 到期或受管 revoke 会自动 rollback 并清理 socket/token，崩溃残
 迁移和启动，继续持有 n8n 写锁；新槽、暂停闸门、router 和最终工作流复核全部成功后才释放。
 `bootstrap.pending` 存在期间，init/stage/bind/retire/switch/rollback 全部失败关闭，只有只读 status
 和完整绑定的 bootstrap 恢复可进入。
+
+数据库迁移与 OpenClaw 插件安装是两条明确边界：导演脑 `0.4.0` 安装器不打开或迁移 Mission
+Control SQLite；058/059 只由目标 3017 release 的应用迁移器在受控 bootstrap 中创建。已发布的
+057 迁移块永久冻结，058/059 只允许静态 `CREATE TABLE/INDEX IF NOT EXISTS`，不更新、不回填、不删除
+既有行。首次迁移前的双库 online backup 属于 rollback proof；bootstrap 成功后旧
+`57f6e6c-runtime` 永久 fence，普通 switch/rollback 只能在相同 projection digest 的新架构 release
+之间进行。
 
 工作流离线迁移另有独立的人类授权门。transition anchor 先把权威 n8n SQLite、回滚包、目标完整
 提交、受管 n8n runtime 和 application release 固定到 upgrade intent；用户审阅本次意图、备份和
@@ -351,7 +358,7 @@ gate 验证开始，经实际替换、验收和失败补偿结束前始终持锁
 outbox pending 为零；durable 根目录缺失不能按空队列处理。无 durable 归属且超过 24 小时的普通
 历史任务只计 attention，有 durable 状态仍阻断；旧媒体节点即使超龄也单独阻断。
 
-首次主库尚无 052/057 表时，只有同一未过期 bootstrap attempt 的 guard、evidence、proof、两库
+首次主库尚无 052/059 表时，只有同一未过期 bootstrap attempt 的 guard、evidence、proof、两库
 身份和目标提交实时复核全部通过才可进入 legacy 安装路径。fresh `PREPARED` 可用于先安装三项共享
 组件，避免把安装与 Gateway restart 挤进 `CURRENT_CONFIRMED` 的 120 秒窗口；最终 confirm/apply
 仍在安装结束后执行。`CURRENT_CONFIRMED`、`SHUTDOWN_REQUESTED` 只用于同一 attempt 的幂等恢复。
@@ -362,7 +369,7 @@ outbox pending 为零；durable 根目录缺失不能按空队列处理。无 du
 
 遗留媒体记录已按授权完成四字段 CAS，当前活跃媒体节点、n8n active execution 和正式队列
 waiting/running 均为零；video lane 仍保持 disabled、unloaded、worker-free。远端 OpenClaw 已可使用
-导演脑 `0.3.0` 的只读与候选入口，但生产 3017 仍运行 `542eebd-runtime`。当前 `0.5.14`、迁移
-`057`、导演脑 `0.3.1` 和自动投影链仍是待切换候选；首次 n8n 离线迁移、blue/green bootstrap、
+导演脑 `0.3.0` 的只读与候选入口，但生产 3017 仍运行 `57f6e6c-runtime`。当前 `0.5.14`、迁移
+`057` 证据 outbox、`058/059` 导演知识提炼扩展、导演脑 `0.4.0` 和自动投影链仍是待切换候选；首次 n8n 离线迁移、blue/green bootstrap、
 真实视频投影和恢复 lane 均须以当次运行核验为准。bootstrap 硬门会拒绝旧生产工作流、未发布
 工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走 legacy 3017。

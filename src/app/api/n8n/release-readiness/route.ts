@@ -59,6 +59,9 @@ export async function GET(request: NextRequest) {
           contractDigest: directorEvidenceProjectionContractDigest(),
           pending: outbox.pending,
           incompatiblePending: outbox.incompatiblePending,
+          deliveredWithoutValidReceipt: outbox.deliveredWithoutValidReceipt,
+          outOfScopeOutbox: outbox.outOfScopeOutbox,
+          outOfScopeExtraction: outbox.outOfScopeExtraction,
         },
       ),
     }, { headers: NO_STORE_HEADERS })

@@ -192,6 +192,7 @@ const SKILLS_SH_API = 'https://skills.sh/api'
 const AWESOME_OPENCLAW_README = 'https://raw.githubusercontent.com/VoltAgent/awesome-openclaw-skills/main/README.md'
 const AWESOME_OPENCLAW_RAW_BASE = 'https://raw.githubusercontent.com/openclaw/skills/main/skills'
 const FETCH_TIMEOUT = 10_000
+const AWESOME_FETCH_TIMEOUT = 15_000
 
 // ---------------------------------------------------------------------------
 // Awesome OpenClaw — in-memory cached index from GitHub README
@@ -225,14 +226,11 @@ async function fetchAwesomeIndex(): Promise<RegistrySkill[]> {
     return awesomeCache.skills
   }
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15_000)
-    let res: Response
-    try {
-      res = await fetch(AWESOME_OPENCLAW_README, { signal: controller.signal })
-    } finally {
-      clearTimeout(timer)
-    }
+    const res = await fetchWithTimeout(
+      AWESOME_OPENCLAW_README,
+      {},
+      AWESOME_FETCH_TIMEOUT,
+    )
     if (!res.ok) throw new Error(`GitHub fetch failed (${res.status})`)
     const markdown = await res.text()
     const skills = parseAwesomeReadme(markdown)
@@ -264,13 +262,29 @@ async function fetchAwesomeOpenclawSkill(slug: string): Promise<{ content: strin
   return { content }
 }
 
-async function fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeoutMs = FETCH_TIMEOUT,
+): Promise<Response> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error(`Registry fetch timed out after ${timeoutMs}ms`))
+    }, timeoutMs)
+  })
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    // Abort asks the transport to release its resources; Promise.race is the
+    // independent response deadline in case a runtime does not settle fetch
+    // promptly after aborting (observed behind the Next.js route in offline QA).
+    return await Promise.race([
+      fetch(url, { ...options, signal: controller.signal }),
+      timeout,
+    ])
   } finally {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
   }
 }
 

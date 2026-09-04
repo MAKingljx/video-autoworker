@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
@@ -104,8 +104,15 @@ function request(body: unknown) {
 }
 
 describe('n8n trigger route', () => {
+  const originalScope = {
+    tenantId: process.env.MC_OPENCLAW_TENANT_ID,
+    workspaceId: process.env.MC_OPENCLAW_WORKSPACE_ID,
+  }
+
   beforeEach(() => {
     vi.clearAllMocks()
+    process.env.MC_OPENCLAW_TENANT_ID = '3'
+    process.env.MC_OPENCLAW_WORKSPACE_ID = '2'
     delete process.env.AIWORKER_N8N_NODE_CALLBACK_URL
     delete process.env.AIWORKER_N8N_MEDIA_CALLBACK_URL
     delete process.env.AIWORKER_N8N_CLAIM_CALLBACK_URL
@@ -179,6 +186,51 @@ describe('n8n trigger route', () => {
       outcome: 'failed',
       run: { taskId, status: 'failed', error, output: null },
     }))
+  })
+
+  afterEach(() => {
+    if (originalScope.tenantId === undefined) delete process.env.MC_OPENCLAW_TENANT_ID
+    else process.env.MC_OPENCLAW_TENANT_ID = originalScope.tenantId
+    if (originalScope.workspaceId === undefined) delete process.env.MC_OPENCLAW_WORKSPACE_ID
+    else process.env.MC_OPENCLAW_WORKSPACE_ID = originalScope.workspaceId
+  })
+
+  it('keeps ordinary tasks available to a second scope without director work resolution', async () => {
+    mocks.requireN8nRole.mockReturnValue({
+      user: { id: 9, username: 'foreign', workspace_id: 22, tenant_id: 33 },
+    })
+
+    const response = await POST(request({
+      bindingId: 7,
+      taskId: 'foreign-ordinary-task',
+      idempotencyKey: 'foreign-ordinary-idem',
+      input: { prompt: '普通任务' },
+    }))
+
+    expect(response.status).toBe(202)
+    expect(mocks.getDatabase).toHaveBeenCalledTimes(1)
+    expect(mocks.getN8nWorkflowBinding).toHaveBeenCalledWith(
+      {}, 7, { workspaceId: 22, tenantId: 33 },
+    )
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
+  })
+
+  it('rejects a second scope director binding before database or Feishu access', async () => {
+    mocks.requireN8nRole.mockReturnValue({
+      user: { id: 9, username: 'foreign', workspace_id: 22, tenant_id: 33 },
+    })
+
+    const response = await POST(request({
+      bindingId: 7,
+      input: { materialId: 'MATERIAL-FOREIGN-001' },
+      directorWork: '测试作品',
+    }))
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ code: 'DIRECTOR_BRAIN_SCOPE_FORBIDDEN' })
+    expect(mocks.mutationLimiter).toHaveBeenCalledTimes(1)
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.resolveDirectorWorkBinding).not.toHaveBeenCalled()
   })
 
   it('sends a stable routing envelope to n8n without the reserved binding property', async () => {

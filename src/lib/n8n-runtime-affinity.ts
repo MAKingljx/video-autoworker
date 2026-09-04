@@ -14,7 +14,7 @@ export const N8N_RELEASE_READINESS_SCHEMA = 'video-autoworker-release-readiness/
 export const N8N_ROLLING_DATABASE_COMPATIBILITY = {
   schemaEpoch: 1,
   rollingSafeFrom: '052_n8n_intake_controls',
-  latestMigration: '057_n8n_director_evidence_outbox',
+  latestMigration: '059_director_evidence_projection_receipts',
 } as const
 
 export type N8nRollingDatabaseCompatibility = typeof N8N_ROLLING_DATABASE_COMPATIBILITY
@@ -41,6 +41,8 @@ const REQUIRED_ROLLING_MIGRATIONS = [
   '055_n8n_child_execution_leases',
   '056_n8n_parent_execution_claims',
   '057_n8n_director_evidence_outbox',
+  '058_director_extraction_task_runs',
+  '059_director_evidence_projection_receipts',
 ] as const
 
 const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
@@ -123,6 +125,38 @@ const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
     { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
     { name: 'updated_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
   ],
+  n8n_director_evidence_projection_receipts: [
+    { name: 'task_id', type: 'TEXT', primaryKey: 1 },
+    { name: 'source_identity_sha256', type: 'TEXT', notNull: true },
+    { name: 'projection_contract_digest', type: 'TEXT', notNull: true },
+    { name: 'receipt_json', type: 'TEXT', notNull: true },
+    { name: 'receipt_sha256', type: 'TEXT', notNull: true },
+    { name: 'origin', type: 'TEXT', notNull: true },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
+  director_extraction_checkpoints: [
+    { name: 'phase_task_id', type: 'TEXT', notNull: true, primaryKey: 1 },
+    { name: 'phase', type: 'TEXT', notNull: true },
+    { name: 'input_sha256', type: 'TEXT', notNull: true },
+    { name: 'phase_input', type: 'TEXT', notNull: true },
+    { name: 'output_sha256', type: 'TEXT', notNull: true },
+    { name: 'candidate_output', type: 'TEXT', notNull: true },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
+  director_extraction_projection_receipts: [
+    { name: 'phase_task_id', type: 'TEXT', notNull: true, primaryKey: 1 },
+    { name: 'receipt_json', type: 'TEXT', notNull: true },
+    { name: 'receipt_sha256', type: 'TEXT', notNull: true },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
+  director_extraction_review_receipts: [
+    { name: 'phase_task_id', type: 'TEXT', notNull: true, primaryKey: 1 },
+    { name: 'receipt_type', type: 'TEXT', notNull: true, primaryKey: 2 },
+    { name: 'reviewed_references', type: 'TEXT', notNull: true },
+    { name: 'error_code', type: 'TEXT' },
+    { name: 'receipt_sha256', type: 'TEXT', notNull: true },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
 }
 
 const DIRECTOR_EVIDENCE_OUTBOX_SQL_CONSTRAINTS = [
@@ -135,6 +169,34 @@ const DIRECTOR_EVIDENCE_OUTBOX_SQL_CONSTRAINTS = [
   'CHECK(attempt_count >= 0)',
   "CHECK(last_error_code IS NULL OR ( length(last_error_code) BETWEEN 1 AND 200 AND last_error_code NOT GLOB '*[^A-Za-z0-9_:-]*' ))",
 ] as const
+
+const DIRECTOR_EVIDENCE_RECEIPT_SQL_CONSTRAINTS = [
+  "CHECK(length(source_identity_sha256) = 64 AND source_identity_sha256 NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(length(projection_contract_digest) = 64 AND projection_contract_digest NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object')",
+  "CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*')",
+  "CHECK(origin IN ('delivery', 'verified_read_recovery'))",
+] as const
+
+const DIRECTOR_EXTRACTION_SQL_CONSTRAINTS: Record<string, readonly string[]> = {
+  director_extraction_checkpoints: [
+    "CHECK(phase IN ('perception', 'understanding', 'judgment', 'case', 'technique'))",
+    "CHECK(length(input_sha256) = 64 AND input_sha256 NOT GLOB '*[^0-9a-f]*')",
+    "CHECK(json_valid(phase_input) AND json_type(phase_input) = 'object')",
+    "CHECK(length(output_sha256) = 64 AND output_sha256 NOT GLOB '*[^0-9a-f]*')",
+    "CHECK(json_valid(candidate_output) AND json_type(candidate_output) = 'object')",
+  ],
+  director_extraction_projection_receipts: [
+    "CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object')",
+    "CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*')",
+  ],
+  director_extraction_review_receipts: [
+    "CHECK(receipt_type IN ('candidate_review', 'intent_review', 'candidate_rejection'))",
+    "CHECK(json_valid(reviewed_references) AND json_type(reviewed_references) = 'object')",
+    "CHECK(error_code IS NULL OR ( length(error_code) BETWEEN 1 AND 200 AND error_code NOT GLOB '*[^A-Za-z0-9_:-]*' ))",
+    "CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*')",
+  ],
+}
 
 const REQUIRED_ROLLING_INDEXES: RequiredIndex[] = [
   {
@@ -185,6 +247,11 @@ const REQUIRED_ROLLING_INDEXES: RequiredIndex[] = [
     name: 'idx_n8n_director_evidence_outbox_scope',
     columns: ['tenant_id', 'workspace_id', 'status', 'updated_at'],
     descending: [false, false, false, true],
+  },
+  {
+    table: 'n8n_director_evidence_projection_receipts',
+    name: 'idx_n8n_director_evidence_projection_receipts_contract',
+    columns: ['projection_contract_digest', 'origin', 'created_at', 'task_id'],
   },
 ]
 
@@ -286,6 +353,9 @@ export interface N8nReleaseReadiness {
     contractDigest: string
     pending: number
     incompatiblePending: number
+    deliveredWithoutValidReceipt: number
+    outOfScopeOutbox: number
+    outOfScopeExtraction: number
   }
   retirement: N8nRuntimeDrainStatus
   scheduler: SchedulerLeadershipStatus
@@ -392,6 +462,51 @@ export function getN8nRollingDatabaseCompatibility(
       ))
       if (!parentReference) {
         throw new Error('n8n rolling director evidence parent reference is incompatible')
+      }
+    }
+
+    if (table === 'n8n_director_evidence_projection_receipts') {
+      const compactSql = String(tableRecord.sql || '').replace(/\s+/gu, ' ').trim()
+      for (const constraint of DIRECTOR_EVIDENCE_RECEIPT_SQL_CONSTRAINTS) {
+        if (!compactSql.includes(constraint)) {
+          throw new Error('n8n rolling director evidence receipt constraint is incompatible')
+        }
+      }
+    }
+
+    const extractionConstraints = DIRECTOR_EXTRACTION_SQL_CONSTRAINTS[table]
+    if (extractionConstraints) {
+      const compactSql = String(tableRecord.sql || '').replace(/\s+/gu, ' ').trim()
+      for (const constraint of extractionConstraints) {
+        if (!compactSql.includes(constraint)) {
+          throw new Error(`n8n rolling director extraction constraint is incompatible: ${table}`)
+        }
+      }
+    }
+
+    const expectedParent = table === 'director_extraction_checkpoints'
+      ? { table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }
+      : table === 'director_extraction_projection_receipts'
+        ? { table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }
+        : table === 'director_extraction_review_receipts'
+          ? { table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }
+          : table === 'n8n_director_evidence_projection_receipts'
+            ? { table: 'n8n_director_evidence_outbox', from: 'task_id', to: 'task_id' }
+            : null
+    if (expectedParent) {
+      const foreignKeys = db.prepare(
+        `PRAGMA foreign_key_list(${quotedSqliteIdentifier(table)})`,
+      ).all() as SqliteForeignKeyRow[]
+      const parentReference = foreignKeys.find(foreignKey => (
+        foreignKey.table === expectedParent.table
+        && foreignKey.from === expectedParent.from
+        && foreignKey.to === expectedParent.to
+        && foreignKey.on_update === 'NO ACTION'
+        && foreignKey.on_delete === 'CASCADE'
+        && foreignKey.match === 'NONE'
+      ))
+      if (!parentReference) {
+        throw new Error(`n8n rolling director extraction parent reference is incompatible: ${table}`)
       }
     }
   }
@@ -671,8 +786,19 @@ export function buildN8nReleaseReadiness(
     || !Number.isSafeInteger(projection.pending) || projection.pending < 0
     || !Number.isSafeInteger(projection.incompatiblePending)
     || projection.incompatiblePending < 0
-    || projection.incompatiblePending > projection.pending) {
+    || projection.incompatiblePending > projection.pending
+    || !Number.isSafeInteger(projection.deliveredWithoutValidReceipt)
+    || projection.deliveredWithoutValidReceipt < 0
+    || !Number.isSafeInteger(projection.outOfScopeOutbox)
+    || projection.outOfScopeOutbox < 0
+    || !Number.isSafeInteger(projection.outOfScopeExtraction)
+    || projection.outOfScopeExtraction < 0) {
     throw new TypeError('n8n director evidence projection readiness is invalid')
+  }
+  if (projection.deliveredWithoutValidReceipt > 0
+    || projection.outOfScopeOutbox > 0
+    || projection.outOfScopeExtraction > 0) {
+    throw new Error('n8n director evidence projection readiness is blocked')
   }
   if (scheduler.state === 'unknown' || scheduler.state === 'unavailable') {
     throw new TypeError('n8n scheduler leadership is not available for release')

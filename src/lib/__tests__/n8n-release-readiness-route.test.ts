@@ -103,11 +103,17 @@ describe('n8n release readiness route', () => {
     mocks.getRollingDatabaseCompatibility.mockReturnValue({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '057_n8n_director_evidence_outbox',
+      latestMigration: '059_director_evidence_projection_receipts',
     })
     mocks.getSchedulerLeadershipStatus.mockReturnValue(scheduler)
     mocks.getDirectorEvidenceOutboxCounts.mockReturnValue({
-      pending: 2, delivered: 7, conflict: 1, incompatiblePending: 0,
+      pending: 2,
+      delivered: 7,
+      conflict: 1,
+      incompatiblePending: 0,
+      deliveredWithoutValidReceipt: 0,
+      outOfScopeOutbox: 0,
+      outOfScopeExtraction: 0,
     })
   })
 
@@ -137,18 +143,43 @@ describe('n8n release readiness route', () => {
         database: {
           schemaEpoch: 1,
           rollingSafeFrom: '052_n8n_intake_controls',
-          latestMigration: '057_n8n_director_evidence_outbox',
+          latestMigration: '059_director_evidence_projection_receipts',
         },
         projection: {
           schema: 'video-autoworker-director-evidence-outbox-readiness/v1',
           contractDigest: 'a'.repeat(64),
           pending: 2,
           incompatiblePending: 0,
+          deliveredWithoutValidReceipt: 0,
+          outOfScopeOutbox: 0,
+          outOfScopeExtraction: 0,
         },
         retirement,
         scheduler,
       },
     })
+  })
+
+  it.each([
+    'deliveredWithoutValidReceipt',
+    'outOfScopeOutbox',
+    'outOfScopeExtraction',
+  ] as const)('fails closed when projection readiness reports %s', async (field) => {
+    mocks.getDirectorEvidenceOutboxCounts.mockReturnValue({
+      pending: 0,
+      delivered: 1,
+      conflict: 0,
+      incompatiblePending: 0,
+      deliveredWithoutValidReceipt: 0,
+      outOfScopeOutbox: 0,
+      outOfScopeExtraction: 0,
+      [field]: 1,
+    })
+
+    const response = await GET(request())
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'RELEASE_READINESS_UNAVAILABLE' })
   })
 
   it('fails closed while the global intake gate is accepting', async () => {

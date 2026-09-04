@@ -6,11 +6,14 @@ const standaloneRuntimeIncludes = [
   './openapi.json',
   './package.json',
   './scripts/feishu-director-brain.mjs',
+  './scripts/apply-openclaw-runtime-convergence.sh',
   './scripts/install-aiworker-director-brain.sh',
   './scripts/verify-shared-runtime-install-gate.mjs',
   './scripts/lib/feishu-director-brain.mjs',
   './scripts/lib/runtime-safe-offline-queue.mjs',
   './scripts/lib/openclaw-secret-reference.mjs',
+  './scripts/lib/openclaw-runtime-convergence.mjs',
+  './scripts/lib/sensitive-value-scanner.mjs',
   './scripts/lib/shared-deployment-lock.mjs',
   './scripts/lib/shared-deployment-lock.sh',
   './openclaw-plugins/aiworker-director-brain/index.js',
@@ -28,6 +31,7 @@ const standaloneRuntimeIncludes = [
   './openclaw-skills/aiworker-task-flow/lib/**/*',
   './openclaw-skills/aiworker-task-flow/scripts/**/*',
   './ops/feishu-director-brain/schema.json',
+  './ops/openclaw/qwen-current-runtime-convergence.manifest.json',
 ]
 
 const standaloneDevelopmentExcludes = [

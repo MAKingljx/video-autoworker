@@ -1,11 +1,12 @@
 {
   "id": "aiworker-director-brain",
   "name": "AI-worker Director Brain",
-  "version": "0.3.1",
-  "description": "Exposes one work-scoped tool for reviewed director context, six-layer workflow guidance, and candidate proposals.",
+  "version": "0.4.0",
+  "description": "Exposes one tool for reviewed work context, global techniques, extraction status, workflow guidance, and candidate proposals.",
   "activation": {
     "onStartup": true,
     "onCapabilities": [
+      "hook",
       "tool"
     ]
   },

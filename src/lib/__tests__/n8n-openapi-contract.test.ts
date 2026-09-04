@@ -31,6 +31,43 @@ describe('n8n rolling and callback OpenAPI contract', () => {
     expect(mutation.responses['503'].description).toMatch(/acquired or released/i)
   })
 
+  it('documents the strict review-polling director extraction boundary', () => {
+    const operation = document.paths['/api/n8n/director-extraction'].post
+    const variants = operation.requestBody.content['application/json'].schema.oneOf
+    const start = variants.find((variant: Record<string, any>) => (
+      variant.properties.action.enum.includes('start_extraction')
+    ))
+    const backfill = variants.find((variant: Record<string, any>) => (
+      variant.properties.action.enum.includes('backfill_extraction')
+    ))
+    const status = variants.find((variant: Record<string, any>) => (
+      variant.properties.action.enum.includes('extraction_status')
+    ))
+
+    expect(start).toMatchObject({
+      additionalProperties: false,
+      required: ['action', 'workId'],
+    })
+    expect(Object.keys(start.properties).sort()).toEqual([
+      'action',
+      'objective',
+      'sourceQuery',
+      'workId',
+    ])
+    expect(start.properties.action.enum).toEqual(['start_extraction'])
+    expect(backfill).toMatchObject({
+      additionalProperties: false,
+      required: ['action', 'workId'],
+    })
+    expect(Object.keys(backfill.properties).sort()).toEqual(['action', 'workId'])
+    expect(backfill.properties.action.enum).toEqual(['backfill_extraction'])
+    expect(status).toMatchObject({
+      additionalProperties: false,
+      required: ['action', 'workId'],
+    })
+    expect(Object.keys(status.properties).sort()).toEqual(['action', 'workId'])
+  })
+
   const document = JSON.parse(
     readFileSync(resolve(process.cwd(), 'openapi.json'), 'utf8'),
   ) as Record<string, any>
@@ -66,9 +103,14 @@ describe('n8n rolling and callback OpenAPI contract', () => {
   it('uses a strict scheduler schema only for release readiness', () => {
     const readiness = document.components.schemas.N8nReleaseReadiness
     expect(readiness.properties.database.properties.latestMigration.enum)
-      .toEqual(['057_n8n_director_evidence_outbox'])
+      .toEqual(['059_director_evidence_projection_receipts'])
     expect(readiness.properties.scheduler.$ref)
       .toBe('#/components/schemas/N8nReleaseSchedulerLeadershipStatus')
+    expect(readiness.properties.projection.required).toEqual(expect.arrayContaining([
+      'deliveredWithoutValidReceipt',
+      'outOfScopeOutbox',
+      'outOfScopeExtraction',
+    ]))
     expect(document.components.schemas.N8nReleaseSchedulerLeadershipStatus.properties.state.enum)
       .toEqual(['leader', 'follower', 'inactive'])
     expect(document.paths['/api/scheduler'].get.responses['200'].content['application/json']

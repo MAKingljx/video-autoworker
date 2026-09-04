@@ -49,6 +49,15 @@ describe('plugin and director service contract', () => {
       { action: 'get', table: 'works', stableId: 'WORK-ICE-001' },
       { action: 'search', table: 'system_blueprint', query: '数据边界' },
       { action: 'search', table: 'works', query: '冰原纪事' },
+      { action: 'get', table: 'skills_techniques', stableId: 'SKILL-GLOBAL-1' },
+      {
+        action: 'get', table: 'skills_techniques', workId: 'WORK-ICE-001',
+        stableId: 'SKILL-FROM-ICE-1',
+      },
+      { action: 'search', table: 'skills_techniques', query: '停顿' },
+      {
+        action: 'search', table: 'skills_techniques', workId: 'WORK-ICE-001', query: '停顿',
+      },
     ]) {
       await expect(serviceModule.executeDirectorBrainOperation(request, connectionReached))
         .rejects.toThrow('contract_connect_reached')
@@ -82,6 +91,14 @@ describe('plugin and director service contract', () => {
         aliases: ['冰原', '冰雪纪事'],
         state: '生效',
         version: 'v0.2.0',
+        hierarchy: {
+          level: '独立作品',
+          parentWorkId: null,
+          seriesId: null,
+          seasonId: null,
+          seasonNumber: null,
+          episodeNumber: null,
+        },
       },
     })
     expect(JSON.stringify(result)).not.toContain('record_id')
@@ -116,9 +133,14 @@ describe('plugin and director service contract', () => {
     for (const table of DIRECTOR_BRAIN_PROPOSAL_TABLES) {
       await expect(serviceModule.executeDirectorBrainOperation({
         action: 'propose',
-        ...(table === 'works' ? {} : { workId: 'WORK-ICE-001' }),
+        ...(table === 'works' || table === 'skills_techniques'
+          ? {}
+          : { workId: 'WORK-ICE-001' }),
         table,
         fields: { '最小候选': '契约探针' },
+        ...(table === 'skills_techniques'
+          ? { references: { caseIds: ['CASE-REVIEWED-001'] } }
+          : {}),
       }, {
         dependencies: { connect: async () => { throw new Error('contract_connect_reached') } },
       })).rejects.toThrow('contract_connect_reached')

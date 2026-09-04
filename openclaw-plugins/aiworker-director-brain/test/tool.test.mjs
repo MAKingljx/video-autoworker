@@ -45,7 +45,8 @@ describe('director brain tool contract', () => {
       'skills_techniques',
     ])
     expect(TOOL_PARAMETERS.properties.action.enum).toEqual([
-      'health', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
+      'health', 'explain', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
+      'start_extraction', 'extraction_status', 'backfill_extraction',
     ])
   })
 
@@ -63,6 +64,11 @@ describe('director brain tool contract', () => {
     expect(tool.description).toContain('不得捏造准确率')
     expect(tool.description).toContain('无法合法组装就明确依据不足')
     expect(tool.description).toContain('必须逐字使用其中 userVisibleAnswer')
+    expect(tool.description).toContain('不得回退到 read、exec、memory')
+    expect(tool.description).toContain('start_extraction、extraction_status、backfill_extraction')
+    expect(tool.description).toContain('skills_techniques 是由已确认案例支撑的跨作品全局技法库')
+    expect(TOOL_PARAMETERS.properties.workId.description).toContain('全局 skills_techniques')
+    expect(TOOL_PARAMETERS.properties.workId.description).toContain('来源作品过滤')
   })
 
   it('returns a deterministic user-visible workflow answer derived only from service fields', async () => {
@@ -81,6 +87,7 @@ describe('director brain tool contract', () => {
         },
         metrics: { layerCoverage: 0.5 },
         nextSuggestion: '先补齐故事证据。',
+        debug: 'x'.repeat(80 * 1024),
       }),
     })
 
@@ -93,20 +100,16 @@ describe('director brain tool contract', () => {
       mustQuoteUserVisibleAnswerExactly: true,
       doNotAddFacts: true,
       doNotExposeInternalIds: true,
-      userVisibleAnswer: [
-        '六层导演脑建设状态：',
-        '- 素材感知层：已就绪',
-        '- 人物理解层：已就绪',
-        '- 故事发现层：未就绪',
-        '- 导演判断层：未就绪',
-        '- 叙事结构层：未就绪',
-        '- 导演意图层：已就绪',
-        '',
-        '当前结论：先补齐故事证据。',
-      ].join('\n'),
+      handled: true,
+      stopAfterReply: true,
+      doNotUseFallbackSources: true,
+      userVisibleAnswer: '导演脑：3/6 层就绪。未就绪：故事发现、导演判断、叙事结构。下一步：先补齐故事证据。',
     })
     expect(result.responseContract.userVisibleAnswer).not.toContain('50%')
     expect(result.responseContract.userVisibleAnswer).not.toContain('WORK-1')
+    expect(Object.keys(result).sort()).toEqual(['action', 'handled', 'ok', 'responseContract'])
+    expect(JSON.stringify(result)).not.toContain('debug')
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(1024)
   })
 
   it('resolves a workflow query internally before requesting the six-layer workflow', async () => {
@@ -148,12 +151,192 @@ describe('director brain tool contract', () => {
       workId: 'WORK-1',
       objective: '判断当前六层建设状态',
     })
-    expect(result.responseContract.userVisibleAnswer).toContain('导演判断层：未就绪')
+    expect(result.responseContract.userVisibleAnswer).toBe(
+      '《冰原纪事》的导演脑：4/6 层就绪。未就绪：导演判断、叙事结构。下一步：补充导演判断后再建立叙事结构。',
+    )
     expect(result.responseContract.userVisibleAnswer).not.toContain('WORK-1')
   })
 
-  it('normalizes the seven allowed actions and rejects extra or privileged operations', () => {
+  it('shows case and technique maturity from both supported workflow field names', async () => {
+    for (const maturityField of ['maturity', 'learningReadiness']) {
+      const tool = createDirectorBrainTool({
+        context: targetContext,
+        service: vi.fn().mockResolvedValue({
+          ok: true,
+          action: 'workflow',
+          workId: 'WORK-MUST-STAY-HIDDEN',
+          readiness: {
+            perception: true,
+            people: true,
+            story: true,
+            judgment: true,
+            narrative: true,
+            intent: true,
+          },
+          [maturityField]: {
+            cases: { status: 'awaiting_review', reviewedCount: 2, totalCount: 3 },
+            techniques: { status: 'blocked_by_case_review' },
+          },
+          nextSuggestion: '先确认导演案例。',
+        }),
+      })
+
+      const result = JSON.parse(resultText(await tool.execute('call-maturity', {
+        action: 'workflow', workId: 'WORK-MUST-STAY-HIDDEN',
+      })))
+      expect(result.responseContract.userVisibleAnswer).toBe(
+        '导演脑：6/6 层就绪。六层均已就绪；导演案例：待确认（已确认 2/3）；技法沉淀：等待案例确认。下一步：先确认导演案例。',
+      )
+      expect(JSON.stringify(result)).not.toContain('WORK-MUST-STAY-HIDDEN')
+    }
+  })
+
+  it('resolves by work name and delegates extraction through the injected shared service', async () => {
+    const service = vi.fn().mockResolvedValue({
+      ok: true,
+      action: 'resolve_work',
+      found: true,
+      work: { workId: 'WORK-PRIVATE-1', name: '冰原纪事' },
+    })
+    const extractionService = vi.fn().mockResolvedValue({
+      ok: true,
+      action: 'start_extraction',
+      state: 'pending',
+      extractionId: 'EXTRACTION-MUST-STAY-HIDDEN',
+      debug: 'x'.repeat(80 * 1024),
+    })
+    const tool = createDirectorBrainTool({ context: targetContext, service, extractionService })
+
+    const result = JSON.parse(resultText(await tool.execute('call-extraction', {
+      action: 'start_extraction',
+      query: '《冰原纪事》',
+      sourceQuery: '第三季第二集.mov',
+      objective: '发现人物变化',
+    })))
+
+    expect(service).toHaveBeenCalledTimes(1)
+    expect(service).toHaveBeenCalledWith({ action: 'resolve_work', query: '《冰原纪事》' })
+    expect(extractionService).toHaveBeenCalledTimes(1)
+    expect(extractionService).toHaveBeenCalledWith({
+      action: 'start_extraction',
+      workId: 'WORK-PRIVATE-1',
+      sourceQuery: '第三季第二集.mov',
+      objective: '发现人物变化',
+    })
+    expect(result).toEqual({
+      ok: true,
+      action: 'start_extraction',
+      handled: true,
+      responseContract: {
+        mustQuoteUserVisibleAnswerExactly: true,
+        doNotAddFacts: true,
+        doNotExposeInternalIds: true,
+        handled: true,
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: '已开始整理《冰原纪事》的导演知识。稍后直接问我进度就行。',
+      },
+    })
+    expect(JSON.stringify(result)).not.toMatch(/WORK-PRIVATE|EXTRACTION-MUST|debug/iu)
+    expect(Buffer.byteLength(JSON.stringify(result), 'utf8')).toBeLessThan(48 * 1024)
+  })
+
+  it('stops after a missing or ambiguous work and never reaches the extraction service', async () => {
+    for (const scenario of [
+      {
+        service: vi.fn().mockResolvedValue({
+          ok: true, action: 'resolve_work', found: false,
+        }),
+        expected: '我没有找到这个作品。请告诉我更准确的完整作品名。',
+      },
+      {
+        service: vi.fn().mockRejectedValue(new Error('work_resolution_ambiguous')),
+        expected: '这个名称对应多个作品。请告诉我更准确的完整作品名。',
+      },
+    ]) {
+      const extractionService = vi.fn()
+      const tool = createDirectorBrainTool({
+        context: targetContext,
+        service: scenario.service,
+        extractionService,
+      })
+      const result = JSON.parse(resultText(await tool.execute('call-no-fallback', {
+        action: 'backfill_extraction', query: '冰原',
+      })))
+
+      expect(extractionService).not.toHaveBeenCalled()
+      expect(result.handled).toBe(true)
+      expect(result.responseContract).toMatchObject({
+        mustQuoteUserVisibleAnswerExactly: true,
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: scenario.expected,
+      })
+      expect(JSON.stringify(result)).not.toMatch(/workId|recordId|candidate/iu)
+    }
+  })
+
+  it('marks a direct unresolved work lookup as handled with no fallback', async () => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'resolve_work',
+        found: false,
+        query: '不存在的作品',
+        matches: [],
+      }),
+    })
+    const result = JSON.parse(resultText(await tool.execute('call-resolve-missing', {
+      action: 'resolve_work', query: '不存在的作品',
+    })))
+
+    expect(result).toMatchObject({
+      ok: true,
+      action: 'resolve_work',
+      handled: true,
+      outcome: 'not_found',
+      responseContract: {
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: '我没有找到这个作品。请告诉我更准确的完整作品名。',
+      },
+    })
+    expect(JSON.stringify(result)).not.toContain('不存在的作品')
+  })
+
+  it.each([
+    ['awaiting_evidence_review', '素材证据已经整理好，正在等你确认'],
+    ['awaiting_understanding_review', '人物和故事理解已经整理好，正在等你确认'],
+    ['awaiting_judgment_review', '导演判断已经整理好，正在等你确认'],
+    ['awaiting_case_review', '导演案例已经整理好，正在等你确认。确认后才会继续沉淀技法'],
+    ['awaiting_technique_review', '导演技法已经整理成候选，正在等你确认'],
+  ])('explains the %s review gate without exposing IDs', async (state, expected) => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'resolve_work',
+        found: true,
+        work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
+      }),
+      extractionService: vi.fn().mockResolvedValue({
+        ok: true, action: 'extraction_status', state, runId: 'RUN-HIDDEN',
+      }),
+    })
+    const result = JSON.parse(resultText(await tool.execute('call-status', {
+      action: 'extraction_status', query: '冰原纪事',
+    })))
+
+    expect(result.responseContract.userVisibleAnswer).toContain(expected)
+    expect(JSON.stringify(result)).not.toMatch(/WORK-HIDDEN|RUN-HIDDEN/iu)
+  })
+
+  it('normalizes the eleven allowed actions and rejects extra or privileged operations', () => {
     expect(normalizeDirectorBrainToolRequest({ action: 'health' })).toEqual({ action: 'health' })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'explain', topic: 'technique_learning',
+    })).toEqual({ action: 'explain', topic: 'technique_learning' })
     expect(normalizeDirectorBrainToolRequest({
       action: 'resolve_work', query: '冰原纪事',
     })).toEqual({ action: 'resolve_work', query: '冰原纪事' })
@@ -182,6 +365,24 @@ describe('director brain tool contract', () => {
       action: 'search', workId: 'WORK-1', table: 'all', query: '主角', limit: 20,
     })
     expect(normalizeDirectorBrainToolRequest({
+      action: 'get', table: 'skills_techniques', stableId: 'SKILL-1',
+    })).toEqual({ action: 'get', table: 'skills_techniques', stableId: 'SKILL-1' })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'get', workId: 'WORK-1', table: 'skills_techniques', stableId: 'SKILL-1',
+    })).toEqual({
+      action: 'get', workId: 'WORK-1', table: 'skills_techniques', stableId: 'SKILL-1',
+    })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'search', table: 'skills_techniques', query: '停顿',
+    })).toEqual({
+      action: 'search', table: 'skills_techniques', query: '停顿', limit: 10,
+    })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'search', workId: 'WORK-1', table: 'skills_techniques', query: '停顿',
+    })).toEqual({
+      action: 'search', workId: 'WORK-1', table: 'skills_techniques', query: '停顿', limit: 10,
+    })
+    expect(normalizeDirectorBrainToolRequest({
       action: 'assemble',
       workId: 'WORK-1',
       references: {
@@ -221,6 +422,21 @@ describe('director brain tool contract', () => {
       action: 'workflow', query: '《冰原纪事》', objective: '判断六层状态',
     })
     expect(normalizeDirectorBrainToolRequest({
+      action: 'start_extraction', query: '《冰原纪事》', objective: '发现人物变化',
+    })).toEqual({
+      action: 'start_extraction',
+      query: '《冰原纪事》',
+      objective: '发现人物变化',
+    })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'backfill_extraction',
+      query: '《冰原纪事》',
+      sourceQuery: '第三季第二集.mov',
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'extraction_status', query: '《冰原纪事》',
+    })).toEqual({ action: 'extraction_status', query: '《冰原纪事》' })
+    expect(normalizeDirectorBrainToolRequest({
       action: 'propose',
       workId: 'WORK-1',
       table: 'story_relations',
@@ -256,13 +472,39 @@ describe('director brain tool contract', () => {
       references: {},
     })
 
-    for (const table of DIRECTOR_BRAIN_PROPOSAL_TABLES.filter(value => value !== 'works')) {
+    for (const table of DIRECTOR_BRAIN_PROPOSAL_TABLES.filter(
+      value => value !== 'works' && value !== 'skills_techniques',
+    )) {
       expect(normalizeDirectorBrainToolRequest({
         action: 'propose', workId: 'WORK-1', table, fields: { '主字段': '候选内容' },
       })).toEqual({
         action: 'propose', workId: 'WORK-1', table, fields: { '主字段': '候选内容' },
       })
     }
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'propose',
+      table: 'skills_techniques',
+      fields: { '知识名称': '在决定前保留停顿' },
+      references: { caseIds: ['CASE-1', 'CASE-2'] },
+    })).toEqual({
+      action: 'propose',
+      table: 'skills_techniques',
+      fields: { '知识名称': '在决定前保留停顿' },
+      references: { caseIds: ['CASE-1', 'CASE-2'] },
+    })
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'propose',
+      workId: 'WORK-1',
+      table: 'skills_techniques',
+      fields: { '知识名称': '在决定前保留停顿' },
+      references: { caseIds: ['CASE-1'] },
+    })).toEqual({
+      action: 'propose',
+      workId: 'WORK-1',
+      table: 'skills_techniques',
+      fields: { '知识名称': '在决定前保留停顿' },
+      references: { caseIds: ['CASE-1'] },
+    })
 
     expect(normalizeDirectorBrainToolRequest({ action: 'approve' })).toBeNull()
     expect(normalizeDirectorBrainToolRequest({ action: 'delete' })).toBeNull()
@@ -327,7 +569,23 @@ describe('director brain tool contract', () => {
       action: 'workflow', workId: 'WORK-1', query: '冰原纪事',
     })).toBeNull()
     expect(normalizeDirectorBrainToolRequest({
+      action: 'extraction_status', query: '冰原纪事', workId: 'WORK-1',
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'start_extraction', query: '冰原纪事', sourceQuery: 'x'.repeat(121),
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'start_extraction', query: '长'.repeat(257),
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
       action: 'propose', table: 'story_nodes', fields: { '节点名称': '无作品' },
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'propose', table: 'skills_techniques', fields: { '知识名称': '无案例技法' },
+    })).toBeNull()
+    expect(normalizeDirectorBrainToolRequest({
+      action: 'propose', table: 'skills_techniques', fields: { '知识名称': '错误引用' },
+      references: { evidenceIds: ['EVIDENCE-1'] },
     })).toBeNull()
     expect(normalizeDirectorBrainToolRequest({
       action: 'propose', workId: 'WORK-1', table: 'works',
@@ -369,6 +627,30 @@ describe('director brain tool contract', () => {
     })
   })
 
+  it('passes global techniques without a work ID and keeps reviewed case provenance', async () => {
+    const service = vi.fn().mockResolvedValue({
+      ok: true,
+      action: 'propose',
+      table: 'skills_techniques',
+      outcome: 'created',
+    })
+    const tool = createDirectorBrainTool({ context: targetContext, service })
+
+    await tool.execute('call-global-technique', {
+      action: 'propose',
+      table: 'skills_techniques',
+      fields: { '知识名称': '风险决定前保留停顿' },
+      references: { caseIds: ['CASE-ICE-1', 'CASE-DESERT-1'] },
+    })
+
+    expect(service).toHaveBeenCalledWith({
+      action: 'propose',
+      table: 'skills_techniques',
+      fields: { '知识名称': '风险决定前保留停顿' },
+      references: { caseIds: ['CASE-ICE-1', 'CASE-DESERT-1'] },
+    })
+  })
+
   it('passes a normalized assemble request and keeps the 48 KiB result boundary', async () => {
     const references = {
       intentVersionId: 'INTENT-1',
@@ -401,7 +683,14 @@ describe('director brain tool contract', () => {
       workId: 'WORK-1',
       references,
     })
-    expect(resultText(oversized)).toBe('导演脑暂时无法读取，请稍后再试。')
+    expect(JSON.parse(resultText(oversized))).toMatchObject({
+      handled: true,
+      responseContract: {
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: '导演脑暂时无法读取，请稍后再试。',
+      },
+    })
   })
 
   it('fails closed without echoing rejected input or service details', async () => {
@@ -421,8 +710,36 @@ describe('director brain tool contract', () => {
     const failed = await tool.execute('call-3', {
       action: 'get', workId: 'WORK-1', table: 'people_profiles', stableId: 'PERSON-1',
     })
-    expect(resultText(failed)).toBe('导演脑暂时无法读取，请稍后再试。')
+    expect(JSON.parse(resultText(failed))).toMatchObject({
+      handled: true,
+      responseContract: {
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: '导演脑暂时无法读取，请稍后再试。',
+      },
+    })
     expect(resultText(failed)).not.toContain('bascn-private-resource')
+
+    const wrongWorkflow = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'search',
+        workId: 'WORK-MUST-NOT-LEAK',
+      }),
+    })
+    const wrongResult = await wrongWorkflow.execute('call-wrong-workflow', {
+      action: 'workflow', workId: 'WORK-1',
+    })
+    expect(JSON.parse(resultText(wrongResult))).toMatchObject({
+      handled: true,
+      responseContract: {
+        stopAfterReply: true,
+        doNotUseFallbackSources: true,
+        userVisibleAnswer: '导演脑暂时无法读取，请稍后再试。',
+      },
+    })
+    expect(resultText(wrongResult)).not.toContain('WORK-MUST-NOT-LEAK')
   })
 
   it('does not call the service when the release gate is closed', async () => {

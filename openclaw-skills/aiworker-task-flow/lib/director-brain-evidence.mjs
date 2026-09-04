@@ -8,6 +8,17 @@ const MAX_INPUT_BYTES = 2 * 1024 * 1024
 const MAX_SEGMENTS = 240
 const MAX_TEXT_LENGTH = 4_000
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]+$/u
+const VISUAL_PERCEPTION_KEYS = Object.freeze([
+  'summary', 'people', 'locations', 'actions', 'objects', 'environment', 'ocr',
+  'shotTypes', 'cameraMovement', 'composition', 'emotion',
+])
+const SOUND_PERCEPTION_KEYS = Object.freeze([
+  'speechSummary', 'ambientSound', 'music', 'emotion',
+])
+const DIRECTOR_PERCEPTION_KEYS = Object.freeze([
+  ...VISUAL_PERCEPTION_KEYS,
+  'sound',
+])
 const ENVELOPE_KEYS = new Set([
   'schemaVersion',
   'projectId',
@@ -77,6 +88,76 @@ function normalizedText(value, label, { required = false, maximum = MAX_TEXT_LEN
     return null
   }
   return text.slice(0, maximum)
+}
+
+function exactObject(value, label, keys) {
+  const object = plainObject(value, label)
+  const expected = new Set(keys)
+  const missing = keys.filter(key => !Object.hasOwn(object, key))
+  if (missing.length) throw new Error(`director_evidence_${label}_field_missing:${missing.join(',')}`)
+  const extra = Object.keys(object).filter(key => !expected.has(key))
+  if (extra.length) throw new Error(`director_evidence_${label}_field_unexpected:${extra.join(',')}`)
+  return object
+}
+
+function normalizedTextList(value, label, { maximumItems, maximumItemLength }) {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    throw new Error(`director_evidence_${label}_invalid`)
+  }
+  const items = value.map((item, index) => normalizedText(
+    item,
+    `${label}:${index + 1}`,
+    { required: true, maximum: maximumItemLength },
+  ))
+  const unique = [...new Set(items)]
+  if (unique.length !== items.length) throw new Error(`director_evidence_${label}_duplicate`)
+  return unique
+}
+
+function visualPerception(value, label, picture) {
+  if (value === undefined) return null
+  const object = exactObject(value, label, VISUAL_PERCEPTION_KEYS)
+  const perception = {
+    summary: normalizedText(object.summary, `${label}_summary`, { required: true }),
+    people: normalizedTextList(object.people, `${label}_people`, { maximumItems: 20, maximumItemLength: 160 }),
+    locations: normalizedTextList(object.locations, `${label}_locations`, { maximumItems: 12, maximumItemLength: 240 }),
+    actions: normalizedTextList(object.actions, `${label}_actions`, { maximumItems: 20, maximumItemLength: 240 }),
+    objects: normalizedTextList(object.objects, `${label}_objects`, { maximumItems: 20, maximumItemLength: 160 }),
+    environment: normalizedTextList(object.environment, `${label}_environment`, { maximumItems: 12, maximumItemLength: 240 }),
+    ocr: normalizedTextList(object.ocr, `${label}_ocr`, { maximumItems: 20, maximumItemLength: 500 }),
+    shotTypes: normalizedTextList(object.shotTypes, `${label}_shot_types`, { maximumItems: 12, maximumItemLength: 120 }),
+    cameraMovement: normalizedTextList(object.cameraMovement, `${label}_camera_movement`, { maximumItems: 12, maximumItemLength: 120 }),
+    composition: normalizedTextList(object.composition, `${label}_composition`, { maximumItems: 12, maximumItemLength: 160 }),
+    emotion: normalizedTextList(object.emotion, `${label}_emotion`, { maximumItems: 12, maximumItemLength: 160 }),
+  }
+  if (picture && perception.summary !== picture) {
+    throw new Error(`director_evidence_${label}_summary_mismatch`)
+  }
+  return perception
+}
+
+function soundPerception(value, label) {
+  if (value === undefined) return null
+  const object = exactObject(value, label, SOUND_PERCEPTION_KEYS)
+  const sound = Object.fromEntries(SOUND_PERCEPTION_KEYS.map(key => [
+    key,
+    normalizedText(object[key], `${label}_${key}`, { maximum: 1_000 }),
+  ]))
+  return Object.values(sound).some(Boolean) ? sound : null
+}
+
+function directorPerception(value, label, summary) {
+  if (value === undefined) return { perception: null, sound: null }
+  const object = exactObject(value, label, DIRECTOR_PERCEPTION_KEYS)
+  const perception = visualPerception(
+    Object.fromEntries(VISUAL_PERCEPTION_KEYS.map(key => [key, object[key]])),
+    `${label}_visual`,
+    summary,
+  )
+  return {
+    perception,
+    sound: soundPerception(object.sound, `${label}_sound`),
+  }
 }
 
 function positiveFinite(value, label) {
@@ -184,12 +265,20 @@ function timelineSources(output, durationSeconds) {
       segment.visualAnalysis,
       `timeline_visual_analysis:${index}`,
     )
+    const perception = visualPerception(
+      segment.perception,
+      `timeline_perception:${index}`,
+      picture,
+    )
+    const sound = soundPerception(segment.sound, `timeline_sound:${index}`)
     return {
       kind: 'timeline',
       index,
       ...range,
       confidence: confidence(segment.confidence, `timeline_confidence:${index}`),
       picture,
+      perception,
+      sound,
       summary: picture,
       summarySource: 'timeline.visualAnalysis',
       sceneId: segment.sceneId === undefined ? null : identifier(segment.sceneId, `timeline_scene_id:${index}`),
@@ -216,6 +305,8 @@ function chapterSources(output, durationSeconds) {
       ...range,
       confidence: confidence(chapter.confidence, `chapter_confidence:${index}`),
       picture: null,
+      perception: null,
+      sound: null,
       summary: null,
       summarySource: null,
       sceneId: chapter.sceneId === undefined ? null : identifier(chapter.sceneId, `chapter_scene_id:${index}`),
@@ -231,7 +322,12 @@ function uniqueIndexes(sources) {
   }
 }
 
-function globalSummarySource(report, sources, durationSeconds) {
+function globalSummarySource(report, sources, durationSeconds, output) {
+  const structured = directorPerception(
+    output.directorPerception,
+    'output_director_perception',
+    report.text,
+  )
   return {
     kind: 'global',
     index: 0,
@@ -239,6 +335,8 @@ function globalSummarySource(report, sources, durationSeconds) {
     endSeconds: durationSeconds,
     confidence: Math.min(...sources.map(source => source.confidence)),
     picture: null,
+    perception: structured.perception,
+    sound: structured.sound,
     summary: report.text,
     summarySource: 'output.summary',
     sceneId: null,
@@ -263,6 +361,23 @@ function evidenceItem(envelope, source) {
   const sourceName = source.kind === 'global'
     ? '全片摘要'
     : `${source.kind === 'timeline' ? '时间片段' : '章节'} ${source.index}`
+  const perception = source.perception
+  const sound = source.sound
+  const shotLanguage = perception
+    ? [
+        ...perception.shotTypes.map(value => `景别：${value}`),
+        ...perception.cameraMovement.map(value => `运镜：${value}`),
+        ...perception.composition.map(value => `构图：${value}`),
+      ].join('\n')
+    : ''
+  const soundInformation = sound
+    ? [
+        sound.speechSummary ? `对白/旁白：${sound.speechSummary}` : '',
+        sound.ambientSound ? `环境声：${sound.ambientSound}` : '',
+        sound.music ? `音乐：${sound.music}` : '',
+        sound.emotion ? `声音情绪：${sound.emotion}` : '',
+      ].filter(Boolean).join('\n')
+    : ''
   const fields = {
     '证据名称': `${envelope.workId} ${sourceName}`,
     '任务 ID': envelope.taskId,
@@ -272,6 +387,15 @@ function evidenceItem(envelope, source) {
     '起始时间码': formatClock(source.startSeconds),
     '结束时间码': formatClock(source.endSeconds),
     '时间信息': source.kind === 'global' ? 'global:summary' : `${source.kind}:${source.index}`,
+    ...(perception?.people.length ? { '人物信息': perception.people.join('\n') } : {}),
+    ...(perception?.locations.length ? { '地点': perception.locations.join('\n') } : {}),
+    ...(perception?.actions.length ? { '行为': perception.actions.join('\n') } : {}),
+    ...(perception?.objects.length ? { '物体信息': perception.objects.join('\n') } : {}),
+    ...(perception?.environment.length ? { '环境信息': perception.environment.join('\n') } : {}),
+    ...(perception?.ocr.length ? { 'OCR 信息': perception.ocr.join('\n') } : {}),
+    ...(shotLanguage ? { '镜头语言': shotLanguage } : {}),
+    ...(perception?.emotion.length ? { '情绪信息': perception.emotion.join('\n') } : {}),
+    ...(soundInformation ? { '声音信息': soundInformation } : {}),
     ...(source.picture ? { '画面信息': source.picture } : {}),
     '证据摘要': source.summary,
     '分析版本': envelope.analysisVersion,
@@ -335,7 +459,7 @@ export function buildDirectorBrainEvidenceProjection(value) {
   if (!sources?.length) throw new Error('director_evidence_timeline_or_chapters_missing')
   uniqueIndexes(sources)
   const evidenceSources = [
-    globalSummarySource(report, sources, envelope.mediaDurationSeconds),
+    globalSummarySource(report, sources, envelope.mediaDurationSeconds, envelope.output),
     ...sources.filter(source => source.summary),
   ]
   const items = evidenceSources.map(source => evidenceItem(envelope, source))

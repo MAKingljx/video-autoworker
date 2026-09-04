@@ -168,6 +168,205 @@ importer/maintenance-lock/anchor/validator/restore 五项工具。
 
 ### 首次迁入 3017 蓝绿协议
 
+#### 逐命令 runbook（首次迁移）
+
+本节是首迁执行清单，不是参数示例。只在已经暂停外部准入、四项活动量全部归零，并由两名运维人员
+复核路径和目标提交后执行。每个占位符都必须替换为本次维护计划中的绝对物理路径；不要把本节直接
+整段粘贴运行。首先建立本次私有目录并固定同一条 release 身份链：
+
+```bash
+set -euo pipefail
+umask 077
+
+repository_root=/absolute/path/video-autoworker
+target_commit=<40-character-target-commit>
+runtime_release=/absolute/path/n8n/releases/<40-character-target-commit>
+application_release=/absolute/path/application-releases/<release-id>/standalone
+release_id=<application-release-id>
+slot=blue
+n8n_db=/absolute/path/database.sqlite
+mission_db=/absolute/path/mission-control.db
+router_run_dir=/absolute/private-state/blue-green
+router_state="$router_run_dir/router-state.json"
+transition_dir=/absolute/private-state/workflow-transition
+attempt_dir=/absolute/private-state/bootstrap-attempt
+recovery_package=/absolute/private-state/managed-workflow-recovery-package
+evidence_file=/absolute/private-state/legacy-freeze/freeze.json
+rollback_proof=/absolute/private-state/legacy-freeze/rollback-proof.json
+
+cd "$repository_root"
+test "$(git rev-parse --show-toplevel)" = "$repository_root"
+test "$(git rev-parse HEAD)" = "$target_commit"
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+test "$(tr -d '[:space:]' < "$runtime_release/SOURCE_COMMIT")" = "$target_commit"
+mkdir -m 700 "$transition_dir" "$attempt_dir"
+```
+
+`attempt_dir` 必须是刚创建的空目录；transition、evidence、proof 和 recovery package 也必须是本次
+独立目标，不能覆盖旧产物。先在 n8n 在线且健康时用只读事务生成受管工作流回滚包；这里的
+`source-commit` 是**目标提交**，表示本次 backup/restore tooling contract，不是数据库里旧工作流的
+来源提交：
+
+```bash
+node "$runtime_release/scripts/n8n-backup-managed-workflows.mjs" backup \
+  --database "$n8n_db" \
+  --module-root "$runtime_release/ops/n8n" \
+  --n8n-version 2.31.6 \
+  --output "$recovery_package" \
+  --source-commit "$target_commit"
+
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" prepare-intent \
+  --upgrade-id <one-current-uuid> \
+  --database "$n8n_db" \
+  --rollback-package "$recovery_package" \
+  --runtime-root "$runtime_release" \
+  --target-commit "$target_commit" \
+  --slot "$slot" \
+  --release-id "$release_id" \
+  --application-release-root "$application_release" \
+  --output "$transition_dir/upgrade-intent.json"
+```
+
+审阅回滚包、intent、数据库 inode、runtime 与目标提交后，由外部确认流程写入一次性 0400
+`operator-token`。然后生成当前确认和短时 capability，停止服务，再执行离线导入。不要在 n8n 在线时
+手工 tar 活跃 SQLite；导入器在确认服务、LaunchAgent、5678 listener 和数据库并发打开均已停止后，
+会先创建完整 n8n state tar、匹配的环境备份及 SHA-256，再开始改库。
+
+```bash
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" current-confirm \
+  --intent "$transition_dir/upgrade-intent.json" \
+  --confirmation-token-file "$transition_dir/operator-token" \
+  --confirmation-receipt-id <one-current-uuid> \
+  --confirmation-output "$transition_dir/current-confirmation.json" \
+  --capability-output "$transition_dir/import-capability.json"
+
+bash "$runtime_release/scripts/n8n-stop.sh"
+
+bash "$runtime_release/scripts/n8n-import-workflows.sh" \
+  --transition-intent "$transition_dir/upgrade-intent.json" \
+  --transition-confirmation "$transition_dir/current-confirmation.json" \
+  --transition-token-file "$transition_dir/operator-token" \
+  --transition-capability "$transition_dir/import-capability.json" \
+  --transition-journal "$transition_dir/journal"
+
+bash "$runtime_release/scripts/n8n-start.sh"
+```
+
+若尚未安装 LaunchAgent，导入后改为执行
+`bash "$runtime_release/scripts/n8n-install-launch-agent.sh"`；已安装时使用上面的 `n8n-start.sh`。
+安装器本身不在整个 plist `bootout/bootstrap` 事务期间直接持 maintenance lock；它启动的
+`n8n-start.sh --foreground` 会在真正打开 n8n 前取得与 importer/restore 相同的物理 lock，因此仍不会
+与离线数据库写入并发。不得把这解释为 installer 从开始到结束一直持锁。
+
+启动后先复核 LaunchAgent、精确 n8n PID、5678 唯一 listener、数据库 FD、健康和 SQLite
+`quick_check`。权威结论由下一步 verifier 统一给出，以下命令是便于人工交叉检查的证据：
+
+```bash
+bash "$runtime_release/scripts/n8n-status.sh"
+n8n_pid="$(tr -d '[:space:]' < /absolute/path/to/n8n.pid)"
+launchctl print "gui/$(id -u)/com.video-autoworker.n8n"
+/usr/sbin/lsof -nP -a -p "$n8n_pid" "$n8n_db"
+/usr/sbin/lsof -nP -iTCP:5678 -sTCP:LISTEN
+curl --fail --silent --show-error http://127.0.0.1:5678/healthz
+sqlite3 "$n8n_db" 'PRAGMA quick_check;'
+```
+
+把 verifier 的 stdout 安全持久化为唯一 0400 live report；stderr 保持在终端，不得混入 JSON。固定
+目标必须不存在，临时文件必须位于同一 0700 transition 目录，校验成功后才 rename：
+
+```bash
+live_report="$transition_dir/live-workflow-report.json"
+test ! -e "$live_report"
+live_report_tmp="$(mktemp "$transition_dir/.live-workflow-report.XXXXXXXX")"
+trap 'rm -f -- "$live_report_tmp"' EXIT
+
+node "$runtime_release/scripts/verify-n8n-blue-green-workflows.mjs" \
+  --database "$n8n_db" \
+  --repository "$repository_root" \
+  --expected-commit "$target_commit" \
+  --module-root "$repository_root" \
+  --pid "$n8n_pid" \
+  --port 5678 > "$live_report_tmp"
+
+chmod 0400 "$live_report_tmp"
+test ! -e "$live_report"
+mv "$live_report_tmp" "$live_report"
+trap - EXIT
+
+node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" attest-transition \
+  --intent "$transition_dir/upgrade-intent.json" \
+  --confirmation "$transition_dir/current-confirmation.json" \
+  --journal-dir "$transition_dir/journal" \
+  --live-report "$transition_dir/live-workflow-report.json" \
+  --verifier "$runtime_release/scripts/verify-n8n-blue-green-workflows.mjs" \
+  --output "$transition_dir/transition-attestation.json"
+```
+
+接着保持同一个 active freeze guard，按下文命令生成 `rollback_proof` 和 `evidence_file`。在 legacy
+仍在线、guard 状态为 active、两份数据库身份与活动量仍稳定时，建立 controller 收据链：
+
+```bash
+node scripts/legacy-bootstrap-controller.mjs prepare \
+  --attempt-dir "$attempt_dir" \
+  --evidence "$evidence_file" \
+  --proof "$rollback_proof" \
+  --source-commit "$target_commit" \
+  --router-run-dir "$router_run_dir" \
+  --router-state "$router_state" \
+  --router-port 3017 \
+  --mission-db "$mission_db" \
+  --n8n-db "$n8n_db" \
+  --transition-intent "$transition_dir/upgrade-intent.json" \
+  --transition-confirmation "$transition_dir/current-confirmation.json" \
+  --transition-journal "$transition_dir/journal" \
+  --transition-attestation "$transition_dir/transition-attestation.json" \
+  --transition-claim "$transition_dir/bootstrap-claim.json"
+
+node scripts/legacy-bootstrap-controller.mjs current-confirm \
+  --prepare "$attempt_dir/prepare.receipt.json"
+
+node scripts/legacy-bootstrap-controller.mjs apply \
+  --prepare "$attempt_dir/prepare.receipt.json" \
+  --confirm "$attempt_dir/current-confirm.receipt.json" \
+  --token "$attempt_dir/current-confirm.token.json"
+```
+
+`prepare.receipt.json`、`current-confirm.receipt.json`、`current-confirm.token.json` 和
+`shutdown-requested.receipt.json` 是固定文件名；不得改名、复制或手填。最后给 deploy verifier 指定
+已生成且仍有效的会话级 OpenClaw runtime convergence proof，再执行 bootstrap：
+
+```bash
+export AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF=/absolute/private-state/qwen-current-runtime-convergence-proof.json
+
+bash scripts/deploy-blue-green.sh bootstrap \
+  "$slot" "$release_id" "$application_release" \
+  "$evidence_file" "$rollback_proof" "$attempt_dir"
+```
+
+deploy 有两个明确的 release/readiness 门：第一阶段 `pre-bootstrap` 在写 pending 和停止 legacy 前，
+验证仓库/release 身份、不可变 standalone 内容、已安装 video-command/task-flow/director payload、
+runtime convergence proof 与 projection contract；第二阶段 `full` 在新 baseline 槽启动后读取 live DB，
+补验 outbox/extraction 完整性，并要求 projection digest 与第一阶段完全一致。任一门失败都不得继续。
+
+#### 回滚分支
+
+- **常规回滚**：legacy 已收到 `SHUTDOWN_REQUESTED`、尚未写 bootstrap pending，且原 controller 确认仍在
+  TTL 内时，用 `legacy-bootstrap-controller.mjs derive-n8n-restore-confirmation` 从同一 prepare、confirm、
+  shutdown、package、runtime 和数据库派生固定 `n8n-restore-confirmation.receipt.json`，再在 n8n/5678/FD
+  全停状态运行 `n8n-restore-managed-workflows.sh`。恢复成功并验证后才重启原 n8n/legacy；不得手写 receipt。
+- **transition rollback**：import journal 已进入 `MUTATING` 且还没有 COMMITTED attestation/bootstrap claim
+  时，只能走下文 `authorize-transition-rollback` 单向分支，并把其 0400 receipt 交给
+  `n8n-restore-managed-workflows.sh`。一旦选择 rollback，前向 attest/bootstrap 永久失败关闭。
+- **disaster recovery**：bootstrap pending 已存在而原 guard/短时确认已失效时，先保持 legacy、所有 slot、
+  n8n、3017/5678 listener 和数据库 FD 全停；在原 attempt 下新建
+  `disaster-recovery-attempts/<new-uuid>/`，用 controller 的
+  `derive-n8n-disaster-recovery-confirmation` 绑定 prepare、confirm、shutdown、pending、proof、package、
+  runtime 与数据库，得到新鲜 0400 receipt。只允许用该 receipt 运行同一 restore 脚本并续作其耐久
+  journal；不得删除 pending、复用旧 receipt、手工还原 SQLite 或把灾难恢复当作继续 bootstrap 的授权。
+
+所有分支都先保存现场和 journal，禁止在活跃 SQLite 上解包覆盖。恢复后重新执行 PID/FD/health/
+`quick_check` 与工作流 verifier；未得到完整通过结论前保持外部准入冻结。
+
 从旧单进程 3017 首次迁入 slot-v1 时，两条工作流也必须完成一次协议升级。该窗口必须先在
 外部停止新任务准入，并确认媒体节点、n8n 活跃 execution 和正式队列 waiting/running 全部
 归零；随后备份 n8n 状态，停止 n8n，使用上述离线导入器发布当前 Git HEAD 的固定 ID 工作流，

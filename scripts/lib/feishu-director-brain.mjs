@@ -1,13 +1,14 @@
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  chmod, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, unlink, writeFile,
+  chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rmdir, unlink, writeFile,
 } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { containsSensitiveValue } from './sensitive-value-scanner.mjs'
 
 const execFileAsync = promisify(execFile)
 const API_ROOT = 'https://open.feishu.cn/open-apis'
@@ -34,14 +35,10 @@ const TOKEN_EXPIRY_MARGIN_MS = 60_000
 const FIELD_TYPES = new Set([1, 2, 3, 4, 5])
 const DEFAULT_STARTER_FIELD_NAMES = new Set(['单选', '日期', '附件'])
 const SECRET_FIELD_PATTERN = /(?:secret|token|password|密码|密钥|私钥)/iu
-const SECRET_VALUE_PATTERNS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
-  /\bsk-[A-Za-z0-9_-]{20,}\b/u,
-  /\b(?:app_secret|client_secret)\s*[:=]\s*\S+/iu,
-]
 
 const OPERATION_ACTIONS = new Set([
-  'health', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
+  'health', 'resolve_work', 'get', 'get_many', 'search', 'assemble', 'workflow',
+  'learning_context', 'propose', 'propose_batch',
 ])
 const PROPOSABLE_TABLES = new Set([
   'works',
@@ -57,7 +54,8 @@ const PROPOSABLE_TABLES = new Set([
 const HIDDEN_OUTPUT_FIELDS = new Set(['剪辑方案 ID', '时间线版本'])
 const SERVICE_OWNED_FIELDS = new Set([
   '项目 ID', '作品 ID', '版本', '来源', '更新时间', '状态', '复核状态',
-  '审核人', '审核时间', '审核原因',
+  '审核人', '审核时间', '审核原因', '父作品 ID', '系列 ID', '季 ID',
+  '作用域', '来源作品 ID',
 ])
 const HUMAN_ONLY_FIELDS = new Set([
   '人工结论',
@@ -102,7 +100,9 @@ const PROPOSAL_REQUIRED_FIELDS = Object.freeze({
   ],
 })
 const PROPOSAL_REFERENCE_RULES = Object.freeze({
-  works: {},
+  works: {
+    optional: { parentWorkId: ['works', '父作品 ID'] },
+  },
   director_intents: {
     optional: { previousIntentVersionId: ['director_intents', '上一版本 ID'] },
   },
@@ -126,6 +126,7 @@ const PROPOSAL_REFERENCE_RULES = Object.freeze({
     required: { intentVersionId: ['director_intents', '意图版本 ID'] },
     optional: { previousJudgmentId: ['material_judgments', '上一版本 ID'] },
     requiredMany: { evidenceIds: ['material_evidence', '证据 ID'] },
+    optionalMany: { techniqueIds: ['skills_techniques', '技法 ID'] },
   },
   narrative_plans: {
     required: { intentVersionId: ['director_intents', '意图版本 ID'] },
@@ -134,6 +135,7 @@ const PROPOSAL_REFERENCE_RULES = Object.freeze({
       nodeIds: ['story_nodes', '节点 ID'],
       evidenceIds: ['material_evidence', '证据 ID'],
     },
+    optionalMany: { techniqueIds: ['skills_techniques', '技法 ID'] },
   },
   director_cases: {
     required: { judgmentId: ['material_judgments', '判断 ID'] },
@@ -157,8 +159,10 @@ const ASSEMBLY_REFERENCE_TABLES = Object.freeze({
   skillTechniqueIds: ['skills_techniques', true],
 })
 const REFERENCE_FIELD_NAMES = new Set([
-  '上一版本 ID', '证据 ID', '源节点 ID', '目标节点 ID', '意图版本 ID', '节点 ID', '判断 ID', '案例 ID',
+  '上一版本 ID', '证据 ID', '源节点 ID', '目标节点 ID', '意图版本 ID', '节点 ID', '判断 ID', '案例 ID', '技法 ID',
+  '父作品 ID', '系列 ID', '季 ID', '来源作品 ID',
 ])
+const GLOBAL_KNOWLEDGE_TABLES = new Set(['skills_techniques'])
 const MATERIAL_VALUE_FIELDS = new Set([
   '故事价值', '人物价值', '情绪价值', '信息价值', '视觉价值', '稀缺性', '叙事价值',
 ])
@@ -220,15 +224,30 @@ const LEGAL_STATUS_TRANSITIONS = Object.freeze({
 const OPERATION_VERSION = 'v0.2.0'
 const OPERATION_SOURCE = 'openclaw-director-brain'
 const MAX_OPERATION_INPUT_BYTES = 32 * 1024
+const MAX_PROPOSAL_BATCH_INPUT_BYTES = 256 * 1024
 const MAX_EVIDENCE_PROJECTION_INPUT_BYTES = 256 * 1024
 const MAX_EVIDENCE_PROJECTION_ITEMS = 50
 const CREATE_LOCK_RETRY_MS = 50
 const CREATE_LOCK_TIMEOUT_MS = 30_000
 const CREATE_LOCK_LEASE_MS = 10 * 60_000
 const CREATE_LOCK_INITIALIZATION_GRACE_MS = 5_000
+const MIGRATION_LOCK_INITIALIZATION_GRACE_MS = 5_000
+const V2_TO_V3_FIELD_COUNT = 14
+const activeMigrationLockContexts = new WeakSet()
+const activeMigrationLocks = new Map()
 const MAX_OPERATION_TEXT_LENGTH = 4_000
+const MAX_PROPOSAL_TEXT_LENGTH = 8_000
+const LONG_PROPOSAL_TEXT_FIELDS = new Set([
+  'narrative_plans:结构说明',
+  'narrative_plans:故事脚本',
+  'skills_techniques:执行方法',
+])
+const LEARNING_CONTEXT_MAX_RECORDS_PER_TABLE = 200
+const LEARNING_CONTEXT_MAX_RECORDS = 600
+const LEARNING_CONTEXT_MAX_OUTPUT_BYTES = 240 * 1024
 const MAX_SEARCH_QUERY_LENGTH = 240
 const MAX_SEARCH_LIMIT = 20
+const MAX_OPERATION_BATCH_ITEMS = 20
 const MAX_SEARCH_PAGES_PER_TABLE = 5
 const SEARCH_PAGE_SIZE = 100
 const SENSITIVE_KEY_PATTERN = /(?:secret|token|password|api.?key|credential|authorization|cookie|密码|密钥|私钥|访问令牌)/iu
@@ -273,7 +292,7 @@ function stableUnique(values, label) {
 
 export function validateDirectorBrainSchema(raw) {
   const schema = requireObject(raw, 'schema')
-  if (Number(schema.schemaVersion) !== 2) throw new Error('schema_version_unsupported')
+  if (Number(schema.schemaVersion) !== 3) throw new Error('schema_version_unsupported')
   requireNonEmpty(schema.brainName, 'brain_name')
   requireNonEmpty(schema.projectId, 'project_id')
   requireNonEmpty(schema.environment, 'environment')
@@ -300,6 +319,11 @@ export function validateDirectorBrainSchema(raw) {
       fieldNames.push(fieldName)
       if (!Number.isInteger(field.type) || !FIELD_TYPES.has(field.type)) {
         throw new Error('field_type_unsupported:' + table.key + ':' + fieldName)
+      }
+      if (field.sinceVersion !== undefined
+        && (!Number.isInteger(field.sinceVersion) || field.sinceVersion < 2
+          || field.sinceVersion > schema.schemaVersion)) {
+        throw new Error('field_since_version_invalid:' + table.key + ':' + fieldName)
       }
       if (field.primary === true) primaryCount += 1
       if ((Number(field.type) === 3 || Number(field.type) === 4)) {
@@ -539,9 +563,12 @@ async function writeCatalog(pathname, catalog) {
 export function validateDirectorBrainCatalog(raw, schema, options = {}) {
   const catalog = requireObject(raw, 'catalog')
   const catalogVersion = Number(catalog.schemaVersion)
-  const legacyV1 = catalogVersion === 1 && Number(schema.schemaVersion) === 2
+  const legacyV1 = catalogVersion === 1 && Number(schema.schemaVersion) === 3
+  const legacyV2 = catalogVersion === 2 && Number(schema.schemaVersion) === 3
+  const legacyAllowed = (legacyV1 && options.allowLegacyV1 === true)
+    || (legacyV2 && options.allowLegacyV2 === true)
   if (catalogVersion !== Number(schema.schemaVersion)
-    && !(legacyV1 && options.allowLegacyV1 === true)) {
+    && !legacyAllowed) {
     throw new Error('catalog_schema_version_mismatch')
   }
   if (requireNonEmpty(catalog.brainName, 'catalog_brain_name') !== schema.brainName) {
@@ -676,12 +703,13 @@ async function createTable(accessToken, appToken, table) {
 }
 
 async function createField(accessToken, appToken, tableId, field) {
-  await requestJson(
+  const response = await requestJson(
     'POST',
     '/bitable/v1/apps/' + appToken + '/tables/' + tableId + '/fields',
     { accessToken, payload: fieldPayload(field) },
   )
   await new Promise(resolvePromise => setTimeout(resolvePromise, 120))
+  return response.data?.field || null
 }
 
 async function updateField(accessToken, appToken, tableId, fieldId, payload) {
@@ -928,93 +956,1335 @@ async function preflightBootstrapRemoteState(accessToken, appToken, schema, cata
 export function planDirectorBrainMigration(catalogValue, schemaValue) {
   const schema = validateDirectorBrainSchema(schemaValue)
   const version = Number(catalogValue?.schemaVersion)
-  if (version === 2) {
+  if (version === 3) {
     validateDirectorBrainCatalog(catalogValue, schema)
-    return { fromVersion: 2, toVersion: 2, required: false, addTables: [], addFields: {} }
+    return {
+      fromVersion: 3,
+      toVersion: 3,
+      required: false,
+      addTables: [],
+      addFields: {},
+      destructiveChanges: [],
+      rollback: { required: false, strategy: 'none', credentialMaterialIncluded: false },
+    }
   }
-  const catalog = validateDirectorBrainCatalog(catalogValue, schema, { allowLegacyV1: true })
-  const additiveFields = new Set([
+  if (version !== 1 && version !== 2) throw new Error('catalog_schema_version_mismatch')
+  const catalog = validateDirectorBrainCatalog(catalogValue, schema, {
+    allowLegacyV1: true,
+    allowLegacyV2: true,
+  })
+  const v2Fields = new Set([
     '作品 ID', '版本', '上一版本 ID', '审核人', '审核时间', '审核原因',
   ])
-  const addFields = Object.fromEntries(schema.tables
-    .filter(table => table.key !== 'system_blueprint' && table.key !== 'works')
-    .map(table => [
-      table.key,
-      table.fields.map(field => field.name).filter(name => additiveFields.has(name)),
-    ]))
+  const addFields = {}
+  if (version === 1) {
+    for (const table of schema.tables.filter(item => (
+      item.key !== 'system_blueprint' && item.key !== 'works'
+    ))) {
+      addFields[table.key] = table.fields
+        .map(field => field.name)
+        .filter(name => v2Fields.has(name))
+    }
+  }
+  for (const table of schema.tables) {
+    const names = table.fields
+      .filter(field => Number(field.sinceVersion || 1) > version)
+      .map(field => field.name)
+    if (names.length) {
+      addFields[table.key] = [...new Set([...(addFields[table.key] || []), ...names])]
+    }
+  }
+  if (version === 2
+    && Object.values(addFields).reduce((sum, names) => sum + names.length, 0)
+      !== V2_TO_V3_FIELD_COUNT) {
+    throw new Error('director_brain_v2_to_v3_field_count_mismatch')
+  }
   return {
-    fromVersion: 1,
-    toVersion: 2,
+    fromVersion: version,
+    toVersion: 3,
     required: true,
     addTables: catalog.tables.works ? [] : ['works'],
     addFields,
     destructiveChanges: [],
+    rollback: {
+      required: true,
+      strategy: 'verified-private-backup-manual-recovery',
+      catalogVersion: version,
+      automaticRestoreAvailable: false,
+      credentialMaterialIncluded: false,
+    },
   }
 }
 
-async function writeMigrationBackup(accessToken, catalog, options = {}) {
-  const backupRoot = resolve(options.backupRoot || join(DEFAULT_CATALOG_ROOT, 'migration-backups'))
-  if (!isAbsolute(backupRoot)) throw new Error('migration_backup_root_must_be_absolute')
-  if (backupRoot === MODULE_ROOT || backupRoot.startsWith(MODULE_ROOT + '/')) {
-    throw new Error('migration_backup_inside_repository_forbidden')
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function migrationRemoteSnapshotDigest(snapshot) {
+  const revisions = migrationTableRevisions(snapshot.remoteTables, 'digest')
+  const sorted = {
+    remoteTables: snapshot.remoteTables.map(table => ({
+      table_id: requireNonEmpty(table.table_id, 'migration_remote_table_id:digest'),
+      name: requireNonEmpty(table.name, 'migration_remote_table_name:digest'),
+    })).sort((left, right) => left.table_id.localeCompare(right.table_id)),
+    remoteTableRevisions: Object.fromEntries(
+      [...revisions.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    tables: Object.fromEntries(Object.entries(snapshot.tables).map(([key, table]) => [key, {
+      ...table,
+      fields: [...table.fields].sort((left, right) => (
+        String(left.field_id || left.field_name).localeCompare(
+          String(right.field_id || right.field_name),
+        )
+      )),
+      records: [...table.records].sort((left, right) => (
+        String(left.record_id).localeCompare(String(right.record_id))
+      )),
+    }])),
   }
-  await mkdir(backupRoot, { recursive: true, mode: 0o700 })
-  const rootStats = await lstat(backupRoot)
-  if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
-    throw new Error('migration_backup_root_invalid')
+  return sha256(canonicalJson(sorted))
+}
+
+function migrationDependencies(options = {}) {
+  const supplied = options.migrationDependencies || {}
+  return {
+    accessToken: supplied.accessToken || tenantAccessToken,
+    listTables: supplied.listTables || listTables,
+    listFields: supplied.listFields || listFields,
+    listRecords: supplied.listRecords || listRecords,
+    createField: supplied.createField || createField,
   }
-  await chmod(backupRoot, 0o700)
-  const backupDirectory = join(
-    backupRoot,
-    'v1-to-v2-' + new Date().toISOString().replace(/[:.]/gu, '-') + '-' + randomUUID(),
-  )
-  await mkdir(backupDirectory, { mode: 0o700 })
+}
+
+async function collectMigrationRemoteSnapshot(accessToken, catalog, dependencies) {
+  const remoteTables = await dependencies.listTables(accessToken, catalog.appToken)
+  if (!Array.isArray(remoteTables)) throw new Error('migration_remote_tables_invalid')
   const tables = {}
   for (const [key, ref] of Object.entries(catalog.tables)) {
     const [fields, records] = await Promise.all([
-      listFields(accessToken, catalog.appToken, ref.tableId),
-      listRecords(accessToken, catalog.appToken, ref.tableId),
+      dependencies.listFields(accessToken, catalog.appToken, ref.tableId),
+      dependencies.listRecords(accessToken, catalog.appToken, ref.tableId),
     ])
+    if (!Array.isArray(fields) || !Array.isArray(records)) {
+      throw new Error('migration_remote_snapshot_invalid:' + key)
+    }
     tables[key] = { name: ref.name, tableId: ref.tableId, fields, records }
   }
-  const backupPath = join(backupDirectory, 'director-brain-v1.json')
-  await writeFile(backupPath, JSON.stringify({
-    schemaVersion: 1,
-    brainName: catalog.brainName,
+  return { remoteTables, tables }
+}
+
+async function syncPath(pathname) {
+  const handle = await open(pathname, 'r')
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+function migrationFileMode(stats) {
+  return stats.mode & 0o777
+}
+
+async function migrationFileBinding(pathname, bytes = null) {
+  const before = await lstat(pathname, { bigint: true })
+  const mode = Number(before.mode & 0o777n)
+  if (before.isSymbolicLink() || !before.isFile() || mode !== 0o600
+    || before.nlink !== 1n) {
+    throw new Error('migration_private_file_invalid')
+  }
+  const handle = await open(pathname, 'r')
+  try {
+    const stats = await handle.stat({ bigint: true })
+    const content = await handle.readFile()
+    const after = await lstat(pathname, { bigint: true })
+    const samePathInode = String(before.dev) === String(stats.dev)
+      && String(before.ino) === String(stats.ino)
+      && String(after.dev) === String(stats.dev)
+      && String(after.ino) === String(stats.ino)
+    if (!samePathInode || after.isSymbolicLink() || !after.isFile()
+      || Number(stats.mode & 0o777n) !== 0o600 || stats.nlink !== 1n
+      || Number(after.mode & 0o777n) !== 0o600 || after.nlink !== 1n
+      || (bytes !== null && !content.equals(bytes))) {
+      throw new Error('migration_private_file_changed_during_read')
+    }
+    const physicalPath = await realpath(pathname)
+    if (physicalPath !== pathname) throw new Error('migration_private_file_path_changed')
+    return {
+      path: pathname,
+      physicalPath,
+      sha256: sha256(content),
+      bytes: content.length,
+      mode: Number(stats.mode & 0o777n),
+      uid: Number(stats.uid),
+      gid: Number(stats.gid),
+      nlink: Number(stats.nlink),
+      device: String(stats.dev),
+      inode: String(stats.ino),
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+function sameMigrationBinding(left, right) {
+  return left.path === right.path
+    && left.physicalPath === right.physicalPath
+    && left.sha256 === right.sha256
+    && Number(left.bytes) === Number(right.bytes)
+    && Number(left.mode) === Number(right.mode)
+    && Number(left.uid) === Number(right.uid)
+    && Number(left.gid) === Number(right.gid)
+    && Number(left.nlink) === Number(right.nlink)
+    && left.device === right.device
+    && left.inode === right.inode
+}
+
+async function validateMigrationReceiptPath(pathname) {
+  if (typeof pathname !== 'string' || !isAbsolute(pathname) || resolve(pathname) !== pathname) {
+    throw new Error('migration_receipt_path_must_be_absolute')
+  }
+  if (pathname === MODULE_ROOT || pathname.startsWith(MODULE_ROOT + '/')) {
+    throw new Error('migration_receipt_inside_repository_forbidden')
+  }
+  const parent = dirname(pathname)
+  const parentStats = await lstat(parent)
+  if (parentStats.isSymbolicLink() || !parentStats.isDirectory()
+    || (parentStats.mode & 0o077) !== 0 || await realpath(parent) !== parent) {
+    throw new Error('migration_receipt_parent_not_private')
+  }
+  return pathname
+}
+
+function sealedMigrationObject(value) {
+  const body = { ...value }
+  delete body.contentSha256
+  return { ...body, contentSha256: sha256(canonicalJson(body)) }
+}
+
+function validateMigrationSeal(value, label) {
+  const object = requireObject(value, label)
+  const observed = requireNonEmpty(object.contentSha256, label + '_content_sha256')
+  const body = { ...object }
+  delete body.contentSha256
+  if (sha256(canonicalJson(body)) !== observed) throw new Error(label + '_seal_mismatch')
+  return object
+}
+
+async function readCatalogArtifact(catalogPath, catalogRoot = DEFAULT_CATALOG_ROOT) {
+  const target = validateDirectorBrainCatalogPath(catalogPath, catalogRoot)
+  await ensureCatalogRoot(dirname(target), false)
+  await assertCatalogFileSafe(target)
+  const bytes = await readFile(target)
+  let catalog
+  try {
+    catalog = requireObject(JSON.parse(bytes.toString('utf8')), 'catalog')
+  } catch (error) {
+    if (error?.message === 'catalog_must_be_object') throw error
+    throw new Error('director_brain_catalog_invalid_json')
+  }
+  return { bytes, catalog, binding: await migrationFileBinding(target, bytes) }
+}
+
+function validateMigrationSnapshotPayload(payloadValue, receipt) {
+  const payload = requireObject(payloadValue, 'migration_snapshot')
+  if (Number(payload.formatVersion) !== 2 || payload.kind !== 'director-brain-migration-snapshot') {
+    throw new Error('migration_snapshot_format_invalid')
+  }
+  const catalogBytes = Buffer.from(requireNonEmpty(
+    payload.originalCatalogBase64, 'migration_original_catalog',
+  ), 'base64')
+  if (catalogBytes.toString('base64') !== payload.originalCatalogBase64
+    || catalogBytes.length !== Number(payload.originalCatalog.bytes)
+    || sha256(catalogBytes) !== payload.originalCatalog.sha256
+    || !sameMigrationBinding(payload.originalCatalog, receipt.originalCatalog)) {
+    throw new Error('migration_original_catalog_binding_mismatch')
+  }
+  let catalog
+  try {
+    catalog = requireObject(JSON.parse(catalogBytes.toString('utf8')), 'catalog')
+  } catch (error) {
+    if (error?.message === 'catalog_must_be_object') throw error
+    throw new Error('migration_original_catalog_invalid_json')
+  }
+  if (Number(catalog.schemaVersion) !== Number(receipt.fromVersion)
+    || catalog.projectId !== receipt.projectId || catalog.environment !== receipt.environment
+    || catalog.brainName !== receipt.brainName) {
+    throw new Error('migration_snapshot_identity_mismatch')
+  }
+  const snapshot = requireObject(payload.remoteSnapshot, 'migration_remote_snapshot')
+  if (!Array.isArray(snapshot.remoteTables) || !snapshot.tables
+    || migrationRemoteSnapshotDigest(snapshot) !== receipt.remoteSha256) {
+    throw new Error('migration_remote_snapshot_digest_mismatch')
+  }
+  return { payload, catalogBytes, catalog, snapshot }
+}
+
+async function readAndVerifyMigrationReceipt(receiptFile, expectedSha256 = null) {
+  const target = await validateMigrationReceiptPath(receiptFile)
+  const receiptBytes = await readFile(target)
+  const receiptBinding = await migrationFileBinding(target, receiptBytes)
+  if (expectedSha256 !== null && receiptBinding.sha256 !== expectedSha256) {
+    throw new Error('migration_receipt_sha256_mismatch')
+  }
+  let receipt
+  try {
+    receipt = validateMigrationSeal(JSON.parse(receiptBytes.toString('utf8')), 'migration_receipt')
+  } catch (error) {
+    if (String(error?.message || '').startsWith('migration_receipt_')) throw error
+    throw new Error('migration_receipt_invalid_json')
+  }
+  if (Number(receipt.formatVersion) !== 3 || receipt.kind !== 'director-brain-migration-receipt'
+    || receipt.receiptPath !== target || receipt.applicationPath !== target + '.applied.json'
+    || receipt.progressPath !== target + '.progress.json') {
+    throw new Error('migration_receipt_identity_mismatch')
+  }
+  const snapshotPath = requireNonEmpty(receipt.snapshot?.path, 'migration_snapshot_path')
+  if (snapshotPath !== target + '.snapshot.json') throw new Error('migration_snapshot_path_mismatch')
+  const snapshotBytes = await readFile(snapshotPath)
+  const snapshotBinding = await migrationFileBinding(snapshotPath, snapshotBytes)
+  if (!sameMigrationBinding(snapshotBinding, receipt.snapshot)) {
+    throw new Error('migration_snapshot_file_binding_mismatch')
+  }
+  let snapshotPayload
+  try {
+    snapshotPayload = JSON.parse(snapshotBytes.toString('utf8'))
+  } catch {
+    throw new Error('migration_snapshot_invalid_json')
+  }
+  const verified = validateMigrationSnapshotPayload(snapshotPayload, receipt)
+  return { receipt, receiptBinding, ...verified }
+}
+
+function migrationSummary(receipt, receiptBinding, snapshot) {
+  return {
+    ok: true,
+    action: 'migration-backup',
+    verified: true,
+    receiptFile: receipt.receiptPath,
+    receiptSha256: receiptBinding.sha256,
+    receiptBytes: receiptBinding.bytes,
+    snapshotFile: receipt.snapshot.path,
+    snapshotSha256: receipt.snapshot.sha256,
+    snapshotBytes: receipt.snapshot.bytes,
+    originalCatalogSha256: receipt.originalCatalog.sha256,
+    originalCatalogBytes: receipt.originalCatalog.bytes,
+    remoteSha256: receipt.remoteSha256,
+    tableCount: Object.keys(snapshot.tables).length,
+    fieldCount: Object.values(snapshot.tables).reduce((sum, table) => sum + table.fields.length, 0),
+    recordCount: Object.values(snapshot.tables).reduce((sum, table) => sum + table.records.length, 0),
+  }
+}
+
+export async function verifyMigrationBackupFile(receiptFile, expectedSha256) {
+  if (!/^[a-f0-9]{64}$/u.test(String(expectedSha256 || ''))) {
+    throw new Error('migration_expected_sha256_invalid')
+  }
+  const verified = await readAndVerifyMigrationReceipt(receiptFile, expectedSha256)
+  return migrationSummary(verified.receipt, verified.receiptBinding, verified.snapshot)
+}
+
+export async function writeMigrationBackup(
+  accessToken, catalogArtifact, schema, plan, options = {},
+) {
+  const receiptPath = await validateMigrationReceiptPath(options.receiptFile)
+  if (await pathStats(receiptPath) || await pathStats(receiptPath + '.snapshot.json')
+    || await pathStats(receiptPath + '.progress.json')
+    || await pathStats(receiptPath + '.applied.json')) {
+    throw new Error('migration_receipt_already_exists')
+  }
+  if (plan.addTables.length) throw new Error('migration_table_changes_forbidden')
+  const dependencies = migrationDependencies(options)
+  const snapshot = await collectMigrationRemoteSnapshot(
+    accessToken, catalogArtifact.catalog, dependencies,
+  )
+  validateMigrationRemoteState(
+    snapshot, snapshot, catalogArtifact.catalog, schema, plan.addFields,
+  )
+  const snapshotPath = receiptPath + '.snapshot.json'
+  const originalCatalog = catalogArtifact.binding
+  const snapshotPayload = {
+    formatVersion: 2,
+    kind: 'director-brain-migration-snapshot',
+    createdAt: new Date().toISOString(),
+    originalCatalog,
+    originalCatalogBase64: catalogArtifact.bytes.toString('base64'),
+    remoteSnapshot: snapshot,
+  }
+  const snapshotBytes = Buffer.from(JSON.stringify(snapshotPayload, null, 2) + '\n', 'utf8')
+  let snapshotCreated = false
+  let receiptCreated = false
+  try {
+    await writeFile(snapshotPath, snapshotBytes, { flag: 'wx', mode: 0o600 })
+    snapshotCreated = true
+    await chmod(snapshotPath, 0o600)
+    await syncPath(snapshotPath)
+    const snapshotBinding = await migrationFileBinding(snapshotPath, snapshotBytes)
+    const receipt = sealedMigrationObject({
+      formatVersion: 3,
+      kind: 'director-brain-migration-receipt',
+      createdAt: snapshotPayload.createdAt,
+      receiptPath,
+      applicationPath: receiptPath + '.applied.json',
+      progressPath: receiptPath + '.progress.json',
+      snapshot: snapshotBinding,
+      originalCatalog,
+      remoteSha256: migrationRemoteSnapshotDigest(snapshot),
+      schemaSha256: sha256(canonicalJson(schema)),
+      fromVersion: plan.fromVersion,
+      toVersion: plan.toVersion,
+      brainName: catalogArtifact.catalog.brainName,
+      projectId: catalogArtifact.catalog.projectId,
+      environment: catalogArtifact.catalog.environment,
+      addFields: plan.addFields,
+      destructiveChanges: [],
+    })
+    const receiptBytes = Buffer.from(JSON.stringify(receipt, null, 2) + '\n', 'utf8')
+    await writeFile(receiptPath, receiptBytes, { flag: 'wx', mode: 0o600 })
+    receiptCreated = true
+    await chmod(receiptPath, 0o600)
+    await syncPath(receiptPath)
+    await syncPath(dirname(receiptPath))
+    return await verifyMigrationBackupFile(receiptPath, sha256(receiptBytes))
+  } catch (error) {
+    if (receiptCreated) await unlink(receiptPath).catch(() => {})
+    if (snapshotCreated) await unlink(snapshotPath).catch(() => {})
+    throw error
+  }
+}
+
+function migrationLockIdentity(catalogPath, catalog, fromVersion, toVersion) {
+  return sha256(canonicalJson({
+    catalogPath,
     projectId: catalog.projectId,
     environment: catalog.environment,
+    brainName: catalog.brainName,
+    appTokenSha256: sha256(catalog.appToken),
+    fromVersion,
+    toVersion,
+  }))
+}
+
+async function migrationProcessIncarnation(pid) {
+  if (!Number.isSafeInteger(Number(pid)) || Number(pid) < 1) return null
+  try {
+    const result = await execFileAsync('/bin/ps', [
+      '-p', String(pid), '-o', 'uid=', '-o', 'lstart=',
+    ], {
+      env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' },
+      maxBuffer: 64 * 1024,
+    })
+    const value = String(result.stdout || '').trim().replace(/\s+/gu, ' ')
+    const match = /^(\d+)\s+(.+)$/u.exec(value)
+    if (!match) throw new Error('director_brain_migration_lock_process_probe_failed')
+    const uid = Number(match[1])
+    if (!Number.isSafeInteger(uid) || uid < 0) {
+      throw new Error('director_brain_migration_lock_process_probe_failed')
+    }
+    return uid + ':' + match[2]
+  } catch (error) {
+    if (Number(error?.code) === 1) return null
+    if (error?.message === 'director_brain_migration_lock_process_probe_failed') throw error
+    throw new Error('director_brain_migration_lock_process_probe_failed')
+  }
+}
+
+async function recoverStaleMigrationLock({
+  lockRoot, lockDir, lockKey, receiptSha256, catalogPath,
+}) {
+  const stats = await lstat(lockDir, { bigint: true }).catch(error => {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  })
+  if (!stats) return false
+  if (stats.isSymbolicLink() || !stats.isDirectory()
+    || Number(stats.mode & 0o077n) !== 0 || Number(stats.uid) !== process.getuid?.()) {
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  const lockDevice = String(stats.dev)
+  const lockInode = String(stats.ino)
+  const initializing = Date.now() - Number(stats.ctimeMs) < MIGRATION_LOCK_INITIALIZATION_GRACE_MS
+  const entries = await readdir(lockDir)
+  if (entries.length !== 1 || !/^owner\.[a-f0-9-]+\.json$/iu.test(entries[0])) {
+    if (initializing) return false
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  const ownerPath = join(lockDir, entries[0])
+  const ownerBytes = await readFile(ownerPath).catch(error => {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  })
+  if (ownerBytes === null) return false
+  let binding
+  let owner
+  try {
+    binding = await migrationFileBinding(ownerPath, ownerBytes)
+    owner = validateMigrationSeal(
+      JSON.parse(ownerBytes.toString('utf8')), 'migration_lock_owner',
+    )
+  } catch {
+    if (initializing) return false
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  if (owner.lockKey !== lockKey
+    || owner.catalogPath !== catalogPath || owner.token !== entries[0].slice(6, -5)
+    || owner.uid !== binding.uid || binding.uid !== process.getuid?.()
+    || typeof owner.processIncarnation !== 'string'
+    || !owner.processIncarnation.startsWith(String(owner.uid) + ':')) {
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  const activeIncarnation = await migrationProcessIncarnation(Number(owner.pid))
+  if (activeIncarnation === owner.processIncarnation) {
+    throw new Error('director_brain_migration_lock_contended')
+  }
+  if (owner.receiptSha256 !== receiptSha256) {
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  const recoveryRoot = join(lockRoot, '.recovered-stale')
+  await mkdir(recoveryRoot, { recursive: true, mode: 0o700 })
+  await chmod(recoveryRoot, 0o700)
+  await assertCreateLockPhysicalPath(recoveryRoot)
+  const recoveredPath = join(recoveryRoot, lockKey + '.' + owner.token + '.stale')
+  try {
+    await rename(lockDir, recoveredPath)
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'EEXIST' || error?.code === 'ENOTEMPTY') {
+      return false
+    }
+    throw error
+  }
+  const recoveredStats = await lstat(recoveredPath, { bigint: true })
+  if (!recoveredStats.isDirectory() || String(recoveredStats.dev) !== lockDevice
+    || String(recoveredStats.ino) !== lockInode) {
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  const recoveredOwnerPath = join(recoveredPath, entries[0])
+  const recoveredOwnerBytes = await readFile(recoveredOwnerPath)
+  const recoveredBinding = await migrationFileBinding(recoveredOwnerPath, recoveredOwnerBytes)
+  if (recoveredOwnerBytes.compare(ownerBytes) !== 0
+    || recoveredBinding.device !== binding.device || recoveredBinding.inode !== binding.inode
+    || recoveredBinding.sha256 !== binding.sha256 || recoveredBinding.uid !== binding.uid) {
+    throw new Error('director_brain_migration_lock_manual_repair_required')
+  }
+  await syncPath(recoveryRoot)
+  await syncPath(lockRoot)
+  return true
+}
+
+function assertMigrationLockContext(context, lockKey) {
+  if (!context || !activeMigrationLockContexts.has(context)
+    || context.lockKey !== lockKey || activeMigrationLocks.get(lockKey)?.context !== context) {
+    throw new Error('director_brain_migration_lock_required')
+  }
+}
+
+export async function withDirectorBrainMigrationLock(
+  {
+    catalogPath, catalog, fromVersion, toVersion, receiptSha256, lockContext = null,
+  }, action,
+) {
+  if (typeof action !== 'function') throw new TypeError('migration_lock_action_required')
+  if (!/^[a-f0-9]{64}$/u.test(String(receiptSha256 || ''))) {
+    throw new Error('migration_lock_receipt_sha256_required')
+  }
+  const physicalCatalogRoot = await realpath(dirname(catalogPath))
+  const physicalCatalogPath = join(physicalCatalogRoot, basename(catalogPath))
+  const lockRoot = join(physicalCatalogRoot, '.director-brain-migration-locks')
+  await mkdir(lockRoot, { recursive: true, mode: 0o700 })
+  await chmod(lockRoot, 0o700)
+  await assertCreateLockPhysicalPath(lockRoot)
+  if ((await lstat(lockRoot)).uid !== process.getuid?.()) {
+    throw new Error('director_brain_migration_lock_owner_invalid')
+  }
+  const lockKey = migrationLockIdentity(
+    physicalCatalogPath, catalog, fromVersion, toVersion,
+  )
+  if (lockContext !== null) {
+    assertMigrationLockContext(lockContext, lockKey)
+    const active = activeMigrationLocks.get(lockKey)
+    active.depth += 1
+    try {
+      return await action(lockContext)
+    } finally {
+      active.depth -= 1
+    }
+  }
+  if (activeMigrationLocks.has(lockKey)) {
+    throw new Error('director_brain_migration_lock_contended')
+  }
+  const lockDir = join(lockRoot, lockKey + '.lock')
+  const token = randomUUID()
+  const ownerPath = join(lockDir, `owner.${token}.json`)
+  const processIncarnation = await migrationProcessIncarnation(process.pid)
+  if (!processIncarnation
+    || !processIncarnation.startsWith(String(process.getuid?.()) + ':')) {
+    throw new Error('director_brain_migration_lock_process_probe_failed')
+  }
+  try {
+    await mkdir(lockDir, { mode: 0o700 })
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      const recovered = await recoverStaleMigrationLock({
+        lockRoot,
+        lockDir,
+        lockKey,
+        receiptSha256,
+        catalogPath: physicalCatalogPath,
+      })
+      if (!recovered) throw new Error('director_brain_migration_lock_contended')
+      try {
+        await mkdir(lockDir, { mode: 0o700 })
+      } catch (retryError) {
+        if (retryError?.code === 'EEXIST') {
+          throw new Error('director_brain_migration_lock_contended')
+        }
+        throw retryError
+      }
+    } else {
+      throw error
+    }
+  }
+  const context = Object.freeze({ lockKey, token })
+  let ownerCreated = false
+  let actionError = null
+  try {
+    const owner = sealedMigrationObject({
+      token,
+      pid: process.pid,
+      lockKey,
+      receiptSha256,
+      catalogPath: physicalCatalogPath,
+      uid: process.getuid?.(),
+      processIncarnation,
+      createdAt: new Date().toISOString(),
+    })
+    await writeFile(ownerPath, JSON.stringify(owner), { flag: 'wx', mode: 0o600 })
+    ownerCreated = true
+    await chmod(ownerPath, 0o600)
+    await syncPath(ownerPath)
+    await syncPath(lockDir)
+    const ownerBinding = await migrationFileBinding(ownerPath)
+    const observed = validateMigrationSeal(
+      JSON.parse(await readFile(ownerPath, 'utf8')), 'migration_lock_owner',
+    )
+    if (observed.token !== token || observed.lockKey !== lockKey || observed.pid !== process.pid
+      || observed.receiptSha256 !== receiptSha256
+      || observed.catalogPath !== physicalCatalogPath
+      || observed.uid !== ownerBinding.uid || ownerBinding.uid !== process.getuid?.()
+      || observed.processIncarnation !== processIncarnation) {
+      throw new Error('director_brain_migration_lock_owner_invalid')
+    }
+    activeMigrationLockContexts.add(context)
+    activeMigrationLocks.set(lockKey, { context, depth: 1 })
+    return await action(context)
+  } catch (error) {
+    actionError = error
+    throw error
+  } finally {
+    const active = activeMigrationLocks.get(lockKey)
+    const reentryIncomplete = active?.context === context && active.depth !== 1
+    if (active?.context === context) activeMigrationLocks.delete(lockKey)
+    activeMigrationLockContexts.delete(context)
+    if (!reentryIncomplete) {
+      try {
+        if (!ownerCreated) {
+          await rmdir(lockDir)
+        } else {
+          const owner = await readFile(ownerPath, 'utf8').catch(error => {
+            if (error?.code === 'ENOENT') return null
+            throw error
+          })
+          if (owner === null) {
+            throw new Error('director_brain_migration_lock_ownership_lost')
+          }
+          let parsed = null
+          try {
+            parsed = validateMigrationSeal(JSON.parse(owner), 'migration_lock_owner')
+          } catch {
+            // Fail closed and preserve the damaged lock for manual inspection.
+          }
+          const entries = await readdir(lockDir)
+          if (parsed?.token !== token || parsed?.lockKey !== lockKey
+            || parsed?.receiptSha256 !== receiptSha256
+            || parsed?.catalogPath !== physicalCatalogPath
+            || parsed?.uid !== process.getuid?.()
+            || parsed?.processIncarnation !== processIncarnation
+            || entries.length !== 1 || entries[0] !== `owner.${token}.json`) {
+            throw new Error('director_brain_migration_lock_manual_repair_required')
+          }
+          await unlink(ownerPath)
+          await rmdir(lockDir)
+        }
+      } catch (releaseError) {
+        if (actionError === null) throw releaseError
+      }
+    }
+    if (reentryIncomplete && actionError === null) {
+      throw new Error('director_brain_migration_lock_reentry_incomplete')
+    }
+  }
+}
+
+export async function verifyMigrationRemoteSnapshot(
+  accessToken, catalog, receipt, dependencies,
+) {
+  const current = await collectMigrationRemoteSnapshot(accessToken, catalog, dependencies)
+  if (migrationRemoteSnapshotDigest(current) !== receipt.remoteSha256) {
+    throw new Error('director_brain_migration_remote_state_changed')
+  }
+  return true
+}
+
+function expectedMigrationFields(schema, addFields) {
+  const expected = new Map()
+  for (const [tableKey, names] of Object.entries(addFields)) {
+    const table = schema.tables.find(item => item.key === tableKey)
+    if (!table) throw new Error('migration_plan_table_invalid:' + tableKey)
+    for (const name of names) {
+      const field = table.fields.find(item => item.name === name)
+      if (!field) throw new Error('migration_plan_field_invalid:' + tableKey + ':' + name)
+      expected.set(tableKey + ':' + name, field)
+    }
+  }
+  return expected
+}
+
+function validateExpectedMigrationField(tableKey, observed, expected) {
+  if (!observed || observed.field_name !== expected.name
+    || Number(observed.type) !== Number(expected.type) || observed.is_primary === true) {
+    throw new Error('migration_field_identity_changed:' + tableKey + ':' + expected.name)
+  }
+  if (expected.type === 3 || expected.type === 4) {
+    const names = (observed.property?.options || []).map(option => option.name)
+    if (canonicalJson(names) !== canonicalJson(expected.options)) {
+      throw new Error('migration_field_options_changed:' + tableKey + ':' + expected.name)
+    }
+  }
+}
+
+function canonicalMigrationRecords(records) {
+  return canonicalJson([...records].sort((left, right) => (
+    String(left.record_id).localeCompare(String(right.record_id))
+  )))
+}
+
+function canonicalMigrationRemoteTables(tables) {
+  return canonicalJson(tables.map(table => ({
+    table_id: requireNonEmpty(table.table_id, 'migration_remote_table_id'),
+    name: requireNonEmpty(table.name, 'migration_remote_table_name'),
+  })).sort((left, right) => left.table_id.localeCompare(right.table_id)))
+}
+
+function migrationTableRevisions(tables, label) {
+  const revisions = new Map()
+  for (const table of tables) {
+    const tableId = requireNonEmpty(table.table_id, 'migration_remote_table_id:' + label)
+    const revision = Number(table.revision)
+    if (!Number.isSafeInteger(revision) || revision < 0 || revisions.has(tableId)) {
+      throw new Error('migration_remote_table_revision_invalid:' + label + ':' + tableId)
+    }
+    revisions.set(tableId, revision)
+  }
+  return revisions
+}
+
+function migrationFieldIdentity(field) {
+  return canonicalJson({
+    tableKey: field.tableKey,
+    tableId: field.tableId,
+    fieldName: field.fieldName,
+    fieldId: field.fieldId,
+    type: Number(field.type),
+    presentAtPrepare: Boolean(field.presentAtPrepare),
+  })
+}
+
+function validateMigrationRevisionAdvance(
+  baseline, current, catalog, observedMigrationFields, ownedFields,
+) {
+  const baselineRevisions = migrationTableRevisions(baseline.remoteTables, 'baseline')
+  const currentRevisions = migrationTableRevisions(current.remoteTables, 'current')
+  const ownedIdentities = new Set(ownedFields.map(migrationFieldIdentity))
+  const observedIdentities = new Set(observedMigrationFields.map(migrationFieldIdentity))
+  for (const owned of ownedIdentities) {
+    if (!observedIdentities.has(owned)) {
+      throw new Error('director_brain_migration_owned_field_missing')
+    }
+  }
+  for (const [tableKey, ref] of Object.entries(catalog.tables)) {
+    const baselineRevision = baselineRevisions.get(ref.tableId)
+    const currentRevision = currentRevisions.get(ref.tableId)
+    const expectedAdvance = observedMigrationFields.filter(field => (
+      field.tableKey === tableKey && !field.presentAtPrepare
+        && ownedIdentities.has(migrationFieldIdentity(field))
+    )).length
+    if (currentRevision !== baselineRevision + expectedAdvance) {
+      throw new Error('director_brain_migration_remote_revision_changed:' + tableKey)
+    }
+  }
+}
+
+function validateMigrationRemoteState(
+  baseline, current, catalog, schema, addFields,
+  { requireComplete = false, compareRecords = true, ownedFields = [] } = {},
+) {
+  const expectedRemoteById = new Map(Object.values(catalog.tables).map(ref => [
+    ref.tableId, ref.name,
+  ]))
+  for (const [label, remoteTables] of [
+    ['baseline', baseline.remoteTables], ['current', current.remoteTables],
+  ]) {
+    const observedIds = new Set()
+    for (const remote of remoteTables) {
+      if (!expectedRemoteById.has(remote.table_id)
+        || expectedRemoteById.get(remote.table_id) !== remote.name
+        || observedIds.has(remote.table_id)) {
+        throw new Error('director_brain_migration_remote_catalog_mismatch:' + label)
+      }
+      observedIds.add(remote.table_id)
+    }
+    if (observedIds.size !== expectedRemoteById.size) {
+      throw new Error('director_brain_migration_remote_catalog_mismatch:' + label)
+    }
+  }
+  if (canonicalMigrationRemoteTables(current.remoteTables)
+    !== canonicalMigrationRemoteTables(baseline.remoteTables)) {
+    throw new Error('director_brain_migration_remote_tables_changed')
+  }
+  const tableKeys = Object.keys(catalog.tables).sort()
+  if (canonicalJson(Object.keys(current.tables).sort()) !== canonicalJson(tableKeys)
+    || canonicalJson(Object.keys(baseline.tables).sort()) !== canonicalJson(tableKeys)) {
+    throw new Error('director_brain_migration_remote_table_set_changed')
+  }
+  const expected = expectedMigrationFields(schema, addFields)
+  const observedMigrationFields = []
+  for (const key of tableKeys) {
+    const before = requireObject(baseline.tables[key], 'migration_baseline_table:' + key)
+    const after = requireObject(current.tables[key], 'migration_current_table:' + key)
+    const ref = catalog.tables[key]
+    if (before.name !== ref.name || after.name !== ref.name
+      || before.tableId !== ref.tableId || after.tableId !== ref.tableId) {
+      throw new Error('director_brain_migration_remote_table_identity_changed:' + key)
+    }
+    if (compareRecords
+      && canonicalMigrationRecords(before.records) !== canonicalMigrationRecords(after.records)) {
+      throw new Error('director_brain_migration_remote_records_changed:' + key)
+    }
+    const beforeIds = new Map()
+    const beforeNames = new Map()
+    for (const field of before.fields) {
+      const fieldId = requireNonEmpty(field.field_id, 'migration_baseline_field_id:' + key)
+      const name = requireNonEmpty(field.field_name, 'migration_baseline_field_name:' + key)
+      if (beforeIds.has(fieldId) || beforeNames.has(name)) {
+        throw new Error('migration_baseline_fields_not_unique:' + key)
+      }
+      beforeIds.set(fieldId, field)
+      beforeNames.set(name, field)
+    }
+    const afterIds = new Map()
+    const afterNames = new Map()
+    for (const field of after.fields) {
+      const fieldId = requireNonEmpty(field.field_id, 'migration_current_field_id:' + key)
+      const name = requireNonEmpty(field.field_name, 'migration_current_field_name:' + key)
+      if (afterIds.has(fieldId) || afterNames.has(name)) {
+        throw new Error('migration_current_fields_not_unique:' + key)
+      }
+      afterIds.set(fieldId, field)
+      afterNames.set(name, field)
+    }
+    for (const [fieldId, field] of beforeIds) {
+      if (canonicalJson(afterIds.get(fieldId)) !== canonicalJson(field)) {
+        throw new Error('director_brain_migration_existing_field_changed:' + key)
+      }
+    }
+    for (const field of after.fields) {
+      if (beforeIds.has(field.field_id)) continue
+      const definition = expected.get(key + ':' + field.field_name)
+      if (!definition || beforeNames.has(field.field_name)) {
+        throw new Error('director_brain_migration_unexpected_field_added:' + key)
+      }
+      validateExpectedMigrationField(key, field, definition)
+    }
+    for (const name of addFields[key] || []) {
+      const definition = expected.get(key + ':' + name)
+      const beforeField = beforeNames.get(name)
+      const afterField = afterNames.get(name)
+      if (beforeField) validateExpectedMigrationField(key, beforeField, definition)
+      if (afterField) {
+        validateExpectedMigrationField(key, afterField, definition)
+        observedMigrationFields.push({
+          tableKey: key,
+          tableId: ref.tableId,
+          fieldName: name,
+          fieldId: afterField.field_id,
+          type: Number(afterField.type),
+          presentAtPrepare: Boolean(beforeField),
+        })
+      } else if (requireComplete) {
+        throw new Error('director_brain_migration_field_missing:' + key + ':' + name)
+      }
+    }
+  }
+  validateMigrationRevisionAdvance(
+    baseline, current, catalog, observedMigrationFields, ownedFields,
+  )
+  return observedMigrationFields
+}
+
+async function writeCatalogBytes(catalogPath, bytes) {
+  const temporary = catalogPath + '.migration-' + process.pid + '-' + randomUUID()
+  let created = false
+  try {
+    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
+    created = true
+    await chmod(temporary, 0o600)
+    await syncPath(temporary)
+    await rename(temporary, catalogPath)
+    created = false
+    await syncPath(catalogPath)
+    await syncPath(dirname(catalogPath))
+  } finally {
+    if (created) await unlink(temporary).catch(() => {})
+  }
+}
+
+function upgradedCatalogBytes(catalog) {
+  return Buffer.from(JSON.stringify({ ...catalog, schemaVersion: 3 }, null, 2) + '\n', 'utf8')
+}
+
+function normalizeMigrationOwnedFields(fieldsValue) {
+  if (!Array.isArray(fieldsValue)) throw new Error('migration_owned_fields_invalid')
+  const fields = fieldsValue.map((value, index) => {
+    const field = requireObject(value, 'migration_owned_field:' + index)
+    if (field.presentAtPrepare === true) {
+      throw new Error('migration_owned_field_present_at_prepare')
+    }
+    return {
+      tableKey: requireNonEmpty(field.tableKey, 'migration_owned_field_table_key:' + index),
+      tableId: requireNonEmpty(field.tableId, 'migration_owned_field_table_id:' + index),
+      fieldName: requireNonEmpty(field.fieldName, 'migration_owned_field_name:' + index),
+      fieldId: requireNonEmpty(field.fieldId, 'migration_owned_field_id:' + index),
+      type: Number(field.type),
+      presentAtPrepare: false,
+    }
+  }).sort((left, right) => migrationFieldIdentity(left).localeCompare(migrationFieldIdentity(right)))
+  if (fields.some(field => !Number.isSafeInteger(field.type) || field.type < 1)
+    || new Set(fields.map(migrationFieldIdentity)).size !== fields.length) {
+    throw new Error('migration_owned_fields_invalid')
+  }
+  return fields
+}
+
+async function readMigrationProgress(receipt, receiptBinding) {
+  const stats = await pathStats(receipt.progressPath)
+  if (!stats) return { ownedFields: [], binding: null }
+  await validateMigrationReceiptPath(receipt.progressPath)
+  const bytes = await readFile(receipt.progressPath)
+  const binding = await migrationFileBinding(receipt.progressPath, bytes)
+  let progress
+  try {
+    progress = validateMigrationSeal(
+      JSON.parse(bytes.toString('utf8')), 'migration_progress_receipt',
+    )
+  } catch (error) {
+    if (String(error?.message || '').startsWith('migration_progress_receipt_')) throw error
+    throw new Error('migration_progress_receipt_invalid_json')
+  }
+  if (Number(progress.formatVersion) !== 1
+    || progress.kind !== 'director-brain-migration-progress'
+    || progress.preparedReceiptSha256 !== receiptBinding.sha256
+    || progress.preparedRemoteSha256 !== receipt.remoteSha256) {
+    throw new Error('migration_progress_receipt_identity_mismatch')
+  }
+  return { progress, ownedFields: normalizeMigrationOwnedFields(progress.ownedFields), binding }
+}
+
+async function writeMigrationProgress(receipt, receiptBinding, ownedFieldsValue) {
+  await validateMigrationReceiptPath(receipt.progressPath)
+  const ownedFields = normalizeMigrationOwnedFields(ownedFieldsValue)
+  const progress = sealedMigrationObject({
+    formatVersion: 1,
+    kind: 'director-brain-migration-progress',
+    updatedAt: new Date().toISOString(),
+    preparedReceiptSha256: receiptBinding.sha256,
+    preparedRemoteSha256: receipt.remoteSha256,
+    ownedFields,
+  })
+  const bytes = Buffer.from(JSON.stringify(progress, null, 2) + '\n', 'utf8')
+  const temporary = receipt.progressPath + '.tmp-' + process.pid + '-' + randomUUID()
+  let created = false
+  try {
+    await writeFile(temporary, bytes, { flag: 'wx', mode: 0o600 })
+    created = true
+    await chmod(temporary, 0o600)
+    await syncPath(temporary)
+    await rename(temporary, receipt.progressPath)
+    created = false
+    await syncPath(receipt.progressPath)
+    await syncPath(dirname(receipt.progressPath))
+  } finally {
+    if (created) await unlink(temporary).catch(() => {})
+  }
+  return { progress, ownedFields, binding: await migrationFileBinding(receipt.progressPath, bytes) }
+}
+
+function migrationOwnershipFromCreateResult(table, ref, expected, observed) {
+  validateExpectedMigrationField(table.key, observed, expected)
+  return normalizeMigrationOwnedFields([{
+    tableKey: table.key,
+    tableId: ref.tableId,
+    fieldName: expected.name,
+    fieldId: requireNonEmpty(observed.field_id, 'migration_created_field_id:' + table.key),
+    type: Number(observed.type),
+    presentAtPrepare: false,
+  }])[0]
+}
+
+async function readMigrationApplication(receipt, required = false) {
+  const stats = await pathStats(receipt.applicationPath)
+  if (!stats) {
+    if (required) throw new Error('migration_application_receipt_missing')
+    return null
+  }
+  await validateMigrationReceiptPath(receipt.applicationPath)
+  const bytes = await readFile(receipt.applicationPath)
+  const binding = await migrationFileBinding(receipt.applicationPath, bytes)
+  let application
+  try {
+    application = validateMigrationSeal(
+      JSON.parse(bytes.toString('utf8')), 'migration_application_receipt',
+    )
+  } catch (error) {
+    if (String(error?.message || '').startsWith('migration_application_receipt_')) throw error
+    throw new Error('migration_application_receipt_invalid_json')
+  }
+  return { application, binding }
+}
+
+async function writeMigrationApplication(
+  receipt, receiptBinding, catalogBinding, fields, ownedFieldsValue,
+) {
+  const ownedFields = normalizeMigrationOwnedFields(ownedFieldsValue)
+  const application = sealedMigrationObject({
+    formatVersion: 1,
+    kind: 'director-brain-migration-application',
     createdAt: new Date().toISOString(),
-    tables,
-  }, null, 2) + '\n', { encoding: 'utf8', mode: 0o600, flag: 'wx' })
-  await chmod(backupPath, 0o600)
-  return backupPath
+    preparedReceiptSha256: receiptBinding.sha256,
+    preparedRemoteSha256: receipt.remoteSha256,
+    postCatalog: catalogBinding,
+    fieldsAddedAfterPrepare: fields.filter(field => !field.presentAtPrepare),
+    ownedFields,
+  })
+  const bytes = Buffer.from(JSON.stringify(application, null, 2) + '\n', 'utf8')
+  await writeFile(receipt.applicationPath, bytes, { flag: 'wx', mode: 0o600 })
+  await chmod(receipt.applicationPath, 0o600)
+  await syncPath(receipt.applicationPath)
+  await syncPath(dirname(receipt.applicationPath))
+  return { application, binding: await migrationFileBinding(receipt.applicationPath, bytes) }
+}
+
+function validateMigrationApplication(application, receiptBinding, catalogBinding, fields) {
+  if (Number(application.formatVersion) !== 1
+    || application.kind !== 'director-brain-migration-application'
+    || application.preparedReceiptSha256 !== receiptBinding.sha256
+    || !sameMigrationBinding(application.postCatalog, catalogBinding)) {
+    throw new Error('migration_application_receipt_identity_mismatch')
+  }
+  const expected = fields.filter(field => !field.presentAtPrepare)
+  if (canonicalJson(application.fieldsAddedAfterPrepare) !== canonicalJson(expected)) {
+    throw new Error('migration_application_field_identity_mismatch')
+  }
+  const ownedFields = normalizeMigrationOwnedFields(application.ownedFields)
+  const expectedIdentities = new Set(expected.map(migrationFieldIdentity))
+  if (ownedFields.some(field => !expectedIdentities.has(migrationFieldIdentity(field)))) {
+    throw new Error('migration_application_field_ownership_invalid')
+  }
+  const ownedIdentities = new Set(ownedFields.map(migrationFieldIdentity))
+  return {
+    ownedFields,
+    unownedFields: expected.filter(field => !ownedIdentities.has(migrationFieldIdentity(field))),
+  }
+}
+
+async function prepareDirectorBrainMigration(options, schema, catalogPath, artifact, plan) {
+  if (!plan.required) {
+    return { ok: true, action: 'migrate', mode: 'prepare', required: false, ...plan }
+  }
+  if (plan.addTables.length) throw new Error('migration_table_changes_forbidden')
+  const context = runtimeContext(schema, artifact.catalog, options.appId, {
+    allowLegacyV1: true, allowLegacyV2: true,
+  })
+  const dependencies = migrationDependencies(options)
+  const accessToken = await dependencies.accessToken(context.appId, context.service, options)
+  const summary = await writeMigrationBackup(
+    accessToken, artifact, schema, plan, options,
+  )
+  const verified = await readAndVerifyMigrationReceipt(options.receiptFile, summary.receiptSha256)
+  validateMigrationRemoteState(
+    verified.snapshot, verified.snapshot, artifact.catalog, schema, plan.addFields,
+  )
+  await verifyMigrationRemoteSnapshot(
+    accessToken, artifact.catalog, verified.receipt, dependencies,
+  )
+  return { ...summary, action: 'migrate', mode: 'prepare', remoteVerified: true, ...plan }
+}
+
+async function applyDirectorBrainMigration(options, schema, catalogPath) {
+  if (!/^[a-f0-9]{64}$/u.test(String(options.expectedSha256 || ''))) {
+    throw new Error('migration_expected_sha256_invalid')
+  }
+  const prepared = await readAndVerifyMigrationReceipt(
+    options.receiptFile, options.expectedSha256,
+  )
+  if (prepared.receipt.schemaSha256 !== sha256(canonicalJson(schema))) {
+    throw new Error('migration_target_schema_changed')
+  }
+  if (prepared.receipt.originalCatalog.path !== catalogPath) {
+    throw new Error('migration_catalog_path_mismatch')
+  }
+  const plan = planDirectorBrainMigration(prepared.catalog, schema)
+  if (canonicalJson(plan.addFields) !== canonicalJson(prepared.receipt.addFields)
+    || plan.addTables.length) {
+    throw new Error('migration_plan_changed')
+  }
+  return withDirectorBrainMigrationLock({
+    catalogPath,
+    catalog: prepared.catalog,
+    fromVersion: plan.fromVersion,
+    toVersion: plan.toVersion,
+    receiptSha256: prepared.receiptBinding.sha256,
+  }, async () => {
+    const locked = await readAndVerifyMigrationReceipt(
+      options.receiptFile, options.expectedSha256,
+    )
+    const currentCatalogArtifact = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    const expectedPostBytes = upgradedCatalogBytes(prepared.catalog)
+    const alreadyCatalogV3 = currentCatalogArtifact.bytes.equals(expectedPostBytes)
+    if (!alreadyCatalogV3
+      && !sameMigrationBinding(currentCatalogArtifact.binding, prepared.receipt.originalCatalog)) {
+      throw new Error('director_brain_migration_catalog_changed')
+    }
+    const context = runtimeContext(schema, prepared.catalog, options.appId, {
+      allowLegacyV1: true, allowLegacyV2: true,
+    })
+    const dependencies = migrationDependencies(options)
+    const accessToken = await dependencies.accessToken(context.appId, context.service, options)
+    const existingApplication = await readMigrationApplication(prepared.receipt)
+    const progress = existingApplication
+      ? null
+      : await readMigrationProgress(prepared.receipt, locked.receiptBinding)
+    let ownedFields = existingApplication
+      ? normalizeMigrationOwnedFields(existingApplication.application.ownedFields)
+      : progress.ownedFields
+    const beforeWrite = await collectMigrationRemoteSnapshot(
+      accessToken, prepared.catalog, dependencies,
+    )
+    let fields = validateMigrationRemoteState(
+      prepared.snapshot, beforeWrite, prepared.catalog, schema, plan.addFields,
+      { requireComplete: alreadyCatalogV3, ownedFields },
+    )
+    if (alreadyCatalogV3) {
+      if (existingApplication) {
+        validateMigrationApplication(
+          existingApplication.application, locked.receiptBinding,
+          currentCatalogArtifact.binding, fields,
+        )
+      } else {
+        await writeMigrationApplication(
+          prepared.receipt, locked.receiptBinding, currentCatalogArtifact.binding, fields,
+          ownedFields,
+        )
+      }
+      return {
+        ok: true, action: 'migrate', mode: 'apply', alreadyApplied: true,
+        fieldsAdded: fields.filter(field => !field.presentAtPrepare).length,
+        catalogSha256: currentCatalogArtifact.binding.sha256,
+      }
+    }
+    if (existingApplication) throw new Error('migration_application_receipt_premature')
+    const currentByTable = new Map(Object.entries(beforeWrite.tables).map(([key, table]) => [
+      key, new Set(table.fields.map(field => field.field_name)),
+    ]))
+    let created = 0
+    for (const table of schema.tables) {
+      const names = plan.addFields[table.key] || []
+      for (const name of names) {
+        if (currentByTable.get(table.key)?.has(name)) continue
+        const field = table.fields.find(item => item.name === name)
+        const observed = await dependencies.createField(
+          accessToken, prepared.catalog.appToken, prepared.catalog.tables[table.key].tableId, field,
+        )
+        if (!observed) {
+          throw new Error('migration_create_field_response_missing:' + table.key + ':' + name)
+        }
+        const ownership = migrationOwnershipFromCreateResult(
+          table, prepared.catalog.tables[table.key], field, observed,
+        )
+        ownedFields = normalizeMigrationOwnedFields([...ownedFields, ownership])
+        await writeMigrationProgress(prepared.receipt, locked.receiptBinding, ownedFields)
+        currentByTable.get(table.key)?.add(name)
+        created += 1
+      }
+    }
+    const afterWrite = await collectMigrationRemoteSnapshot(
+      accessToken, prepared.catalog, dependencies,
+    )
+    fields = validateMigrationRemoteState(
+      prepared.snapshot, afterWrite, prepared.catalog, schema, plan.addFields,
+      { requireComplete: true, ownedFields },
+    )
+    const catalogBeforeCommit = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    if (!sameMigrationBinding(catalogBeforeCommit.binding, prepared.receipt.originalCatalog)) {
+      throw new Error('director_brain_migration_catalog_changed')
+    }
+    await writeCatalogBytes(catalogPath, expectedPostBytes)
+    const postCatalog = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    if (!postCatalog.bytes.equals(expectedPostBytes)) {
+      throw new Error('director_brain_migration_catalog_commit_failed')
+    }
+    const application = await writeMigrationApplication(
+      prepared.receipt, locked.receiptBinding, postCatalog.binding, fields, ownedFields,
+    )
+    return {
+      ok: true,
+      action: 'migrate',
+      mode: 'apply',
+      alreadyApplied: false,
+      fieldsCreatedThisRun: created,
+      fieldsAdded: fields.filter(field => !field.presentAtPrepare).length,
+      fieldsOwned: ownedFields.length,
+      catalogSha256: postCatalog.binding.sha256,
+      applicationReceiptFile: prepared.receipt.applicationPath,
+      applicationReceiptSha256: application.binding.sha256,
+    }
+  })
+}
+
+async function rollbackDryRunDirectorBrainMigration(options, schema, catalogPath) {
+  if (!/^[a-f0-9]{64}$/u.test(String(options.expectedSha256 || ''))) {
+    throw new Error('migration_expected_sha256_invalid')
+  }
+  const prepared = await readAndVerifyMigrationReceipt(
+    options.receiptFile, options.expectedSha256,
+  )
+  if (prepared.receipt.originalCatalog.path !== catalogPath) {
+    throw new Error('migration_catalog_path_mismatch')
+  }
+  if (prepared.receipt.schemaSha256 !== sha256(canonicalJson(schema))) {
+    throw new Error('migration_target_schema_changed')
+  }
+  const plan = planDirectorBrainMigration(prepared.catalog, schema)
+  return withDirectorBrainMigrationLock({
+    catalogPath,
+    catalog: prepared.catalog,
+    fromVersion: plan.fromVersion,
+    toVersion: plan.toVersion,
+    receiptSha256: prepared.receiptBinding.sha256,
+  }, async () => {
+    const locked = await readAndVerifyMigrationReceipt(
+      options.receiptFile, options.expectedSha256,
+    )
+    const application = await readMigrationApplication(locked.receipt, true)
+    const currentCatalog = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    const dependencies = migrationDependencies(options)
+    const context = runtimeContext(schema, locked.catalog, options.appId, {
+      allowLegacyV1: true, allowLegacyV2: true,
+    })
+    const accessToken = await dependencies.accessToken(context.appId, context.service, options)
+    const ownedFields = normalizeMigrationOwnedFields(application.application.ownedFields)
+    const firstObservedAt = new Date().toISOString()
+    const first = await collectMigrationRemoteSnapshot(
+      accessToken, locked.catalog, dependencies,
+    )
+    const firstFields = validateMigrationRemoteState(
+      locked.snapshot, first, locked.catalog, schema, locked.receipt.addFields,
+      { requireComplete: true, compareRecords: false, ownedFields },
+    )
+    const firstOwnership = validateMigrationApplication(
+      application.application, locked.receiptBinding, currentCatalog.binding, firstFields,
+    )
+    if (firstOwnership.unownedFields.length) {
+      throw new Error('migration_rollback_field_ownership_unproven')
+    }
+    await delay(120)
+    const secondObservedAt = new Date().toISOString()
+    const second = await collectMigrationRemoteSnapshot(
+      accessToken, locked.catalog, dependencies,
+    )
+    const firstDigest = migrationRemoteSnapshotDigest(first)
+    const secondDigest = migrationRemoteSnapshotDigest(second)
+    if (firstDigest !== secondDigest) {
+      throw new Error('migration_rollback_remote_state_changed_between_samples')
+    }
+    const fields = validateMigrationRemoteState(
+      locked.snapshot, second, locked.catalog, schema, locked.receipt.addFields,
+      { requireComplete: true, compareRecords: false, ownedFields },
+    )
+    const secondOwnership = validateMigrationApplication(
+      application.application, locked.receiptBinding, currentCatalog.binding, fields,
+    )
+    if (secondOwnership.unownedFields.length) {
+      throw new Error('migration_rollback_field_ownership_unproven')
+    }
+    const added = fields.filter(field => !field.presentAtPrepare)
+    for (const field of added) {
+      const records = second.tables[field.tableKey].records
+      if (records.some(record => !recordFieldIsBlank(record, field.fieldName))) {
+        throw new Error('migration_rollback_field_has_values:' + field.tableKey + ':' + field.fieldName)
+      }
+    }
+    for (const key of Object.keys(locked.catalog.tables)) {
+      if (canonicalMigrationRecords(locked.snapshot.tables[key].records)
+        !== canonicalMigrationRecords(second.tables[key].records)) {
+        throw new Error('migration_rollback_business_writes_detected:' + key)
+      }
+    }
+    return {
+      ok: true,
+      action: 'migrate',
+      mode: 'rollback-dry-run',
+      eligibleForManualRollback: true,
+      destructiveActionPerformed: false,
+      fieldsChecked: added.length,
+      remoteVerification: {
+        sha256: secondDigest,
+        firstObservedAt,
+        secondObservedAt,
+        samples: 2,
+      },
+      originalCatalogRecovery: {
+        snapshotFile: locked.receipt.snapshot.path,
+        sha256: locked.receipt.originalCatalog.sha256,
+        bytes: locked.receipt.originalCatalog.bytes,
+      },
+    }
+  })
 }
 
 export async function migrateDirectorBrain(options = {}) {
   const schema = await loadDirectorBrainSchema(options.schemaPath)
-  const catalogPath = validateDirectorBrainCatalogPath(options.catalogPath || DEFAULT_CATALOG_PATH)
-  const catalog = options.catalog || await readCatalog(catalogPath)
-  if (!catalog) throw new Error('director_brain_catalog_missing')
-  const plan = planDirectorBrainMigration(catalog, schema)
-  if (options.dryRun === true || !plan.required) {
-    return { ok: true, action: 'migrate', dryRun: true, ...plan }
+  const catalogPath = validateDirectorBrainCatalogPath(
+    options.catalogPath || DEFAULT_CATALOG_PATH,
+    options.catalogRoot || DEFAULT_CATALOG_ROOT,
+  )
+  if (options.dryRun === true) {
+    const artifact = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    const plan = planDirectorBrainMigration(artifact.catalog, schema)
+    return {
+      ok: true, action: 'migrate', mode: 'dry-run', dryRun: true,
+      scope: 'local-catalog-and-schema-only', remoteVerified: false, ...plan,
+    }
   }
-  const context = runtimeContext(schema, catalog, options.appId, { allowLegacyV1: true })
-  const accessToken = await tenantAccessToken(context.appId, context.service, options)
-  const backupPath = await writeMigrationBackup(accessToken, catalog, options)
-  const result = await bootstrapDirectorBrain({
-    ...options,
-    catalogPath,
-    migrationBackupVerified: true,
-  })
-  return {
-    ok: true,
-    action: 'migrate',
-    dryRun: false,
-    ...plan,
-    backupPath,
-    contractVerified: result.contractVerified,
+  if (options.prepare === true) {
+    const artifact = await readCatalogArtifact(catalogPath, options.catalogRoot)
+    const plan = planDirectorBrainMigration(artifact.catalog, schema)
+    return prepareDirectorBrainMigration(options, schema, catalogPath, artifact, plan)
   }
+  if (options.apply === true) return applyDirectorBrainMigration(options, schema, catalogPath)
+  if (options.rollbackDryRun === true) {
+    return rollbackDryRunDirectorBrainMigration(options, schema, catalogPath)
+  }
+  throw new Error('migration_mode_required')
 }
 
 export async function bootstrapDirectorBrain(options = {}) {
@@ -1024,10 +2294,11 @@ export async function bootstrapDirectorBrain(options = {}) {
   const context = runtimeContext(schema, catalog, options.appId, {
     allowPartialTables: true,
     allowLegacyV1: true,
+    allowLegacyV2: true,
   })
-  const legacyV1 = Number(catalog?.schemaVersion) === 1
-  if (legacyV1 && options.migrationBackupVerified !== true) {
-    throw new Error('director_brain_migration_backup_required')
+  const legacyCatalog = catalog && Number(catalog.schemaVersion) !== Number(schema.schemaVersion)
+  if (legacyCatalog) {
+    throw new Error('director_brain_legacy_catalog_requires_migrate_apply')
   }
   if (!catalog?.appToken) await prepareCatalogRoot(catalogPath)
   const accessToken = await tenantAccessToken(context.appId, context.service, options)
@@ -1048,7 +2319,7 @@ export async function bootstrapDirectorBrain(options = {}) {
       defaultTableId: app.default_table_id,
       tables: {},
     }
-    if (!legacyV1) await writeCatalog(catalogPath, catalog)
+    if (!legacyCatalog) await writeCatalog(catalogPath, catalog)
   }
 
   const existing = await listTables(accessToken, catalog.appToken)
@@ -1112,7 +2383,7 @@ export async function bootstrapDirectorBrain(options = {}) {
         tableId,
       ),
     }
-    if (!legacyV1) await writeCatalog(catalogPath, catalog)
+    if (!legacyCatalog) await writeCatalog(catalogPath, catalog)
   }
 
   delete catalog.defaultTableId
@@ -1147,7 +2418,7 @@ function assertNoSecrets(fields) {
   for (const [name, value] of Object.entries(fields)) {
     if (SECRET_FIELD_PATTERN.test(name)) throw new Error('secret_field_forbidden:' + name)
     const text = typeof value === 'string' ? value : JSON.stringify(value)
-    if (SECRET_VALUE_PATTERNS.some(pattern => pattern.test(text))) {
+    if (containsSensitiveValue(text)) {
       throw new Error('sensitive_value_forbidden:' + name)
     }
   }
@@ -1169,13 +2440,13 @@ function normalizeRecordFields(table, fields) {
   }))
 }
 
-function assertSafeOperationContent(value, path = 'request') {
+function assertSafeOperationContent(value, path = 'request', options = {}) {
   if (value === null || value === undefined) return
   if (typeof value === 'string') {
-    if (value.length > MAX_OPERATION_TEXT_LENGTH) {
+    if (value.length > (options.maximumTextLength || MAX_OPERATION_TEXT_LENGTH)) {
       throw new Error('operation_text_too_long:' + path)
     }
-    if (SECRET_VALUE_PATTERNS.some(pattern => pattern.test(value))) {
+    if (containsSensitiveValue(value)) {
       throw new Error('sensitive_value_forbidden:' + path)
     }
     if (containsFeishuResourceId(value)) {
@@ -1204,7 +2475,7 @@ function assertSafeOperationContent(value, path = 'request') {
   if (typeof value !== 'object') return
   if (Array.isArray(value)) {
     for (let index = 0; index < value.length; index += 1) {
-      assertSafeOperationContent(value[index], path + '[' + index + ']')
+      assertSafeOperationContent(value[index], path + '[' + index + ']', options)
     }
     return
   }
@@ -1212,15 +2483,17 @@ function assertSafeOperationContent(value, path = 'request') {
     if (SENSITIVE_KEY_PATTERN.test(key)) throw new Error('sensitive_key_forbidden:' + key)
     if (TASK_STATE_KEY_PATTERN.test(key)) throw new Error('task_state_forbidden:' + key)
     if (TRANSCRIPT_KEY_PATTERN.test(key)) throw new Error('full_transcript_forbidden:' + key)
-    assertSafeOperationContent(nested, path + '.' + key)
+    assertSafeOperationContent(nested, path + '.' + key, options)
   }
 }
 
 function assertSafeRemoteOutput(value, path = 'record', options = {}) {
   if (value === null || value === undefined) return
   if (typeof value === 'string') {
-    if (value.length > MAX_OPERATION_TEXT_LENGTH) throw new Error('operation_text_too_long:' + path)
-    if (SECRET_VALUE_PATTERNS.some(pattern => pattern.test(value))) {
+    if (value.length > (options.maximumTextLength || MAX_OPERATION_TEXT_LENGTH)) {
+      throw new Error('operation_text_too_long:' + path)
+    }
+    if (containsSensitiveValue(value)) {
       throw new Error('sensitive_value_forbidden:' + path)
     }
     if (containsFeishuResourceId(value)) {
@@ -1267,16 +2540,18 @@ function assertOperationRequestSize(value) {
   assertSerializedSize(value, MAX_OPERATION_INPUT_BYTES, 'operation_request')
 }
 
-function normalizeOperationString(value, fieldName) {
+function normalizeOperationString(value, fieldName, maximumTextLength = MAX_OPERATION_TEXT_LENGTH) {
   if (typeof value !== 'string') throw new Error('record_field_type_invalid:' + fieldName)
   const normalized = value.normalize('NFKC').replace(/\r\n?/gu, '\n').trim()
   if (!normalized) throw new Error('record_field_empty:' + fieldName)
-  assertSafeOperationContent(normalized, 'fields.' + fieldName)
+  assertSafeOperationContent(normalized, 'fields.' + fieldName, { maximumTextLength })
   return normalized
 }
 
-function normalizeOperationField(field, value) {
-  if (Number(field.type) === 1) return normalizeOperationString(value, field.name)
+function normalizeOperationField(field, value, maximumTextLength = MAX_OPERATION_TEXT_LENGTH) {
+  if (Number(field.type) === 1) {
+    return normalizeOperationString(value, field.name, maximumTextLength)
+  }
   if (Number(field.type) === 2) {
     if (typeof value !== 'number' || !Number.isFinite(value)) {
       throw new Error('record_field_type_invalid:' + field.name)
@@ -1330,7 +2605,7 @@ function canonicalJson(value) {
   return JSON.stringify(value)
 }
 
-function normalizeProposalBusinessFields(table, rawFields) {
+function normalizeProposalBusinessFields(table, rawFields, options = {}) {
   const fields = requireObject(rawFields, 'operation_fields')
   const entries = Object.entries(fields)
   if (!entries.length) throw new Error('operation_fields_required')
@@ -1348,7 +2623,11 @@ function normalizeProposalBusinessFields(table, rawFields) {
     if (TRANSCRIPT_KEY_PATTERN.test(name)) throw new Error('full_transcript_forbidden:' + name)
     const definition = definitions.get(name)
     if (!definition) throw new Error('unknown_record_field:' + table.key + ':' + name)
-    normalized[name] = normalizeOperationField(definition, value)
+    const maximumTextLength = options.allowLongFields
+      && LONG_PROPOSAL_TEXT_FIELDS.has(`${table.key}:${name}`)
+      ? MAX_PROPOSAL_TEXT_LENGTH
+      : MAX_OPERATION_TEXT_LENGTH
+    normalized[name] = normalizeOperationField(definition, value, maximumTextLength)
   }
   const primaryName = table.fields[0].name
   if (!Object.hasOwn(normalized, primaryName)) {
@@ -1359,7 +2638,30 @@ function normalizeProposalBusinessFields(table, rawFields) {
       throw new Error('proposal_required_field_missing:' + table.key + ':' + required)
     }
   }
-  assertSafeOperationContent(normalized, 'fields')
+  if (table.key === 'works') {
+    normalized['作品层级'] = normalized['作品层级'] || '独立作品'
+    if (normalized['别名']) {
+      const aliases = String(normalized['别名'])
+        .split('\n')
+        .map(normalizeWorkAliasForStorage)
+        .filter(Boolean)
+      if (new Set(aliases.map(normalizeWorkTitle)).size !== aliases.length) {
+        throw new Error('work_alias_duplicate')
+      }
+      normalized['别名'] = aliases.join('\n')
+    }
+    for (const fieldName of ['季序号', '集序号']) {
+      if (normalized[fieldName] !== undefined
+        && (!Number.isSafeInteger(normalized[fieldName]) || normalized[fieldName] < 1)) {
+        throw new Error('work_ordinal_invalid:' + fieldName)
+      }
+    }
+  }
+  assertSafeOperationContent(normalized, 'fields', {
+    maximumTextLength: options.allowLongFields
+      ? MAX_PROPOSAL_TEXT_LENGTH
+      : MAX_OPERATION_TEXT_LENGTH,
+  })
   return Object.fromEntries(Object.entries(normalized).sort(([left], [right]) => left.localeCompare(right)))
 }
 
@@ -1369,7 +2671,13 @@ function normalizeCompleteOperationFields(table, fields) {
   for (const [name, value] of Object.entries(fields)) {
     const definition = definitions.get(name)
     if (!definition) throw new Error('unknown_record_field:' + table.key + ':' + name)
-    normalized[name] = normalizeOperationField(definition, value)
+    normalized[name] = normalizeOperationField(
+      definition,
+      value,
+      LONG_PROPOSAL_TEXT_FIELDS.has(`${table.key}:${name}`)
+        ? MAX_PROPOSAL_TEXT_LENGTH
+        : MAX_OPERATION_TEXT_LENGTH,
+    )
   }
   return normalized
 }
@@ -1502,6 +2810,7 @@ function sanitizedRecordFields(table, rawFields) {
   assertSafeRemoteOutput(safe, 'record', {
     // Governance records must be able to state that full transcripts are forbidden.
     allowTranscriptPolicyText: table.key === 'system_blueprint',
+    maximumTextLength: MAX_PROPOSAL_TEXT_LENGTH,
   })
   return safe
 }
@@ -1596,6 +2905,17 @@ function operationRecordWorkId(table, record) {
     : String(record.fields['作品 ID'] || '').trim()
 }
 
+function operationRecordSourceWorkIds(table, record) {
+  if (table.key === 'works') return [record.stableId]
+  if (GLOBAL_KNOWLEDGE_TABLES.has(table.key)) {
+    const sourceIds = splitStoredReferences(record.fields['来源作品 ID'])
+    const legacyWorkId = String(record.fields['作品 ID'] || '').trim()
+    return [...new Set([...sourceIds, ...(legacyWorkId ? [legacyWorkId] : [])])]
+  }
+  const workId = operationRecordWorkId(table, record)
+  return workId ? [workId] : []
+}
+
 function isHistoricallyReviewedRecord(record) {
   return record.reviewed
     || (['废弃', '失效', '已合并', '已解决', '归档'].includes(record.state)
@@ -1611,9 +2931,9 @@ function assertOperationRecordScope(context, table, record, workId = null) {
     throw new Error('record_project_mismatch:' + table.key + ':' + record.stableId)
   }
   if (table.key !== 'system_blueprint') {
-    const observedWorkId = operationRecordWorkId(table, record)
-    if (!observedWorkId) throw new Error('record_work_missing:' + table.key + ':' + record.stableId)
-    if (workId && observedWorkId !== workId) {
+    const sourceWorkIds = operationRecordSourceWorkIds(table, record)
+    if (!sourceWorkIds.length) throw new Error('record_work_missing:' + table.key + ':' + record.stableId)
+    if (workId && !sourceWorkIds.includes(workId)) {
       throw new Error('record_work_mismatch:' + table.key + ':' + record.stableId)
     }
   }
@@ -1656,7 +2976,43 @@ async function loadReviewedReference(context, dependencies, tableKey, stableId, 
   return record
 }
 
-async function resolveProposalReferences(context, dependencies, table, rawReferences, workId) {
+async function loadReviewedDirectorCaseChain(context, dependencies, caseId) {
+  const directorCase = await loadReviewedReference(
+    context, dependencies, 'director_cases', caseId, null,
+  )
+  const caseWorkId = operationRecordWorkId(
+    operationTable(context.schema, 'director_cases'),
+    directorCase,
+  )
+  const judgmentId = String(directorCase.fields['判断 ID'] || '').trim()
+  const caseEvidenceIds = splitStoredReferences(directorCase.fields['证据 ID'])
+  if (!caseWorkId || !judgmentId || !caseEvidenceIds.length) {
+    throw new Error('technique_case_chain_incomplete')
+  }
+  await loadReviewedReference(context, dependencies, 'works', caseWorkId, caseWorkId)
+  const judgment = await loadReviewedReference(
+    context, dependencies, 'material_judgments', judgmentId, caseWorkId,
+  )
+  const intentVersionId = String(judgment.fields['意图版本 ID'] || '').trim()
+  const judgmentEvidenceIds = splitStoredReferences(judgment.fields['证据 ID'])
+  if (!intentVersionId || !judgmentEvidenceIds.length
+    || caseEvidenceIds.some(evidenceId => !judgmentEvidenceIds.includes(evidenceId))) {
+    throw new Error('technique_case_chain_incomplete')
+  }
+  await loadReviewedReference(
+    context, dependencies, 'director_intents', intentVersionId, caseWorkId,
+  )
+  for (const evidenceId of judgmentEvidenceIds) {
+    await loadReviewedReference(
+      context, dependencies, 'material_evidence', evidenceId, caseWorkId,
+    )
+  }
+  return { directorCase, caseWorkId, judgment }
+}
+
+async function resolveProposalReferences(
+  context, dependencies, table, rawReferences, workId, proposalFields = {},
+) {
   const normalized = normalizeProposalReferences(table, rawReferences)
   const rule = PROPOSAL_REFERENCE_RULES[table.key]
   const fields = {}
@@ -1665,7 +3021,11 @@ async function resolveProposalReferences(context, dependencies, table, rawRefere
     for (const [name, [tableKey, fieldName]] of Object.entries(rule[groupName] || {})) {
       if (normalized[name] === undefined) continue
       records[name] = await loadReviewedReference(
-        context, dependencies, tableKey, normalized[name], workId,
+        context,
+        dependencies,
+        tableKey,
+        normalized[name],
+        GLOBAL_KNOWLEDGE_TABLES.has(tableKey) ? null : workId,
       )
       fields[fieldName] = normalized[name]
     }
@@ -1676,7 +3036,11 @@ async function resolveProposalReferences(context, dependencies, table, rawRefere
       records[name] = []
       for (const stableId of values) {
         records[name].push(await loadReviewedReference(
-          context, dependencies, tableKey, stableId, workId,
+          context,
+          dependencies,
+          tableKey,
+          stableId,
+          GLOBAL_KNOWLEDGE_TABLES.has(tableKey) ? null : workId,
         ))
       }
       if (values.length) fields[fieldName] = values.join('\n')
@@ -1684,6 +3048,55 @@ async function resolveProposalReferences(context, dependencies, table, rawRefere
   }
   if (table.key === 'story_relations' && normalized.sourceNodeId === normalized.targetNodeId) {
     throw new Error('story_relation_self_reference_forbidden')
+  }
+  if (table.key === 'works') {
+    const level = proposalFields['作品层级'] || '独立作品'
+    const parent = records.parentWorkId || null
+    if ((level === '独立作品' || level === '系列') && parent) {
+      throw new Error('work_parent_forbidden_for_level:' + level)
+    }
+    if ((level === '季' || level === '集') && !parent) {
+      throw new Error('work_parent_required_for_level:' + level)
+    }
+    if ((level === '独立作品' || level === '系列') && (proposalFields['季序号'] !== undefined
+      || proposalFields['集序号'] !== undefined)) {
+      throw new Error('work_ordinal_forbidden_for_level:' + level)
+    }
+    if (level === '季') {
+      if (parent.fields['作品层级'] !== '系列') throw new Error('work_parent_level_invalid:季')
+      if (proposalFields['季序号'] === undefined || proposalFields['集序号'] !== undefined) {
+        throw new Error('work_ordinal_invalid_for_level:季')
+      }
+      fields['系列 ID'] = parent.stableId
+    }
+    if (level === '集') {
+      if (parent.fields['作品层级'] !== '季') throw new Error('work_parent_level_invalid:集')
+      if (proposalFields['集序号'] === undefined || proposalFields['季序号'] !== undefined) {
+        throw new Error('work_ordinal_invalid_for_level:集')
+      }
+      const seriesId = String(parent.fields['系列 ID'] || '').trim()
+      if (!seriesId) throw new Error('work_parent_series_missing')
+      fields['系列 ID'] = seriesId
+      fields['季 ID'] = parent.stableId
+    }
+  }
+  if (table.key === 'skills_techniques') {
+    const cases = records.caseIds || []
+    for (const directorCase of cases) {
+      await loadReviewedDirectorCaseChain(context, dependencies, directorCase.stableId)
+    }
+    const sourceWorkIds = [...new Set(cases.map(record => operationRecordWorkId(
+      operationTable(context.schema, 'director_cases'),
+      record,
+    )))]
+    if (sourceWorkIds.some(sourceWorkId => !sourceWorkId)) {
+      throw new Error('technique_source_work_missing')
+    }
+    if (workId && sourceWorkIds.some(sourceWorkId => sourceWorkId !== workId)) {
+      throw new Error('technique_source_work_mismatch')
+    }
+    fields['作用域'] = '跨作品'
+    fields['来源作品 ID'] = sourceWorkIds.sort().join('\n')
   }
   return { normalized, fields, records }
 }
@@ -1700,11 +3113,17 @@ function assertReferenceSetIncluded(value, included, fieldName) {
   }
 }
 
+function assertOptionalReferenceSetIncluded(value, included, fieldName) {
+  if (!splitStoredReferences(value).length) return
+  assertReferenceSetIncluded(value, included, fieldName)
+}
+
 function assertAssemblyIntegrity(grouped, references) {
   const evidenceIds = new Set(references.evidenceIds)
   const nodeIds = new Set(references.storyNodeIds)
   const judgmentIds = new Set(references.materialJudgmentIds)
   const caseIds = new Set(references.directorCaseIds)
+  const techniqueIds = new Set(references.skillTechniqueIds)
   for (const record of grouped.peopleProfiles) {
     assertReferenceSetIncluded(record.fields['证据 ID'], evidenceIds, 'people_profiles.证据 ID')
   }
@@ -1721,6 +3140,9 @@ function assertAssemblyIntegrity(grouped, references) {
       throw new Error('assembly_intent_mismatch:material_judgments')
     }
     assertReferenceSetIncluded(record.fields['证据 ID'], evidenceIds, 'material_judgments.证据 ID')
+    assertOptionalReferenceSetIncluded(
+      record.fields['技法 ID'], techniqueIds, 'material_judgments.技法 ID',
+    )
   }
   for (const record of grouped.narrativePlans) {
     if (record.fields['意图版本 ID'] !== references.intentVersionId) {
@@ -1728,6 +3150,9 @@ function assertAssemblyIntegrity(grouped, references) {
     }
     assertReferenceSetIncluded(record.fields['节点 ID'], nodeIds, 'narrative_plans.节点 ID')
     assertReferenceSetIncluded(record.fields['证据 ID'], evidenceIds, 'narrative_plans.证据 ID')
+    assertOptionalReferenceSetIncluded(
+      record.fields['技法 ID'], techniqueIds, 'narrative_plans.技法 ID',
+    )
   }
   for (const record of grouped.directorCases) {
     assertReferenceSetIncluded(record.fields['判断 ID'], judgmentIds, 'director_cases.判断 ID')
@@ -1738,11 +3163,14 @@ function assertAssemblyIntegrity(grouped, references) {
   }
 }
 
-function inspectWorkflowReferenceIntegrity(reviewed, allRecords = reviewed) {
+function inspectWorkflowReferenceIntegrity(reviewed, allRecords = reviewed, externalReviewed = {}) {
   const indexes = Object.fromEntries(Object.entries(reviewed).map(([tableKey, records]) => [
     tableKey,
     new Set(records.map(record => record.stableId)),
   ]))
+  for (const [tableKey, records] of Object.entries(externalReviewed)) {
+    indexes[tableKey] = new Set(records.map(record => record.stableId))
+  }
   const historicalIndexes = Object.fromEntries(Object.entries(allRecords).map(([tableKey, records]) => [
     tableKey,
     new Set(records.filter(isHistoricallyReviewedRecord).map(record => record.stableId)),
@@ -1811,6 +3239,25 @@ function inspectWorkflowReferenceIntegrity(reviewed, allRecords = reviewed) {
   }
 }
 
+function sortedOperationRecords(records) {
+  return [...records].sort((left, right) => left.stableId.localeCompare(right.stableId))
+}
+
+function assertLearningContextTableLimit(tableKey, records) {
+  if (records.length > LEARNING_CONTEXT_MAX_RECORDS_PER_TABLE) {
+    throw new Error('learning_context_table_limit_exceeded:' + tableKey)
+  }
+}
+
+function previousVersionIsValid(record, historicalIds) {
+  const previousId = String(record.fields['上一版本 ID'] || '').trim()
+  return !previousId || historicalIds.has(previousId)
+}
+
+function sameStableIdSet(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 function businessFieldsMatch(table, record, businessFields) {
   const fields = record?.fields || {}
   const definitions = new Map(table.fields.map(field => [field.name, field]))
@@ -1821,6 +3268,9 @@ function businessFieldsMatch(table, record, businessFields) {
         Number(definitions.get(name)?.type) === 2 && typeof fields[name] === 'string'
           ? Number(fields[name])
           : fields[name],
+        LONG_PROPOSAL_TEXT_FIELDS.has(`${table.key}:${name}`)
+          ? MAX_PROPOSAL_TEXT_LENGTH
+          : MAX_OPERATION_TEXT_LENGTH,
       ))
         === canonicalJson(expected)
     ))
@@ -2401,8 +3851,7 @@ async function searchOperationRecords({ context, table, tableId, query, status, 
       }
       stableIds.add(normalizedRecord.stableId)
       if (table.key !== 'system_blueprint' && workId) {
-        const observedWorkId = operationRecordWorkId(table, normalizedRecord)
-        if (observedWorkId !== workId) continue
+        if (!operationRecordSourceWorkIds(table, normalizedRecord).includes(workId)) continue
       }
       if (recordMatchesSearch(
         table,
@@ -2435,6 +3884,27 @@ async function findOperationRecordsByWork({ context, table, tableId, workId }) {
   )
 }
 
+async function findGlobalKnowledgeBySourceWork({ context, table, tableId, workId }) {
+  const records = await listRecords(
+    context.accessToken,
+    context.catalog.appToken,
+    tableId,
+  )
+  return records.filter(rawRecord => {
+    const record = operationRecord(table, rawRecord)
+    assertOperationRecordScope(context, table, record)
+    return operationRecordSourceWorkIds(table, record).includes(workId)
+  })
+}
+
+async function listAllOperationRecords({ context, tableId }) {
+  return listRecords(
+    context.accessToken,
+    context.catalog.appToken,
+    tableId,
+  )
+}
+
 const WORK_TITLE_WRAPPERS = Object.freeze([
   ['《', '》'],
   ['“', '”'],
@@ -2443,7 +3913,37 @@ const WORK_TITLE_WRAPPERS = Object.freeze([
   ["'", "'"],
 ])
 
-function normalizeWorkTitle(value) {
+function chineseOrdinalValue(value) {
+  if (/^\d+$/u.test(value)) return Number(value)
+  const digits = Object.freeze({ 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 })
+  let total = 0
+  let current = 0
+  for (const character of value) {
+    if (Object.hasOwn(digits, character)) {
+      current = digits[character]
+    } else if (character === '十' || character === '百' || character === '千') {
+      const unit = character === '十' ? 10 : character === '百' ? 100 : 1_000
+      total += (current || 1) * unit
+      current = 0
+    } else {
+      return null
+    }
+  }
+  return total + current
+}
+
+function normalizeWorkAliasForStorage(value) {
+  let normalized = String(value || '').normalize('NFKC').trim().replace(/\s+/gu, ' ')
+  for (const [opening, closing] of WORK_TITLE_WRAPPERS) {
+    if (normalized.startsWith(opening) && normalized.endsWith(closing)) {
+      normalized = normalized.slice(opening.length, -closing.length).trim()
+      break
+    }
+  }
+  return normalized
+}
+
+export function normalizeDirectorWorkTitle(value) {
   let normalized = String(value || '').normalize('NFKC').trim()
   let stripped = true
   while (normalized && stripped) {
@@ -2457,13 +3957,40 @@ function normalizeWorkTitle(value) {
       break
     }
   }
-  return normalized.toLocaleLowerCase('zh-CN')
+  normalized = normalized.replace(/第([零〇一二两三四五六七八九十百千\d]+)(季|集)/gu, (match, ordinal, unit) => {
+    const numeric = chineseOrdinalValue(ordinal)
+    return Number.isSafeInteger(numeric) && numeric > 0 ? `第${numeric}${unit}` : match
+  })
+  normalized = normalized.replace(/\bS0*(\d+)\s*E0*(\d+)\b/giu, '第$1季第$2集')
+  return normalized
+    .replace(/[\s·•:：,_，.。\-—–]+/gu, '')
+    .toLocaleLowerCase('zh-CN')
 }
 
-function normalizedWorkNames(fields) {
-  return [fields['作品名称'], ...String(fields['别名'] || '').split('\n')]
-    .map(normalizeWorkTitle)
-    .filter(Boolean)
+const normalizeWorkTitle = normalizeDirectorWorkTitle
+
+export function deriveDirectorWorkNames(fields, worksById = new Map(), visited = new Set()) {
+  const direct = [fields['作品名称'], ...String(fields['别名'] || '').split('\n')].filter(Boolean)
+  const parentId = String(fields['父作品 ID'] || '').trim()
+  if (parentId && !visited.has(parentId)) {
+    const parent = worksById.get(parentId)
+    if (parent) {
+      const nextVisited = new Set(visited)
+      nextVisited.add(parentId)
+      const parentNames = deriveDirectorWorkNames(parent.fields || parent, worksById, nextVisited)
+      const level = String(fields['作品层级'] || '')
+      const ordinal = level === '季' ? fields['季序号'] : level === '集' ? fields['集序号'] : null
+      const unit = level === '季' ? '季' : level === '集' ? '集' : ''
+      if (Number.isSafeInteger(Number(ordinal)) && Number(ordinal) > 0 && unit) {
+        direct.push(...parentNames.map(name => `${name} 第${Number(ordinal)}${unit}`))
+      }
+    }
+  }
+  return [...new Set(direct.map(normalizeWorkAliasForStorage).filter(Boolean))]
+}
+
+function normalizedWorkNames(fields, worksById = new Map()) {
+  return deriveDirectorWorkNames(fields, worksById).map(normalizeWorkTitle).filter(Boolean)
 }
 
 async function resolveWorkRecords({ context, table, tableId, query }) {
@@ -2472,12 +3999,10 @@ async function resolveWorkRecords({ context, table, tableId, query }) {
     context.catalog.appToken,
     tableId,
   )
-  const normalizedQuery = normalizeWorkTitle(query)
   return records.filter(record => {
     const normalizedRecord = operationRecord(table, record)
     assertOperationRecordScope(context, table, normalizedRecord, normalizedRecord.stableId)
     return normalizedRecord.reviewed
-      && normalizedWorkNames(normalizedRecord.fields).includes(normalizedQuery)
   })
 }
 
@@ -2783,6 +4308,10 @@ function operationDependencies(options) {
     findExact: supplied.findExact || findExactOperationRecords,
     search: supplied.search || searchOperationRecords,
     findByWork: supplied.findByWork || findOperationRecordsByWork,
+    listAll: supplied.listAll || listAllOperationRecords,
+    findGlobalBySourceWork: supplied.findGlobalBySourceWork
+      || supplied.findByWork
+      || findGlobalKnowledgeBySourceWork,
     resolveWork: supplied.resolveWork || resolveWorkRecords,
     inspectSchema: supplied.inspectSchema || inspectOperationSchema,
     withStableCreateLock: supplied.withStableCreateLock || withStableCreateFileLock,
@@ -2809,9 +4338,15 @@ function normalizeSearchRequest(request, schema = null) {
   }
   assertSafeRemoteOutput(request.table, 'table')
   if (schema) operationTable(schema, request.table, true)
+  const globalKnowledge = request.table === 'skills_techniques'
   const needsWork = request.table !== 'system_blueprint' && request.table !== 'works'
-  const workId = needsWork ? validateOperationStableId(request.workId) : null
-  if (!needsWork && request.workId !== undefined) throw new Error('search_work_id_unexpected')
+    && !globalKnowledge
+  const workId = needsWork
+    ? validateOperationStableId(request.workId)
+    : request.workId === undefined ? null : validateOperationStableId(request.workId)
+  if (!needsWork && !globalKnowledge && request.workId !== undefined) {
+    throw new Error('search_work_id_unexpected')
+  }
   if (typeof request.query !== 'string') throw new Error('record_field_type_invalid:query')
   const query = request.query.normalize('NFKC').replace(/\r\n?/gu, '\n').trim()
   if (!query) throw new Error('record_field_empty:query')
@@ -2850,6 +4385,31 @@ function normalizeWorkflowObjective(value) {
   return objective
 }
 
+function normalizeStableIdBatch(value, label = 'stableIds') {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OPERATION_BATCH_ITEMS) {
+    throw new Error('operation_batch_size_invalid:' + label)
+  }
+  const stableIds = value.map(validateOperationStableId)
+  if (new Set(stableIds).size !== stableIds.length) {
+    throw new Error('operation_batch_duplicate_identity:' + label)
+  }
+  return stableIds
+}
+
+function normalizeProposalBatchItems(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_OPERATION_BATCH_ITEMS) {
+    throw new Error('operation_batch_size_invalid:items')
+  }
+  return value.map((rawItem, index) => {
+    const item = requireObject(rawItem, 'operation_batch_item')
+    assertOperationKeys(item, new Set(['fields', 'references']))
+    if (!Object.hasOwn(item, 'fields')) {
+      throw new Error('operation_batch_item_fields_required:' + index)
+    }
+    return item
+  })
+}
+
 function incrementDirectorBrainVersion(value) {
   const match = /^v(\d+)\.(\d+)\.(\d+)$/u.exec(String(value || ''))
   if (!match) throw new Error('record_version_invalid')
@@ -2862,7 +4422,8 @@ function requiredReviewFields(table) {
   const common = [
     table.fields[0].name, table.stableId, '项目 ID', '版本', '来源', '更新时间',
   ]
-  if (table.key !== 'system_blueprint' && table.key !== 'works') common.push('作品 ID')
+  if (table.key !== 'system_blueprint' && table.key !== 'works'
+    && !GLOBAL_KNOWLEDGE_TABLES.has(table.key)) common.push('作品 ID')
   if (table.key === 'material_evidence') {
     common.push(
       '任务 ID', '素材 ID', '场景 ID', '镜头 ID', '起始时间码', '结束时间码',
@@ -2909,6 +4470,7 @@ async function loadReviewedVersionReference(
 
 async function validateReviewReferences(context, dependencies, table, record, workId) {
   const rule = PROPOSAL_REFERENCE_RULES[table.key] || {}
+  const referenceWorkId = GLOBAL_KNOWLEDGE_TABLES.has(table.key) ? null : workId
   for (const groupName of ['required', 'optional']) {
     for (const [, [tableKey, fieldName]] of Object.entries(rule[groupName] || {})) {
       const stableId = String(record.fields[fieldName] || '').trim()
@@ -2918,10 +4480,11 @@ async function validateReviewReferences(context, dependencies, table, record, wo
         }
         continue
       }
+      const targetWorkId = GLOBAL_KNOWLEDGE_TABLES.has(tableKey) ? null : referenceWorkId
       if (fieldName === '上一版本 ID') {
-        await loadReviewedVersionReference(context, dependencies, tableKey, stableId, workId)
+        await loadReviewedVersionReference(context, dependencies, tableKey, stableId, targetWorkId)
       } else {
-        await loadReviewedReference(context, dependencies, tableKey, stableId, workId)
+        await loadReviewedReference(context, dependencies, tableKey, stableId, targetWorkId)
       }
     }
   }
@@ -2932,7 +4495,17 @@ async function validateReviewReferences(context, dependencies, table, record, wo
         throw new Error('review_reference_missing:' + table.key + ':' + fieldName)
       }
       for (const stableId of stableIds) {
-        await loadReviewedReference(context, dependencies, tableKey, stableId, workId)
+        if (table.key === 'skills_techniques' && tableKey === 'director_cases') {
+          await loadReviewedDirectorCaseChain(context, dependencies, stableId)
+        } else {
+          await loadReviewedReference(
+            context,
+            dependencies,
+            tableKey,
+            stableId,
+            GLOBAL_KNOWLEDGE_TABLES.has(tableKey) ? null : referenceWorkId,
+          )
+        }
       }
     }
   }
@@ -3368,9 +4941,12 @@ export async function reviewDirectorBrainRecord(requestValue, options = {}) {
   if (table.key === 'system_blueprint') {
     throw new Error('review_table_not_allowed:system_blueprint')
   }
+  const globalKnowledge = GLOBAL_KNOWLEDGE_TABLES.has(table.key)
   const workId = table.key === 'system_blueprint' || table.key === 'works'
     ? null
-    : validateOperationStableId(request.workId)
+    : globalKnowledge && request.workId === undefined
+      ? null
+      : validateOperationStableId(request.workId)
   if ((table.key === 'system_blueprint' || table.key === 'works')
     && request.workId !== undefined) {
     throw new Error('review_work_id_unexpected')
@@ -3518,6 +5094,186 @@ export async function reviewDirectorBrainRecord(requestValue, options = {}) {
   }
 }
 
+async function executeOneDirectorBrainProposal({
+  context,
+  dependencies,
+  table,
+  workId,
+  fields: rawFields,
+  references: rawReferences,
+  options,
+  allowLongFields = false,
+}) {
+  const proposalFields = normalizeProposalBusinessFields(
+    table,
+    rawFields,
+    { allowLongFields },
+  )
+  const proposalReferences = await resolveProposalReferences(
+    context,
+    dependencies,
+    table,
+    rawReferences,
+    workId,
+    proposalFields,
+  )
+  const businessFields = {
+    ...proposalFields,
+    ...proposalReferences.fields,
+    ...(workId && table.key !== 'skills_techniques' ? { '作品 ID': workId } : {}),
+  }
+  const stableId = stableProposalId(table.key, businessFields)
+  const storedBusinessFields = {
+    ...businessFields,
+    ...(table.key === 'works' && proposalFields['作品层级'] === '系列'
+      ? { '系列 ID': stableId }
+      : {}),
+  }
+  const { tableId } = tableContext(context.schema, context.catalog, table.key)
+  return dependencies.withStableCreateLock({ context, table, tableId, stableId }, async () => {
+    const existing = await dependencies.findExact({ context, table, tableId, stableId })
+    if (!Array.isArray(existing)) throw new Error('operation_dependency_result_invalid')
+    if (existing.length > 1) throw new Error('duplicate_stable_record_id:' + table.key)
+    if (existing.length === 1) {
+      if (!businessFieldsMatch(table, existing[0], storedBusinessFields)) {
+        throw new Error('stable_record_id_hash_collision:' + table.key)
+      }
+      const record = operationRecord(table, existing[0])
+      assertOperationRecordScope(
+        context,
+        table,
+        record,
+        table.key === 'works' ? stableId : workId,
+      )
+      return {
+        ok: true,
+        action: 'propose',
+        table: table.key,
+        stableId,
+        outcome: 'unchanged',
+        record,
+      }
+    }
+
+    const nowValue = typeof options.now === 'function' ? options.now() : new Date().toISOString()
+    const fields = {
+      ...storedBusinessFields,
+      [table.stableId]: stableId,
+      '项目 ID': context.schema.projectId,
+      ...(workId && table.key !== 'skills_techniques' ? { '作品 ID': workId } : {}),
+      ...(table.fields.some(field => field.name === '版本') ? { '版本': OPERATION_VERSION } : {}),
+      '来源': OPERATION_SOURCE,
+      '更新时间': nowValue,
+      [table.key === 'director_cases' ? '复核状态' : '状态']: CANDIDATE_STATUS_BY_TABLE[table.key],
+    }
+    const normalizedFields = normalizeCompleteOperationFields(table, fields)
+    await dependencies.create({ context, table, tableId, fields: normalizedFields })
+    const verified = await dependencies.findExact({ context, table, tableId, stableId })
+    if (!Array.isArray(verified) || verified.length !== 1) {
+      throw new Error(verified?.length > 1
+        ? 'duplicate_stable_record_id:' + table.key
+        : 'proposed_record_verification_failed:' + table.key)
+    }
+    if (!businessFieldsMatch(table, verified[0], normalizedFields)) {
+      throw new Error('stable_record_id_hash_collision:' + table.key)
+    }
+    const record = operationRecord(table, verified[0])
+    assertOperationRecordScope(
+      context,
+      table,
+      record,
+      table.key === 'works' ? stableId : workId,
+    )
+    return {
+      ok: true,
+      action: 'propose',
+      table: table.key,
+      stableId,
+      outcome: 'created',
+      record,
+    }
+  })
+}
+
+function validateProposalBatchRequest(request, options = {}) {
+  assertOperationKeys(request, new Set(['action', 'table', 'workId', 'items']))
+  if (request.action !== 'propose_batch') throw new Error('operation_action_invalid')
+  assertSafeOperationContent(request, 'request', {
+    maximumTextLength: options.allowLongFields
+      ? MAX_PROPOSAL_TEXT_LENGTH
+      : MAX_OPERATION_TEXT_LENGTH,
+  })
+  if (typeof request.table !== 'string' || !request.table.trim()) {
+    throw new Error('operation_table_required')
+  }
+  if (!PROPOSABLE_TABLES.has(request.table)) {
+    throw new Error('operation_table_not_proposable:' + request.table)
+  }
+  const items = normalizeProposalBatchItems(request.items)
+  if (request.table === 'works' && request.workId !== undefined) {
+    throw new Error('work_proposal_work_id_forbidden')
+  }
+  if (request.table !== 'works' && request.table !== 'skills_techniques') {
+    validateOperationStableId(request.workId)
+  } else if (request.table === 'skills_techniques' && request.workId !== undefined) {
+    validateOperationStableId(request.workId)
+  }
+  return items
+}
+
+async function executeProposalBatch(request, options, allowLongFields) {
+  const dependencies = operationDependencies(options)
+  const items = validateProposalBatchRequest(request, { allowLongFields })
+  const context = await dependencies.connect(options)
+  const table = operationTable(context.schema, request.table)
+  const workId = table.key === 'works'
+    ? null
+    : table.key === 'skills_techniques' && request.workId === undefined
+      ? null
+      : validateOperationStableId(request.workId)
+  if (workId) await loadReviewedReference(context, dependencies, 'works', workId, workId)
+  const identities = new Set()
+  for (const item of items) {
+    const fields = normalizeProposalBusinessFields(table, item.fields, { allowLongFields })
+    const references = normalizeProposalReferences(table, item.references)
+    const identity = canonicalJson({ fields, references })
+    if (identities.has(identity)) throw new Error('operation_batch_duplicate_identity:items')
+    identities.add(identity)
+    await resolveProposalReferences(
+      context, dependencies, table, item.references, workId, fields,
+    )
+  }
+  const results = []
+  for (const item of items) {
+    results.push(await executeOneDirectorBrainProposal({
+      context,
+      dependencies,
+      table,
+      workId,
+      fields: item.fields,
+      references: item.references,
+      options,
+      allowLongFields,
+    }))
+  }
+  return {
+    ok: true,
+    action: 'propose_batch',
+    table: table.key,
+    workId,
+    count: results.length,
+    created: results.filter(result => result.outcome === 'created').length,
+    unchanged: results.filter(result => result.outcome === 'unchanged').length,
+    results,
+  }
+}
+
+export async function executeDirectorBrainProposalBatch(requestValue, options = {}) {
+  const request = requireObject(requestValue, 'proposal_batch_request')
+  assertSerializedSize(request, MAX_PROPOSAL_BATCH_INPUT_BYTES, 'proposal_batch_request')
+  return executeProposalBatch(request, options, true)
+}
+
 export async function executeDirectorBrainOperation(requestValue, options = {}) {
   const request = requireObject(requestValue, 'operation_request')
   assertOperationRequestSize(request)
@@ -3555,6 +5311,13 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     }
     assertSafeRemoteOutput(request.table, 'table')
     validatedStableId = validateOperationStableId(request.stableId)
+  } else if (request.action === 'get_many') {
+    assertOperationKeys(request, new Set(['action', 'table', 'workId', 'stableIds']))
+    if (typeof request.table !== 'string' || !request.table.trim()) {
+      throw new Error('operation_table_required')
+    }
+    assertSafeRemoteOutput(request.table, 'table')
+    normalizeStableIdBatch(request.stableIds)
   } else if (request.action === 'search') {
     normalizeSearchRequest(request)
   } else if (request.action === 'assemble') {
@@ -3567,6 +5330,12 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     assertOperationKeys(request, new Set(['action', 'workId', 'objective']))
     validateOperationStableId(request.workId)
     normalizeWorkflowObjective(request.objective)
+  } else if (request.action === 'learning_context') {
+    assertSafeOperationContent(request, 'request')
+    assertOperationKeys(request, new Set(['action', 'workId']))
+    validateOperationStableId(request.workId)
+  } else if (request.action === 'propose_batch') {
+    validateProposalBatchRequest(request)
   } else {
     assertSafeOperationContent(request, 'request')
     assertOperationKeys(request, new Set(['action', 'table', 'workId', 'fields', 'references']))
@@ -3578,6 +5347,8 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     }
     if (request.table === 'works') {
       if (request.workId !== undefined) throw new Error('work_proposal_work_id_forbidden')
+    } else if (request.table === 'skills_techniques' && request.workId === undefined) {
+      // Cross-work techniques derive their source works from reviewed case references.
     } else {
       validateOperationStableId(request.workId)
     }
@@ -3590,10 +5361,12 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     const { tableId } = tableContext(context.schema, context.catalog, table.key)
     const records = await dependencies.resolveWork({ context, table, tableId, query })
     if (!Array.isArray(records)) throw new Error('operation_dependency_result_invalid')
-    const matches = records.map(record => operationRecord(table, record)).filter(record => {
+    const normalizedRecords = records.map(record => operationRecord(table, record))
+    const worksById = new Map(normalizedRecords.map(record => [record.stableId, record]))
+    const matches = normalizedRecords.filter(record => {
       assertOperationRecordScope(context, table, record, record.stableId)
       return record.reviewed
-        && normalizedWorkNames(record.fields).includes(
+        && normalizedWorkNames(record.fields, worksById).includes(
           normalizeWorkTitle(query),
         )
     })
@@ -3608,6 +5381,14 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
         workId: match.stableId,
         name: match.fields['作品名称'],
         aliases: String(match.fields['别名'] || '').split('\n').filter(Boolean),
+        hierarchy: {
+          level: match.fields['作品层级'] || '独立作品',
+          parentWorkId: match.fields['父作品 ID'] || null,
+          seriesId: match.fields['系列 ID'] || null,
+          seasonId: match.fields['季 ID'] || null,
+          seasonNumber: match.fields['季序号'] ?? null,
+          episodeNumber: match.fields['集序号'] ?? null,
+        },
         state: match.state,
         version: match.fields['版本'],
       } : null,
@@ -3615,9 +5396,12 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
   }
   if (request.action === 'get') {
     const table = operationTable(context.schema, request.table)
+    const globalKnowledge = GLOBAL_KNOWLEDGE_TABLES.has(table.key)
     const workId = table.key === 'system_blueprint' || table.key === 'works'
       ? null
-      : validateOperationStableId(request.workId)
+      : globalKnowledge && request.workId === undefined
+        ? null
+        : validateOperationStableId(request.workId)
     if ((table.key === 'system_blueprint' || table.key === 'works')
       && request.workId !== undefined) {
       throw new Error('get_work_id_unexpected')
@@ -3637,6 +5421,87 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
       found: records.length === 1,
       workId,
       record,
+    }
+  }
+
+  if (request.action === 'get_many') {
+    const table = operationTable(context.schema, request.table)
+    const globalKnowledge = GLOBAL_KNOWLEDGE_TABLES.has(table.key)
+    const workId = table.key === 'system_blueprint' || table.key === 'works'
+      ? null
+      : globalKnowledge && request.workId === undefined
+        ? null
+        : validateOperationStableId(request.workId)
+    if ((table.key === 'system_blueprint' || table.key === 'works')
+      && request.workId !== undefined) throw new Error('get_work_id_unexpected')
+    const stableIds = normalizeStableIdBatch(request.stableIds)
+    const { tableId } = tableContext(context.schema, context.catalog, table.key)
+    const records = []
+    const missing = []
+    for (const stableId of stableIds) {
+      const found = await dependencies.findExact({ context, table, tableId, stableId })
+      if (!Array.isArray(found)) throw new Error('operation_dependency_result_invalid')
+      if (found.length > 1) throw new Error('duplicate_stable_record_id:' + table.key)
+      if (found.length === 0) {
+        missing.push(stableId)
+        continue
+      }
+      const record = operationRecord(table, found[0])
+      assertOperationRecordScope(context, table, record, workId)
+      records.push(record)
+    }
+    return {
+      ok: true,
+      action: 'get_many',
+      table: table.key,
+      workId,
+      count: records.length,
+      missing,
+      records,
+    }
+  }
+
+  if (request.action === 'propose_batch') {
+    const table = operationTable(context.schema, request.table)
+    const workId = table.key === 'works'
+      ? null
+      : table.key === 'skills_techniques' && request.workId === undefined
+        ? null
+        : validateOperationStableId(request.workId)
+    if (workId) await loadReviewedReference(context, dependencies, 'works', workId, workId)
+    const items = normalizeProposalBatchItems(request.items)
+    const identities = new Set()
+    for (const item of items) {
+      const fields = normalizeProposalBusinessFields(table, item.fields)
+      const references = normalizeProposalReferences(table, item.references)
+      const identity = canonicalJson({ fields, references })
+      if (identities.has(identity)) throw new Error('operation_batch_duplicate_identity:items')
+      identities.add(identity)
+      await resolveProposalReferences(
+        context, dependencies, table, item.references, workId, fields,
+      )
+    }
+    const results = []
+    for (const item of items) {
+      results.push(await executeOneDirectorBrainProposal({
+        context,
+        dependencies,
+        table,
+        workId,
+        fields: item.fields,
+        references: item.references,
+        options,
+      }))
+    }
+    return {
+      ok: true,
+      action: 'propose_batch',
+      table: table.key,
+      workId,
+      count: results.length,
+      created: results.filter(result => result.outcome === 'created').length,
+      unchanged: results.filter(result => result.outcome === 'unchanged').length,
+      results,
     }
   }
 
@@ -3713,6 +5578,146 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
     }
   }
 
+  if (request.action === 'learning_context') {
+    const workId = validateOperationStableId(request.workId)
+    await loadReviewedReference(context, dependencies, 'works', workId, workId)
+
+    const workTableKeys = [
+      'director_intents', 'material_evidence', 'people_profiles', 'story_nodes',
+      'story_relations', 'material_judgments', 'narrative_plans', 'director_cases',
+    ]
+    const reviewedByWork = {}
+    const allByWork = {}
+    let scannedRecordCount = 0
+    for (const tableKey of workTableKeys) {
+      const table = operationTable(context.schema, tableKey)
+      const { tableId } = tableContext(context.schema, context.catalog, table.key)
+      const rawRecords = await dependencies.findByWork({ context, table, tableId, workId })
+      if (!Array.isArray(rawRecords)) throw new Error('operation_dependency_result_invalid')
+      assertLearningContextTableLimit(table.key, rawRecords)
+      scannedRecordCount += rawRecords.length
+      const records = rawRecords.map(record => operationRecord(table, record))
+      assertUniqueOperationStableIds(table, records)
+      for (const record of records) assertOperationRecordScope(context, table, record, workId)
+      allByWork[table.key] = records
+      reviewedByWork[table.key] = records.filter(record => record.reviewed)
+    }
+    // Techniques are validated separately at project scope. Keeping the table
+    // present here lets the existing fixed-point integrity checker validate all
+    // same-work reference chains without treating cross-work cases as local.
+    reviewedByWork.skills_techniques = []
+    allByWork.skills_techniques = []
+    const projectTables = {}
+    for (const tableKey of ['director_cases', 'skills_techniques']) {
+      const table = operationTable(context.schema, tableKey)
+      const { tableId } = tableContext(context.schema, context.catalog, table.key)
+      const rawRecords = await dependencies.listAll({ context, table, tableId })
+      if (!Array.isArray(rawRecords)) throw new Error('operation_dependency_result_invalid')
+      assertLearningContextTableLimit(table.key, rawRecords)
+      scannedRecordCount += rawRecords.length
+      const records = rawRecords.map(record => operationRecord(table, record))
+      assertUniqueOperationStableIds(table, records)
+      for (const record of records) assertOperationRecordScope(context, table, record)
+      projectTables[table.key] = records
+    }
+    if (scannedRecordCount > LEARNING_CONTEXT_MAX_RECORDS) {
+      throw new Error('learning_context_record_limit_exceeded')
+    }
+
+    const allProjectCases = projectTables.director_cases
+    const historicalCaseIds = new Set(allProjectCases
+      .filter(isHistoricallyReviewedRecord)
+      .map(record => record.stableId))
+    const caseChains = new Map()
+    for (const record of allProjectCases.filter(record => record.reviewed)) {
+      if (!previousVersionIsValid(record, historicalCaseIds)) continue
+      try {
+        caseChains.set(
+          record.stableId,
+          await loadReviewedDirectorCaseChain(context, dependencies, record.stableId),
+        )
+      } catch {
+        // A nominally reviewed case with a broken source chain is not a safe
+        // learning input. Exclude it; no partial chain reaches the caller.
+      }
+    }
+    const validProjectCases = sortedOperationRecords(
+      allProjectCases.filter(record => caseChains.has(record.stableId)),
+    )
+
+    const allProjectTechniques = projectTables.skills_techniques
+    const historicalTechniqueIds = new Set(allProjectTechniques
+      .filter(isHistoricallyReviewedRecord)
+      .map(record => record.stableId))
+    const validProjectTechniques = []
+    for (const record of allProjectTechniques.filter(record => record.reviewed)) {
+      if (!previousVersionIsValid(record, historicalTechniqueIds)) continue
+      const caseIds = splitStoredReferences(record.fields['案例 ID']).sort()
+      if (!caseIds.length || caseIds.some(caseId => !caseChains.has(caseId))) continue
+      const sourceWorkIds = [...new Set(caseIds.map(caseId => caseChains.get(caseId).caseWorkId))]
+        .sort()
+      const storedSourceWorkIds = splitStoredReferences(record.fields['来源作品 ID']).sort()
+      if (!sameStableIdSet(sourceWorkIds, storedSourceWorkIds)) continue
+      validProjectTechniques.push(record)
+    }
+
+    const workIntegrity = inspectWorkflowReferenceIntegrity(
+      reviewedByWork,
+      allByWork,
+      { skills_techniques: validProjectTechniques },
+    )
+    const validWork = workIntegrity.validRecords
+    const activeIntents = sortedOperationRecords(validWork.director_intents || [])
+    if (activeIntents.length > 1) throw new Error('learning_context_active_intent_ambiguous')
+
+    const workContext = {
+      activeIntent: activeIntents[0] || null,
+      people_profiles: sortedOperationRecords(validWork.people_profiles || []),
+      story_nodes: sortedOperationRecords(validWork.story_nodes || []),
+      story_relations: sortedOperationRecords(validWork.story_relations || []),
+      material_judgments: sortedOperationRecords(validWork.material_judgments || []),
+      narrative_plans: sortedOperationRecords(validWork.narrative_plans || []),
+      director_cases: sortedOperationRecords(validWork.director_cases || []),
+    }
+    const projectContext = {
+      director_cases: validProjectCases,
+      skills_techniques: sortedOperationRecords(validProjectTechniques),
+    }
+    const outputRecordCount = (workContext.activeIntent ? 1 : 0)
+      + Object.entries(workContext)
+        .filter(([key]) => key !== 'activeIntent')
+        .reduce((sum, [, records]) => sum + records.length, 0)
+      + Object.values(projectContext).reduce((sum, records) => sum + records.length, 0)
+    const snapshot = {
+      schemaVersion: 1,
+      projectId: context.schema.projectId,
+      workId,
+      counts: {
+        work: Object.fromEntries(Object.entries(workContext).map(([key, value]) => [
+          key,
+          Array.isArray(value) ? value.length : value ? 1 : 0,
+        ])),
+        project: Object.fromEntries(Object.entries(projectContext).map(([key, records]) => (
+          [key, records.length]
+        ))),
+        total: outputRecordCount,
+      },
+      work: workContext,
+      project: projectContext,
+    }
+    const serializedSnapshot = canonicalJson(snapshot)
+    if (Buffer.byteLength(serializedSnapshot, 'utf8') > LEARNING_CONTEXT_MAX_OUTPUT_BYTES) {
+      throw new Error('learning_context_output_too_large')
+    }
+    return {
+      ok: true,
+      action: 'learning_context',
+      workId,
+      snapshot,
+      digest: createHash('sha256').update(serializedSnapshot, 'utf8').digest('hex'),
+    }
+  }
+
   if (request.action === 'assemble') {
     const workId = validateOperationStableId(request.workId)
     const work = await loadReviewedReference(context, dependencies, 'works', workId, workId)
@@ -3785,7 +5790,9 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
       item.key !== 'system_blueprint' && item.key !== 'works'
     ))) {
       const { tableId } = tableContext(context.schema, context.catalog, table.key)
-      const records = await dependencies.findByWork({ context, table, tableId, workId })
+      const records = GLOBAL_KNOWLEDGE_TABLES.has(table.key)
+        ? await dependencies.findGlobalBySourceWork({ context, table, tableId, workId })
+        : await dependencies.findByWork({ context, table, tableId, workId })
       if (!Array.isArray(records)) throw new Error('operation_dependency_result_invalid')
       const normalizedRecords = records.map(record => operationRecord(table, record))
       assertUniqueOperationStableIds(table, normalizedRecords)
@@ -3797,7 +5804,31 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
       reviewed[table.key] = safeRecords
       allRecords[table.key] = normalizedRecords
     }
-    const integrity = inspectWorkflowReferenceIntegrity(reviewed, allRecords)
+    const integrity = inspectWorkflowReferenceIntegrity(
+      { ...reviewed, skills_techniques: [] },
+      { ...allRecords, skills_techniques: [] },
+    )
+    const validTechniquePatterns = []
+    for (const technique of reviewed.skills_techniques || []) {
+      let validTechnique = true
+      for (const caseId of splitStoredReferences(technique.fields['案例 ID'])) {
+        try {
+          await loadReviewedDirectorCaseChain(context, dependencies, caseId)
+        } catch {
+          validTechnique = false
+          integrity.issues.push({
+            table: 'skills_techniques',
+            stableId: technique.stableId,
+            field: '案例 ID',
+            reason: 'not_reviewed_or_missing',
+          })
+          break
+        }
+      }
+      if (validTechnique) validTechniquePatterns.push(technique)
+    }
+    integrity.validRecords.skills_techniques = validTechniquePatterns
+    integrity.valid = integrity.issues.length === 0
     const valid = integrity.validRecords
     const layers = {
       perception: valid.material_evidence.length > 0,
@@ -3815,8 +5846,53 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
       ['judgment', '完成受导演意图约束的七维素材判断。'],
       ['narrative', '在已确认事实之上形成含故事脚本的叙事方案。'],
     ]
-    const nextSuggestion = missingSuggestions.find(([key]) => !layers[key])?.[1]
-      || '六层基础已就绪，可继续人工复核叙事方案与导演案例。'
+    const caseCount = {
+      total: counts.director_cases || 0,
+      reviewed: valid.director_cases.length,
+      candidates: Math.max(0, (counts.director_cases || 0) - valid.director_cases.length),
+    }
+    const techniqueCount = {
+      total: counts.skills_techniques || 0,
+      reviewed: valid.skills_techniques.length,
+      candidates: Math.max(0, (counts.skills_techniques || 0) - valid.skills_techniques.length),
+    }
+    const learningReadiness = {
+      cases: caseCount.reviewed > 0,
+      techniques: techniqueCount.reviewed > 0,
+      complete: caseCount.reviewed > 0 && techniqueCount.reviewed > 0,
+    }
+    const stageCount = tableKeys => {
+      const total = tableKeys.reduce((sum, tableKey) => sum + (counts[tableKey] || 0), 0)
+      const reviewedCount = tableKeys.reduce(
+        (sum, tableKey) => sum + (valid[tableKey]?.length || 0),
+        0,
+      )
+      return { total, reviewed: reviewedCount, candidates: Math.max(0, total - reviewedCount) }
+    }
+    const stageCounts = {
+      perception: stageCount(['material_evidence']),
+      people: stageCount(['people_profiles']),
+      story: stageCount(['story_nodes', 'story_relations']),
+      judgment: stageCount(['material_judgments']),
+      narrative: stageCount(['narrative_plans']),
+      intent: stageCount(['director_intents']),
+      cases: caseCount,
+      techniques: techniqueCount,
+    }
+    const stageOrder = [
+      'perception', 'intent', 'people', 'story', 'judgment', 'narrative', 'cases', 'techniques',
+    ]
+    const nextReviewStage = stageOrder.find(stage => stageCounts[stage].candidates > 0) || null
+    const missingLayerSuggestion = missingSuggestions.find(([key]) => !layers[key])?.[1]
+    const nextSuggestion = missingLayerSuggestion || (
+      !learningReadiness.cases
+        ? '六层基础已就绪；下一步生成并人工确认导演案例。'
+        : !techniqueCount.total
+          ? '导演案例已确认；下一步从已审核案例提炼跨作品技法候选。'
+          : !learningReadiness.techniques
+            ? '已有技法候选；下一步人工审核后进入可复用技法库。'
+            : '六层基础、导演案例和跨作品技法均已就绪。'
+    )
     const readyLayers = Object.values(layers).filter(Boolean).length
     return {
       ok: true,
@@ -3824,6 +5900,17 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
       workId,
       objective,
       readiness: layers,
+      learningReadiness,
+      // Internal orchestration receipt. OpenClaw strips this identifier from
+      // user-visible workflow responses; extraction uses it to bind every
+      // judgment to the one reviewed active intent.
+      activeIntentId: valid.director_intents.length === 1
+        ? valid.director_intents[0].stableId
+        : null,
+      caseCount,
+      techniqueCount,
+      stageCounts,
+      nextReviewGate: nextReviewStage ? `review:${nextReviewStage}` : null,
       metrics: {
         readyLayers,
         totalLayers: 6,
@@ -3844,85 +5931,20 @@ export async function executeDirectorBrainOperation(requestValue, options = {}) 
   if (!PROPOSABLE_TABLES.has(table.key)) {
     throw new Error('operation_table_not_proposable:' + table.key)
   }
-  const workId = table.key === 'works' ? null : validateOperationStableId(request.workId)
+  const workId = table.key === 'works'
+    ? null
+    : table.key === 'skills_techniques' && request.workId === undefined
+      ? null
+      : validateOperationStableId(request.workId)
   if (workId) await loadReviewedReference(context, dependencies, 'works', workId, workId)
-  const proposalFields = normalizeProposalBusinessFields(table, request.fields)
-  const proposalReferences = await resolveProposalReferences(
+  return executeOneDirectorBrainProposal({
     context,
     dependencies,
     table,
-    request.references,
     workId,
-  )
-  const businessFields = {
-    ...proposalFields,
-    ...proposalReferences.fields,
-    ...(workId ? { '作品 ID': workId } : {}),
-  }
-  const stableId = stableProposalId(table.key, businessFields)
-  const { tableId } = tableContext(context.schema, context.catalog, table.key)
-  return dependencies.withStableCreateLock({ context, table, tableId, stableId }, async () => {
-    const existing = await dependencies.findExact({ context, table, tableId, stableId })
-    if (!Array.isArray(existing)) throw new Error('operation_dependency_result_invalid')
-    if (existing.length > 1) throw new Error('duplicate_stable_record_id:' + table.key)
-    if (existing.length === 1) {
-      if (!businessFieldsMatch(table, existing[0], businessFields)) {
-        throw new Error('stable_record_id_hash_collision:' + table.key)
-      }
-      const record = operationRecord(table, existing[0])
-      assertOperationRecordScope(
-        context,
-        table,
-        record,
-        table.key === 'works' ? stableId : workId,
-      )
-      return {
-        ok: true,
-        action: 'propose',
-        table: table.key,
-        stableId,
-        outcome: 'unchanged',
-        record,
-      }
-    }
-
-    const nowValue = typeof options.now === 'function' ? options.now() : new Date().toISOString()
-    const fields = {
-      ...businessFields,
-      [table.stableId]: stableId,
-      '项目 ID': context.schema.projectId,
-      ...(workId ? { '作品 ID': workId } : {}),
-      ...(table.fields.some(field => field.name === '版本') ? { '版本': OPERATION_VERSION } : {}),
-      '来源': OPERATION_SOURCE,
-      '更新时间': nowValue,
-      [table.key === 'director_cases' ? '复核状态' : '状态']: CANDIDATE_STATUS_BY_TABLE[table.key],
-    }
-    const normalizedFields = normalizeCompleteOperationFields(table, fields)
-    await dependencies.create({ context, table, tableId, fields: normalizedFields })
-    const verified = await dependencies.findExact({ context, table, tableId, stableId })
-    if (!Array.isArray(verified) || verified.length !== 1) {
-      throw new Error(verified?.length > 1
-        ? 'duplicate_stable_record_id:' + table.key
-        : 'proposed_record_verification_failed:' + table.key)
-    }
-    if (!businessFieldsMatch(table, verified[0], normalizedFields)) {
-      throw new Error('stable_record_id_hash_collision:' + table.key)
-    }
-    const record = operationRecord(table, verified[0])
-    assertOperationRecordScope(
-      context,
-      table,
-      record,
-      table.key === 'works' ? stableId : workId,
-    )
-    return {
-      ok: true,
-      action: 'propose',
-      table: table.key,
-      stableId,
-      outcome: 'created',
-      record,
-    }
+    fields: request.fields,
+    references: request.references,
+    options,
   })
 }
 
@@ -4157,6 +6179,10 @@ function parseOperationInput(value) {
   return parseStdinJson(value, 'operate', MAX_OPERATION_INPUT_BYTES)
 }
 
+function parseProposalBatchInput(value) {
+  return parseStdinJson(value, 'propose_batch', MAX_PROPOSAL_BATCH_INPUT_BYTES)
+}
+
 function parseEvidenceProjectionInput(value) {
   return parseStdinJson(value, 'project_evidence', MAX_EVIDENCE_PROJECTION_INPUT_BYTES)
 }
@@ -4168,6 +6194,9 @@ function parseReviewInput(value) {
 export function directorBrainStdinSpec(command) {
   if (command === 'operate') {
     return { label: 'operate', maximumBytes: MAX_OPERATION_INPUT_BYTES }
+  }
+  if (command === 'propose-batch') {
+    return { label: 'propose_batch', maximumBytes: MAX_PROPOSAL_BATCH_INPUT_BYTES }
   }
   if (command === 'project-evidence') {
     return { label: 'project_evidence', maximumBytes: MAX_EVIDENCE_PROJECTION_INPUT_BYTES }
@@ -4186,24 +6215,47 @@ export function parseDirectorBrainArgs(argv) {
     appId: null,
     tableKey: null,
     dryRun: false,
+    prepare: false,
+    apply: false,
+    rollbackDryRun: false,
+    receiptFile: null,
+    expectedSha256: null,
+    backupAction: null,
   }
-  if (['operate', 'project-evidence', 'review'].includes(args.command) && argv.length !== 1) {
+  if (['operate', 'propose-batch', 'project-evidence', 'review'].includes(args.command)
+    && argv.length !== 1) {
     throw new Error(args.command.replace(/-/gu, '_') + '_accepts_stdin_only')
   }
-  for (let index = 1; index < argv.length; index += 1) {
+  let firstOption = 1
+  if (args.command === 'migration-backup') {
+    args.backupAction = argv[1] || null
+    if (args.backupAction !== 'verify') throw new Error('migration_backup_action_invalid')
+    firstOption = 2
+  }
+  for (let index = firstOption; index < argv.length; index += 1) {
     const flag = argv[index]
-    if (flag === '--dry-run') {
+    if (['--dry-run', '--prepare', '--apply', '--rollback-dry-run'].includes(flag)) {
       if (args.command !== 'migrate') throw new Error('unknown_option:' + flag)
-      args.dryRun = true
+      if (flag === '--dry-run') args.dryRun = true
+      if (flag === '--prepare') args.prepare = true
+      if (flag === '--apply') args.apply = true
+      if (flag === '--rollback-dry-run') args.rollbackDryRun = true
       continue
     }
     const value = argv[index + 1]
-    if (flag === '--schema' || flag === '--catalog' || flag === '--app-id' || flag === '--table') {
+    if (flag === '--schema' || flag === '--catalog' || flag === '--app-id' || flag === '--table'
+      || flag === '--receipt-file' || flag === '--expected-sha') {
       if (!value) throw new Error('missing_option_value:' + flag)
+      if (args.command === 'migration-backup'
+        && !['--receipt-file', '--expected-sha'].includes(flag)) {
+        throw new Error('unknown_option:' + flag)
+      }
       if (flag === '--schema') args.schemaPath = resolve(value)
       if (flag === '--catalog') args.catalogPath = value
       if (flag === '--app-id') args.appId = value
       if (flag === '--table') args.tableKey = value
+      if (flag === '--receipt-file') args.receiptFile = value
+      if (flag === '--expected-sha') args.expectedSha256 = value
       index += 1
       continue
     }
@@ -4218,11 +6270,33 @@ export function parseDirectorBrainArgs(argv) {
     'verify',
     'schema',
     'operate',
+    'propose-batch',
     'project-evidence',
     'review',
     'migrate',
+    'migration-backup',
   ].includes(args.command)) {
     throw new Error('director_brain_command_invalid')
+  }
+  if (args.command === 'migrate') {
+    const modeCount = [args.dryRun, args.prepare, args.apply, args.rollbackDryRun]
+      .filter(Boolean).length
+    if (modeCount !== 1) throw new Error('migration_mode_required')
+    if ((args.prepare || args.apply || args.rollbackDryRun) && !args.receiptFile) {
+      throw new Error('migration_receipt_file_required')
+    }
+    if ((args.apply || args.rollbackDryRun) && !args.expectedSha256) {
+      throw new Error('migration_expected_sha256_required')
+    }
+    if ((args.dryRun || args.prepare) && args.expectedSha256) {
+      throw new Error('migration_expected_sha256_write_or_rollback_only')
+    }
+  }
+  if (args.command === 'migration-backup' && !args.receiptFile) {
+    throw new Error('migration_receipt_file_required')
+  }
+  if (args.command === 'migration-backup' && !args.expectedSha256) {
+    throw new Error('migration_expected_sha256_required')
   }
   return args
 }
@@ -4232,13 +6306,19 @@ export async function runDirectorBrainCli(argv, options = {}) {
   if (args.command === 'operate') {
     return executeDirectorBrainOperation(parseOperationInput(options.stdin), options)
   }
+  if (args.command === 'propose-batch') {
+    return executeDirectorBrainProposalBatch(parseProposalBatchInput(options.stdin), options)
+  }
   if (args.command === 'project-evidence') {
     return projectDirectorBrainEvidence(parseEvidenceProjectionInput(options.stdin), options)
   }
   if (args.command === 'review') {
     return reviewDirectorBrainRecord(parseReviewInput(options.stdin), options)
   }
-  if (args.command === 'migrate') return migrateDirectorBrain(args)
+  if (args.command === 'migrate') return migrateDirectorBrain({ ...options, ...args })
+  if (args.command === 'migration-backup') {
+    return verifyMigrationBackupFile(args.receiptFile, args.expectedSha256)
+  }
   if (args.command === 'schema') {
     const schema = await loadDirectorBrainSchema(args.schemaPath)
     return {

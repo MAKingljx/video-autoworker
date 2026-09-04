@@ -51,6 +51,25 @@ describe('OpenClaw loopback authentication boundary', () => {
     ))).toBe(false)
   })
 
+  it('admits director extraction only as a local POST through the existing OpenClaw boundary', () => {
+    const endpoint = 'http://127.0.0.1:3017/api/n8n/director-extraction'
+
+    // No Authorization header or endpoint-specific token is required on the trusted loopback path.
+    expect(isOpenClawN8nOperatorRequest(new Request(endpoint, { method: 'POST' }))).toBe(true)
+    expect(isOpenClawN8nOperatorRequest(new Request(
+      'http://director.example.test/api/n8n/director-extraction', { method: 'POST' },
+    ))).toBe(false)
+    expect(isOpenClawN8nOperatorRequest(new Request(endpoint, {
+      method: 'POST',
+      headers: { 'x-forwarded-for': '203.0.113.10' },
+    }))).toBe(false)
+    expect(isOpenClawN8nOperatorRequest(new Request(endpoint, {
+      method: 'POST',
+      headers: { 'x-forwarded-host': 'director.example.test' },
+    }))).toBe(false)
+    expect(isOpenClawN8nOperatorRequest(new Request(endpoint, { method: 'GET' }))).toBe(false)
+  })
+
   it('admits callbacks only on their exact POST loopback endpoint', () => {
     expect(checkOpenClawN8nCallbackRequest(new Request(
       'http://127.0.0.1:3017/api/n8n/claim', { method: 'POST' },

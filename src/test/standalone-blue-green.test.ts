@@ -4,6 +4,7 @@ import { execFile, execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -34,6 +35,24 @@ import {
 type RunningServer = { server: HttpServer; port: number }
 const cleanup: Array<() => void> = []
 const execFileAsync = promisify(execFile)
+
+function cleanDeployScriptFixture(root: string): string {
+  const repository = join(root, 'repository')
+  mkdirSync(repository, { mode: 0o700 })
+  cpSync(resolve(process.cwd(), 'scripts'), join(repository, 'scripts'), { recursive: true })
+  mkdirSync(join(repository, 'ops', 'n8n'), { recursive: true, mode: 0o700 })
+  cpSync(
+    resolve(process.cwd(), 'ops/n8n/workflows'),
+    join(repository, 'ops/n8n/workflows'),
+    { recursive: true },
+  )
+  execFileSync('git', ['init', '-b', 'main'], { cwd: repository, stdio: 'ignore' })
+  execFileSync('git', ['config', 'user.name', 'Blue Green Test'], { cwd: repository })
+  execFileSync('git', ['config', 'user.email', 'blue-green-test@example.invalid'], { cwd: repository })
+  execFileSync('git', ['add', '--', 'scripts', 'ops/n8n/workflows'], { cwd: repository })
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repository, stdio: 'ignore' })
+  return join(repository, 'scripts/deploy-blue-green.sh')
+}
 
 async function listen(server: HttpServer): Promise<RunningServer> {
   const sockets = new Set<Socket>()
@@ -134,7 +153,7 @@ function releaseReadinessPayload(
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '057_n8n_director_evidence_outbox',
+        latestMigration: '059_director_evidence_projection_receipts',
       },
       projection: {
         schema: 'video-autoworker-director-evidence-outbox-readiness/v1',
@@ -216,6 +235,44 @@ afterEach(() => {
 })
 
 describe('standalone blue-green router', () => {
+  it('keeps the first migration runbook complete and ordered', () => {
+    const document = readFileSync(
+      resolve(process.cwd(), 'docs/n8n-production-deployment.md'),
+      'utf8',
+    )
+    const start = document.indexOf('#### 逐命令 runbook（首次迁移）')
+    const end = document.indexOf('\n从旧单进程 3017 首次迁入 slot-v1', start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const runbook = document.slice(start, end)
+    const anchors = [
+      'n8n-backup-managed-workflows.mjs" backup',
+      'n8n-stop.sh"',
+      'n8n-import-workflows.sh"',
+      'n8n-start.sh"',
+      'verify-n8n-blue-green-workflows.mjs"',
+      'attest-transition',
+      'legacy-bootstrap-controller.mjs prepare',
+      'legacy-bootstrap-controller.mjs current-confirm',
+      'legacy-bootstrap-controller.mjs apply',
+      'deploy-blue-green.sh bootstrap',
+    ]
+    let previous = -1
+    for (const anchor of anchors) {
+      const current = runbook.indexOf(anchor)
+      expect(current, `missing or unordered runbook anchor: ${anchor}`).toBeGreaterThan(previous)
+      previous = current
+    }
+    expect(runbook).toContain('安装器本身不在整个 plist `bootout/bootstrap` 事务期间直接持 maintenance lock')
+    expect(runbook).toContain('n8n-start.sh --foreground')
+    expect(runbook).toContain('**常规回滚**')
+    expect(runbook).toContain('**transition rollback**')
+    expect(runbook).toContain('**disaster recovery**')
+    expect(runbook).toContain('AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF')
+    expect(runbook).toContain('第一阶段 `pre-bootstrap`')
+    expect(runbook).toContain('第二阶段 `full`')
+  })
+
   it('durably publishes JSON state before exposing the atomic rename', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-durable-json-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -568,9 +625,9 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
   })
 
   it('initializes a permission-restricted state file without touching application services', () => {
-    const root = mkdtempSync(join(tmpdir(), 'standalone-router-cli-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-router-cli-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
-    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const script = cleanDeployScriptFixture(root)
     const runDir = join(root, 'run')
     const releasesDir = join(root, 'releases')
 
@@ -596,6 +653,94 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
         green: { host: '127.0.0.1', port: 43417 },
       },
     })
+  })
+
+  it.each([
+    ['self drift', 'scripts/deploy-blue-green.sh', false,
+      'critical deployment source differs from Git HEAD: scripts/deploy-blue-green.sh'],
+    ['dirty worktree', 'scripts/standalone-router.mjs', false,
+      'deployment source worktree and index must be clean'],
+    ['dirty index', 'scripts/standalone-router.mjs', true,
+      'deployment source worktree and index must be clean'],
+  ] as const)('fails closed before creating deployment state for %s', (_label, relative, staged, error) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-source-gate-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = cleanDeployScriptFixture(root)
+    const repository = join(root, 'repository')
+    const changed = join(repository, relative)
+    writeFileSync(changed, `${readFileSync(changed, 'utf8')}\n# source gate drift\n`)
+    if (staged) execFileSync('git', ['add', '--', relative], { cwd: repository })
+    const runDir = join(root, 'run')
+
+    const result = spawnSync('bash', [script, 'init', 'blue'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AIWORKER_BG_RUN_DIR: runDir,
+        AIWORKER_BG_RELEASES_DIR: join(root, 'releases'),
+        NODE_BIN: process.execPath,
+      },
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain(error)
+    expect(existsSync(runDir)).toBe(false)
+  })
+
+  it('rejects a symlinked deploy entrypoint before creating deployment state', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-source-path-gate-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = cleanDeployScriptFixture(root)
+    const linked = join(root, 'deploy-blue-green.sh')
+    const runDir = join(root, 'run')
+    symlinkSync(script, linked)
+
+    const result = spawnSync('bash', [linked, 'init', 'blue'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AIWORKER_BG_RUN_DIR: runDir,
+        AIWORKER_BG_RELEASES_DIR: join(root, 'releases'),
+        NODE_BIN: process.execPath,
+      },
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('deploy entrypoint must not be a symbolic link')
+    expect(existsSync(runDir)).toBe(false)
+  })
+
+  it('recovers a sealed dead-owner lock through the deploy Shell bridge', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-stale-lock-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = cleanDeployScriptFixture(root)
+    const runDir = join(root, 'run')
+    const lockDir = join(runDir, '.deployment.lock')
+    mkdirSync(lockDir, { recursive: true, mode: 0o700 })
+    writeFileSync(join(lockDir, 'pid'), `${JSON.stringify({
+      schema: 'video-autoworker-shared-deployment-lock-owner/v2',
+      pid: 2_147_483_647,
+      nonce: 'a'.repeat(64),
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      processIdentitySha256: 'b'.repeat(64),
+    })}\n`, { mode: 0o600 })
+
+    const result = spawnSync('bash', [script, 'init', 'blue'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AIWORKER_BG_RUN_DIR: runDir,
+        AIWORKER_BG_RELEASES_DIR: join(root, 'releases'),
+        AIWORKER_BG_ROUTER_PORT: '43017',
+        AIWORKER_BG_BLUE_PORT: '43317',
+        AIWORKER_BG_GREEN_PORT: '43417',
+        NODE_BIN: process.execPath,
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(existsSync(lockDir)).toBe(false)
+    expect(existsSync(join(runDir, 'router-state.json'))).toBe(true)
   })
 
   it('refuses to start a slot whose recorded PID is still alive', () => {
@@ -700,9 +845,9 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
   })
 
   it('refuses to switch to a probe runtime even when its attestation matches the slot binding', () => {
-    const root = mkdtempSync(join(tmpdir(), 'standalone-switch-probe-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-switch-probe-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
-    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const script = cleanDeployScriptFixture(root)
     const runDir = join(root, 'run')
     const releasesDir = join(root, 'releases')
     const commonEnv = {
@@ -749,9 +894,9 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
   })
 
   it('refuses an active runtime whose attested database differs from the explicit live database', () => {
-    const root = mkdtempSync(join(tmpdir(), 'standalone-switch-wrong-db-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-switch-wrong-db-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
-    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const script = cleanDeployScriptFixture(root)
     const runDir = join(root, 'run')
     const releasesDir = join(root, 'releases')
     const attestedDb = join(root, 'attested.db')
@@ -803,9 +948,9 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
   })
 
   it('refuses to rebind a stopped production slot without a one-use retirement proof', () => {
-    const root = mkdtempSync(join(tmpdir(), 'standalone-rebind-without-retirement-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-rebind-without-retirement-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
-    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const script = cleanDeployScriptFixture(root)
     const runDir = join(root, 'run')
     const releasesDir = join(root, 'releases')
     const liveDb = join(root, 'mission-control.db')
@@ -841,9 +986,9 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
   })
 
   it('does not let ordinary init become a legacy hot-switch baseline', () => {
-    const root = mkdtempSync(join(tmpdir(), 'standalone-init-not-bootstrap-'))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-init-not-bootstrap-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
-    const script = resolve(process.cwd(), 'scripts/deploy-blue-green.sh')
+    const script = cleanDeployScriptFixture(root)
     const runDir = join(root, 'run')
     const liveDb = join(root, 'mission-control.db')
     writeFileSync(liveDb, 'fixture\n')
@@ -1687,6 +1832,11 @@ check_legacy_databases_quiescent "$1" "$2"
       '[[ "$source_projection_contract" == "$target_projection_contract" ]]',
     )
     expect(deployScript).not.toMatch(/\b(?:launchctl|n8n-stop|n8n-start)\b/u)
+    expect(deployScript).toContain('source "$SHARED_DEPLOYMENT_LOCK_SHELL"')
+    expect(deployScript).toContain('acquire_shared_deployment_lock')
+    expect(deployScript).toContain('release_shared_deployment_lock')
+    expect(deployScript).not.toContain('if ! mkdir "$LOCK_DIR"')
+    expect(deployScript).toContain('deployment source worktree and index must be clean')
     expect(deployScript).toContain('stage_release()')
     expect(deployScript).toContain('source standalone artifact failed verification')
     expect(deployScript).toContain('staged standalone artifact failed verification')
@@ -1742,9 +1892,29 @@ check_legacy_databases_quiescent "$1" "$2"
       deployScript.indexOf('bootstrap_baseline()'),
       deployScript.indexOf('bind_slot()'),
     )
+    const sourceGate = deployScript.slice(
+      deployScript.indexOf('verify_deployment_source_gate()'),
+      deployScript.indexOf('verify_director_video_release_chain()'),
+    )
+    expect(sourceGate).toContain('scripts/deploy-blue-green.sh')
+    expect(sourceGate).toContain('scripts/lib/shared-deployment-lock.mjs')
+    expect(sourceGate).toContain('GIT_OPTIONAL_LOCKS=0')
+    const preShutdownReleaseGate = bootstrapBody.indexOf(
+      'bootstrap_preflight_contract="$(verify_director_video_release_preflight',
+    )
+    expect(preShutdownReleaseGate).toBeGreaterThan(0)
+    expect(preShutdownReleaseGate).toBeLessThan(
+      bootstrapBody.indexOf('write_json_immutable "$pending"'),
+    )
+    expect(preShutdownReleaseGate).toBeLessThan(bootstrapBody.indexOf('kill -TERM "$legacy_pid"'))
     const finalWorkflowCheck = bootstrapBody.lastIndexOf('check_n8n_workflow_compatibility')
     expect(finalWorkflowCheck).toBeGreaterThan(bootstrapBody.indexOf('"$manager" status router'))
     expect(finalWorkflowCheck).toBeLessThan(bootstrapBody.indexOf('baseline_payload='))
+    expect(bootstrapBody.indexOf('baseline_verified_contract="$(verify_director_video_release_chain'))
+      .toBeGreaterThan(bootstrapBody.indexOf('"$manager" start "$slot"'))
+    expect(bootstrapBody).toContain(
+      'post-migration projection contract differs from the pre-shutdown release preflight',
+    )
     expect(bootstrapBody).toContain('"$workflow_compatibility_final" == "$workflow_compatibility_after"')
     expect(bootstrapBody.indexOf('workflow_digest="$($NODE_BIN', finalWorkflowCheck))
       .toBeLessThan(bootstrapBody.indexOf('baseline_payload='))

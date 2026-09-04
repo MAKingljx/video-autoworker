@@ -21,8 +21,10 @@ import type {
   DirectorCommand,
   DirectorCommandRunner,
   DirectorEvidenceBinding,
+  DirectorEvidenceOutboxCounts,
   DirectorEvidenceOutbox,
 } from '@/lib/director-evidence-delivery-core'
+import { getDirectorBrainScope } from '@/lib/director-brain-scope'
 
 export {
   DIRECTOR_EVIDENCE_BINDING_AUTHORITY,
@@ -46,12 +48,13 @@ export const DIRECTOR_EVIDENCE_PROJECTION_SCHEMA_VERSION = 1
 
 const SHA256 = /^[a-f0-9]{64}$/u
 const DIRECTOR_BRAIN_CLI_SHA256 = '8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e'
-const DIRECTOR_BRAIN_SERVICE_SHA256 = '6c90469a92fec3c806cbe8380537ecd2485f7dd850af1e4e8ea6ad5868cf33b3'
-const DIRECTOR_BRAIN_SCHEMA_SHA256 = '6f3a1a873343180e6ed5b5a0446de7b4a7bcdf1a458f433767c945ca13e87f58'
+const DIRECTOR_BRAIN_SERVICE_SHA256 = '7e7fd6a7f289a0c70a2410af48f3e7d333df3c6a6b2644c6622d79edbb182089'
+const DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256 = 'c42084e29db688f39834a9d580a6cb17e0a1a4e8d3302aa94cc6a6327d076f80'
+const DIRECTOR_BRAIN_SCHEMA_SHA256 = '72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f'
 const DIRECTOR_EVIDENCE_TRANSFORMER_SHA256 = 'b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1'
-const DIRECTOR_EVIDENCE_LIBRARY_SHA256 = 'eec1c2abf86282358f2188c3c603a1523119326105b4f5b9d29d92e874d4694a'
-const DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256 = 'c7f873c6d639088e5c114ba54eaab8dc4fc45a8249e529344b72b9a7d2d2d6d6'
-const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = '02bface6abefa124a73e3ae742e7dbc218bcfb11235cf2b4bc18f237c8ff8621'
+const DIRECTOR_EVIDENCE_LIBRARY_SHA256 = 'dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc'
+const DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256 = '1e5153a633225b6454ab722b689de9ee7a5dcfccff697c19d2ea2d0a708e2cda'
+const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = 'ceefa7f9b1f37c359637ec13947aade3d093fa53f7c2de591901446207f10040'
 const DIRECTOR_COMMAND_ENV_KEYS = [
   'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'NODE_ENV',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
@@ -60,9 +63,23 @@ const DIRECTOR_COMMAND_ENV_KEYS = [
 ] as const
 const COMMAND_TIMEOUT_MS = {
   operate: 30_000,
+  'propose-batch': 180_000,
   transform: 30_000,
   'project-evidence': 10 * 60_000,
 } as const
+
+export function directorCommandTimeoutMs(
+  command: DirectorCommand,
+  input: Record<string, unknown>,
+): number {
+  if (command !== 'propose-batch' || !Array.isArray(input.items)) {
+    return COMMAND_TIMEOUT_MS[command]
+  }
+  // propose_batch intentionally performs stable, reference-checked creates in
+  // sequence. Give each bounded item time for Feishu round trips without
+  // turning every read-only operate call into a long-running process.
+  return Math.min(180_000, 30_000 + input.items.length * 15_000)
+}
 
 function commandPaths(command: DirectorCommand): { script: string; args: string[] } {
   if (command === 'transform') {
@@ -98,6 +115,11 @@ export function directorEvidenceProjectionContractDigest(
     ),
     directorBrainServiceSha256: configuredDigest(
       'AIWORKER_DIRECTOR_BRAIN_SERVICE_SHA256', DIRECTOR_BRAIN_SERVICE_SHA256, source,
+    ),
+    directorBrainSensitiveValueScannerSha256: configuredDigest(
+      'AIWORKER_DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256',
+      DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256,
+      source,
     ),
     directorBrainSchemaSha256: configuredDigest(
       'AIWORKER_DIRECTOR_BRAIN_SCHEMA_SHA256', DIRECTOR_BRAIN_SCHEMA_SHA256, source,
@@ -189,6 +211,13 @@ async function validateCommandDependencyClosure(
         DIRECTOR_BRAIN_SERVICE_SHA256,
       ),
     }),
+    validatedCommandFile(resolve(scriptDirectory, 'lib', 'sensitive-value-scanner.mjs'), {
+      executable: false,
+      expectedSha256: configuredDigest(
+        'AIWORKER_DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256',
+        DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256,
+      ),
+    }),
     validatedCommandFile(resolve(scriptDirectory, '..', 'ops', 'feishu-director-brain', 'schema.json'), {
       executable: false,
       expectedSha256: configuredDigest(
@@ -276,7 +305,7 @@ export async function runDirectorCommand(
     })
     timer = setTimeout(
       () => fail(new Error('director_command_timeout')),
-      COMMAND_TIMEOUT_MS[command],
+      directorCommandTimeoutMs(command, input),
     )
     try {
       child.stdin.end(stdin)
@@ -313,13 +342,14 @@ export function getDirectorEvidenceOutbox(
   return getDirectorEvidenceOutboxCore(db, taskId)
 }
 
-export function getDirectorEvidenceOutboxCounts(db: Database.Database): {
-  pending: number
-  delivered: number
-  conflict: number
-  incompatiblePending: number
-} {
-  return getDirectorEvidenceOutboxCountsCore(db, directorEvidenceProjectionContractDigest())
+export function getDirectorEvidenceOutboxCounts(
+  db: Database.Database,
+): DirectorEvidenceOutboxCounts {
+  return getDirectorEvidenceOutboxCountsCore(
+    db,
+    directorEvidenceProjectionContractDigest(),
+    getDirectorBrainScope(),
+  )
 }
 
 export function enqueueDirectorEvidenceOutbox(
@@ -344,7 +374,9 @@ export async function drainDirectorEvidenceOutbox(
     runner?: DirectorCommandRunner
   } = {},
 ): Promise<{ scanned: number; delivered: number; pending: number; conflict: number }> {
+  const scope = getDirectorBrainScope()
   return await drainDirectorEvidenceOutboxCore(db, {
+    scope,
     currentProjectionContractDigest: directorEvidenceProjectionContractDigest(),
     nowSeconds: options.nowSeconds,
     now: options.now,

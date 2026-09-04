@@ -1750,6 +1750,91 @@ const migrations: Migration[] = [
           ON n8n_director_evidence_outbox(tenant_id, workspace_id, status, updated_at DESC);
       `)
     }
+  },
+  {
+    id: '058_director_extraction_task_runs',
+    up(db: Database.Database) {
+      // Lifecycle authority stays in n8n_task_runs. These append-only/immutable
+      // records reference formal phase runs and never copy the work/video binding.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS director_extraction_checkpoints (
+          phase_task_id TEXT NOT NULL PRIMARY KEY,
+          phase TEXT NOT NULL
+            CHECK(phase IN ('perception', 'understanding', 'judgment', 'case', 'technique')),
+          input_sha256 TEXT NOT NULL
+            CHECK(length(input_sha256) = 64 AND input_sha256 NOT GLOB '*[^0-9a-f]*'),
+          phase_input TEXT NOT NULL
+            CHECK(json_valid(phase_input) AND json_type(phase_input) = 'object'),
+          output_sha256 TEXT NOT NULL
+            CHECK(length(output_sha256) = 64 AND output_sha256 NOT GLOB '*[^0-9a-f]*'),
+          candidate_output TEXT NOT NULL
+            CHECK(json_valid(candidate_output) AND json_type(candidate_output) = 'object'),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (phase_task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS director_extraction_projection_receipts (
+          phase_task_id TEXT NOT NULL PRIMARY KEY,
+          receipt_json TEXT NOT NULL
+            CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+          receipt_sha256 TEXT NOT NULL
+            CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (phase_task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS director_extraction_review_receipts (
+          phase_task_id TEXT NOT NULL,
+          receipt_type TEXT NOT NULL
+            CHECK(receipt_type IN ('candidate_review', 'intent_review', 'candidate_rejection')),
+          reviewed_references TEXT NOT NULL
+            CHECK(json_valid(reviewed_references) AND json_type(reviewed_references) = 'object'),
+          error_code TEXT
+            CHECK(error_code IS NULL OR (
+              length(error_code) BETWEEN 1 AND 200
+              AND error_code NOT GLOB '*[^A-Za-z0-9_:-]*'
+            )),
+          receipt_sha256 TEXT NOT NULL
+            CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (phase_task_id, receipt_type),
+          FOREIGN KEY (phase_task_id) REFERENCES n8n_task_runs(task_id) ON DELETE CASCADE
+        );
+      `)
+    }
+  },
+  {
+    id: '059_director_evidence_projection_receipts',
+    up(db: Database.Database) {
+      // Keep the compact, verified remote lineage separate from the outbox.
+      // The outbox remains routing metadata; the receipt contains no transcript,
+      // model output, Feishu record ID, credentials, or raw media paths.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_director_evidence_projection_receipts (
+          task_id TEXT PRIMARY KEY,
+          source_identity_sha256 TEXT NOT NULL
+            CHECK(length(source_identity_sha256) = 64
+              AND source_identity_sha256 NOT GLOB '*[^0-9a-f]*'),
+          projection_contract_digest TEXT NOT NULL
+            CHECK(length(projection_contract_digest) = 64
+              AND projection_contract_digest NOT GLOB '*[^0-9a-f]*'),
+          receipt_json TEXT NOT NULL
+            CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+          receipt_sha256 TEXT NOT NULL
+            CHECK(length(receipt_sha256) = 64
+              AND receipt_sha256 NOT GLOB '*[^0-9a-f]*'),
+          origin TEXT NOT NULL
+            CHECK(origin IN ('delivery', 'verified_read_recovery')),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          FOREIGN KEY (task_id) REFERENCES n8n_director_evidence_outbox(task_id)
+            ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_director_evidence_projection_receipts_contract
+          ON n8n_director_evidence_projection_receipts(
+            projection_contract_digest, origin, created_at, task_id
+          );
+      `)
+    }
   }
 ]
 

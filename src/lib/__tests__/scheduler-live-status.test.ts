@@ -14,6 +14,7 @@ const autoRouteInboxTasks = vi.fn()
 const spawnRecurringTasks = vi.fn()
 const drainN8nMediaCleanupDebts = vi.fn()
 const drainDirectorEvidenceOutbox = vi.fn()
+const drainDirectorExtractionJobs = vi.fn()
 const pruneGatewaySessionsOlderThan = vi.fn()
 const getAgentLiveStatuses = vi.fn()
 const logger = { info: vi.fn(), warn: vi.fn() }
@@ -38,6 +39,18 @@ const getSchedulerRuntimeEligibility = vi.fn(() => ({
   activeSlot: null as 'blue' | 'green' | null,
   generation: null as number | null,
 }))
+
+function emptyExtractionDrainResult() {
+  return {
+    processed: 0,
+    awaitingReview: 0,
+    waitingEvidence: 0,
+    reviewsChecked: 0,
+    resumed: 0,
+    completed: 0,
+    failed: 0,
+  }
+}
 
 vi.mock('@/lib/db', () => ({ getDatabase, logAuditEvent }))
 vi.mock('@/lib/agent-sync', () => ({ syncAgentsFromConfig }))
@@ -67,6 +80,7 @@ vi.mock('@/lib/task-dispatch', () => ({ dispatchAssignedTasks, runAegisReviews, 
 vi.mock('@/lib/recurring-tasks', () => ({ spawnRecurringTasks }))
 vi.mock('@/lib/n8n-media-cleanup', () => ({ drainN8nMediaCleanupDebts }))
 vi.mock('@/lib/director-evidence-outbox', () => ({ drainDirectorEvidenceOutbox }))
+vi.mock('@/lib/director-extraction-service', () => ({ drainDirectorExtractionJobs }))
 vi.mock('@/lib/scheduler-leader', () => ({
   acquireOrRenewSchedulerLeadership,
   createSchedulerHolderId: () => '00000000000000000000000000000000',
@@ -124,6 +138,7 @@ describe('scheduler gateway live-status boundary', () => {
       pending: 0,
       conflict: 0,
     })
+    drainDirectorExtractionJobs.mockResolvedValue(emptyExtractionDrainResult())
     pruneGatewaySessionsOlderThan.mockReturnValue({ deleted: 0, filesTouched: 0 })
 
     getDatabase.mockReturnValue({
@@ -181,6 +196,88 @@ describe('scheduler gateway live-status boundary', () => {
       ok: true,
       message: 'Media cleanup debts: 1 cleared, 0 pending, 0 rejected',
     })
+  })
+
+  it('uses the existing evidence scheduler entry to reach both canonical director drains', async () => {
+    drainDirectorEvidenceOutbox.mockResolvedValueOnce({
+      scanned: 1,
+      delivered: 1,
+      pending: 0,
+      conflict: 0,
+    })
+    drainDirectorExtractionJobs.mockResolvedValueOnce({
+      ...emptyExtractionDrainResult(),
+      processed: 2,
+      resumed: 1,
+      completed: 1,
+    })
+    const { triggerTask } = await import('@/lib/scheduler')
+
+    await expect(triggerTask('director_evidence_outbox')).resolves.toEqual({
+      ok: true,
+      message: 'Director evidence: 1 delivered, 0 pending, 0 conflict | extraction: 2 processed, 1 resumed, 0 failed',
+    })
+    const nowSeconds = Math.floor(Date.parse('2026-03-27T03:00:00.000Z') / 1_000)
+    expect(drainDirectorEvidenceOutbox).toHaveBeenCalledWith(
+      expect.anything(), { limit: 20, nowSeconds },
+    )
+    expect(drainDirectorExtractionJobs).toHaveBeenCalledWith(
+      expect.anything(), { limit: 5, nowSeconds },
+    )
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'n8n_director_evidence_projection',
+    }))
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'n8n_director_extraction_drain',
+    }))
+  })
+
+  it('isolates either director drain failure and does not audit idle drains', async () => {
+    drainDirectorEvidenceOutbox.mockRejectedValueOnce(new Error('projection unavailable'))
+    drainDirectorExtractionJobs.mockResolvedValueOnce({
+      ...emptyExtractionDrainResult(),
+      processed: 1,
+      completed: 1,
+    })
+    const { triggerTask } = await import('@/lib/scheduler')
+
+    await expect(triggerTask('director_evidence_outbox')).resolves.toEqual({
+      ok: false,
+      message: 'Director evidence: failed | extraction: 1 processed, 0 resumed, 0 failed',
+    })
+    expect(drainDirectorExtractionJobs).toHaveBeenCalledTimes(1)
+    expect(logAuditEvent).toHaveBeenCalledTimes(1)
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'n8n_director_extraction_drain',
+    }))
+
+    vi.clearAllMocks()
+    drainDirectorEvidenceOutbox.mockResolvedValueOnce({
+      scanned: 1,
+      delivered: 1,
+      pending: 0,
+      conflict: 0,
+    })
+    drainDirectorExtractionJobs.mockRejectedValueOnce(new Error('extraction unavailable'))
+    await expect(triggerTask('director_evidence_outbox')).resolves.toEqual({
+      ok: false,
+      message: 'Director evidence: 1 delivered, 0 pending, 0 conflict | extraction: failed',
+    })
+    expect(logAuditEvent).toHaveBeenCalledTimes(1)
+    expect(logAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'n8n_director_evidence_projection',
+    }))
+
+    vi.clearAllMocks()
+    drainDirectorEvidenceOutbox.mockResolvedValueOnce({
+      scanned: 0,
+      delivered: 0,
+      pending: 0,
+      conflict: 0,
+    })
+    drainDirectorExtractionJobs.mockResolvedValueOnce(emptyExtractionDrainResult())
+    await expect(triggerTask('director_evidence_outbox')).resolves.toMatchObject({ ok: true })
+    expect(logAuditEvent).not.toHaveBeenCalled()
   })
 
   it('keeps a follower passive and begins scheduled work after lease takeover', async () => {
@@ -283,9 +380,14 @@ describe('scheduler gateway live-status boundary', () => {
         running: false,
         lastResult: expect.objectContaining({
           ok: true,
-          message: 'Director evidence: 1 delivered, 0 pending, 0 conflict',
+          message: 'Director evidence: 1 delivered, 0 pending, 0 conflict | extraction: 0 processed, 0 resumed, 0 failed',
         }),
       })
+
+    expect(drainDirectorExtractionJobs).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(drainDirectorEvidenceOutbox).toHaveBeenCalledTimes(2)
+    expect(drainDirectorExtractionJobs).toHaveBeenCalledTimes(2)
     stopScheduler()
   })
 

@@ -1,4 +1,5 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import {
   chmodSync,
   closeSync,
@@ -19,7 +20,8 @@ import {
 import { isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const OWNER_SCHEMA = 'video-autoworker-shared-deployment-lock-owner/v1'
+const OWNER_SCHEMA = 'video-autoworker-shared-deployment-lock-owner/v2'
+const LEGACY_OWNER_SCHEMA = 'video-autoworker-shared-deployment-lock-owner/v1'
 const LEASE_SCHEMA = 'video-autoworker-shared-deployment-lock-lease/v1'
 const MAX_OWNER_BYTES = 4 * 1024
 
@@ -27,10 +29,34 @@ function fail(message) {
   throw new Error(`shared deployment lock failed: ${message}`)
 }
 
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function processIdentity(pid) {
+  const result = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'lstart=', '-o', 'command='], {
+    encoding: 'utf8', timeout: 5_000, maxBuffer: 1024 * 1024,
+  })
+  if (result.error || result.signal || result.status !== 0 || !result.stdout.trim()) return null
+  return sha256(result.stdout.trim())
+}
+
 function normalizedAbsolute(pathname, label) {
   if (typeof pathname !== 'string' || !isAbsolute(pathname) || resolve(pathname) !== pathname
     || /[\u0000-\u001f\u007f]/u.test(pathname)) fail(`${label} must be one normalized absolute path`)
   return pathname
+}
+
+function physicalSystemTemporaryPath(pathname) {
+  normalizedAbsolute(pathname, 'blue-green run directory')
+  if (process.platform !== 'darwin' || (pathname !== '/tmp' && !pathname.startsWith('/tmp/'))) {
+    return pathname
+  }
+  const temporaryAlias = lstatSync('/tmp')
+  if (!temporaryAlias.isSymbolicLink() || realpathSync('/tmp') !== '/private/tmp') {
+    fail('system temporary directory alias is unsafe')
+  }
+  return join('/private/tmp', relative('/tmp', pathname))
 }
 
 function assertNoSymlink(pathname, label) {
@@ -113,11 +139,18 @@ function readOwner(pathname) {
       value = { schema: 'legacy-pid/v1', pid: Number(trimmed), nonce: null, createdAt: null }
     } else {
       try { value = JSON.parse(source) } catch { fail('owner record is not JSON') }
+      const keys = Object.keys(value || {}).sort()
+      const legacy = value?.schema === LEGACY_OWNER_SCHEMA
+        && JSON.stringify(keys) === JSON.stringify(['createdAt', 'nonce', 'pid', 'schema'])
+      const current = value?.schema === OWNER_SCHEMA
+        && JSON.stringify(keys) === JSON.stringify([
+          'createdAt', 'nonce', 'pid', 'processIdentitySha256', 'schema',
+        ])
       if (!value || typeof value !== 'object' || Array.isArray(value)
-        || JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(['createdAt', 'nonce', 'pid', 'schema'])
-        || value.schema !== OWNER_SCHEMA || !Number.isSafeInteger(value.pid) || value.pid <= 0
+        || (!legacy && !current) || !Number.isSafeInteger(value.pid) || value.pid <= 0
         || typeof value.nonce !== 'string' || !/^[a-f0-9]{64}$/u.test(value.nonce)
-        || typeof value.createdAt !== 'string' || !Number.isFinite(Date.parse(value.createdAt))) {
+        || typeof value.createdAt !== 'string' || !Number.isFinite(Date.parse(value.createdAt))
+        || (current && !/^[a-f0-9]{64}$/u.test(value.processIdentitySha256))) {
         fail('owner record contract is invalid')
       }
     }
@@ -135,6 +168,13 @@ function processExists(pid) {
     if (error?.code === 'EPERM') return true
     fail('owner liveness cannot be determined')
   }
+}
+
+function ownerProcessIsCurrent(owner) {
+  if (owner.schema === OWNER_SCHEMA) {
+    return processIdentity(owner.pid) === owner.processIdentitySha256
+  }
+  return processExists(owner.pid)
 }
 
 function lockMembers(lockPath) {
@@ -164,7 +204,7 @@ function recoverDeadOwner(lockPath, runDirectory) {
   }
   const ownerPath = join(lockPath, 'pid')
   const owner = readOwner(ownerPath)
-  if (processExists(owner.value.pid)) return false
+  if (ownerProcessIsCurrent(owner.value)) return false
   for (let pass = 0; pass < 2; pass += 1) {
     const currentLock = safeDirectory(lockPath, 'existing deployment lock', 0o700)
     const currentOwner = readOwner(ownerPath)
@@ -174,7 +214,7 @@ function recoverDeadOwner(lockPath, runDirectory) {
       || JSON.stringify(lockMembers(lockPath)) !== JSON.stringify(['pid'])) {
       fail('dead-owner lock changed during recovery')
     }
-    if (processExists(owner.value.pid)) return false
+    if (ownerProcessIsCurrent(owner.value)) return false
   }
   const retiredPath = `${lockPath}.recovered-${process.pid}-${randomBytes(16).toString('hex')}`
   renameSync(lockPath, retiredPath)
@@ -371,8 +411,10 @@ export function releaseSharedDeploymentLockSync(descriptorValue) {
 }
 
 export function acquireSharedDeploymentLockSync({ runDirectory, ownerPid = process.pid }) {
-  normalizedAbsolute(runDirectory, 'blue-green run directory')
+  runDirectory = physicalSystemTemporaryPath(runDirectory)
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) fail('owner PID is invalid')
+  const ownerProcessIdentitySha256 = processIdentity(ownerPid)
+  if (!ownerProcessIdentitySha256) fail('owner process identity is unavailable')
   mkdirSync(runDirectory, { recursive: true, mode: 0o700 })
   const run = safeDirectory(runDirectory, 'blue-green run directory', 0o700)
   const lockPath = join(runDirectory, '.deployment.lock')
@@ -382,6 +424,7 @@ export function acquireSharedDeploymentLockSync({ runDirectory, ownerPid = proce
       pid: ownerPid,
       nonce: randomBytes(32).toString('hex'),
       createdAt: new Date().toISOString(),
+      processIdentitySha256: ownerProcessIdentitySha256,
     }
     const ownerSource = `${JSON.stringify(ownerValue)}\n`
     const stagingPath = `${lockPath}.pending-${process.pid}-${randomBytes(16).toString('hex')}`
@@ -451,14 +494,42 @@ export function acquireSharedDeploymentLockSync({ runDirectory, ownerPid = proce
   fail('shared deployment lock acquisition did not converge')
 }
 
+export function assertSharedDeploymentLockAvailableSync(runDirectory) {
+  runDirectory = physicalSystemTemporaryPath(runDirectory)
+  try {
+    const entry = lstatSync(runDirectory, { bigint: true })
+    if (entry.isSymbolicLink() || !entry.isDirectory() || entry.uid !== BigInt(process.getuid())
+      || Number(entry.mode & 0o7777n) !== 0o700 || realpathSync(runDirectory) !== runDirectory) {
+      fail('blue-green run directory is unsafe')
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  const lockPath = join(runDirectory, '.deployment.lock')
+  try {
+    lstatSync(lockPath)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
+  // A read-only preflight never repairs or quarantines a stale lock. Any
+  // canonical lock object means a writer may own the deployment transaction.
+  fail('another shared deployment operation is active')
+}
+
 function runCli() {
-  const [command, runDirectory, ownerPidSource] = process.argv.slice(2)
+  const [command, runDirectorySource, ownerPidSource] = process.argv.slice(2)
+  const runDirectory = physicalSystemTemporaryPath(runDirectorySource)
   const ownerPid = Number(ownerPidSource)
-  if (!['acquire-shell', 'release-shell'].includes(command)
+  if (!['acquire-shell', 'release-shell', 'inspect-shell'].includes(command)
     || !Number.isSafeInteger(ownerPid) || ownerPid <= 0 || ownerPid !== process.ppid) {
     fail('shell bridge invocation is invalid')
   }
-  if (command === 'acquire-shell') {
+  if (command === 'inspect-shell') {
+    assertSharedDeploymentLockAvailableSync(runDirectory)
+    return
+  } else if (command === 'acquire-shell') {
     const lease = acquireSharedDeploymentLockSync({ runDirectory, ownerPid })
     process.stdout.write(`${JSON.stringify(lease.descriptor)}\n`)
     return

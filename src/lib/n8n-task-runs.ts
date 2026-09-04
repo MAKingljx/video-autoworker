@@ -92,6 +92,22 @@ export type N8nChildExecutionResult = {
   lease: N8nChildExecutionLease | null
 }
 
+export type N8nChildParentMode = 'running_execution' | 'succeeded_postprocess'
+
+export interface N8nChildRunInput {
+  parentTaskId: string
+  parentIdempotencyKey: string
+  bindingId: number
+  childTaskId: string
+  childIdempotencyKey: string
+  source: 'n8n-node' | 'n8n-media-node'
+  routing: Record<string, unknown>
+  taskInput: Record<string, unknown>
+  delivery: N8nTaskDelivery
+  maxAttempts: number
+  parentMode?: N8nChildParentMode
+}
+
 /**
  * Keep one callback request open while another request owns the child. This
  * turns an n8n HTTP retry into a durable poll: only a cached success or a newly
@@ -889,6 +905,69 @@ function childLeaseFromRow(taskId: string, row: N8nChildExecutionLeaseRow): N8nC
   }
 }
 
+function validChildParent(
+  db: Database.Database,
+  parent: N8nTaskRun,
+  input: N8nChildRunInput & { executionOwner?: string },
+  scope: N8nTaskScope,
+): boolean {
+  const mode = input.parentMode ?? 'running_execution'
+  if (mode === 'succeeded_postprocess') return parent.status === 'succeeded'
+  if (parent.status !== 'running' || !input.executionOwner) return false
+  return isScopedN8nParentExecutionOwner(db, parent.taskId, input.executionOwner, scope)
+}
+
+/**
+ * Persist a deterministic queued child without acquiring an execution lease.
+ * This is the registration primitive for post-processing an already-successful
+ * parent; execution ownership is acquired only when a worker is ready to run.
+ */
+export function ensureN8nChildRunFromParent(
+  db: Database.Database,
+  input: N8nChildRunInput & { executionOwner?: string },
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number } = {},
+): { outcome: 'created' | 'existing' | 'terminal' | 'rejected' | 'not_found'; parent: N8nTaskRun | null; child: N8nTaskRun | null } {
+  const now = childLeaseClock(options.nowSeconds)
+  if (input.parentMode !== 'succeeded_postprocess') {
+    if (!input.executionOwner) throw new TypeError('n8n 父执行身份无效')
+    n8nExecutionOwnerSchema.parse(input.executionOwner)
+  }
+  return db.transaction(() => {
+    const parent = getScopedN8nTaskRunByTaskId(db, input.parentTaskId, scope)
+    if (!parent) return { outcome: 'not_found' as const, parent: null, child: null }
+    if (parent.idempotencyKey !== input.parentIdempotencyKey
+      || parent.bindingId !== input.bindingId
+      || !validChildParent(db, parent, input, scope)) {
+      const terminal = ['succeeded', 'failed', 'cancelled'].includes(parent.status)
+        && input.parentMode !== 'succeeded_postprocess'
+      return { outcome: terminal ? 'terminal' as const : 'rejected' as const, parent, child: null }
+    }
+    let child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)
+    if (child) {
+      const valid = child.idempotencyKey === input.childIdempotencyKey
+        && child.bindingId === input.bindingId && child.source === input.source
+      return { outcome: valid ? 'existing' as const : 'rejected' as const, parent, child }
+    }
+    const idempotent = getN8nTaskRunByIdempotencyKey(db, input.childIdempotencyKey, scope)
+    if (idempotent) return { outcome: 'rejected' as const, parent, child: idempotent }
+    db.prepare(`
+      INSERT INTO n8n_task_runs (
+        task_id, idempotency_key, binding_id, status, source, requested_by,
+        routing, input, delivery, attempt_count, max_attempts,
+        workspace_id, tenant_id, accepted_at, updated_at
+      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+    `).run(
+      input.childTaskId, input.childIdempotencyKey, input.bindingId, input.source,
+      parent.requestedBy, JSON.stringify(input.routing), JSON.stringify(input.taskInput),
+      JSON.stringify(input.delivery), Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
+      scope.workspaceId, scope.tenantId, now, now,
+    )
+    child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)
+    return { outcome: 'created' as const, parent, child }
+  }).immediate()
+}
+
 /**
  * Create and claim a deterministic n8n child in one IMMEDIATE transaction.
  * A different process instance may fence a running owner only after the
@@ -897,25 +976,23 @@ function childLeaseFromRow(taskId: string, row: N8nChildExecutionLeaseRow): N8nC
  */
 export function createAndClaimN8nChildRunFromParent(
   db: Database.Database,
-  input: {
-    parentTaskId: string
-    parentIdempotencyKey: string
-    bindingId: number
-    childTaskId: string
-    childIdempotencyKey: string
-    source: 'n8n-node' | 'n8n-media-node'
-    routing: Record<string, unknown>
-    taskInput: Record<string, unknown>
-    delivery: N8nTaskDelivery
-    maxAttempts: number
+  input: N8nChildRunInput & {
     ownerInstanceId: string
-    executionOwner: string
+    executionOwner?: string
   },
   scope: N8nTaskScope,
-  options: { nowSeconds?: number; leaseSeconds?: number; leaseToken?: string } = {},
+  options: {
+    nowSeconds?: number
+    leaseSeconds?: number
+    leaseToken?: string
+    initialLeaseRevision?: number
+  } = {},
 ): N8nChildExecutionResult {
   assertChildLeaseIdentity(input.ownerInstanceId, options.leaseToken)
-  const executionOwner = n8nExecutionOwnerSchema.parse(input.executionOwner)
+  if (input.parentMode !== 'succeeded_postprocess') {
+    if (!input.executionOwner) throw new TypeError('n8n 父执行身份无效')
+    n8nExecutionOwnerSchema.parse(input.executionOwner)
+  }
   const now = childLeaseClock(options.nowSeconds)
   const leaseSeconds = options.leaseSeconds ?? N8N_CHILD_EXECUTION_LEASE_SECONDS
   if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 5 || leaseSeconds > 60 * 60) {
@@ -923,18 +1000,19 @@ export function createAndClaimN8nChildRunFromParent(
   }
   const token = options.leaseToken ?? randomBytes(32).toString('hex')
   const leaseExpiresAt = now + leaseSeconds
+  const initialLeaseRevision = options.initialLeaseRevision ?? 1
+  if (!Number.isSafeInteger(initialLeaseRevision) || initialLeaseRevision < 1) {
+    throw new TypeError('n8n 子任务执行租约版本无效')
+  }
 
   const execute = db.transaction((): N8nChildExecutionResult => {
     const parent = getScopedN8nTaskRunByTaskId(db, input.parentTaskId, scope)
     if (!parent) return { outcome: 'not_found', parent: null, child: null, lease: null }
     if (parent.idempotencyKey !== input.parentIdempotencyKey
       || parent.bindingId !== input.bindingId
-      || parent.status !== 'running') {
+      || !validChildParent(db, parent, input, scope)) {
       const outcome = ['succeeded', 'failed', 'cancelled'].includes(parent.status) ? 'terminal' : 'rejected'
       return { outcome, parent, child: null, lease: null }
-    }
-    if (!isScopedN8nParentExecutionOwner(db, parent.taskId, executionOwner, scope)) {
-      return { outcome: 'rejected', parent, child: null, lease: null }
     }
 
     let child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)
@@ -967,15 +1045,15 @@ export function createAndClaimN8nChildRunFromParent(
         INSERT INTO n8n_child_execution_leases (
           task_id, tenant_id, workspace_id, owner_instance_id, lease_token,
           lease_expires_at, heartbeat_at, revision, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         input.childTaskId, scope.tenantId, scope.workspaceId,
-        input.ownerInstanceId, token, leaseExpiresAt, now, now, now,
+        input.ownerInstanceId, token, leaseExpiresAt, now, initialLeaseRevision, now, now,
       )
       child = getScopedN8nTaskRunByTaskId(db, input.childTaskId, scope)!
       return {
         outcome: 'claimed', parent, child,
-        lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: 1 },
+        lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: initialLeaseRevision },
       }
     }
 
@@ -996,6 +1074,31 @@ export function createAndClaimN8nChildRunFromParent(
       WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
     `).get(child.taskId, scope.tenantId, scope.workspaceId) as N8nChildExecutionLeaseRow | undefined
 
+    if (child.status === 'queued') {
+      if (current) return { outcome: 'rejected', parent, child, lease: null }
+      const claimed = db.prepare(`
+        UPDATE n8n_task_runs
+        SET status = 'running', attempt_count = attempt_count + 1,
+            started_at = ?, completed_at = NULL, error = NULL, updated_at = ?
+        WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'queued'
+      `).run(now, now, child.taskId, scope.tenantId, scope.workspaceId)
+      if (claimed.changes !== 1) return { outcome: 'running', parent, child, lease: null }
+      db.prepare(`
+        INSERT INTO n8n_child_execution_leases (
+          task_id, tenant_id, workspace_id, owner_instance_id, lease_token,
+          lease_expires_at, heartbeat_at, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        child.taskId, scope.tenantId, scope.workspaceId,
+        input.ownerInstanceId, token, leaseExpiresAt, now, initialLeaseRevision, now, now,
+      )
+      child = getScopedN8nTaskRunByTaskId(db, child.taskId, scope)!
+      return {
+        outcome: 'claimed', parent, child,
+        lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: initialLeaseRevision },
+      }
+    }
+
     if (child.status === 'running') {
       if (!current) return { outcome: 'rejected', parent, child, lease: null }
       if (current.owner_instance_id === input.ownerInstanceId) {
@@ -1005,6 +1108,16 @@ export function createAndClaimN8nChildRunFromParent(
         return { outcome: 'running', parent, child, lease: childLeaseFromRow(child.taskId, current) }
       }
       if (child.attemptCount >= child.maxAttempts) {
+        db.prepare(`
+          UPDATE n8n_task_runs
+          SET status = 'failed', error = 'director_extraction_attempts_exhausted',
+              completed_at = ?, updated_at = ?
+          WHERE task_id = ? AND tenant_id = ? AND workspace_id = ? AND status = 'running'
+        `).run(now, now, child.taskId, scope.tenantId, scope.workspaceId)
+        db.prepare(`
+          DELETE FROM n8n_child_execution_leases
+          WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
+        `).run(child.taskId, scope.tenantId, scope.workspaceId)
         return { outcome: 'exhausted', parent, child, lease: null }
       }
       const takeover = db.prepare(`
@@ -1054,15 +1167,15 @@ export function createAndClaimN8nChildRunFromParent(
       INSERT INTO n8n_child_execution_leases (
         task_id, tenant_id, workspace_id, owner_instance_id, lease_token,
         lease_expires_at, heartbeat_at, revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       child.taskId, scope.tenantId, scope.workspaceId,
-      input.ownerInstanceId, token, leaseExpiresAt, now, now, now,
+      input.ownerInstanceId, token, leaseExpiresAt, now, initialLeaseRevision, now, now,
     )
     child = getScopedN8nTaskRunByTaskId(db, child.taskId, scope)!
     return {
       outcome: 'claimed', parent, child,
-      lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: 1 },
+      lease: { taskId: child.taskId, ownerInstanceId: input.ownerInstanceId, leaseToken: token, leaseExpiresAt, revision: initialLeaseRevision },
     }
   })
   return execute.immediate()
@@ -2251,6 +2364,7 @@ export function searchN8nVideoResults(
   scope: N8nTaskScope,
   rawQuery: string,
   requestedLimit = 80,
+  constraints: { directorEvidenceWorkId?: string } = {},
 ): N8nVideoSearchResult {
   const query = compactString(rawQuery, 120) || ''
   const terms = normalizedSearchTerms(query)
@@ -2260,6 +2374,15 @@ export function searchN8nVideoResults(
   }
 
   const { whereSql, params } = videoResultWhere(scope, { status: 'succeeded' })
+  const directorWorkId = compactString(constraints.directorEvidenceWorkId, 160)
+  if (constraints.directorEvidenceWorkId !== undefined && !directorWorkId) {
+    throw new TypeError('director evidence work id invalid')
+  }
+  const directorWorkWhere = directorWorkId
+    ? `AND json_valid(r.input) = 1
+      AND json_extract(r.input, '$.directorEvidence.workId') = ?`
+    : ''
+  if (directorWorkId) params.push(directorWorkId)
   const searchWhere: string[] = []
   for (const term of terms) {
     const escaped = `%${term.replace(/[\\%_]/g, value => `\\${value}`)}%`
@@ -2279,6 +2402,7 @@ export function searchN8nVideoResults(
       AND b.tenant_id = r.tenant_id
       AND b.workspace_id = r.workspace_id
     WHERE ${whereSql}
+      ${directorWorkWhere}
       AND ${searchWhere.join('\n      AND ')}
     ORDER BY COALESCE(r.completed_at, r.updated_at) DESC, r.id DESC
     LIMIT ?

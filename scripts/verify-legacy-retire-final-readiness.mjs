@@ -21,6 +21,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolveGatewayTokenFromConfigPath } from './lib/openclaw-secret-reference.mjs'
+import { assertConvergenceProof } from './lib/openclaw-runtime-convergence.mjs'
 
 const SCRIPT_PATH = realpathSync(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = realpathSync(join(dirname(SCRIPT_PATH), '..'))
@@ -364,17 +365,19 @@ function gatewayAuthenticatedEnvironment(profileConfig) {
 }
 
 function validateDirectorInspection(value) {
+  const requiredHooks = ['before_agent_reply', 'before_message_write', 'tool_result_persist']
   const plugin = value?.plugin
   const tools = Array.isArray(value?.tools) ? value.tools : []
   const toolNames = tools.flatMap(item => Array.isArray(item?.names) ? item.names : []).sort()
   const diagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : []
-  if (plugin?.id !== 'aiworker-director-brain' || plugin.status !== 'loaded' || plugin.version !== '0.3.1'
+  if (plugin?.id !== 'aiworker-director-brain' || plugin.status !== 'loaded' || plugin.version !== '0.4.0'
     || canonicalJson(toolNames) !== canonicalJson(['aiworker_director_brain'])
-    || !Array.isArray(value?.typedHooks) || value.typedHooks.length !== 0
+    || !Array.isArray(value?.typedHooks)
+    || canonicalJson(value.typedHooks.toSorted()) !== canonicalJson(requiredHooks)
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {
     fail('director-brain runtime inspection is invalid')
   }
-  return { id: plugin.id, status: plugin.status, version: plugin.version, toolNames, typedHooks: [] }
+  return { id: plugin.id, status: plugin.status, version: plugin.version, toolNames, typedHooks: requiredHooks }
 }
 
 function validateDirectorCatalog(value, agentId) {
@@ -467,6 +470,13 @@ function captureProduction(inputs) {
     || !SHA256.test(workflows.runtimeIdentitySha256 || '')) fail('live n8n workflow verification is incompatible')
 
   const directorControlPlane = captureDirectorControlPlane(inputs)
+  const runtimeConvergence = assertConvergenceProof(
+    inputs.runtimeConvergenceProof.path,
+    join(REPOSITORY_ROOT, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json'),
+    inputs.profileStateRoot.path,
+    join(inputs.profileStateRoot.path, 'openclaw.json'),
+    false,
+  )
 
   const listeners = Object.fromEntries([3017, 5678, 5679, 18889, 18091, 18789, 18989]
     .map(port => [String(port), listenerPid(port)]))
@@ -486,6 +496,7 @@ function captureProduction(inputs) {
     },
     director: {
       ...directorControlPlane,
+      runtimeConvergence,
       process: processIdentity(listeners['18889'], 'qwen-current Gateway'),
     },
     router: processIdentity(listeners['3017'], 'standalone router'),
@@ -535,6 +546,9 @@ function inputBinding(values, prepared) {
     profileStateRoot,
     workspaceRoot,
     openclawBin,
+    runtimeConvergenceProof: fullFileReference(
+      values['--runtime-convergence-proof'], 'runtime convergence proof', 0o600,
+    ),
     agentId,
     unchangedPids: prepared.projection.unchangedPids,
   }
@@ -550,6 +564,7 @@ function validateInputs(inputs) {
   verifyDirectoryReference(inputs.profileStateRoot, 'qwen-current profile root')
   verifyDirectoryReference(inputs.workspaceRoot, 'qwen-current workspace root')
   verifyFullFileReference(inputs.openclawBin, 'managed OpenClaw executable')
+  verifyFullFileReference(inputs.runtimeConvergenceProof, 'runtime convergence proof', 0o600)
   if ((!TEST_MODE && inputs.openclawBin.path !== MANAGED_OPENCLAW)
     || (inputs.openclawBin.mode & 0o111) === 0) {
     fail('managed OpenClaw executable binding is invalid')
@@ -614,6 +629,7 @@ function parseArguments(argv) {
   const required = command === 'create' ? [
     '--output', '--prepared-receipt', '--transition-intent', '--transition-confirmation',
     '--transition-journal', '--transition-attestation', '--n8n-database', '--expected-commit',
+    '--runtime-convergence-proof',
   ] : command === 'verify-live' ? ['--report', '--prepared-receipt'] : null
   if (!required) fail('expected create or verify-live')
   const optional = command === 'create'

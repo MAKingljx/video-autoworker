@@ -16,6 +16,14 @@ import {
 } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import {
+  buildStandaloneArtifactContentBinding,
+  DIRECTOR_EXTRACTION_PROVENANCE_NAME,
+  isStandaloneArtifactContentBinding,
+  STANDALONE_ARTIFACT_CONTENT_SCHEMA,
+  STANDALONE_PROVENANCE_SCHEMA,
+  writeDirectorExtractionProvenance,
+} from './lib/director-extraction-release-provenance.mjs'
 
 export const FORBIDDEN_STANDALONE_NAMES = new Set([
   '.phoenixbrain',
@@ -112,6 +120,7 @@ const ALLOWED_STANDALONE_ROOT_FILES = new Set([
   'openapi.json',
   'package.json',
   'release-manifest.json',
+  DIRECTOR_EXTRACTION_PROVENANCE_NAME,
   'server.js',
 ])
 
@@ -132,18 +141,22 @@ const ALLOWED_NEXT_ROOT_FILES = new Set([
 ])
 
 const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
+  'scripts/apply-openclaw-runtime-convergence.sh',
   'scripts/feishu-director-brain.mjs',
   'scripts/install-aiworker-director-brain.sh',
   'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/openclaw-runtime-convergence.mjs',
+  'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
 ])
 
 const ALLOWED_STANDALONE_OPS_PATHS = new Set([
   'ops/feishu-director-brain/schema.json',
+  'ops/openclaw/qwen-current-runtime-convergence.manifest.json',
 ])
 
 const ALLOWED_STANDALONE_PLUGIN_NAMES = new Set([
@@ -179,19 +192,28 @@ const REQUIRED_STANDALONE_FILES = [
   'openapi.json',
   'openclaw-plugins/aiworker-director-brain/index.js',
   'openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js',
+  'openclaw-plugins/aiworker-director-brain/lib/director-context-summary.js',
+  'openclaw-plugins/aiworker-director-brain/lib/director-system-question-router.js',
+  'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js',
+  'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js',
   'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json',
   'openclaw-plugins/aiworker-director-brain/package.json',
   'openclaw-skills/aiworker-director-brain/SKILL.md',
   'openclaw-skills/aiworker-task-flow/SKILL.md',
   'ops/feishu-director-brain/schema.json',
+  'ops/openclaw/qwen-current-runtime-convergence.manifest.json',
   'package.json',
+  DIRECTOR_EXTRACTION_PROVENANCE_NAME,
   'runtime/schema.sql',
   'scripts/feishu-director-brain.mjs',
+  'scripts/apply-openclaw-runtime-convergence.sh',
   'scripts/install-aiworker-director-brain.sh',
   'scripts/verify-shared-runtime-install-gate.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
+  'scripts/lib/openclaw-runtime-convergence.mjs',
+  'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
   'server.js',
@@ -206,6 +228,15 @@ const REQUIRED_STANDALONE_DIRECTORIES = [
 ]
 
 const RELEASE_MANIFEST_NAME = 'release-manifest.json'
+const RELEASE_MANIFEST_SCHEMA_VERSION = 2
+const ATTESTATION_NAMES = new Set([
+  RELEASE_MANIFEST_NAME,
+  DIRECTOR_EXTRACTION_PROVENANCE_NAME,
+])
+
+function comparePath(left, right) {
+  return left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+}
 
 function isAllowedPathOrDirectoryAncestor(pathname, allowedPaths, isDirectory) {
   if (allowedPaths.has(pathname)) return true
@@ -791,7 +822,7 @@ export async function assertRequiredStandaloneMembers(rootPath = resolve('.next/
   return true
 }
 
-async function collectStandaloneManifestMembers(rootPath) {
+async function collectStandaloneTreeMembers(rootPath, excludedNames = new Set()) {
   const { root } = await assertStandalonePhysicalRoot(rootPath)
   const directories = []
   const files = []
@@ -802,32 +833,87 @@ async function collectStandaloneManifestMembers(rootPath) {
     for (const entry of entries) {
       const pathname = resolve(directory, entry.name)
       const member = relative(root, pathname).split('\\').join('/')
-      if (member === RELEASE_MANIFEST_NAME) continue
+      if (excludedNames.has(member)) continue
       if (entry.isSymbolicLink()) {
-        symlinks.push({ path: member, target: await readlink(pathname) })
+        const memberStat = await lstat(pathname)
+        symlinks.push({
+          path: member,
+          mode: (memberStat.mode & 0o7777).toString(8).padStart(4, '0'),
+          target: await readlink(pathname),
+        })
         continue
       }
       if (entry.isDirectory()) {
-        directories.push(member)
+        const memberStat = await lstat(pathname)
+        directories.push({
+          path: member,
+          mode: (memberStat.mode & 0o7777).toString(8).padStart(4, '0'),
+        })
         await visit(pathname)
         continue
       }
       if (!entry.isFile()) throw new Error(`standalone_unsupported_member_type:${member}`)
       const fileStat = await lstat(pathname)
-      files.push({ path: member, bytes: fileStat.size, sha256: await sha256(pathname) })
+      files.push({
+        path: member,
+        mode: (fileStat.mode & 0o7777).toString(8).padStart(4, '0'),
+        bytes: fileStat.size,
+        sha256: await sha256(pathname),
+      })
     }
   }
 
   await visit(root)
-  directories.sort()
-  files.sort((left, right) => left.path.localeCompare(right.path))
-  symlinks.sort((left, right) => left.path.localeCompare(right.path))
+  directories.sort(comparePath)
+  files.sort(comparePath)
+  symlinks.sort(comparePath)
+  return { directories, files, symlinks }
+}
+
+async function collectStandaloneArtifactContentManifest(rootPath) {
+  const members = await collectStandaloneTreeMembers(rootPath, ATTESTATION_NAMES)
   return {
-    schemaVersion: 1,
+    schema: STANDALONE_ARTIFACT_CONTENT_SCHEMA,
     algorithm: 'sha256',
-    directories,
-    files,
-    symlinks,
+    ...members,
+  }
+}
+
+export async function computeStandaloneArtifactContentBinding(
+  rootPath = resolve('.next/standalone'),
+) {
+  return buildStandaloneArtifactContentBinding(
+    await collectStandaloneArtifactContentManifest(rootPath),
+  )
+}
+
+async function assertStandaloneProvenanceArtifactBinding(rootPath, artifactContent) {
+  const { root } = await assertStandalonePhysicalRoot(rootPath)
+  const provenancePath = resolve(root, DIRECTOR_EXTRACTION_PROVENANCE_NAME)
+  const provenanceStat = await lstat(provenancePath).catch(() => null)
+  if (!provenanceStat?.isFile() || provenanceStat.isSymbolicLink() || provenanceStat.size === 0) {
+    throw new Error('standalone_release_provenance_missing')
+  }
+  let provenance
+  try {
+    provenance = JSON.parse(await readFile(provenancePath, 'utf8'))
+  } catch {
+    throw new Error('standalone_release_provenance_invalid')
+  }
+  if (!provenance || provenance.schema !== STANDALONE_PROVENANCE_SCHEMA
+    || !isStandaloneArtifactContentBinding(provenance.artifactContent)
+    || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)) {
+    throw new Error('standalone_release_provenance_artifact_mismatch')
+  }
+  return provenance
+}
+
+async function collectStandaloneManifestMembers(rootPath, artifactContent) {
+  return {
+    schemaVersion: RELEASE_MANIFEST_SCHEMA_VERSION,
+    algorithm: 'sha256',
+    artifactContent,
+    ...await collectStandaloneTreeMembers(rootPath, new Set([RELEASE_MANIFEST_NAME])),
   }
 }
 
@@ -840,9 +926,17 @@ export async function writeStandaloneReleaseManifest(rootPath = resolve('.next/s
     throw new Error('standalone_release_manifest_unsafe_type')
   }
   await assertSafeMutationPath(root, manifestPath, 'standalone_release_manifest')
-  const manifest = await collectStandaloneManifestMembers(root)
+  const artifactContent = await computeStandaloneArtifactContentBinding(root)
+  await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
+  const manifest = await collectStandaloneManifestMembers(root, artifactContent)
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
-  return { path: RELEASE_MANIFEST_NAME, files: manifest.files.length, symlinks: manifest.symlinks.length }
+  const verified = await verifyStandaloneReleaseManifest(root)
+  return {
+    path: RELEASE_MANIFEST_NAME,
+    files: verified.files,
+    symlinks: verified.symlinks,
+    artifactContent: verified.artifactContent,
+  }
 }
 
 export async function verifyStandaloneReleaseManifest(rootPath = resolve('.next/standalone')) {
@@ -858,11 +952,38 @@ export async function verifyStandaloneReleaseManifest(rootPath = resolve('.next/
   } catch {
     throw new Error('standalone_release_manifest_invalid')
   }
-  const actual = await collectStandaloneManifestMembers(root)
+  const artifactContent = await computeStandaloneArtifactContentBinding(root)
+  await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
+  const actual = await collectStandaloneManifestMembers(root, artifactContent)
   if (JSON.stringify(declared) !== JSON.stringify(actual)) {
     throw new Error('standalone_release_manifest_mismatch')
   }
-  return { files: actual.files.length, symlinks: actual.symlinks.length }
+  return { files: actual.files.length, symlinks: actual.symlinks.length, artifactContent }
+}
+
+export async function writeStandaloneReleaseAttestations(
+  rootPath = resolve('.next/standalone'),
+  repositoryRootPath,
+  buildSourceAnchor = null,
+) {
+  const { root } = await assertStandalonePhysicalRoot(rootPath)
+  const repositoryRoot = repositoryRootPath || resolve(root, '..', '..')
+  const artifactContent = await computeStandaloneArtifactContentBinding(root)
+  const provenancePath = resolve(root, DIRECTOR_EXTRACTION_PROVENANCE_NAME)
+  const existingProvenance = await lstat(provenancePath).catch(() => null)
+  if (existingProvenance?.isSymbolicLink()
+    || (existingProvenance && !existingProvenance.isFile())) {
+    throw new Error('standalone_release_provenance_unsafe_type')
+  }
+  await assertSafeMutationPath(root, provenancePath, 'standalone_release_provenance')
+  const provenance = writeDirectorExtractionProvenance(
+    repositoryRoot,
+    root,
+    artifactContent,
+    buildSourceAnchor,
+  )
+  const releaseManifest = await writeStandaloneReleaseManifest(root)
+  return { artifactContent, provenance, releaseManifest }
 }
 
 async function findBuildRootLeaks(rootPath, projectRootPath) {
@@ -893,7 +1014,10 @@ async function findBuildRootLeaks(rootPath, projectRootPath) {
   return leaked.sort()
 }
 
-export async function sanitizeStandaloneArtifact(rootPath = resolve('.next/standalone')) {
+export async function sanitizeStandaloneArtifact(
+  rootPath = resolve('.next/standalone'),
+  options = {},
+) {
   const { root } = await assertStandalonePhysicalRoot(rootPath)
   const projectRoot = resolve(root, '..', '..')
   const unsafeBeforeMutation = await findUnsafeStandaloneLinks(root)
@@ -922,12 +1046,16 @@ export async function sanitizeStandaloneArtifact(rootPath = resolve('.next/stand
   if (unsafeLinks.length > 0) {
     throw new Error(`standalone_unsafe_links:${unsafeLinks.join(',')}`)
   }
-  await assertRequiredStandaloneMembers(root)
   const buildRootLeaks = await findBuildRootLeaks(root, projectRoot)
   if (buildRootLeaks.length > 0) {
     throw new Error(`standalone_build_root_leaks:${buildRootLeaks.join(',')}`)
   }
-  const releaseManifest = await writeStandaloneReleaseManifest(root)
+  const attestations = await writeStandaloneReleaseAttestations(
+    root,
+    projectRoot,
+    options.buildSourceAnchor,
+  )
+  await assertRequiredStandaloneMembers(root)
   return {
     ok: true,
     root,
@@ -938,7 +1066,9 @@ export async function sanitizeStandaloneArtifact(rootPath = resolve('.next/stand
     copiedRuntimeSchema,
     sanitizedServer,
     sanitizedRequiredServerFiles,
-    releaseManifest,
+    releaseManifest: attestations.releaseManifest,
+    provenance: attestations.provenance,
+    artifactContent: attestations.artifactContent,
     repairedPnpmLinks: repairedLinks.length,
     removedMembers: forbidden,
   }
@@ -957,8 +1087,13 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
   await assertRequiredStandaloneMembers(root)
   await assertStandaloneServerConfigSanitized(root)
   await assertStandaloneRequiredServerFilesSanitized(root)
-  await verifyStandaloneReleaseManifest(root)
-  return { ok: true, root, forbiddenMembers: 0 }
+  const releaseManifest = await verifyStandaloneReleaseManifest(root)
+  return {
+    ok: true,
+    root,
+    forbiddenMembers: 0,
+    artifactContent: releaseManifest.artifactContent,
+  }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null

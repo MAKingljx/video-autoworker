@@ -38,10 +38,11 @@ describe('current video-command plugin installer', () => {
     expect(secretReference).toContain("provider.source === 'exec'")
     expect(secretReference).toContain('env: {}')
     expect(secretReference).toContain('maxBuffer = MAX_OUTPUT_BYTES')
-    expect(secretReference).toContain('timeoutMs = DEFAULT_TIMEOUT_MS')
+    expect(secretReference).toContain('effectiveTimeoutMs = timeoutMs ?? provider.timeoutMs ?? DEFAULT_TIMEOUT_MS')
     expect(secretReference).toContain('TOKEN_PATTERN')
     expect(script).toContain('OPENCLAW_GATEWAY_TOKEN="$gateway_token"')
     expect(script).toContain('Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.')
+    expect(script).toContain('optional direct tool exactly once through alsoAllow')
     expect(script).not.toContain('--token "$gateway_token"')
     const ordinaryRunner = script.slice(
       script.indexOf('run_qwen_openclaw() {'),

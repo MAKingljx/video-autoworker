@@ -1,5 +1,6 @@
 import {
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -15,6 +16,10 @@ import { describe, expect, it } from 'vitest'
 
 const launcherPath = resolve(process.cwd(), 'scripts/start-standalone.sh')
 const artifactCheckerPath = resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs')
+const artifactProvenancePath = resolve(
+  process.cwd(),
+  'scripts/lib/director-extraction-release-provenance.mjs',
+)
 
 type LauncherFixture = {
   projectRoot: string
@@ -28,12 +33,21 @@ function createLauncherFixture(): LauncherFixture {
   const resultPath = join(projectRoot, 'launch-result.json')
 
   mkdirSync(join(projectRoot, 'scripts'), { recursive: true })
+  mkdirSync(join(projectRoot, 'scripts', 'lib'), { recursive: true })
   mkdirSync(join(standaloneRoot, '.next', 'static'), { recursive: true })
   mkdirSync(join(standaloneRoot, 'public'), { recursive: true })
   mkdirSync(join(standaloneRoot, 'messages'), { recursive: true })
   mkdirSync(join(standaloneRoot, 'runtime'), { recursive: true })
   copyFileSync(launcherPath, join(projectRoot, 'scripts', 'start-standalone.sh'))
   copyFileSync(artifactCheckerPath, join(projectRoot, 'scripts', 'check-standalone-artifact.mjs'))
+  copyFileSync(
+    artifactProvenancePath,
+    join(projectRoot, 'scripts', 'lib', 'director-extraction-release-provenance.mjs'),
+  )
+  writeFileSync(
+    join(projectRoot, 'scripts', 'write-fixture-attestations.mjs'),
+    `import { writeStandaloneReleaseAttestations } from './check-standalone-artifact.mjs'\nawait writeStandaloneReleaseAttestations(process.argv[2])\n`,
+  )
   writeFileSync(join(projectRoot, 'package.json'), '{}\n')
   writeFileSync(join(standaloneRoot, 'package.json'), '{}\n')
   writeFileSync(join(standaloneRoot, '.next', 'BUILD_ID'), 'fixture-build\n')
@@ -56,17 +70,25 @@ function createLauncherFixture(): LauncherFixture {
     'openapi.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/index.js': 'export default {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-context-summary.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-system-question-router.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/openclaw.plugin.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/package.json': '{}\n',
     'openclaw-skills/aiworker-director-brain/SKILL.md': 'runtime\n',
     'openclaw-skills/aiworker-task-flow/SKILL.md': 'runtime\n',
     'ops/feishu-director-brain/schema.json': '{}\n',
+    'ops/openclaw/qwen-current-runtime-convergence.manifest.json': '{}\n',
+    'scripts/apply-openclaw-runtime-convergence.sh': '#!/bin/sh\n',
     'scripts/feishu-director-brain.mjs': 'export {}\n',
     'scripts/install-aiworker-director-brain.sh': '#!/bin/sh\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
+    'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
+    'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
   }
@@ -89,7 +111,7 @@ require('node:fs').writeFileSync(process.env.LAUNCH_RESULT_PATH, JSON.stringify(
 
   const manifestResult = spawnSync(
     process.execPath,
-    [join(projectRoot, 'scripts', 'check-standalone-artifact.mjs'), '--write-manifest', standaloneRoot],
+    [join(projectRoot, 'scripts', 'write-fixture-attestations.mjs'), standaloneRoot],
     { encoding: 'utf8' },
   )
   if (manifestResult.status !== 0) {
@@ -121,6 +143,21 @@ function runLauncher(fixture: LauncherFixture, overrides: Partial<NodeJS.Process
 }
 
 describe('standalone runtime launcher', () => {
+  it('imports and audits the immutable artifact without a TypeScript runtime package', () => {
+    const fixture = createLauncherFixture()
+    try {
+      expect(existsSync(join(fixture.projectRoot, 'node_modules', 'typescript'))).toBe(false)
+      const audit = spawnSync(
+        process.execPath,
+        [join(fixture.projectRoot, 'scripts', 'check-standalone-artifact.mjs'), fixture.standaloneRoot],
+        { cwd: fixture.projectRoot, encoding: 'utf8' },
+      )
+      expect(audit.status, audit.stderr).toBe(0)
+    } finally {
+      rmSync(fixture.projectRoot, { recursive: true, force: true })
+    }
+  })
+
   it('uses the local OpenClaw binary on the managed production host', () => {
     const script = readFileSync(resolve(process.cwd(), 'scripts/start-standalone.sh'), 'utf8')
 
@@ -157,10 +194,21 @@ describe('standalone runtime launcher', () => {
     const fixture = createLauncherFixture()
     try {
       writeFileSync(join(fixture.standaloneRoot, '.next', 'static', 'runtime.css'), 'tampered {}\n')
+      const manifestRewrite = spawnSync(
+        process.execPath,
+        [
+          join(fixture.projectRoot, 'scripts', 'check-standalone-artifact.mjs'),
+          '--write-manifest',
+          fixture.standaloneRoot,
+        ],
+        { encoding: 'utf8' },
+      )
       const result = runLauncher(fixture)
 
+      expect(manifestRewrite.status).toBe(1)
+      expect(manifestRewrite.stderr).toContain('standalone_release_provenance_artifact_mismatch')
       expect(result.status).toBe(1)
-      expect(result.stderr).toContain('standalone_release_manifest_mismatch')
+      expect(result.stderr).toContain('standalone_release_provenance_artifact_mismatch')
       expect(result.stderr).toContain('standalone artifact integrity verification failed')
     } finally {
       rmSync(fixture.projectRoot, { recursive: true, force: true })
@@ -238,6 +286,7 @@ describe('standalone runtime launcher', () => {
     ['messages', 'directory'],
     ['runtime/schema.sql', 'file'],
     ['package.json', 'file'],
+    ['openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js', 'file'],
   ] as const)('refuses an artifact missing required %s', (relativePath, kind) => {
     const fixture = createLauncherFixture()
     try {
@@ -247,6 +296,8 @@ describe('standalone runtime launcher', () => {
       expect(result.status).toBe(1)
       if (relativePath === 'server.js') {
         expect(result.stderr).toContain('standalone server missing')
+      } else if (relativePath.includes('sensitive-narrative-text.js')) {
+        expect(result.stderr).toContain(`standalone_required_file_missing:${relativePath}`)
       } else {
         expect(result.stderr).toContain(`missing required ${kind}`)
         expect(result.stderr).toContain(relativePath)

@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
-  renameSync, rmSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -130,6 +130,43 @@ describe('shared deployment lock cross-runtime protocol', () => {
     expect(existsSync(value.lockPath)).toBe(false)
   })
 
+  it.runIf(process.platform === 'darwin' && realpathSync('/tmp') === '/private/tmp')(
+    'uses the physical macOS system temporary path for Shell lock leases',
+    () => {
+      const physicalRoot = realpathSync(mkdtempSync('/tmp/shared-deployment-lock-alias-'))
+      roots.push(physicalRoot)
+      chmodSync(physicalRoot, 0o700)
+      const aliasRunDirectory = join('/tmp', physicalRoot.slice('/private/tmp/'.length), 'run')
+      mkdirSync(join(physicalRoot, 'run'), { mode: 0o700 })
+
+      const result = runShell(aliasRunDirectory, [
+        'acquire_shared_deployment_lock',
+        'printf "%s\\n" "$DEPLOYMENT_LOCK_LEASE_JSON"',
+        'release_shared_deployment_lock',
+      ].join('\n'))
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        runDirectory: join(physicalRoot, 'run'),
+        lockPath: join(physicalRoot, 'run/.deployment.lock'),
+      })
+      expect(existsSync(join(physicalRoot, 'run/.deployment.lock'))).toBe(false)
+    },
+  )
+
+  it('still rejects a user-controlled symlink below the temporary root', () => {
+    const value = fixture()
+    const target = join(value.root, 'redirected')
+    const linked = join(value.root, 'linked')
+    mkdirSync(target, { mode: 0o700 })
+    symlinkSync(target, linked)
+
+    const result = runShell(join(linked, 'run'), 'acquire_shared_deployment_lock')
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('contains a symlink')
+    expect(existsSync(join(target, 'run/.deployment.lock'))).toBe(false)
+  })
+
   it('lets Node recognize a live Shell owner and recover it only after death', async () => {
     const value = fixture()
     const holder = spawn('/bin/bash', ['-c', shellScript(value.runDirectory, [
@@ -174,7 +211,8 @@ describe('shared deployment lock cross-runtime protocol', () => {
     ].join('\n'))
     expect(recovered.status, recovered.stderr).toBe(0)
     expect(JSON.parse(recovered.stdout)).toMatchObject({
-      schema: 'video-autoworker-shared-deployment-lock-owner/v1',
+      schema: 'video-autoworker-shared-deployment-lock-owner/v2',
+      processIdentitySha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
     })
     expect(existsSync(value.lockPath)).toBe(false)
   })
@@ -202,7 +240,8 @@ describe('shared deployment lock cross-runtime protocol', () => {
     const nodeLease = lockModule.acquireSharedDeploymentLockSync({ runDirectory: empty.runDirectory })
     expect(JSON.parse(readFileSync(join(empty.lockPath, 'pid'), 'utf8'))).toMatchObject({
       pid: process.pid,
-      schema: 'video-autoworker-shared-deployment-lock-owner/v1',
+      schema: 'video-autoworker-shared-deployment-lock-owner/v2',
+      processIdentitySha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
     })
     nodeLease.release()
 
@@ -253,6 +292,27 @@ describe('shared deployment lock cross-runtime protocol', () => {
         .toThrow()
       expect(existsSync(value.lockPath), kind).toBe(true)
     }
+  })
+
+  it('reclaims a sealed owner after PID reuse changes the process incarnation', async () => {
+    const value = fixture()
+    makeExisting(value.lockPath, `${JSON.stringify({
+      schema: 'video-autoworker-shared-deployment-lock-owner/v2',
+      pid: process.pid,
+      nonce: 'a'.repeat(64),
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      processIdentitySha256: 'b'.repeat(64),
+    })}\n`)
+
+    const lockModule = await import(pathToFileURL(nodeHelper).href)
+    const lease = lockModule.acquireSharedDeploymentLockSync({ runDirectory: value.runDirectory })
+    expect(JSON.parse(readFileSync(join(value.lockPath, 'pid'), 'utf8'))).toMatchObject({
+      schema: 'video-autoworker-shared-deployment-lock-owner/v2',
+      pid: process.pid,
+      processIdentitySha256: expect.not.stringMatching(/^b{64}$/u),
+    })
+    lease.release()
+    expect(existsSync(value.lockPath)).toBe(false)
   })
 
   it('refuses release after same-content owner inode replacement', () => {

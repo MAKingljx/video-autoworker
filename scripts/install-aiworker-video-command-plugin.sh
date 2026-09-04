@@ -243,9 +243,15 @@ if (JSON.stringify(manifest?.configSchema) !== JSON.stringify({
 const agents = Array.isArray(config?.agents?.list) ? config.agents.list : []
 const targets = agents.filter(agent => agent?.id === agentId)
 if (targets.length !== 1) throw new Error('target agent must exist exactly once')
-const grants = ['allow', 'alsoAllow'].flatMap(key =>
-  Array.isArray(targets[0]?.tools?.[key]) ? targets[0].tools[key].filter(id => id === toolId) : [])
-if (grants.length !== 1) throw new Error('target agent must grant the direct tool exactly once')
+const allowGrants = Array.isArray(targets[0]?.tools?.allow)
+  ? targets[0].tools.allow.filter(id => id === toolId) : []
+const profileExpansionGrants = Array.isArray(targets[0]?.tools?.alsoAllow)
+  ? targets[0].tools.alsoAllow.filter(id => id === toolId) : []
+const hasExplicitAllow = Array.isArray(targets[0]?.tools?.allow)
+if (profileExpansionGrants.length !== 1
+  || (hasExplicitAllow ? allowGrants.length !== 1 : allowGrants.length !== 0)) {
+  throw new Error('target agent must grant the optional direct tool exactly once through alsoAllow')
+}
 for (const agent of agents) {
   if (agent?.id === agentId) continue
   for (const key of ['allow', 'alsoAllow']) {

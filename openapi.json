@@ -11623,6 +11623,54 @@
         }
       }
     },
+    "/api/n8n/director-extraction": {
+      "post": {
+        "tags": ["n8n"],
+        "summary": "Start, backfill, or inspect director-brain extraction for a reviewed work",
+        "operationId": "operateDirectorExtraction",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "workId"],
+              "properties": {
+                "action": { "type": "string", "enum": ["start_extraction"] },
+                "workId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" },
+                "sourceQuery": { "type": "string", "minLength": 1, "maxLength": 120 },
+                "objective": { "type": "string", "minLength": 1, "maxLength": 500 }
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "workId"],
+              "properties": {
+                "action": { "type": "string", "enum": ["backfill_extraction"] },
+                "workId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" }
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "workId"],
+              "properties": {
+                "action": { "type": "string", "enum": ["extraction_status"] },
+                "workId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" }
+              }
+            }
+          ]
+        } } } },
+        "responses": {
+          "200": { "description": "Current review-gated extraction state" },
+          "202": { "description": "Extraction accepted by the existing video-analysis extension" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Source, work binding, or human-review gate conflict" },
+          "429": { "description": "Mutation rate limit exceeded" },
+          "503": { "description": "Director extraction is temporarily unavailable" }
+        }
+      }
+    },
     "/api/n8n/trigger": {
       "post": {
         "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",
@@ -11969,18 +12017,21 @@
             "properties": {
               "schemaEpoch": { "type": "integer", "enum": [1] },
               "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
-              "latestMigration": { "type": "string", "enum": ["057_n8n_director_evidence_outbox"] }
+              "latestMigration": { "type": "string", "enum": ["059_director_evidence_projection_receipts"] }
             }
           },
           "projection": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["schema", "contractDigest", "pending", "incompatiblePending"],
+            "required": ["schema", "contractDigest", "pending", "incompatiblePending", "deliveredWithoutValidReceipt", "outOfScopeOutbox", "outOfScopeExtraction"],
             "properties": {
               "schema": { "type": "string", "enum": ["video-autoworker-director-evidence-outbox-readiness/v1"] },
               "contractDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
               "pending": { "type": "integer", "minimum": 0 },
-              "incompatiblePending": { "type": "integer", "minimum": 0 }
+              "incompatiblePending": { "type": "integer", "minimum": 0 },
+              "deliveredWithoutValidReceipt": { "type": "integer", "minimum": 0 },
+              "outOfScopeOutbox": { "type": "integer", "minimum": 0 },
+              "outOfScopeExtraction": { "type": "integer", "minimum": 0 }
             }
           },
           "retirement": { "$ref": "#/components/schemas/N8nRuntimeDrainStatus" },

@@ -83,9 +83,15 @@ function request(body: Record<string, unknown>) {
 
 describe('director-bound n8n trigger integration', () => {
   let db: Database.Database
+  const originalScope = {
+    tenantId: process.env.MC_OPENCLAW_TENANT_ID,
+    workspaceId: process.env.MC_OPENCLAW_WORKSPACE_ID,
+  }
 
   beforeEach(() => {
     vi.clearAllMocks()
+    process.env.MC_OPENCLAW_TENANT_ID = '3'
+    process.env.MC_OPENCLAW_WORKSPACE_ID = '2'
     db = new Database(':memory:')
     mocks.db = db
     runMigrations(db)
@@ -117,6 +123,10 @@ describe('director-bound n8n trigger integration', () => {
   afterEach(() => {
     mocks.db = null
     db.close()
+    if (originalScope.tenantId === undefined) delete process.env.MC_OPENCLAW_TENANT_ID
+    else process.env.MC_OPENCLAW_TENANT_ID = originalScope.tenantId
+    if (originalScope.workspaceId === undefined) delete process.env.MC_OPENCLAW_WORKSPACE_ID
+    else process.env.MC_OPENCLAW_WORKSPACE_ID = originalScope.workspaceId
   })
 
   it('persists the trusted work binding and replays a terminal run without Feishu', async () => {

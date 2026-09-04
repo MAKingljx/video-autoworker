@@ -42,6 +42,7 @@ import {
   acquireSharedDeploymentLock,
   type SharedDeploymentLockResult,
 } from '@/lib/shared-deployment-lock'
+import { isDirectorBrainScope } from '@/lib/director-brain-scope'
 
 function resolveN8nLoopbackCallbackUrl(configuredValue: string, pathname: string, label: string): string {
   const configured = String(configuredValue || '').trim()
@@ -225,10 +226,17 @@ function sameDirectorTaskBinding(
 export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
   const limited = mutationLimiter(request)
   if (limited) return limited
 
   const body = await request.json().catch(() => null) as Record<string, unknown> | null
+  if (body?.directorWork !== undefined && !isDirectorBrainScope(scope)) {
+    return NextResponse.json({
+      code: 'DIRECTOR_BRAIN_SCOPE_FORBIDDEN',
+      error: '当前工作区不属于已配置的导演脑',
+    }, { status: 403 })
+  }
   const bindingId = Number(body?.bindingId)
   if (!Number.isInteger(bindingId) || bindingId <= 0) {
     return NextResponse.json({ error: '缺少有效的任务链 ID' }, { status: 400 })
@@ -238,7 +246,6 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'input 必须是 JSON 对象' }, { status: 400 })
   }
   const db = getDatabase()
-  const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
   const binding = getN8nWorkflowBinding(db, bindingId, scope)
   if (!binding) return NextResponse.json({ error: '未找到任务链' }, { status: 404 })
   if (!binding.enabled) return NextResponse.json({ error: '任务链当前已停用' }, { status: 409 })

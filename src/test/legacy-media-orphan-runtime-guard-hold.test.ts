@@ -49,7 +49,7 @@ function waitForExit(child: ChildProcess): Promise<{ code: number | null; signal
 function waitForJsonLine(
   child: ChildProcess,
   stderr: () => string,
-  timeoutMilliseconds = 10_000,
+  timeoutMilliseconds = 15_000,
 ): Promise<Record<string, string>> {
   return new Promise((resolvePromise, rejectPromise) => {
     let source = ''

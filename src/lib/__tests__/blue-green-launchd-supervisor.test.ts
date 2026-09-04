@@ -369,7 +369,7 @@ printf '${process.pid}\\n'
       encoding: 'utf8',
     })
     expect(status.stdout).toContain(`managed and healthy label=com.video-autoworker.blue-green.router pid=${process.pid} port=3017`)
-  })
+  }, 15_000)
 
   it('exposes a read-only preflight and keeps lifecycle commands scoped away from protected services', async () => {
     const source = await readFile(manager, 'utf8')

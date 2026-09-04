@@ -85,6 +85,8 @@ process.stdout.write(JSON.stringify({blueGreen:{generation:value.generation,rele
   const openclaw = join(root, 'openclaw')
   executable(openclaw, `#!${process.execPath}\nprocess.exit(0)\n`)
   const report = join(root, 'final-readiness.json')
+  const runtimeConvergenceProof = join(root, 'runtime-convergence-proof.json')
+  writeFileSync(runtimeConvergenceProof, '{}\n', { mode: 0o600 })
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_ENV: 'test' as const,
@@ -104,6 +106,7 @@ process.stdout.write(JSON.stringify({blueGreen:{generation:value.generation,rele
     '--workspace-root', workspace,
     '--agent-id', 'second-original',
     '--openclaw-bin', openclaw,
+    '--runtime-convergence-proof', runtimeConvergenceProof,
   ]
   const run = (args: string[]) => spawnSync(process.execPath, [script, ...args], {
     encoding: 'utf8', env,
@@ -140,7 +143,7 @@ describe('legacy retire final-readiness report', () => {
     const esmRecorder = `import fs from 'node:fs';const keys=['OPENCLAW_GATEWAY_TOKEN','GATEWAY_TOKEN','OPENCLAW_GATEWAY_PASSWORD','GATEWAY_PASSWORD'];fs.appendFileSync(process.env.COMMAND_LOG,JSON.stringify({argv:process.argv.slice(2),env:Object.fromEntries(keys.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]]))})+'\\n')`
     executable(fixture.openclaw, `#!${process.execPath}
 ${recorder}
-const a=process.argv.slice(2);if(a.includes('plugins'))process.stdout.write(JSON.stringify({plugin:{id:'aiworker-director-brain',status:'loaded',version:'0.3.1'},tools:[{names:['aiworker_director_brain']}],diagnostics:[],typedHooks:[]}));else if(a.includes('tools.catalog'))process.stdout.write(JSON.stringify({agentId:'second-original',groups:[{pluginId:'aiworker-director-brain',source:'plugin',tools:[{id:'aiworker_director_brain',pluginId:'aiworker-director-brain',source:'plugin',optional:true}]}]}));else process.stdout.write('{}')
+const a=process.argv.slice(2);if(a.includes('plugins'))process.stdout.write(JSON.stringify({plugin:{id:'aiworker-director-brain',status:'loaded',version:'0.4.0'},tools:[{names:['aiworker_director_brain']}],diagnostics:[],typedHooks:['before_agent_reply','before_message_write','tool_result_persist']}));else if(a.includes('tools.catalog'))process.stdout.write(JSON.stringify({agentId:'second-original',groups:[{pluginId:'aiworker-director-brain',source:'plugin',tools:[{id:'aiworker_director_brain',pluginId:'aiworker-director-brain',source:'plugin',optional:true}]}]}));else process.stdout.write('{}')
 `)
     executable(join(runtimeScripts, 'feishu-director-brain.mjs'), `#!${process.execPath}
 ${esmRecorder}

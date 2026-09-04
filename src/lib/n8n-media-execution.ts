@@ -53,6 +53,29 @@ export interface N8nVideoGenerationProfile {
   maxTokens: number
 }
 
+export interface N8nVisualPerception {
+  summary: string
+  people: string[]
+  locations: string[]
+  actions: string[]
+  objects: string[]
+  environment: string[]
+  ocr: string[]
+  shotTypes: string[]
+  cameraMovement: string[]
+  composition: string[]
+  emotion: string[]
+}
+
+export interface N8nDirectorPerception extends N8nVisualPerception {
+  sound: {
+    speechSummary: string | null
+    ambientSound: string | null
+    music: string | null
+    emotion: string | null
+  }
+}
+
 export interface PreparedMedia extends Record<string, unknown> {
   kind: 'prepared-video'
   durationSeconds: number
@@ -92,6 +115,52 @@ interface MediaMetadata extends PreparedMedia {
 type CliAudioResource = Omit<AuxiliaryModelResource, 'runtime'> & {
   runtime: Extract<AuxiliaryModelResource['runtime'], { type: 'cli' }>
 }
+
+const visualPerceptionSchema = z.object({
+  summary: z.string().trim().min(1).max(4_000),
+  people: z.array(z.string().trim().min(1).max(160)).max(20),
+  locations: z.array(z.string().trim().min(1).max(240)).max(12),
+  actions: z.array(z.string().trim().min(1).max(240)).max(20),
+  objects: z.array(z.string().trim().min(1).max(160)).max(20),
+  environment: z.array(z.string().trim().min(1).max(240)).max(12),
+  ocr: z.array(z.string().trim().min(1).max(500)).max(20),
+  shotTypes: z.array(z.string().trim().min(1).max(120)).max(12),
+  cameraMovement: z.array(z.string().trim().min(1).max(120)).max(12),
+  composition: z.array(z.string().trim().min(1).max(160)).max(12),
+  emotion: z.array(z.string().trim().min(1).max(160)).max(12),
+}).strict()
+
+const directorPerceptionSchema = visualPerceptionSchema.extend({
+  // The final report carries the whole-video narrative, while a per-segment
+  // visual observation stays capped at 4,000 characters.
+  summary: z.string().trim().min(1).max(16_000),
+  sound: z.object({
+    speechSummary: z.string().trim().min(1).max(1_000).nullable(),
+    ambientSound: z.string().trim().min(1).max(1_000).nullable(),
+    music: z.string().trim().min(1).max(1_000).nullable(),
+    emotion: z.string().trim().min(1).max(1_000).nullable(),
+  }).strict(),
+}).strict()
+
+const FINAL_SUMMARY_CHECKPOINT_SCHEMA = 'video-autoworker-final-summary-checkpoint'
+const FINAL_SUMMARY_CHECKPOINT_VERSION = 1
+
+const finalSummaryCheckpointSchema = z.object({
+  schema: z.literal(FINAL_SUMMARY_CHECKPOINT_SCHEMA),
+  version: z.literal(FINAL_SUMMARY_CHECKPOINT_VERSION),
+  summary: z.string().trim().min(1).max(16_000),
+  directorPerception: directorPerceptionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.summary !== value.directorPerception.summary) {
+    context.addIssue({
+      code: 'custom',
+      path: ['summary'],
+      message: 'final_summary_checkpoint_summary_mismatch',
+    })
+  }
+})
+
+type FinalSummaryCheckpoint = z.infer<typeof finalSummaryCheckpointSchema>
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -664,6 +733,7 @@ async function callCompatibleModel(
 
 interface CompatibleRouteAttempt {
   payload: any
+  validated?: unknown
   route: Extract<N8nModelRoute, { transport: 'openai-compatible' }>
   routeIndex: number
 }
@@ -704,6 +774,7 @@ async function callCompatibleModelWithFallback(
   content: unknown,
   failurePrefix: string,
   options: Parameters<typeof callCompatibleModel>[4] = {},
+  validatePayload?: (payload: any) => unknown,
 ): Promise<CompatibleRouteAttempt> {
   const errors: string[] = []
   const start = Math.max(0, Math.min(startRouteIndex, Math.max(0, candidates.length - 1)))
@@ -714,7 +785,8 @@ async function callCompatibleModelWithFallback(
       const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
       if (route.apiKeyEnv && !apiKey) throw new Error(`缺少外部凭据引用 ${route.apiKeyEnv}`)
       const payload = await callCompatibleModel(route, apiKey, content, failurePrefix, options)
-      return { payload, route, routeIndex }
+      const validated = validatePayload ? validatePayload(payload) : undefined
+      return { payload, validated, route, routeIndex }
     } catch (error) {
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
       logSafeOperationError('media_model_route_attempt', error, projection)
@@ -742,6 +814,74 @@ export function visibleModelAnswer(value: unknown): string {
   const closing = raw.lastIndexOf('</think>')
   if (closing >= 0) return raw.slice(closing + '</think>'.length).trim()
   return raw.replace(/<think>[\s\S]*$/i, '').trim() || raw
+}
+
+function uniquePerceptionValues(values: string[]): string[] {
+  return [...new Set(values.map(value => value.replace(/\s+/gu, ' ').trim()).filter(Boolean))]
+}
+
+/**
+ * Parse the factual visual node's bounded JSON response.  The parser accepts
+ * an optional Markdown fence because several OpenAI-compatible runtimes add
+ * one even when explicitly asked for JSON, but it rejects prose before or
+ * after the object and never infers missing fields.
+ */
+export function parseVisualPerceptionAnswer(value: unknown): N8nVisualPerception {
+  const visible = visibleModelAnswer(value)
+  const unfenced = visible
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .trim()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(unfenced)
+  } catch {
+    throw new Error('视频画面模型返回无法解析的结构化结果')
+  }
+  const result = visualPerceptionSchema.safeParse(parsed)
+  if (!result.success) throw new Error('视频画面模型返回不符合结构化感知契约')
+  return {
+    ...result.data,
+    people: uniquePerceptionValues(result.data.people),
+    locations: uniquePerceptionValues(result.data.locations),
+    actions: uniquePerceptionValues(result.data.actions),
+    objects: uniquePerceptionValues(result.data.objects),
+    environment: uniquePerceptionValues(result.data.environment),
+    ocr: uniquePerceptionValues(result.data.ocr),
+    shotTypes: uniquePerceptionValues(result.data.shotTypes),
+    cameraMovement: uniquePerceptionValues(result.data.cameraMovement),
+    composition: uniquePerceptionValues(result.data.composition),
+    emotion: uniquePerceptionValues(result.data.emotion),
+  }
+}
+
+export function parseDirectorSynthesisAnswer(value: unknown): N8nDirectorPerception {
+  const visible = visibleModelAnswer(value)
+  const unfenced = visible
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .trim()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(unfenced)
+  } catch {
+    throw new Error('视频汇总模型返回无法解析的结构化结果')
+  }
+  const result = directorPerceptionSchema.safeParse(parsed)
+  if (!result.success) throw new Error('视频汇总模型返回不符合导演感知契约')
+  return {
+    ...result.data,
+    people: uniquePerceptionValues(result.data.people),
+    locations: uniquePerceptionValues(result.data.locations),
+    actions: uniquePerceptionValues(result.data.actions),
+    objects: uniquePerceptionValues(result.data.objects),
+    environment: uniquePerceptionValues(result.data.environment),
+    ocr: uniquePerceptionValues(result.data.ocr),
+    shotTypes: uniquePerceptionValues(result.data.shotTypes),
+    cameraMovement: uniquePerceptionValues(result.data.cameraMovement),
+    composition: uniquePerceptionValues(result.data.composition),
+    emotion: uniquePerceptionValues(result.data.emotion),
+  }
 }
 
 export async function analyzeN8nVideoFrames(
@@ -779,8 +919,10 @@ export async function analyzeN8nVideoFrames(
             resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
             `当前片段时间为 ${segmentTimeLabel(segment)}，提供 ${images.length} 张按时间排序的关键帧。`,
             `业务要求：${prompt.slice(0, 4_000)}`,
-            '只输出画面可见的人物、场景、动作、文字和事件；不要分析音频。',
-            '不要引用历史会话或长期记忆；无法从画面确认的内容要明确说明。',
+            '只记录画面能够确认的事实，不要分析音频，不要引用历史会话或长期记忆。',
+            '只输出一个 JSON 对象，不要代码围栏或额外文字。对象必须恰好包含这些字段：',
+            '{"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}',
+            '无法确认的数组保持为空；不得用猜测补齐。',
           ].join('\n'),
         },
         ...images.map(url => ({ type: 'image_url', image_url: { url } })),
@@ -796,16 +938,17 @@ export async function analyzeN8nVideoFrames(
           reasoningEffort: generation.reasoningEffort,
           phase: generation.phase,
         },
+        payload => parseVisualPerceptionAnswer(payload?.choices?.[0]?.message?.content),
       )
       activeRouteIndex = attempt.routeIndex
-      const analysis = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
-      if (!analysis) throw new Error(`第 ${segment.index} 段画面模型返回空结果`)
+      const perception = attempt.validated as N8nVisualPerception
       segmentResult = {
         index: segment.index,
         startSeconds: segment.startSeconds,
         durationSeconds: segment.durationSeconds,
         timeRange: segmentTimeLabel(segment),
-        analysis: analysis.slice(0, 12_000),
+        analysis: perception.summary,
+        perception,
         frameCount: images.length,
         routeId: attempt.route.id,
       }
@@ -860,6 +1003,10 @@ export function mergeN8nMediaResults(
       timeRange: String(audioSegment.timeRange || visionSegment.timeRange || ''),
       transcript: String(audioSegment.transcript || ''),
       visualAnalysis: String(visionSegment.analysis || ''),
+      ...(visionSegment.perception && typeof visionSegment.perception === 'object'
+        && !Array.isArray(visionSegment.perception)
+        ? { perception: visionSegment.perception }
+        : {}),
       // Existing Whisper and visual routes do not expose calibrated
       // probabilities. Persist 0 (unknown) instead of inventing certainty;
       // future calibrated routes may supply a bounded value per segment.
@@ -945,10 +1092,13 @@ export async function synthesizeN8nMediaResults(
         timeoutSeconds: synthesisTimeoutSeconds,
         reasoningEffort: chapterGeneration.reasoningEffort,
         phase: chapterGeneration.phase,
+      }, payload => {
+        const summary = visibleModelAnswer(payload?.choices?.[0]?.message?.content)
+        if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
+        return summary
       })
       activeRouteIndex = attempt.routeIndex
-      const summary = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
-      if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
+      const summary = attempt.validated as string
       chapter = {
         index: chapterIndex,
         startTime: String(group[0]?.timeRange || '').split('-')[0],
@@ -979,29 +1129,45 @@ export async function synthesizeN8nMediaResults(
     })
   }
 
-  let finalSummary = await readCheckpoint(workspace, 'final-summary.json', value => typeof value.summary === 'string')
+  const storedFinalSummary = await readCheckpoint(
+    workspace,
+    'final-summary.json',
+    value => finalSummaryCheckpointSchema.safeParse(value).success,
+  )
+  let finalSummary: FinalSummaryCheckpoint | null = storedFinalSummary
+    ? finalSummaryCheckpointSchema.parse(storedFinalSummary)
+    : null
   if (!finalSummary) {
     const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, [
-      '根据下面的章节汇总，生成整部视频的最终分析报告。',
+      '根据下面的章节汇总，生成整部视频的最终分析报告与结构化导演感知。',
       `业务要求：${businessPrompt}`,
-      '报告包含：一句话结论、内容主线、按时间章节、音画相互印证的关键证据、无法确认的信息。保持事实边界。只输出最终报告，不要输出思考过程。',
+      '只输出一个 JSON 对象，不要代码围栏或额外文字。必须恰好包含：',
+      '{"summary":"含一句话结论、内容主线、按时间章节、音画证据和不确定项的最终报告","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}',
+      '数组只保留章节中能够确认的事实；无法确认时使用空数组或 null，不得虚构。',
       chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${visibleModelAnswer(chapter.summary).slice(0, 8_000)}`).join('\n\n'),
     ].join('\n\n'), '全片汇总失败', {
       maxTokens: finalGeneration.maxTokens,
       timeoutSeconds: synthesisTimeoutSeconds,
       reasoningEffort: finalGeneration.reasoningEffort,
       phase: finalGeneration.phase,
-    })
+    }, payload => parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content))
     activeRouteIndex = attempt.routeIndex
-    const summary = visibleModelAnswer(attempt.payload?.choices?.[0]?.message?.content)
-    if (!summary) throw new Error('全片汇总返回空结果')
-    finalSummary = { summary: summary.slice(0, 16_000) }
+    const directorPerception = attempt.validated as N8nDirectorPerception
+    finalSummary = {
+      schema: FINAL_SUMMARY_CHECKPOINT_SCHEMA,
+      version: FINAL_SUMMARY_CHECKPOINT_VERSION,
+      summary: directorPerception.summary,
+      directorPerception,
+    }
     await writeCheckpoint(workspace, 'final-summary.json', finalSummary)
   }
   return {
     ...merged,
     chapters,
     summary: finalSummary.summary,
+    ...(finalSummary.directorPerception && typeof finalSummary.directorPerception === 'object'
+      ? { directorPerception: finalSummary.directorPerception }
+      : {}),
     generation: {
       chapter: {
         reasoningEffort: chapterGeneration.reasoningEffort,

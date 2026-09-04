@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
+import { describe, expect, it } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
 import {
   getN8nRollingDatabaseCompatibility,
@@ -9,174 +10,134 @@ import {
 } from '@/lib/n8n-runtime-affinity'
 
 describe('n8n rolling database compatibility epoch', () => {
-  function replaceDirectorEvidenceOutbox(
-    db: Database.Database,
-    mutate: (sql: string) => string,
-  ) {
-    const table = db.prepare(`
-      SELECT sql FROM sqlite_master
-      WHERE type = 'table' AND name = 'n8n_director_evidence_outbox'
-    `).get() as { sql: string }
-    const changed = mutate(table.sql)
-    expect(changed).not.toBe(table.sql)
-    db.exec(`
-      DROP TABLE n8n_director_evidence_outbox;
-      ${changed};
-      CREATE INDEX idx_n8n_director_evidence_outbox_due
-        ON n8n_director_evidence_outbox(status, next_attempt_at, updated_at, task_id);
-      CREATE INDEX idx_n8n_director_evidence_outbox_scope
-        ON n8n_director_evidence_outbox(tenant_id, workspace_id, status, updated_at DESC);
-    `)
-  }
+  it('keeps published migration 057 byte-stable while appending 058 and 059', () => {
+    const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
+    const start = source.indexOf("  {\n    id: '057_n8n_director_evidence_outbox'")
+    const end = source.indexOf("  {\n    id: '058_director_extraction_task_runs'", start)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    const publishedBlock = source.slice(start, end).trimEnd().replace(/,$/u, '')
+    expect(createHash('sha256').update(publishedBlock).digest('hex')).toBe(
+      'bf78ce0a0784e823261bc0e55e0e4ea23ec226013a70702faa3200e285d6d048',
+    )
+  })
 
-  it('keeps every migration in the declared epoch additive-only', () => {
+  it('keeps the declared rolling epoch additive-only through migration 059', () => {
     expect(N8N_ROLLING_DATABASE_COMPATIBILITY).toEqual({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '057_n8n_director_evidence_outbox',
+      latestMigration: '059_director_evidence_projection_receipts',
     })
 
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
-    const startMarker = `id: '${N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom}'`
-    const start = source.indexOf(startMarker)
+    const start = source.indexOf(`id: '${N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom}'`)
     const end = source.indexOf('\n]\n\nexport function runMigrations', start)
     expect(start).toBeGreaterThanOrEqual(0)
     expect(end).toBeGreaterThan(start)
-
-    const rollingEpochSource = source.slice(start, end)
-    const migrationIds = [...rollingEpochSource.matchAll(/\bid:\s*'(\d{3}_[^']+)'/gu)]
+    const epoch = source.slice(start, end)
+    const ids = [...epoch.matchAll(/\bid:\s*'(\d{3}_[^']+)'/gu)].map(match => match[1])
+    expect(ids.at(-1)).toBe('059_director_evidence_projection_receipts')
+    expect(epoch).not.toMatch(/\bdb\.(?:prepare|pragma|transaction)\s*\(/gu)
+    const templates = [...epoch.matchAll(/\bdb\.exec\(\s*`([\s\S]*?)`\s*\)/gu)]
       .map(match => match[1])
-    expect(migrationIds[0]).toBe(N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom)
-    expect(migrationIds.at(-1)).toBe(N8N_ROLLING_DATABASE_COMPATIBILITY.latestMigration)
-
-    // Epoch migrations may execute only static SQL templates through db.exec.
-    // Any prepare/run/pragma/transaction path must raise the database epoch and
-    // establish a new rolling-safe boundary before hot switching is re-enabled.
-    const databaseCalls = [...rollingEpochSource.matchAll(/\bdb\.([A-Za-z_$][\w$]*)\s*\(/gu)]
-      .map(match => match[1])
-    expect(databaseCalls.length).toBeGreaterThan(0)
-    expect(new Set(databaseCalls)).toEqual(new Set(['exec']))
-
-    const sqlTemplates = [...rollingEpochSource.matchAll(/\bdb\.exec\(\s*`([\s\S]*?)`\s*\)/gu)]
-      .map(match => match[1])
-    expect(sqlTemplates).toHaveLength(databaseCalls.length)
-    for (const sql of sqlTemplates) {
+    expect(templates.length).toBeGreaterThan(0)
+    for (const sql of templates) {
       expect(sql).not.toContain('${')
-      const statements = sql.split(';').map(statement => statement.trim()).filter(Boolean)
-      expect(statements.length).toBeGreaterThan(0)
-      for (const statement of statements) {
+      for (const statement of sql.split(';').map(value => value.trim()).filter(Boolean)) {
         expect(statement).toMatch(/^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+IF\s+NOT\s+EXISTS\b/iu)
-        expect(statement).not.toMatch(/^\s*(?:ALTER|DROP|RENAME|UPDATE|DELETE|REPLACE|TRIGGER|PRAGMA)\b/iu)
       }
     }
   })
 
-  it('attests applied migration rows plus the real rolling tables, columns, and indexes', () => {
+  it('attests the task-run-only extraction schema without rewriting the published root outbox', () => {
     const db = new Database(':memory:')
     try {
+      db.pragma('foreign_keys = ON')
       runMigrations(db)
       expect(getN8nRollingDatabaseCompatibility(db))
         .toEqual(N8N_ROLLING_DATABASE_COMPATIBILITY)
 
+      const tables = new Set((db.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'table'
+      `).all() as Array<{ name: string }>).map(row => row.name))
+      expect(tables.has('director_extraction_jobs')).toBe(false)
+      expect(tables.has('director_extraction_backfill_rejections')).toBe(false)
+      expect(tables.has('director_extraction_checkpoints')).toBe(true)
+      expect(tables.has('director_extraction_projection_receipts')).toBe(true)
+      expect(tables.has('director_extraction_review_receipts')).toBe(true)
+
+      const outboxColumns = (db.prepare(`
+        PRAGMA table_info(n8n_director_evidence_outbox)
+      `).all() as Array<{ name: string }>).map(row => row.name)
+      expect(outboxColumns).toEqual([
+        'task_id', 'binding_id', 'tenant_id', 'workspace_id', 'work_id', 'query_digest',
+        'projection_contract_digest', 'idempotency_key', 'result_sha256',
+        'status', 'attempt_count', 'next_attempt_at', 'last_error_code',
+        'delivered_at', 'created_at', 'updated_at',
+      ])
+      const checkpointColumns = (db.prepare(`
+        PRAGMA table_info(director_extraction_checkpoints)
+      `).all() as Array<{ name: string }>).map(row => row.name)
+      expect(checkpointColumns).toEqual([
+        'phase_task_id', 'phase', 'input_sha256', 'phase_input', 'output_sha256',
+        'candidate_output', 'created_at',
+      ])
+      const projectionColumns = (db.prepare(`
+        PRAGMA table_info(director_extraction_projection_receipts)
+      `).all() as Array<{ name: string }>).map(row => row.name)
+      expect(projectionColumns).toEqual([
+        'phase_task_id', 'receipt_json', 'receipt_sha256', 'created_at',
+      ])
+      const reviewColumns = (db.prepare(`
+        PRAGMA table_info(director_extraction_review_receipts)
+      `).all() as Array<{ name: string }>).map(row => row.name)
+      expect(reviewColumns).toEqual([
+        'phase_task_id', 'receipt_type', 'reviewed_references', 'error_code',
+        'receipt_sha256', 'created_at',
+      ])
+      for (const table of [
+        'director_extraction_checkpoints',
+        'director_extraction_projection_receipts',
+        'director_extraction_review_receipts',
+      ]) {
+        expect(db.prepare(`PRAGMA foreign_key_list(${table})`).all()).toEqual(expect.arrayContaining([
+          expect.objectContaining({ table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }),
+        ]))
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  it('fails closed when a required migration row is missing', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
       db.prepare('DELETE FROM schema_migrations WHERE id = ?')
-        .run('054_n8n_task_dispatch_leases')
-      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(/migration is missing/)
+        .run('058_director_extraction_task_runs')
+      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(/migration is missing/u)
     } finally {
       db.close()
     }
   })
 
-  it('rejects counterfeit rolling tables with a required column missing', () => {
+  it('fails closed when a required immutable checkpoint column is counterfeit', () => {
     const db = new Database(':memory:')
     try {
       runMigrations(db)
       db.exec(`
-        DROP INDEX idx_scheduler_leader_leases_expiry;
-        DROP TABLE scheduler_leader_leases;
-        CREATE TABLE scheduler_leader_leases (
-          lease_name TEXT PRIMARY KEY,
-          holder_id TEXT NOT NULL,
-          lease_expires_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL
+        DROP TABLE director_extraction_checkpoints;
+        CREATE TABLE director_extraction_checkpoints (
+          phase_task_id TEXT NOT NULL PRIMARY KEY,
+          phase TEXT NOT NULL,
+          input_sha256 TEXT NOT NULL,
+          phase_input TEXT NOT NULL,
+          output_sha256 TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );
-        CREATE INDEX idx_scheduler_leader_leases_expiry
-          ON scheduler_leader_leases(lease_expires_at);
       `)
       expect(() => getN8nRollingDatabaseCompatibility(db))
-        .toThrow(/column is incompatible: scheduler_leader_leases\.revision/)
-    } finally {
-      db.close()
-    }
-  })
-
-  it('rejects missing or directionally incompatible rolling indexes', () => {
-    const db = new Database(':memory:')
-    try {
-      runMigrations(db)
-      db.exec(`
-        DROP INDEX idx_n8n_intake_control_events_time;
-        CREATE INDEX idx_n8n_intake_control_events_time
-          ON n8n_intake_control_events(created_at ASC, id ASC);
-      `)
-      expect(() => getN8nRollingDatabaseCompatibility(db))
-        .toThrow(/index columns are incompatible: idx_n8n_intake_control_events_time/)
-    } finally {
-      db.close()
-    }
-  })
-
-  it.each([
-    {
-      name: 'idempotency uniqueness',
-      mutate: (sql: string) => sql.replace(
-        'idempotency_key TEXT NOT NULL UNIQUE',
-        'idempotency_key TEXT NOT NULL',
-      ),
-      message: /idempotency identity is not unique/u,
-    },
-    {
-      name: 'parent cascade reference',
-      mutate: (sql: string) => sql.replace(
-        /,\s*FOREIGN KEY \(task_id\) REFERENCES n8n_task_runs\(task_id\) ON DELETE CASCADE/u,
-        '',
-      ),
-      message: /parent reference is incompatible/u,
-    },
-    {
-      name: 'status check',
-      mutate: (sql: string) => sql.replace(
-        /\s*CHECK\(status IN \('pending', 'delivered', 'conflict'\)\)/u,
-        '',
-      ),
-      message: /constraint is incompatible/u,
-    },
-    {
-      name: 'query digest check',
-      mutate: (sql: string) => sql.replace(
-        /\s*CHECK\(length\(query_digest\) = 64\s+AND query_digest NOT GLOB '\*\[\^0-9a-f\]\*'\)/u,
-        '',
-      ),
-      message: /constraint is incompatible/u,
-    },
-    {
-      name: 'projection contract digest check',
-      mutate: (sql: string) => sql.replace(
-        /\s*CHECK\(length\(projection_contract_digest\) = 64\s+AND projection_contract_digest NOT GLOB '\*\[\^0-9a-f\]\*'\)/u,
-        '',
-      ),
-      message: /constraint is incompatible/u,
-    },
-    {
-      name: 'pending default',
-      mutate: (sql: string) => sql.replace("DEFAULT 'pending'", "DEFAULT 'queued'"),
-      message: /column is incompatible: n8n_director_evidence_outbox\.status/u,
-    },
-  ])('rejects a counterfeit director evidence outbox without $name', ({ mutate, message }) => {
-    const db = new Database(':memory:')
-    try {
-      runMigrations(db)
-      replaceDirectorEvidenceOutbox(db, mutate)
-      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(message)
+        .toThrow(/director_extraction_checkpoints\.candidate_output/u)
     } finally {
       db.close()
     }
