@@ -384,6 +384,28 @@ describe('transactional AI-worker task-flow installer', () => {
     }
   }, 15_000)
 
+  it('appends the video command rule to a workspace that has no previous section', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-install-test-'))
+    const workspace = resolve(root, 'workspace')
+    try {
+      await mkdir(workspace, { recursive: true })
+      await writeFile(resolve(workspace, 'AGENTS.md'), '# Workspace Rules\n\nKeep this rule.\n')
+
+      // Exercise real installation and replay with the shared isolated runtime fixture.
+      await runInstaller(workspace, resolve(root, 'backups-1'))
+      await runInstaller(workspace, resolve(root, 'backups-2'))
+
+      const agents = await readFile(resolve(workspace, 'AGENTS.md'), 'utf8')
+      expect(agents).toContain('Keep this rule.')
+      expect(agents).toContain('`aiworker_analyze_video`')
+      expect(agents).toContain('`before_dispatch`')
+      expect(agents).toContain('raw scheduler script is not exposed')
+      expect(agents.match(/^## Video Analysis Task Flow Rule$/gm)).toHaveLength(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 15_000)
+
   it('verifies a changed install before retaining only two recoverable backups', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-retention-test-'))
     const workspace = resolve(root, 'workspace')
