@@ -444,10 +444,12 @@ async function runCell(options, descriptor, index) {
     const catalogBefore = normalizedCatalogToolIds(catalogBeforeInventory)
     const effectiveFingerprintBefore = fingerprintOpenClawToolInventory(effectiveBeforeInventory, {
       agentId: TARGET_AGENT_ID,
+      kind: 'effective',
       label: `${descriptor.id} tools.effective before`,
     })
     const catalogFingerprintBefore = fingerprintOpenClawToolInventory(catalogBeforeInventory, {
       agentId: TARGET_AGENT_ID,
+      kind: 'catalog',
       label: `${descriptor.id} tools.catalog before`,
     })
     const rowOffset = before.rows.length
@@ -488,10 +490,12 @@ async function runCell(options, descriptor, index) {
     const catalogAfter = normalizedCatalogToolIds(catalogAfterInventory)
     const effectiveFingerprintAfter = fingerprintOpenClawToolInventory(effectiveAfterInventory, {
       agentId: TARGET_AGENT_ID,
+      kind: 'effective',
       label: `${descriptor.id} tools.effective after`,
     })
     const catalogFingerprintAfter = fingerprintOpenClawToolInventory(catalogAfterInventory, {
       agentId: TARGET_AGENT_ID,
+      kind: 'catalog',
       label: `${descriptor.id} tools.catalog after`,
     })
     const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''

@@ -1619,6 +1619,7 @@ try {
   const toolIdsBefore = effectiveToolIds(toolsInventory)
   const effectiveToolFingerprintBefore = fingerprintOpenClawToolInventory(toolsInventory, {
     agentId: 'second-original',
+    kind: 'effective',
     label: 'rich canary tools.effective before',
   })
   const toolsCatalogBefore = unwrap(call('tools.catalog', {
@@ -1628,6 +1629,7 @@ try {
   const catalogToolIdsBefore = catalogToolIds(toolsCatalogBefore)
   const catalogToolFingerprintBefore = fingerprintOpenClawToolInventory(toolsCatalogBefore, {
     agentId: 'second-original',
+    kind: 'catalog',
     label: 'rich canary tools.catalog before',
   })
   const codingCatalogToolIdsBefore = catalogProfileToolIds(toolsCatalogBefore, 'coding')
@@ -1884,6 +1886,7 @@ try {
   const effectiveToolSetUnchanged = JSON.stringify(toolIdsBefore) === JSON.stringify(toolIdsAfter)
   const effectiveToolFingerprintAfter = fingerprintOpenClawToolInventory(finalToolsInventory, {
     agentId: 'second-original',
+    kind: 'effective',
     label: 'rich canary tools.effective after',
   })
   const effectiveToolCapabilitiesUnchanged = JSON.stringify(effectiveToolFingerprintBefore)
@@ -1895,6 +1898,7 @@ try {
   const catalogToolIdsAfter = catalogToolIds(toolsCatalogAfter)
   const catalogToolFingerprintAfter = fingerprintOpenClawToolInventory(toolsCatalogAfter, {
     agentId: 'second-original',
+    kind: 'catalog',
     label: 'rich canary tools.catalog after',
   })
   const catalogToolCapabilitiesUnchanged = JSON.stringify(catalogToolFingerprintBefore)

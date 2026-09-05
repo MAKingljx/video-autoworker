@@ -547,7 +547,15 @@ if (operation === 'effective') {
   fs.appendFileSync(authLog, 'gateway call tools.effective=resolved\\n')
   const call = calls('tools.effective')
   const includeRead = Number(process.env.FAKE_REMOVE_READ_ON_EFFECTIVE_CALL) !== call
-  write({ agentId: 'second-original', ...(process.env.FAKE_EFFECTIVE_NOTICE === '1'
+  const validProfileNotice = process.env.FAKE_EFFECTIVE_PROFILE_NOTICE === '1'
+  const driftAt = Number(process.env.FAKE_EFFECTIVE_PROFILE_NOTICE_DRIFT_ON_CALL)
+  const policyMessage = Number.isInteger(driftAt) && call >= driftAt
+    ? 'Browser policy changed after the baseline.'
+    : 'Browser is filtered by the active profile.'
+  write({ agentId: 'second-original', ...(validProfileNotice ? {
+    profile: 'coding',
+    notices: [{ id: 'browser-filtered-by-profile', severity: 'info', message: policyMessage }],
+  } : process.env.FAKE_EFFECTIVE_NOTICE === '1'
     ? { notices: [{ id: 'mcp-not-yet-listed', severity: 'info' }] } : {}), groups: [
     { source: 'core', tools: [...includeRead ? [{ id: 'read',
       ...(process.env.FAKE_READ_DESCRIPTION ? { description: process.env.FAKE_READ_DESCRIPTION } : {}) }] : [],
@@ -825,13 +833,15 @@ function toolBaselineValue(sessionKey: string, catalogIds: string[], effectiveId
   return {
     agentId: 'second-original',
     catalogCapabilities,
+    catalogNotices: [],
     catalogSha256: digest(JSON.stringify(catalogCapabilities)),
     catalogToolIds: [...catalogIds].toSorted(),
     effectiveCapabilities,
+    effectiveNotices: [],
     effectiveSha256: digest(JSON.stringify(effectiveCapabilities)),
     effectiveToolIds: [...effectiveIds].toSorted(),
     profile: 'qwen-current',
-    schema: 'video-autoworker-openclaw-tool-baseline/v3',
+    schema: 'video-autoworker-openclaw-tool-baseline/v4',
     sessionKeySha256: digest(sessionKey),
   }
 }
@@ -1004,7 +1014,9 @@ describe('qwen-current unified runtime convergence installer', () => {
     expect(baseline).toBeTruthy()
     expect((await stat(baseline as string)).mode & 0o777).toBe(0o600)
     const value = JSON.parse(await readFile(baseline as string, 'utf8'))
-    expect(value.schema).toBe('video-autoworker-openclaw-tool-baseline/v3')
+    expect(value.schema).toBe('video-autoworker-openclaw-tool-baseline/v4')
+    expect(value.catalogNotices).toEqual([])
+    expect(value.effectiveNotices).toEqual([])
     expect(value.sessionKeySha256).toBe(digest(entry.fixtureSessionKey))
     expect(await readFile(baseline as string, 'utf8')).not.toContain(entry.fixtureSessionKey)
     expect(value.catalogToolIds).toContain('read')
@@ -1012,6 +1024,34 @@ describe('qwen-current unified runtime convergence installer', () => {
     expect(await readFile(entry.config, 'utf8')).toBe(configBefore)
     expect(await exists(entry.gatewayLog)).toBe(false)
   }, 15_000)
+
+  it('captures the supported effective policy notice and rejects post-baseline policy drift', async () => {
+    const entry = await createFixture()
+    entry.env.FAKE_EFFECTIVE_PROFILE_NOTICE = '1'
+    const configBefore = await readFile(entry.config, 'utf8')
+
+    const captured = await run(entry, '--capture-tool-baseline')
+    const baseline = /baseline: (.+)$/mu.exec(captured.stdout)?.[1]
+    expect(baseline).toBeTruthy()
+    const value = JSON.parse(await readFile(baseline as string, 'utf8'))
+    expect(value.schema).toBe('video-autoworker-openclaw-tool-baseline/v4')
+    expect(value.catalogNotices).toEqual([])
+    expect(value.effectiveNotices).toEqual([{
+      id: 'browser-filtered-by-profile',
+      severity: 'info',
+      messageSha256: digest('Browser is filtered by the active profile.'),
+      profileSha256: digest('coding'),
+    }])
+
+    entry.env.FAKE_EFFECTIVE_PROFILE_NOTICE_DRIFT_ON_CALL = '2'
+    await expect(run(
+      entry,
+      '--dry-run',
+      '--tool-baseline', baseline as string,
+    )).rejects.toThrow(/tool policy context changed after the pre-install baseline/u)
+    expect(await readFile(entry.config, 'utf8')).toBe(configBefore)
+    expect(await exists(entry.gatewayLog)).toBe(false)
+  }, 30_000)
 
   it.each(['capture-tool-baseline', 'dry-run', 'apply'])(
     'rejects a multi-agent qwen-current profile during %s without persistent writes',
@@ -1162,9 +1202,10 @@ describe('qwen-current unified runtime convergence installer', () => {
     roots.push(root)
     const inventory = join(root, 'tools-effective.json')
     await writeFile(inventory, `${JSON.stringify({
+      agentId: 'second-original',
       groups: [
-        { tools: [{ id: 'aiworker_director_brain' }, { id: 'session_status' }] },
-        { tools: [{ id: 'aiworker_analyze_video' }] },
+        { source: 'core', tools: [{ id: 'aiworker_director_brain' }, { id: 'session_status' }] },
+        { source: 'core', tools: [{ id: 'aiworker_analyze_video' }] },
       ],
     })}\n`, { mode: 0o600 })
 
@@ -1176,7 +1217,8 @@ describe('qwen-current unified runtime convergence installer', () => {
     ])).resolves.toMatchObject({ stdout: '' })
 
     await writeFile(inventory, `${JSON.stringify({
-      groups: [{ tools: [
+      agentId: 'second-original',
+      groups: [{ source: 'core', tools: [
         { id: 'session_status' },
         { id: 'aiworker_analyze_video' },
         { id: 'aiworker_director_brain' },
@@ -1191,7 +1233,8 @@ describe('qwen-current unified runtime convergence installer', () => {
     ])).resolves.toMatchObject({ stdout: '' })
 
     await writeFile(inventory, `${JSON.stringify({
-      groups: [{ tools: [
+      agentId: 'second-original',
+      groups: [{ source: 'core', tools: [
         { id: 'session_status' },
         { id: 'aiworker_director_brain' },
         { id: 'read' },
@@ -1205,7 +1248,8 @@ describe('qwen-current unified runtime convergence installer', () => {
     ])).rejects.toThrow()
 
     await writeFile(inventory, `${JSON.stringify({
-      groups: [{ tools: [
+      agentId: 'second-original',
+      groups: [{ source: 'core', tools: [
         { id: 'session_status' },
         { id: 'aiworker_analyze_video' },
         { id: 'aiworker_director_brain' },
@@ -1218,6 +1262,32 @@ describe('qwen-current unified runtime convergence installer', () => {
       inventory,
       manifestFile,
     ])).rejects.toThrow()
+  })
+
+  it.each([
+    ['MCP notice', { id: 'mcp-not-yet-listed', severity: 'info', message: 'MCP unavailable.' }],
+    ['unknown notice', { id: 'unknown-policy', severity: 'info', message: 'Unknown policy.' }],
+  ])('verify-effective rejects an otherwise complete inventory with an %s', async (_label, policyNotice) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'openclaw-effective-notice.')))
+    roots.push(root)
+    const inventory = join(root, 'tools-effective.json')
+    await writeFile(inventory, `${JSON.stringify({
+      agentId: 'second-original',
+      profile: 'coding',
+      notices: [policyNotice],
+      groups: [{ source: 'core', tools: [
+        { id: 'session_status' },
+        { id: 'aiworker_analyze_video' },
+        { id: 'aiworker_director_brain' },
+      ] }],
+    })}\n`, { mode: 0o600 })
+
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'verify-effective',
+      inventory,
+      manifestFile,
+    ])).rejects.toThrow(/effective tool inventory is incomplete/u)
   })
 
   it('applies only compaction policy for the sole profile agent and preserves its tools', async () => {
@@ -1346,6 +1416,33 @@ describe('qwen-current unified runtime convergence installer', () => {
       .toEqual(backups.filter(name => name.includes('before-runtime-convergence')))
     expect(repeatedFiles.filter(name => name.includes('runtime-convergence-proof')))
       .toEqual(backups.filter(name => name.includes('runtime-convergence-proof')))
+  }, 20_000)
+
+  it('rejects reuse of a v3-derived proof without policy markers or notice arrays', async () => {
+    const entry = await createFixture()
+    const applied = await run(entry, '--apply')
+    const proofPath = /Verified session-scoped runtime convergence proof: (.+)$/mu
+      .exec(applied.stdout)?.[1]
+    expect(proofPath).toBeTruthy()
+    const proof = JSON.parse(await readFile(proofPath!, 'utf8'))
+    proof.runtime.preInstallToolBaseline.baselineSchema =
+      'video-autoworker-openclaw-tool-baseline/v3'
+    delete proof.runtime.preInstallToolBaseline.catalogNotices
+    delete proof.runtime.preInstallToolBaseline.effectiveNotices
+    delete proof.runtime.toolInventory.policyNotices
+    delete proof.runtime.effectiveToolInventory.policyNotices
+    await writeFile(proofPath!, `${JSON.stringify(proof, null, 2)}\n`, { mode: 0o600 })
+    const configBefore = await readFile(entry.config, 'utf8')
+    const backupsBefore = await readdir(entry.backupRoot)
+
+    await expect(run(
+      entry,
+      '--apply',
+      '--runtime-convergence-proof', proofPath!,
+    )).rejects.toThrow(/runtime tool policy evidence is invalid/u)
+    expect(await readFile(entry.config, 'utf8')).toBe(configBefore)
+    expect(await readdir(entry.backupRoot)).toEqual(backupsBefore)
+    expect(await exists(entry.gatewayLog)).toBe(false)
   }, 20_000)
 
   it.each([

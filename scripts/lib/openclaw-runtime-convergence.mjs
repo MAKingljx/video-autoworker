@@ -4,7 +4,11 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { fingerprintOpenClawToolInventory } from './openclaw-tool-capability-fingerprint.mjs'
+import {
+  fingerprintOpenClawToolInventory,
+  normalizeOpenClawToolPolicyNotices,
+  validateNormalizedOpenClawToolPolicyNotices,
+} from './openclaw-tool-capability-fingerprint.mjs'
 
 const GATEWAY_PORT = 18889
 
@@ -206,25 +210,30 @@ function assertSource(configPath, stateDir, manifestPath, mode) {
   }
 }
 
-function toolCapabilitiesFromInventory(value, label, agentId) {
-  return fingerprintOpenClawToolInventory(value, { label, agentId })
+function toolCapabilitiesFromInventory(value, label, agentId, kind) {
+  return fingerprintOpenClawToolInventory(value, { label, agentId, kind })
 }
 
 function validateToolBaseline(value, manifest) {
   const expectedKeys = [
-    'agentId', 'catalogCapabilities', 'catalogSha256', 'catalogToolIds',
-    'effectiveCapabilities', 'effectiveSha256', 'effectiveToolIds',
+    'agentId', 'catalogCapabilities', 'catalogNotices', 'catalogSha256', 'catalogToolIds',
+    'effectiveCapabilities', 'effectiveNotices', 'effectiveSha256', 'effectiveToolIds',
     'profile', 'schema', 'sessionKeySha256',
   ]
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || !same(Object.keys(value).toSorted(), expectedKeys)
-    || value.schema !== 'video-autoworker-openclaw-tool-baseline/v3'
+    || value.schema !== 'video-autoworker-openclaw-tool-baseline/v4'
     || value.profile !== manifest.profile || value.agentId !== manifest.agent.id
     || !/^[a-f0-9]{64}$/u.test(value.sessionKeySha256)
     || !Array.isArray(value.catalogToolIds) || !Array.isArray(value.effectiveToolIds)
     || !Array.isArray(value.catalogCapabilities)
     || !Array.isArray(value.effectiveCapabilities)) {
     fail('pre-install tool baseline is invalid')
+  }
+  validateNormalizedOpenClawToolPolicyNotices(value.catalogNotices, { kind: 'catalog', label: 'baseline catalog' })
+  validateNormalizedOpenClawToolPolicyNotices(value.effectiveNotices, { kind: 'effective', label: 'baseline effective tools' })
+  if (value.effectiveNotices.length > 0 && value.effectiveToolIds.includes('browser')) {
+    fail('pre-install tool baseline policy context is invalid')
   }
   const catalogToolIds = value.catalogToolIds.toSorted()
   const effectiveToolIds = value.effectiveToolIds.toSorted()
@@ -262,6 +271,8 @@ function validateToolBaseline(value, manifest) {
     effectiveToolIds,
     catalogCapabilities: value.catalogCapabilities,
     effectiveCapabilities: value.effectiveCapabilities,
+    catalogNotices: value.catalogNotices,
+    effectiveNotices: value.effectiveNotices,
     sessionKeySha256: value.sessionKeySha256,
   }
 }
@@ -280,10 +291,10 @@ function writeToolBaseline(
   const catalog = readEvidenceJson(catalogPath, 'pre-install tool catalog evidence')
   const effective = readEvidenceJson(effectivePath, 'pre-install effective tool evidence')
   const catalogCapabilities = toolCapabilitiesFromInventory(
-    catalog.value, 'pre-install tool catalog', manifest.agent.id,
+    catalog.value, 'pre-install tool catalog', manifest.agent.id, 'catalog',
   )
   const effectiveCapabilities = toolCapabilitiesFromInventory(
-    effective.value, 'pre-install effective tools', manifest.agent.id,
+    effective.value, 'pre-install effective tools', manifest.agent.id, 'effective',
   )
   const catalogToolIds = catalogCapabilities.map(item => item.id)
   const effectiveToolIds = effectiveCapabilities.map(item => item.id)
@@ -295,14 +306,16 @@ function writeToolBaseline(
     fail('pre-install tool baseline output is unsafe')
   }
   const value = stable({
-    schema: 'video-autoworker-openclaw-tool-baseline/v3',
+    schema: 'video-autoworker-openclaw-tool-baseline/v4',
     profile: manifest.profile,
     agentId: manifest.agent.id,
     catalogToolIds,
     catalogCapabilities,
+    catalogNotices: normalizeOpenClawToolPolicyNotices(catalog.value, { kind: 'catalog' }),
     catalogSha256: sha256(JSON.stringify(catalogCapabilities)),
     effectiveToolIds,
     effectiveCapabilities,
+    effectiveNotices: normalizeOpenClawToolPolicyNotices(effective.value, { kind: 'effective' }),
     effectiveSha256: sha256(JSON.stringify(effectiveCapabilities)),
     sessionKeySha256,
   })
@@ -316,6 +329,8 @@ function assertNoToolRegression(
   catalogCapabilities,
   effectiveCapabilities,
   sessionKeySha256,
+  catalogNotices,
+  effectiveNotices,
 ) {
   const baselineFile = readPhysicalFile(baselinePath, 'pre-install tool baseline')
   let baselineValue
@@ -325,6 +340,9 @@ function assertNoToolRegression(
   const baseline = validateToolBaseline(baselineValue, manifest)
   if (baseline.sessionKeySha256 !== sessionKeySha256) {
     fail('pre-install tool baseline is bound to a different runtime session')
+  }
+  if (!same(baseline.catalogNotices, catalogNotices) || !same(baseline.effectiveNotices, effectiveNotices)) {
+    fail('tool policy context changed after the pre-install baseline')
   }
   const allowedAddition = manifest.requiredPlugins
     .find(plugin => plugin.id === 'aiworker-director-brain')?.tool
@@ -352,7 +370,10 @@ function assertNoToolRegression(
   }
   return {
     sha256: baselineFile.snapshot.sha256,
+    baselineSchema: 'video-autoworker-openclaw-tool-baseline/v4',
     sessionKeySha256,
+    catalogNotices,
+    effectiveNotices,
     catalog: compare(baseline.catalogCapabilities, catalogCapabilities, 'tool catalog'),
     effective: compare(
       baseline.effectiveCapabilities, effectiveCapabilities, 'effective tools',
@@ -518,12 +539,13 @@ function validateRuntimeCatalog(value, manifest, descriptor) {
     fail('director-brain runtime catalog binding is invalid')
   }
   const capabilities = toolCapabilitiesFromInventory(
-    value, 'director-brain runtime catalog', manifest.agent.id,
+    value, 'director-brain runtime catalog', manifest.agent.id, 'catalog',
   )
   return {
     count: toolIds.length,
     ids: toolIds,
     capabilities,
+    policyNotices: normalizeOpenClawToolPolicyNotices(value, { kind: 'catalog' }),
     sha256: sha256(JSON.stringify(capabilities)),
   }
 }
@@ -534,12 +556,8 @@ function validateEffectiveInventory(value, manifest) {
       || !Array.isArray(group.tools))) {
     fail('effective tool inventory is invalid')
   }
-  if (value.notices !== undefined
-    && (!Array.isArray(value.notices) || value.notices.length > 0)) {
-    fail('effective tool inventory is incomplete')
-  }
   const capabilities = toolCapabilitiesFromInventory(
-    value, 'effective tool inventory', manifest.agent.id,
+    value, 'effective tool inventory', manifest.agent.id, 'effective',
   )
   const toolIds = capabilities.map(item => item.id)
   const rawToolCount = value.groups.flatMap(group => group.tools).length
@@ -556,6 +574,7 @@ function validateEffectiveInventory(value, manifest) {
     count: toolIds.length,
     ids: toolIds,
     capabilities,
+    policyNotices: normalizeOpenClawToolPolicyNotices(value, { kind: 'effective' }),
     sha256: sha256(JSON.stringify(capabilities)),
   }
 }
@@ -614,6 +633,8 @@ function verifyRuntimeHooks(
     inventory.capabilities,
     effectiveInventory.capabilities,
     sessionKeySha256,
+    inventory.policyNotices,
+    effectiveInventory.policyNotices,
   )
   const identity = gatewayProcessIdentity(pid)
   const trees = requiredPluginTreeEvidence(stateDir, manifest)
@@ -1180,6 +1201,36 @@ function validateHotReloadProof(value, configSha256) {
     && /^[a-f0-9]{64}$/u.test(value.logSha256)
 }
 
+function validateRuntimeToolPolicyEvidence(runtime, manifest) {
+  const baseline = runtime?.preInstallToolBaseline
+  const catalog = runtime?.toolInventory
+  const effective = runtime?.effectiveToolInventory
+  if (baseline?.baselineSchema !== 'video-autoworker-openclaw-tool-baseline/v4'
+    || !/^[a-f0-9]{64}$/u.test(baseline.sha256)
+    || !same(baseline.catalogNotices, catalog?.policyNotices)
+    || !same(baseline.effectiveNotices, effective?.policyNotices)
+    || baseline.catalog?.sha256 !== catalog?.sha256
+    || baseline.effective?.sha256 !== effective?.sha256) {
+    fail('runtime tool policy evidence is invalid')
+  }
+  // Reuse the complete v4 contract for persisted inventories. A pre-v4 proof
+  // cannot bypass notice validation through the recent-proof reuse path.
+  validateToolBaseline({
+    schema: baseline.baselineSchema,
+    profile: manifest.profile,
+    agentId: manifest.agent.id,
+    sessionKeySha256: baseline.sessionKeySha256,
+    catalogToolIds: catalog?.ids,
+    catalogCapabilities: catalog?.capabilities,
+    catalogNotices: catalog?.policyNotices,
+    catalogSha256: catalog?.sha256,
+    effectiveToolIds: effective?.ids,
+    effectiveCapabilities: effective?.capabilities,
+    effectiveNotices: effective?.policyNotices,
+    effectiveSha256: effective?.sha256,
+  }, manifest)
+}
+
 function writeConvergenceProof(
   runtimePath,
   hotReloadPath,
@@ -1189,6 +1240,7 @@ function writeConvergenceProof(
 ) {
   const manifest = validateManifest(manifestPath)
   const runtime = readJson(runtimePath, 'runtime convergence evidence')
+  validateRuntimeToolPolicyEvidence(runtime, manifest)
   const hotReload = readJson(hotReloadPath, 'hot-reload convergence evidence')
   const configSnapshot = configScopeSnapshot(configPath, manifestPath, false)
   if (!validateHotReloadProof(hotReload, configSnapshot.sha256)
@@ -1236,6 +1288,7 @@ export function assertConvergenceProof(proofPath, manifestPath, stateDir, config
     || !/^[a-f0-9]{64}$/u.test(proof.runtime?.preInstallToolBaseline?.sessionKeySha256)) {
     fail('runtime convergence proof is invalid or stale')
   }
+  validateRuntimeToolPolicyEvidence(proof.runtime, manifest)
   if (!same(configScopeSnapshot(configPath, manifestPath, false), proof.configSnapshot)) {
     fail('OpenClaw config changed after runtime convergence proof')
   }
@@ -1267,21 +1320,7 @@ export function assertConvergenceProof(proofPath, manifestPath, stateDir, config
 function verifyEffective(inventoryPath, manifestPath) {
   const manifest = validateManifest(manifestPath)
   const inventory = readJson(inventoryPath, 'tools.effective inventory')
-  if (!Array.isArray(inventory.groups)
-    || inventory.groups.some(group => !group || typeof group !== 'object'
-      || !Array.isArray(group.tools))) {
-    fail('tools.effective inventory is malformed')
-  }
-  const tools = inventory.groups.flatMap(group => group.tools)
-  if (tools.some(tool => !tool || typeof tool !== 'object'
-    || typeof tool.id !== 'string' || tool.id.length === 0)) {
-    fail('tools.effective inventory is malformed')
-  }
-  const ids = tools.map(tool => tool.id)
-  const required = manifest.requiredPlugins.map(plugin => plugin.tool)
-  if (new Set(ids).size !== ids.length || required.some(id => !ids.includes(id))) {
-    fail('tools.effective is missing a required AI-worker tool or contains duplicates')
-  }
+  validateEffectiveInventory(inventory, manifest)
 }
 
 function assertBackup(pathname) {

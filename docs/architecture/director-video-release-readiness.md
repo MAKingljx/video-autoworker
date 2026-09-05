@@ -69,6 +69,12 @@ runner、投影契约构建与薄入口。transform 的 JSON 合同仍为 2 MiB�
 projection receipt 摘要、review receipt 摘要、后继 phase 的前置审核和 checkpoint 的投影版本。
 等待人工审核本身不是活跃执行；queued/running phase、断链、缺失回执或旧投影边界均阻断切换。
 
+工具基线采用v4，同时固定catalog/effective可见工具描述面和策略提示。唯一已验证可接受的提示是
+effective中的 `browser-filtered-by-profile / info`，它表示现有profile有意过滤browser；必须保留其
+原始message/profile哈希，并要求browser确实不在有效工具集合。catalog非空提示、MCP目录未就绪、
+警告、重复和未知提示仍拒绝。安装前后先比策略数组，再比工具集合与描述面，不能删除提示或改变
+profile来使门禁通过；复用近期收敛proof时也必须具备完整v4策略内证。
+
 readiness 只给统一 preinstall orchestrator 提供不可变只读判据。orchestrator 对每个组件维护
 append-only journal，以固定 component identity、备份、安装结果和补偿结果追加事件，不覆盖历史；
 terminal 状态只能由单次 finalize CAS 从未决状态推进。成功必须产出绑定同一 attempt、source commit、
