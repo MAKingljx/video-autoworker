@@ -184,7 +184,7 @@ test.describe('dashboard overview card frames', () => {
     }
   })
 
-  test('lets the page reflow while each card fills its row at intermediate widths', async ({ page }) => {
+  test('uses the available content width while keeping every responsive row filled', async ({ page }) => {
     await installDashboardRoutes(page, () => 4)
     await login(page)
     await page.setViewportSize({ width: 900, height: 1000 })
@@ -199,12 +199,23 @@ test.describe('dashboard overview card frames', () => {
       expect(rowBox).not.toBeNull()
 
       const cards = row.locator(':scope > [data-dashboard-widget]')
+      const cardCount = await cards.count()
       for (let cardIndex = 0; cardIndex < await cards.count(); cardIndex += 1) {
         const cardBox = await cards.nth(cardIndex).boundingBox()
         expect(cardBox).not.toBeNull()
-        expect(Math.abs(cardBox!.x - rowBox!.x)).toBeLessThanOrEqual(1)
-        expect(Math.abs(cardBox!.width - rowBox!.width)).toBeLessThanOrEqual(1)
         expect(cardBox!.height).toBeCloseTo(320, 0)
+
+        const isLastOddCard = cardCount % 2 === 1 && cardIndex === cardCount - 1
+        if (cardCount === 1 || isLastOddCard) {
+          expect(Math.abs(cardBox!.x - rowBox!.x)).toBeLessThanOrEqual(1)
+          expect(Math.abs(cardBox!.width - rowBox!.width)).toBeLessThanOrEqual(1)
+          continue
+        }
+
+        const expectedWidth = (rowBox!.width - 16) / 2
+        const expectedX = rowBox!.x + (cardIndex % 2) * (expectedWidth + 16)
+        expect(Math.abs(cardBox!.x - expectedX)).toBeLessThanOrEqual(1)
+        expect(Math.abs(cardBox!.width - expectedWidth)).toBeLessThanOrEqual(1)
       }
     }
   })

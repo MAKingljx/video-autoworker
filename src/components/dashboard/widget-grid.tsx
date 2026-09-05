@@ -37,18 +37,18 @@ const SIZE_SPANS: Record<string, number> = {
 }
 
 const SPAN_CLASSES: Record<number, string> = {
-  1: 'xl:col-span-1',
-  2: 'xl:col-span-2',
-  3: 'xl:col-span-3',
-  4: 'xl:col-span-4',
-  5: 'xl:col-span-5',
-  6: 'xl:col-span-6',
-  7: 'xl:col-span-7',
-  8: 'xl:col-span-8',
-  9: 'xl:col-span-9',
-  10: 'xl:col-span-10',
-  11: 'xl:col-span-11',
-  12: 'xl:col-span-12',
+  1: '@5xl:col-span-1',
+  2: '@5xl:col-span-2',
+  3: '@5xl:col-span-3',
+  4: '@5xl:col-span-4',
+  5: '@5xl:col-span-5',
+  6: '@5xl:col-span-6',
+  7: '@5xl:col-span-7',
+  8: '@5xl:col-span-8',
+  9: '@5xl:col-span-9',
+  10: '@5xl:col-span-10',
+  11: '@5xl:col-span-11',
+  12: '@5xl:col-span-12',
 }
 
 function fillAvailableColumns(spans: number[]): number[] {
@@ -182,11 +182,16 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
       elements.push(
         <section
           key={`row-${elements.length}`}
-          className="grid gap-4 xl:grid-cols-12"
+          className="grid grid-cols-1 gap-4 @xl:grid-cols-2 @5xl:grid-cols-12"
           data-dashboard-widget-row
         >
           {rowWidgets.map(({ id }, index) => (
-            renderWidget(id, SPAN_CLASSES[filledSpans[index]] || 'xl:col-span-4')
+            renderWidget(
+              id,
+              `${rowWidgets.length === 1 || (rowWidgets.length % 2 === 1 && index === rowWidgets.length - 1)
+                ? '@xl:col-span-2'
+                : '@xl:col-span-1'} ${SPAN_CLASSES[filledSpans[index]] || '@5xl:col-span-4'}`,
+            )
           ))}
         </section>
       )
@@ -261,7 +266,7 @@ export function WidgetGrid({ data }: { data: DashboardData }) {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="@container space-y-4">
       {renderWidgets()}
 
       {/* Customize mode: hidden widgets + controls */}
