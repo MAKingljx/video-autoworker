@@ -251,10 +251,6 @@ async function openclawCalls(fixture) {
 describe('current video-command plugin installer', () => {
   it('owns the only supported current release path', async () => {
     const script = await readFile(installerPath, 'utf8')
-    const secretReference = await readFile(
-      resolve(process.cwd(), 'scripts/lib/openclaw-secret-reference.mjs'),
-      'utf8',
-    )
 
     expect(script).toContain('PROFILE="qwen-current"')
     expect(script).toContain('AGENT_ID="second-original"')
@@ -274,13 +270,9 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('plugin config schema must contain only the current release gate')
     expect(script).toContain('tools.catalog')
     expect(script).toContain('run_qwen_openclaw_gateway_call tools.catalog')
+    // Provider validation and execution bounds are exercised by the shared
+    // adapter's behavior tests; the installer must delegate to that adapter.
     expect(script).toContain('node "$REPOSITORY_ROOT/scripts/lib/openclaw-secret-reference.mjs" "$PROFILE_CONFIG"')
-    expect(secretReference).toContain("reference.source !== 'exec'")
-    expect(secretReference).toContain("provider.source === 'exec'")
-    expect(secretReference).toContain('env: {}')
-    expect(secretReference).toContain('maxBuffer = MAX_OUTPUT_BYTES')
-    expect(secretReference).toContain('effectiveTimeoutMs = timeoutMs ?? provider.timeoutMs ?? DEFAULT_TIMEOUT_MS')
-    expect(secretReference).toContain('TOKEN_PATTERN')
     expect(script).toContain('OPENCLAW_GATEWAY_TOKEN="$gateway_token"')
     expect(script).toContain('Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.')
     expect(script).toContain('optional direct tool exactly once through alsoAllow')

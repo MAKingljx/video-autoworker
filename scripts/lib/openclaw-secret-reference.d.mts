@@ -9,6 +9,11 @@ export interface ExecSecretProvider {
   command: string
   args: string[]
   timeoutMs?: number
+  noOutputTimeoutMs?: number
+  maxOutputBytes?: number
+  jsonOnly?: false
+  trustedDirs?: string[]
+  allowInsecurePath?: boolean
 }
 
 export function isValidExecSecretReference(

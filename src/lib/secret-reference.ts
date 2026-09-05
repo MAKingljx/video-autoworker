@@ -2,20 +2,11 @@ import {
   isValidExecSecretReference as isValidSharedExecSecretReference,
   resolveExecSecretReference as resolveSharedExecSecretReference,
   resolveOpenClawGatewaySecret as resolveSharedOpenClawGatewaySecret,
+  type ExecSecretProvider,
+  type ExecSecretReference,
 } from '../../scripts/lib/openclaw-secret-reference.mjs'
 
-export interface ExecSecretReference {
-  id: string
-  provider: string
-  source: 'exec'
-}
-
-export interface ExecSecretProvider {
-  source: 'exec'
-  command: string
-  args: string[]
-  timeoutMs?: number
-}
+export type { ExecSecretProvider, ExecSecretReference } from '../../scripts/lib/openclaw-secret-reference.mjs'
 
 export function isValidExecSecretReference(
   reference: unknown,

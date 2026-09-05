@@ -1,10 +1,32 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
+import { dirname, isAbsolute, normalize, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/u
 const MAX_OUTPUT_BYTES = 4_096
 const DEFAULT_TIMEOUT_MS = 10_000
+const MAX_TIMEOUT_MS = 120_000
+const MAX_PROVIDER_OUTPUT_BYTES = 20 * 1024 * 1024
+const OPTIONAL_PROVIDER_KEYS = [
+  'timeoutMs', 'noOutputTimeoutMs', 'maxOutputBytes', 'jsonOnly',
+  'trustedDirs', 'allowInsecurePath',
+]
+
+function isSafeAbsolutePath(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 4_096
+    && !/[\u0000-\u001f\u007f]/u.test(value)
+    && isAbsolute(value) && normalize(value) === value
+}
+
+function isWithinDirectory(directory, pathname) {
+  const suffix = relative(directory, pathname)
+  return suffix !== '' && suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix)
+}
+
+function isTimeout(value) {
+  return Number.isSafeInteger(value) && value >= 1_000 && value <= MAX_TIMEOUT_MS
+}
 
 function hasExactKeys(value, expected) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -26,14 +48,42 @@ export function isValidExecSecretReference(reference, providers) {
   if (typeof reference.provider !== 'string' || !reference.provider) return false
   const provider = providers?.[reference.provider]
   return Boolean(provider
-    && hasOnlyKeys(provider, ['args', 'command', 'source'], ['timeoutMs'])
+    && hasOnlyKeys(provider, ['args', 'command', 'source'], OPTIONAL_PROVIDER_KEYS)
     && provider.source === 'exec'
-    && typeof provider.command === 'string'
-    && provider.command.startsWith('/')
-    && Array.isArray(provider.args)
-    && provider.args.every(value => typeof value === 'string' && !/[\r\n\0]/u.test(value))
-    && (provider.timeoutMs === undefined
-      || (Number.isSafeInteger(provider.timeoutMs) && provider.timeoutMs >= 1_000 && provider.timeoutMs <= 120_000)))
+    && isSafeAbsolutePath(provider.command)
+    && Array.isArray(provider.args) && provider.args.length <= 128
+    && provider.args.every(value => typeof value === 'string' && value.length <= 1_024
+      && !/[\u0000-\u001f\u007f]/u.test(value))
+    && (provider.timeoutMs === undefined || isTimeout(provider.timeoutMs))
+    && (provider.noOutputTimeoutMs === undefined || isTimeout(provider.noOutputTimeoutMs))
+    && (provider.maxOutputBytes === undefined || (Number.isSafeInteger(provider.maxOutputBytes)
+      && provider.maxOutputBytes > 0 && provider.maxOutputBytes <= MAX_PROVIDER_OUTPUT_BYTES))
+    // This shared adapter resolves one raw value, as required by security -w.
+    // JSON/stdin and inherited-environment providers remain unsupported.
+    && (provider.jsonOnly === undefined || provider.jsonOnly === false)
+    && (provider.allowInsecurePath === undefined || typeof provider.allowInsecurePath === 'boolean')
+    && (provider.trustedDirs === undefined || (Array.isArray(provider.trustedDirs)
+      && provider.trustedDirs.length > 0 && provider.trustedDirs.length <= 64
+      && provider.trustedDirs.every(isSafeAbsolutePath)
+      && provider.trustedDirs.some(directory => isWithinDirectory(directory, provider.command)))))
+}
+
+function resolveProviderCommand(provider) {
+  const entry = lstatSync(provider.command)
+  if (!entry.isFile() || entry.isSymbolicLink()) return ''
+  const command = realpathSync(provider.command)
+  const resolved = lstatSync(command)
+  if (entry.dev !== resolved.dev || entry.ino !== resolved.ino) return ''
+  // A configured permission exception never bypasses the trusted-directory
+  // boundary. Check physical paths as well as the lexical schema check above.
+  if (provider.trustedDirs && !provider.trustedDirs.some(directory => {
+    const physical = realpathSync(directory)
+    return lstatSync(physical).isDirectory() && isWithinDirectory(physical, command)
+  })) return ''
+  if (provider.allowInsecurePath !== true
+    && ((entry.mode & 0o022) !== 0
+      || (typeof process.getuid === 'function' && entry.uid !== process.getuid()))) return ''
+  return command
 }
 
 export function resolveExecSecretReference(reference, providers, {
@@ -43,13 +93,27 @@ export function resolveExecSecretReference(reference, providers, {
 } = {}) {
   if (!isValidExecSecretReference(reference, providers)) return ''
   const provider = providers[reference.provider]
-  const effectiveTimeoutMs = timeoutMs ?? provider.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  if ((timeoutMs !== undefined && !isTimeout(timeoutMs))
+    || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0) return ''
+  const providerTimeout = provider.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  // spawnSync cannot measure gaps between output chunks. Treat the configured
+  // no-output budget as a stricter total deadline, never silently ignore it.
+  const effectiveTimeoutMs = Math.min(
+    timeoutMs ?? providerTimeout,
+    providerTimeout,
+    provider.noOutputTimeoutMs ?? providerTimeout,
+  )
+  const effectiveMaxBuffer = Math.min(maxBuffer, MAX_OUTPUT_BYTES, provider.maxOutputBytes ?? MAX_OUTPUT_BYTES)
   let result
   try {
-    result = spawnSync(provider.command, provider.args, {
+    const command = resolveProviderCommand(provider)
+    if (!command) return ''
+    result = spawnSync(command, provider.args, {
       encoding: 'utf8',
+      cwd: dirname(command),
       env: {},
-      maxBuffer,
+      shell: false,
+      maxBuffer: effectiveMaxBuffer,
       timeout: effectiveTimeoutMs,
       windowsHide: true,
     })
@@ -57,7 +121,10 @@ export function resolveExecSecretReference(reference, providers, {
     return ''
   }
   if (result.error || result.signal || result.status !== 0) return ''
-  const value = String(result.stdout || '').trim()
+  const stdout = String(result.stdout || '')
+  const stderr = String(result.stderr || '')
+  if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) > effectiveMaxBuffer) return ''
+  const value = stdout.trim()
   return valuePattern.test(value) ? value : ''
 }
 
