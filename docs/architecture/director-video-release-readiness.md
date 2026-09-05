@@ -75,6 +75,21 @@ effective中的 `browser-filtered-by-profile / info`，它表示现有profile有
 警告、重复和未知提示仍拒绝。安装前后先比策略数组，再比工具集合与描述面，不能删除提示或改变
 profile来使门禁通过；复用近期收敛proof时也必须具备完整v4策略内证。
 
+共享组件的 rolling 安装门按成对布局验证运行状态根和不可变 release 根。生产使用同一受管用户
+home 下的 `ai-worker/state/video-autoworker/blue-green` 与
+`ai-worker/services/video-autoworker-app/releases`，避免运行资产落入 CloudDocs/FileProvider
+管理的 Documents。既有仓库内布局仍限定为同一 repository root 下的 `.run/blue-green` 与
+`.runtime/releases`。两种布局不能交叉配对，也不接受任意环境变量指定的其他目录；选定布局后仍逐项
+核对目录 owner、运行状态根的 0700 权限、realpath、router/slot 的状态路径、真实 PID/cwd 和数据库打开文件身份。
+
+实际部署从 canonical repository 的物理脚本路径执行。统一 preinstall 显式传入 `--releases-root`
+和 `--deployment-run-dir`；bootstrap controller 显式绑定 `--router-run-dir` 与 `--router-state`。
+部署及 LaunchAgent 安装同时设置 `AIWORKER_BG_RUN_DIR`、`AIWORKER_BG_RELEASES_DIR` 和绝对 Node 路径，
+并在 bootstrap 前完成受管 LaunchAgent 的安装，使运行目录与启动参数持久化。生产槽每次启动依次
+读取 canonical repository 的 `.env`、`.env.local` 和默认
+`~/.config/video-autoworker/platform.env`，必须核对这些持久文件合并后的数据库与运行配置；不能把
+仅在当前 shell 中设置的路径当作重启后的配置证据。
+
 readiness 只给统一 preinstall orchestrator 提供不可变只读判据。orchestrator 对每个组件维护
 append-only journal，以固定 component identity、备份、安装结果和补偿结果追加事件，不覆盖历史；
 terminal 状态只能由单次 finalize CAS 从未决状态推进。成功必须产出绑定同一 attempt、source commit、

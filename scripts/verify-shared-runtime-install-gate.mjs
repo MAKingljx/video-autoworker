@@ -353,12 +353,25 @@ export function verifyRollingRuntimeBinding({
   videoBatchRoot,
   sourceRepositoryRoot = repositoryRoot,
 }, dependencies = {}) {
-  const expectedRunDir = join(sourceRepositoryRoot, '.run', 'blue-green')
-  if (deploymentRunDir !== expectedRunDir) fail('rolling_run_directory_not_canonical')
   safeOwnedDirectory(sourceRepositoryRoot, 'rolling_repository')
-  safeOwnedDirectory(deploymentRunDir, 'rolling_run_directory', 0o700)
   const canonicalHome = dependencies.canonicalHome
     ?? productionHomeFromRepository(sourceRepositoryRoot)
+  safeOwnedDirectory(canonicalHome, 'rolling_canonical_home')
+  const trustedLayouts = [
+    {
+      runDirectory: join(sourceRepositoryRoot, '.run', 'blue-green'),
+      releasesDirectory: join(sourceRepositoryRoot, '.runtime', 'releases'),
+    },
+    {
+      runDirectory: join(canonicalHome, 'ai-worker', 'state', 'video-autoworker', 'blue-green'),
+      releasesDirectory: join(
+        canonicalHome, 'ai-worker', 'services', 'video-autoworker-app', 'releases',
+      ),
+    },
+  ]
+  const trustedLayout = trustedLayouts.find(layout => layout.runDirectory === deploymentRunDir)
+  if (!trustedLayout) fail('rolling_run_directory_not_canonical')
+  safeOwnedDirectory(deploymentRunDir, 'rolling_run_directory', 0o700)
   const expectedBatchRoot = join(canonicalHome, 'ai-worker', 'state',
     'video-autoworker', 'video-batches')
   if (videoBatchRoot !== expectedBatchRoot) fail('rolling_batch_root_not_canonical')
@@ -428,7 +441,7 @@ export function verifyRollingRuntimeBinding({
     const binding = readOwnedJson(bindingPath, `rolling_${slot}_binding`)
     const runtime = readOwnedJson(runtimePath, `rolling_${slot}_runtime`)
     const recordedPid = Number(readOwnedText(pidPath, `rolling_${slot}_pid`, 128).trim())
-    const expectedReleaseRoot = join(sourceRepositoryRoot, '.runtime', 'releases',
+    const expectedReleaseRoot = join(trustedLayout.releasesDirectory,
       binding?.releaseId || '', 'standalone')
     if (binding?.schema !== 'video-autoworker-standalone-slot/v1' || binding.slot !== slot
       || binding.releaseId !== state.slots[slot].releaseId

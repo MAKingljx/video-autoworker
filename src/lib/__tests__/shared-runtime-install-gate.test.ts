@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile,
+  chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
@@ -245,15 +245,23 @@ async function verifier() {
   }
 }
 
-async function createRollingRuntimeFixture(root: string) {
+async function createRollingRuntimeFixture(
+  root: string,
+  layout: 'repository' | 'production' = 'repository',
+) {
   const physicalRoot = await realpath(root)
   await mkdir(resolve(physicalRoot, 'repository'), { mode: 0o700 })
   const sourceRepositoryRoot = await realpath(resolve(physicalRoot, 'repository'))
-  const deploymentRunDir = resolve(sourceRepositoryRoot, '.run/blue-green')
-  const slots = resolve(deploymentRunDir, 'slots')
   const canonicalHome = resolve(physicalRoot, 'home')
+  const deploymentRunDir = layout === 'production'
+    ? resolve(canonicalHome, 'ai-worker/state/video-autoworker/blue-green')
+    : resolve(sourceRepositoryRoot, '.run/blue-green')
+  const releasesDirectory = layout === 'production'
+    ? resolve(canonicalHome, 'ai-worker/services/video-autoworker-app/releases')
+    : resolve(sourceRepositoryRoot, '.runtime/releases')
+  const slots = resolve(deploymentRunDir, 'slots')
   const videoBatchRoot = resolve(canonicalHome, 'ai-worker/state/video-autoworker/video-batches')
-  const releaseRoot = resolve(sourceRepositoryRoot, '.runtime/releases/active-release/standalone')
+  const releaseRoot = resolve(releasesDirectory, 'active-release/standalone')
   await mkdir(slots, { recursive: true, mode: 0o700 })
   await chmod(deploymentRunDir, 0o700)
   await mkdir(videoBatchRoot, { recursive: true, mode: 0o700 })
@@ -340,6 +348,8 @@ async function createRollingRuntimeFixture(root: string) {
     n8nIdentity,
     videoBatchRoot,
     deploymentRunDir,
+    releasesDirectory,
+    releaseRoot,
     statePath,
     slots,
     processPaths,
@@ -1118,6 +1128,72 @@ describe('shared runtime installation gate', () => {
         n8n: fixture.n8nIdentity,
         videoBatchRoot: fixture.videoBatchRoot,
       })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts only the paired production state and application release roots', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-rolling-production-layout-'))
+    try {
+      const fixture = await createRollingRuntimeFixture(root, 'production')
+      const { verifyRollingRuntimeBinding } = await verifier()
+      expect(verifyRollingRuntimeBinding(fixture.input, fixture.dependencies)).toMatchObject({
+        schema: 'video-autoworker-rolling-runtime-binding/v1',
+        runDirectory: fixture.deploymentRunDir,
+        activeSlot: 'blue',
+        routerPid: 101,
+        slotPids: { blue: 102 },
+        n8nPid: 103,
+      })
+
+      const bindingPath = resolve(fixture.slots, 'blue.json')
+      const binding = JSON.parse(await readFile(bindingPath, 'utf8'))
+      binding.releaseRoot = resolve(
+        fixture.input.sourceRepositoryRoot,
+        '.runtime/releases/active-release/standalone',
+      )
+      await writeFile(bindingPath, `${JSON.stringify(binding)}\n`, { mode: 0o600 })
+      expect(() => verifyRollingRuntimeBinding(
+        fixture.input, fixture.dependencies,
+      )).toThrow(/rolling_blue_runtime_binding_mismatch/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects noncanonical and unsafe production state roots', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-rolling-production-state-'))
+    try {
+      const fixture = await createRollingRuntimeFixture(root, 'production')
+      const { verifyRollingRuntimeBinding } = await verifier()
+      expect(() => verifyRollingRuntimeBinding({
+        ...fixture.input,
+        deploymentRunDir: resolve(
+          fixture.dependencies.canonicalHome,
+          'ai-worker/state/video-autoworker/blue-green-sibling',
+        ),
+      }, fixture.dependencies)).toThrow(/rolling_run_directory_not_canonical/u)
+
+      const otherHome = resolve(await realpath(root), 'other-home')
+      await mkdir(otherHome, { mode: 0o700 })
+      expect(() => verifyRollingRuntimeBinding(fixture.input, {
+        ...fixture.dependencies,
+        canonicalHome: otherHome,
+      })).toThrow(/rolling_run_directory_not_canonical/u)
+
+      await chmod(fixture.deploymentRunDir, 0o755)
+      expect(() => verifyRollingRuntimeBinding(
+        fixture.input, fixture.dependencies,
+      )).toThrow(/rolling_run_directory_unsafe/u)
+      await chmod(fixture.deploymentRunDir, 0o700)
+
+      const physicalRunDirectory = resolve(await realpath(root), 'physical-blue-green-state')
+      await rename(fixture.deploymentRunDir, physicalRunDirectory)
+      await symlink(physicalRunDirectory, fixture.deploymentRunDir, 'dir')
+      expect(() => verifyRollingRuntimeBinding(
+        fixture.input, fixture.dependencies,
+      )).toThrow(/rolling_run_directory_unsafe/u)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
