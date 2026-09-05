@@ -1,9 +1,9 @@
 // @vitest-environment node
 
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   realpathSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -464,11 +464,60 @@ describe('legacy preinstall controller', () => {
       stdio: ['ignore', 'ignore', 'pipe'],
     }))
     const results = await Promise.all(children.map(waitChild))
-    expect(results.filter(result => result.code === 0)).toHaveLength(1)
-    expect(results.filter(result => result.code !== 0)).toHaveLength(1)
+    const diagnostic = JSON.stringify(results)
+    expect(results.filter(result => result.code === 0), diagnostic).toHaveLength(1)
+    expect(results.filter(result => result.code !== 0), diagnostic).toHaveLength(1)
     const status = run({ ...entry, env: { ...entry.env, AIWORKER_TEST_LEGACY_PREINSTALL_NOW: String(NOW + 10) } },
       'status', '--attempt-dir', entry.attempt)
     expect(JSON.parse(status.stdout)).toMatchObject({ phase: 'INSTALL_PREPARED', revision: 2 })
+  })
+
+  it('does not recover another live process immutable publication as crash residue', () => {
+    const entry = fixture()
+    const prepared = JSON.parse(prepare(entry).stdout)
+    recordInstalls(entry, prepared.installAttemptId)
+    const fresh = freshEvidence(entry, NOW + 10, 'live-publication')
+    const actionName = 'install-action.r000001.claim.json'
+    const temporary = join(entry.attempt, 'preinstall',
+      `.${actionName}.${process.pid}.${digest(processStartToken())}.${randomUUID()}.tmp`)
+    writeFileSync(temporary, '{}\n', { mode: 0o400 })
+    chmodSync(temporary, 0o400)
+
+    const renewed = run({
+      ...entry,
+      env: { ...entry.env, AIWORKER_TEST_LEGACY_PREINSTALL_NOW: String(NOW + 10) },
+    }, 'renew', '--attempt-dir', entry.attempt,
+    '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+    '--evidence', fresh.evidence, '--proof', fresh.proof)
+
+    expect(renewed.status, renewed.stderr).toBe(0)
+    expect(existsSync(temporary)).toBe(true)
+    rmSync(temporary)
+    const status = run({
+      ...entry,
+      env: { ...entry.env, AIWORKER_TEST_LEGACY_PREINSTALL_NOW: String(NOW + 10) },
+    }, 'status', '--attempt-dir', entry.attempt)
+    expect(JSON.parse(status.stdout)).toMatchObject({ phase: 'INSTALL_PREPARED', revision: 2 })
+  })
+
+  it('preserves a live publisher hard link until the publisher removes it', () => {
+    const entry = fixture()
+    const first = prepare(entry)
+    expect(first.status, first.stderr).toBe(0)
+    const owner = join(entry.root, 'transition', 'preinstall-owner-claim.json')
+    const temporary = join(entry.root, 'transition',
+      `.preinstall-owner-claim.json.${process.pid}.${digest(processStartToken())}.${randomUUID()}.tmp`)
+    linkSync(owner, temporary)
+    expect(statSync(temporary, { bigint: true }).nlink).toBe(BigInt(2))
+
+    const blocked = prepare(entry)
+
+    expect(blocked.status).not.toBe(0)
+    expect(existsSync(temporary)).toBe(true)
+    rmSync(temporary)
+    const retried = prepare(entry)
+    expect(retried.status, retried.stderr).toBe(0)
+    expect(JSON.parse(retried.stdout)).toMatchObject({ resumed: true, revision: 1 })
   })
 
   it('resumes renew, verify, and terminal commands killed after their durable publication', () => {

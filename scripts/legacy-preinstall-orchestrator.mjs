@@ -237,21 +237,25 @@ function resolveCommand(name) {
   return pathname
 }
 
-const paths = {
-  controller: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONTROLLER',
-    join(repositoryRoot, 'scripts/legacy-preinstall-controller.mjs')),
-  task: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_TASK_INSTALLER',
-    join(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')),
-  video: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_VIDEO_INSTALLER',
-    join(repositoryRoot, 'scripts/install-aiworker-video-command-plugin.sh')),
-  director: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_DIRECTOR_INSTALLER',
-    join(repositoryRoot, 'scripts/install-aiworker-director-brain.sh')),
-  convergence: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONVERGENCE',
-    join(repositoryRoot, 'scripts/apply-openclaw-runtime-convergence.sh')),
-  openclaw: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_OPENCLAW',
-    testMode ? process.execPath : resolveCommand('openclaw')),
-  lsof: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_LSOF', '/usr/sbin/lsof'),
-  pgrep: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_PGREP', '/usr/bin/pgrep'),
+let paths
+
+function initializePaths() {
+  return {
+    controller: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONTROLLER',
+      join(repositoryRoot, 'scripts/legacy-preinstall-controller.mjs')),
+    task: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_TASK_INSTALLER',
+      join(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')),
+    video: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_VIDEO_INSTALLER',
+      join(repositoryRoot, 'scripts/install-aiworker-video-command-plugin.sh')),
+    director: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_DIRECTOR_INSTALLER',
+      join(repositoryRoot, 'scripts/install-aiworker-director-brain.sh')),
+    convergence: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONVERGENCE',
+      join(repositoryRoot, 'scripts/apply-openclaw-runtime-convergence.sh')),
+    openclaw: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_OPENCLAW',
+      testMode ? process.execPath : resolveCommand('openclaw')),
+    lsof: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_LSOF', '/usr/sbin/lsof'),
+    pgrep: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_PGREP', '/usr/bin/pgrep'),
+  }
 }
 
 function baseEnvironment(values, status, { convergence = false } = {}) {
@@ -938,6 +942,7 @@ function parseArguments(argv) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  paths = initializePaths()
   currentValues = parseArguments(argv)
   const newAttempt = !readdirSync(join(currentValues['--attempt-dir'], 'preinstall'))
     .some(name => /^install-prepared\.r\d{6}\.receipt\.json$/u.test(name))

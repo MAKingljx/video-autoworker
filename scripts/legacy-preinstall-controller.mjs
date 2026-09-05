@@ -253,7 +253,34 @@ function fsyncDirectory(pathname) {
 }
 
 const IMMUTABLE_PREINSTALL_NAME = /^(?:install-prepared\.r\d{6}\.receipt\.json|install-action\.r\d{6}\.claim\.json|install-postverify-action\.r\d{6}\.claim\.json|install-verified\.r\d{6}\.receipt\.json|install-readiness\.r\d{6}\.report\.json|install-component-(?:reservation|result|event)\.\d{6}\.receipt\.json|install-finalize-claim\.receipt\.json|install-terminal-claim\.receipt\.json|preinstall-owner-claim\.json)$/u
-const IMMUTABLE_TEMPORARY_NAME = /^\.(?<final>(?:install-prepared\.r\d{6}\.receipt\.json|install-action\.r\d{6}\.claim\.json|install-postverify-action\.r\d{6}\.claim\.json|install-verified\.r\d{6}\.receipt\.json|install-readiness\.r\d{6}\.report\.json|install-component-(?:reservation|result|event)\.\d{6}\.receipt\.json|install-finalize-claim\.receipt\.json|install-terminal-claim\.receipt\.json|preinstall-owner-claim\.json))\.(?<nonce>[a-f0-9-]{36})\.tmp$/u
+const IMMUTABLE_TEMPORARY_NAME = /^\.(?<final>(?:install-prepared\.r\d{6}\.receipt\.json|install-action\.r\d{6}\.claim\.json|install-postverify-action\.r\d{6}\.claim\.json|install-verified\.r\d{6}\.receipt\.json|install-readiness\.r\d{6}\.report\.json|install-component-(?:reservation|result|event)\.\d{6}\.receipt\.json|install-finalize-claim\.receipt\.json|install-terminal-claim\.receipt\.json|preinstall-owner-claim\.json))\.(?:(?<ownerPid>[1-9]\d*)\.(?<ownerStartTokenSha256>[a-f0-9]{64})\.)?(?<nonce>[a-f0-9-]{36})\.tmp$/u
+
+function publicationOwner() {
+  const startToken = processStartToken(process.pid)
+  if (!startToken) fail('immutable publication process identity is unavailable')
+  return { pid: process.pid, startTokenSha256: sha256(startToken) }
+}
+
+function temporaryPublicationIsActive(groups) {
+  const hasPid = typeof groups.ownerPid === 'string'
+  const hasStartToken = typeof groups.ownerStartTokenSha256 === 'string'
+  if (!hasPid && !hasStartToken) return false
+  if (!hasPid || !hasStartToken) fail('preinstall temporary publication owner is invalid')
+  const pid = Number(groups.ownerPid)
+  if (!Number.isSafeInteger(pid) || pid < 1) {
+    fail('preinstall temporary publication owner is invalid')
+  }
+  const startToken = processStartToken(pid)
+  if (startToken) return sha256(startToken) === groups.ownerStartTokenSha256
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false
+    if (error?.code === 'EPERM') return true
+    fail('unable to determine preinstall temporary publication owner state')
+  }
+}
 
 function recoverImmutableCrashResidue(parent) {
   safeEntry(parent, 'immutable preinstall namespace', 'directory', 0o700)
@@ -266,20 +293,30 @@ function recoverImmutableCrashResidue(parent) {
     }
     const temporary = join(parent, name)
     const final = join(parent, match.groups.final)
-    const temporaryEntry = lstatSync(temporary, { bigint: true })
+    let temporaryEntry
+    try {
+      temporaryEntry = lstatSync(temporary, { bigint: true })
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      fail('unable to inspect preinstall temporary publication residue')
+    }
     const temporaryMode = Number(temporaryEntry.mode & 0o7777n)
     if (!temporaryEntry.isFile() || temporaryEntry.isSymbolicLink()
       || temporaryEntry.uid !== BigInt(process.getuid()) || temporaryMode !== 0o400
       || ![1n, 2n].includes(temporaryEntry.nlink)) {
       fail('preinstall temporary publication residue is unsafe')
     }
-    if (!existsSync(final)) {
-      if (temporaryEntry.nlink !== 1n) {
-        fail('preinstall temporary publication residue has an unknown hard link')
+    if (temporaryPublicationIsActive(match.groups)) continue
+    if (temporaryEntry.nlink === 1n) {
+      try { unlinkSync(temporary) } catch (error) {
+        if (error?.code === 'ENOENT') continue
+        fail('unable to remove preinstall temporary publication residue')
       }
-      unlinkSync(temporary)
       changed = true
       continue
+    }
+    if (!existsSync(final)) {
+      fail('preinstall temporary publication residue has an unknown hard link')
     }
     const finalEntry = lstatSync(final, { bigint: true })
     const finalMode = Number(finalEntry.mode & 0o7777n)
@@ -289,7 +326,10 @@ function recoverImmutableCrashResidue(parent) {
       || finalEntry.nlink !== 2n || temporaryEntry.nlink !== 2n) {
       fail('preinstall linked publication residue conflicts with the final receipt')
     }
-    unlinkSync(temporary)
+    try { unlinkSync(temporary) } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      fail('unable to remove linked preinstall publication residue')
+    }
     changed = true
   }
   if (changed) fsyncDirectory(parent)
@@ -311,7 +351,9 @@ function writeImmutable(pathname, value, label) {
   safeEntry(parent, `${label} parent`, 'directory', 0o700)
   recoverImmutableCrashResidue(parent)
   const source = Buffer.from(`${canonicalJson(value)}\n`)
-  const temporary = join(parent, `.${basename(pathname)}.${randomUUID()}.tmp`)
+  const owner = publicationOwner()
+  const temporary = join(parent,
+    `.${basename(pathname)}.${owner.pid}.${owner.startTokenSha256}.${randomUUID()}.tmp`)
   let descriptor
   try {
     descriptor = openSync(temporary,
@@ -592,6 +634,8 @@ function revisionFiles(root) {
         safeEntry(join(artifactRoot, artifact), `preinstall orchestrator artifact ${artifact}`,
           'file', 0o600)
       }
+    } else if (IMMUTABLE_TEMPORARY_NAME.test(name)) {
+      continue
     } else if (!allowed.test(name)) fail('preinstall state directory contains an unknown member')
   }
   return names.filter(name => REVISION_FILE.test(name)).sort()
