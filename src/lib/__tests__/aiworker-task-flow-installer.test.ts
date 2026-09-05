@@ -6,6 +6,7 @@ import {
   access,
   chmod,
   lstat,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -18,11 +19,13 @@ import {
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 
 const repositoryRoot = process.cwd()
 const installer = resolve(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')
+const execFileAsync = promisify(execFile)
 const rendererUrl = pathToFileURL(resolve(
   repositoryRoot,
   'scripts/lib/render-managed-markdown-section.mjs',
@@ -258,6 +261,160 @@ describe('managed AI-worker workspace section renderer', () => {
 })
 
 describe('transactional AI-worker task-flow installer', () => {
+  it('keeps batched tree manifests byte-compatible with the legacy BSD manifest format', async () => {
+    const root = realpathSync.native(await mkdtemp(resolve(tmpdir(), 'task-flow-manifest-format-')))
+    const tree = resolve(root, 'tree')
+    try {
+      await mkdir(resolve(tree, 'nested'), { recursive: true, mode: 0o751 })
+      await chmod(tree, 0o700)
+      for (const name of ['space name.txt', '.hidden', 'back\\slash.txt', '\uE000.txt', '\u{10000}.txt']) {
+        await writeFile(resolve(tree, name), Buffer.from([0, 1, 127, 255]), { mode: 0o640 })
+      }
+      await writeFile(resolve(tree, 'nested/file.mjs'), 'export const fixture = true\n', { mode: 0o755 })
+      await link(resolve(tree, '.hidden'), resolve(tree, 'hard-link'))
+      await symlink('space name.txt', resolve(tree, 'relative-link'))
+      await symlink('missing\n\n', resolve(tree, 'trailing-newline-link'))
+      await symlink('..', resolve(tree, 'nested/parent-link'))
+      await writeFile(resolve(tree, 'MANIFEST.sha256'), 'excluded\n')
+      await execFileAsync('/usr/bin/mkfifo', [resolve(tree, 'pipe')])
+      const reference = [
+        'set -e',
+        'cd "$1"',
+        'printf ".\\tdirectory\\t%s\\t-\\n" "$(stat -f %Lp .)"',
+        'while IFS= read -r item; do',
+        '  [[ "$item" == "$2" ]] && continue',
+        '  if [[ -L "$item" ]]; then',
+        '    target="$(readlink "$item")"',
+        '    hash="$(printf %s "$target" | /usr/bin/shasum -a 256)"',
+        '    printf "%s\\tsymlink\\t%s\\t%s\\n" "$item" "$(stat -f %Lp "$item")" "${hash%% *}"',
+        '  elif [[ -d "$item" ]]; then',
+        '    printf "%s\\tdirectory\\t%s\\t-\\n" "$item" "$(stat -f %Lp "$item")"',
+        '  elif [[ -f "$item" ]]; then',
+        '    hash="$(/usr/bin/shasum -a 256 "$item")"',
+        '    printf "%s\\tfile\\t%s\\t%s\\n" "$item" "$(stat -f %Lp "$item")" "${hash%% *}"',
+        '  else',
+        '    printf "%s\\tother\\t%s\\t-\\n" "$item" "$(stat -f %Lp "$item")"',
+        '  fi',
+        'done < <(LC_ALL=C find . -mindepth 1 -print | LC_ALL=C sort)',
+      ].join('\n')
+      const expected = await execFileAsync('bash', ['-c', reference, 'legacy-manifest', tree, './MANIFEST.sha256'])
+      const source = await readFile(installer, 'utf8')
+      const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
+      const output = resolve(root, 'actual.manifest')
+      await execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2" "$3"`, 'batch-manifest', tree, output, './MANIFEST.sha256'], {
+        env: { ...process.env, NODE_BIN: process.execPath },
+      })
+      expect(await readFile(output, 'utf8')).toBe(expected.stdout)
+      expect((await stat(output)).mode & 0o777).toBe(0o600)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  }, 15_000)
+
+  it('hashes a whole tree in one Node process without per-file shasum invocations', async () => {
+    const root = realpathSync.native(await mkdtemp(resolve(tmpdir(), 'task-flow-manifest-batch-')))
+    const tree = resolve(root, 'tree')
+    try {
+      await mkdir(tree)
+      await Promise.all(Array.from({ length: 64 }, (_, index) => writeFile(resolve(tree, `file-${index}`), 'fixture')))
+      const log = resolve(root, 'node-calls')
+      const nodeWrapper = resolve(root, 'node-wrapper')
+      const shasumTrap = resolve(root, 'shasum-trap')
+      await writeFile(nodeWrapper, '#!/bin/sh\nprintf "node\\n" >> "$MANIFEST_NODE_LOG"\nexec "$MANIFEST_REAL_NODE" "$@"\n', { mode: 0o755 })
+      await writeFile(shasumTrap, '#!/bin/sh\nexit 97\n', { mode: 0o755 })
+      const source = await readFile(installer, 'utf8')
+      const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
+      const output = resolve(root, 'actual.manifest')
+      await execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2"`, 'batch-manifest', tree, output], {
+        env: { ...process.env, NODE_BIN: nodeWrapper, SHASUM_BIN: shasumTrap, MANIFEST_REAL_NODE: process.execPath, MANIFEST_NODE_LOG: log },
+      })
+      expect(await readFile(log, 'utf8')).toBe('node\n')
+      expect((await readFile(output, 'utf8')).trim().split('\n')).toHaveLength(65)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('removes partial manifest output when a path cannot be represented safely', async () => {
+    const root = realpathSync.native(await mkdtemp(resolve(tmpdir(), 'task-flow-manifest-invalid-')))
+    const tree = resolve(root, 'tree')
+    try {
+      await mkdir(tree)
+      await writeFile(resolve(tree, 'bad\nname'), 'fixture')
+      const source = await readFile(installer, 'utf8')
+      const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
+      const output = resolve(root, 'actual.manifest')
+      await expect(execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2"`, 'batch-manifest', tree, output], {
+        env: { ...process.env, NODE_BIN: process.execPath },
+      })).rejects.toThrow()
+      expect(await pathExists(output)).toBe(false)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it.each(['mode-before-open', 'replace-after-read', 'directory-during-walk'])(
+    'rejects %s races without retaining a partial tree manifest',
+    async fault => {
+      const root = realpathSync.native(await mkdtemp(resolve(tmpdir(), 'task-flow-manifest-race-')))
+      const tree = resolve(root, 'tree')
+      try {
+        await mkdir(resolve(tree, 'nested'), { recursive: true })
+        const victim = resolve(tree, 'nested/victim')
+        await writeFile(victim, 'before', { mode: 0o600 })
+        const hook = resolve(root, 'race.cjs')
+        await writeFile(hook, `
+const fs = require('node:fs')
+const target = process.env.MANIFEST_RACE_TARGET
+const directory = process.env.MANIFEST_RACE_DIRECTORY
+const fault = process.env.MANIFEST_RACE_KIND
+const originalOpen = fs.openSync
+const originalRead = fs.readSync
+const originalReaddir = fs.readdirSync
+let injected = false
+let targetFd
+fs.openSync = function (pathname, ...args) {
+  if (String(pathname) === target && fault === 'mode-before-open' && !injected) {
+    injected = true
+    fs.chmodSync(target, 0o640)
+  }
+  const fd = originalOpen.call(this, pathname, ...args)
+  if (String(pathname) === target) targetFd = fd
+  return fd
+}
+fs.readSync = function (fd, ...args) {
+  const count = originalRead.call(this, fd, ...args)
+  if (fd === targetFd && count > 0 && fault === 'replace-after-read' && !injected) {
+    injected = true
+    fs.renameSync(target, target + '.previous')
+    fs.writeFileSync(target, 'after', { mode: 0o600 })
+  }
+  return count
+}
+fs.readdirSync = function (pathname, ...args) {
+  if (String(pathname) === directory && fault === 'directory-during-walk' && !injected) {
+    injected = true
+    fs.renameSync(directory, directory + '.previous')
+    fs.mkdirSync(directory)
+  }
+  return originalReaddir.call(this, pathname, ...args)
+}
+`)
+        const wrapper = resolve(root, 'node-wrapper')
+        await writeFile(wrapper, '#!/bin/sh\nexec "$MANIFEST_REAL_NODE" --require "$MANIFEST_RACE_HOOK" "$@"\n', { mode: 0o755 })
+        const source = await readFile(installer, 'utf8')
+        const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
+        const output = resolve(root, 'actual.manifest')
+        await expect(execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2"`, 'batch-manifest', tree, output], {
+          env: {
+            ...process.env,
+            NODE_BIN: wrapper,
+            MANIFEST_REAL_NODE: process.execPath,
+            MANIFEST_RACE_HOOK: hook,
+            MANIFEST_RACE_TARGET: victim,
+            MANIFEST_RACE_DIRECTORY: resolve(tree, 'nested'),
+            MANIFEST_RACE_KIND: fault,
+          },
+        })).rejects.toThrow()
+        expect(await pathExists(output)).toBe(false)
+      } finally { await rm(root, { recursive: true, force: true }) }
+    },
+  )
+
   it('does not mutate the workspace while the shared deployment lock is held', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'aiworker-task-flow-deployment-lock-test-'))
     const workspace = resolve(root, 'workspace')
