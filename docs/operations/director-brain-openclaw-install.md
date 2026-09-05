@@ -122,7 +122,7 @@ Gateway 重启属于独立风险阶段，必须重新通过运行硬门。若原
 安装前必须私有保存 `tools.catalog` 与目标会话 `tools.effective` 基线，fresh restart 后只允许新增
 `aiworker_director_brain`，删除集合必须为空。对账使用工具 ID、来源、plugin/channel 所有权和描述、
 optional、profile、risk、tags 的语义指纹，不能只比较 ID。`aiworker-video-command@0.5.14` 与
-`aiworker-director-brain@0.4.0` 的完整安装树摘要也必须绑定进证明。后续五项有界 compaction 配置 patch 可走官方热更新，
+`aiworker-director-brain@0.4.0` 的完整安装树摘要也必须绑定进证明。后续 manifest 声明的有界 compaction 配置 patch 可走官方配置更新，
 但不能用它替代插件 fresh restart。
 
 fresh restart 后继续复用同一短进程环境和基线路径；先执行 dry-run，再执行 apply：
@@ -139,9 +139,15 @@ unset AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY
 
 每次检查都同时读取全量 `tools.catalog` 与该真实会话的 `tools.effective`。安装前后允许的唯一新增项是
 `aiworker_director_brain`；任一原有工具消失、出现其他新增工具、会话绑定变化或插件树漂移都会失败关闭。
-apply 还必须证明 Gateway PID 未变化、`requiresRestart=false`、热加载状态为 active，且新日志只有成功的
-compaction reload、没有 restart/reload failure。成功后产生 `0600` runtime convergence proof；导演发布门与
-legacy final readiness 都必须引用并重新验证该证明。相同配置重复执行时显式传入
+OpenClaw `2026.7.1-2` 将 `agents.defaults.compaction` 归类为 `none`（运行时动态读取），因此不会保证出现
+`config hot reload applied` 完成日志，`config change detected` 也只能证明开始处理。apply 的完成证据必须同时包含：
+官方 `config.patch` 成功返回前已经完成 runtime snapshot 刷新且 `requiresRestart=false`；Gateway PID 不变、
+health 中 `configReload.hotReloadStatus=active`；`openclaw.json.last-good` 从 CAS `baseHash` 正向晋升到
+post-config hash；以及同一 `0600` 日志实体从基线到终态连续、无 restart/reload failure。日志连续性以
+`file`、cursor/size、reset/truncated、行数上限、dev/inode 和对基线 cursor 之前内容的流式 SHA-256 前缀摘要共同验证，
+不能把单条 detected 日志当成完成。该 compaction 更新不需要重启 Gateway；上述内容仍是发布验收合同，
+不表示本次已经部署。成功后产生 `0600` runtime convergence proof；导演发布门与 legacy final readiness
+都必须引用并重新验证该证明。相同配置重复执行时显式传入
 `--runtime-convergence-proof /absolute/path/to/proof` 复用仍有效的证明，不会生成空证明或无证据重新背书。
 
 由于 compaction patch 写入 `agents.defaults`，capture、dry-run、apply、proof 验证和 rollback 的每个配置

@@ -195,6 +195,8 @@ attempt_dir=/absolute/private-state/bootstrap-attempt
 recovery_package=/absolute/private-state/managed-workflow-recovery-package
 evidence_file=/absolute/private-state/legacy-freeze/freeze.json
 rollback_proof=/absolute/private-state/legacy-freeze/rollback-proof.json
+postinstall_evidence_file=/absolute/private-state/legacy-freeze/postinstall-freeze.json
+postinstall_rollback_proof=/absolute/private-state/legacy-freeze/postinstall-rollback-proof.json
 
 cd "$repository_root"
 test "$(git rev-parse --show-toplevel)" = "$repository_root"
@@ -204,8 +206,10 @@ test "$(tr -d '[:space:]' < "$runtime_release/SOURCE_COMMIT")" = "$target_commit
 mkdir -m 700 "$transition_dir" "$attempt_dir"
 ```
 
-`attempt_dir` 必须是刚创建的空目录；transition、evidence、proof 和 recovery package 也必须是本次
-独立目标，不能覆盖旧产物。先在 n8n 在线且健康时用只读事务生成受管工作流回滚包；这里的
+`attempt_dir` 必须是刚创建的空目录；transition、两组 evidence/proof 和 recovery package 也必须是本次
+独立目标，不能覆盖旧产物。`evidence_file` / `rollback_proof` 绑定 preinstall 前状态，
+`postinstall_evidence_file` / `postinstall_rollback_proof` 绑定 terminal handoff 后状态，四个目标均须预先
+不存在。先在 n8n 在线且健康时用只读事务生成受管工作流回滚包；这里的
 `source-commit` 是**目标提交**，表示本次 backup/restore tooling contract，不是数据库里旧工作流的
 来源提交：
 
@@ -304,7 +308,8 @@ node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" attest-transi
   --output "$transition_dir/transition-attestation.json"
 ```
 
-接着保持同一个 active freeze guard，按下文命令生成 `rollback_proof` 和 `evidence_file`。在 legacy
+接着保持同一个 active freeze guard，按下文命令生成 preinstall 输入 `rollback_proof` 和
+`evidence_file`。在 legacy
 仍在线、guard 状态为 active、两份数据库身份与活动量仍稳定时，先从真实
 `second-original` 入站会话捕获私有 `tools.catalog` / `tools.effective` 基线，再运行
 `legacy-preinstall-orchestrator.mjs`。完整参数和敏感值边界见
@@ -316,13 +321,69 @@ terminal handoff。不得在这里逐项手工运行安装器，也不得把蓝�
 `qwen-current:18889` 外，任何 listener 漂移或 worker 出现都阻断发布和 handoff。
 
 确认 orchestrator journal 已 terminal success、handoff 与同一 attempt/commit/transition claim 完全
-一致后，才建立 controller 收据链：
+一致后，先从 controller 的真实 `status` JSON 取得 `verification.path`，再从该 verification receipt 的
+`runtimeConvergenceProof.path` 取得同一次安装生成的会话级证明。不要猜测 revision 文件名，也不要从
+orchestrator 的终端文本解析路径：
+
+```bash
+preinstall_status="$(
+  node scripts/legacy-preinstall-controller.mjs status --attempt-dir "$attempt_dir"
+)"
+
+install_verification="$(node -e '
+const value = JSON.parse(process.argv[1])
+if (value.phase !== "BOOTSTRAP_HANDOFF"
+  || typeof value.verification?.path !== "string"
+  || typeof value.terminal?.path !== "string") process.exit(1)
+process.stdout.write(value.verification.path)
+' "$preinstall_status")"
+
+runtime_convergence_proof="$(node -e '
+const fs = require("node:fs")
+const path = require("node:path")
+const receiptPath = process.argv[1]
+if (!path.isAbsolute(receiptPath)) process.exit(1)
+const value = JSON.parse(fs.readFileSync(receiptPath, "utf8"))
+const proofPath = value?.runtimeConvergenceProof?.path
+if (typeof proofPath !== "string" || !path.isAbsolute(proofPath)) process.exit(1)
+process.stdout.write(proofPath)
+' "$install_verification")"
+```
+
+preinstall 使用过的 evidence/proof 不能直接交给 bootstrap controller。controller 明确要求 post-install
+evidence 的 `observedAt` 晚于 install verification，且 evidence/proof 摘要不能与 preinstall 绑定相同。
+因此必须保持原 active guard 进程和同一个 `guard_socket`，先确认 guard 仍 active，再按固定顺序生成
+新的 post-install rollback proof 与 evidence：
+
+```bash
+node scripts/legacy-freeze-guard.mjs status \
+  --database "$mission_db" \
+  --n8n-database "$n8n_db" \
+  --socket "$guard_socket"
+
+node scripts/generate-legacy-bootstrap-rollback-proof.mjs \
+  --output "$postinstall_rollback_proof" \
+  --slot "$slot" \
+  --release-id "$release_id" \
+  --standalone-root "$application_release" \
+  --guard-socket "$guard_socket"
+
+node scripts/generate-legacy-freeze-evidence.mjs \
+  --output "$postinstall_evidence_file" \
+  --slot "$slot" \
+  --release-id "$release_id" \
+  --standalone-root "$application_release" \
+  --rollback-proof "$postinstall_rollback_proof"
+```
+
+只有上述新证明生成并验真后，才建立 controller 收据链；`prepare` 必须显式携带 status 返回的
+install verification 和该 receipt 绑定的 runtime convergence proof：
 
 ```bash
 node scripts/legacy-bootstrap-controller.mjs prepare \
   --attempt-dir "$attempt_dir" \
-  --evidence "$evidence_file" \
-  --proof "$rollback_proof" \
+  --evidence "$postinstall_evidence_file" \
+  --proof "$postinstall_rollback_proof" \
   --source-commit "$target_commit" \
   --router-run-dir "$router_run_dir" \
   --router-state "$router_state" \
@@ -333,7 +394,9 @@ node scripts/legacy-bootstrap-controller.mjs prepare \
   --transition-confirmation "$transition_dir/current-confirmation.json" \
   --transition-journal "$transition_dir/journal" \
   --transition-attestation "$transition_dir/transition-attestation.json" \
-  --transition-claim "$transition_dir/bootstrap-claim.json"
+  --transition-claim "$transition_dir/bootstrap-claim.json" \
+  --install-verification "$install_verification" \
+  --runtime-convergence-proof "$runtime_convergence_proof"
 
 node scripts/legacy-bootstrap-controller.mjs current-confirm \
   --prepare "$attempt_dir/prepare.receipt.json"
@@ -349,11 +412,11 @@ node scripts/legacy-bootstrap-controller.mjs apply \
 已生成且仍有效的会话级 OpenClaw runtime convergence proof，再执行 bootstrap：
 
 ```bash
-export AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF=/absolute/private-state/qwen-current-runtime-convergence-proof.json
+export AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF="$runtime_convergence_proof"
 
 bash scripts/deploy-blue-green.sh bootstrap \
   "$slot" "$release_id" "$application_release" \
-  "$evidence_file" "$rollback_proof" "$attempt_dir"
+  "$postinstall_evidence_file" "$postinstall_rollback_proof" "$attempt_dir"
 ```
 
 deploy 有两个明确的 release/readiness 门：第一阶段 `pre-bootstrap` 在写 pending 和停止 legacy 前，
@@ -364,7 +427,8 @@ runtime convergence proof 与 projection contract；第二阶段 `full` 在新 b
 首次发布的完整顺序是：最终干净提交构建 standalone 并审计静态/动态闭包；先用额外的 3018 仅作
 隔离快照验收，再使用正式 blue/green 的 3317/3417 槽；执行飞书 v2 -> v3 dry-run、私有全表快照、
 独立 verify、仅新增字段 apply、真实 API 回读和 rollback-dry-run；完成 n8n transition/attestation；
-捕获真实工具基线并运行统一 preinstall；收到 handoff 后执行 controller
+捕获真实工具基线并运行统一 preinstall；收到 handoff 后回读 controller status、在同一 active guard 下
+重建 post-install proof/evidence，再执行
 `prepare -> current-confirm -> apply`；最后才 bootstrap 和精确切换 3017。3018 不是路由槽，不得与只
 适用于旧 UI 固定提交的 `switch-legacy-standalone-3017.sh` 混用。
 

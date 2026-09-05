@@ -10,6 +10,7 @@ TOOL_BASELINE=""
 EXISTING_CONVERGENCE_PROOF=""
 RUNTIME_SESSION_KEY="${AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY:-}"
 RUNTIME_SESSION_KEY_SHA256=""
+HOT_RELOAD_DEADLINE_MS=15000
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MANIFEST_FILE="$REPOSITORY_ROOT/ops/openclaw/qwen-current-runtime-convergence.manifest.json"
@@ -19,6 +20,7 @@ PRIVATE_GATEWAY_RPC_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-private-gatewa
 SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
 PROFILE_STATE_DIR="${AIWORKER_OPENCLAW_QWEN_STATE_DIR:-$HOME/.openclaw-qwen-current}"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
+PROFILE_LAST_GOOD_CONFIG="$PROFILE_CONFIG.last-good"
 BACKUP_ROOT="${AIWORKER_OPENCLAW_RUNTIME_BACKUP_ROOT:-$HOME/ai-worker/backups/openclaw-runtime-convergence}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
 NODE_BIN="${AIWORKER_NODE_BIN:-$(command -v node 2>/dev/null || true)}"
@@ -101,6 +103,7 @@ fi
 if [[ "${AIWORKER_OPENCLAW_RUNTIME_TEST_MODE:-}" == 1 \
   && -n "${AIWORKER_OPENCLAW_RUNTIME_RPC_HELPER:-}" ]]; then
   PRIVATE_GATEWAY_RPC_HELPER="$AIWORKER_OPENCLAW_RUNTIME_RPC_HELPER"
+  HOT_RELOAD_DEADLINE_MS=2000
 fi
 [[ "$LSOF_BIN" == /* && -x "$LSOF_BIN" && ! -L "$LSOF_BIN" ]] || {
   printf 'lsof is unavailable.\n' >&2
@@ -196,12 +199,44 @@ run_openclaw_gateway() {
 }
 
 run_private_gateway_rpc() {
-  local operation="$1" output_path="$2" gateway_token status
+  local operation="$1" output_path="$2" timeout_ms="${3:-}" gateway_token status
   gateway_token="$(resolve_gateway_token)" || {
     printf 'Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.\n' >&2
     return 1
   }
-  if env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
+  if [[ -n "$timeout_ms" && ( ! "$timeout_ms" =~ ^[0-9]+$ || "$timeout_ms" -le 0 ) ]]; then
+    printf 'Private Gateway RPC timeout is invalid.\n' >&2
+    return 1
+  fi
+  if [[ -n "$timeout_ms" ]]; then
+    if env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
+      -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
+      -u GATEWAY_TOKEN -u OPENCLAW_GATEWAY_PASSWORD -u GATEWAY_PASSWORD \
+      OPENCLAW_BIN="$(command -v "$OPENCLAW_BIN" 2>/dev/null || printf '%s' "$OPENCLAW_BIN")" \
+      OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
+      AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY="$RUNTIME_SESSION_KEY" \
+      AIWORKER_OPENCLAW_RUNTIME_RPC_TIMEOUT_MS="$timeout_ms" \
+      "$NODE_BIN" - "$NODE_BIN" "$PRIVATE_GATEWAY_RPC_HELPER" \
+        "$operation" "$output_path" "$timeout_ms" <<'NODE'
+const { spawnSync } = require('node:child_process')
+const [node, helper, operation, outputPath, timeoutSource] = process.argv.slice(2)
+const timeout = Number(timeoutSource)
+if (!Number.isSafeInteger(timeout) || timeout <= 0) process.exit(2)
+const result = spawnSync(node, [helper, operation, outputPath], {
+  env: process.env,
+  stdio: 'inherit',
+  timeout,
+  killSignal: 'SIGKILL',
+})
+if (result.error?.code === 'ETIMEDOUT') process.exit(124)
+process.exit(result.status ?? 1)
+NODE
+    then
+      status=0
+    else
+      status=$?
+    fi
+  elif env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
     -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
     -u GATEWAY_TOKEN -u OPENCLAW_GATEWAY_PASSWORD -u GATEWAY_PASSWORD \
     OPENCLAW_BIN="$(command -v "$OPENCLAW_BIN" 2>/dev/null || printf '%s' "$OPENCLAW_BIN")" \
@@ -237,9 +272,13 @@ apply_config_patch_cas() {
   config_get="$(mktemp "$WORK_ROOT/gateway-config-get.XXXXXXXX")"
   patch_result="$(mktemp "$WORK_ROOT/gateway-config-patch.XXXXXXXX")"
   run_private_gateway_rpc config-get "$config_get" || return 1
+  "$NODE_BIN" "$CONVERGENCE_HELPER" assert-hot-reload-preconditions \
+    "$config_get" "$MANIFEST_FILE" || return 1
   base_hash="$("$NODE_BIN" "$CONVERGENCE_HELPER" read-config-base-hash \
     "$config_get" "$MANIFEST_FILE")" \
     || return 1
+  "$NODE_BIN" "$CONVERGENCE_HELPER" assert-last-good-baseline \
+    "$PROFILE_LAST_GOOD_CONFIG" "$base_hash" || return 1
   if ! AIWORKER_OPENCLAW_RUNTIME_BASE_HASH="$base_hash" \
     AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE="$patch_file" \
     run_private_gateway_rpc config-patch "$patch_result"; then
@@ -247,6 +286,10 @@ apply_config_patch_cas() {
   fi
   HOT_RELOAD_BASE_HASH="$base_hash"
   HOT_RELOAD_PATCH_RESULT="$patch_result"
+  if ! "$NODE_BIN" "$CONVERGENCE_HELPER" assert-config-patch-hot-reload \
+    "$patch_result" "$MANIFEST_FILE"; then
+    return 2
+  fi
 }
 
 capture_gateway_log_cursor() {
@@ -257,30 +300,102 @@ capture_gateway_log_cursor() {
 }
 
 verify_compaction_hot_reload() {
-  local expected_pid="$1" cursor="$2" attempt health logs post_config_get listener_after
+  local expected_pid="$1" log_baseline="$2" expected_hash="$3"
+  local health logs post_config_get listener_after
+  local classification_status promotion_status ready=0 now_ms deadline_ms remaining_ms log_cursor
+  local log_ready promotion_ready
   health="$(mktemp "$WORK_ROOT/gateway-hot-reload-health.XXXXXXXX")"
   logs="$(mktemp "$WORK_ROOT/gateway-hot-reload-logs.XXXXXXXX")"
   post_config_get="$(mktemp "$WORK_ROOT/gateway-post-patch-config-get.XXXXXXXX")"
-  for attempt in {1..30}; do
-    : > "$health"
+  log_cursor="$("$NODE_BIN" -e '
+const value = JSON.parse(process.argv[1])
+if (!Number.isSafeInteger(value?.cursor) || value.cursor < 0) process.exit(1)
+process.stdout.write(String(value.cursor))
+' "$log_baseline")" || return 1
+  now_ms="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')" || return 1
+  deadline_ms=$((now_ms + HOT_RELOAD_DEADLINE_MS))
+  while [[ "$ready" != 1 ]]; do
+    now_ms="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')" || return 1
+    remaining_ms=$((deadline_ms - now_ms))
+    if [[ "$remaining_ms" -le 0 ]]; then
+      break
+    fi
     : > "$logs"
-    : > "$post_config_get"
-    chmod 600 "$health" "$logs" "$post_config_get"
-    if run_private_gateway_rpc health "$health" \
-      && AIWORKER_OPENCLAW_RUNTIME_LOG_CURSOR="$cursor" \
-        run_private_gateway_rpc logs-tail "$logs" \
-      && run_private_gateway_rpc config-get "$post_config_get" \
-      && listener_after="$(gateway_listener_pid)" \
-      && [[ "$listener_after" == "$expected_pid" ]] \
-      && "$NODE_BIN" "$CONVERGENCE_HELPER" verify-hot-reload \
-        "$health" "$logs" "$HOT_RELOAD_PATCH_RESULT" "$post_config_get" \
-        "$MANIFEST_FILE" "$expected_pid" "$HOT_RELOAD_BASE_HASH" "$cursor"; then
-      return 0
+    chmod 600 "$logs"
+    if ! AIWORKER_OPENCLAW_RUNTIME_LOG_CURSOR="$log_cursor" \
+      run_private_gateway_rpc logs-tail "$logs" "$remaining_ms"; then
+      printf 'qwen-current hot-reload log evidence could not be read.\n' >&2
+      return 1
+    fi
+    log_ready=0
+    classification_status=0
+    if "$NODE_BIN" "$CONVERGENCE_HELPER" classify-hot-reload-logs \
+      "$logs" "$log_baseline"; then
+      log_ready=1
+    else
+      classification_status=$?
+    fi
+    if [[ "$log_ready" != 1 && "$classification_status" != 75 ]]; then
+      printf 'qwen-current reported terminal hot-reload evidence.\n' >&2
+      return 1
+    fi
+    promotion_ready=0
+    promotion_status=0
+    if "$NODE_BIN" "$CONVERGENCE_HELPER" classify-last-good-promotion \
+      "$PROFILE_LAST_GOOD_CONFIG" "$HOT_RELOAD_BASE_HASH" "$expected_hash"; then
+      promotion_ready=1
+    else
+      promotion_status=$?
+    fi
+    if [[ "$promotion_status" != 0 && "$promotion_status" != 75 ]]; then
+      printf 'qwen-current last-good promotion reported terminal failure.\n' >&2
+      return 1
+    fi
+    if [[ "$log_ready" == 1 && "$promotion_ready" == 1 ]]; then
+      ready=1
+      break
     fi
     sleep 0.1
   done
-  printf 'qwen-current did not prove a clean in-process compaction hot reload.\n' >&2
-  return 1
+  if [[ "$ready" != 1 ]]; then
+    printf 'qwen-current did not prove a clean in-process compaction hot reload.\n' >&2
+    return 1
+  fi
+  now_ms="$("$NODE_BIN" -e 'process.stdout.write(String(Date.now()))')" || return 1
+  remaining_ms=$((deadline_ms - now_ms))
+  if [[ "$remaining_ms" -le 0 ]]; then
+    printf 'qwen-current hot-reload evidence deadline expired before the terminal log read.\n' >&2
+    return 1
+  fi
+  : > "$logs"
+  chmod 600 "$logs"
+  if ! AIWORKER_OPENCLAW_RUNTIME_LOG_CURSOR="$log_cursor" \
+    run_private_gateway_rpc logs-tail "$logs" "$remaining_ms" \
+    || ! "$NODE_BIN" "$CONVERGENCE_HELPER" classify-hot-reload-logs \
+      "$logs" "$log_baseline"; then
+    printf 'qwen-current terminal hot-reload log evidence failed.\n' >&2
+    return 1
+  fi
+  : > "$health"
+  : > "$post_config_get"
+  chmod 600 "$health" "$post_config_get"
+  if ! run_private_gateway_rpc health "$health" \
+    || ! run_private_gateway_rpc config-get "$post_config_get" \
+    || ! listener_after="$(gateway_listener_pid)"; then
+    printf 'qwen-current terminal hot-reload evidence could not be completed.\n' >&2
+    return 1
+  fi
+  if [[ "$listener_after" != "$expected_pid" ]]; then
+    printf 'qwen-current Gateway listener changed during hot reload.\n' >&2
+    return 1
+  fi
+  if ! "$NODE_BIN" "$CONVERGENCE_HELPER" verify-hot-reload \
+    "$health" "$logs" "$HOT_RELOAD_PATCH_RESULT" "$post_config_get" \
+    "$MANIFEST_FILE" "$expected_pid" "$HOT_RELOAD_BASE_HASH" "$log_baseline" \
+    "$PROFILE_LAST_GOOD_CONFIG"; then
+    printf 'qwen-current reported terminal hot-reload evidence.\n' >&2
+    return 1
+  fi
 }
 
 persist_runtime_convergence_proof() {
@@ -651,22 +766,28 @@ if ! assert_config_snapshot "$BEFORE_SNAPSHOT" 2>/dev/null; then
   exit 1
 fi
 
-APPLY_OK=1
+APPLY_STATUS=0
 HOT_RELOAD_PID="$(gateway_listener_pid)" || exit 1
 HOT_RELOAD_CURSOR="$(capture_gateway_log_cursor)" || exit 1
 HOT_RELOAD_PATCH_RESULT=""
 HOT_RELOAD_BASE_HASH=""
-apply_config_patch_cas "$PATCH_FILE" || APPLY_OK=0
-if [[ "$APPLY_OK" == 0 ]]; then
+apply_config_patch_cas "$PATCH_FILE" || APPLY_STATUS=$?
+if [[ "$APPLY_STATUS" == 1 ]]; then
   assert_config_snapshot "$BEFORE_SNAPSHOT" 2>/dev/null \
     || { refuse_concurrent_recovery; exit 70; }
   printf 'Gateway CAS patch was rejected; no config recovery was attempted.\n' >&2
   exit 1
 fi
 APPLY_WRITE_SNAPSHOT="$(safe_config_snapshot)" || { refuse_concurrent_recovery; exit 70; }
+HOT_RELOAD_EXPECTED_HASH="$("$NODE_BIN" -e '
+const value = JSON.parse(process.argv[1])
+if (!/^[a-f0-9]{64}$/u.test(value?.sha256)) process.exit(1)
+process.stdout.write(value.sha256)
+' "$APPLY_WRITE_SNAPSHOT")" || { refuse_concurrent_recovery; exit 70; }
 POST_APPLY_RUNTIME_PROOF=""
 HOT_RELOAD_PROOF=""
-if ! run_config_validate \
+if [[ "$APPLY_STATUS" != 0 ]] \
+  || ! run_config_validate \
   || ! wait_for_stable_config \
   || ! "$NODE_BIN" "$CONVERGENCE_HELPER" verify-difference \
     "$BEFORE_CONFIG" "$PROFILE_CONFIG" "$MANIFEST_FILE" yes \
@@ -674,7 +795,7 @@ if ! run_config_validate \
   || ! POST_APPLY_RUNTIME_PROOF="$(verify_runtime_hooks "$APPLY_WRITE_SNAPSHOT")" \
   || [[ "$POST_APPLY_RUNTIME_PROOF" != "$BASELINE_RUNTIME_PROOF" ]] \
   || ! HOT_RELOAD_PROOF="$(verify_compaction_hot_reload \
-    "$HOT_RELOAD_PID" "$HOT_RELOAD_CURSOR")"; then
+    "$HOT_RELOAD_PID" "$HOT_RELOAD_CURSOR" "$HOT_RELOAD_EXPECTED_HASH")"; then
   assert_config_snapshot "$APPLY_WRITE_SNAPSHOT" 2>/dev/null \
     || { refuse_concurrent_recovery; exit 70; }
   semantic_equal "$EXPECTED_CONFIG" "$PROFILE_CONFIG" 2>/dev/null \

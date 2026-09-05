@@ -793,9 +793,272 @@ function readConfigBaseHash(pathname, manifestPath) {
 
 function readLogCursor(pathname) {
   const value = readEvidenceJson(pathname, 'Gateway log cursor evidence').value
-  if (!Number.isSafeInteger(value?.cursor) || value.cursor < 0
-    || !Array.isArray(value.lines)) fail('Gateway log cursor evidence is invalid')
-  process.stdout.write(`${value.cursor}\n`)
+  const snapshot = validateLogCursorSnapshot(value, 'Gateway log cursor evidence')
+  const physical = readLogPrefix(snapshot.file, snapshot.cursor, null)
+  process.stdout.write(`${JSON.stringify({
+    file: snapshot.file,
+    cursor: snapshot.cursor,
+    realpath: physical.realpath,
+    dev: physical.dev,
+    ino: physical.ino,
+    prefixSha256: physical.prefixSha256,
+  })}\n`)
+}
+
+const HOT_RELOAD_DETECTED = /^config change detected; evaluating reload \(([^\r\n]*)\)$/u
+const MANAGED_COMPACTION_PATHS = new Set([
+  'agents.defaults.compaction',
+  'agents.defaults.compaction.model',
+  'agents.defaults.compaction.timeoutSeconds',
+  'agents.defaults.compaction.keepRecentTokens',
+  'agents.defaults.compaction.recentTurnsPreserve',
+  'agents.defaults.compaction.truncateAfterCompaction',
+  'agents.defaults.compaction.maxActiveTranscriptBytes',
+  'agents.defaults.compaction.midTurnPrecheck',
+  'agents.defaults.compaction.midTurnPrecheck.enabled',
+  'agents.defaults.compaction.identifierInstructions',
+])
+const AUTO_MANAGED_CONFIG_PATHS = new Set(['meta.lastTouchedAt', 'meta.lastTouchedVersion'])
+const HOT_RELOAD_FAILED = [
+  /^config (?:hot )?reload failed\b/iu,
+  /^config reload superseded\b/iu,
+  /^config reload (?:in-process )?last-known-good promotion failed\b/iu,
+  /^config reload disabled \(gateway\.reload\.mode=off\)$/iu,
+  /^config hot-reload disabled: watcher failed\b/iu,
+  /^config change requires gateway restart\b/iu,
+  /^config reload requires gateway restart\b/iu,
+  /^config restart failed\b/iu,
+  /\brestart pending\b/iu,
+]
+
+function readLogPrefix(pathname, cursor, expected) {
+  normalizedAbsolute(pathname, 'Gateway log file')
+  if (!Number.isSafeInteger(cursor) || cursor < 0) fail('Gateway log cursor is invalid')
+  const minimumSize = BigInt(expected?.minimumSize ?? cursor)
+  const before = fs.lstatSync(pathname, { bigint: true })
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+    || before.uid !== BigInt(process.getuid())
+    || Number(before.mode & 0o7777n) !== 0o600) {
+    fail('Gateway log file is unsafe')
+  }
+  const descriptor = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  try {
+    const opened = fs.fstatSync(descriptor, { bigint: true })
+    const realpath = fs.realpathSync(pathname)
+    const identity = {
+      realpath,
+      dev: opened.dev.toString(),
+      ino: opened.ino.toString(),
+    }
+    if (!opened.isFile() || opened.nlink !== 1n
+      || opened.uid !== BigInt(process.getuid())
+      || Number(opened.mode & 0o7777n) !== 0o600
+      || opened.dev !== before.dev || opened.ino !== before.ino
+      || opened.size < minimumSize
+      || (expected && (identity.realpath !== expected.realpath
+        || identity.dev !== expected.dev || identity.ino !== expected.ino))) {
+      fail('Gateway log file identity changed')
+    }
+    const digest = createHash('sha256')
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    let offset = 0
+    while (offset < cursor) {
+      const length = Math.min(buffer.length, cursor - offset)
+      const bytesRead = fs.readSync(descriptor, buffer, 0, length, offset)
+      if (bytesRead <= 0) fail('Gateway log prefix is incomplete')
+      digest.update(buffer.subarray(0, bytesRead))
+      offset += bytesRead
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true })
+    const current = fs.lstatSync(pathname, { bigint: true })
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size < minimumSize
+      || current.dev !== opened.dev || current.ino !== opened.ino
+      || current.size < minimumSize
+      || current.isSymbolicLink() || current.nlink !== 1n
+      || current.uid !== BigInt(process.getuid())
+      || Number(current.mode & 0o7777n) !== 0o600) {
+      fail('Gateway log file changed while hashing its prefix')
+    }
+    const prefixSha256 = digest.digest('hex')
+    if (expected && prefixSha256 !== expected.prefixSha256) {
+      fail('Gateway log prefix changed after the baseline cursor')
+    }
+    return { ...identity, prefixSha256 }
+  } finally {
+    fs.closeSync(descriptor)
+  }
+}
+
+function validateLogCursorSnapshot(value, label) {
+  if (typeof value?.file !== 'string' || value.file.length === 0
+    || /[\u0000-\u001f\u007f]/u.test(value.file)
+    || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || !Number.isSafeInteger(value.size) || value.size < 0
+    || value.cursor !== value.size
+    || !Array.isArray(value.lines)
+    || value.lines.some(line => typeof line !== 'string')
+    || value.reset === true) {
+    fail(`${label} is invalid or incomplete`)
+  }
+  return value
+}
+
+function validatePostPatchLogTail(value, label) {
+  const logs = validateLogCursorSnapshot(value, label)
+  if (logs.reset === true || logs.truncated === true || logs.lines.length >= 5000) {
+    fail(`${label} is invalid or incomplete`)
+  }
+  return logs
+}
+
+function logMessageCandidates(line) {
+  let value
+  try {
+    value = JSON.parse(line)
+  } catch {
+    return [line]
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  return [value.message, value.msg, ...Object.keys(value)
+    .filter(key => /^\d+$/u.test(key))
+    .toSorted((left, right) => Number(left) - Number(right))
+    .map(key => value[key])]
+    .filter(item => typeof item === 'string')
+}
+
+function classifyHotReloadMessages(lines) {
+  const messages = lines.flatMap(logMessageCandidates)
+  let detected = false
+  let invalidDetection = false
+  for (const message of messages) {
+    const match = HOT_RELOAD_DETECTED.exec(message)
+    if (!match) continue
+    const changedPaths = match[1].split(',').map(item => item.trim()).filter(Boolean)
+    const hasCompaction = changedPaths.some(item => item.startsWith('agents.defaults.compaction'))
+    if (!hasCompaction) continue
+    if (changedPaths.length === 0 || changedPaths.some(item => (
+      !MANAGED_COMPACTION_PATHS.has(item) && !AUTO_MANAGED_CONFIG_PATHS.has(item)
+    ))) {
+      invalidDetection = true
+    } else {
+      detected = true
+    }
+  }
+  return {
+    detected,
+    failed: invalidDetection
+      || messages.some(message => HOT_RELOAD_FAILED.some(pattern => pattern.test(message))),
+  }
+}
+
+function parseLogBaseline(source) {
+  let value
+  try {
+    value = JSON.parse(source)
+  } catch {
+    fail('Gateway hot-reload log baseline is invalid')
+  }
+  if (typeof value?.file !== 'string' || value.file.length === 0
+    || /[\u0000-\u001f\u007f]/u.test(value.file)
+    || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || typeof value.realpath !== 'string' || value.realpath.length === 0
+    || typeof value.dev !== 'string' || !/^[0-9]+$/u.test(value.dev)
+    || typeof value.ino !== 'string' || !/^[0-9]+$/u.test(value.ino)
+    || !/^[a-f0-9]{64}$/u.test(value.prefixSha256)
+    || !same(Object.keys(value).toSorted(), [
+      'cursor', 'dev', 'file', 'ino', 'prefixSha256', 'realpath',
+    ])) {
+    fail('Gateway hot-reload log baseline is invalid')
+  }
+  return value
+}
+
+function validatePostBaselineLogs(value, baseline, label, verifyPrefix = false) {
+  const logs = validatePostPatchLogTail(value, label)
+  if (logs.file !== baseline.file || logs.cursor < baseline.cursor
+    || (logs.cursor === baseline.cursor && logs.lines.length !== 0)
+    || (logs.cursor > baseline.cursor && logs.lines.length === 0)) {
+    fail(`${label} does not continue the captured log file`)
+  }
+  const current = fs.lstatSync(logs.file, { bigint: true })
+  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1n
+    || current.uid !== BigInt(process.getuid())
+    || Number(current.mode & 0o7777n) !== 0o600
+    || current.size < BigInt(logs.cursor)
+    || current.dev.toString() !== baseline.dev || current.ino.toString() !== baseline.ino
+    || fs.realpathSync(logs.file) !== baseline.realpath) {
+    fail(`${label} changed physical log files`)
+  }
+  if (verifyPrefix) readLogPrefix(logs.file, baseline.cursor, { ...baseline, minimumSize: logs.cursor })
+  return logs
+}
+
+function assertLastGoodBaseline(pathname, baseHash) {
+  if (!/^[a-f0-9]{64}$/u.test(baseHash)
+    || readPhysicalFile(pathname, 'Gateway last-good config').snapshot.sha256 !== baseHash) {
+    fail('Gateway last-good config does not match the CAS base')
+  }
+}
+
+function lastGoodPromotionStatus(pathname, baseHash, expectedHash) {
+  if (!/^[a-f0-9]{64}$/u.test(baseHash) || !/^[a-f0-9]{64}$/u.test(expectedHash)
+    || baseHash === expectedHash) fail('Gateway last-good promotion hashes are invalid')
+  const actual = readPhysicalFile(pathname, 'Gateway last-good config').snapshot.sha256
+  if (actual === expectedHash) return 'applied'
+  if (actual === baseHash) return 'pending'
+  fail('Gateway last-good config changed to an unexpected hash')
+}
+
+function classifyLastGoodPromotion(pathname, baseHash, expectedHash) {
+  if (lastGoodPromotionStatus(pathname, baseHash, expectedHash) === 'pending') {
+    process.exitCode = 75
+  }
+}
+
+function assertHotReloadPreconditions(configGetPath, manifestPath) {
+  const value = readEvidenceJson(
+    configGetPath,
+    'pre-patch Gateway config.get evidence',
+  ).value
+  const manifest = validateManifest(manifestPath)
+  if (value?.exists !== true || value.valid !== true
+    || !/^[a-f0-9]{64}$/u.test(value.hash)
+    || !value.config || typeof value.config !== 'object' || Array.isArray(value.config)) {
+    fail('pre-patch Gateway config.get evidence is invalid')
+  }
+  exclusiveProfileAgent(value.config, manifest.agent.id)
+  const reloadMode = value.config?.gateway?.reload?.mode
+  if (![undefined, null, 'hybrid', 'hot'].includes(reloadMode)) {
+    fail('Gateway reload mode is incompatible with in-process convergence')
+  }
+}
+
+function assertConfigPatchHotReload(pathname, manifestPath) {
+  const patch = readEvidenceJson(pathname, 'Gateway config.patch evidence').value
+  const manifest = validateManifest(manifestPath)
+  if (patch?.ok !== true || patch.noop === true
+    || patch?.sentinel?.payload?.stats?.requiresRestart !== false
+    || (patch.restart !== undefined && patch.restart !== null)
+    || !patch.config || typeof patch.config !== 'object' || Array.isArray(patch.config)) {
+    fail('Gateway config.patch requested or requires a restart')
+  }
+  assertTarget(patch.config, manifest)
+}
+
+function classifyHotReloadLogs(logsPath, baselineSource) {
+  const baseline = parseLogBaseline(baselineSource)
+  const logs = validatePostBaselineLogs(
+    readEvidenceJson(logsPath, 'Gateway hot-reload log evidence').value,
+    baseline,
+    'Gateway hot-reload log evidence',
+  )
+  if (logs.cursor === baseline.cursor) {
+    process.exitCode = 75
+    return
+  }
+  const classification = classifyHotReloadMessages(logs.lines)
+  if (classification.failed) fail('Gateway reported a compaction hot-reload failure')
+  if (!classification.detected) process.exitCode = 75
 }
 
 function verifyHotReload(
@@ -806,7 +1069,8 @@ function verifyHotReload(
   manifestPath,
   pidSource,
   baseHash,
-  cursorSource,
+  baselineSource,
+  lastGoodPath,
 ) {
   const manifest = validateManifest(manifestPath)
   const health = readEvidenceJson(healthPath, 'Gateway hot-reload health evidence').value
@@ -817,13 +1081,17 @@ function verifyHotReload(
     'post-patch Gateway config.get evidence',
   ).value
   const pid = Number(pidSource)
-  const cursor = Number(cursorSource)
+  const baseline = parseLogBaseline(baselineSource)
+  const checkedLogs = validatePostBaselineLogs(
+    logs,
+    baseline,
+    'Gateway hot-reload log evidence',
+    true,
+  )
   if (!Number.isSafeInteger(pid) || pid <= 0
     || !/^[a-f0-9]{64}$/u.test(baseHash)
-    || !Number.isSafeInteger(cursor) || cursor < 0
     || health?.configReload?.hotReloadStatus !== 'active'
-    || !Number.isSafeInteger(logs?.cursor) || logs.cursor <= cursor
-    || !Array.isArray(logs.lines) || logs.lines.length === 0
+    || checkedLogs.cursor <= baseline.cursor
     || patch?.ok !== true || patch?.noop === true
     || patch?.sentinel?.payload?.stats?.requiresRestart !== false
     || (patch.restart !== undefined && patch.restart !== null)
@@ -835,9 +1103,9 @@ function verifyHotReload(
   }
   assertTarget(patch.config, manifest)
   assertTarget(postConfigGet.config, manifest)
-  const logText = logs.lines.join('\n')
-  if (!/config hot reload applied \([^\n]*agents\.defaults\.compaction[^\n]*\)/u.test(logText)
-    || /config reload failed|config hot-reload disabled|requires gateway restart|restart pending/iu.test(logText)) {
+  const classification = classifyHotReloadMessages(checkedLogs.lines)
+  if (!classification.detected || classification.failed
+    || lastGoodPromotionStatus(lastGoodPath, baseHash, postConfigGet.hash) !== 'applied') {
     fail('Gateway did not prove a clean compaction hot reload')
   }
   const compaction = stable(Object.fromEntries(
@@ -852,9 +1120,9 @@ function verifyHotReload(
     compaction,
     baseHash,
     newHash: postConfigGet.hash,
-    logCursorStart: cursor,
-    logCursorEnd: logs.cursor,
-    logSha256: sha256(JSON.stringify(logs.lines)),
+    logCursorStart: baseline.cursor,
+    logCursorEnd: checkedLogs.cursor,
+    logSha256: sha256(JSON.stringify(checkedLogs.lines)),
   }))}\n`)
 }
 
@@ -1226,7 +1494,22 @@ else if (command === 'verify-difference' && args.length === 4) verifyDifference(
 else if (command === 'semantic-equal' && args.length === 3) semanticEqual(...args)
 else if (command === 'read-config-base-hash' && args.length === 2) readConfigBaseHash(...args)
 else if (command === 'read-log-cursor' && args.length === 1) readLogCursor(args[0])
-else if (command === 'verify-hot-reload' && args.length === 8) verifyHotReload(...args)
+else if (command === 'assert-hot-reload-preconditions' && args.length === 2) {
+  assertHotReloadPreconditions(...args)
+}
+else if (command === 'assert-config-patch-hot-reload' && args.length === 2) {
+  assertConfigPatchHotReload(...args)
+}
+else if (command === 'assert-last-good-baseline' && args.length === 2) {
+  assertLastGoodBaseline(...args)
+}
+else if (command === 'classify-last-good-promotion' && args.length === 3) {
+  classifyLastGoodPromotion(...args)
+}
+else if (command === 'classify-hot-reload-logs' && args.length === 2) {
+  classifyHotReloadLogs(...args)
+}
+else if (command === 'verify-hot-reload' && args.length === 9) verifyHotReload(...args)
 else if (command === 'verify-startup-loaded' && args.length === 4) verifyStartupLoaded(...args)
 else if (command === 'write-convergence-proof' && args.length === 5) writeConvergenceProof(...args)
 else if (command === 'assert-convergence-proof' && args.length === 4) assertConvergenceProof(...args)
