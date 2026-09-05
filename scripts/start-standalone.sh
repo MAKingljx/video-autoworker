@@ -62,6 +62,11 @@ load_runtime_env_file() {
 }
 
 PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
+if [[ "$PLATFORM_ENV_FILE" != /* || "$PLATFORM_ENV_FILE" == *[$'\r\n']* ]]; then
+  printf 'AIWORKER_PLATFORM_ENV_FILE must be an absolute single-line path: %s\n' "$PLATFORM_ENV_FILE" >&2
+  exit 1
+fi
+export AIWORKER_PLATFORM_ENV_FILE="$PLATFORM_ENV_FILE"
 
 load_runtime_env() {
   load_runtime_env_file "$SOURCE_PROJECT_ROOT/.env"
@@ -169,6 +174,7 @@ fi
 
 STANDALONE_DIR="$(cd "$(dirname "$STANDALONE_SERVER")" && pwd -P)"
 PHYSICAL_STANDALONE_ROOT="$(cd "$STANDALONE_ROOT" && pwd -P)"
+export AIWORKER_STANDALONE_ROOT="$PHYSICAL_STANDALONE_ROOT"
 STANDALONE_NEXT_DIR="$STANDALONE_DIR/.next"
 STANDALONE_STATIC_DIR="$STANDALONE_NEXT_DIR/static"
 STANDALONE_PUBLIC_DIR="$STANDALONE_DIR/public"

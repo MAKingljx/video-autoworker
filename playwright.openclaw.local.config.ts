@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
+  globalSetup: './tests/e2e-artifact-integrity.ts',
   testDir: 'tests',
   testMatch: /openclaw-harness\.spec\.ts/,
   timeout: 60_000,

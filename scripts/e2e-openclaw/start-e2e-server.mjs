@@ -38,11 +38,13 @@ const runtimeRoot = path.join(repoRoot, '.tmp', 'e2e-openclaw', mode)
 const dataDir = path.join(runtimeRoot, 'data')
 const mockBinDir = path.join(repoRoot, 'scripts', 'e2e-openclaw', 'bin')
 const skillsRoot = path.join(runtimeRoot, 'skills')
+const platformEnvFile = path.join(runtimeRoot, 'platform.env')
 
 fs.rmSync(runtimeRoot, { recursive: true, force: true })
 fs.mkdirSync(runtimeRoot, { recursive: true })
 fs.mkdirSync(dataDir, { recursive: true })
 fs.cpSync(fixtureSource, runtimeRoot, { recursive: true })
+fs.writeFileSync(platformEnvFile, '', { flag: 'wx', mode: 0o600 })
 
 const gatewayHost = '127.0.0.1'
 const gatewayPort = String(await findAvailablePort(gatewayHost))
@@ -69,6 +71,8 @@ const baseEnv = {
   MC_SKILLS_OPENCLAW_DIR: path.join(skillsRoot, 'openclaw'),
   PATH: `${mockBinDir}:${process.env.PATH || ''}`,
   E2E_GATEWAY_EXPECTED: mode === 'gateway' ? '1' : '0',
+  AIWORKER_PLATFORM_ENV_FILE: platformEnvFile,
+  AIWORKER_STANDALONE_ROOT: path.join(repoRoot, '.next', 'standalone'),
 }
 
 const children = []

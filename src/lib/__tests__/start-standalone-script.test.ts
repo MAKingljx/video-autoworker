@@ -307,6 +307,9 @@ describe('standalone runtime launcher', () => {
     const script = readFileSync(resolve(process.cwd(), 'scripts/start-standalone.sh'), 'utf8')
 
     expect(script).toContain('PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"')
+    expect(script).toContain('export AIWORKER_PLATFORM_ENV_FILE="$PLATFORM_ENV_FILE"')
+    expect(script).toContain('export AIWORKER_STANDALONE_ROOT="$PHYSICAL_STANDALONE_ROOT"')
+    expect(script).toContain('AIWORKER_PLATFORM_ENV_FILE must be an absolute single-line path')
     expect(script).toContain('find_source_project_root()')
     expect(script).toContain('拒绝加载不安全的平台环境文件')
     expect(script.indexOf('load_runtime_env_file "$SOURCE_PROJECT_ROOT/.env.local"'))

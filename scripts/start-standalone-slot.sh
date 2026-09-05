@@ -9,6 +9,11 @@ RUN_DIR="${AIWORKER_BG_RUN_DIR:-$PROJECT_ROOT/.run/blue-green}"
 RELEASES_DIR="${AIWORKER_BG_RELEASES_DIR:-$PROJECT_ROOT/.runtime/releases}"
 ROUTER_STATE_FILE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
 PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
+if [[ "$PLATFORM_ENV_FILE" != /* || "$PLATFORM_ENV_FILE" == *[$'\r\n']* ]]; then
+  printf 'AIWORKER_PLATFORM_ENV_FILE must be an absolute single-line path: %s\n' "$PLATFORM_ENV_FILE" >&2
+  exit 1
+fi
+export AIWORKER_PLATFORM_ENV_FILE="$PLATFORM_ENV_FILE"
 NODE_BIN="${NODE_BIN:-node}"
 AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
 SLOT="${1:-}"
@@ -126,6 +131,7 @@ PORT="$(printf '%s\n' "$mapfile_values" | sed -n '5p')"
 
 PHYSICAL_RELEASES="$($NODE_BIN -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$RELEASES_DIR")"
 PHYSICAL_ROOT="$($NODE_BIN -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$RELEASE_ROOT")"
+export AIWORKER_STANDALONE_ROOT="$PHYSICAL_ROOT"
 [[ "$PHYSICAL_ROOT" == "$PHYSICAL_RELEASES/$RELEASE_ID/standalone" ]] || {
   printf 'slot release escaped immutable release root\n' >&2
   exit 1

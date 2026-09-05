@@ -35,6 +35,38 @@ describe('OpenClaw-only production launch contract', () => {
     expect(source).not.toContain('ExecStart=$node_path $INSTALL_DIR/.next/standalone/server.js')
   })
 
+  it('routes runtime environment writes outside immutable standalone artifacts', () => {
+    const standalone = readFileSync(resolve(process.cwd(), 'scripts/start-standalone.sh'), 'utf8')
+    const slot = readFileSync(resolve(process.cwd(), 'scripts/start-standalone-slot.sh'), 'utf8')
+    const e2eServer = readFileSync(
+      resolve(process.cwd(), 'scripts/e2e-openclaw/start-e2e-server.mjs'),
+      'utf8',
+    )
+
+    expect(standalone).toContain('export AIWORKER_PLATFORM_ENV_FILE="$PLATFORM_ENV_FILE"')
+    expect(standalone).toContain('export AIWORKER_STANDALONE_ROOT="$PHYSICAL_STANDALONE_ROOT"')
+    expect(slot).toContain('export AIWORKER_PLATFORM_ENV_FILE="$PLATFORM_ENV_FILE"')
+    expect(slot).toContain('export AIWORKER_STANDALONE_ROOT="$PHYSICAL_ROOT"')
+    expect(e2eServer).toContain('AIWORKER_PLATFORM_ENV_FILE: platformEnvFile')
+    expect(e2eServer).toContain("AIWORKER_STANDALONE_ROOT: path.join(repoRoot, '.next', 'standalone')")
+  })
+
+  it('audits immutable standalone content and its manifest digest after every E2E suite', () => {
+    const integrityGate = readFileSync(resolve(process.cwd(), 'tests/e2e-artifact-integrity.ts'), 'utf8')
+    expect(integrityGate).toContain("name === '.env' || name.startsWith('.env.')")
+    expect(integrityGate).toContain('originalManifestSha256')
+    expect(integrityGate).toContain('scripts/check-standalone-artifact.mjs')
+
+    for (const relativePath of [
+      'playwright.config.ts',
+      'playwright.openclaw.local.config.ts',
+      'playwright.openclaw.gateway.config.ts',
+    ]) {
+      const config = readFileSync(resolve(process.cwd(), relativePath), 'utf8')
+      expect(config).toContain("globalSetup: './tests/e2e-artifact-integrity.ts'")
+    }
+  })
+
   it('makes the Windows local launcher enforce the equivalent auth, host, and artifact gate', () => {
     const source = readFileSync(resolve(process.cwd(), 'install.ps1'), 'utf8')
     expect(source).toContain('$env:MC_AUTH_MODE = "openclaw-loopback"')

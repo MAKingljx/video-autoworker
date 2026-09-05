@@ -9,6 +9,10 @@ import { getDatabase } from '@/lib/db'
 import { logger } from '@/lib/logger'
 import { FIX_SAFETY, runSecurityScan, type FixSafety } from '@/lib/security-scan'
 import { isValidExecSecretReference } from '@/lib/secret-reference'
+import {
+  resolveConfiguredPlatformEnvFilePath,
+  writePlatformEnvFile,
+} from '@/lib/platform-env-file'
 
 export interface FixResult {
   id: string
@@ -72,25 +76,25 @@ export async function POST(request: NextRequest) {
   const shouldFix = (id: string) => !targetIds || targetIds.has(id)
 
   const results: FixResult[] = []
-  const envPaths = [
-    path.join(process.cwd(), '.env'),
-    path.join(process.cwd(), '.env.local'),
-  ]
+  let platformEnvPath: string | null = null
+  let platformEnvError: Error | null = null
+  try {
+    platformEnvPath = resolveConfiguredPlatformEnvFilePath()
+  } catch (error) {
+    platformEnvError = error instanceof Error ? error : new Error('invalid platform environment path')
+  }
+
+  function getPlatformEnvPath(): string {
+    if (platformEnvPath) return platformEnvPath
+    throw platformEnvError || new Error('platform environment path is unavailable')
+  }
 
   function readEnv(filePath: string): string {
     try { return readFileSync(filePath, 'utf-8') } catch { return '' }
   }
 
   function setEnvVar(key: string, value: string) {
-    let targetPath = envPaths[0]
-    for (const filePath of envPaths) {
-      const content = readEnv(filePath)
-      if (new RegExp(`^${key}=.*$`, 'm').test(content)) {
-        targetPath = filePath
-        break
-      }
-    }
-
+    const targetPath = getPlatformEnvPath()
     let content = readEnv(targetPath)
     const regex = new RegExp(`^${key}=.*$`, 'm')
     if (regex.test(content)) {
@@ -98,29 +102,25 @@ export async function POST(request: NextRequest) {
     } else {
       content = content.trimEnd() + `\n${key}=${value}\n`
     }
-    writeFileSync(targetPath, content, 'utf-8')
+    writePlatformEnvFile(targetPath, content)
     if (shouldMutateRuntimeEnv()) {
       process.env[key] = value
     }
   }
 
   function unsetEnvVar(key: string) {
-    const regex = new RegExp(`^${key}=.*\n?`, 'm')
-    for (const filePath of envPaths) {
-      let content = readEnv(filePath)
-      if (regex.test(content)) {
-        content = content.replace(regex, '')
-        writeFileSync(filePath, content, 'utf-8')
-      }
-    }
+    // Persist an empty override in the canonical last-loaded environment file.
+    // Removing only that line could reveal a stale checkout-local value again
+    // after restart.
+    setEnvVar(key, '')
     if (shouldMutateRuntimeEnv()) {
       delete process.env[key]
     }
   }
 
   // 1. Fix .env file permissions
-  const envPath = envPaths[0]
-  if (shouldFix('env_permissions') && existsSync(envPath)) {
+  const envPath = platformEnvPath
+  if (shouldFix('env_permissions') && envPath && existsSync(envPath)) {
     try {
       const stat = statSync(envPath)
       const mode = (stat.mode & 0o777).toString(8)
@@ -133,6 +133,14 @@ export async function POST(request: NextRequest) {
     } catch (e: any) {
       results.push({ id: 'env_permissions', name: '.env file permissions', fixed: false, detail: e.message, fixSafety: FIX_SAFETY['env_permissions'] })
     }
+  } else if (shouldFix('env_permissions') && platformEnvError) {
+    results.push({
+      id: 'env_permissions',
+      name: '.env file permissions',
+      fixed: false,
+      detail: platformEnvError.message,
+      fixSafety: FIX_SAFETY['env_permissions'],
+    })
   }
 
   // 2. Fix MC_ALLOWED_HOSTS if not set

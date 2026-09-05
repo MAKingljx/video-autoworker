@@ -1,4 +1,12 @@
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -43,13 +51,16 @@ describe('security-scan fix route env mutation', () => {
   const originalCwd = process.cwd()
   const originalEnv = { ...process.env }
   let tempDir = ''
+  let platformEnvPath = ''
 
   beforeEach(() => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'mc-security-fix-'))
     process.chdir(tempDir)
-    writeFileSync(path.join(tempDir, '.env'), 'MC_DISABLE_RATE_LIMIT=1\n', 'utf-8')
-    writeFileSync(path.join(tempDir, '.env.local'), '', 'utf-8')
     process.env = { ...originalEnv }
+    platformEnvPath = path.join(tempDir, 'platform.env')
+    writeFileSync(platformEnvPath, 'MC_DISABLE_RATE_LIMIT=1\n', { encoding: 'utf8', mode: 0o600 })
+    process.env.AIWORKER_PLATFORM_ENV_FILE = platformEnvPath
+    process.env.AIWORKER_STANDALONE_ROOT = path.join(tempDir, 'standalone')
   })
 
   afterEach(() => {
@@ -72,7 +83,9 @@ describe('security-scan fix route env mutation', () => {
     const response = await POST(request)
     expect(response.status).toBe(200)
     expect(process.env.MC_DISABLE_RATE_LIMIT).toBe('1')
-    expect(readFileSync(path.join(tempDir, '.env'), 'utf-8')).not.toContain('MC_DISABLE_RATE_LIMIT=')
+    expect(readFileSync(platformEnvPath, 'utf-8')).toContain('MC_DISABLE_RATE_LIMIT=\n')
+    expect(statSync(platformEnvPath).mode & 0o777).toBe(0o600)
+    expect(existsSync(path.join(process.env.AIWORKER_STANDALONE_ROOT!, '.env'))).toBe(false)
   })
 
   it('mutates runtime env outside test mode so fixes apply immediately', async () => {
@@ -89,6 +102,49 @@ describe('security-scan fix route env mutation', () => {
     const response = await POST(request)
     expect(response.status).toBe(200)
     expect(process.env.MC_DISABLE_RATE_LIMIT).toBeUndefined()
+  })
+
+  it('fails closed without an explicit platform environment file', async () => {
+    delete process.env.AIWORKER_PLATFORM_ENV_FILE
+    process.env.MC_DISABLE_RATE_LIMIT = '1'
+
+    const { POST } = await import('@/app/api/security-scan/fix/route')
+    const request = new NextRequest('http://localhost/api/security-scan/fix', {
+      method: 'POST',
+      body: JSON.stringify({ ids: ['rate_limiting'] }),
+      headers: { 'content-type': 'application/json' },
+    })
+
+    const response = await POST(request)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'rate_limiting', fixed: false }),
+    ]))
+    expect(existsSync(path.join(tempDir, '.env'))).toBe(false)
+  })
+
+  it('rejects a platform environment file inside the immutable standalone root', async () => {
+    const standaloneRoot = process.env.AIWORKER_STANDALONE_ROOT!
+    mkdirSync(standaloneRoot)
+    const unsafePath = path.join(standaloneRoot, '.env')
+    process.env.AIWORKER_PLATFORM_ENV_FILE = unsafePath
+    process.env.MC_DISABLE_RATE_LIMIT = '1'
+
+    const { POST } = await import('@/app/api/security-scan/fix/route')
+    const request = new NextRequest('http://localhost/api/security-scan/fix', {
+      method: 'POST',
+      body: JSON.stringify({ ids: ['rate_limiting'] }),
+      headers: { 'content-type': 'application/json' },
+    })
+
+    const response = await POST(request)
+    const body = await response.json()
+    expect(response.status).toBe(200)
+    expect(body.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'rate_limiting', fixed: false }),
+    ]))
+    expect(existsSync(unsafePath)).toBe(false)
   })
 
   it('fails closed for gateway auth without generating an inline token', async () => {
