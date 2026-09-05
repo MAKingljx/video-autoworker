@@ -28,6 +28,7 @@ const execFileAsync = promisify(execFile)
 const sourceRepository = process.cwd()
 let installerRepository = ''
 let installer = resolve(sourceRepository, 'scripts/install-aiworker-director-brain.sh')
+const treeManifestHelper = resolve(sourceRepository, 'scripts/lib/runtime-tree-manifest.mjs')
 let commandFixtureRoot = ''
 let fakeCommandBin = ''
 let fakeOpenClawCallLog = ''
@@ -90,6 +91,10 @@ async function readInstallerResult(pathname: string) {
 
 async function sha256File(pathname: string) {
   return createHash('sha256').update(await readFile(pathname)).digest('hex')
+}
+
+function sha256(value: string) {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 const activeInstallerAttempts = new Set<InstallerExecution>()
@@ -359,6 +364,7 @@ async function initializeCleanInstallerRepository() {
     'scripts/lib/feishu-director-brain.mjs',
     'scripts/lib/runtime-safe-offline-queue.mjs',
     'scripts/lib/sensitive-value-scanner.mjs',
+    'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
   ]
@@ -693,6 +699,107 @@ describe('installer synchronization', () => {
 })
 
 describe('transactional director-brain OpenClaw installer', () => {
+  it('uses one strict Node manifest process with byte-compatible tree and backup output', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-tree-manifest-'))
+    try {
+      const tree = resolve(root, 'tree')
+      const child = resolve(tree, 'dir')
+      await mkdir(child, { recursive: true, mode: 0o750 })
+      await chmod(tree, 0o700)
+      await chmod(child, 0o750)
+      await writeFile(resolve(child, 'a.txt'), 'alpha\n', { mode: 0o640 })
+      await writeFile(resolve(tree, 'z.txt'), 'zulu\n', { mode: 0o600 })
+      await writeFile(resolve(tree, 'MANIFEST.sha256'), 'excluded\n', { mode: 0o600 })
+
+      const nodeLog = resolve(root, 'node.log')
+      const forbiddenLog = resolve(root, 'forbidden.log')
+      const nodeWrapper = resolve(root, 'node-wrapper')
+      await writeFile(nodeWrapper, `#!/bin/sh\nprintf 'node\\n' >> "$MANIFEST_NODE_LOG"\nexec "$MANIFEST_REAL_NODE" "$@"\n`, { mode: 0o700 })
+      await chmod(nodeWrapper, 0o700)
+      const source = await readFile(installer, 'utf8')
+      const treeBody = source.slice(
+        source.indexOf('write_tree_manifest() {'),
+        source.indexOf('\ntrees_equal()'),
+      )
+      const backupBody = source.slice(
+        source.indexOf('write_backup_tree_manifest() {'),
+        source.indexOf('\nwrite_backup_manifest()'),
+      )
+      const treeOutput = resolve(root, 'tree.manifest')
+      const backupOutput = resolve(root, 'backup.manifest')
+      await execFileAsync('bash', ['-c', `
+stat() { printf 'stat\\n' >> "$MANIFEST_FORBIDDEN_LOG"; return 91; }
+shasum() { printf 'shasum\\n' >> "$MANIFEST_FORBIDDEN_LOG"; return 92; }
+find() { printf 'find\\n' >> "$MANIFEST_FORBIDDEN_LOG"; return 93; }
+${treeBody}
+${backupBody}
+write_tree_manifest "$1" "$2"
+write_backup_tree_manifest "$1" "$3"
+`, 'director-manifest', tree, treeOutput, backupOutput], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          NODE_BIN: nodeWrapper,
+          TREE_MANIFEST_HELPER: treeManifestHelper,
+          MANIFEST_REAL_NODE: process.execPath,
+          MANIFEST_NODE_LOG: nodeLog,
+          MANIFEST_FORBIDDEN_LOG: forbiddenLog,
+        },
+      })
+
+      const mode = async (pathname: string) => ((await stat(pathname)).mode & 0o7777).toString(8)
+      const expectedTree = [
+        `.\tdirectory\t${await mode(tree)}\t-`,
+        `./MANIFEST.sha256\tfile\t${await mode(resolve(tree, 'MANIFEST.sha256'))}\t${sha256('excluded\n')}`,
+        `./dir\tdirectory\t${await mode(child)}\t-`,
+        `./dir/a.txt\tfile\t${await mode(resolve(child, 'a.txt'))}\t${sha256('alpha\n')}`,
+        `./z.txt\tfile\t${await mode(resolve(tree, 'z.txt'))}\t${sha256('zulu\n')}`,
+        '',
+      ].join('\n')
+      expect(await readFile(treeOutput, 'utf8')).toBe(expectedTree)
+      expect(await readFile(backupOutput, 'utf8')).toBe(
+        expectedTree.replace(/^\.\/MANIFEST\.sha256.*\n/mu, ''),
+      )
+      expect((await stat(treeOutput)).mode & 0o777).toBe(0o600)
+      expect((await stat(backupOutput)).mode & 0o777).toBe(0o600)
+      expect(await readFile(nodeLog, 'utf8')).toBe('node\nnode\n')
+      expect(await exists(forbiddenLog)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects missing, symlinked, and unsupported director manifest trees', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-tree-manifest-strict-'))
+    try {
+      const missing = resolve(root, 'missing')
+      await expect(execFileAsync(process.execPath, [
+        treeManifestHelper, 'director-brain', missing,
+      ], { encoding: 'utf8' })).rejects.toThrow()
+
+      const physical = resolve(root, 'physical')
+      const linked = resolve(root, 'linked')
+      await mkdir(physical)
+      await symlink(physical, linked)
+      await expect(execFileAsync(process.execPath, [
+        treeManifestHelper, 'director-brain', linked,
+      ], { encoding: 'utf8' })).rejects.toThrow()
+
+      await symlink(resolve(root, 'target'), resolve(physical, 'unsupported-link'))
+      await expect(execFileAsync(process.execPath, [
+        treeManifestHelper, 'director-brain', physical,
+      ], { encoding: 'utf8' })).rejects.toThrow()
+
+      await rm(resolve(physical, 'unsupported-link'), { force: true })
+      await symlink(resolve(root, 'target'), resolve(physical, 'MANIFEST.sha256'))
+      await expect(execFileAsync(process.execPath, [
+        treeManifestHelper, 'director-brain', physical, './MANIFEST.sha256',
+      ], { encoding: 'utf8' })).rejects.toThrow()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('settles an unawaited installer before recursively removing its fixture', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-unawaited-cleanup-'))
     const syncDir = resolve(root, 'sync')

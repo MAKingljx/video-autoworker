@@ -11,6 +11,7 @@ PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 SKILL_SOURCE="$REPOSITORY_ROOT/openclaw-skills/$PLUGIN_ID"
 SERVICE_SOURCE="$REPOSITORY_ROOT/scripts/lib/feishu-director-brain.mjs"
 SENSITIVE_VALUE_SCANNER_SOURCE="$REPOSITORY_ROOT/scripts/lib/sensitive-value-scanner.mjs"
+TREE_MANIFEST_HELPER="$REPOSITORY_ROOT/scripts/lib/runtime-tree-manifest.mjs"
 SERVICE_CLI_SOURCE="$REPOSITORY_ROOT/scripts/feishu-director-brain.mjs"
 SCHEMA_SOURCE="$REPOSITORY_ROOT/ops/feishu-director-brain/schema.json"
 SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
@@ -229,6 +230,11 @@ for required_command in chmod cmp cp date diff env find git grep install ln mkdi
     exit 1
   }
 done
+NODE_BIN="${AIWORKER_NODE_BIN:-$(command -v node)}"
+case "$NODE_BIN" in
+  /*) ;;
+  *) printf 'Node.js command must resolve to an absolute path.\n' >&2; exit 1 ;;
+esac
 if [[ -x /usr/bin/git && ! -L /usr/bin/git ]]; then
   GIT_COMMAND=/usr/bin/git
 else
@@ -285,7 +291,7 @@ assert_canonical_source_repository() {
   done < <(find \
     "$PLUGIN_SOURCE" "$SKILL_SOURCE" \
     "$SERVICE_SOURCE" "$SENSITIVE_VALUE_SCANNER_SOURCE" "$SERVICE_CLI_SOURCE" \
-    "$SCHEMA_SOURCE" -type f -print)
+    "$TREE_MANIFEST_HELPER" "$SCHEMA_SOURCE" -type f -print)
   printf '%s\n' "$current_commit"
 }
 
@@ -671,6 +677,10 @@ regular_file "$SHARED_DEPLOYMENT_LOCK_HELPER" || {
   printf 'Shared deployment lock helper is unavailable: %s\n' "$SHARED_DEPLOYMENT_LOCK_HELPER" >&2
   exit 1
 }
+regular_file "$TREE_MANIFEST_HELPER" || {
+  printf 'Runtime tree manifest helper is unavailable: %s\n' "$TREE_MANIFEST_HELPER" >&2
+  exit 1
+}
 
 if [[ "$MODE" != "rollback" ]]; then
   validate_agent_workspace "$PROFILE_CONFIG"
@@ -686,6 +696,7 @@ if [[ "$MODE" != "rollback" ]]; then
     "$SKILL_SOURCE/SKILL.md" \
     "$SERVICE_SOURCE" \
     "$SENSITIVE_VALUE_SCANNER_SOURCE" \
+    "$TREE_MANIFEST_HELPER" \
     "$SERVICE_CLI_SOURCE" \
     "$SCHEMA_SOURCE"; do
     regular_file "$source_file" || {
@@ -708,6 +719,7 @@ if [[ "$MODE" != "rollback" ]]; then
   node --check "$SERVICE_CLI_SOURCE"
   node --check "$SERVICE_SOURCE"
   node --check "$SENSITIVE_VALUE_SCANNER_SOURCE"
+  node --check "$TREE_MANIFEST_HELPER"
   node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" <<'NODE'
 const fs = require('node:fs')
 const [manifestPath, packagePath] = process.argv.slice(2)
@@ -853,30 +865,16 @@ retain_previous_tree() {
 }
 
 write_tree_manifest() {
-  local tree_root="$1" output="$2"
-  if ! (
-    cd "$tree_root" || return 1
-    local mode digest
-    mode="$(path_mode .)" || return 1
-    printf '.\tdirectory\t%s\t-\n' "$mode" || return 1
-    while IFS= read -r relative; do
-      if [[ -d "$relative" ]]; then
-        mode="$(path_mode "$relative")" || return 1
-        printf '%s\tdirectory\t%s\t-\n' "$relative" "$mode" || return 1
-      elif [[ -f "$relative" ]]; then
-        mode="$(path_mode "$relative")" || return 1
-        digest="$(path_sha256 "$relative")" || return 1
-        printf '%s\tfile\t%s\t%s\n' "$relative" "$mode" "$digest" || return 1
-      else
-        printf 'Unsupported tree object: %s\n' "$relative" >&2
-        return 1
-      fi
-    done < <(LC_ALL=C find . -mindepth 1 -print | LC_ALL=C sort)
-  ) > "$output"; then
+  local tree_root="$1" output="$2" excluded_relative_path="${3:-}"
+  if ! "$NODE_BIN" "$TREE_MANIFEST_HELPER" director-brain \
+    "$tree_root" "$excluded_relative_path" > "$output"; then
     rm -f -- "$output"
     return 1
   fi
-  chmod 600 "$output" || return 1
+  if ! chmod 600 "$output"; then
+    rm -f -- "$output"
+    return 1
+  fi
 }
 
 trees_equal() {
@@ -1070,25 +1068,7 @@ NODE
 
 write_backup_tree_manifest() {
   local backup="$1" output="$2"
-  if ! (
-    cd "$backup"
-    printf '.\tdirectory\t%s\t-\n' "$(path_mode .)"
-    while IFS= read -r relative; do
-      [[ "$relative" == "./MANIFEST.sha256" ]] && continue
-      if [[ -d "$relative" ]]; then
-        printf '%s\tdirectory\t%s\t-\n' "$relative" "$(path_mode "$relative")"
-      elif [[ -f "$relative" ]]; then
-        printf '%s\tfile\t%s\t%s\n' "$relative" "$(path_mode "$relative")" "$(path_sha256 "$relative")"
-      else
-        printf 'Unsupported backup object: %s\n' "$relative" >&2
-        return 1
-      fi
-    done < <(LC_ALL=C find . -mindepth 1 -print | LC_ALL=C sort)
-  ) > "$output"; then
-    rm -f -- "$output"
-    return 1
-  fi
-  chmod 600 "$output"
+  write_tree_manifest "$backup" "$output" './MANIFEST.sha256'
 }
 
 write_backup_manifest() {

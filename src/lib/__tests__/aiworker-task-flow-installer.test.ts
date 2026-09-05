@@ -25,6 +25,7 @@ import Database from 'better-sqlite3'
 
 const repositoryRoot = process.cwd()
 const installer = resolve(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')
+const treeManifestHelper = resolve(repositoryRoot, 'scripts/lib/runtime-tree-manifest.mjs')
 const execFileAsync = promisify(execFile)
 const rendererUrl = pathToFileURL(resolve(
   repositoryRoot,
@@ -302,7 +303,7 @@ describe('transactional AI-worker task-flow installer', () => {
       const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
       const output = resolve(root, 'actual.manifest')
       await execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2" "$3"`, 'batch-manifest', tree, output, './MANIFEST.sha256'], {
-        env: { ...process.env, NODE_BIN: process.execPath },
+        env: { ...process.env, NODE_BIN: process.execPath, TREE_MANIFEST_HELPER: treeManifestHelper },
       })
       expect(await readFile(output, 'utf8')).toBe(expected.stdout)
       expect((await stat(output)).mode & 0o777).toBe(0o600)
@@ -324,7 +325,7 @@ describe('transactional AI-worker task-flow installer', () => {
       const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
       const output = resolve(root, 'actual.manifest')
       await execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2"`, 'batch-manifest', tree, output], {
-        env: { ...process.env, NODE_BIN: nodeWrapper, SHASUM_BIN: shasumTrap, MANIFEST_REAL_NODE: process.execPath, MANIFEST_NODE_LOG: log },
+        env: { ...process.env, NODE_BIN: nodeWrapper, TREE_MANIFEST_HELPER: treeManifestHelper, SHASUM_BIN: shasumTrap, MANIFEST_REAL_NODE: process.execPath, MANIFEST_NODE_LOG: log },
       })
       expect(await readFile(log, 'utf8')).toBe('node\n')
       expect((await readFile(output, 'utf8')).trim().split('\n')).toHaveLength(65)
@@ -341,7 +342,7 @@ describe('transactional AI-worker task-flow installer', () => {
       const body = source.slice(source.indexOf('write_tree_manifest() {'), source.indexOf('\nis_task_flow_backup_family_name()'))
       const output = resolve(root, 'actual.manifest')
       await expect(execFileAsync('bash', ['-c', `${body}\nwrite_tree_manifest "$1" "$2"`, 'batch-manifest', tree, output], {
-        env: { ...process.env, NODE_BIN: process.execPath },
+        env: { ...process.env, NODE_BIN: process.execPath, TREE_MANIFEST_HELPER: treeManifestHelper },
       })).rejects.toThrow()
       expect(await pathExists(output)).toBe(false)
     } finally { await rm(root, { recursive: true, force: true }) }
@@ -403,6 +404,7 @@ fs.readdirSync = function (pathname, ...args) {
           env: {
             ...process.env,
             NODE_BIN: wrapper,
+            TREE_MANIFEST_HELPER: treeManifestHelper,
             MANIFEST_REAL_NODE: process.execPath,
             MANIFEST_RACE_HOOK: hook,
             MANIFEST_RACE_TARGET: victim,

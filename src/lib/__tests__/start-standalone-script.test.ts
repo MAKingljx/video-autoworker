@@ -148,6 +148,7 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
     'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
+    'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
     'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
@@ -273,6 +274,7 @@ describe('standalone runtime launcher', () => {
       './scripts/apply-openclaw-runtime-convergence.sh',
       './scripts/lib/openclaw-private-gateway-rpc.mjs',
       './scripts/lib/render-managed-markdown-section.mjs',
+      './scripts/lib/runtime-tree-manifest.mjs',
     ]) {
       expect(nextConfig).toContain(member)
     }
@@ -451,6 +453,7 @@ describe('standalone runtime launcher', () => {
     ['scripts/legacy-preinstall-orchestrator.mjs', 'file'],
     ['scripts/lib/openclaw-private-gateway-rpc.mjs', 'file'],
     ['scripts/lib/render-managed-markdown-section.mjs', 'file'],
+    ['scripts/lib/runtime-tree-manifest.mjs', 'file'],
   ] as const)('refuses an artifact missing required %s', (relativePath, kind) => {
     const fixture = createLauncherFixture()
     try {
@@ -464,7 +467,8 @@ describe('standalone runtime launcher', () => {
         || relativePath.startsWith('openclaw-skills/')
         || relativePath === 'scripts/legacy-preinstall-orchestrator.mjs'
         || relativePath === 'scripts/lib/openclaw-private-gateway-rpc.mjs'
-        || relativePath === 'scripts/lib/render-managed-markdown-section.mjs') {
+        || relativePath === 'scripts/lib/render-managed-markdown-section.mjs'
+        || relativePath === 'scripts/lib/runtime-tree-manifest.mjs') {
         expect(result.stderr).toContain(`standalone_required_file_missing:${relativePath}`)
       } else {
         expect(result.stderr).toContain(`missing required ${kind}`)

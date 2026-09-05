@@ -664,6 +664,8 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
       'critical deployment source differs from Git HEAD: scripts/lib/openclaw-private-gateway-rpc.mjs'],
     ['managed Markdown renderer drift', 'scripts/lib/render-managed-markdown-section.mjs', false,
       'critical deployment source differs from Git HEAD: scripts/lib/render-managed-markdown-section.mjs'],
+    ['runtime tree manifest helper drift', 'scripts/lib/runtime-tree-manifest.mjs', false,
+      'critical deployment source differs from Git HEAD: scripts/lib/runtime-tree-manifest.mjs'],
     ['dirty worktree', 'scripts/standalone-router.mjs', false,
       'deployment source worktree and index must be clean'],
     ['dirty index', 'scripts/standalone-router.mjs', true,
@@ -1908,6 +1910,7 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(sourceGate).toContain('scripts/lib/sensitive-value-scanner.mjs')
     expect(sourceGate).toContain('scripts/lib/openclaw-private-gateway-rpc.mjs')
     expect(sourceGate).toContain('scripts/lib/render-managed-markdown-section.mjs')
+    expect(sourceGate).toContain('scripts/lib/runtime-tree-manifest.mjs')
     expect(sourceGate).toContain('scripts/legacy-preinstall-orchestrator.mjs')
     expect(sourceGate).toContain('scripts/install-aiworker-task-flow-skill.sh')
     expect(sourceGate).toContain('scripts/install-aiworker-video-command-plugin.sh')

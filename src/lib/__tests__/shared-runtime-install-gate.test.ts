@@ -1419,6 +1419,9 @@ describe('shared runtime installation gate', () => {
       expect(source).toContain('custom overrides are test-only')
     }
     const [video, task, director] = installers
+    for (const source of [task, director]) {
+      expect(source).toContain('scripts/lib/runtime-tree-manifest.mjs')
+    }
     expect(task).toContain('assert_canonical_clean_source_repository')
     expect(task).toContain('diff-index --quiet HEAD --')
     expect(task).toContain('status --porcelain=v1 --untracked-files=all')

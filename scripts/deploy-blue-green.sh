@@ -114,6 +114,7 @@ verify_deployment_source_gate() {
     scripts/lib/openclaw-private-gateway-rpc.mjs
     scripts/lib/openclaw-runtime-convergence.mjs
     scripts/lib/render-managed-markdown-section.mjs
+    scripts/lib/runtime-tree-manifest.mjs
     scripts/manage-blue-green-services.sh
     scripts/install-blue-green-launch-agents.sh
     scripts/start-standalone-slot.sh

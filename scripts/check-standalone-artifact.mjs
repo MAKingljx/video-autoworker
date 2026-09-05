@@ -166,6 +166,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/lib/openclaw-runtime-convergence.mjs',
   'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
   'scripts/lib/render-managed-markdown-section.mjs',
+  'scripts/lib/runtime-tree-manifest.mjs',
   'scripts/lib/director-extraction-release-provenance.mjs',
   'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
@@ -276,6 +277,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'scripts/lib/openclaw-runtime-convergence.mjs',
   'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
   'scripts/lib/render-managed-markdown-section.mjs',
+  'scripts/lib/runtime-tree-manifest.mjs',
   'scripts/lib/director-extraction-release-provenance.mjs',
   'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
@@ -311,6 +313,7 @@ const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
   ]],
   ['scripts/install-aiworker-task-flow-skill.sh', [
     'scripts/lib/render-managed-markdown-section.mjs',
+    'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/verify-shared-runtime-install-gate.mjs',
     'scripts/lib/shared-deployment-lock.sh',
   ]],
@@ -322,6 +325,7 @@ const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
   ['scripts/install-aiworker-director-brain.sh', [
     'scripts/feishu-director-brain.mjs',
     'scripts/lib/feishu-director-brain.mjs',
+    'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/lib/sensitive-value-scanner.mjs',
     'scripts/verify-shared-runtime-install-gate.mjs',
     'scripts/lib/shared-deployment-lock.sh',

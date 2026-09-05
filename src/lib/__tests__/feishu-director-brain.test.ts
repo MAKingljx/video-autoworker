@@ -239,6 +239,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
     'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
+    'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
     'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
@@ -1977,7 +1978,7 @@ describe('Feishu director brain contract', () => {
         ok: true,
         root,
         forbiddenMembers: 0,
-        importClosure: { dynamicDependencies: 26 },
+        importClosure: { dynamicDependencies: 28 },
       })
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -1992,6 +1993,7 @@ describe('Feishu director brain contract', () => {
       'scripts/lib/openclaw-private-gateway-rpc.mjs',
       'scripts/lib/openclaw-runtime-convergence.mjs',
       'scripts/lib/render-managed-markdown-section.mjs',
+      'scripts/lib/runtime-tree-manifest.mjs',
       'scripts/lib/sensitive-value-scanner.mjs',
     ]) {
       expect(nextConfig).toContain(`'./${helper}'`)
