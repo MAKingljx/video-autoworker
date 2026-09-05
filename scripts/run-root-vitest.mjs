@@ -10,6 +10,7 @@ const heavyRootTests = [
   'src/lib/__tests__/aiworker-task-flow-installer.test.ts',
   'src/lib/__tests__/aiworker-video-lane-supervisor.test.ts',
   'src/lib/__tests__/aiworker-director-brain-installer.test.ts',
+  'src/lib/__tests__/director-video-release-readiness-script.test.ts',
   'src/lib/__tests__/openclaw-runtime-convergence-installer.test.ts',
   'src/test/legacy-media-orphan-reconcile.test.ts',
 ]
