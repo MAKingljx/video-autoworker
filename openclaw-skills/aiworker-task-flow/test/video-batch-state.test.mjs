@@ -1,6 +1,8 @@
 import { access, link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -22,6 +24,214 @@ import {
   writeBatchState,
   globalBatchLockPath,
 } from '../lib/video-batch-state.mjs'
+
+const execFileAsync = promisify(execFile)
+const lockRaceModuleUrl = new URL('../lib/video-batch-state.mjs', import.meta.url).href
+async function installLockRacePreload() {
+  const fs = (await import('node:fs')).default
+  const { syncBuiltinESMExports } = await import('node:module')
+
+  const scenario = process.env.AIWORKER_LOCK_RACE_SCENARIO
+  const lockPath = process.env.AIWORKER_LOCK_RACE_PATH
+  const originalOpen = fs.promises.open.bind(fs.promises)
+  const originalLstat = fs.promises.lstat.bind(fs.promises)
+  const originalRename = fs.promises.rename.bind(fs.promises)
+  const state = {
+    createAttempts: 0,
+    lstatAttempts: 0,
+    readOpenAttempts: 0,
+    staleRenameAttempts: 0,
+  }
+  globalThis.__aiworkerLockRace = state
+
+  const systemError = code => Object.assign(new Error(`injected ${code}`), { code })
+  const ownerSource = pid => `${JSON.stringify({
+    pid,
+    token: '00000000-0000-4000-8000-000000000000',
+    createdAt: '2026-09-05T00:00:00.000Z',
+  })}\n`
+  const writeOwner = pid => fs.writeFileSync(lockPath, ownerSource(pid), { mode: 0o600 })
+
+  if (scenario === 'second-sample-missing' || scenario === 'stale-rename-missing'
+    || scenario === 'quarantine-sample-missing'
+    || scenario === 'permission-read-error') {
+    writeOwner(2_147_483_647)
+  } else if (scenario === 'fresh-empty') {
+    fs.writeFileSync(lockPath, '', { mode: 0o600 })
+  } else if (scenario === 'fresh-partial-json') {
+    fs.writeFileSync(lockPath, '{"pid":', { mode: 0o600 })
+  } else if (scenario === 'unsafe-mode') {
+    writeOwner(2_147_483_647)
+    fs.chmodSync(lockPath, 0o644)
+  } else if (scenario === 'hardlinked-file') {
+    writeOwner(2_147_483_647)
+    fs.linkSync(lockPath, `${lockPath}.peer`)
+  } else if (scenario === 'directory-entry') {
+    fs.mkdirSync(lockPath, { mode: 0o700 })
+  } else if (scenario === 'dangling-symlink') {
+    fs.symlinkSync('missing-lock-target', lockPath)
+  }
+
+  fs.promises.open = async (pathname, flags, ...rest) => {
+    if (String(pathname) !== lockPath) return originalOpen(pathname, flags, ...rest)
+    if (flags === 'wx') {
+      state.createAttempts += 1
+      if ((scenario === 'first-sample-missing' && state.createAttempts === 1)
+        || (scenario.startsWith('canonical-lstat-') && state.createAttempts === 1)
+        || scenario === 'persistent-churn') {
+        throw systemError('EEXIST')
+      }
+      if (scenario === 'successor-on-retry' && state.createAttempts === 1) {
+        throw systemError('EEXIST')
+      }
+      if (scenario === 'successor-on-retry' && state.createAttempts === 2) {
+        state.successorSource = ownerSource(process.pid)
+        fs.writeFileSync(lockPath, state.successorSource, { mode: 0o600 })
+      }
+      return originalOpen(pathname, flags, ...rest)
+    }
+
+    state.readOpenAttempts += 1
+    if (scenario === 'permission-read-error') throw systemError('EACCES')
+    const handle = await originalOpen(pathname, flags, ...rest)
+    if (scenario !== 'second-sample-missing' || state.readOpenAttempts !== 1) return handle
+    let closed = false
+    return new Proxy(handle, {
+      get(target, property) {
+        if (property === 'close') {
+          return async () => {
+            if (closed) return
+            closed = true
+            await target.close()
+            try { fs.unlinkSync(lockPath) } catch (error) {
+              if (error?.code !== 'ENOENT') throw error
+            }
+          }
+        }
+        const value = Reflect.get(target, property, target)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+  }
+
+  fs.promises.lstat = async (pathname, ...rest) => {
+    if (String(pathname) === lockPath) {
+      state.lstatAttempts += 1
+      if (scenario.startsWith('canonical-lstat-') && state.lstatAttempts === 2) {
+        throw systemError(scenario.slice('canonical-lstat-'.length))
+      }
+    }
+    if (scenario === 'quarantine-sample-missing'
+      && String(pathname) === state.quarantinePath) {
+      throw systemError('ENOENT')
+    }
+    return originalLstat(pathname, ...rest)
+  }
+
+  fs.promises.rename = async (source, destination) => {
+    if (scenario === 'stale-rename-missing' && String(source) === lockPath
+      && String(destination).startsWith(`${lockPath}.stale-`)) {
+      state.staleRenameAttempts += 1
+      fs.unlinkSync(lockPath)
+      throw systemError('ENOENT')
+    }
+    if (scenario === 'quarantine-sample-missing' && String(source) === lockPath
+      && String(destination).startsWith(`${lockPath}.stale-`)) {
+      await originalRename(source, destination)
+      state.quarantinePath = String(destination)
+      return
+    }
+    return originalRename(source, destination)
+  }
+
+  syncBuiltinESMExports()
+}
+
+const lockRacePreloadSource = `await (${installLockRacePreload.toString()})()\n`
+const lockRacePreloadUrl = `data:text/javascript;base64,${Buffer.from(lockRacePreloadSource).toString('base64')}`
+
+const lockRaceChildSource = String.raw`
+import fs from 'node:fs'
+import { lstat, readFile } from 'node:fs/promises'
+
+const { acquireGlobalBatchLock } = await import(process.env.AIWORKER_LOCK_RACE_MODULE_URL)
+const lockPath = process.env.AIWORKER_LOCK_RACE_PATH
+let outcome
+try {
+  const lease = await acquireGlobalBatchLock(process.env.AIWORKER_LOCK_RACE_STATE_PATH)
+  outcome = { completed: true, acquired: lease.acquired }
+  if (lease.acquired) await lease.release()
+} catch (error) {
+  outcome = {
+    completed: false,
+    errorCode: error?.code ?? error?.cause?.code ?? null,
+    errorMessage: error instanceof Error ? error.message : String(error),
+  }
+}
+
+let canonical
+try {
+  const entry = await lstat(lockPath)
+  canonical = {
+    kind: entry.isSymbolicLink() ? 'symlink' : entry.isFile() ? 'file' : 'other',
+    source: entry.isFile() ? await readFile(lockPath, 'utf8') : null,
+    mode: entry.mode & 0o7777,
+    nlink: entry.nlink,
+  }
+} catch (error) {
+  canonical = {
+    kind: error?.code === 'ENOENT' ? 'missing' : 'unreadable',
+    source: null,
+    mode: null,
+    nlink: null,
+  }
+}
+let quarantine = { kind: 'missing', source: null }
+if (globalThis.__aiworkerLockRace.quarantinePath) {
+  try {
+    const entry = fs.lstatSync(globalThis.__aiworkerLockRace.quarantinePath)
+    quarantine = {
+      kind: entry.isFile() ? 'file' : 'other',
+      source: entry.isFile()
+        ? fs.readFileSync(globalThis.__aiworkerLockRace.quarantinePath, 'utf8')
+        : null,
+    }
+  } catch { /* reported as missing */ }
+}
+process.stdout.write(JSON.stringify({
+  outcome,
+  canonical,
+  quarantine,
+  state: globalThis.__aiworkerLockRace,
+}))
+`
+
+async function runLockRaceScenario(scenario) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), `aiworker-lock-race-${scenario}-`)))
+  const statePath = join(root, 'state.json')
+  const lockPath = globalBatchLockPath(statePath)
+  try {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [
+      '--import', lockRacePreloadUrl,
+      '--input-type=module',
+      '--eval', lockRaceChildSource,
+    ], {
+      env: {
+        ...process.env,
+        AIWORKER_LOCK_RACE_SCENARIO: scenario,
+        AIWORKER_LOCK_RACE_PATH: lockPath,
+        AIWORKER_LOCK_RACE_STATE_PATH: statePath,
+        AIWORKER_LOCK_RACE_MODULE_URL: lockRaceModuleUrl,
+      },
+      timeout: 4_000,
+      maxBuffer: 64 * 1024,
+    })
+    assert.equal(stderr, '')
+    return JSON.parse(stdout)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
 
 function identityFromStat(details) {
   return {
@@ -108,6 +318,111 @@ test('global lock reclaims a stable dead owner through quarantine', async () => 
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+test('global lock retries when an EEXIST owner disappears before the first sample', async () => {
+  const result = await runLockRaceScenario('first-sample-missing')
+
+  assert.deepEqual(result.outcome, { completed: true, acquired: true })
+  assert.equal(result.state.createAttempts, 2)
+  assert.equal(result.canonical.kind, 'missing')
+})
+
+test('global lock retries when the sampled owner disappears before the second sample', async () => {
+  const result = await runLockRaceScenario('second-sample-missing')
+
+  assert.deepEqual(result.outcome, { completed: true, acquired: true })
+  assert.equal(result.state.createAttempts, 2)
+  assert.equal(result.state.readOpenAttempts >= 2, true)
+  assert.equal(result.canonical.kind, 'missing')
+})
+
+test('global lock retries when the stale owner disappears before its initial quarantine rename', async () => {
+  const result = await runLockRaceScenario('stale-rename-missing')
+
+  assert.deepEqual(result.outcome, { completed: true, acquired: true })
+  assert.equal(result.state.createAttempts, 2)
+  assert.equal(result.state.staleRenameAttempts, 1)
+  assert.equal(result.canonical.kind, 'missing')
+})
+
+test('global lock does not overwrite a successor that appears on the bounded retry', async () => {
+  const result = await runLockRaceScenario('successor-on-retry')
+
+  assert.deepEqual(result.outcome, { completed: true, acquired: false })
+  assert.equal(result.state.createAttempts, 2)
+  assert.equal(result.canonical.kind, 'file')
+  assert.equal(result.canonical.source, result.state.successorSource)
+})
+
+test('global lock reports bounded busy under persistent owner-release churn', async () => {
+  const result = await runLockRaceScenario('persistent-churn')
+
+  assert.deepEqual(result.outcome, { completed: true, acquired: false })
+  assert.equal(result.state.createAttempts, 2)
+  assert.equal(result.canonical.kind, 'missing')
+})
+
+test('global lock keeps fresh empty and partial owner publications busy', async () => {
+  for (const [scenario, source] of [
+    ['fresh-empty', ''],
+    ['fresh-partial-json', '{"pid":'],
+  ]) {
+    const result = await runLockRaceScenario(scenario)
+
+    assert.deepEqual(result.outcome, { completed: true, acquired: false }, scenario)
+    assert.equal(result.state.createAttempts, 1, scenario)
+    assert.equal(result.canonical.kind, 'file', scenario)
+    assert.equal(result.canonical.source, source, scenario)
+  }
+})
+
+test('global lock rejects unsafe existing objects without replacing them', async () => {
+  const fixtures = [
+    { scenario: 'unsafe-mode', kind: 'file', mode: 0o644 },
+    { scenario: 'hardlinked-file', kind: 'file', nlink: 2 },
+    { scenario: 'directory-entry', kind: 'other' },
+    { scenario: 'dangling-symlink', kind: 'symlink' },
+  ]
+  for (const fixture of fixtures) {
+    const result = await runLockRaceScenario(fixture.scenario)
+
+    assert.equal(result.outcome.completed, false, fixture.scenario)
+    assert.equal(result.state.createAttempts, 1, fixture.scenario)
+    assert.equal(result.canonical.kind, fixture.kind, fixture.scenario)
+    if (fixture.mode) assert.equal(result.canonical.mode, fixture.mode, fixture.scenario)
+    if (fixture.nlink) assert.equal(result.canonical.nlink, fixture.nlink, fixture.scenario)
+  }
+})
+
+test('global lock propagates a permission error instead of classifying it as a missing owner', async () => {
+  const result = await runLockRaceScenario('permission-read-error')
+
+  assert.equal(result.outcome.completed, false)
+  assert.equal(result.outcome.errorCode, 'EACCES')
+  assert.equal(result.state.createAttempts, 1)
+  assert.equal(result.canonical.kind, 'file')
+})
+
+test('global lock propagates canonical lstat errors instead of retrying them as absence', async () => {
+  for (const code of ['EACCES', 'EIO']) {
+    const result = await runLockRaceScenario(`canonical-lstat-${code}`)
+
+    assert.equal(result.outcome.completed, false, code)
+    assert.equal(result.outcome.errorCode, code, code)
+    assert.equal(result.state.createAttempts, 1, code)
+    assert.equal(result.canonical.kind, 'missing', code)
+  }
+})
+
+test('global lock propagates a missing quarantine sample after the stale rename succeeds', async () => {
+  const result = await runLockRaceScenario('quarantine-sample-missing')
+
+  assert.equal(result.outcome.completed, false)
+  assert.equal(result.outcome.errorCode, 'ENOENT')
+  assert.equal(result.state.createAttempts, 1)
+  assert.equal(result.canonical.kind, 'missing')
+  assert.equal(result.quarantine.kind, 'file')
 })
 
 test('state writes keep a durable backup and recover a damaged primary', async () => {

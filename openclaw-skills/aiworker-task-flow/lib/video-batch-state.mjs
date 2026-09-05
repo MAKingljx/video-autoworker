@@ -1758,11 +1758,28 @@ function sameLockSample(left, right) {
     && left.source === right.source && left.pid === right.pid && left.token === right.token
 }
 
+function isPrivateLockFile(entry) {
+  return entry.isFile() && !entry.isSymbolicLink() && entry.nlink === 1n
+    && (entry.mode & 0o7777n) === 0o600n
+    && (typeof process.getuid !== 'function' || entry.uid === BigInt(process.getuid()))
+}
+
+function isRecentLock(entry) {
+  return Date.now() - Number(entry.mtimeNs / 1_000_000n) < 30_000
+}
+
+async function lstatLockOrNull(lockPath) {
+  try {
+    return await lstat(lockPath, { bigint: true })
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
 async function readLockSample(lockPath) {
   const entry = await lstat(lockPath, { bigint: true })
-  if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1n
-    || (entry.mode & 0o7777n) !== 0o600n || entry.size <= 0n || entry.size > 4_096n
-    || (typeof process.getuid === 'function' && entry.uid !== BigInt(process.getuid()))) {
+  if (!isPrivateLockFile(entry) || entry.size <= 0n || entry.size > 4_096n) {
     throw new Error('视频队列锁身份无效')
   }
   const descriptor = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -1797,7 +1814,14 @@ async function readLockSample(lockPath) {
 
 async function quarantineStaleLock(lockPath, expected) {
   const quarantine = `${lockPath}.stale-${process.pid}-${randomUUID()}`
-  await rename(lockPath, quarantine)
+  try {
+    await rename(lockPath, quarantine)
+  } catch (error) {
+    // Another reclaimer may have won the canonical name. The caller retries
+    // exclusive create; errors after a successful rename must still propagate.
+    if (error?.code === 'ENOENT') return
+    throw error
+  }
   const moved = await readLockSample(quarantine)
   const sameMovedObject = moved.dev === expected.dev && moved.ino === expected.ino
     && moved.uid === expected.uid && moved.mode === expected.mode && moved.nlink === expected.nlink
@@ -1939,15 +1963,35 @@ async function acquireFileLock(lockPath) {
       // removed as cleanup for this failed create.
       if (handle) await cleanupFailedLockCreate(lockPath, createdIdentity)
       if (error?.code !== 'EEXIST') throw error
-      const first = await readLockSample(lockPath).catch(() => null)
-      const pid = first?.pid ?? null
+      let first
+      try {
+        first = await readLockSample(lockPath)
+      } catch (readError) {
+        // A release can remove the name after EEXIST, or while its descriptor
+        // is being sampled. Only lstat ENOENT proves absence: stat would follow
+        // a dangling symlink, and a catch-all would hide permission/I/O errors.
+        const entry = await lstatLockOrNull(lockPath)
+        if (!entry) continue
+        if (readError?.code && readError.code !== 'ENOENT') throw readError
+        if (isPrivateLockFile(entry) && entry.size <= 4_096n && isRecentLock(entry)) {
+          return { acquired: false, release: async () => undefined }
+        }
+        throw new Error('视频队列锁无法安全读取', { cause: readError })
+      }
+      const pid = first.pid
       if (await pidIsAlive(pid)) return { acquired: false, release: async () => undefined }
-      const lockStat = first ? null : await stat(lockPath).catch(() => null)
-      if ((!Number.isInteger(pid) || pid <= 0) && lockStat && Date.now() - lockStat.mtimeMs < 30_000) {
+      // Exclusive create publishes the name before its ownership JSON. A
+      // positive-length partial write also needs the existing publication grace.
+      if ((!Number.isInteger(pid) || pid <= 0) && isRecentLock(first)) {
         return { acquired: false, release: async () => undefined }
       }
-      if (!first) throw new Error('视频队列锁无法安全读取')
-      const second = await readLockSample(lockPath)
+      let second
+      try {
+        second = await readLockSample(lockPath)
+      } catch (readError) {
+        if (!await lstatLockOrNull(lockPath)) continue
+        throw readError
+      }
       if (!sameLockSample(first, second) || await pidIsAlive(second.pid)) {
         return { acquired: false, release: async () => undefined }
       }
