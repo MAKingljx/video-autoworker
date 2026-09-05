@@ -7,6 +7,7 @@ import { resolve } from 'node:path'
 const repositoryRoot = process.cwd()
 const vitestCli = resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs')
 const heavyRootTests = [
+  'src/lib/__tests__/aiworker-task-flow-installer.test.ts',
   'src/lib/__tests__/aiworker-director-brain-installer.test.ts',
   'src/lib/__tests__/openclaw-runtime-convergence-installer.test.ts',
   'src/test/legacy-media-orphan-reconcile.test.ts',

@@ -26,6 +26,24 @@ const script = join(repositoryRoot, 'scripts/reconcile-legacy-media-orphan.mjs')
 const roots: string[] = []
 const toolShaA = '1'.repeat(64)
 const toolShaB = '2'.repeat(64)
+const parentModernMigrations = [
+  '049_n8n_workflow_bindings',
+  '050_n8n_task_runs',
+  '051_n8n_media_cleanup_debts',
+  '052_n8n_intake_controls',
+  '053_scheduler_leader_lease',
+  '054_n8n_task_dispatch_leases',
+  '055_n8n_child_execution_leases',
+  '056_n8n_parent_execution_claims',
+  '057_n8n_director_evidence_outbox',
+]
+const parentAncillaryTables = [
+  'n8n_media_cleanup_debts',
+  'n8n_task_dispatch_leases',
+  'n8n_child_execution_leases',
+  'n8n_parent_execution_claims',
+  'n8n_director_evidence_outbox',
+]
 
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex')
@@ -137,7 +155,11 @@ function createFixture() {
   mission.pragma('wal_autocheckpoint = 0')
   mission.exec(`
     CREATE TABLE n8n_workflow_bindings (
-      id INTEGER PRIMARY KEY, task_type TEXT NOT NULL, workspace_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL
+      id INTEGER PRIMARY KEY, name TEXT, description TEXT, workflow_id TEXT, webhook_path TEXT,
+      task_type TEXT NOT NULL, agent_role TEXT, model TEXT, timeout_seconds INTEGER,
+      retry_count INTEGER, enabled INTEGER, config TEXT, workspace_id INTEGER NOT NULL,
+      tenant_id INTEGER NOT NULL, created_by TEXT, created_at INTEGER, updated_at INTEGER,
+      last_run_at INTEGER, last_status TEXT
     );
     CREATE TABLE n8n_task_runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -154,7 +176,10 @@ function createFixture() {
       heartbeat_at INTEGER NOT NULL, revision INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
   `)
-  mission.prepare('INSERT INTO n8n_workflow_bindings VALUES (1, ?, 1, 1)').run('video-analysis')
+  mission.prepare(`
+    INSERT INTO n8n_workflow_bindings (id, task_type, workspace_id, tenant_id)
+    VALUES (1, ?, 1, 1)
+  `).run('video-analysis')
   const insert = mission.prepare(`
     INSERT INTO n8n_task_runs (
       task_id, idempotency_key, binding_id, status, source, requested_by, routing, input, delivery,
@@ -358,15 +383,52 @@ function createParentFixture() {
     WHERE task_id = ?
   `).run(staleUpdatedAt - 60, staleUpdatedAt, fixture.parentTaskId)
   fixture.mission.exec(`
+    CREATE TABLE schema_migrations (
+      id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
     CREATE TABLE n8n_parent_execution_claims (
-      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL
+      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL,
+      execution_owner TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     CREATE TABLE n8n_task_dispatch_leases (
-      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL
+      task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL,
+      owner_token TEXT NOT NULL, lease_expires_at INTEGER NOT NULL, revision INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
-    CREATE TABLE n8n_media_cleanup_debts (task_id TEXT PRIMARY KEY);
-    CREATE TABLE n8n_director_evidence_outbox (task_id TEXT PRIMARY KEY);
+    CREATE TABLE n8n_media_cleanup_debts (
+      task_id TEXT PRIMARY KEY, binding_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL,
+      tenant_id INTEGER NOT NULL, workspace_digest TEXT NOT NULL, reason TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL, last_error TEXT, next_attempt_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_director_evidence_outbox (
+      task_id TEXT PRIMARY KEY, binding_id INTEGER NOT NULL, tenant_id INTEGER NOT NULL,
+      workspace_id INTEGER NOT NULL, work_id TEXT NOT NULL, query_digest TEXT NOT NULL,
+      projection_contract_digest TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+      result_sha256 TEXT NOT NULL, status TEXT NOT NULL, attempt_count INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL, last_error_code TEXT, delivered_at INTEGER,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_intake_controls (
+      control_id INTEGER PRIMARY KEY, accepting INTEGER NOT NULL, reason TEXT NOT NULL,
+      changed_by_id INTEGER NOT NULL, changed_by_name TEXT NOT NULL,
+      changed_at INTEGER NOT NULL, revision INTEGER NOT NULL
+    );
+    CREATE TABLE n8n_intake_control_events (
+      id INTEGER PRIMARY KEY, action TEXT NOT NULL, before_accepting INTEGER NOT NULL,
+      after_accepting INTEGER NOT NULL, reason TEXT NOT NULL, actor_id INTEGER NOT NULL,
+      actor_name TEXT NOT NULL, control_revision INTEGER NOT NULL, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE scheduler_leader_leases (
+      lease_name TEXT PRIMARY KEY, holder_id TEXT NOT NULL,
+      lease_expires_at INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
   `)
+  const insertMigration = fixture.mission.prepare('INSERT INTO schema_migrations (id) VALUES (?)')
+  for (const id of parentModernMigrations) insertMigration.run(id)
+  fixture.mission.prepare(`
+    INSERT INTO n8n_intake_controls VALUES (1, 0, 'managed parent reconciliation', 1, 'tester', ?, 1)
+  `).run(Math.floor(Date.now() / 1_000))
   writeFileSync(fixture.queuePath, JSON.stringify({
     counts: { attention: 1, running: 0, waiting: 0 },
     queue: [{
@@ -393,16 +455,25 @@ fs.writeFileSync(${JSON.stringify(fixture.queuePath)}, JSON.stringify({
 }
 
 function createIntakeControl(fixture: ParentFixture, accepting = 0): void {
-  fixture.mission.exec(`
-    CREATE TABLE n8n_intake_controls (
-      control_id INTEGER PRIMARY KEY, accepting INTEGER NOT NULL, reason TEXT NOT NULL,
-      changed_by_id INTEGER NOT NULL, changed_by_name TEXT NOT NULL,
-      changed_at INTEGER NOT NULL, revision INTEGER NOT NULL
-    );
-  `)
   fixture.mission.prepare(`
-    INSERT INTO n8n_intake_controls VALUES (1, ?, 'managed parent reconciliation', 1, 'tester', ?, 1)
+    UPDATE n8n_intake_controls
+    SET accepting = ?, changed_at = ?, revision = revision + 1
+    WHERE control_id = 1
   `).run(accepting, Math.floor(Date.now() / 1_000))
+}
+
+function useLegacyParentSchema(fixture: ParentFixture): void {
+  fixture.mission.exec(`
+    DROP TABLE n8n_media_cleanup_debts;
+    DROP TABLE n8n_intake_controls;
+    DROP TABLE n8n_intake_control_events;
+    DROP TABLE scheduler_leader_leases;
+    DROP TABLE n8n_task_dispatch_leases;
+    DROP TABLE n8n_child_execution_leases;
+    DROP TABLE n8n_parent_execution_claims;
+    DROP TABLE n8n_director_evidence_outbox;
+    DELETE FROM schema_migrations WHERE CAST(substr(id, 1, 3) AS INTEGER) >= 51;
+  `)
 }
 
 function prepare(fixture: Fixture, extraEnv: Partial<NodeJS.ProcessEnv> = {}): PrepareOutput {
@@ -1201,6 +1272,170 @@ describe('managed stale parent pre-media reconciliation', () => {
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
+  it('accepts only a complete through-050 legacy epoch and binds absent ancillary tables', () => {
+    const fixture = createParentFixture()
+    try {
+      useLegacyParentSchema(fixture)
+      const dryRun = fixture.runParent()
+      expect(dryRun.status, dryRun.stderr).toBe(0)
+      const prepared = prepareParent(fixture)
+      const manifest = JSON.parse(readFileSync(prepared.prepareManifest, 'utf8')) as {
+        target: { ancillary: { schemaEpoch: {
+          kind: string
+          latestMigrationVersion: number
+          tables: Record<string, { present: boolean }>
+        } } }
+      }
+      const epoch = manifest.target.ancillary.schemaEpoch
+      expect(epoch.kind).toBe('legacy-through-050')
+      expect(epoch.latestMigrationVersion).toBe(50)
+      for (const table of parentAncillaryTables) expect(epoch.tables[table]).toEqual({ present: false })
+      const applied = apply(fixture, prepared, {
+        AIWORKER_TEST_LEGACY_ORPHAN_AFTER_COMMIT_COMMAND: fixture.clearQueueHook,
+      })
+      expect(applied.status, applied.stderr).toBe(0)
+      expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+        .get(fixture.parentTaskId) as { status: string }).status).toBe('failed')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each(parentAncillaryTables)(
+    'rejects a modern migration epoch when %s is missing',
+    table => {
+      const fixture = createParentFixture()
+      try {
+        fixture.mission.exec(`DROP TABLE ${table}`)
+        const result = fixture.runParent()
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain('schema epoch is incomplete or inconsistent')
+        expect(result.stdout).toBe('')
+      } finally { fixture.mission.close(); fixture.n8n.close() }
+    },
+  )
+
+  it('rejects a modern migration epoch when the 052 event table is missing', () => {
+    const fixture = createParentFixture()
+    try {
+      fixture.mission.exec('DROP TABLE n8n_intake_control_events')
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('schema epoch is incomplete or inconsistent')
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects a through-050 legacy epoch with an orphaned 052 event table', () => {
+    const fixture = createParentFixture()
+    try {
+      useLegacyParentSchema(fixture)
+      fixture.mission.exec(`
+        CREATE TABLE n8n_intake_control_events (
+          id INTEGER PRIMARY KEY, action TEXT NOT NULL, before_accepting INTEGER NOT NULL,
+          after_accepting INTEGER NOT NULL, reason TEXT NOT NULL, actor_id INTEGER NOT NULL,
+          actor_name TEXT NOT NULL, control_revision INTEGER NOT NULL, created_at INTEGER NOT NULL
+        )
+      `)
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('schema epoch is incomplete or inconsistent')
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['schema_migrations', 'core schema is unavailable'],
+    ['n8n_workflow_bindings', 'n8n_workflow_bindings schema is unavailable'],
+  ])(
+    'rejects parent reconciliation when the core %s table is missing',
+    (table, expectedError) => {
+      const fixture = createParentFixture()
+      try {
+        fixture.mission.exec(`DROP TABLE ${table}`)
+        const result = fixture.runParent()
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain(expectedError)
+        expect(result.stdout).toBe('')
+      } finally { fixture.mission.close(); fixture.n8n.close() }
+    },
+  )
+
+  it('rejects a partial modern migration history even when its table still exists', () => {
+    const fixture = createParentFixture()
+    try {
+      fixture.mission.prepare('DELETE FROM schema_migrations WHERE id = ?')
+        .run('054_n8n_task_dispatch_leases')
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('migration history is not contiguous')
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it('rejects a modern ancillary table that omits non-counting lease columns', () => {
+    const fixture = createParentFixture()
+    try {
+      fixture.mission.exec(`
+        DROP TABLE n8n_task_dispatch_leases;
+        CREATE TABLE n8n_task_dispatch_leases (
+          task_id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL, workspace_id INTEGER NOT NULL
+        );
+      `)
+      const result = fixture.runParent()
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('n8n_task_dispatch_leases schema is unavailable')
+      expect(result.stdout).toBe('')
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
+  it.each([
+    ['missing 058 before 059', (fixture: ParentFixture) => {
+      fixture.mission.prepare('INSERT INTO schema_migrations (id) VALUES (?)')
+        .run('059_director_evidence_projection_receipts')
+    }],
+    ['unknown current-epoch marker', (fixture: ParentFixture) => {
+      fixture.mission.prepare('INSERT INTO schema_migrations (id) VALUES (?)')
+        .run('058_unrecognized_migration')
+    }],
+  ] as Array<[string, (fixture: ParentFixture) => void]>)(
+    'rejects non-canonical migration continuity: %s',
+    (_label, mutate) => {
+      const fixture = createParentFixture()
+      try {
+        mutate(fixture)
+        const result = fixture.runParent()
+        expect(result.status).not.toBe(0)
+        expect(result.stdout).toBe('')
+      } finally { fixture.mission.close(); fixture.n8n.close() }
+    },
+  )
+
+  it.each([
+    ['legacy table creation', (fixture: ParentFixture) => {
+      fixture.mission.exec('CREATE TABLE n8n_media_cleanup_debts (task_id TEXT PRIMARY KEY)')
+    }],
+    ['modern table alteration', (fixture: ParentFixture) => {
+      fixture.mission.exec('ALTER TABLE n8n_task_dispatch_leases ADD COLUMN drift TEXT')
+    }],
+    ['modern migration marker removal', (fixture: ParentFixture) => {
+      fixture.mission.prepare('DELETE FROM schema_migrations WHERE id = ?')
+        .run('057_n8n_director_evidence_outbox')
+    }],
+  ] as Array<[string, (fixture: ParentFixture) => void]>)(
+    'rejects %s after prepare before changing the parent',
+    (label, mutate) => {
+      const fixture = createParentFixture()
+      try {
+        if (label === 'legacy table creation') useLegacyParentSchema(fixture)
+        const prepared = prepareParent(fixture)
+        mutate(fixture)
+        const result = apply(fixture, prepared)
+        expect(result.status).not.toBe(0)
+        expect((fixture.mission.prepare('SELECT status FROM n8n_task_runs WHERE task_id = ?')
+          .get(fixture.parentTaskId) as { status: string }).status).toBe('accepted')
+      } finally { fixture.mission.close(); fixture.n8n.close() }
+    },
+  )
+
   it('rejects every command-line business identifier in parent mode', () => {
     const fixture = createParentFixture()
     try {
@@ -1217,7 +1452,7 @@ describe('managed stale parent pre-media reconciliation', () => {
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
-  it('accepts a paused newer intake-control row as an additional legacy freeze gate', () => {
+  it('accepts a paused modern intake-control row as an additional freeze gate', () => {
     const fixture = createParentFixture()
     try {
       createIntakeControl(fixture)
@@ -1694,19 +1929,31 @@ fs.writeFileSync(${JSON.stringify(fixture.queuePath)}, JSON.stringify({
       fixture, childTaskId(fixture.parentTaskId, 'prepare'), 'n8n-media-node', 'failed',
     )],
     ['parent claim', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_parent_execution_claims VALUES (?, 1, 1)',
+      `INSERT INTO n8n_parent_execution_claims
+        (task_id, tenant_id, workspace_id, execution_owner, created_at, updated_at)
+        VALUES (?, 1, 1, 'n8n-execution:test', 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['dispatch lease', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_task_dispatch_leases VALUES (?, 1, 1)',
+      `INSERT INTO n8n_task_dispatch_leases
+        (task_id, tenant_id, workspace_id, owner_token, lease_expires_at, revision, created_at, updated_at)
+        VALUES (?, 1, 1, 'owner', 1, 1, 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['child lease', (fixture: ParentFixture) => fixture.mission.prepare(`
       INSERT INTO n8n_child_execution_leases VALUES (?, 1, 1, ?, ?, 1, 1, 1, 1, 1)
     `).run(childTaskId(fixture.parentTaskId, 'audio'), 'a'.repeat(64), 'b'.repeat(64))],
     ['cleanup debt', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_media_cleanup_debts VALUES (?)',
+      `INSERT INTO n8n_media_cleanup_debts
+        (task_id, binding_id, workspace_id, tenant_id, workspace_digest, reason,
+         attempt_count, last_error, next_attempt_at, created_at, updated_at)
+        VALUES (?, 1, 1, 1, 'digest', 'test', 0, NULL, 1, 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['director outbox', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_director_evidence_outbox VALUES (?)',
+      `INSERT INTO n8n_director_evidence_outbox
+        (task_id, binding_id, tenant_id, workspace_id, work_id, query_digest,
+         projection_contract_digest, idempotency_key, result_sha256, status, attempt_count,
+         next_attempt_at, last_error_code, delivered_at, created_at, updated_at)
+        VALUES (?, 1, 1, 1, 'work', 'query', 'contract', 'idempotency', 'result',
+          'pending', 0, 1, NULL, NULL, 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['media active', (fixture: ParentFixture) => insertTaskFromParent(
       fixture, 'unrelated-media-active', 'n8n-media-node',
@@ -1744,10 +1991,14 @@ fs.writeFileSync(${JSON.stringify(fixture.queuePath)}, JSON.stringify({
       ).run(taskId)
     }],
     ['cross-scope parent claim', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_parent_execution_claims VALUES (?, 2, 2)',
+      `INSERT INTO n8n_parent_execution_claims
+        (task_id, tenant_id, workspace_id, execution_owner, created_at, updated_at)
+        VALUES (?, 2, 2, 'n8n-execution:test', 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['cross-scope dispatch lease', (fixture: ParentFixture) => fixture.mission.prepare(
-      'INSERT INTO n8n_task_dispatch_leases VALUES (?, 2, 2)',
+      `INSERT INTO n8n_task_dispatch_leases
+        (task_id, tenant_id, workspace_id, owner_token, lease_expires_at, revision, created_at, updated_at)
+        VALUES (?, 2, 2, 'owner', 1, 1, 1, 1)`,
     ).run(fixture.parentTaskId)],
     ['cross-scope child lease', (fixture: ParentFixture) => fixture.mission.prepare(`
       INSERT INTO n8n_child_execution_leases VALUES (?, 2, 2, ?, ?, 1, 1, 1, 1, 1)

@@ -64,6 +64,76 @@ const PREPARE_DIRECTORY_MEMBERS = [
   'backup-manifest.json',
   'prepare-manifest.json',
 ]
+const PARENT_KNOWN_MIGRATIONS = [
+  '049_n8n_workflow_bindings',
+  '050_n8n_task_runs',
+  '051_n8n_media_cleanup_debts',
+  '052_n8n_intake_controls',
+  '053_scheduler_leader_lease',
+  '054_n8n_task_dispatch_leases',
+  '055_n8n_child_execution_leases',
+  '056_n8n_parent_execution_claims',
+  '057_n8n_director_evidence_outbox',
+  '058_director_extraction_task_runs',
+  '059_director_evidence_projection_receipts',
+]
+const PARENT_CORE_MIGRATIONS = PARENT_KNOWN_MIGRATIONS.slice(0, 2)
+const PARENT_MODERN_MIGRATIONS = PARENT_KNOWN_MIGRATIONS.slice(2, 9)
+const PARENT_SCHEMA_TABLES = [
+  ['schema_migrations', ['id', 'applied_at']],
+  ['n8n_workflow_bindings', [
+    'id', 'name', 'description', 'workflow_id', 'webhook_path', 'task_type', 'agent_role', 'model',
+    'timeout_seconds', 'retry_count', 'enabled', 'config', 'workspace_id', 'tenant_id',
+    'created_by', 'created_at', 'updated_at', 'last_run_at', 'last_status',
+  ]],
+  ['n8n_task_runs', [
+    'id', 'task_id', 'idempotency_key', 'binding_id', 'status', 'source', 'requested_by', 'routing',
+    'input', 'delivery', 'output', 'error', 'attempt_count', 'max_attempts', 'workspace_id',
+    'tenant_id', 'created_at', 'accepted_at', 'started_at', 'completed_at', 'updated_at',
+  ]],
+  ['n8n_media_cleanup_debts', [
+    'task_id', 'binding_id', 'workspace_id', 'tenant_id', 'workspace_digest', 'reason',
+    'attempt_count', 'last_error', 'next_attempt_at', 'created_at', 'updated_at',
+  ]],
+  ['n8n_intake_controls', [
+    'control_id', 'accepting', 'reason', 'changed_by_id', 'changed_by_name', 'changed_at', 'revision',
+  ]],
+  ['n8n_intake_control_events', [
+    'id', 'action', 'before_accepting', 'after_accepting', 'reason', 'actor_id', 'actor_name',
+    'control_revision', 'created_at',
+  ]],
+  ['scheduler_leader_leases', [
+    'lease_name', 'holder_id', 'lease_expires_at', 'revision', 'updated_at',
+  ]],
+  ['n8n_task_dispatch_leases', [
+    'task_id', 'tenant_id', 'workspace_id', 'owner_token', 'lease_expires_at', 'revision',
+    'created_at', 'updated_at',
+  ]],
+  ['n8n_child_execution_leases', [
+    'task_id', 'tenant_id', 'workspace_id', 'owner_instance_id', 'lease_token', 'lease_expires_at',
+    'heartbeat_at', 'revision', 'created_at', 'updated_at',
+  ]],
+  ['n8n_parent_execution_claims', [
+    'task_id', 'tenant_id', 'workspace_id', 'execution_owner', 'created_at', 'updated_at',
+  ]],
+  ['n8n_director_evidence_outbox', [
+    'task_id', 'binding_id', 'tenant_id', 'workspace_id', 'work_id', 'query_digest',
+    'projection_contract_digest', 'idempotency_key', 'result_sha256', 'status', 'attempt_count',
+    'next_attempt_at', 'last_error_code', 'delivered_at', 'created_at', 'updated_at',
+  ]],
+]
+const PARENT_ANCILLARY_TABLES = [
+  'n8n_media_cleanup_debts',
+  'n8n_task_dispatch_leases',
+  'n8n_child_execution_leases',
+  'n8n_parent_execution_claims',
+  'n8n_director_evidence_outbox',
+]
+const PARENT_EPOCH_SUPPORT_TABLES = [
+  'n8n_intake_controls',
+  'n8n_intake_control_events',
+  'scheduler_leader_leases',
+]
 const FINAL_BACKUP_DIRECTORY = /^\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
 const PENDING_BACKUP_DIRECTORY = /^\.pending-\d{4}-\d{2}-\d{2}T\d{9}Z-[a-f0-9]{12}$/u
 const EXCLUSIVE_RENAME_HELPER = `
@@ -1047,6 +1117,88 @@ function requireTable(db, table, columns) {
   tableColumns(db, table, columns)
 }
 
+function tableSchemaBinding(db, table, requiredColumns) {
+  const definition = db.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?
+  `).get(table)
+  if (!definition) return { present: false }
+  if (typeof definition.sql !== 'string' || !definition.sql) {
+    fail(`${table} schema definition is unavailable`)
+  }
+  const columns = db.pragma(`table_info(${table})`).map(row => ({
+    cid: row.cid,
+    name: row.name,
+    type: row.type,
+    notnull: row.notnull,
+    defaultValue: row.dflt_value,
+    primaryKey: row.pk,
+  }))
+  const names = new Set(columns.map(column => column.name))
+  if (requiredColumns.some(name => !names.has(name))) fail(`${table} schema is unavailable`)
+  return {
+    present: true,
+    sqlSha256: sha256(definition.sql),
+    columnsSha256: sha256(canonicalJson(columns)),
+  }
+}
+
+function parentSchemaEpoch(db) {
+  const tables = Object.fromEntries(PARENT_SCHEMA_TABLES.map(([table, columns]) => [
+    table,
+    tableSchemaBinding(db, table, columns),
+  ]))
+  if (!tables.schema_migrations.present
+    || !tables.n8n_workflow_bindings.present || !tables.n8n_task_runs.present) {
+    fail('parent reconciliation core schema is unavailable')
+  }
+  const migrationIds = db.prepare('SELECT id FROM schema_migrations ORDER BY id').all()
+    .map(row => row.id)
+  if (migrationIds.some(id => typeof id !== 'string' || !/^\d{3}_[a-z0-9_]+$/u.test(id))) {
+    fail('parent reconciliation migration history is invalid')
+  }
+  const migrationSet = new Set(migrationIds)
+  if (PARENT_CORE_MIGRATIONS.some(id => !migrationSet.has(id))) {
+    fail('parent reconciliation core migration history is incomplete')
+  }
+  const versions = migrationIds.map(id => Number(id.slice(0, 3)))
+  const latestMigrationVersion = Math.max(...versions)
+  if (!Number.isSafeInteger(latestMigrationVersion) || latestMigrationVersion > 59) {
+    fail('parent reconciliation migration history is unsupported')
+  }
+  const knownByVersion = new Map(PARENT_KNOWN_MIGRATIONS.map(id => [Number(id.slice(0, 3)), id]))
+  for (const id of migrationIds.filter(value => Number(value.slice(0, 3)) >= 49)) {
+    if (knownByVersion.get(Number(id.slice(0, 3))) !== id) {
+      fail('parent reconciliation migration history contains an unknown current-epoch marker')
+    }
+  }
+  for (let version = 49; version <= latestMigrationVersion; version += 1) {
+    const expected = knownByVersion.get(version)
+    if (!expected || !migrationSet.has(expected)) {
+      fail('parent reconciliation migration history is not contiguous')
+    }
+  }
+  const laterTables = [...PARENT_ANCILLARY_TABLES, ...PARENT_EPOCH_SUPPORT_TABLES]
+  const legacy = latestMigrationVersion === 50
+    && PARENT_MODERN_MIGRATIONS.every(id => !migrationSet.has(id))
+    && laterTables.every(table => tables[table].present === false)
+  const modern = latestMigrationVersion >= 57
+    && PARENT_MODERN_MIGRATIONS.every(id => migrationSet.has(id))
+    && laterTables.every(table => tables[table].present === true)
+  if (!legacy && !modern) {
+    fail('parent reconciliation schema epoch is incomplete or inconsistent')
+  }
+  return {
+    kind: legacy ? 'legacy-through-050' : 'modern-057-plus',
+    latestMigrationVersion,
+    migrationIdsSha256: sha256(canonicalJson(migrationIds)),
+    migrationMarkers: Object.fromEntries([
+      ...PARENT_CORE_MIGRATIONS,
+      ...PARENT_MODERN_MIGRATIONS,
+    ].map(id => [id, migrationSet.has(id)])),
+    tables,
+  }
+}
+
 function validateMissionTarget(db, input, now) {
   tableColumns(db, 'n8n_task_runs', [
     'id', 'task_id', 'binding_id', 'status', 'source', 'routing', 'error', 'output', 'attempt_count',
@@ -1109,36 +1261,34 @@ function validateMissionTarget(db, input, now) {
 }
 
 function parentAncillaryState(db, parent, childTaskIds) {
-  requireTable(db, 'n8n_parent_execution_claims', ['task_id', 'tenant_id', 'workspace_id'])
-  requireTable(db, 'n8n_task_dispatch_leases', ['task_id', 'tenant_id', 'workspace_id'])
-  requireTable(db, 'n8n_child_execution_leases', ['task_id', 'tenant_id', 'workspace_id'])
-  requireTable(db, 'n8n_media_cleanup_debts', ['task_id'])
-  requireTable(db, 'n8n_director_evidence_outbox', ['task_id'])
+  const schemaEpoch = parentSchemaEpoch(db)
   const placeholders = childTaskIds.map(() => '?').join(', ')
-  const values = {
-    parentClaims: Number(db.prepare(`
-      SELECT COUNT(*) AS count FROM n8n_parent_execution_claims
-      WHERE task_id = ?
-    `).get(parent.task_id).count),
-    dispatchLeases: Number(db.prepare(`
-      SELECT COUNT(*) AS count FROM n8n_task_dispatch_leases
-      WHERE task_id = ?
-    `).get(parent.task_id).count),
-    childLeases: Number(db.prepare(`
-      SELECT COUNT(*) AS count FROM n8n_child_execution_leases
-      WHERE task_id IN (${placeholders})
-    `).get(...childTaskIds).count),
-    cleanupDebts: Number(db.prepare(
-      'SELECT COUNT(*) AS count FROM n8n_media_cleanup_debts WHERE task_id = ?',
-    ).get(parent.task_id).count),
-    directorOutbox: Number(db.prepare(
-      'SELECT COUNT(*) AS count FROM n8n_director_evidence_outbox WHERE task_id = ?',
-    ).get(parent.task_id).count),
-  }
+  const values = schemaEpoch.kind === 'legacy-through-050'
+    ? { parentClaims: 0, dispatchLeases: 0, childLeases: 0, cleanupDebts: 0, directorOutbox: 0 }
+    : {
+        parentClaims: Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM n8n_parent_execution_claims
+          WHERE task_id = ?
+        `).get(parent.task_id).count),
+        dispatchLeases: Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM n8n_task_dispatch_leases
+          WHERE task_id = ?
+        `).get(parent.task_id).count),
+        childLeases: Number(db.prepare(`
+          SELECT COUNT(*) AS count FROM n8n_child_execution_leases
+          WHERE task_id IN (${placeholders})
+        `).get(...childTaskIds).count),
+        cleanupDebts: Number(db.prepare(
+          'SELECT COUNT(*) AS count FROM n8n_media_cleanup_debts WHERE task_id = ?',
+        ).get(parent.task_id).count),
+        directorOutbox: Number(db.prepare(
+          'SELECT COUNT(*) AS count FROM n8n_director_evidence_outbox WHERE task_id = ?',
+        ).get(parent.task_id).count),
+      }
   if (Object.values(values).some(count => count !== 0)) {
     fail('parent still has a claim, lease, cleanup debt, or director outbox record')
   }
-  return values
+  return { schemaEpoch, ...values }
 }
 
 function parentIntakeState(db) {
