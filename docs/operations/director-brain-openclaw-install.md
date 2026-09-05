@@ -150,6 +150,11 @@ post-config hash；以及同一 `0600` 日志实体从基线到终态连续、�
 都必须引用并重新验证该证明。相同配置重复执行时显式传入
 `--runtime-convergence-proof /absolute/path/to/proof` 复用仍有效的证明，不会生成空证明或无证据重新背书。
 
+每轮 runtime RPC 收集前必须先固定必需插件树快照，证据处理前后均与该快照比较。证明生成和复用
+都要求 `pluginCollectionAnchor` 与 runtime.plugins 一致，复用时再与当前安装树核对；旧 proof 缺少
+该内证时失败关闭。preinstall controller 将 readiness 返回的证明 SHA 与随后读取的同一文件引用
+对账，防止校验结束后更换文件；合法的新 fresh proof 仍可按原流程重新验真后用于 handoff。
+
 由于 compaction patch 写入 `agents.defaults`，capture、dry-run、apply、proof 验证和 rollback 的每个配置
 快照都要求 `qwen-current.agents.list` 只有一个 `second-original`。任一阶段发现第二个 Agent 或列表漂移都
 失败关闭；写入后才出现的多 Agent 漂移会保留现场并要求人工检查，不用旧备份自动覆盖。需要新增 Agent

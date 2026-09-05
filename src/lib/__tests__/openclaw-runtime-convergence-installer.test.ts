@@ -128,6 +128,7 @@ async function createFixture() {
   const validationCount = join(root, 'validation-count')
   const lsofCount = join(root, 'lsof-count')
   const gatewayLog = join(root, 'gateway-restarts.log')
+  const pluginMutationWitness = join(root, 'plugin-mutation-witness')
   const toolBaseline = join(home, 'pre-install-tool-baseline.json')
   const fakeOpenClaw = join(bin, 'openclaw')
   const fakeProgram = join(bin, 'openclaw.mjs')
@@ -398,6 +399,7 @@ if (args[0] === 'gateway' && args[1] === 'call' && args[2] === 'tools.catalog') 
     .split(/\\r?\\n/u).filter(line => line.startsWith('gateway call tools.catalog ')).length
   if (Number(process.env.FAKE_MUTATE_PLUGIN_ON_CATALOG_CALL) === catalogCall) {
     fs.appendFileSync(process.env.FAKE_PLUGIN_ENTRY_PATH, '// runtime drift\\n')
+    fs.writeFileSync(process.env.FAKE_PLUGIN_MUTATION_WITNESS, String(catalogCall), { mode: 0o600 })
   }
   if (Number(process.env.FAKE_REPLACE_CONFIG_ON_CATALOG_CALL) === catalogCall) {
     const replacement = configPath + '.catalog-replacement'
@@ -520,6 +522,7 @@ if (operation === 'catalog') {
   const call = calls('tools.catalog')
   if (Number(process.env.FAKE_MUTATE_PLUGIN_ON_CATALOG_CALL) === call) {
     fs.appendFileSync(process.env.FAKE_PLUGIN_ENTRY_PATH, '// runtime drift\\n')
+    fs.writeFileSync(process.env.FAKE_PLUGIN_MUTATION_WITNESS, String(call), { mode: 0o600 })
   }
   if (Number(process.env.FAKE_REPLACE_CONFIG_ON_CATALOG_CALL) === call) {
     const replacement = configPath + '.catalog-replacement'
@@ -725,6 +728,7 @@ printf 'p%s\\n' "$pid"
     FAKE_LSOF_COUNT_FILE: lsofCount,
     FAKE_GATEWAY_LOG: gatewayLog,
     FAKE_PLUGIN_ENTRY_PATH: join(state, 'extensions/aiworker-director-brain/index.js'),
+    FAKE_PLUGIN_MUTATION_WITNESS: pluginMutationWitness,
     FAKE_GATEWAY_PID: String(gatewayProcess.pid),
     OPENCLAW_GATEWAY_TOKEN: 'parent-token-must-not-leak',
     GATEWAY_TOKEN: 'parent-gateway-token-must-not-leak',
@@ -753,6 +757,7 @@ printf 'p%s\\n' "$pid"
     fixtureGatewayToken,
     fixtureSessionKey,
     gatewayLog,
+    pluginMutationWitness,
     toolBaseline,
     initial,
     env,
@@ -1495,7 +1500,20 @@ describe('qwen-current unified runtime convergence installer', () => {
       entry.env.FAKE_REPLACEMENT_GATEWAY_PID = '999999'
     }
 
-    await expect(run(entry, '--apply')).rejects.toThrow()
+    if (variable === 'FAKE_MUTATE_PLUGIN_ON_CATALOG_CALL' && value === '1') {
+      // Keep the synthetic Gateway start inside the helper's accepted future
+      // clock-skew window and prove the pre-RPC tree anchor, rather than ctime,
+      // detects a mutation made by the first catalog call.
+      entry.env.AIWORKER_OPENCLAW_RUNTIME_TEST_GATEWAY_START_MS = String(Date.now() + 900)
+      await expect(run(entry, '--apply')).rejects.toMatchObject({
+        stderr: expect.stringContaining(
+          'required plugin tree changed during runtime evidence collection',
+        ),
+      })
+      expect(await readFile(entry.pluginMutationWitness, 'utf8')).toBe('1')
+    } else {
+      await expect(run(entry, '--apply')).rejects.toThrow()
+    }
     expect(await readFile(entry.config, 'utf8')).toBe(before)
     expect(await exists(entry.backupRoot)).toBe(false)
     expect(await exists(entry.gatewayLog)).toBe(false)
@@ -1902,6 +1920,77 @@ describe('qwen-current unified runtime convergence installer', () => {
     const proof = /Verified session-scoped runtime convergence proof: (.+)$/mu
       .exec(applied.stdout)?.[1]
     expect(proof).toBeTruthy()
+
+    const proofSource = await readFile(proof!, 'utf8')
+    const validProof = JSON.parse(proofSource)
+    const runtimeEvidence = join(entry.root, 'runtime-with-invalid-anchor.json')
+    const hotReloadEvidence = join(entry.root, 'hot-reload-from-valid-proof.json')
+    const proofOutput = join(entry.root, 'proof-mint-output.json')
+    const configBeforeMint = await readFile(entry.config, 'utf8')
+    await writeFile(
+      hotReloadEvidence,
+      `${JSON.stringify(validProof.hotReload)}\n`,
+      { mode: 0o600 },
+    )
+    await writeFile(proofOutput, '', { mode: 0o600 })
+
+    const runtimeWithoutAnchor = structuredClone(validProof.runtime)
+    delete runtimeWithoutAnchor.pluginCollectionAnchor
+    await writeFile(
+      runtimeEvidence,
+      `${JSON.stringify(runtimeWithoutAnchor)}\n`,
+      { mode: 0o600 },
+    )
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'write-convergence-proof',
+      runtimeEvidence,
+      hotReloadEvidence,
+      manifestFile,
+      entry.config,
+      proofOutput,
+    ])).rejects.toMatchObject({
+      stderr: expect.stringContaining('runtime plugin collection anchor is invalid'),
+    })
+    expect(await readFile(proofOutput, 'utf8')).toBe('')
+    expect(await readFile(entry.config, 'utf8')).toBe(configBeforeMint)
+
+    const runtimeWithMismatchedAnchor = structuredClone(validProof.runtime)
+    runtimeWithMismatchedAnchor.pluginCollectionAnchor.plugins[0].treeSha256 = 'f'.repeat(64)
+    await writeFile(
+      runtimeEvidence,
+      `${JSON.stringify(runtimeWithMismatchedAnchor)}\n`,
+      { mode: 0o600 },
+    )
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'write-convergence-proof',
+      runtimeEvidence,
+      hotReloadEvidence,
+      manifestFile,
+      entry.config,
+      proofOutput,
+    ])).rejects.toMatchObject({
+      stderr: expect.stringContaining('runtime plugin collection anchor is invalid'),
+    })
+    expect(await readFile(proofOutput, 'utf8')).toBe('')
+    expect(await readFile(entry.config, 'utf8')).toBe(configBeforeMint)
+
+    const proofWithoutAnchor = JSON.parse(proofSource)
+    delete proofWithoutAnchor.runtime.pluginCollectionAnchor
+    await writeFile(proof!, `${JSON.stringify(proofWithoutAnchor, null, 2)}\n`, { mode: 0o600 })
+    const configBeforeReuse = await readFile(entry.config, 'utf8')
+    const backupsBeforeReuse = await readdir(entry.backupRoot)
+    await expect(run(
+      entry,
+      '--apply',
+      '--runtime-convergence-proof', proof!,
+    )).rejects.toMatchObject({
+      stderr: expect.stringContaining('runtime plugin collection anchor is invalid'),
+    })
+    expect(await readFile(entry.config, 'utf8')).toBe(configBeforeReuse)
+    expect(await readdir(entry.backupRoot)).toEqual(backupsBeforeReuse)
+    await writeFile(proof!, proofSource, { mode: 0o600 })
 
     const videoPackage = join(
       entry.state,

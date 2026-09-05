@@ -624,7 +624,8 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
   assert.ok(helper.includes('requiredPluginTreeEvidence(stateDir, manifest)'))
   assert.ok(helper.includes('defaults: { compaction: patchCompaction }'))
   assert.ok(helper.includes('expected.agents.defaults.compaction = expectedCompaction'))
-  assert.ok(helper.includes("command === 'verify-runtime-hooks'"))
+  assert.ok(helper.includes("command === 'required-plugin-tree-snapshot' && args.length === 2"))
+  assert.ok(helper.includes("command === 'verify-runtime-hooks' && args.length === 12"))
 })
 
 test('rich canary rejects unsupported retention before starting a Gateway', () => {

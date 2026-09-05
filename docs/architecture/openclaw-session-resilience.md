@@ -122,8 +122,9 @@ profile，再另行评审和迁移，不能让默认策略静默扩散到新 Age
 2. orchestrator 固定安装 task-flow、video-command、`aiworker-director-brain 0.4.0`，确认导演脑载荷
    包含 `director-context-summary.js` 与 `transcript-tool-result-projection.js`；
 3. 由 orchestrator fresh restart `qwen-current`，整个前向发布只允许这一次 restart；
-4. 从真实 `18889` listener、`gateway status --deep --require-rpc`、插件 runtime inspection、全量
-   `tools.catalog` 和同一真实会话的 `tools.effective` 建立一致证据；
+4. 在任何本轮 runtime RPC 前固定全部必需插件树快照，再从真实 `18889` listener、
+   `gateway status --deep --require-rpc`、插件 runtime inspection、全量 `tools.catalog` 和同一真实会话的
+   `tools.effective` 收集证据，并在证据处理前后与同一快照对账；
 5. 确认 Gateway 启动时间严格晚于插件树最后变化后的下一整秒，三个 hook 均已加载；
 6. 对比跨 restart 基线：删除集合必须为空，新增只能是 `aiworker_director_brain`；
 7. 对 manifest 声明的有界配置 patch 先 dry-run，再以 inode、摘要和进程证据做 CAS；
@@ -133,6 +134,11 @@ profile，再另行评审和迁移，不能让默认策略静默扩散到新 Age
 只接受该 handoff。失败时先逆序回滚 runtime convergence、director-brain、video-command、task-flow；
 仅当第 3 步确实发生过前向 restart，才在磁盘恢复完成后做一次 recovery restart。普通维护直接运行某个
 安装器时也必须显式声明其范围和回滚点，但不能借此伪造首次发布 handoff。
+
+runtime proof 保持外层 v1，并必须包含稳定的 `pluginCollectionAnchor` 内证：插件 ID、版本和树摘要
+须与本轮采集前的快照、runtime.plugins 及复用时的当前安装树一致。该内证不加入每次变化的时间或
+nonce，以保持连续验证可比较；缺少内证的旧 proof 不能直接复用。Gateway 启动时间仍须满足独立的
+fresh restart 门，但不能以时间先后来代替采集前后的内容快照。
 
 配置 patch 走 OpenClaw 官方热更新，不允许调用 Gateway start/stop/restart，也不允许触碰 n8n、3017、
 模型、video worker、任务、数据库或媒体文件。

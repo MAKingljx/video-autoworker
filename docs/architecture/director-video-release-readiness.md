@@ -75,6 +75,11 @@ effective中的 `browser-filtered-by-profile / info`，它表示现有profile有
 警告、重复和未知提示仍拒绝。安装前后先比策略数组，再比工具集合与描述面，不能删除提示或改变
 profile来使门禁通过；复用近期收敛proof时也必须具备完整v4策略内证。
 
+runtime proof 还必须具备插件收集锚点：快照在本轮首次 RPC 前取得，证据处理前后都验证同一组
+插件树；生成和复用均验证 `pluginCollectionAnchor`，缺少该内证的旧 proof 拒绝复用。
+controller 必须把 readiness 返回的 proof SHA 与实际使用的文件引用绑定，不能在通过校验后
+接纳另一个未经该次校验的文件。该要求不改变外层 proof/v1 或合法 fresh proof 的重验流程。
+
 共享组件的 rolling 安装门按成对布局验证运行状态根和不可变 release 根。生产使用同一受管用户
 home 下的 `ai-worker/state/video-autoworker/blue-green` 与
 `ai-worker/services/video-autoworker-app/releases`，避免运行资产落入 CloudDocs/FileProvider

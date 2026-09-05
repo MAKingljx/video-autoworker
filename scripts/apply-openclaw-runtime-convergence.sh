@@ -492,12 +492,17 @@ collect_tool_baseline_evidence() {
 }
 
 verify_runtime_hooks() {
-  local config_snapshot_source="$1" gateway_pid suffix
+  local config_snapshot_source="$1" gateway_pid suffix plugin_tree_snapshot
+  plugin_tree_snapshot="$("$NODE_BIN" "$CONVERGENCE_HELPER" \
+    required-plugin-tree-snapshot "$PROFILE_STATE_DIR" "$MANIFEST_FILE")" || {
+    printf 'Unable to capture the required plugin tree before runtime evidence collection.\n' >&2
+    return 1
+  }
   gateway_pid="$(gateway_listener_pid)" || return 1
   suffix="verify-$RANDOM-$RANDOM"
   collect_runtime_evidence "$gateway_pid" "$suffix" || return 1
   "$NODE_BIN" "$CONVERGENCE_HELPER" verify-runtime-hooks \
-    "$PROFILE_STATE_DIR" "$MANIFEST_FILE" "$gateway_pid" \
+    "$PROFILE_STATE_DIR" "$MANIFEST_FILE" "$plugin_tree_snapshot" "$gateway_pid" \
     "$EVIDENCE_GATEWAY_STATUS" "$EVIDENCE_INSPECTION" "$EVIDENCE_CATALOG" \
     "$EVIDENCE_EFFECTIVE" "$PROFILE_CONFIG" "$config_snapshot_source" "$TOOL_BASELINE" \
     "$RUNTIME_SESSION_KEY_SHA256"

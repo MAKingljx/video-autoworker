@@ -1048,20 +1048,27 @@ function loadState(attemptDirectory, options = {}) {
     if (Object.values(value.payloads).some(item => !SHA256.test(item))) {
       fail('verified preinstall payload digests are invalid')
     }
-    sameReference(reference(value.readiness.path, 'preinstall readiness report', 0o400), value.readiness,
-      'preinstall readiness report')
-    sameReference(reference(value.runtimeConvergenceProof.path, 'runtime convergence proof', 0o600),
-      value.runtimeConvergenceProof, 'runtime convergence proof')
+    const readinessReport = readJson(value.readiness.path, 'preinstall readiness report', 0o400)
+    sameReference(readinessReport.reference, value.readiness, 'preinstall readiness report')
+    const runtimeConvergenceProof = reference(
+      value.runtimeConvergenceProof.path, 'runtime convergence proof', 0o600,
+    )
+    sameReference(runtimeConvergenceProof, value.runtimeConvergenceProof,
+      'runtime convergence proof')
     exactKeys(value.gatewayActivation, ['convergence', 'gateway', 'restart'],
       'verified Gateway activation')
     sameReference(reference(value.gatewayActivation.restart.path, 'Gateway fresh restart evidence', 0o600),
       value.gatewayActivation.restart, 'Gateway fresh restart evidence')
-    if (canonicalJson(value.gatewayActivation.convergence)
-      !== canonicalJson(value.runtimeConvergenceProof)) fail('verified Gateway convergence changed')
+    sameReference(value.gatewayActivation.convergence, runtimeConvergenceProof,
+      'verified Gateway convergence')
+    if (readinessReport.value?.runtimeConvergence?.sha256 !== runtimeConvergenceProof.sha256
+      || value.payloads.runtimeConvergenceProofSha256 !== runtimeConvergenceProof.sha256) {
+      fail('verified Gateway convergence changed')
+    }
     if (currentAction?.value.choice !== 'verify'
       || value.verifiedAt !== currentAction.value.claimedAt
       || canonicalJson(currentAction.value.payload?.readiness)
-        !== canonicalJson(readJson(value.readiness.path, 'preinstall readiness report', 0o400).value)
+        !== canonicalJson(readinessReport.value)
       || canonicalJson(currentAction.value.payload?.runtimeConvergenceProof)
         !== canonicalJson(value.runtimeConvergenceProof)
       || canonicalJson(currentAction.value.payload?.gatewayActivation)
@@ -1394,7 +1401,8 @@ function runReadiness(state, values) {
     || !result.payloads?.videoCommand?.manifestSha256
     || !result.payloads?.taskFlow?.manifestSha256
     || !result.payloads?.directorBrain?.manifestSha256
-    || result.runtimeConvergence?.schema !== 'video-autoworker-openclaw-runtime-convergence-proof/v1') {
+    || result.runtimeConvergence?.schema !== 'video-autoworker-openclaw-runtime-convergence-proof/v1'
+    || !SHA256.test(result.runtimeConvergence.sha256 || '')) {
     fail('director/video preinstall readiness result is invalid')
   }
   return result
@@ -1435,6 +1443,11 @@ function completeVerification(state, action, resumed) {
   const gatewayActivation = action.value.payload?.gatewayActivation
   if (!readiness || !runtimeConvergenceProof || !gatewayActivation) {
     fail('pending preinstall verification is invalid')
+  }
+  sameReference(gatewayActivation.convergence, runtimeConvergenceProof,
+    'Gateway runtime convergence proof')
+  if (readiness.runtimeConvergence?.sha256 !== runtimeConvergenceProof.sha256) {
+    fail('runtime convergence proof does not match verified readiness')
   }
   const readinessOutput = reportPath(state.root, state.current.revision)
   const reportWritten = writeImmutable(readinessOutput, readiness, 'preinstall readiness report')
@@ -1537,9 +1550,14 @@ function verify(values) {
   const runtimeConvergenceProof = reference(
     values['--runtime-convergence-proof'], 'runtime convergence proof', 0o600,
   )
+  if (runtimeConvergenceProof.sha256 !== readiness.runtimeConvergence.sha256) {
+    fail('runtime convergence proof changed after readiness verification')
+  }
   const gatewayActivation = gatewayActivationEvidence(
     values['--gateway-restart-evidence'], values['--runtime-convergence-proof'],
   )
+  sameReference(gatewayActivation.convergence, runtimeConvergenceProof,
+    'Gateway runtime convergence proof')
   const action = {
     schema: ACTION_SCHEMA,
     choice: 'verify',
@@ -2402,6 +2420,9 @@ export function reverifyPreinstallReadiness(attemptDirectory, runtimeConvergence
   const runtimeConvergenceProof = reference(
     runtimeConvergenceProofPath, 'fresh runtime convergence proof', 0o600,
   )
+  if (runtimeConvergenceProof.sha256 !== current.runtimeConvergence.sha256) {
+    fail('fresh runtime convergence proof does not match verified readiness')
+  }
   return {
     installAttemptId: state.current.installAttemptId,
     revision: state.current.revision,

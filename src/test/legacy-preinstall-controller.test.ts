@@ -124,7 +124,7 @@ function fixture() {
   writeFileSync(transitionVerifier, `import{readFileSync}from'node:fs';import{createHash}from'node:crypto';const p=${JSON.stringify(attestation)};process.stdout.write(JSON.stringify({committed:true,attestationSha256:createHash('sha256').update(readFileSync(p)).digest('hex'),liveCombinedSha256:${JSON.stringify(liveCombinedSha256)},upgradeId:'11111111-1111-4111-8111-111111111111'})+'\\n')\n`, { mode: 0o700 })
   chmodSync(transitionVerifier, 0o700)
   const readinessVerifier = join(root, 'readiness-verifier.mjs')
-  writeFileSync(readinessVerifier, `process.stdout.write(JSON.stringify({schema:'video-autoworker-director-video-preflight/v1',phase:'pre-bootstrap',ok:true,commit:${JSON.stringify(COMMIT)},app:{releaseId:${JSON.stringify(releaseId)},root:${JSON.stringify(releaseRoot)},manifestSha256:${JSON.stringify(digest(readFileSync(manifest)))}},contracts:{directorWork:true,outboxClosure:true,sessionScopedRuntimeConvergence:true},payloads:{videoCommand:{root:${JSON.stringify(join(profileStateRoot, 'plugins/aiworker-video-command'))},manifestSha256:'1'.repeat(64)},taskFlow:{root:${JSON.stringify(join(workspaceRoot, 'skills/aiworker-task-flow'))},manifestSha256:'2'.repeat(64)},directorBrain:{manifestSha256:'3'.repeat(64)}},runtimeConvergence:{schema:'video-autoworker-openclaw-runtime-convergence-proof/v1'}})+'\\n')\n`, { mode: 0o700 })
+  writeFileSync(readinessVerifier, `import{createHash}from'node:crypto';import{readFileSync,renameSync,writeFileSync}from'node:fs';const a=process.argv.slice(2),p=a[a.indexOf('--runtime-convergence-proof')+1],source=readFileSync(p),proofSha256=createHash('sha256').update(source).digest('hex');if(process.env.AIWORKER_TEST_REPLACE_RUNTIME_PROOF_AFTER_READINESS==='1'){const replacement=p+'.replacement',value=JSON.parse(source);value.replacedAfterReadiness=true;writeFileSync(replacement,JSON.stringify(value)+'\\n',{mode:0o600});renameSync(replacement,p)}process.stdout.write(JSON.stringify({schema:'video-autoworker-director-video-preflight/v1',phase:'pre-bootstrap',ok:true,commit:${JSON.stringify(COMMIT)},app:{releaseId:${JSON.stringify(releaseId)},root:${JSON.stringify(releaseRoot)},manifestSha256:${JSON.stringify(digest(readFileSync(manifest)))}},contracts:{directorWork:true,outboxClosure:true,sessionScopedRuntimeConvergence:true},payloads:{videoCommand:{root:${JSON.stringify(join(profileStateRoot, 'plugins/aiworker-video-command'))},manifestSha256:'1'.repeat(64)},taskFlow:{root:${JSON.stringify(join(workspaceRoot, 'skills/aiworker-task-flow'))},manifestSha256:'2'.repeat(64)},directorBrain:{manifestSha256:'3'.repeat(64)}},runtimeConvergence:{schema:'video-autoworker-openclaw-runtime-convergence-proof/v1',sha256:proofSha256}})+'\\n')\n`, { mode: 0o700 })
   chmodSync(readinessVerifier, 0o700)
   const runtimeProof = join(root, 'runtime-proof.json')
   writeJson(runtimeProof, {
@@ -420,6 +420,64 @@ describe('legacy preinstall controller', () => {
       '--workspace-root', entry.workspaceRoot, '--runtime-convergence-proof', entry.runtimeProof,
       '--gateway-restart-evidence', entry.gatewayRestart)
     expect(repeatedVerify.status).not.toBe(0)
+  })
+
+  it('rejects a runtime proof replaced after readiness and publishes no verification receipt', () => {
+    const entry = fixture()
+    const prepared = JSON.parse(prepare(entry).stdout)
+    recordInstalls(entry, prepared.installAttemptId)
+    const raced = {
+      ...entry,
+      env: {
+        ...entry.env,
+        AIWORKER_TEST_REPLACE_RUNTIME_PROOF_AFTER_READINESS: '1',
+      },
+    }
+
+    const verified = run(raced,
+      'verify', '--attempt-dir', entry.attempt,
+      '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+      '--releases-root', entry.releasesRoot, '--profile-state-root', entry.profileStateRoot,
+      '--workspace-root', entry.workspaceRoot, '--runtime-convergence-proof', entry.runtimeProof,
+      '--gateway-restart-evidence', entry.gatewayRestart)
+
+    expect(verified.status).not.toBe(0)
+    expect(verified.stderr).toContain(
+      'runtime convergence proof changed after readiness verification',
+    )
+    expect(existsSync(join(
+      entry.attempt, 'preinstall', 'install-action.r000001.claim.json',
+    ))).toBe(false)
+    expect(existsSync(join(
+      entry.attempt, 'preinstall', 'install-verified.r000001.receipt.json',
+    ))).toBe(false)
+  })
+
+  it('accepts a distinct fresh proof when handoff readiness binds its current digest', () => {
+    const entry = fixture()
+    const prepared = JSON.parse(prepare(entry).stdout)
+    recordInstalls(entry, prepared.installAttemptId)
+    const verified = run(entry,
+      'verify', '--attempt-dir', entry.attempt,
+      '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+      '--releases-root', entry.releasesRoot, '--profile-state-root', entry.profileStateRoot,
+      '--workspace-root', entry.workspaceRoot, '--runtime-convergence-proof', entry.runtimeProof,
+      '--gateway-restart-evidence', entry.gatewayRestart)
+    expect(verified.status, verified.stderr).toBe(0)
+
+    const freshProof = join(entry.root, 'fresh-runtime-proof.json')
+    const freshValue = JSON.parse(readFileSync(entry.runtimeProof, 'utf8'))
+    freshValue.createdAt = '2026-09-06T20:00:00.000Z'
+    writeJson(freshProof, freshValue)
+    expect(reference(freshProof).sha256).not.toBe(reference(entry.runtimeProof).sha256)
+
+    const handed = run(entry,
+      'handoff', '--attempt-dir', entry.attempt,
+      '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+      '--runtime-convergence-proof', freshProof, '--video-batch-root', entry.videoBatchRoot)
+    expect(handed.status, handed.stderr).toBe(0)
+    const status = JSON.parse(run(entry, 'status', '--attempt-dir', entry.attempt).stdout)
+    expect(status.phase).toBe('BOOTSTRAP_HANDOFF')
   })
 
   it('renews a verified lease after thirty minutes with fresh evidence and re-verifies the successor', () => {

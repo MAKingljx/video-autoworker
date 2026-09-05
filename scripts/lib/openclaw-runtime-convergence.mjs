@@ -461,6 +461,57 @@ function requiredPluginTreeEvidence(stateDir, manifest) {
   })).toSorted((left, right) => left.id.localeCompare(right.id))
 }
 
+function requiredPluginTreeSnapshot(stateDir, manifestPath) {
+  const manifest = validateManifest(manifestPath)
+  process.stdout.write(JSON.stringify(stable({
+    schema: 'video-autoworker-openclaw-plugin-tree-snapshot/v1',
+    plugins: requiredPluginTreeEvidence(stateDir, manifest),
+  })))
+}
+
+function parseRequiredPluginTreeSnapshot(source) {
+  if (typeof source !== 'string' || Buffer.byteLength(source) > 64 * 1024) {
+    fail('required plugin tree snapshot is invalid')
+  }
+  let value
+  try { value = JSON.parse(source) } catch { fail('required plugin tree snapshot is invalid') }
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !same(Object.keys(value).toSorted(), ['plugins', 'schema'])
+    || value.schema !== 'video-autoworker-openclaw-plugin-tree-snapshot/v1'
+    || !Array.isArray(value.plugins)) {
+    fail('required plugin tree snapshot is invalid')
+  }
+  return value.plugins
+}
+
+function pluginCollectionAnchor(trees) {
+  return stable({
+    schema: 'video-autoworker-openclaw-plugin-collection-anchor/v1',
+    plugins: trees.map(({ id, version, treeSha256 }) => ({ id, version, treeSha256 })),
+  })
+}
+
+function validateRuntimePluginCollectionAnchor(runtime, manifest, currentPlugins) {
+  const anchor = runtime?.pluginCollectionAnchor
+  const expectedPlugins = manifest.requiredPlugins.map(({ id, version }) => ({ id, version }))
+    .toSorted((left, right) => left.id.localeCompare(right.id))
+  if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor)
+    || !same(Object.keys(anchor).toSorted(), ['plugins', 'schema'])
+    || anchor.schema !== 'video-autoworker-openclaw-plugin-collection-anchor/v1'
+    || !Array.isArray(anchor.plugins)
+    || anchor.plugins.some(plugin => !plugin || typeof plugin !== 'object' || Array.isArray(plugin)
+      || !same(Object.keys(plugin).toSorted(), ['id', 'treeSha256', 'version'])
+      || !/^[a-f0-9]{64}$/u.test(plugin.treeSha256))
+    || !same(anchor.plugins.map(({ id, version }) => ({ id, version })), expectedPlugins)
+    || !same(anchor.plugins, runtime?.plugins)) {
+    fail('runtime plugin collection anchor is invalid')
+  }
+  if (currentPlugins !== undefined && !same(anchor.plugins, currentPlugins)) {
+    fail('required plugin tree changed after runtime convergence proof')
+  }
+  return anchor
+}
+
 function runPs(pid, field) {
   const result = spawnSync('/bin/ps', ['-p', String(pid), '-o', `${field}=`], {
     encoding: 'utf8',
@@ -602,6 +653,7 @@ function validateGatewayStatus(value, pid, port) {
 function verifyRuntimeHooks(
   stateDir,
   manifestPath,
+  pluginTreeSnapshotSource,
   pidSource,
   gatewayStatusPath,
   inspectionPath,
@@ -614,11 +666,15 @@ function verifyRuntimeHooks(
 ) {
   const manifest = validateManifest(manifestPath)
   const descriptor = directorPluginDescriptor(manifest)
+  const anchoredTrees = parseRequiredPluginTreeSnapshot(pluginTreeSnapshotSource)
+  const treesBefore = requiredPluginTreeEvidence(stateDir, manifest)
+  if (!same(anchoredTrees, treesBefore)) {
+    fail('required plugin tree changed during runtime evidence collection')
+  }
   assertFileSnapshot(configPath, configSnapshotSource)
   exclusiveProfileAgent(readJson(configPath, 'OpenClaw config'), manifest.agent.id)
   const pid = Number(pidSource)
   const identityBefore = gatewayProcessIdentity(pid)
-  const treesBefore = requiredPluginTreeEvidence(stateDir, manifest)
   const gatewayStatus = readEvidenceJson(gatewayStatusPath, 'Gateway status evidence')
   const inspection = readEvidenceJson(inspectionPath, 'plugin runtime inspection evidence')
   const catalog = readEvidenceJson(catalogPath, 'tool catalog evidence')
@@ -638,6 +694,9 @@ function verifyRuntimeHooks(
   )
   const identity = gatewayProcessIdentity(pid)
   const trees = requiredPluginTreeEvidence(stateDir, manifest)
+  if (!same(anchoredTrees, trees)) {
+    fail('required plugin tree changed during runtime evidence collection')
+  }
   const latestPluginChangeMs = Math.max(...trees.map(tree => tree.latestChangeMs))
   const nextSecondAfterPlugin = (Math.floor(latestPluginChangeMs / 1_000) + 1) * 1_000
   assertFileSnapshot(configPath, configSnapshotSource)
@@ -662,6 +721,7 @@ function verifyRuntimeHooks(
       hooks: descriptor.requiredHooks.toSorted(),
     },
     plugins: trees.map(({ id, version, treeSha256 }) => ({ id, version, treeSha256 })),
+    pluginCollectionAnchor: pluginCollectionAnchor(anchoredTrees),
     toolInventory: inventory,
     effectiveToolInventory: effectiveInventory,
     preInstallToolBaseline,
@@ -1240,6 +1300,7 @@ function writeConvergenceProof(
 ) {
   const manifest = validateManifest(manifestPath)
   const runtime = readJson(runtimePath, 'runtime convergence evidence')
+  validateRuntimePluginCollectionAnchor(runtime, manifest)
   validateRuntimeToolPolicyEvidence(runtime, manifest)
   const hotReload = readJson(hotReloadPath, 'hot-reload convergence evidence')
   const configSnapshot = configScopeSnapshot(configPath, manifestPath, false)
@@ -1294,6 +1355,7 @@ export function assertConvergenceProof(proofPath, manifestPath, stateDir, config
   }
   const currentPlugins = requiredPluginTreeEvidence(stateDir, manifest)
     .map(({ id, version, treeSha256 }) => ({ id, version, treeSha256 }))
+  validateRuntimePluginCollectionAnchor(proof.runtime, manifest, currentPlugins)
   if (!same(currentPlugins, proof.runtime?.plugins)) {
     fail('required plugin tree changed after runtime convergence proof')
   }
@@ -1553,7 +1615,10 @@ else if (command === 'verify-startup-loaded' && args.length === 4) verifyStartup
 else if (command === 'write-convergence-proof' && args.length === 5) writeConvergenceProof(...args)
 else if (command === 'assert-convergence-proof' && args.length === 4) assertConvergenceProof(...args)
 else if (command === 'verify-effective' && args.length === 2) verifyEffective(...args)
-else if (command === 'verify-runtime-hooks' && args.length === 11) verifyRuntimeHooks(...args)
+else if (command === 'required-plugin-tree-snapshot' && args.length === 2) {
+  requiredPluginTreeSnapshot(...args)
+}
+else if (command === 'verify-runtime-hooks' && args.length === 12) verifyRuntimeHooks(...args)
 else if (command === 'assert-backup' && args.length === 1) assertBackup(args[0])
 else if (command === 'assert-config-backup' && args.length === 2) assertConfigBackup(...args)
 else if (command === 'file-snapshot' && args.length === 1) {

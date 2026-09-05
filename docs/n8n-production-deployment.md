@@ -379,6 +379,9 @@ node scripts/generate-legacy-freeze-evidence.mjs \
 只有上述新证明生成并验真后，才建立 controller 收据链；`prepare` 必须显式携带 status 返回的
 install verification 和该 receipt 绑定的 runtime convergence proof：
 
+runtime convergence proof 必须保留 RPC 收集前插件快照对应的 `pluginCollectionAnchor`；旧缺字段
+证明不能复用。controller 同时把 readiness 验证出的 proof SHA 与随后绑定的文件引用对账。
+
 ```bash
 node scripts/legacy-bootstrap-controller.mjs prepare \
   --attempt-dir "$attempt_dir" \
