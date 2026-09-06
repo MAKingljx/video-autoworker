@@ -35,6 +35,7 @@ async function createVideoInstallerFixture() {
   const runDir = resolve(physicalRoot, 'run')
   const videoBatchRoot = resolve(root, 'video-batches')
   const gateLog = resolve(root, 'gate.ndjson')
+  const gitLog = resolve(root, 'git.ndjson')
   const openclawLog = resolve(root, 'openclaw.ndjson')
   const liveDbPath = resolve(root, 'mission-control.db')
   const n8nDbPath = resolve(root, 'n8n.sqlite')
@@ -47,6 +48,7 @@ async function createVideoInstallerFixture() {
   for (const relative of [
     'scripts/install-aiworker-video-command-plugin.sh',
     'scripts/lib/openclaw-secret-reference.mjs',
+    'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
     'openclaw-plugins/aiworker-video-command',
@@ -127,19 +129,34 @@ process.stdout.write(JSON.stringify({ mode: 'rolling' }) + '\\n')
   await chmod(liveDbPath, 0o600)
   await chmod(n8nDbPath, 0o600)
   await writeFile(gateLog, '', { mode: 0o600 })
+  await writeFile(gitLog, '', { mode: 0o600 })
   await writeFile(openclawLog, '', { mode: 0o600 })
 
   await createExecutable(resolve(bin, 'id'), '#!/bin/sh\nprintf "heisenbergs-1\\n"\n')
   await createExecutable(resolve(bin, 'hostname'), '#!/bin/sh\nprintf "HEISENBERGS-1deMac-Studio.local\\n"\n')
   await createExecutable(resolve(bin, 'lsof'), '#!/bin/sh\nprintf "12345\\n"\n')
   await createExecutable(resolve(bin, 'git'), `#!${process.execPath}
+const fs = require('node:fs')
 const args = process.argv.slice(2)
 const target = process.env.AIWORKER_TEST_TARGET_SHA
-if (args.includes('remote') && args.includes('get-url')) console.log('https://github.com/MAKingljx/video-autoworker.git')
-else if (args.includes('symbolic-ref')) console.log('main')
-else if (args.includes('status') || args.includes('fetch')) {}
-else if (args.includes('rev-parse')) console.log(target)
-else if (args.includes('ls-remote')) console.log(target + '\\trefs/heads/main')
+fs.appendFileSync(process.env.AIWORKER_TEST_GIT_LOG, JSON.stringify(args) + '\\n')
+if (args.includes('remote') && args.includes('get-url')) {
+  console.log(process.env.AIWORKER_TEST_GIT_REMOTE_URL || 'https://github.com/MAKingljx/video-autoworker.git')
+} else if (args.includes('symbolic-ref')) {
+  console.log(process.env.AIWORKER_TEST_GIT_BRANCH || 'main')
+} else if (args.includes('status')) {
+  if (process.env.AIWORKER_TEST_GIT_DIRTY === '1') console.log(' M local-drift')
+} else if (args.includes('fetch')) {
+  if (process.env.AIWORKER_TEST_GIT_FAIL_FETCH === '1') process.exit(71)
+} else if (args.includes('rev-parse')) {
+  const remote = args.some(value => value.includes('refs/remotes/origin/main'))
+  console.log(remote
+    ? (process.env.AIWORKER_TEST_GIT_ORIGIN_SHA || target)
+    : (process.env.AIWORKER_TEST_GIT_HEAD_SHA || target))
+} else if (args.includes('ls-remote')) {
+  if (process.env.AIWORKER_TEST_GIT_FAIL_LS_REMOTE === '1') process.exit(72)
+  console.log(target + '\\trefs/heads/main')
+}
 else process.exit(90)
 `)
   await createExecutable(resolve(bin, 'openclaw'), `#!${process.execPath}
@@ -185,6 +202,7 @@ if (command[0] === 'plugins' && command[1] === 'install') {
     PATH: [bin, dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter),
     AIWORKER_TEST_TARGET_SHA: targetSha,
     AIWORKER_TEST_GATE_LOG: gateLog,
+    AIWORKER_TEST_GIT_LOG: gitLog,
     AIWORKER_TEST_OPENCLAW_LOG: openclawLog,
     AIWORKER_BG_RUN_DIR: runDir,
     AIWORKER_BG_LIVE_DB_PATH: liveDbPath,
@@ -201,6 +219,7 @@ if (command[0] === 'plugins' && command[1] === 'install') {
     installedPlugin,
     backupRoot: resolve(home, 'ai-worker/backups/aiworker-video-command'),
     gateLog,
+    gitLog,
     openclawLog,
     environment,
   }
@@ -248,6 +267,11 @@ async function openclawCalls(fixture) {
   return source.trim() === '' ? [] : source.trim().split('\n').map(line => JSON.parse(line))
 }
 
+async function gitCalls(fixture) {
+  const source = await readFile(fixture.gitLog, 'utf8')
+  return source.trim() === '' ? [] : source.trim().split('\n').map(line => JSON.parse(line))
+}
+
 describe('current video-command plugin installer', () => {
   it('owns the only supported current release path', async () => {
     const script = await readFile(installerPath, 'utf8')
@@ -260,6 +284,10 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('validate_git_target')
+    expect(script).toContain('git -C "$REPOSITORY_ROOT" fetch --prune origin')
+    expect(script).toContain('git -C "$REPOSITORY_ROOT" ls-remote --exit-code origin refs/heads/main')
+    expect(script).toContain('&& "$MODE" != dry-run && "$MODE" != probe-current-manifest')
+    expect(script).toContain('Local HEAD and origin/main must match the preinstall target SHA.')
     expect(script).toContain('HEAD, origin/main, live GitHub main, and target SHA must match.')
     expect(script).toContain('run_qwen_openclaw plugins install --force "$PLUGIN_DIR"')
     expect(script).toContain('run_qwen_openclaw gateway restart --wait 60s --json')
@@ -545,7 +573,111 @@ describe('current video-command plugin installer', () => {
     }
   }, 30_000)
 
-  it('defers only the orchestrated apply restart and rejects occupied result outputs', async () => {
+  it.each([
+    ['fetch', 'AIWORKER_TEST_GIT_FAIL_FETCH'],
+    ['ls-remote', 'AIWORKER_TEST_GIT_FAIL_LS_REMOTE'],
+  ])('keeps preinstall dry-run dependent on live GitHub %s', async (operation, failureFlag) => {
+    const fixture = await createVideoInstallerFixture()
+    try {
+      const attemptDir = resolve(fixture.root, 'preinstall-attempt')
+      await mkdir(attemptDir, { mode: 0o700 })
+      fixture.environment.AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR = attemptDir
+      fixture.environment[failureFlag] = '1'
+      const before = await fileSha256(resolve(fixture.installedPlugin, 'package.json'))
+      await expect(runFixtureInstaller(fixture, '--dry-run')).rejects.toThrow()
+      const calls = await gitCalls(fixture)
+      expect(calls.some(args => args.includes(operation))).toBe(true)
+      expect(await fileSha256(resolve(fixture.installedPlugin, 'package.json'))).toBe(before)
+      expect((await readFile(fixture.gateLog, 'utf8')).trim()).toBe('')
+      expect(await pathExists(fixture.backupRoot)).toBe(false)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['apply', 'rollback'])('keeps ordinary %s dependent on live GitHub', async operation => {
+    const fixture = await createVideoInstallerFixture()
+    try {
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_FETCH = '1'
+      const result = resolve(fixture.root, `ordinary-${operation}.json`)
+      const before = await fileSha256(resolve(fixture.installedPlugin, 'package.json'))
+      const arguments_ = operation === 'apply'
+        ? ['--apply', '--result-output', result]
+        : ['--rollback', '--backup', resolve(fixture.root, 'absent-backup'),
+            '--result-output', result]
+      await expect(runFixtureInstaller(fixture, ...arguments_)).rejects.toThrow()
+      expect((await gitCalls(fixture)).some(args => args.includes('fetch'))).toBe(true)
+      expect(await fileSha256(resolve(fixture.installedPlugin, 'package.json'))).toBe(before)
+      expect((await readFile(fixture.gateLog, 'utf8')).trim()).toBe('')
+      expect(await pathExists(result)).toBe(false)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not let an unverified preinstall marker bypass the shared gate while offline', async () => {
+    const fixture = await createVideoInstallerFixture()
+    try {
+      const attemptDir = resolve(fixture.root, 'unverified-preinstall-attempt')
+      const result = resolve(fixture.root, 'unverified-preinstall.json')
+      await mkdir(attemptDir, { mode: 0o700 })
+      fixture.environment.AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR = attemptDir
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_FETCH = '1'
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_LS_REMOTE = '1'
+      fixture.environment.AIWORKER_TEST_GATE_FAIL = '1'
+      const before = await fileSha256(resolve(fixture.installedPlugin, 'package.json'))
+      await expect(runFixtureInstaller(
+        fixture, '--apply', '--defer-gateway-restart', '--result-output', result,
+      )).rejects.toThrow()
+      expect((await gitCalls(fixture)).some(args => (
+        args.includes('fetch') || args.includes('ls-remote')
+      ))).toBe(false)
+      expect((await readFile(fixture.gateLog, 'utf8')).trim()).not.toBe('')
+      expect(await fileSha256(resolve(fixture.installedPlugin, 'package.json'))).toBe(before)
+      expect(await pathExists(fixture.backupRoot)).toBe(false)
+      expect(await pathExists(result)).toBe(false)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    ['remote URL', 'AIWORKER_TEST_GIT_REMOTE_URL', 'https://example.invalid/wrong.git',
+      'Canonical Git remote mismatch.'],
+    ['branch', 'AIWORKER_TEST_GIT_BRANCH', 'not-main', 'Canonical checkout must be on main.'],
+    ['clean worktree', 'AIWORKER_TEST_GIT_DIRTY', '1', 'Canonical checkout must be clean.'],
+    ['local HEAD', 'AIWORKER_TEST_GIT_HEAD_SHA', 'b'.repeat(40),
+      'Local HEAD and origin/main must match the preinstall target SHA.'],
+    ['origin/main', 'AIWORKER_TEST_GIT_ORIGIN_SHA', 'b'.repeat(40),
+      'Local HEAD and origin/main must match the preinstall target SHA.'],
+  ])('rejects preinstall %s drift before gate or mutation', async (_label, variable, value, error) => {
+    const fixture = await createVideoInstallerFixture()
+    try {
+      const attemptDir = resolve(fixture.root, 'preinstall-attempt')
+      const result = resolve(fixture.root, 'drifted-preinstall.json')
+      await mkdir(attemptDir, { mode: 0o700 })
+      fixture.environment.AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR = attemptDir
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_FETCH = '1'
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_LS_REMOTE = '1'
+      fixture.environment[variable] = value
+      const before = await fileSha256(resolve(fixture.installedPlugin, 'package.json'))
+      await expect(runFixtureInstaller(
+        fixture, '--apply', '--defer-gateway-restart', '--result-output', result,
+      )).rejects.toThrow(error)
+      expect((await gitCalls(fixture)).some(args => (
+        args.includes('fetch') || args.includes('ls-remote')
+      ))).toBe(false)
+      expect((await readFile(fixture.gateLog, 'utf8')).trim()).toBe('')
+      expect((await openclawCalls(fixture))).toHaveLength(0)
+      expect(await fileSha256(resolve(fixture.installedPlugin, 'package.json'))).toBe(before)
+      expect(await pathExists(fixture.backupRoot)).toBe(false)
+      expect(await pathExists(result)).toBe(false)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  it('continues preinstall apply and rollback without GitHub while retaining the shared gate', async () => {
     const fixture = await createVideoInstallerFixture()
     try {
       const attemptDir = resolve(fixture.root, 'preinstall-attempt')
@@ -553,6 +685,8 @@ describe('current video-command plugin installer', () => {
       const deferredRollbackOutput = resolve(fixture.root, 'deferred-rollback.json')
       await mkdir(attemptDir, { mode: 0o700 })
       fixture.environment.AIWORKER_BG_LEGACY_PREINSTALL_ATTEMPT_DIR = attemptDir
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_FETCH = '1'
+      fixture.environment.AIWORKER_TEST_GIT_FAIL_LS_REMOTE = '1'
       await runFixtureInstaller(
         fixture,
         '--apply', '--defer-gateway-restart', '--result-output', deferredOutput,
@@ -581,6 +715,17 @@ describe('current video-command plugin installer', () => {
       expect(deferredRollback.afterManifestSha256).toBe(deferred.beforeManifestSha256)
       expect((await openclawCalls(fixture))
         .filter(args => args.slice(2, 4).join(' ') === 'gateway restart')).toHaveLength(0)
+      const offlineGitCalls = await gitCalls(fixture)
+      expect(offlineGitCalls.some(args => args.includes('fetch'))).toBe(false)
+      expect(offlineGitCalls.some(args => args.includes('ls-remote'))).toBe(false)
+      const gateCalls = (await readFile(fixture.gateLog, 'utf8')).trim().split('\n')
+        .filter(Boolean).map(line => JSON.parse(line))
+      expect(gateCalls.some(args => args.includes('--legacy-preinstall-attempt-dir')
+        && args.includes(attemptDir) && args.includes('--operation')
+        && args.includes('install'))).toBe(true)
+      expect(gateCalls.some(args => args.includes('--legacy-preinstall-attempt-dir')
+        && args.includes(attemptDir) && args.includes('--operation')
+        && args.includes('rollback'))).toBe(true)
 
       const occupied = resolve(fixture.root, 'occupied.json')
       const symlinkTarget = resolve(fixture.root, 'symlink-target.json')

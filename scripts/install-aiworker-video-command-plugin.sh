@@ -388,6 +388,20 @@ validate_git_target() {
     printf 'Canonical checkout must be clean.\n' >&2
     return 1
   }
+  # The preinstall dry-run already established live GitHub identity. Once a
+  # component transaction starts, the shared gate binds this exact local SHA
+  # to its prepared attempt and reservation, so recovery must not depend on
+  # another network round trip.
+  if [[ -n "$LEGACY_PREINSTALL_ATTEMPT_DIR" \
+    && "$MODE" != dry-run && "$MODE" != probe-current-manifest ]]; then
+    head="$(git -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')"
+    origin_main="$(git -C "$REPOSITORY_ROOT" rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+    [[ "$head" == "$TARGET_SHA" && "$origin_main" == "$TARGET_SHA" ]] || {
+      printf 'Local HEAD and origin/main must match the preinstall target SHA.\n' >&2
+      return 1
+    }
+    return 0
+  fi
   git -C "$REPOSITORY_ROOT" fetch --prune origin >/dev/null
   head="$(git -C "$REPOSITORY_ROOT" rev-parse --verify 'HEAD^{commit}')"
   origin_main="$(git -C "$REPOSITORY_ROOT" rev-parse --verify 'refs/remotes/origin/main^{commit}')"
