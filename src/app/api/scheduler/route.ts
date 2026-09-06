@@ -1,12 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
+import { requireN8nGlobalReleaseManager } from '@/lib/n8n-global-release-auth'
+import { isOpenClawLoopbackAuthMode } from '@/lib/openclaw-loopback-auth'
 import { getSchedulerLeadershipStatus, getSchedulerStatus, triggerTask } from '@/lib/scheduler'
 
 /**
  * GET /api/scheduler - Get scheduler status
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = isOpenClawLoopbackAuthMode()
+    ? requireN8nGlobalReleaseManager(request)
+    : requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   return NextResponse.json({

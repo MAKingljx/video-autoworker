@@ -77,8 +77,10 @@ They verify the selected release through port 3017 and automatically roll back
 if the routed read-only checks fail. Ordinary switch and explicit rollback are
 contract-preserving only; a different director projection contract is rejected
 even at zero work. They do not stop either backend or mutate application data.
-Set AIWORKER_BG_CONTROL_TOKEN_FILE to a mode-0600 file that
-contains the viewer/admin API token (or inject AIWORKER_BG_CONTROL_TOKEN).
+For an OpenClaw loopback deployment, set MC_AUTH_MODE=openclaw-loopback,
+matching the slot environment. Requests then use the existing loopback release
+boundary and never read or forward a control token. Other authentication modes
+require AIWORKER_BG_CONTROL_TOKEN_FILE (mode 0600) or AIWORKER_BG_CONTROL_TOKEN.
 `bootstrap` is the only supported migration from a legacy single-process 3017.
 It accepts only mode-0600 managed v3 evidence produced while the managed
 legacy freeze guard holds a real BEGIN IMMEDIATE reservation on the authoritative
@@ -665,6 +667,13 @@ NODE
 
 read_control_token() {
   local token
+  if [[ "${MC_AUTH_MODE:-}" == openclaw-loopback ]]; then
+    [[ "$ROUTER_HOST" == 127.0.0.1 ]] \
+      || fail "OpenClaw release control requires the fixed loopback router host"
+    # The application authenticates this exact internal release route. Do not
+    # resolve or forward Gateway credentials to the application HTTP service.
+    return 0
+  fi
   if [[ -n "$CONTROL_TOKEN_FILE" ]]; then
     assert_absolute "AIWORKER_BG_CONTROL_TOKEN_FILE" "$CONTROL_TOKEN_FILE"
     assert_private_file "blue-green control token file" "$CONTROL_TOKEN_FILE"
@@ -1190,7 +1199,10 @@ try {
   response = await fetch(`http://${host}:${rawPort}${pathname}`, {
     cache: 'no-store',
     redirect: 'manual',
-    headers: { authorization: `Bearer ${token}`, accept: kind === 'api' ? 'application/json' : 'text/html' },
+    headers: {
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      accept: kind === 'api' ? 'application/json' : 'text/html',
+    },
     signal: AbortSignal.timeout(Number(process.env.AIWORKER_BG_REQUEST_TIMEOUT_MS)),
   })
 } catch {
@@ -1212,13 +1224,30 @@ ensure_bootstrap_intake_paused() {
   local host="$1"
   local port="$2"
   local token
+  [[ "${DEPLOYMENT_LOCK_OWNED:-0}" == 1 && -n "${DEPLOYMENT_LOCK_LEASE_JSON:-}" ]] \
+    || fail "bootstrap intake requires the current shared deployment lock"
   token="$(read_control_token)"
   AIWORKER_BG_REQUEST_TOKEN="$token" AIWORKER_BG_REQUEST_TIMEOUT_MS="$HTTP_TIMEOUT_MS" \
-    "$NODE_BIN" - "$host" "$port" <<'NODE'
-const [host, port] = process.argv.slice(2)
+    AIWORKER_BG_INTAKE_LOCK_LEASE="$DEPLOYMENT_LOCK_LEASE_JSON" \
+    "$NODE_BIN" - "$host" "$port" "$SCRIPT_DIR/lib/shared-deployment-lock.mjs" "$RUN_DIR" <<'NODE'
+const [host, port, helper, runDirectory] = process.argv.slice(2)
+const { pathToFileURL } = await import('node:url')
+const { verifySharedDeploymentLockDelegationSync } = await import(pathToFileURL(helper).href)
+const lease = JSON.parse(process.env.AIWORKER_BG_INTAKE_LOCK_LEASE || 'null')
+delete process.env.AIWORKER_BG_INTAKE_LOCK_LEASE
+if (lease?.schema !== 'video-autoworker-shared-deployment-lock-lease/v1'
+  || lease.runDirectory !== runDirectory || typeof lease.ownerSource !== 'string') {
+  throw new Error('bootstrap intake deployment lease is invalid')
+}
+const owner = JSON.parse(lease.ownerSource)
+if (lease.ownerPid !== owner.pid) throw new Error('bootstrap intake lock owner is invalid')
+const witness = verifySharedDeploymentLockDelegationSync({
+  runDirectory, ownerPid: owner.pid, ownerNonce: owner.nonce, expectedLease: lease,
+})
 const base = `http://${host}:${port}`
+const token = process.env.AIWORKER_BG_REQUEST_TOKEN || ''
 const headers = {
-  authorization: `Bearer ${process.env.AIWORKER_BG_REQUEST_TOKEN || ''}`,
+  ...(token ? { authorization: `Bearer ${token}` } : {}),
   accept: 'application/json',
 }
 const request = async (path, init = {}) => {
@@ -1237,9 +1266,16 @@ if (!first || first.schema !== 'video-autoworker-intake-control/v1' || first.glo
   || !Number.isSafeInteger(first.revision)) throw new Error('bootstrap intake control is invalid')
 let control = first
 if (control.accepting) {
+  witness.assertCurrent()
   control = (await request('/api/n8n/intake-control', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // Delegate only the existing drain transaction; keep the deployment lock
+    // held so ordinary task creation and other installers remain blocked.
+    headers: {
+      'content-type': 'application/json',
+      'x-aiworker-bootstrap-lock-owner-pid': String(owner.pid),
+      'x-aiworker-bootstrap-lock-nonce': owner.nonce,
+    },
     body: JSON.stringify({
       action: 'drain',
       reason: '首次蓝绿基线引导期间冻结入口',
@@ -1247,6 +1283,7 @@ if (control.accepting) {
     }),
   }))?.control
 }
+witness.assertCurrent()
 if (!control || control.accepting !== false || control.mode !== 'paused'
   || control.counts?.active !== 0 || !Number.isSafeInteger(control.revision) || control.revision < 1) {
   throw new Error('bootstrap intake did not reach a zero-work paused state')

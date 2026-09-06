@@ -1,6 +1,9 @@
 import { resolve } from 'node:path'
 
-import { acquireSharedDeploymentLockSync } from '../../scripts/lib/shared-deployment-lock.mjs'
+import {
+  acquireSharedDeploymentLockSync,
+  verifySharedDeploymentLockDelegationSync,
+} from '../../scripts/lib/shared-deployment-lock.mjs'
 
 const DEFAULT_ATTEMPTS = 4
 const DEFAULT_RETRY_DELAY_MS = 25
@@ -18,6 +21,18 @@ export interface SharedDeploymentLockOptions {
   runDirectory?: string
   attempts?: number
   retryDelayMs?: number
+}
+
+export interface SharedDeploymentLockDelegationWitness {
+  path: string
+  ownerPid: number
+  assertCurrent: () => void
+}
+
+export interface SharedDeploymentLockDelegationOptions {
+  runDirectory?: string
+  ownerPid: number
+  ownerNonce: string
 }
 
 function fail(message: string): never {
@@ -75,4 +90,21 @@ export async function acquireSharedDeploymentLock(
     }
   }
   return { acquired: false, reason: 'busy' }
+}
+
+export function verifySharedDeploymentLockDelegation(
+  options: SharedDeploymentLockDelegationOptions,
+): SharedDeploymentLockDelegationWitness {
+  const runDirectory = String(
+    options.runDirectory || process.env.AIWORKER_BG_RUN_DIR || resolve(process.cwd(), '.run/blue-green'),
+  ).trim()
+  try {
+    return verifySharedDeploymentLockDelegationSync({
+      runDirectory,
+      ownerPid: options.ownerPid,
+      ownerNonce: options.ownerNonce,
+    })
+  } catch (error) {
+    translateAcquireError(error)
+  }
 }

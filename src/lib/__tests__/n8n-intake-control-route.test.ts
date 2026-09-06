@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest, NextResponse } from 'next/server'
+import Database from 'better-sqlite3'
+import { runMigrations } from '@/lib/migrations'
 
 const mocks = vi.hoisted(() => ({
   getGlobalReleaseAccess: vi.fn(),
@@ -9,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   getN8nIntakeControl: vi.fn(),
   setN8nIntakeControl: vi.fn(),
   acquireSharedDeploymentLock: vi.fn(),
+  verifySharedDeploymentLockDelegation: vi.fn(),
+  assertDelegationCurrent: vi.fn(),
+  databaseTransaction: vi.fn(),
   releaseSharedDeploymentLock: vi.fn(),
 }))
 
@@ -20,6 +25,7 @@ vi.mock('@/lib/rate-limit', () => ({ mutationLimiter: mocks.mutationLimiter }))
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
 vi.mock('@/lib/shared-deployment-lock', () => ({
   acquireSharedDeploymentLock: mocks.acquireSharedDeploymentLock,
+  verifySharedDeploymentLockDelegation: mocks.verifySharedDeploymentLockDelegation,
 }))
 vi.mock('@/lib/n8n-intake-control', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/n8n-intake-control')>()
@@ -44,11 +50,11 @@ const control = {
   counts: { queued: 0, accepted: 0, running: 0, waiting: 0, active: 0 },
 }
 
-function request(method: 'GET' | 'POST', body?: unknown) {
+function request(method: 'GET' | 'POST', body?: unknown, headers: Record<string, string> = {}) {
   return new NextRequest('http://127.0.0.1:3017/api/n8n/intake-control', {
     method,
     ...(body === undefined ? {} : {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...headers },
       body: JSON.stringify(body),
     }),
   })
@@ -65,13 +71,21 @@ describe('n8n intake control route', () => {
       user: { id: 8, username: 'admin', role: 'admin', workspace_id: 2, tenant_id: 3 },
     })
     mocks.mutationLimiter.mockReturnValue(null)
-    mocks.getDatabase.mockReturnValue({})
+    mocks.databaseTransaction.mockImplementation((callback: () => unknown) => ({
+      immediate: () => callback(),
+    }))
+    mocks.getDatabase.mockReturnValue({ transaction: mocks.databaseTransaction })
     mocks.getN8nIntakeControl.mockReturnValue(control)
     mocks.setN8nIntakeControl.mockReturnValue({ outcome: 'updated', control })
     mocks.releaseSharedDeploymentLock.mockReturnValue(undefined)
     mocks.acquireSharedDeploymentLock.mockResolvedValue({
       acquired: true,
       lease: { path: '/private/run/.deployment.lock', release: mocks.releaseSharedDeploymentLock },
+    })
+    mocks.verifySharedDeploymentLockDelegation.mockReturnValue({
+      path: '/private/run/.deployment.lock',
+      ownerPid: 123,
+      assertCurrent: mocks.assertDelegationCurrent,
     })
   })
 
@@ -81,7 +95,7 @@ describe('n8n intake control route', () => {
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(await response.json()).toEqual({ control: { ...control, canManage: true } })
     expect(mocks.getGlobalReleaseAccess).toHaveBeenCalledWith(expect.any(NextRequest))
-    expect(mocks.getN8nIntakeControl).toHaveBeenCalledWith({})
+    expect(mocks.getN8nIntakeControl).toHaveBeenCalledWith(expect.anything())
   })
 
   it('returns only the safe gate status to a non-admin caller', async () => {
@@ -97,7 +111,7 @@ describe('n8n intake control route', () => {
         canManage: false,
       },
     })
-    expect(mocks.getN8nIntakeControl).toHaveBeenCalledWith({})
+    expect(mocks.getN8nIntakeControl).toHaveBeenCalledWith(expect.anything())
   })
 
   it('requires a global release manager before applying the mutation limiter or reading the database', async () => {
@@ -128,7 +142,7 @@ describe('n8n intake control route', () => {
     expect(response.headers.get('cache-control')).toBe('no-store')
     expect(mocks.requireGlobalReleaseManager).toHaveBeenCalledWith(expect.any(NextRequest))
     expect(mocks.setN8nIntakeControl).toHaveBeenCalledWith(
-      {},
+      expect.anything(),
       { action: 'drain', reason: '准备发布新的服务版本', expectedRevision: 1 },
       { id: 8, name: 'admin' },
     )
@@ -175,6 +189,95 @@ describe('n8n intake control route', () => {
     expect(await response.json()).toMatchObject({ code: 'DEPLOYMENT_IN_PROGRESS' })
     expect(mocks.getDatabase).not.toHaveBeenCalled()
     expect(mocks.setN8nIntakeControl).not.toHaveBeenCalled()
+  })
+
+  it('uses the current deployment owner as a transaction-scoped bootstrap drain delegation', async () => {
+    const response = await POST(request('POST', {
+      action: 'drain',
+      reason: '首次蓝绿基线引导期间冻结入口',
+      expectedRevision: 0,
+    }, {
+      'x-aiworker-bootstrap-lock-owner-pid': '123',
+      'x-aiworker-bootstrap-lock-nonce': 'a'.repeat(64),
+    }))
+
+    expect(response.status).toBe(200)
+    expect(mocks.verifySharedDeploymentLockDelegation).toHaveBeenCalledWith({
+      ownerPid: 123,
+      ownerNonce: 'a'.repeat(64),
+    })
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.databaseTransaction).toHaveBeenCalledOnce()
+    expect(mocks.assertDelegationCurrent).toHaveBeenCalledTimes(2)
+    expect(mocks.setN8nIntakeControl).toHaveBeenCalledOnce()
+    expect(mocks.releaseSharedDeploymentLock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [{ 'x-aiworker-bootstrap-lock-owner-pid': '123' }, 'drain', '首次蓝绿基线引导期间冻结入口'],
+    [{ 'x-aiworker-bootstrap-lock-owner-pid': '123', 'x-aiworker-bootstrap-lock-nonce': 'z'.repeat(64) }, 'drain', '首次蓝绿基线引导期间冻结入口'],
+    [{ 'x-aiworker-bootstrap-lock-owner-pid': '123', 'x-aiworker-bootstrap-lock-nonce': 'a'.repeat(64) }, 'resume', '首次蓝绿基线引导期间冻结入口'],
+    [{ 'x-aiworker-bootstrap-lock-owner-pid': '123', 'x-aiworker-bootstrap-lock-nonce': 'a'.repeat(64) }, 'drain', '准备发布新的服务版本'],
+  ] as const)('rejects an invalid bootstrap delegation without falling back to lock acquisition', async (
+    headers, action, reason,
+  ) => {
+    const response = await POST(request('POST', { action, reason, expectedRevision: 0 }, headers))
+    expect(response.status).toBe(403)
+    expect(mocks.verifySharedDeploymentLockDelegation).not.toHaveBeenCalled()
+    expect(mocks.acquireSharedDeploymentLock).not.toHaveBeenCalled()
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+  })
+
+  it('rolls back the delegated mutation when the owner changes before transaction commit', async () => {
+    const database = new Database(':memory:')
+    try {
+      runMigrations(database)
+      const actual = await vi.importActual<typeof import('@/lib/n8n-intake-control')>(
+        '@/lib/n8n-intake-control',
+      )
+      mocks.getDatabase.mockReturnValue(database)
+      mocks.setN8nIntakeControl.mockImplementation(actual.setN8nIntakeControl)
+      mocks.assertDelegationCurrent
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => { throw new Error('owner changed') })
+      const response = await POST(request('POST', {
+        action: 'drain', reason: '首次蓝绿基线引导期间冻结入口', expectedRevision: 0,
+      }, {
+        'x-aiworker-bootstrap-lock-owner-pid': '123',
+        'x-aiworker-bootstrap-lock-nonce': 'a'.repeat(64),
+      }))
+      expect(response.status).toBe(503)
+      expect(await response.json()).toMatchObject({ code: 'BOOTSTRAP_LOCK_DELEGATION_LOST' })
+      expect(database.prepare('SELECT COUNT(*) AS count FROM n8n_intake_controls').get())
+        .toEqual({ count: 0 })
+      expect(database.prepare('SELECT COUNT(*) AS count FROM n8n_intake_control_events').get())
+        .toEqual({ count: 0 })
+      expect(mocks.releaseSharedDeploymentLock).not.toHaveBeenCalled()
+    } finally {
+      database.close()
+    }
+  })
+
+  it('rejects bootstrap delegation headers from a non-loopback request', async () => {
+    const response = await POST(new NextRequest(
+      'https://example.invalid/api/n8n/intake-control',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-aiworker-bootstrap-lock-owner-pid': '123',
+          'x-aiworker-bootstrap-lock-nonce': 'a'.repeat(64),
+        },
+        body: JSON.stringify({
+          action: 'drain',
+          reason: '首次蓝绿基线引导期间冻结入口',
+          expectedRevision: 0,
+        }),
+      },
+    ))
+    expect(response.status).toBe(403)
+    expect(mocks.verifySharedDeploymentLockDelegation).not.toHaveBeenCalled()
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
   })
 
   it('fails closed when the shared deployment lock cannot be inspected', async () => {

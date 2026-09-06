@@ -1138,6 +1138,107 @@ check_json_endpoint readiness "http://127.0.0.1:${endpoint.port}/api/n8n/release
     expect(failure?.stderr).not.toContain('fixture-token-that-must-not-be-logged')
   })
 
+  it('uses the loopback release boundary without reading or forwarding credentials for all deploy HTTP clients', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-loopback-control-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(cleanDeployScriptFixture(root), 'utf8')
+    const harness = join(root, 'repository/scripts/loopback-control.sh')
+    const runDirectory = join(root, 'run')
+    const requests: Array<{ path: string; method: string; authorization: string | undefined }> = []
+    let mutation: unknown
+    let lockWasDelegated = false
+    const endpoint = await listen(createServer((request, response) => {
+      requests.push({ path: request.url || '', method: request.method || '', authorization: request.headers.authorization })
+      if (request.url === '/materials') {
+        response.writeHead(200, { 'content-type': 'text/html' })
+        response.end('<html>materials</html>')
+      } else if (request.url === '/api/scheduler') {
+        response.writeHead(200, { 'content-type': 'application/json' })
+        response.end(JSON.stringify(schedulerPayload('leader')))
+      } else {
+        let body = ''
+        request.on('data', chunk => { body += String(chunk) })
+        request.on('end', () => {
+          const accepting = request.method === 'GET'
+          if (!accepting) {
+            mutation = JSON.parse(body)
+            const owner = JSON.parse(readFileSync(join(runDirectory, '.deployment.lock/pid'), 'utf8'))
+            lockWasDelegated = request.headers['x-aiworker-bootstrap-lock-owner-pid'] === String(owner.pid)
+              && request.headers['x-aiworker-bootstrap-lock-nonce'] === owner.nonce
+              && Object.keys(request.headers).filter(name => name.startsWith('x-aiworker-bootstrap')).length === 2
+          }
+          response.writeHead(200, { 'content-type': 'application/json' })
+          response.end(JSON.stringify({ control: {
+            schema: 'video-autoworker-intake-control/v1', globalScope: true,
+            accepting, mode: accepting ? 'accepting' : 'paused',
+            revision: accepting ? 3 : 4, counts: { active: 0 },
+          } }))
+        })
+      }
+    }))
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    writeFileSync(harness, `${functionPrelude}
+source "$SHARED_DEPLOYMENT_LOCK_SHELL"
+DEPLOYMENT_RUN_DIR="$RUN_DIR"
+DEPLOYMENT_LOCK_DIR="$RUN_DIR/.deployment.lock"
+acquire_shared_deployment_lock
+trap release_shared_deployment_lock EXIT
+check_json_endpoint leader "http://127.0.0.1:${endpoint.port}/api/scheduler" 7
+check_routed_readonly_endpoint /materials page
+ensure_bootstrap_intake_paused 127.0.0.1 ${endpoint.port}
+`)
+    const result = await execFileAsync('bash', [harness], {
+      env: {
+        ...process.env,
+        MC_AUTH_MODE: 'openclaw-loopback',
+        AIWORKER_BG_RUN_DIR: runDirectory,
+        AIWORKER_BG_ROUTER_HOST: '127.0.0.1',
+        AIWORKER_BG_ROUTER_PORT: String(endpoint.port),
+        // A missing file proves this mode does not even resolve credentials.
+        AIWORKER_BG_CONTROL_TOKEN_FILE: join(root, 'must-not-be-read'),
+        AIWORKER_BG_CONTROL_TOKEN: 'fixture-must-not-forward',
+        API_KEY: 'fixture-must-not-forward',
+        NODE_BIN: process.execPath,
+      },
+    })
+    expect(requests.map(({ path, method }) => `${method} ${path}`)).toEqual([
+      'GET /api/scheduler', 'GET /materials', 'GET /api/n8n/intake-control', 'POST /api/n8n/intake-control',
+    ])
+    expect(requests.every(request => request.authorization === undefined)).toBe(true)
+    expect(lockWasDelegated).toBe(true)
+    expect(existsSync(join(runDirectory, '.deployment.lock'))).toBe(false)
+    expect(mutation).toEqual({ action: 'drain', reason: '首次蓝绿基线引导期间冻结入口', expectedRevision: 3 })
+    expect(result.stdout).not.toContain('fixture-must-not-forward')
+    expect(result.stderr).not.toContain('fixture-must-not-forward')
+  })
+
+  it.each(['', 'openclaw-loopback-typo'])(
+    'keeps the control credential requirement outside the exact loopback mode (%s)',
+    async mode => {
+      const root = mkdtempSync(join(tmpdir(), 'standalone-control-required-'))
+      cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+      const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+      const harness = join(root, 'token-harness.sh')
+      writeFileSync(harness, `${script.slice(0, script.indexOf('\ncommand="${1:-}"'))}\nread_control_token\n`)
+      const failure = await execFileAsync('bash', [harness], {
+        env: { ...process.env, MC_AUTH_MODE: mode, AIWORKER_BG_CONTROL_TOKEN_FILE: '', AIWORKER_BG_CONTROL_TOKEN: '', API_KEY: '', NODE_BIN: process.execPath },
+      }).then(() => null, error => error as Error & { stderr?: string })
+      expect(failure?.stderr).toContain('AIWORKER_BG_CONTROL_TOKEN_FILE or AIWORKER_BG_CONTROL_TOKEN is required')
+    },
+  )
+
+  it('refuses a non-loopback router in OpenClaw control mode before issuing a request', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-control-host-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(root, 'token-harness.sh')
+    writeFileSync(harness, `${script.slice(0, script.indexOf('\ncommand="${1:-}"'))}\nread_control_token\n`)
+    const failure = await execFileAsync('bash', [harness], {
+      env: { ...process.env, MC_AUTH_MODE: 'openclaw-loopback', AIWORKER_BG_ROUTER_HOST: 'example.invalid', NODE_BIN: process.execPath },
+    }).then(() => null, error => error as Error & { stderr?: string })
+    expect(failure?.stderr).toContain('OpenClaw release control requires the fixed loopback router host')
+  })
+
   it('waits through a temporary follower state until the routed slot becomes leader', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-leader-handoff-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))

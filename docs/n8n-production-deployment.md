@@ -417,15 +417,26 @@ node scripts/legacy-bootstrap-controller.mjs apply \
 
 `prepare.receipt.json`、`current-confirm.receipt.json`、`current-confirm.token.json` 和
 `shutdown-requested.receipt.json` 是固定文件名；不得改名、复制或手填。最后给 deploy verifier 指定
-已生成且仍有效的会话级 OpenClaw runtime convergence proof，再执行 bootstrap：
+已生成且仍有效的会话级 OpenClaw runtime convergence proof，再执行 bootstrap。生产 slot 使用
+`MC_AUTH_MODE=openclaw-loopback` 时，部署命令也显式传入同一模式；部署器只访问固定
+`127.0.0.1`，不读取或发送控制 Token，更不能把 Gateway SecretRef 转发给 3017。其他鉴权模式
+仍必须提供原有控制凭据。调度验收复用精确的 `GET /api/scheduler` 内部只读权限，
+`POST /api/scheduler` 的手动触发权限不随此开放：
 
 ```bash
 export AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF="$runtime_convergence_proof"
+export MC_AUTH_MODE=openclaw-loopback
 
 bash scripts/deploy-blue-green.sh bootstrap \
   "$slot" "$release_id" "$application_release" \
   "$postinstall_evidence_file" "$postinstall_rollback_proof" "$attempt_dir"
 ```
+
+bootstrap 始终持有同一 shared deployment lock。新槽第一次建立暂停闸门时，部署器仅将
+当前锁的 owner PID 与 nonce 委托给既有 intake-control API；该 API 仍先执行原有发布权限
+和 loopback 检查，只允许固定原因的 drain，并在原有 CAS 事务提交前再次核实锁的文件及
+进程身份。完整锁描述不会发往 HTTP，普通请求和 resume 不能使用该委托；无需释放部署锁，
+也不直接写库或绕过同一 `setN8nIntakeControl` 服务。
 
 deploy 有两个明确的 release/readiness 门：第一阶段 `pre-bootstrap` 在写 pending 和停止 legacy 前，
 验证仓库/release 身份、不可变 standalone 内容、已安装 video-command/task-flow/director payload、

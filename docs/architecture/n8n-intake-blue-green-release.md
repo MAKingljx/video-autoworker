@@ -36,6 +36,11 @@ Host 和外部 forwarded 链；普通本地请求只得到固定 viewer，只有
 和发布控制路径获得内部权限。该分支不会回退到密码、Cookie session、全局/Agent API key、
 proxy header、desktop mode 或默认租户推断。
 
+发布器显式使用与 slot 相同的 `MC_AUTH_MODE=openclaw-loopback`，仅向固定 `127.0.0.1`
+发出内部控制请求，不读取或转发 API key、控制 Token 或 Gateway SecretRef。调度状态的
+精确 `GET /api/scheduler` 复用集中式发布控制权限；该只读例外不适用于 POST、其他路径或
+非 loopback 请求，手动触发 scheduler 的权限保持原有边界。其他鉴权模式仍使用原有控制凭据。
+
 OpenClaw Gateway token 由唯一 Gateway 适配器从 SecretRef 解析，只在真实 Gateway HTTP/CLI
 调用时短暂注入 Authorization 或子进程环境；列表和连接 API 只返回凭据来源/配置状态，不解析
 SecretRef、不向浏览器返回 token，也不把探测值写入 SQLite。旧版数据库中若已有 Gateway token，
@@ -61,6 +66,12 @@ OpenClaw-only 模式下，精确 loopback 发布控制路径可读取并操作�
 不能获得全局管理权。旧鉴权模式仍保留原 owner workspace 范围，避免兼容运行时扩大租户管理员
 权限。`drain-status` 和
 `release-readiness` 使用同一角色判断。`/tasks` 的按钮以后端返回的 `canManage` 为准。
+
+首次 bootstrap 持有发布锁时，普通 intake-control POST 再取同锁会被正确拒绝。部署器的
+初始 drain 通过同一锁的受限委托完成：原有发布鉴权与 loopback 边界先行，只传当前锁的
+owner PID 和 nonce，限定固定原因的 drain 与当前 CAS revision。API 在事务内前后核对
+受管 RUN、锁文件、nonce 与活跃进程身份，再调用同一状态服务；末尾身份漂移使事务回滚。
+它不能用于 resume，不释放或接管锁，也不让普通任务请求跳过发布互斥。
 
 ## Webhook 幂等与响应不确定性
 

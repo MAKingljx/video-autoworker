@@ -410,6 +410,61 @@ export function releaseSharedDeploymentLockSync(descriptorValue) {
   fsyncDirectory(descriptor.runDirectory)
 }
 
+/**
+ * @param {{ runDirectory: string, ownerPid: number, ownerNonce: string,
+ *   expectedLease?: ReturnType<typeof leaseDescriptor> | null }} options
+ */
+export function verifySharedDeploymentLockDelegationSync({
+  runDirectory,
+  ownerPid,
+  ownerNonce,
+  expectedLease = null,
+}) {
+  runDirectory = physicalSystemTemporaryPath(runDirectory)
+  if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0
+    || typeof ownerNonce !== 'string' || !/^[a-f0-9]{64}$/u.test(ownerNonce)) {
+    fail('delegated owner identity is invalid')
+  }
+  const run = safeDirectory(runDirectory, 'blue-green run directory', 0o700)
+  const lockPath = join(runDirectory, '.deployment.lock')
+  const lock = safeDirectory(lockPath, 'shared deployment lock', 0o700)
+  if (JSON.stringify(lockMembers(lockPath)) !== JSON.stringify(['pid'])) {
+    fail('delegated lock member set is invalid')
+  }
+  const ownerPath = join(lockPath, 'pid')
+  const owner = readOwner(ownerPath)
+  const descriptor = expectedLease === null ? null : validateLeaseDescriptor(expectedLease)
+  if (descriptor && (descriptor.runDirectory !== runDirectory || descriptor.ownerPid !== ownerPid
+    || descriptor.lockPath !== lockPath || descriptor.ownerPath !== ownerPath
+    || !sameIdentity(descriptor.runIdentity, run.identity)
+    || !sameIdentity(descriptor.lockIdentity, lock.identity)
+    || !sameIdentity(descriptor.ownerIdentity, owner.identity)
+    || descriptor.ownerSource !== owner.source)) {
+    fail('delegated lock does not match the expected lease')
+  }
+  if (owner.value.schema !== OWNER_SCHEMA || owner.value.pid !== ownerPid
+    || owner.value.nonce !== ownerNonce || !ownerProcessIsCurrent(owner.value)) {
+    fail('delegated lock owner is not current')
+  }
+
+  const assertCurrent = () => {
+    const currentRun = safeDirectory(runDirectory, 'blue-green run directory', 0o700)
+    const currentLock = safeDirectory(lockPath, 'shared deployment lock', 0o700)
+    const currentOwner = readOwner(ownerPath)
+    if (!sameIdentity(run.identity, currentRun.identity)
+      || !sameIdentity(lock.identity, currentLock.identity)
+      || !sameIdentity(owner.identity, currentOwner.identity)
+      || currentOwner.source !== owner.source
+      || JSON.stringify(lockMembers(lockPath)) !== JSON.stringify(['pid'])
+      || currentOwner.value.schema !== OWNER_SCHEMA
+      || currentOwner.value.pid !== ownerPid || currentOwner.value.nonce !== ownerNonce
+      || !ownerProcessIsCurrent(currentOwner.value)) {
+      fail('delegated lock ownership changed')
+    }
+  }
+  return { path: lockPath, ownerPid, assertCurrent }
+}
+
 export function acquireSharedDeploymentLockSync({ runDirectory, ownerPid = process.pid }) {
   runDirectory = physicalSystemTemporaryPath(runDirectory)
   if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) fail('owner PID is invalid')

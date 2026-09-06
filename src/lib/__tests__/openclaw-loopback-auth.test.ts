@@ -82,10 +82,19 @@ describe('OpenClaw loopback authentication boundary', () => {
     ), '/api/n8n/claim')).toMatchObject({ allowed: false, status: 403 })
   })
 
-  it('limits global release authority to the three release-control endpoints', () => {
+  it('adds only read-only scheduler status to the global release-control endpoints', () => {
     expect(isOpenClawN8nGlobalReleaseRequest(new Request(
       'http://127.0.0.1:3017/api/n8n/intake-control',
     ))).toBe(true)
+    expect(isOpenClawN8nGlobalReleaseRequest(new Request(
+      'http://127.0.0.1:3017/api/scheduler', { method: 'GET' },
+    ))).toBe(true)
+    expect(isOpenClawN8nGlobalReleaseRequest(new Request(
+      'http://127.0.0.1:3017/api/scheduler', { method: 'POST' },
+    ))).toBe(false)
+    expect(isOpenClawN8nGlobalReleaseRequest(new Request(
+      'http://scheduler.example.test/api/scheduler', { method: 'GET' },
+    ))).toBe(false)
     expect(isOpenClawN8nGlobalReleaseRequest(new Request(
       'http://127.0.0.1:3017/api/n8n/runs',
     ))).toBe(false)

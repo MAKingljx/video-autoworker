@@ -21,6 +21,8 @@ const N8N_GLOBAL_RELEASE_PATHS = new Set([
   '/api/n8n/release-readiness',
 ])
 
+const SCHEDULER_STATUS_PATH = '/api/scheduler'
+
 function hostnameWithoutPort(raw: string): string {
   const value = raw.trim().toLowerCase()
   if (!value) return ''
@@ -97,9 +99,11 @@ export function isOpenClawN8nOperatorRequest(request: Request): boolean {
 }
 
 export function isOpenClawN8nGlobalReleaseRequest(request: Request): boolean {
+  const pathname = requestPathname(request)
   return isOpenClawLoopbackAuthMode()
     && isLoopbackHttpRequest(request)
-    && N8N_GLOBAL_RELEASE_PATHS.has(requestPathname(request))
+    && (N8N_GLOBAL_RELEASE_PATHS.has(pathname)
+      || (request.method.toUpperCase() === 'GET' && pathname === SCHEDULER_STATUS_PATH))
 }
 
 export function checkOpenClawN8nCallbackRequest(
