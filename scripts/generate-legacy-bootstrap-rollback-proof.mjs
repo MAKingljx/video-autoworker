@@ -14,6 +14,7 @@ import {
   captureOpenFileRecords,
   hashFileStable,
   revalidateDatabaseConnection,
+  resolveTrustedStandaloneTarget,
   validateNewDatabaseConnection,
   writeExclusiveAtomic,
 } from './generate-legacy-freeze-evidence.mjs'
@@ -75,18 +76,6 @@ function parseArguments(argv) {
     standaloneRoot: values['--standalone-root'], guardSocket: values['--guard-socket'],
   }
 }
-function targetIdentity(args) {
-  noSymlink(args.standaloneRoot, 'target standalone root')
-  const physical = realpathSync(args.standaloneRoot)
-  const expected = join(repositoryRoot, '.runtime/releases', args.releaseId, 'standalone')
-  const testRoot = testMode ? realpathSync(process.env.AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT) : repositoryRoot
-  const expectedForMode = join(testRoot, '.runtime/releases', args.releaseId, 'standalone')
-  if (physical !== (testMode ? expectedForMode : expected)) fail('target standalone root is not the exact release')
-  const manifest = join(physical, 'release-manifest.json')
-  noSymlink(manifest, 'target release manifest')
-  if (!testMode) execFileSync(process.execPath, [join(repositoryRoot, 'scripts/check-standalone-artifact.mjs'), physical])
-  return { slot: args.slot, releaseId: args.releaseId, manifestSha256: hashFileStable(manifest, 'target release manifest') }
-}
 function fsyncFile(pathname) {
   const fd = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
   try { fsyncSync(fd) } finally { closeSync(fd) }
@@ -135,12 +124,13 @@ async function main() {
   const outputDirectory = dirname(args.output)
   safeDirectory(outputDirectory, 'rollback output directory')
   if (existsSync(args.output)) fail('rollback proof output already exists')
-  const target = targetIdentity(args)
   const effectiveRepository = testMode
     ? realpathSync(process.env.AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT) : repositoryRoot
-  const releaseRoot = dirname(args.standaloneRoot)
+  const resolvedTarget = resolveTrustedStandaloneTarget(args, effectiveRepository)
+  const { releaseRoot: standaloneRoot, ...target } = resolvedTarget
+  const releaseRoot = dirname(standaloneRoot)
   for (const [label, protectedPath] of [
-    ['repository', effectiveRepository], ['target standalone', args.standaloneRoot],
+    ['repository', effectiveRepository], ['target standalone', standaloneRoot],
     ['target release', releaseRoot],
   ]) {
     if (pathsOverlap(outputDirectory, protectedPath)) {

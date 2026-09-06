@@ -18,6 +18,7 @@ import {
   writeSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
+import { userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -670,11 +671,24 @@ export async function captureValidatedSnapshot(repositoryRoot = defaultRepositor
   return validateSnapshot(await captureSnapshot(repositoryRoot))
 }
 
-function targetIdentity(argumentsValue, repositoryRoot) {
-  const expected = join(repositoryRoot, '.runtime/releases', argumentsValue.releaseId, 'standalone')
+export function resolveTrustedStandaloneTarget(argumentsValue, repositoryRoot = defaultRepositoryRoot) {
+  const managedHome = testMode
+    ? testPath('AIWORKER_TEST_LEGACY_FREEZE_MANAGED_HOME', userInfo().homedir)
+    : userInfo().homedir
+  const expectedRoots = [
+    join(repositoryRoot, '.runtime/releases', argumentsValue.releaseId, 'standalone'),
+    join(
+      managedHome,
+      'ai-worker/services/video-autoworker-app/releases',
+      argumentsValue.releaseId,
+      'standalone',
+    ),
+  ]
   assertNoSymlink(argumentsValue.standaloneRoot, 'target standalone root')
   const physical = realpathSync(argumentsValue.standaloneRoot)
-  if (physical !== expected) fail(`target standalone root must be ${expected}`)
+  if (!expectedRoots.includes(physical)) {
+    fail('target standalone root is outside the trusted release layouts')
+  }
   safeEntry(physical, 'target standalone root', 'directory')
   const manifestPath = join(physical, 'release-manifest.json')
   safeEntry(manifestPath, 'target release manifest', 'file')
@@ -830,7 +844,7 @@ async function main() {
       'queueDigestSha256', 'rollback', 'schema', 'supervisor', 'target',
     ], 'evidence')
     const repositoryRoot = testPath('AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT', defaultRepositoryRoot)
-    const target = targetIdentity(argumentsValue, repositoryRoot)
+    const target = resolveTrustedStandaloneTarget(argumentsValue, repositoryRoot)
     if (evidence.schema !== SCHEMA || evidence.generatorSha256 !== sha256(readFileSync(scriptPath))
       || canonicalJson(evidence.target) !== canonicalJson(target)) fail('evidence generator or target binding is invalid')
     const evidenceSnapshot = validateSnapshot({
@@ -874,7 +888,7 @@ async function main() {
   const argumentsValue = parseArguments(process.argv.slice(2))
   const repositoryRoot = testPath('AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT', defaultRepositoryRoot)
   safeEntry(repositoryRoot, 'repository root', 'directory')
-  const target = targetIdentity(argumentsValue, repositoryRoot)
+  const target = resolveTrustedStandaloneTarget(argumentsValue, repositoryRoot)
   const first = validateSnapshot(await captureSnapshot(repositoryRoot))
   const delay = testMode ? Number(process.env.AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS || 0) : 1000
   if (!Number.isSafeInteger(delay) || delay < 0 || delay > 5000) fail('sample delay is invalid')

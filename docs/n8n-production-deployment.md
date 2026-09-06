@@ -209,14 +209,19 @@ mkdir -m 700 "$transition_dir" "$attempt_dir"
 `attempt_dir` 必须是刚创建的空目录；transition、两组 evidence/proof 和 recovery package 也必须是本次
 独立目标，不能覆盖旧产物。`evidence_file` / `rollback_proof` 绑定 preinstall 前状态，
 `postinstall_evidence_file` / `postinstall_rollback_proof` 绑定 terminal handoff 后状态，四个目标均须预先
-不存在。先在 n8n 在线且健康时用只读事务生成受管工作流回滚包；这里的
+不存在。先核对 n8n 在线状态，再用官方 stop/install 完成目标 runtime 与 current 的选择并保持停机。
+停机 checkpoint 会改变 SQLite 主库及 sidecar 的物理引用，因此必须在这之后用只读事务生成新的
+受管工作流回滚包和 intent；不得复用停机前的 intent。这里的
 `source-commit` 是**目标提交**，表示本次 backup/restore tooling contract，不是数据库里旧工作流的
 来源提交：
 
 ```bash
+bash "$runtime_release/scripts/n8n-stop.sh"
+bash "$repository_root/scripts/n8n-install.sh"
+
 node "$runtime_release/scripts/n8n-backup-managed-workflows.mjs" backup \
   --database "$n8n_db" \
-  --module-root "$runtime_release/ops/n8n" \
+  --module-root "$repository_root" \
   --n8n-version 2.31.6 \
   --output "$recovery_package" \
   --source-commit "$target_commit"
@@ -234,7 +239,9 @@ node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" prepare-inten
 ```
 
 审阅回滚包、intent、数据库 inode、runtime 与目标提交后，由外部确认流程写入一次性 0400
-`operator-token`。然后生成当前确认和短时 capability，停止服务，再执行离线导入。不要在 n8n 在线时
+`operator-token`。保持离线，生成当前确认和短时 capability 后立即执行导入，中间不再 stop/install/start。
+备份和 intent 生成器不要求服务在线；这样保留首次 claim 对整个数据库 family 的精确检查，而不放宽为
+仅检查主库 inode。若旧回滚包已用于用户审阅，新包的两条工作流语义和 active 状态还须逐项一致。不要在 n8n 在线时
 手工 tar 活跃 SQLite；导入器在确认服务、LaunchAgent、5678 listener 和数据库并发打开均已停止后，
 会先创建完整 n8n state tar、匹配的环境备份及 SHA-256，再开始改库。
 
@@ -245,8 +252,6 @@ node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" current-confi
   --confirmation-receipt-id <one-current-uuid> \
   --confirmation-output "$transition_dir/current-confirmation.json" \
   --capability-output "$transition_dir/import-capability.json"
-
-bash "$runtime_release/scripts/n8n-stop.sh"
 
 bash "$runtime_release/scripts/n8n-import-workflows.sh" \
   --transition-intent "$transition_dir/upgrade-intent.json" \
@@ -286,7 +291,7 @@ test ! -e "$live_report"
 live_report_tmp="$(mktemp "$transition_dir/.live-workflow-report.XXXXXXXX")"
 trap 'rm -f -- "$live_report_tmp"' EXIT
 
-node "$runtime_release/scripts/verify-n8n-blue-green-workflows.mjs" \
+node "$repository_root/scripts/verify-n8n-blue-green-workflows.mjs" \
   --database "$n8n_db" \
   --repository "$repository_root" \
   --expected-commit "$target_commit" \
@@ -304,7 +309,7 @@ node "$runtime_release/scripts/n8n-workflow-transition-anchor.mjs" attest-transi
   --confirmation "$transition_dir/current-confirmation.json" \
   --journal-dir "$transition_dir/journal" \
   --live-report "$transition_dir/live-workflow-report.json" \
-  --verifier "$runtime_release/scripts/verify-n8n-blue-green-workflows.mjs" \
+  --verifier "$repository_root/scripts/verify-n8n-blue-green-workflows.mjs" \
   --output "$transition_dir/transition-attestation.json"
 ```
 
@@ -468,6 +473,9 @@ nodeGroups。应用基线 release、受管 n8n release 的 `SOURCE_COMMIT` 和�
 bootstrap 的固定顺序是 **serve guard → rollback proof → evidence**。生成器不会用布尔字段
 自行宣称入口冻结；必须先启动 `legacy-freeze-guard.mjs serve`，由它按
 Mission Control → n8n 的固定顺序对两份权威 SQLite 取得 `BEGIN IMMEDIATE` writer reservation；
+生产证据生成器使用上述固定 `legacy-freeze/guard.sock`，bootstrap从同目录读取 `guard.token`；
+不得把 socket/token 改为任意维护目录或其他文件名。Mission 与 n8n 主库在进入统一 preinstall 前
+都须为受管用户所有的 0600 普通单链接文件。
 锁建立后 guard 再次复核精确 legacy PID 的进程/监听/双库 FD 身份。legacy 3017 与 n8n 保持在线，
 读探针继续工作，但两库新写会被阻塞或拒绝。guard 状态目录、proof/备份目录和 evidence 目录须
 预先由运维方建立为当前用户所有的 mode `0700` 独立物理目录，目标文件必须不存在。以下三个步骤
@@ -480,8 +488,8 @@ projection 和部署 SQL 仍需在后续独立重构中收敛为唯一共享 pro
 允许多套队列语义并存。
 
 ```bash
-guard_socket=/absolute/private-state/legacy-freeze/guard.sock
-guard_token=/absolute/private-state/legacy-freeze/guard.token
+guard_socket="$HOME/ai-worker/state/video-autoworker/legacy-freeze/guard.sock"
+guard_token="$HOME/ai-worker/state/video-autoworker/legacy-freeze/guard.token"
 
 node scripts/legacy-freeze-guard.mjs serve \
   --database /absolute/path/mission-control.db \
@@ -496,7 +504,7 @@ node scripts/legacy-freeze-guard.mjs serve \
 时不得生成 proof：
 
 ```bash
-guard_socket=/absolute/private-state/legacy-freeze/guard.sock
+guard_socket="$HOME/ai-worker/state/video-autoworker/legacy-freeze/guard.sock"
 
 node scripts/legacy-freeze-guard.mjs status \
   --database /absolute/path/mission-control.db \
@@ -526,6 +534,11 @@ SIGKILL 遗留只能用 `recover-stale` 在证明旧 guard PID 不存在且 stat
 `0600`、`nlink=1` 和目录 fsync 验证，再独占发布 v2 proof。proof 绑定目标、guard、运行身份和队列摘要。
 冻结证据生成器随后要求 supervisor disabled/unloaded、worker 与全局锁均不存在，并回读该 proof；
 两个生成器都必须是当前 Git HEAD 中受管文件，普通手填 JSON 不能替代。
+
+每次回滚证明会在输出目录创建固定命名的 `mission-control.db` 和 `database.sqlite`，并拒绝覆盖。
+因此 preinstall 与 postinstall 必须使用两个独立的 0700 proof 输出目录；两组 evidence 也分别保存。
+standalone目标仅接受同仓库 `.runtime/releases` 或受管用户固定的独立 services release 根，
+所有生成、FD复验及静态复验共用同一目录判据。
 
 停止状态不能只比较 PID 数字。冻结证据把 legacy incarnation 固定为 PID、PPID、UID、启动时间和
 argv：若该 PID 已被新 incarnation 复用且 3017 无 listener，才可认定旧 legacy 已停；若复用 PID

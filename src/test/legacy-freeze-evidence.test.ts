@@ -115,12 +115,20 @@ function createGuardDatabases(root: string) {
   return { database, n8nDatabase }
 }
 
-function fixture() {
+function fixture(options: { layout?: 'repository' | 'managed-home' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-freeze-evidence.')))
   roots.push(root)
   const repository = join(root, 'repo')
+  const managedHome = join(root, 'managed-home')
   const releaseId = 'abcdef0123456789-runtime'
-  const standalone = join(repository, '.runtime/releases', releaseId, 'standalone')
+  const standalone = options.layout === 'managed-home'
+    ? join(
+      managedHome,
+      'ai-worker/services/video-autoworker-app/releases',
+      releaseId,
+      'standalone',
+    )
+    : join(repository, '.runtime/releases', releaseId, 'standalone')
   const outputDir = join(root, 'evidence')
   const backupDir = join(root, 'rollback')
   const databaseDir = join(root, 'databases')
@@ -220,6 +228,7 @@ function fixture() {
     NODE_ENV: 'test' as const,
     AIWORKER_TEST_LEGACY_FREEZE: '1',
     AIWORKER_TEST_LEGACY_FREEZE_REPOSITORY_ROOT: repository,
+    AIWORKER_TEST_LEGACY_FREEZE_MANAGED_HOME: managedHome,
     AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND: snapshotCommand,
     AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS: '0',
   }
@@ -228,7 +237,7 @@ function fixture() {
     '--standalone-root', standalone, '--rollback-proof', proof,
   ]
   return {
-    root, repository, standalone, releaseId, outputDir, databaseDir, output, proof, snapshotPath,
+    root, repository, managedHome, standalone, releaseId, outputDir, databaseDir, output, proof, snapshotPath,
     snapshotCommand, snapshot, env, args,
   }
 }
@@ -321,7 +330,7 @@ describe('managed legacy freeze evidence', () => {
     }, [])).toThrow(/identity changed without a PID incarnation change/u)
   })
 
-  it('creates guarded online backups and a proof consumed by the evidence validator', () => {
+  it('keeps the repository-local release layout working for both generators', () => {
     const entry = fixture()
     const oldProof = JSON.parse(readFileSync(entry.proof, 'utf8'))
     unlinkSync(entry.proof)
@@ -358,6 +367,78 @@ describe('managed legacy freeze evidence', () => {
     expect(changedProof.status).not.toBe(0)
     expect(String(changedProof.stderr)).toContain('rollback proof binding is invalid')
   })
+
+  it('accepts the managed non-Cloud release layout for both generators', () => {
+    const entry = fixture({ layout: 'managed-home' })
+    const oldProof = JSON.parse(readFileSync(entry.proof, 'utf8'))
+    unlinkSync(entry.proof)
+    unlinkSync(oldProof.backups.mission.path)
+    unlinkSync(oldProof.backups.n8n.path)
+    const rollback = spawnSync(process.execPath, [
+      rollbackGenerator,
+      '--output', entry.proof,
+      '--slot', 'blue',
+      '--release-id', entry.releaseId,
+      '--standalone-root', entry.standalone,
+      '--guard-socket', entry.snapshot.frozen.socket.path,
+    ], { encoding: 'utf8', env: entry.env, cwd: projectRoot })
+    expect(rollback.status, rollback.stderr).toBe(0)
+
+    const evidence = spawnSync(process.execPath, entry.args, {
+      encoding: 'utf8', env: entry.env, cwd: projectRoot,
+    })
+    expect(evidence.status, evidence.stderr).toBe(0)
+    expect(JSON.parse(readFileSync(entry.output, 'utf8')).target.releaseRoot)
+      .toBe(entry.standalone)
+  })
+
+  it.each(['arbitrary', 'other-home', 'symlink'] as const)(
+    'rejects a %s target layout in both generators',
+    kind => {
+      const entry = fixture({ layout: 'managed-home' })
+      let standalone: string
+      if (kind === 'other-home') {
+        standalone = join(
+          entry.root,
+          'other-home/ai-worker/services/video-autoworker-app/releases',
+          entry.releaseId,
+          'standalone',
+        )
+      } else if (kind === 'arbitrary') {
+        standalone = join(entry.root, 'arbitrary-releases', entry.releaseId, 'standalone')
+      } else {
+        standalone = join(entry.root, 'standalone-link')
+        symlinkSync(entry.standalone, standalone)
+      }
+      if (kind !== 'symlink') {
+        mkdirSync(standalone, { recursive: true, mode: 0o700 })
+        chmodSync(standalone, 0o700)
+        writeFileSync(join(standalone, 'release-manifest.json'), '{}\n', { mode: 0o600 })
+      }
+      const env = kind === 'arbitrary'
+        ? { ...entry.env, AIWORKER_BG_RELEASES_DIR: dirname(dirname(standalone)) }
+        : entry.env
+
+      const evidenceArgs = [...entry.args]
+      evidenceArgs[evidenceArgs.indexOf('--standalone-root') + 1] = standalone
+      const evidence = spawnSync(process.execPath, evidenceArgs, {
+        encoding: 'utf8', env, cwd: projectRoot,
+      })
+      expect(evidence.status).not.toBe(0)
+      expect(evidence.stderr).toMatch(/trusted release layouts|contains a symlink/u)
+
+      const rollback = spawnSync(process.execPath, [
+        rollbackGenerator,
+        '--output', join(dirname(entry.proof), `rejected-${kind}.json`),
+        '--slot', 'blue',
+        '--release-id', entry.releaseId,
+        '--standalone-root', standalone,
+        '--guard-socket', entry.snapshot.frozen.socket.path,
+      ], { encoding: 'utf8', env, cwd: projectRoot })
+      expect(rollback.status).not.toBe(0)
+      expect(rollback.stderr).toMatch(/trusted release layouts|contains a symlink/u)
+    },
+  )
 
   it('statically verifies the same evidence after the legacy guard socket is gone', () => {
     const entry = fixture()
