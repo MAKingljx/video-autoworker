@@ -403,7 +403,107 @@ function secureStateDirectory(stateDir) {
   }
 }
 
-function pluginTreeEvidence(stateDir, descriptor) {
+function managedNodePhysicalRoot() {
+  const testRoot = process.env.AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT
+  if (process.env.NODE_ENV === 'test'
+    && process.env.AIWORKER_OPENCLAW_RUNTIME_TEST_MODE === '1' && testRoot) {
+    normalizedAbsolute(testRoot, 'test managed Node root')
+    const physical = fs.realpathSync(testRoot)
+    if (physical !== testRoot) fail('test managed Node root is not physical')
+    const entry = fs.lstatSync(physical)
+    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== process.getuid()
+      || (entry.mode & 0o022) !== 0) fail('test managed Node root is unsafe')
+    return physical
+  }
+  const nodeBinary = fs.realpathSync(process.execPath)
+  const root = path.dirname(path.dirname(nodeBinary))
+  if (path.basename(path.dirname(root)) !== 'node'
+    || nodeBinary !== path.join(root, 'bin', 'node')) {
+    fail('runtime Node is outside the managed physical installation')
+  }
+  const entry = fs.lstatSync(root)
+  if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== process.getuid()
+    || (entry.mode & 0o022) !== 0 || fs.realpathSync(root) !== root) {
+    fail('managed Node root is unsafe')
+  }
+  return root
+}
+
+function openClawSdkLinkEvidence(pathname, entry, expectedVersion) {
+  const target = fs.readlinkSync(pathname)
+  const managedNodeRoot = managedNodePhysicalRoot()
+  const expectedTarget = path.join(managedNodeRoot, 'lib', 'node_modules', 'openclaw')
+  if (target !== expectedTarget || fs.realpathSync(pathname) !== expectedTarget) {
+    fail('video-command OpenClaw SDK link target is invalid')
+  }
+  for (const directory of [
+    path.join(managedNodeRoot, 'lib'),
+    path.join(managedNodeRoot, 'lib', 'node_modules'),
+  ]) {
+    const directoryEntry = fs.lstatSync(directory)
+    if (!directoryEntry.isDirectory() || directoryEntry.isSymbolicLink()
+      || directoryEntry.uid !== process.getuid() || (directoryEntry.mode & 0o022) !== 0
+      || fs.realpathSync(directory) !== directory) {
+      fail('video-command OpenClaw SDK ancestry is unsafe')
+    }
+  }
+  const sdkEntry = fs.lstatSync(expectedTarget)
+  if (!sdkEntry.isDirectory() || sdkEntry.isSymbolicLink()
+    || sdkEntry.uid !== process.getuid() || (sdkEntry.mode & 0o022) !== 0
+    || fs.realpathSync(expectedTarget) !== expectedTarget) {
+    fail('video-command OpenClaw SDK root is unsafe')
+  }
+  const packagePath = path.join(expectedTarget, 'package.json')
+  const packageEntry = fs.lstatSync(packagePath)
+  if (!packageEntry.isFile() || packageEntry.isSymbolicLink() || packageEntry.nlink !== 1
+    || packageEntry.uid !== process.getuid() || (packageEntry.mode & 0o022) !== 0
+    || packageEntry.size < 1 || packageEntry.size > 1024 * 1024) {
+    fail('video-command OpenClaw SDK package is unsafe')
+  }
+  const packageSource = fs.readFileSync(packagePath)
+  const packageAfter = fs.lstatSync(packagePath)
+  if (packageAfter.dev !== packageEntry.dev || packageAfter.ino !== packageEntry.ino
+    || packageAfter.size !== packageEntry.size || packageAfter.mtimeMs !== packageEntry.mtimeMs
+    || packageAfter.ctimeMs !== packageEntry.ctimeMs || packageAfter.nlink !== 1) {
+    fail('video-command OpenClaw SDK package changed while reading')
+  }
+  let packageValue
+  try { packageValue = JSON.parse(packageSource.toString('utf8')) } catch {
+    fail('video-command OpenClaw SDK package is invalid JSON')
+  }
+  if (packageValue?.name !== 'openclaw' || packageValue.version !== expectedVersion) {
+    fail('video-command OpenClaw SDK package identity is invalid')
+  }
+  const linkAfter = fs.lstatSync(pathname)
+  if (!linkAfter.isSymbolicLink() || linkAfter.dev !== entry.dev || linkAfter.ino !== entry.ino
+    || linkAfter.mtimeMs !== entry.mtimeMs || linkAfter.ctimeMs !== entry.ctimeMs
+    || fs.readlinkSync(pathname) !== target) {
+    fail('video-command OpenClaw SDK link changed while reading')
+  }
+  return {
+    evidence: {
+      path: 'node_modules/openclaw',
+      type: 'symlink',
+      mode: entry.mode & 0o7777,
+      target,
+      targetSha256: sha256(target),
+      sdk: {
+        name: packageValue.name,
+        version: packageValue.version,
+        rootMode: sdkEntry.mode & 0o7777,
+        packageMode: packageEntry.mode & 0o7777,
+        packageSize: packageSource.length,
+        packageSha256: sha256(packageSource),
+      },
+    },
+    latestChangeMs: Math.max(
+      entry.mtimeMs, entry.ctimeMs, sdkEntry.mtimeMs, sdkEntry.ctimeMs,
+      packageEntry.mtimeMs, packageEntry.ctimeMs,
+    ),
+  }
+}
+
+function pluginTreeEvidence(stateDir, descriptor, openclawVersion) {
   secureStateDirectory(stateDir)
   const root = path.join(stateDir, 'extensions', descriptor.id)
   const rootReal = fs.realpathSync(root)
@@ -424,9 +524,21 @@ function pluginTreeEvidence(stateDir, descriptor) {
       const childPath = path.join(pathname, child.name)
       const childRelative = path.posix.join(relative, child.name)
       const entry = fs.lstatSync(childPath)
-      if (entry.isSymbolicLink() || entry.uid !== process.getuid() || (entry.mode & 0o077) !== 0) {
+      if (entry.uid !== process.getuid()) {
         fail('plugin tree contains an unsafe object')
       }
+      if (entry.isSymbolicLink()) {
+        if (descriptor.id !== 'aiworker-video-command'
+          || childRelative !== 'node_modules/openclaw') {
+          fail('plugin tree contains an unsafe object')
+        }
+        const sdk = openClawSdkLinkEvidence(childPath, entry, openclawVersion)
+        entries.push(sdk.evidence)
+        latestChangeMs = Math.max(latestChangeMs, sdk.latestChangeMs)
+        continue
+      }
+      const forbiddenMode = descriptor.id === 'aiworker-director-brain' ? 0o077 : 0o022
+      if ((entry.mode & forbiddenMode) !== 0) fail('plugin tree contains an unsafe object')
       latestChangeMs = Math.max(latestChangeMs, entry.mtimeMs, entry.ctimeMs)
       if (entry.isDirectory()) {
         entries.push({ path: childRelative, type: 'directory', mode: entry.mode & 0o7777 })
@@ -457,7 +569,7 @@ function requiredPluginTreeEvidence(stateDir, manifest) {
   return manifest.requiredPlugins.map(descriptor => ({
     id: descriptor.id,
     version: descriptor.version,
-    ...pluginTreeEvidence(stateDir, descriptor),
+    ...pluginTreeEvidence(stateDir, descriptor, manifest.openclawVersion),
   })).toSorted((left, right) => left.id.localeCompare(right.id))
 }
 

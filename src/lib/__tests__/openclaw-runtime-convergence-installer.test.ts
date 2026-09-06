@@ -11,6 +11,7 @@ import {
   rm,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -49,21 +50,37 @@ async function installPluginManifest(
   tool: string,
   includePersistenceHooks = false,
   version?: string,
+  openclawSdkRoot?: string,
 ) {
   const directory = join(state, 'extensions', id)
   await mkdir(directory, { recursive: true, mode: 0o700 })
+  await chmod(directory, 0o700)
+  const memberMode = id === 'aiworker-video-command' ? 0o644 : 0o600
   await writeFile(join(directory, 'openclaw.plugin.json'), `${JSON.stringify({
     id,
     ...(version ? { version } : {}),
     contracts: { tools: [tool] },
     toolMetadata: { [tool]: { optional: true } },
-  }, null, 2)}\n`, { mode: 0o600 })
+  }, null, 2)}\n`, { mode: memberMode })
   if (version) {
     await writeFile(join(directory, 'package.json'), `${JSON.stringify({
       name: `@fixture/${id}`,
       version,
       type: 'module',
-    }, null, 2)}\n`, { mode: 0o600 })
+    }, null, 2)}\n`, { mode: memberMode })
+  }
+  if (id === 'aiworker-video-command') {
+    if (!openclawSdkRoot) throw new Error('video fixture requires an OpenClaw SDK root')
+    await Promise.all([
+      mkdir(join(directory, 'lib'), { mode: 0o755 }),
+      mkdir(join(directory, 'node_modules'), { mode: 0o755 }),
+      writeFile(join(directory, 'README.md'), 'fixture video command\n', { mode: 0o644 }),
+      writeFile(join(directory, 'index.js'), 'export default {}\n', { mode: 0o644 }),
+    ])
+    await writeFile(join(directory, 'lib/runtime.js'), 'export const ready = true\n', {
+      mode: 0o644,
+    })
+    await symlink(openclawSdkRoot, join(directory, 'node_modules/openclaw'))
   }
   if (includePersistenceHooks) {
     await mkdir(join(directory, 'lib'), { recursive: true, mode: 0o700 })
@@ -129,6 +146,9 @@ async function createFixture() {
   const lsofCount = join(root, 'lsof-count')
   const gatewayLog = join(root, 'gateway-restarts.log')
   const pluginMutationWitness = join(root, 'plugin-mutation-witness')
+  const managedNodeRoot = join(root, 'managed-node', 'node-v22.22.3-darwin-arm64')
+  const openclawSdkRoot = join(managedNodeRoot, 'lib/node_modules/openclaw')
+  const openclawSdkPackage = join(openclawSdkRoot, 'package.json')
   const toolBaseline = join(home, 'pre-install-tool-baseline.json')
   const fakeOpenClaw = join(bin, 'openclaw')
   const fakeProgram = join(bin, 'openclaw.mjs')
@@ -216,7 +236,11 @@ async function createFixture() {
   await Promise.all([
     mkdir(bin, { recursive: true, mode: 0o700 }),
     mkdir(state, { recursive: true, mode: 0o700 }),
+    mkdir(openclawSdkRoot, { recursive: true, mode: 0o755 }),
   ])
+  await writeFile(openclawSdkPackage, `${JSON.stringify({
+    name: 'openclaw', version: '2026.7.1-2', type: 'module',
+  })}\n`, { mode: 0o644 })
   await writeFile(config, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 })
   await writeFile(`${config}.last-good`, await readFile(config), { mode: 0o600 })
   const baselineToolIds = [
@@ -231,6 +255,7 @@ async function createFixture() {
     'aiworker_analyze_video',
     false,
     '0.5.14',
+    openclawSdkRoot,
   )
   await installPluginManifest(
     state,
@@ -712,6 +737,7 @@ printf 'p%s\\n' "$pid"
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    NODE_ENV: 'test',
     HOME: home,
     OPENCLAW_BIN: fakeOpenClaw,
     AIWORKER_NODE_BIN: process.execPath,
@@ -735,6 +761,7 @@ printf 'p%s\\n' "$pid"
     OPENCLAW_GATEWAY_PASSWORD: 'parent-openclaw-password-must-not-leak',
     GATEWAY_PASSWORD: 'parent-gateway-password-must-not-leak',
     AIWORKER_OPENCLAW_RUNTIME_TEST_MODE: '1',
+    AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT: managedNodeRoot,
     AIWORKER_OPENCLAW_RUNTIME_RPC_HELPER: fakePrivateRpc,
     AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: fixtureSessionKey,
     AIWORKER_OPENCLAW_RUNTIME_TEST_GATEWAY_START_MS: String(
@@ -758,6 +785,9 @@ printf 'p%s\\n' "$pid"
     fixtureSessionKey,
     gatewayLog,
     pluginMutationWitness,
+    managedNodeRoot,
+    openclawSdkRoot,
+    openclawSdkPackage,
     toolBaseline,
     initial,
     env,
@@ -1467,6 +1497,68 @@ describe('qwen-current unified runtime convergence installer', () => {
     expect(await exists(entry.gatewayLog)).toBe(false)
   }, 15_000)
 
+  it.each([
+    ['a group-writable video member', async (entry: Fixture) => {
+      await chmod(join(entry.state, 'extensions/aiworker-video-command/README.md'), 0o664)
+    }, 'plugin tree contains an unsafe object'],
+    ['an extra video symlink', async (entry: Fixture) => {
+      await symlink(entry.openclawSdkRoot,
+        join(entry.state, 'extensions/aiworker-video-command/node_modules/other-sdk'))
+    }, 'plugin tree contains an unsafe object'],
+    ['another SDK target', async (entry: Fixture) => {
+      const link = join(entry.state, 'extensions/aiworker-video-command/node_modules/openclaw')
+      const other = join(entry.managedNodeRoot, 'lib/node_modules/openclaw-other')
+      await mkdir(other, { mode: 0o755 })
+      await unlink(link)
+      await symlink(other, link)
+    }, 'video-command OpenClaw SDK link target is invalid'],
+    ['an SDK package name drift', async (entry: Fixture) => {
+      await writeFile(entry.openclawSdkPackage,
+        '{"name":"not-openclaw","version":"2026.7.1-2"}\n', { mode: 0o644 })
+    }, 'video-command OpenClaw SDK package identity is invalid'],
+    ['an SDK package version drift', async (entry: Fixture) => {
+      await writeFile(entry.openclawSdkPackage,
+        '{"name":"openclaw","version":"2026.7.1-1"}\n', { mode: 0o644 })
+    }, 'video-command OpenClaw SDK package identity is invalid'],
+  ])('rejects %s before convergence writes', async (_label, mutate, message) => {
+    const entry = await createFixture()
+    await mutate(entry)
+    await expect(run(entry, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining(message),
+    })
+    expect(await exists(entry.backupRoot)).toBe(false)
+  }, 15_000)
+
+  it('binds the real video SDK link into proof and rejects later SDK package hash drift', async () => {
+    const entry = await createFixture()
+    const applied = await run(entry, '--apply')
+    const proof = /Verified session-scoped runtime convergence proof: (.+)$/mu
+      .exec(applied.stdout)?.[1]
+    expect(proof).toBeTruthy()
+
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'assert-convergence-proof',
+      proof!,
+      manifestFile,
+      entry.state,
+      entry.config,
+    ], { env: entry.env })).resolves.toBeTruthy()
+
+    await writeFile(entry.openclawSdkPackage,
+      `${await readFile(entry.openclawSdkPackage, 'utf8')}\n`, { mode: 0o644 })
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'assert-convergence-proof',
+      proof!,
+      manifestFile,
+      entry.state,
+      entry.config,
+    ], { env: entry.env })).rejects.toMatchObject({
+      stderr: expect.stringContaining('required plugin tree changed'),
+    })
+  }, 20_000)
+
   it('fails closed when the configured Gateway SecretRef cannot be resolved', async () => {
     const entry = await createFixture()
     const config = JSON.parse(await readFile(entry.config, 'utf8'))
@@ -1825,7 +1917,7 @@ describe('qwen-current unified runtime convergence installer', () => {
       manifestFile,
       proofEntry.state,
       proofEntry.config,
-    ])).rejects.toThrow(/agents\.list must contain only the second-original profile agent/u)
+    ], { env: proofEntry.env })).rejects.toThrow(/agents\.list must contain only the second-original profile agent/u)
   }, 20_000)
 
   it('requires exact OpenClaw and optional plugin readiness gates', async () => {
@@ -1949,7 +2041,7 @@ describe('qwen-current unified runtime convergence installer', () => {
       manifestFile,
       entry.config,
       proofOutput,
-    ])).rejects.toMatchObject({
+    ], { env: entry.env })).rejects.toMatchObject({
       stderr: expect.stringContaining('runtime plugin collection anchor is invalid'),
     })
     expect(await readFile(proofOutput, 'utf8')).toBe('')
@@ -2004,7 +2096,7 @@ describe('qwen-current unified runtime convergence installer', () => {
       manifestFile,
       entry.state,
       entry.config,
-    ])).rejects.toMatchObject({
+    ], { env: entry.env })).rejects.toMatchObject({
       stderr: expect.stringContaining('required plugin tree changed'),
     })
   }, 15_000)
