@@ -111,6 +111,10 @@ apply、真实 API 回读和 rollback-dry-run；完成 n8n transition/attestatio
 legacy controller 的 `prepare -> current-confirm -> apply`；最后才 bootstrap 并精确切换 3017。该检查
 不能代替隔离启动、飞书迁移、OpenClaw 自然对话、跨压缩恢复或真实视频闭环验收。
 
+进入生产数据阶段前，还须在真实 canonical checkout 核对统一 orchestrator 直接调用的四个 shell
+入口均具备 Git 跟踪的可执行位，并以正式入口验证解释器和参数可用。模拟 fixture 的权限不能作为
+真实文件权限证据；缺少执行权限必须先通过源码提交和最终制品验证修复，不得等数据迁移后才发现。
+
 ### 插件安装与数据库迁移边界
 
 `aiworker-director-brain 0.4.0` 的安装器只替换目标 OpenClaw profile 下的插件、Skill、私有无密钥
