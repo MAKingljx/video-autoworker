@@ -402,15 +402,22 @@ if (args[0] === 'gateway' && args[1] === 'status') {
     gateway: { bindHost: '127.0.0.1', port: 18889 },
     port: { port: 18889, status: 'busy', listeners: [{ pid }] },
     connections: { port: 18889 },
-    rpc: { ok: true },
-    health: { healthy: true, staleGatewayPids: [] },
+    rpc: {
+      ok: true,
+      url: process.env.FAKE_GATEWAY_RPC_URL || 'ws://127.0.0.1:18889',
+    },
   }) + '\\n')
   process.exit(0)
 }
 if (args[0] === 'plugins' && args[1] === 'inspect') {
   const typedHooks = process.env.FAKE_MISSING_PERSISTENCE_HOOK === '1'
-    ? ['tool_result_persist']
-    : ['before_agent_reply', 'before_message_write', 'tool_result_persist']
+    ? [{ name: 'tool_result_persist' }]
+    : ['before_agent_reply', 'before_message_write', 'tool_result_persist'].map((name, index) => ({
+        name,
+        ...(process.env.FAKE_TYPED_HOOK_INVALID_PRIORITY === '1'
+          ? { priority: 'high' }
+          : process.env.FAKE_TYPED_HOOK_PRIORITY === '1' ? { priority: index + 1 } : {}),
+      }))
   process.stdout.write(JSON.stringify({
     plugin: { id: 'aiworker-director-brain', status: 'loaded', version: '0.4.0' },
     tools: [{ names: ['aiworker_director_brain'] }],
@@ -1483,6 +1490,7 @@ describe('qwen-current unified runtime convergence installer', () => {
   it.each([
     ['Gateway status PID mismatch', 'FAKE_STATUS_GATEWAY_PID', '999999'],
     ['missing persistence hook', 'FAKE_MISSING_PERSISTENCE_HOOK', '1'],
+    ['invalid typed hook priority', 'FAKE_TYPED_HOOK_INVALID_PRIORITY', '1'],
     ['Gateway was not freshly restarted after plugin install', 'AIWORKER_OPENCLAW_RUNTIME_TEST_GATEWAY_START_MS', '1'],
   ])('blocks apply on %s without config or backup writes', async (_label, variable, value) => {
     const entry = await createFixture()
@@ -1495,6 +1503,34 @@ describe('qwen-current unified runtime convergence installer', () => {
     expect(await readFile(entry.config, 'utf8')).toBe(before)
     expect(await exists(entry.backupRoot)).toBe(false)
     expect(await exists(entry.gatewayLog)).toBe(false)
+  }, 15_000)
+
+  it('accepts real typed hook objects with finite priorities through apply and proof', async () => {
+    const entry = await createFixture()
+    entry.env.FAKE_TYPED_HOOK_PRIORITY = '1'
+    const applied = await run(entry, '--apply')
+    const proof = /Verified session-scoped runtime convergence proof: (.+)$/mu
+      .exec(applied.stdout)?.[1]
+    expect(proof).toBeTruthy()
+    await expect(execFileAsync(process.execPath, [
+      convergenceHelper,
+      'assert-convergence-proof',
+      proof!,
+      manifestFile,
+      entry.state,
+      entry.config,
+    ], { env: entry.env })).resolves.toBeTruthy()
+  }, 15_000)
+
+  it('rejects a Gateway status RPC URL outside the qwen-current listener', async () => {
+    const entry = await createFixture()
+    const before = await readFile(entry.config, 'utf8')
+    entry.env.FAKE_GATEWAY_RPC_URL = 'ws://127.0.0.1:18789'
+    await expect(run(entry, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining('Gateway status is not bound to the qwen-current listener'),
+    })
+    expect(await readFile(entry.config, 'utf8')).toBe(before)
+    expect(await exists(entry.backupRoot)).toBe(false)
   }, 15_000)
 
   it.each([

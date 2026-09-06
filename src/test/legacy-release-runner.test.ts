@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   OWNER_SCHEMA, PROGRESS_SCHEMA, recordMaintenanceProgress, runManagedChild,
   sanitizeMaintenanceFailure, validateLegacyReleasePlan,
-  settleFailedMaintenance,
+  settleFailedMaintenance, waitForGuardCleanup,
 } from '../../scripts/legacy-release-runner.mjs'
 
 const roots: string[] = []
@@ -145,12 +145,36 @@ describe('continuous legacy release execution', () => {
       expect(events).toEqual(['stop-gateway'])
     }
     const events: string[] = []
+    let guardPresent = true
     const result = await settleFailedMaintenance({
       stopGateway: async () => { events.push('stop-gateway') }, gatewayStopped: async () => true,
-      guardPresent: () => true, recoveryPending: () => false, guardStatus: async () => ({ mode: 'dual' }),
-      revokeGuard: async () => { events.push('revoke') },
+      guardPresent: () => guardPresent,
+      recoveryPending: () => false, guardStatus: async () => ({ mode: 'dual' }),
+      revokeGuard: async () => { events.push('revoke'); guardPresent = false },
     })
     expect(result.guard).toBe('released')
     expect(events).toEqual(['stop-gateway', 'revoke'])
+  })
+
+  it('waits for guard-owned cleanup after one successful revoke acknowledgement', async () => {
+    const events: string[] = []
+    let artifactsPresent = true
+    const result = await settleFailedMaintenance({
+      stopGateway: async () => { events.push('stop-gateway') },
+      gatewayStopped: async () => true,
+      guardPresent: () => artifactsPresent,
+      recoveryPending: () => false,
+      guardStatus: async () => ({ mode: 'dual' }),
+      revokeGuard: async () => {
+        events.push('revoke')
+        setTimeout(() => { artifactsPresent = false }, 10)
+      },
+    })
+    expect(result).toEqual({ gatewayStopped: true, guard: 'released' })
+    expect(artifactsPresent).toBe(false)
+    expect(events).toEqual(['stop-gateway', 'revoke'])
+    expect(await waitForGuardCleanup(() => true, {
+      timeoutMs: 2, pollIntervalMs: 1,
+    })).toBe(false)
   })
 })

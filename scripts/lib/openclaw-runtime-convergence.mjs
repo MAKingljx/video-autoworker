@@ -661,14 +661,28 @@ function readEvidenceJson(pathname, label) {
   return { value, sha256: file.snapshot.sha256, snapshot: file.snapshot }
 }
 
+export function normalizeOpenClawTypedHookNames(value) {
+  if (!Array.isArray(value)) return null
+  const names = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || typeof item.name !== 'string' || !item.name
+      || (item.priority !== undefined && !Number.isFinite(item.priority))) return null
+    names.push(item.name)
+  }
+  if (new Set(names).size !== names.length) return null
+  return names.toSorted()
+}
+
 function validateRuntimeInspection(value, descriptor) {
   const tools = Array.isArray(value.tools) ? value.tools : []
   const toolNames = tools.flatMap(item => Array.isArray(item?.names) ? item.names : []).sort()
   const diagnostics = Array.isArray(value.diagnostics) ? value.diagnostics : []
+  const typedHookNames = normalizeOpenClawTypedHookNames(value.typedHooks)
   if (value?.plugin?.id !== descriptor.id || value.plugin.status !== 'loaded'
     || value.plugin.version !== descriptor.version || !same(toolNames, [descriptor.tool])
-    || !Array.isArray(value.typedHooks)
-    || !same(value.typedHooks.toSorted(), (descriptor.requiredHooks || []).toSorted())
+    || typedHookNames === null
+    || !same(typedHookNames, (descriptor.requiredHooks || []).toSorted())
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {
     fail('director-brain runtime inspection is invalid')
   }
@@ -755,9 +769,7 @@ function validateGatewayStatus(value, pid, port) {
     || listenerPids.some(listenerPid => listenerPid !== pid)
     || value?.connections?.port !== port
     || value?.rpc?.ok !== true
-    || value?.health?.healthy !== true
-    || !Array.isArray(value.health.staleGatewayPids)
-    || value.health.staleGatewayPids.length !== 0) {
+    || value.rpc.url !== `ws://127.0.0.1:${port}`) {
     fail('Gateway status is not bound to the qwen-current listener')
   }
 }

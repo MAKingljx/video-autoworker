@@ -93,6 +93,23 @@ export function sanitizeMaintenanceFailure(failure, sessionKey = '') {
     .split(sessionKey || '\u0000').join('[session]').replace(/[a-f0-9]{64}/giu, '[opaque]').slice(-16000) }
 }
 
+export async function waitForGuardCleanup(guardPresent, {
+  timeoutMs = 1000,
+  pollIntervalMs = 20,
+} = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0
+    || !Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    fail('guard cleanup wait budget is invalid')
+  }
+  const deadline = Date.now() + timeoutMs
+  while (guardPresent()) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return false
+    await new Promise(resolveWait => setTimeout(resolveWait, Math.min(pollIntervalMs, remaining)))
+  }
+  return true
+}
+
 export async function settleFailedMaintenance({ stopGateway, gatewayStopped, guardPresent,
   recoveryPending, guardStatus, revokeGuard }) {
   await stopGateway().catch(() => {})
@@ -103,7 +120,11 @@ export async function settleFailedMaintenance({ stopGateway, gatewayStopped, gua
   if (!stopped || recoveryPending()) return { gatewayStopped: stopped, guard: 'held' }
   const current = await guardStatus().catch(() => null)
   if (current?.mode !== 'dual') return { gatewayStopped: stopped, guard: 'held' }
-  try { await revokeGuard(); return { gatewayStopped: stopped, guard: 'released' } }
+  try {
+    await revokeGuard()
+    const released = await waitForGuardCleanup(guardPresent)
+    return { gatewayStopped: stopped, guard: released ? 'released' : 'held' }
+  }
   catch { return { gatewayStopped: stopped, guard: 'held' } }
 }
 
@@ -373,14 +394,13 @@ export async function main(argv = process.argv.slice(2)) {
           const listener = spawnSyncResult('/usr/sbin/lsof', ['-nP', '-iTCP:18889', '-sTCP:LISTEN', '-t'])
           return listener.status === 1 && !listener.stdout.trim()
         },
-        guardPresent: () => existsSync(socket),
+        guardPresent: () => existsSync(socket) || existsSync(tokenFile),
         recoveryPending: () => !resourcesMayBeReleased || existsSync(join(plan.runDir, 'bootstrap.pending.json'))
           || existsSync(join(attempt, 'shutdown-requested.receipt.json')),
         guardStatus: async () => JSON.parse(await run('failure-guard-status', node,
           [guardScript, 'status', '--socket', socket, '--database', plan.missionDb, '--n8n-database', plan.n8nDb])),
         revokeGuard: async () => {
           await run('failure-revoke', node, [guardScript, 'revoke', ...guardArgs])
-          if (existsSync(socket) || existsSync(tokenFile)) fail('guard release was not completed')
         },
       })
       exclusiveJson(join(plan.controlRoot, 'failure-recovery.json'), recovery)

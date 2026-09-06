@@ -21,7 +21,10 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolveGatewayTokenFromConfigPath } from './lib/openclaw-secret-reference.mjs'
-import { assertConvergenceProof } from './lib/openclaw-runtime-convergence.mjs'
+import {
+  assertConvergenceProof,
+  normalizeOpenClawTypedHookNames,
+} from './lib/openclaw-runtime-convergence.mjs'
 
 const SCRIPT_PATH = realpathSync(fileURLToPath(import.meta.url))
 const REPOSITORY_ROOT = realpathSync(join(dirname(SCRIPT_PATH), '..'))
@@ -370,10 +373,10 @@ function validateDirectorInspection(value) {
   const tools = Array.isArray(value?.tools) ? value.tools : []
   const toolNames = tools.flatMap(item => Array.isArray(item?.names) ? item.names : []).sort()
   const diagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : []
+  const typedHookNames = normalizeOpenClawTypedHookNames(value?.typedHooks)
   if (plugin?.id !== 'aiworker-director-brain' || plugin.status !== 'loaded' || plugin.version !== '0.4.0'
     || canonicalJson(toolNames) !== canonicalJson(['aiworker_director_brain'])
-    || !Array.isArray(value?.typedHooks)
-    || canonicalJson(value.typedHooks.toSorted()) !== canonicalJson(requiredHooks)
+    || canonicalJson(typedHookNames) !== canonicalJson(requiredHooks)
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {
     fail('director-brain runtime inspection is invalid')
   }
