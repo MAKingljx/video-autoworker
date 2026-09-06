@@ -224,6 +224,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/check-sensitive-content.mjs': 'export {}\n',
     'scripts/verify-director-video-release-readiness.mjs': 'export {}\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
+    'scripts/legacy-release-runner.mjs': 'export {}\n',
     'scripts/legacy-preinstall-orchestrator.mjs': 'export {}\n',
     'scripts/legacy-preinstall-controller.mjs': 'export {}\n',
     'scripts/legacy-bootstrap-controller.mjs': 'export {}\n',
@@ -232,6 +233,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
     'scripts/legacy-freeze-guard.mjs': 'export {}\n',
     'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
+    'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
@@ -1978,7 +1980,7 @@ describe('Feishu director brain contract', () => {
         ok: true,
         root,
         forbiddenMembers: 0,
-        importClosure: { dynamicDependencies: 28 },
+        importClosure: { dynamicDependencies: 36 },
       })
     } finally {
       await rm(root, { recursive: true, force: true })

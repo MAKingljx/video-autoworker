@@ -2016,6 +2016,7 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(sourceGate).toContain('scripts/lib/render-managed-markdown-section.mjs')
     expect(sourceGate).toContain('scripts/lib/runtime-tree-manifest.mjs')
     expect(sourceGate).toContain('scripts/legacy-preinstall-orchestrator.mjs')
+    expect(sourceGate).toContain('scripts/legacy-release-runner.mjs')
     expect(sourceGate).toContain('scripts/install-aiworker-task-flow-skill.sh')
     expect(sourceGate).toContain('scripts/install-aiworker-video-command-plugin.sh')
     expect(sourceGate).toContain('scripts/install-aiworker-director-brain.sh')

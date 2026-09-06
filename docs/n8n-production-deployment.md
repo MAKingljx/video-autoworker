@@ -170,6 +170,9 @@ importer/maintenance-lock/anchor/validator/restore 五项工具。
 
 #### 逐命令 runbook（首次迁移）
 
+正常首迁在 n8n transition 完成后使用[连续执行入口](operations/legacy-release-runner.md)，
+自动衔接保护、基线、证明、安装和切换。以下命令用于理解及受控恢复，不应跨聊天轮次人工接续。
+
 本节是首迁执行清单，不是参数示例。只在已经暂停外部准入、四项活动量以及队列 `attention` 全部归零，
 并由两名运维人员复核路径和目标提交后执行。`attention` 即使来自超过 24 小时的非 durable
 `queued/accepted/running` 记录，也不能在首次迁移中静默忽略；必须先走独立、受控、带备份与回读的
@@ -537,8 +540,9 @@ node scripts/generate-legacy-freeze-evidence.mjs \
   --rollback-proof /absolute/managed-backup/rollback-proof.json
 ```
 
-guard 默认最长只允许 1800 秒，
-TTL 到期或 `revoke` 都自动 rollback 并删除 socket/token；
+guard 单次阶段租约为 30 至 1800 秒，连续执行入口按实际阶段进展续期，整条发布没有固定总截止。
+租约到期保持数据库写保护；新鲜进度可通过受控 `renew` 取得下一段租约，只有 `revoke`
+显式 rollback 并删除 socket/token。不得把过期持锁误报为仍可使用旧证明继续前进；
 SIGKILL 遗留只能用 `recover-stale` 在证明旧 guard PID 不存在且 state/数据库身份完全匹配后清理。
 回滚生成器只在同一 guard 已验真且四项活动归零时工作；它从 3017/5678 唯一 listener 的 open FD
 绑定两库，使用 SQLite online backup 生成一致性快照，以单 FD 分块摘要、前后身份、`quick_check`、

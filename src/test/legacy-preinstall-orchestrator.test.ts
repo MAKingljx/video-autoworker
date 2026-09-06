@@ -31,11 +31,19 @@ if(command==='prepare'){
   const preparedPath=path.join(attempt,'preinstall','install-prepared.r000001.receipt.json')
   if(!fs.existsSync(preparedPath))fs.writeFileSync(preparedPath,'{}\n',{mode:0o400})
   const initialScenario=fs.existsSync(process.env.FAKE_SCENARIO)?fs.readFileSync(process.env.FAKE_SCENARIO,'utf8').trim():''
-  if(!fs.existsSync(statePath))write({phase:'INSTALL_PREPARED',installAttemptId:'12345678-1234-4123-8123-123456789abc',revision:1,expiresAt:initialScenario==='lease-expired'?1:9999999999,verification:null,terminal:null,finalize:null,components:{installed:[],rolledBack:[],journalHead:null},bindings:{sourceCommit:'${commit}',target:{releaseId:'${commit}-runtime'},databases:{mission:{path:path.join(attempt,'mission.db')},n8n:{path:path.join(attempt,'n8n.db')}}}})
+  if(!fs.existsSync(statePath))write({phase:'INSTALL_PREPARED',installAttemptId:'12345678-1234-4123-8123-123456789abc',revision:1,expiresAt:initialScenario==='lease-expired'?1:9999999999,verification:null,terminal:null,finalize:null,reservation:null,components:{installed:[],rolledBack:[],journalHead:null},bindings:{sourceCommit:'${commit}',target:{slot:'blue',releaseId:'${commit}-runtime',releaseRoot:path.join(path.dirname(attempt),'releases','${commit}-runtime','standalone')},databases:{mission:{path:path.join(attempt,'mission.db')},n8n:{path:path.join(attempt,'n8n.db')}},evidence:{path:value('--evidence')},proof:{path:value('--proof')}}})
   log('controller:prepare');console.log(JSON.stringify({phase:'INSTALL_PREPARED'}));process.exit(0)
 }
 const state=read()
 if(command==='status'){console.log(JSON.stringify(state));process.exit(0)}
+if(command==='renew'){
+  const evidence=value('--evidence'),proof=value('--proof'),payload=JSON.parse(fs.readFileSync(evidence,'utf8'))
+  state.revision+=1;state.expiresAt=Math.floor(Date.now()/1000)+240
+  state.bindings.evidence={path:evidence};state.bindings.proof={path:proof}
+  state.bindings.evidenceObservedAt=payload.observedAt;state.bindings.guard={expiresAt:payload.frozen.expiresAt}
+  write(state);log('controller:renew')
+  console.log(JSON.stringify({phase:'INSTALL_PREPARED',revision:state.revision,expiresAt:state.expiresAt}));process.exit(0)
+}
 if(command==='record-component'){
   const operation=value('--operation'),component=value('--component'),result=value('--raw-result')
   const receipt=JSON.parse(fs.readFileSync(result,'utf8'))
@@ -169,6 +177,38 @@ fs.writeFileSync(proof,JSON.stringify({schema:'proof'})+'\n',{flag:'wx',mode:0o6
 console.log('Verified 0600 rollback backup: '+backup);console.log('Verified session-scoped runtime convergence proof: '+proof)
 `
 
+const guardSource = String.raw`#!/usr/bin/env node
+const fs=require('node:fs'),crypto=require('node:crypto'),args=process.argv.slice(2),command=args.shift(),value=name=>{const i=args.indexOf(name);return i<0?null:args[i+1]}
+const tokenPath=value('--token-file')||process.env.FAKE_GUARD_TOKEN,state=()=>JSON.parse(fs.readFileSync(tokenPath,'utf8'))
+if(command==='status'){
+  const token=state();console.log(JSON.stringify({schema:'video-autoworker-legacy-freeze-guard/v1',mode:'dual',issuedAt:token.issuedAt,expiresAt:token.expiresAt}));process.exit(0)
+}
+if(command==='renew'){
+  const token=state(),seconds=Number(value('--lease-seconds')),issuedAt=Math.floor(Date.now()/1000),expiresAt=issuedAt+seconds
+  if(Number(value('--expected-issued-at'))!==token.issuedAt||Number(value('--expected-expires-at'))!==token.expiresAt)process.exit(3)
+  fs.writeFileSync(tokenPath,JSON.stringify({issuedAt,expiresAt})+'\n',{mode:0o600})
+  const progress=fs.readFileSync(value('--progress-receipt'))
+  fs.appendFileSync(process.env.FAKE_LOG,'guard:renew\n')
+  console.log(JSON.stringify({schema:'video-autoworker-legacy-freeze-guard-renewal/v1',issuedAt,expiresAt,sequence:1,progressSha256:crypto.createHash('sha256').update(progress).digest('hex')}));process.exit(0)
+}
+process.exit(4)
+`
+
+const rollbackProofSource = String.raw`#!/usr/bin/env node
+const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2),value=name=>args[args.indexOf(name)+1],output=value('--output')
+fs.writeFileSync(path.join(path.dirname(output),'mission-control.db'),'mission\n',{mode:0o600})
+fs.writeFileSync(path.join(path.dirname(output),'database.sqlite'),'n8n\n',{mode:0o600})
+fs.writeFileSync(output,JSON.stringify({schema:'proof'})+'\n',{mode:0o600})
+fs.appendFileSync(process.env.FAKE_LOG,'proof:renew\n')
+`
+
+const freezeEvidenceSource = String.raw`#!/usr/bin/env node
+const fs=require('node:fs'),args=process.argv.slice(2),value=name=>args[args.indexOf(name)+1]
+const token=JSON.parse(fs.readFileSync(process.env.FAKE_GUARD_TOKEN,'utf8'))
+fs.writeFileSync(value('--output'),JSON.stringify({observedAt:Math.floor(Date.now()/1000),target:{slot:value('--slot'),releaseId:value('--release-id'),releaseRoot:value('--standalone-root')},legacy:{database:{path:process.env.FAKE_MISSION_DB}},n8n:{database:{path:process.env.FAKE_N8N_DB}},frozen:{socket:{path:process.env.FAKE_GUARD_SOCKET},issuedAt:token.issuedAt,expiresAt:token.expiresAt}})+'\n',{mode:0o600})
+fs.appendFileSync(process.env.FAKE_LOG,'evidence:renew\n')
+`
+
 type Fixture = ReturnType<typeof fixture>
 function fixture() {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'legacy-preinstall-orchestrator-'))
@@ -189,10 +229,14 @@ function fixture() {
   const video = join(bin, 'video.cjs'), director = join(bin, 'director.cjs')
   const convergence = join(bin, 'convergence.cjs'), openclaw = join(bin, 'openclaw.cjs')
   const lsof = join(bin, 'lsof.cjs'), pgrep = join(bin, 'pgrep.cjs')
+  const guard = join(bin, 'guard.cjs'), rollbackProof = join(bin, 'rollback-proof.cjs')
+  const freezeEvidence = join(bin, 'freeze-evidence.cjs')
   executable(controller, controllerSource); executable(task, installerSource)
   executable(video, installerSource); executable(director, installerSource)
   executable(convergence, convergenceSource); executable(openclaw, openclawSource); executable(lsof, lsofSource)
   executable(pgrep, pgrepSource)
+  executable(guard, guardSource); executable(rollbackProof, rollbackProofSource)
+  executable(freezeEvidence, freezeEvidenceSource)
   const log = join(root, 'events.log'); writeFileSync(log, '')
   const scenario = join(root, 'scenario'); writeFileSync(scenario, '')
   const pids = join(root, 'pids.json')
@@ -226,7 +270,7 @@ function fixture() {
     AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: 'private-test-session',
     FAKE_LOG: log, FAKE_SCENARIO: scenario, FAKE_PIDS: pids,
   }
-  return { root, attempt, args, env, log, scenario, pids }
+  return { root, attempt, args, env, log, scenario, pids, guard, rollbackProof, freezeEvidence }
 }
 
 function run(entry: Fixture) {
@@ -236,6 +280,43 @@ function run(entry: Fixture) {
 }
 function events(entry: Fixture) { return readFileSync(entry.log, 'utf8').trim().split('\n').filter(Boolean) }
 function setScenario(entry: Fixture, scenario: string) { writeFileSync(entry.scenario, scenario) }
+function enableRenewal(entry: Fixture) {
+  const control = join(entry.root, 'control'); mkdirSync(control, { mode: 0o700 })
+  const owner = join(control, 'runner.owner.json')
+  writeFileSync(owner, JSON.stringify({
+    schema: 'video-autoworker-maintenance-owner/v1',
+    attemptId: '12345678-1234-4123-8123-123456789abc',
+    pid: process.pid,
+    startToken: 'test',
+    argvSha256: 'a'.repeat(64),
+    sourceSha256: 'b'.repeat(64),
+  }) + '\n', { mode: 0o600 })
+  const guardDirectory = join(entry.root, 'guard'); mkdirSync(guardDirectory, { mode: 0o700 })
+  const socket = join(guardDirectory, 'guard.sock')
+  const token = join(guardDirectory, 'guard.token')
+  writeFileSync(token, JSON.stringify({ issuedAt: 1, expiresAt: 2 }) + '\n', { mode: 0o600 })
+  writeFileSync(join(entry.root, 'evidence'), JSON.stringify({
+    observedAt: 1,
+    target: {
+      slot: 'blue',
+      releaseId: `${commit}-runtime`,
+      releaseRoot: join(entry.root, 'releases', `${commit}-runtime`, 'standalone'),
+    },
+    legacy: { database: { path: join(entry.attempt, 'mission.db') } },
+    n8n: { database: { path: join(entry.attempt, 'n8n.db') } },
+    frozen: { socket: { path: socket }, issuedAt: 1, expiresAt: 2 },
+  }) + '\n', { mode: 0o600 })
+  Object.assign(entry.env, {
+    AIWORKER_LEGACY_RELEASE_OWNER_RECEIPT: owner,
+    AIWORKER_TEST_LEGACY_PREINSTALL_GUARD: entry.guard,
+    AIWORKER_TEST_LEGACY_PREINSTALL_ROLLBACK_PROOF: entry.rollbackProof,
+    AIWORKER_TEST_LEGACY_PREINSTALL_FREEZE_EVIDENCE: entry.freezeEvidence,
+    FAKE_GUARD_TOKEN: token,
+    FAKE_GUARD_SOCKET: socket,
+    FAKE_MISSION_DB: join(entry.attempt, 'mission.db'),
+    FAKE_N8N_DB: join(entry.attempt, 'n8n.db'),
+  })
+}
 
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
@@ -374,6 +455,22 @@ describe('legacy preinstall orchestrator', () => {
       'task:dry-run', 'video-command:dry-run', 'director-brain:dry-run',
       'controller:prepare', 'controller:abandon',
     ])
+  })
+
+  it('renews an expired forward lease through fresh proof and evidence at a safe boundary', () => {
+    const entry = fixture(); setScenario(entry, 'lease-expired'); enableRenewal(entry)
+    const result = run(entry)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(events(entry)).toEqual(expect.arrayContaining([
+      'guard:renew', 'proof:renew', 'evidence:renew', 'controller:renew',
+    ]))
+    const state = JSON.parse(readFileSync(join(entry.attempt, 'fake-controller.json'), 'utf8'))
+    expect(state.revision).toBe(2)
+    expect(state.phase).toBe('BOOTSTRAP_HANDOFF')
+    const renewalRoot = join(entry.root, 'control', 'preinstall-renewals')
+    expect(readdirSync(renewalRoot)).toHaveLength(1)
+    expect(readdirSync(join(entry.root, 'control', 'progress'))).toEqual(['000001.json'])
   })
 
   it('rejects protected application PID drift and never reaches handoff', () => {

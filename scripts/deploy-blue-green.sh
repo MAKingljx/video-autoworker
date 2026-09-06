@@ -127,6 +127,7 @@ verify_deployment_source_gate() {
     scripts/generate-legacy-freeze-evidence.mjs
     scripts/generate-legacy-bootstrap-rollback-proof.mjs
     scripts/legacy-freeze-guard.mjs
+    scripts/legacy-release-runner.mjs
     scripts/legacy-preinstall-orchestrator.mjs
     scripts/legacy-preinstall-controller.mjs
     scripts/legacy-bootstrap-controller.mjs

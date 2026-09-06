@@ -115,6 +115,70 @@ function createGuardDatabases(root: string) {
   return { database, n8nDatabase }
 }
 
+async function startRenewableGuard(
+  root: string,
+  database: string,
+  n8nDatabase: string,
+  legacyPid: number,
+) {
+  const state = join(root, 'state')
+  const socket = join(state, 'guard.sock')
+  const token = join(state, 'guard.token')
+  const ownerReceipt = join(state, 'owner.json')
+  const readyFile = join(state, 'runner.ready')
+  const runner = join(root, 'legacy-release-runner.mjs')
+  mkdirSync(state, { mode: 0o700 })
+  writeFileSync(runner, `#!${process.execPath}
+import { spawn } from 'node:child_process'
+import { chmodSync, existsSync, writeFileSync } from 'node:fs'
+const [command, guard, ownerReceipt, readyFile, ...args] = process.argv.slice(2)
+if (command !== 'run') process.exit(2)
+while (!existsSync(ownerReceipt)) await new Promise(resolve => setTimeout(resolve, 10))
+const child = spawn(process.execPath, [guard, ...args, '--owner-receipt', ownerReceipt], {
+  stdio: ['ignore', 'ignore', 'inherit'], env: process.env,
+})
+for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal))
+writeFileSync(readyFile, String(child.pid), { mode: 0o600 })
+chmodSync(readyFile, 0o600)
+child.once('exit', (code, signal) => process.exitCode = signal ? 1 : (code ?? 1))
+await new Promise(resolve => child.once('close', resolve))
+`, { mode: 0o700 })
+  chmodSync(runner, 0o700)
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: 'test',
+    AIWORKER_TEST_LEGACY_FREEZE: '1',
+    AIWORKER_TEST_LEGACY_FREEZE_RUNNER: runner,
+  }
+  const runnerProcess = spawn(process.execPath, [
+    runner, 'run', guard, ownerReceipt, readyFile,
+    'serve', '--database', database, '--n8n-database', n8nDatabase,
+    '--socket', socket, '--token-file', token, '--ttl-seconds', '30',
+    '--legacy-pid', String(legacyPid),
+  ], { cwd: projectRoot, env, stdio: 'ignore' })
+  children.push(runnerProcess)
+  await waitFor(() => runnerProcess.pid !== undefined)
+  const ownerPid = runnerProcess.pid!
+  const startToken = spawnSync('/bin/ps', ['-p', String(ownerPid), '-o', 'lstart='], {
+    encoding: 'utf8',
+  }).stdout.trim()
+  const argv = spawnSync('/bin/ps', ['-ww', '-p', String(ownerPid), '-o', 'command='], {
+    encoding: 'utf8',
+  }).stdout.trim()
+  writeFileSync(ownerReceipt, `${JSON.stringify({
+    schema: 'video-autoworker-maintenance-owner/v1',
+    attemptId: '12345678-1234-4123-8123-123456789abc',
+    pid: ownerPid,
+    startToken,
+    argvSha256: hash(argv),
+    sourceSha256: hash(readFileSync(runner)),
+  })}\n`, { mode: 0o600 })
+  chmodSync(ownerReceipt, 0o600)
+  await waitFor(() => existsSync(readyFile) && existsSync(socket) && existsSync(token)
+    && guardStatus(socket, database, n8nDatabase).status === 0)
+  return { socket, token, ownerReceipt, runner, runnerProcess, env }
+}
+
 function fixture(options: { layout?: 'repository' | 'managed-home' } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-freeze-evidence.')))
   roots.push(root)
@@ -644,6 +708,111 @@ describe('managed legacy freeze evidence', () => {
     await waitFor(() => legacy.exitCode !== null || legacy.signalCode !== null)
   })
 
+  it('renews only for the bound live runner and monotonic completed progress', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-freeze-renew.')))
+    roots.push(root)
+    const { database, n8nDatabase } = createGuardDatabases(root)
+    const legacy = await startLegacy(database)
+    const managed = await startRenewableGuard(root, database, n8nDatabase, legacy.pid!)
+    const before = JSON.parse(guardStatus(managed.socket, database, n8nDatabase).stdout)
+    const tokenBefore = JSON.parse(readFileSync(managed.token, 'utf8'))
+    const progress1 = join(dirname(managed.ownerReceipt), 'progress-000001.json')
+    const completedAt = Math.floor(Date.now() / 1000)
+    writeFileSync(progress1, `${JSON.stringify({
+      schema: 'video-autoworker-maintenance-progress/v1',
+      attemptId: '12345678-1234-4123-8123-123456789abc',
+      sequence: 1,
+      previousSha256: null,
+      controllerRevision: 0,
+      step: 'freeze-captured',
+      completedAt,
+    })}\n`, { mode: 0o600 })
+    chmodSync(progress1, 0o600)
+    const renewArgs = [
+      guard, 'renew', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+      '--owner-receipt', managed.ownerReceipt, '--progress-receipt', progress1,
+      '--expected-issued-at', String(before.issuedAt),
+      '--expected-expires-at', String(before.expiresAt), '--lease-seconds', '300',
+    ]
+    const renewed = spawnSync(process.execPath, renewArgs, {
+      encoding: 'utf8', cwd: projectRoot, env: managed.env,
+    })
+    expect(renewed.status, renewed.stderr).toBe(0)
+    const renewal = JSON.parse(renewed.stdout)
+    expect(renewal).toMatchObject({
+      schema: 'video-autoworker-legacy-freeze-guard-renewal/v1',
+      sequence: 1,
+      progressSha256: hash(readFileSync(progress1)),
+    })
+    expect(renewal.expiresAt - renewal.issuedAt).toBe(300)
+    expect(renewed.stdout).not.toContain(tokenBefore.token)
+    const tokenAfter = JSON.parse(readFileSync(managed.token, 'utf8'))
+    expect(Object.keys(tokenAfter).sort()).toEqual(Object.keys(tokenBefore).sort())
+    expect(tokenAfter.token).toBe(tokenBefore.token)
+    expect(tokenAfter).toMatchObject({ issuedAt: renewal.issuedAt, expiresAt: renewal.expiresAt })
+
+    const replay = spawnSync(process.execPath, renewArgs, {
+      encoding: 'utf8', cwd: projectRoot, env: managed.env,
+    })
+    expect(replay.status).not.toBe(0)
+    expect(replay.stderr).toContain('lease CAS lost')
+
+    const skipped = join(dirname(managed.ownerReceipt), 'progress-000003.json')
+    writeFileSync(skipped, `${JSON.stringify({
+      schema: 'video-autoworker-maintenance-progress/v1',
+      attemptId: '12345678-1234-4123-8123-123456789abc',
+      sequence: 3,
+      previousSha256: hash(readFileSync(progress1)),
+      controllerRevision: 1,
+      step: 'proof-built',
+      completedAt,
+    })}\n`, { mode: 0o600 })
+    chmodSync(skipped, 0o600)
+    const skippedResult = spawnSync(process.execPath, [
+      guard, 'renew', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+      '--owner-receipt', managed.ownerReceipt, '--progress-receipt', skipped,
+      '--expected-issued-at', String(renewal.issuedAt),
+      '--expected-expires-at', String(renewal.expiresAt), '--lease-seconds', '300',
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(skippedResult.status).not.toBe(0)
+    expect(skippedResult.stderr).toContain('monotonic completed work')
+
+    managed.runnerProcess.kill('SIGKILL')
+    await waitFor(() => managed.runnerProcess.exitCode !== null || managed.runnerProcess.signalCode !== null)
+    const progress2 = join(dirname(managed.ownerReceipt), 'progress-000002.json')
+    writeFileSync(progress2, `${JSON.stringify({
+      schema: 'video-autoworker-maintenance-progress/v1',
+      attemptId: '12345678-1234-4123-8123-123456789abc',
+      sequence: 2,
+      previousSha256: hash(readFileSync(progress1)),
+      controllerRevision: 1,
+      step: 'proof-built',
+      completedAt,
+    })}\n`, { mode: 0o600 })
+    chmodSync(progress2, 0o600)
+    const deadOwner = spawnSync(process.execPath, [
+      guard, 'renew', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+      '--owner-receipt', managed.ownerReceipt, '--progress-receipt', progress2,
+      '--expected-issued-at', String(renewal.issuedAt),
+      '--expected-expires-at', String(renewal.expiresAt), '--lease-seconds', '300',
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(deadOwner.status).not.toBe(0)
+    expect(deadOwner.stderr).toContain('owner uid query failed')
+    expect(guardStatus(managed.socket, database, n8nDatabase).status).toBe(0)
+
+    const revoked = spawnSync(process.execPath, [
+      guard, 'revoke', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(revoked.status, revoked.stderr).toBe(0)
+    await waitFor(() => !existsSync(managed.socket) && !existsSync(managed.token))
+    legacy.kill('SIGTERM')
+    await waitFor(() => legacy.exitCode !== null || legacy.signalCode !== null)
+  }, 20_000)
+
   it('recovers only verified stale guard socket/token state after a crash', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-freeze-stale.')))
     roots.push(root)
@@ -865,37 +1034,77 @@ process.stdout.write(JSON.stringify(value))
     await waitFor(() => legacy.exitCode !== null || legacy.signalCode !== null)
   }, 15_000)
 
-  it('automatically releases the writer lock and private state at TTL', async () => {
+  it('keeps an expired guard holding both writers and permits only a progressed renewal', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-freeze-ttl.')))
     roots.push(root)
-    const state = join(root, 'state')
     const { database, n8nDatabase } = createGuardDatabases(root)
-    const socket = join(state, 'guard.sock')
-    const token = join(state, 'guard.token')
-    mkdirSync(state, { mode: 0o700 })
     const legacy = await startLegacy(database)
-    const child = spawn(process.execPath, [
-      guard, 'serve', '--database', database, '--n8n-database', n8nDatabase,
-      '--socket', socket, '--token-file', token,
-      '--ttl-seconds', '30', '--legacy-pid', String(legacy.pid),
-    ], { cwd: projectRoot, stdio: 'ignore' })
-    children.push(child)
-    await waitFor(() => existsSync(socket) && existsSync(token)
-      && guardStatus(socket, database, n8nDatabase).status === 0)
-    const hangingClient = createConnection({ path: socket })
-    await new Promise<void>((resolvePromise, reject) => {
-      hangingClient.once('connect', resolvePromise)
-      hangingClient.once('error', reject)
+    const managed = await startRenewableGuard(root, database, n8nDatabase, legacy.pid!)
+    const before = JSON.parse(guardStatus(managed.socket, database, n8nDatabase).stdout)
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 31_000))
+    expect(existsSync(managed.socket)).toBe(true)
+    expect(existsSync(managed.token)).toBe(true)
+    expect(managed.runnerProcess.exitCode).toBeNull()
+    const expiredStatus = guardStatus(managed.socket, database, n8nDatabase)
+    expect(expiredStatus.status, expiredStatus.stderr).toBe(0)
+    expect(JSON.parse(expiredStatus.stdout).expiresAt).toBeLessThan(Math.floor(Date.now() / 1000))
+    const staleHandoff = spawnSync(process.execPath, [
+      guard, 'handoff', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(staleHandoff.status).not.toBe(0)
+    const rawHandoff = await new Promise<string>((resolveResponse, reject) => {
+      const connection = createConnection({ path: managed.socket })
+      let response = ''
+      connection.setEncoding('utf8')
+      connection.on('connect', () => connection.write(`${JSON.stringify({
+        action: 'handoff', challenge: 'a'.repeat(64),
+        token: JSON.parse(readFileSync(managed.token, 'utf8')).token,
+      })}\n`))
+      connection.on('data', chunk => { response += chunk })
+      connection.on('error', reject)
+      connection.on('close', () => resolveResponse(response))
     })
-    await waitFor(() => !existsSync(socket) && !existsSync(token), 35_000)
-    await waitFor(() => child.exitCode !== null || child.signalCode !== null)
-    expect(hangingClient.destroyed).toBe(true)
-    const writable = new Database(database)
-    writable.prepare('INSERT INTO probe(value) VALUES (1)').run()
-    writable.close()
-    const n8nWritable = new Database(n8nDatabase)
-    n8nWritable.prepare('INSERT INTO probe(value) VALUES (1)').run()
-    n8nWritable.close()
+    expect(JSON.parse(rawHandoff)).toEqual({ error: 'lease_expired' })
+    for (const pathname of [database, n8nDatabase]) {
+      const blocked = spawnSync(process.execPath, ['-e', `
+        const Database = require('better-sqlite3')
+        const db = new Database(process.argv[1], { timeout: 0 })
+        db.prepare('INSERT INTO probe(value) VALUES (1)').run()
+      `, pathname], { encoding: 'utf8', cwd: projectRoot })
+      expect(blocked.status).not.toBe(0)
+      expect(blocked.stderr).toContain('database is locked')
+    }
+    const progress = join(dirname(managed.ownerReceipt), 'expired-progress.json')
+    writeFileSync(progress, `${JSON.stringify({
+      schema: 'video-autoworker-maintenance-progress/v1',
+      attemptId: '12345678-1234-4123-8123-123456789abc',
+      sequence: 1,
+      previousSha256: null,
+      controllerRevision: 1,
+      step: 'expired-work-completed',
+      completedAt: Math.floor(Date.now() / 1000),
+    })}\n`, { mode: 0o600 })
+    chmodSync(progress, 0o600)
+    const renewed = spawnSync(process.execPath, [
+      guard, 'renew', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+      '--owner-receipt', managed.ownerReceipt, '--progress-receipt', progress,
+      '--expected-issued-at', String(before.issuedAt),
+      '--expected-expires-at', String(before.expiresAt), '--lease-seconds', '60',
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(renewed.status, renewed.stderr).toBe(0)
+    const renewal = JSON.parse(renewed.stdout)
+    expect(renewal).toMatchObject({ sequence: 1, progressSha256: hash(readFileSync(progress)) })
+    expect(renewal.expiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000))
+    const revoked = spawnSync(process.execPath, [
+      guard, 'revoke', '--socket', managed.socket, '--token-file', managed.token,
+      '--database', database, '--n8n-database', n8nDatabase,
+    ], { encoding: 'utf8', cwd: projectRoot, env: managed.env })
+    expect(revoked.status, revoked.stderr).toBe(0)
+    await waitFor(() => managed.runnerProcess.exitCode !== null || managed.runnerProcess.signalCode !== null)
+    expect(existsSync(managed.socket)).toBe(false)
+    expect(existsSync(managed.token)).toBe(false)
     legacy.kill('SIGTERM')
     await waitFor(() => legacy.exitCode !== null || legacy.signalCode !== null)
   }, 40_000)

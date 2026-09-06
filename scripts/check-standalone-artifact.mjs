@@ -151,6 +151,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/check-sensitive-content.mjs',
   'scripts/verify-director-video-release-readiness.mjs',
   'scripts/verify-shared-runtime-install-gate.mjs',
+  'scripts/legacy-release-runner.mjs',
   'scripts/legacy-preinstall-orchestrator.mjs',
   'scripts/legacy-preinstall-controller.mjs',
   'scripts/legacy-bootstrap-controller.mjs',
@@ -159,6 +160,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
   'scripts/legacy-freeze-guard.mjs',
   'scripts/n8n-workflow-transition-anchor.mjs',
+  'scripts/deploy-blue-green.sh',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
@@ -262,6 +264,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'scripts/check-sensitive-content.mjs',
   'scripts/verify-director-video-release-readiness.mjs',
   'scripts/verify-shared-runtime-install-gate.mjs',
+  'scripts/legacy-release-runner.mjs',
   'scripts/legacy-preinstall-orchestrator.mjs',
   'scripts/legacy-preinstall-controller.mjs',
   'scripts/legacy-bootstrap-controller.mjs',
@@ -270,6 +273,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
   'scripts/legacy-freeze-guard.mjs',
   'scripts/n8n-workflow-transition-anchor.mjs',
+  'scripts/deploy-blue-green.sh',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
@@ -294,6 +298,16 @@ const REQUIRED_STANDALONE_DIRECTORIES = [
 ]
 
 const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
+  ['scripts/legacy-release-runner.mjs', [
+    'scripts/legacy-freeze-guard.mjs',
+    'scripts/apply-openclaw-runtime-convergence.sh',
+    'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
+    'scripts/generate-legacy-freeze-evidence.mjs',
+    'scripts/legacy-preinstall-orchestrator.mjs',
+    'scripts/legacy-preinstall-controller.mjs',
+    'scripts/legacy-bootstrap-controller.mjs',
+    'scripts/deploy-blue-green.sh',
+  ]],
   ['scripts/legacy-preinstall-orchestrator.mjs', [
     'scripts/legacy-preinstall-controller.mjs',
     'scripts/install-aiworker-task-flow-skill.sh',

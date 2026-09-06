@@ -9,6 +9,7 @@ import {
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { acquireSharedDeploymentLockSync } from './lib/shared-deployment-lock.mjs'
+import { recordMaintenanceProgress } from './legacy-release-runner.mjs'
 
 const INSTALLER_RESULT_SCHEMA = 'video-autoworker-installer-result/v1'
 const CONVERGENCE_RAW_SCHEMA = 'video-autoworker-legacy-preinstall-convergence-result/v1'
@@ -32,6 +33,8 @@ const MAX_BYTES = 1024 * 1024
 const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
+const CONTROLLER_LEASE_MARGIN_SECONDS = 30
+const RENEWAL_ARTIFACT_BUDGET_SECONDS = 300
 const scriptPath = realpathSync(fileURLToPath(import.meta.url))
 const repositoryRoot = realpathSync(join(dirname(scriptPath), '..'))
 const testMode = process.env.NODE_ENV === 'test'
@@ -243,6 +246,12 @@ function initializePaths() {
   return {
     controller: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONTROLLER',
       join(repositoryRoot, 'scripts/legacy-preinstall-controller.mjs')),
+    guard: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_GUARD',
+      join(repositoryRoot, 'scripts/legacy-freeze-guard.mjs')),
+    rollbackProof: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_ROLLBACK_PROOF',
+      join(repositoryRoot, 'scripts/generate-legacy-bootstrap-rollback-proof.mjs')),
+    freezeEvidence: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_FREEZE_EVIDENCE',
+      join(repositoryRoot, 'scripts/generate-legacy-freeze-evidence.mjs')),
     task: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_TASK_INSTALLER',
       join(repositoryRoot, 'scripts/install-aiworker-task-flow-skill.sh')),
     video: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_VIDEO_INSTALLER',
@@ -542,16 +551,193 @@ function preflight(values, baseline) {
   'director-brain dry-run', baseEnvironment(values, null))
   assertPids(values, baseline, 'same')
 }
-function requireForwardLease() {
-  if (!Number.isSafeInteger(currentStatus?.expiresAt)
-    || Math.floor(Date.now() / 1000) + 30 >= currentStatus.expiresAt) {
-    fail('preinstall lease is too close to expiry for another forward step')
+
+function renewalOwnerReceipt() {
+  const pathname = process.env.AIWORKER_LEGACY_RELEASE_OWNER_RECEIPT || ''
+  if (!pathname) return null
+  assertAbsolute(pathname, 'legacy release owner receipt')
+  stableFile(pathname, 'legacy release owner receipt', 0o600)
+  return pathname
+}
+
+function ensureRenewalDirectory(pathname, label) {
+  assertNoSymlink(pathname, label, true)
+  if (!existsSync(pathname)) mkdirSync(pathname, { mode: 0o700 })
+  safeDirectory(pathname, label)
+  return pathname
+}
+
+function guardStatus(values, socket, databases) {
+  const output = run(process.execPath, [paths.guard, 'status', '--socket', socket,
+    '--database', databases.mission,
+    '--n8n-database', databases.n8n],
+  'freeze guard status', baseEnvironment(values, currentStatus))
+  const status = strictJson(output.trim(), 'freeze guard status')
+  if (status?.schema !== 'video-autoworker-legacy-freeze-guard/v1'
+    || !Number.isSafeInteger(status.issuedAt) || !Number.isSafeInteger(status.expiresAt)
+    || !['dual', 'dual-recovery'].includes(status.mode)) fail('freeze guard status is invalid')
+  return status
+}
+
+function generateRenewalArtifacts(values, directory, socket, target) {
+  const proofDirectory = ensureRenewalDirectory(join(directory, 'proof'), 'renewal proof directory')
+  const evidenceDirectory = ensureRenewalDirectory(join(directory, 'evidence'), 'renewal evidence directory')
+  const proof = join(proofDirectory, 'rollback-proof.json')
+  const evidence = join(evidenceDirectory, 'freeze.json')
+  if (!['blue', 'green'].includes(target?.slot) || typeof target.releaseId !== 'string'
+    || typeof target.releaseRoot !== 'string') fail('renewal target binding is invalid')
+  run(process.execPath, [paths.rollbackProof, '--output', proof,
+    '--slot', target.slot, '--release-id', target.releaseId,
+    '--standalone-root', target.releaseRoot, '--guard-socket', socket],
+  'renewal rollback proof', baseEnvironment(values, currentStatus))
+  run(process.execPath, [paths.freezeEvidence, '--output', evidence,
+    '--slot', target.slot, '--release-id', target.releaseId,
+    '--standalone-root', target.releaseRoot, '--rollback-proof', proof],
+  'renewal freeze evidence', baseEnvironment(values, currentStatus))
+  stableFile(proof, 'renewal rollback proof', 0o600)
+  stableFile(evidence, 'renewal freeze evidence', 0o600)
+  return { proof, evidence }
+}
+
+function evidenceRenewalContext(evidence) {
+  const target = evidence?.target
+  const databases = {
+    mission: evidence?.legacy?.database?.path,
+    n8n: evidence?.n8n?.database?.path,
+  }
+  const socket = evidence?.frozen?.socket?.path
+  if (!['blue', 'green'].includes(target?.slot) || typeof target.releaseId !== 'string'
+    || typeof target.releaseRoot !== 'string' || typeof databases.mission !== 'string'
+    || typeof databases.n8n !== 'string') fail('freeze evidence renewal context is invalid')
+  assertAbsolute(socket, 'freeze guard socket')
+  assertAbsolute(databases.mission, 'Mission Control database')
+  assertAbsolute(databases.n8n, 'n8n database')
+  return { target, databases, socket }
+}
+
+function renewGuardIfNeeded(values, {
+  ownerReceipt, step, controllerRevision, stageTimeoutMs, context,
+}) {
+  const tokenFile = join(dirname(context.socket), 'guard.token')
+  stableFile(tokenFile, 'freeze guard token', 0o600)
+  let liveGuard = guardStatus(values, context.socket, context.databases)
+  const stageSeconds = Math.ceil(stageTimeoutMs / 1000)
+  const now = Math.floor(Date.now() / 1000)
+  if (liveGuard.expiresAt >= now + RENEWAL_ARTIFACT_BUDGET_SECONDS + stageSeconds) {
+    return liveGuard
+  }
+  const progress = recordMaintenanceProgress(ownerReceipt, {
+    step: `preinstall-${step}`,
+    controllerRevision,
+  })
+  const leaseSeconds = Math.min(1800,
+    Math.max(30, RENEWAL_ARTIFACT_BUDGET_SECONDS + stageSeconds))
+  const renewedSource = run(process.execPath, [paths.guard, 'renew',
+    '--socket', context.socket, '--token-file', tokenFile,
+    '--database', context.databases.mission,
+    '--n8n-database', context.databases.n8n,
+    '--owner-receipt', ownerReceipt, '--progress-receipt', progress.path,
+    '--expected-issued-at', String(liveGuard.issuedAt),
+    '--expected-expires-at', String(liveGuard.expiresAt),
+    '--lease-seconds', String(leaseSeconds)],
+  'freeze guard renew', baseEnvironment(values, currentStatus))
+  const renewed = strictJson(renewedSource.trim(), 'freeze guard renewal')
+  if (renewed?.schema !== 'video-autoworker-legacy-freeze-guard-renewal/v1'
+    || renewed.progressSha256 !== progress.sha256
+    || !Number.isSafeInteger(renewed.issuedAt) || !Number.isSafeInteger(renewed.expiresAt)
+    || renewed.expiresAt - renewed.issuedAt !== leaseSeconds) {
+    fail('freeze guard renewal result is invalid')
+  }
+  liveGuard = guardStatus(values, context.socket, context.databases)
+  if (liveGuard.issuedAt !== renewed.issuedAt || liveGuard.expiresAt !== renewed.expiresAt) {
+    fail('freeze guard renewal did not become current')
+  }
+  return liveGuard
+}
+
+function renewForwardLease(values, step, stageTimeoutMs, ownerReceipt) {
+  if (currentStatus.reservation || currentStatus.finalize || currentStatus.terminal
+    || currentStatus.phase.startsWith('BOOTSTRAP_HANDOFF')) {
+    fail('preinstall lease cannot renew during a reserved or finalized stage')
+  }
+  const previousRevision = currentStatus.revision
+  const currentEvidence = readJson(
+    currentStatus.bindings.evidence.path, 'current freeze evidence', 0o600,
+  ).value
+  const context = evidenceRenewalContext(currentEvidence)
+  renewGuardIfNeeded(values, {
+    ownerReceipt, step, controllerRevision: previousRevision, stageTimeoutMs, context,
+  })
+  const controlRoot = dirname(ownerReceipt)
+  safeDirectory(controlRoot, 'legacy release control root')
+  const renewalRoot = ensureRenewalDirectory(
+    join(controlRoot, 'preinstall-renewals'), 'preinstall renewal root',
+  )
+  const directory = ensureRenewalDirectory(
+    join(renewalRoot, `r${String(previousRevision + 1).padStart(6, '0')}.${randomUUID()}`),
+    'preinstall renewal directory',
+  )
+  const artifacts = generateRenewalArtifacts(values, directory, context.socket, context.target)
+  const result = runController(['renew', '--attempt-dir', values['--attempt-dir'],
+    '--install-attempt-id', currentStatus.installAttemptId,
+    '--expected-revision', String(previousRevision),
+    '--evidence', artifacts.evidence, '--proof', artifacts.proof], 'preinstall lease renew')
+  if (result?.phase !== 'INSTALL_PREPARED' || result.revision !== previousRevision + 1) {
+    fail('preinstall lease renewal result is invalid')
+  }
+  currentStatus = controllerStatus(values)
+  const requiredUntil = Math.floor(Date.now() / 1000)
+    + Math.ceil(stageTimeoutMs / 1000) + CONTROLLER_LEASE_MARGIN_SECONDS
+  if (currentStatus.revision !== previousRevision + 1 || currentStatus.expiresAt < requiredUntil
+    || currentStatus.bindings.evidence.path !== artifacts.evidence
+    || currentStatus.bindings.proof.path !== artifacts.proof) {
+    fail('preinstall renewed lease is too short or changed')
   }
 }
-function requireForwardLeaseUnlessRecovering(component) {
+
+function refreshInitialEvidenceAfterPreflight(values) {
+  const ownerReceipt = renewalOwnerReceipt()
+  if (!ownerReceipt) return
+  const loaded = readJson(values['--evidence'], 'initial freeze evidence', 0o600).value
+  const now = Math.floor(Date.now() / 1000)
+  if (Number.isSafeInteger(loaded?.observedAt)
+    && Number.isSafeInteger(loaded?.frozen?.expiresAt)
+    && now + CONTROLLER_LEASE_MARGIN_SECONDS < loaded.observedAt + 300
+    && loaded.frozen.expiresAt >= now + RENEWAL_ARTIFACT_BUDGET_SECONDS + 120) return
+  const context = evidenceRenewalContext(loaded)
+  renewGuardIfNeeded(values, {
+    ownerReceipt,
+    step: 'preflight-complete',
+    controllerRevision: 0,
+    stageTimeoutMs: 120_000,
+    context,
+  })
+  const controlRoot = dirname(ownerReceipt)
+  safeDirectory(controlRoot, 'legacy release control root')
+  const refreshRoot = ensureRenewalDirectory(
+    join(controlRoot, 'preinstall-initial-refreshes'), 'preinstall initial refresh root',
+  )
+  const directory = ensureRenewalDirectory(
+    join(refreshRoot, randomUUID()), 'preinstall initial refresh directory',
+  )
+  const artifacts = generateRenewalArtifacts(values, directory, context.socket, context.target)
+  values['--evidence'] = artifacts.evidence
+  values['--proof'] = artifacts.proof
+}
+
+function requireForwardLease(values, step, stageTimeoutMs = 120_000) {
+  const requiredUntil = Math.floor(Date.now() / 1000)
+    + Math.ceil(stageTimeoutMs / 1000) + CONTROLLER_LEASE_MARGIN_SECONDS
+  if (Number.isSafeInteger(currentStatus?.expiresAt) && currentStatus.expiresAt >= requiredUntil) return
+  const ownerReceipt = renewalOwnerReceipt()
+  if (!ownerReceipt) fail('preinstall lease is too close to expiry for another forward step')
+  renewForwardLease(values, step, stageTimeoutMs, ownerReceipt)
+}
+
+function requireForwardLeaseUnlessRecovering(values, component, stageTimeoutMs = 120_000) {
   if (currentStatus?.reservation?.component === component
     && currentStatus.reservation.operation === 'install') return
-  requireForwardLease()
+  requireForwardLease(values, component, stageTimeoutMs)
 }
 
 function record(values, component, operation, raw) {
@@ -741,9 +927,9 @@ function installDirector(values, baseline) {
     recordDirectorRaw(values, directorRaw)
     assertPids(values, baseline, 'same')
   }
-  requireForwardLease()
+  requireForwardLease(values, 'gateway-restart', 90_000)
   restartGateway(values, baseline)
-  requireForwardLease()
+  requireForwardLease(values, 'runtime-convergence')
   const convergenceRaw = applyConvergence(values, baseline)
   return convergenceRaw
 }
@@ -947,7 +1133,10 @@ export async function main(argv = process.argv.slice(2)) {
   const newAttempt = !readdirSync(join(currentValues['--attempt-dir'], 'preinstall'))
     .some(name => /^install-prepared\.r\d{6}\.receipt\.json$/u.test(name))
   const baseline = loadOrCreatePidBaseline(currentValues)
-  if (newAttempt) preflight(currentValues, baseline)
+  if (newAttempt) {
+    preflight(currentValues, baseline)
+    refreshInitialEvidenceAfterPreflight(currentValues)
+  }
   currentStatus = prepare(currentValues)
   if (currentStatus.phase === 'BOOTSTRAP_HANDOFF') {
     process.stdout.write(`${canonicalJson({ phase: 'BOOTSTRAP_HANDOFF', resumed: true })}\n`)
@@ -970,15 +1159,15 @@ export async function main(argv = process.argv.slice(2)) {
     fail('resumed preinstall rollback completed; attempt is abandoned')
   }
   try {
-    requireForwardLeaseUnlessRecovering('task-flow')
+    requireForwardLeaseUnlessRecovering(currentValues, 'task-flow')
     installTask(currentValues, baseline)
-    requireForwardLeaseUnlessRecovering('video-command')
+    requireForwardLeaseUnlessRecovering(currentValues, 'video-command')
     installStructured(currentValues, 'video-command', paths.video,
       ['--apply', '--target-sha', currentValues['--source-commit'], '--defer-gateway-restart'], baseline)
-    requireForwardLeaseUnlessRecovering('director-brain')
+    requireForwardLeaseUnlessRecovering(currentValues, 'director-brain')
     const convergence = installDirector(currentValues, baseline)
     currentStatus = controllerStatus(currentValues)
-    requireForwardLease()
+    requireForwardLease(currentValues, 'verify')
     const verifyResult = runController(['verify', '--attempt-dir', currentValues['--attempt-dir'],
       '--install-attempt-id', currentStatus.installAttemptId,
       '--expected-revision', String(currentStatus.revision),
@@ -992,7 +1181,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (verifyResult?.phase !== 'INSTALL_VERIFIED') fail('preinstall verification result is invalid')
     currentStatus = controllerStatus(currentValues)
     assertPids(currentValues, baseline, 'changed')
-    requireForwardLease()
+    requireForwardLease(currentValues, 'handoff')
     const handoffResult = runController(['handoff', '--attempt-dir', currentValues['--attempt-dir'],
       '--install-attempt-id', currentStatus.installAttemptId,
       '--expected-revision', String(currentStatus.revision),

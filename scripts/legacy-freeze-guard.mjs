@@ -11,11 +11,16 @@ import { createRequire } from 'node:module'
 import { createConnection, createServer } from 'node:net'
 import { basename, dirname, isAbsolute, parse, relative, resolve, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { OWNER_SCHEMA, PROGRESS_SCHEMA } from './legacy-release-runner.mjs'
 
 const SCHEMA = 'video-autoworker-legacy-freeze-guard/v1'
+const RENEWAL_SCHEMA = 'video-autoworker-legacy-freeze-guard-renewal/v1'
 const scriptPath = realpathSync(fileURLToPath(import.meta.url))
 const managedBootstrapControllerPath = join(dirname(scriptPath), 'legacy-bootstrap-controller.mjs')
+const managedRunnerPath = join(dirname(scriptPath), 'legacy-release-runner.mjs')
 const SHA256 = /^[a-f0-9]{64}$/u
+const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
+const STEP = /^[a-z0-9][a-z0-9-]{0,100}$/u
 const TEST_MODE = process.env.NODE_ENV === 'test'
   && process.env.AIWORKER_TEST_LEGACY_FREEZE === '1'
 
@@ -28,6 +33,15 @@ function bootstrapControllerPath() {
     return override
   }
   return managedBootstrapControllerPath
+}
+function releaseRunnerPath() {
+  const override = process.env.AIWORKER_TEST_LEGACY_FREEZE_RUNNER
+  if (override !== undefined) {
+    if (!TEST_MODE) fail('release runner override is forbidden outside isolated test mode')
+    absolute(override, 'test release runner')
+    return override
+  }
+  return managedRunnerPath
 }
 function sha256(value) { return createHash('sha256').update(value).digest('hex') }
 function canonicalize(value) {
@@ -126,8 +140,8 @@ function legacyBinding(pid, database) {
   if (uid !== process.getuid() || !startedAt || !argv) fail('legacy process identity is invalid')
   return { pid, uid, startedAt, argvSha256: sha256(argv), database, port: 3017 }
 }
-function readPrivate(pathname, label) {
-  const entry = safeEntry(pathname, label, 'file', 0o600)
+function readStableFile(pathname, label, mode = null) {
+  const entry = safeEntry(pathname, label, 'file', mode)
   const fd = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const opened = fstatSync(fd, { bigint: true })
@@ -136,6 +150,63 @@ function readPrivate(pathname, label) {
     if (readSync(fd, result, 0, result.length, 0) !== result.length) fail(`${label} short read`)
     return result
   } finally { closeSync(fd) }
+}
+function readPrivate(pathname, label) { return readStableFile(pathname, label, 0o600) }
+function readPrivateJson(pathname, label) {
+  const source = readPrivate(pathname, label)
+  let value
+  try { value = JSON.parse(source.toString('utf8')) } catch { fail(`${label} is invalid JSON`) }
+  return { source, value, sha256: sha256(source) }
+}
+function processOwnerIdentity(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) fail('renewal owner PID is invalid')
+  const uid = Number(run('/bin/ps', ['-p', String(pid), '-o', 'uid='], 'renewal owner uid query').trim())
+  const startToken = run('/bin/ps', ['-p', String(pid), '-o', 'lstart='],
+    'renewal owner start query').trim()
+  const argv = run('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command='],
+    'renewal owner argv query').trim()
+  if (uid !== process.getuid() || !startToken || !argv) fail('renewal owner process is unavailable')
+  return { startToken, argv, argvSha256: sha256(argv) }
+}
+function validateOwnerReceipt(pathname, expectedPid = null) {
+  const loaded = readPrivateJson(pathname, 'guard renewal owner receipt')
+  const value = loaded.value
+  exactKeys(value, ['schema', 'attemptId', 'pid', 'startToken', 'argvSha256', 'sourceSha256'],
+    'guard renewal owner receipt')
+  const runner = releaseRunnerPath()
+  const runnerSource = readStableFile(runner, 'managed release runner')
+  const processIdentity = processOwnerIdentity(value.pid)
+  if (value.schema !== OWNER_SCHEMA || !UUID.test(value.attemptId || '')
+    || !Number.isSafeInteger(value.pid) || value.pid <= 0
+    || (expectedPid !== null && value.pid !== expectedPid)
+    || typeof value.startToken !== 'string' || value.startToken !== processIdentity.startToken
+    || !SHA256.test(value.argvSha256 || '') || value.argvSha256 !== processIdentity.argvSha256
+    || !SHA256.test(value.sourceSha256 || '') || value.sourceSha256 !== sha256(runnerSource)
+    || !processIdentity.argv.includes(`${runner} run`)) {
+    fail('guard renewal owner receipt is not bound to the canonical live runner')
+  }
+  return { ...loaded, path: pathname }
+}
+function validateProgressReceipt(pathname, owner, previous) {
+  const loaded = readPrivateJson(pathname, 'guard renewal progress receipt')
+  const value = loaded.value
+  exactKeys(value, [
+    'schema', 'attemptId', 'sequence', 'previousSha256', 'controllerRevision', 'step', 'completedAt',
+  ], 'guard renewal progress receipt')
+  const now = Math.floor(Date.now() / 1000)
+  const expectedSequence = previous === null ? 1 : previous.value.sequence + 1
+  const expectedPrevious = previous === null ? null : previous.sha256
+  if (value.schema !== PROGRESS_SCHEMA || value.attemptId !== owner.value.attemptId
+    || !Number.isSafeInteger(value.sequence) || value.sequence !== expectedSequence
+    || value.previousSha256 !== expectedPrevious
+    || !Number.isSafeInteger(value.controllerRevision) || value.controllerRevision < 0
+    || (previous !== null && value.controllerRevision < previous.value.controllerRevision)
+    || typeof value.step !== 'string' || !STEP.test(value.step)
+    || !Number.isSafeInteger(value.completedAt) || value.completedAt <= 0 || value.completedAt > now + 30
+    || (previous !== null && value.completedAt < previous.value.completedAt)) {
+    fail('guard renewal progress receipt did not prove monotonic completed work')
+  }
+  return { ...loaded, path: pathname }
 }
 function parseArgs(argv) {
   const command = argv[0]
@@ -281,6 +352,9 @@ function verifyResumeCapability(command, values) {
 async function serve(values, recovery = false) {
   requirePaths(values, ['--database', '--n8n-database', '--socket', '--token-file'])
   requireSocketPath(values['--socket'])
+  const renewalOwner = values['--owner-receipt']
+    ? validateOwnerReceipt(values['--owner-receipt'], process.ppid) : null
+  let renewalProgress = null
   const legacyPid = recovery ? null : Number(values['--legacy-pid'])
   if (!recovery && (!Number.isSafeInteger(legacyPid) || legacyPid <= 0)) fail('--legacy-pid is required')
   const ttl = Number(values['--ttl-seconds'])
@@ -342,8 +416,8 @@ async function serve(values, recovery = false) {
     ? sha256(canonicalJson({ receipt: values['--resume-receipt'], expiresAt: resumeAfterLock.expiresAt }))
     : sha256(canonicalJson(legacyAfterLock))
   const token = randomBytes(32)
-  const issuedAt = Math.floor(Date.now() / 1000)
-  const expiresAt = issuedAt + ttl
+  let issuedAt = Math.floor(Date.now() / 1000)
+  let expiresAt = issuedAt + ttl
   const startingToken = JSON.stringify({
     schema: SCHEMA, token: token.toString('hex'), pid: process.pid, uid: process.getuid(),
     database, n8nDatabase, socket: values['--socket'], scriptSha256: sha256(readFileSync(scriptPath)),
@@ -363,11 +437,11 @@ async function serve(values, recovery = false) {
   let released = false
   let ready = false
   let mode = recovery ? 'dual-recovery' : 'dual'
-  let expiryTimer
+  let readyTokenState = null
+  let readyTokenSource = null
   const cleanup = () => {
     if (released) return
     released = true
-    if (expiryTimer) clearTimeout(expiryTimer)
     try { n8nDb.exec('ROLLBACK') } catch {}
     try { db.exec('ROLLBACK') } catch {}
     try { n8nDb.close() } catch {}
@@ -399,7 +473,62 @@ async function serve(values, recovery = false) {
           scriptSha256: sha256(readFileSync(scriptPath)), guardNonceSha256: nonceHash,
           issuedAt, expiresAt, legacyBindingSha256, mode,
           database, n8nDatabase, socket: socketIdentity })}\n`)
+      } else if (request.action === 'renew') {
+        try {
+          exactKeys(request, [
+            'action', 'challenge', 'token', 'expectedIssuedAt', 'expectedExpiresAt', 'leaseSeconds',
+            'ownerReceiptPath', 'progressReceiptPath',
+          ], 'guard renewal request')
+          let candidate
+          try { candidate = Buffer.from(request.token, 'hex') } catch { candidate = Buffer.alloc(0) }
+          if (candidate.length !== token.length || !timingSafeEqual(candidate, token)) {
+            fail('guard renewal token is invalid')
+          }
+          if (renewalOwner === null) fail('guard was not started by a managed renewal owner')
+          if (request.expectedIssuedAt !== issuedAt || request.expectedExpiresAt !== expiresAt) {
+            fail('guard renewal lease CAS lost')
+          }
+          if (!Number.isSafeInteger(request.leaseSeconds)
+            || request.leaseSeconds < 30 || request.leaseSeconds > 1800) {
+            fail('guard renewal lease must be between 30 and 1800 seconds')
+          }
+          const currentOwner = validateOwnerReceipt(request.ownerReceiptPath, renewalOwner.value.pid)
+          if (currentOwner.path !== renewalOwner.path || currentOwner.sha256 !== renewalOwner.sha256
+            || canonicalJson(currentOwner.value) !== canonicalJson(renewalOwner.value)) {
+            fail('guard renewal owner changed')
+          }
+          const progress = validateProgressReceipt(
+            request.progressReceiptPath, renewalOwner, renewalProgress,
+          )
+          const nextIssuedAt = Math.floor(Date.now() / 1000)
+          const nextExpiresAt = nextIssuedAt + request.leaseSeconds
+          if (nextIssuedAt === issuedAt && nextExpiresAt === expiresAt) {
+            fail('guard renewal lease did not advance')
+          }
+          const nextTokenState = { ...readyTokenState, issuedAt: nextIssuedAt, expiresAt: nextExpiresAt }
+          const nextTokenSource = JSON.stringify(nextTokenState)
+          replacePrivate(values['--token-file'], Buffer.from(readyTokenSource), nextTokenSource)
+          issuedAt = nextIssuedAt
+          expiresAt = nextExpiresAt
+          readyTokenState = nextTokenState
+          readyTokenSource = nextTokenSource
+          renewalProgress = progress
+          socket.end(`${JSON.stringify({
+            schema: RENEWAL_SCHEMA,
+            issuedAt,
+            expiresAt,
+            sequence: progress.value.sequence,
+            progressSha256: progress.sha256,
+          })}\n`)
+        } catch (error) {
+          socket.end(`${JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          })}\n`)
+        }
       } else if (request.action === 'handoff') {
+        if (Math.floor(Date.now() / 1000) >= expiresAt) {
+          socket.end('{"error":"lease_expired"}\n'); return
+        }
         let candidate
         try { candidate = Buffer.from(request.token, 'hex') } catch { candidate = Buffer.alloc(0) }
         if (candidate.length !== token.length || !timingSafeEqual(candidate, token)) {
@@ -459,13 +588,14 @@ async function serve(values, recovery = false) {
       'Mission Control': database,
       n8n: n8nDatabase,
     }, values['--socket'])
-    const readyToken = JSON.stringify({
+    readyTokenState = {
       schema: SCHEMA, token: token.toString('hex'), pid: process.pid, uid: process.getuid(),
       database, n8nDatabase, socket: values['--socket'], scriptSha256: sha256(readFileSync(scriptPath)),
       issuedAt, expiresAt, state: 'ready', socketIdentity,
       ownerStartTime: owner.startedAt, ownerArgvSha256: owner.argvSha256,
-    })
-    replacePrivate(values['--token-file'], Buffer.from(startingBoundToken), readyToken)
+    }
+    readyTokenSource = JSON.stringify(readyTokenState)
+    replacePrivate(values['--token-file'], Buffer.from(startingBoundToken), readyTokenSource)
     if (recovery) {
       const consumed = verifyResumeCapability('consume-bootstrap-resume', values)
       if (canonicalJson(consumed.databases) !== canonicalJson(resumeBefore.databases)
@@ -474,22 +604,13 @@ async function serve(values, recovery = false) {
       }
     }
     ready = true
-    expiryTimer = setTimeout(stop, Math.max(1, expiresAt * 1000 - Date.now()))
   } catch (error) {
     cleanup()
     throw error
   }
   process.stdout.write(`Legacy freeze guard active: pid=${process.pid}\n`)
 }
-async function statusOrRevoke(command, values) {
-  requirePaths(values, ['--socket', '--database', '--n8n-database'])
-  const expected = {
-    mission: identity(values['--database'], 'expected database'),
-    n8n: identity(values['--n8n-database'], 'expected n8n database'),
-  }
-  const attestation = await attestGuard(values['--socket'], expected, command === 'revoke')
-  if (command === 'status') { process.stdout.write(`${JSON.stringify(attestation)}\n`); return }
-  requirePaths(values, ['--token-file'])
+function readyToken(values, attestation) {
   let tokenState
   try { tokenState = JSON.parse(readPrivate(values['--token-file'], 'guard token').toString('utf8')) }
   catch { fail('guard token is invalid') }
@@ -508,7 +629,63 @@ async function statusOrRevoke(command, values) {
     || JSON.stringify(tokenState.socketIdentity) !== JSON.stringify(attestation.socket)
     || tokenState.issuedAt !== attestation.issuedAt || tokenState.expiresAt !== attestation.expiresAt
     || !SHA256.test(tokenState.token)
-    || sha256(Buffer.from(tokenState.token, 'hex')) !== attestation.guardNonceSha256) fail('guard token is invalid')
+    || sha256(Buffer.from(tokenState.token, 'hex')) !== attestation.guardNonceSha256) {
+    fail('guard token is invalid')
+  }
+  return tokenState
+}
+async function renew(values) {
+  requirePaths(values, [
+    '--socket', '--token-file', '--database', '--n8n-database',
+    '--owner-receipt', '--progress-receipt',
+  ])
+  const expectedIssuedAt = Number(values['--expected-issued-at'])
+  const expectedExpiresAt = Number(values['--expected-expires-at'])
+  const leaseSeconds = Number(values['--lease-seconds'])
+  if (!Number.isSafeInteger(expectedIssuedAt) || !Number.isSafeInteger(expectedExpiresAt)
+    || !Number.isSafeInteger(leaseSeconds) || leaseSeconds < 30 || leaseSeconds > 1800) {
+    fail('guard renewal numeric arguments are invalid')
+  }
+  const expected = {
+    mission: identity(values['--database'], 'expected database'),
+    n8n: identity(values['--n8n-database'], 'expected n8n database'),
+  }
+  const attestation = await attestGuard(values['--socket'], expected, true)
+  if (attestation.issuedAt !== expectedIssuedAt || attestation.expiresAt !== expectedExpiresAt) {
+    fail('guard renewal lease CAS lost')
+  }
+  const tokenState = readyToken(values, attestation)
+  const challenge = randomBytes(32).toString('hex')
+  const response = await exchange(values['--socket'], {
+    action: 'renew',
+    challenge,
+    token: tokenState.token,
+    expectedIssuedAt,
+    expectedExpiresAt,
+    leaseSeconds,
+    ownerReceiptPath: values['--owner-receipt'],
+    progressReceiptPath: values['--progress-receipt'],
+  })
+  if (typeof response?.error === 'string') fail(response.error)
+  exactKeys(response, ['schema', 'issuedAt', 'expiresAt', 'sequence', 'progressSha256'],
+    'guard renewal response')
+  if (response.schema !== RENEWAL_SCHEMA
+    || !Number.isSafeInteger(response.issuedAt) || !Number.isSafeInteger(response.expiresAt)
+    || response.expiresAt - response.issuedAt !== leaseSeconds
+    || !Number.isSafeInteger(response.sequence) || response.sequence <= 0
+    || !SHA256.test(response.progressSha256 || '')) fail('guard renewal response is invalid')
+  process.stdout.write(`${JSON.stringify(response)}\n`)
+}
+async function statusOrRevoke(command, values) {
+  requirePaths(values, ['--socket', '--database', '--n8n-database'])
+  const expected = {
+    mission: identity(values['--database'], 'expected database'),
+    n8n: identity(values['--n8n-database'], 'expected n8n database'),
+  }
+  const attestation = await attestGuard(values['--socket'], expected, command !== 'handoff')
+  if (command === 'status') { process.stdout.write(`${JSON.stringify(attestation)}\n`); return }
+  requirePaths(values, ['--token-file'])
+  const tokenState = readyToken(values, attestation)
   const challenge = randomBytes(32).toString('hex')
   const action = command === 'handoff' ? 'handoff' : 'revoke'
   if (action === 'handoff' && !['dual', 'dual-recovery'].includes(attestation.mode)) {
@@ -571,9 +748,10 @@ async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   if (command === 'serve') return serve(values)
   if (command === 'serve-recovery') return serve(values, true)
+  if (command === 'renew') return renew(values)
   if (command === 'status' || command === 'handoff' || command === 'revoke') return statusOrRevoke(command, values)
   if (command === 'recover-stale') return recoverStale(values)
-  fail('expected serve, serve-recovery, status, handoff, revoke, or recover-stale')
+  fail('expected serve, serve-recovery, renew, status, handoff, revoke, or recover-stale')
 }
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   main().catch(error => { process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1 })

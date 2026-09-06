@@ -133,6 +133,7 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/check-sensitive-content.mjs': 'export {}\n',
     'scripts/verify-director-video-release-readiness.mjs': 'export {}\n',
     'scripts/verify-shared-runtime-install-gate.mjs': 'export {}\n',
+    'scripts/legacy-release-runner.mjs': 'export {}\n',
     'scripts/legacy-preinstall-orchestrator.mjs': 'export {}\n',
     'scripts/legacy-preinstall-controller.mjs': 'export {}\n',
     'scripts/legacy-bootstrap-controller.mjs': 'export {}\n',
@@ -140,6 +141,7 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
     'scripts/legacy-freeze-guard.mjs': 'export {}\n',
     'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
+    'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
     'scripts/verify-n8n-blue-green-workflows.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
@@ -265,8 +267,14 @@ describe('standalone runtime launcher', () => {
 
   it('traces the single preinstall orchestrator and every managed executable into standalone', () => {
     const nextConfig = readFileSync(resolve(process.cwd(), 'next.config.js'), 'utf8')
+    const artifactChecker = readFileSync(
+      resolve(process.cwd(), 'scripts/check-standalone-artifact.mjs'),
+      'utf8',
+    )
     for (const member of [
       './scripts/legacy-preinstall-orchestrator.mjs',
+      './scripts/legacy-release-runner.mjs',
+      './scripts/deploy-blue-green.sh',
       './scripts/legacy-preinstall-controller.mjs',
       './scripts/install-aiworker-task-flow-skill.sh',
       './scripts/install-aiworker-video-command-plugin.sh',
@@ -277,6 +285,28 @@ describe('standalone runtime launcher', () => {
       './scripts/lib/runtime-tree-manifest.mjs',
     ]) {
       expect(nextConfig).toContain(member)
+    }
+    const runnerDependencyStart = artifactChecker.indexOf(
+      "['scripts/legacy-release-runner.mjs', [",
+    )
+    const runnerDependencyEnd = artifactChecker.indexOf('  ]],', runnerDependencyStart)
+    expect(runnerDependencyStart).toBeGreaterThan(0)
+    expect(runnerDependencyEnd).toBeGreaterThan(runnerDependencyStart)
+    const runnerDependencyContract = artifactChecker.slice(
+      runnerDependencyStart,
+      runnerDependencyEnd,
+    )
+    for (const dependency of [
+      'scripts/legacy-freeze-guard.mjs',
+      'scripts/apply-openclaw-runtime-convergence.sh',
+      'scripts/generate-legacy-bootstrap-rollback-proof.mjs',
+      'scripts/generate-legacy-freeze-evidence.mjs',
+      'scripts/legacy-preinstall-orchestrator.mjs',
+      'scripts/legacy-preinstall-controller.mjs',
+      'scripts/legacy-bootstrap-controller.mjs',
+      'scripts/deploy-blue-green.sh',
+    ]) {
+      expect(runnerDependencyContract).toContain(`    '${dependency}',`)
     }
   })
 
@@ -451,6 +481,8 @@ describe('standalone runtime launcher', () => {
     ['openclaw-skills/aiworker-task-flow/lib/video-task.mjs', 'file'],
     ['openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs', 'file'],
     ['scripts/legacy-preinstall-orchestrator.mjs', 'file'],
+    ['scripts/legacy-release-runner.mjs', 'file'],
+    ['scripts/deploy-blue-green.sh', 'file'],
     ['scripts/lib/openclaw-private-gateway-rpc.mjs', 'file'],
     ['scripts/lib/render-managed-markdown-section.mjs', 'file'],
     ['scripts/lib/runtime-tree-manifest.mjs', 'file'],
@@ -466,6 +498,8 @@ describe('standalone runtime launcher', () => {
       } else if (relativePath.startsWith('openclaw-plugins/')
         || relativePath.startsWith('openclaw-skills/')
         || relativePath === 'scripts/legacy-preinstall-orchestrator.mjs'
+        || relativePath === 'scripts/legacy-release-runner.mjs'
+        || relativePath === 'scripts/deploy-blue-green.sh'
         || relativePath === 'scripts/lib/openclaw-private-gateway-rpc.mjs'
         || relativePath === 'scripts/lib/render-managed-markdown-section.mjs'
         || relativePath === 'scripts/lib/runtime-tree-manifest.mjs') {
