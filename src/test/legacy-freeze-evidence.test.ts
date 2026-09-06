@@ -30,6 +30,7 @@ import {
   classifyEvidencedLegacyProcess,
   hashFileStable,
   queueState,
+  releaseIdFromCwd,
   revalidateDatabaseConnection,
   validateDatabaseBinding,
   validateNewDatabaseConnection,
@@ -307,6 +308,46 @@ function fixture(options: { layout?: 'repository' | 'managed-home' } = {}) {
 }
 
 describe('managed legacy freeze evidence', () => {
+  it('derives one release ID from every supported normalized legacy cwd layout', () => {
+    expect(releaseIdFromCwd(
+      '/Users/heisenbergs-1/Documents/Phoenix/video-autoworker/.runtime/releases/57f6e6c-runtime/.next/standalone',
+    )).toBe('57f6e6c-runtime')
+    expect(releaseIdFromCwd('/runtime/releases/legacy-runtime/standalone'))
+      .toBe('legacy-runtime')
+    expect(releaseIdFromCwd('/runtime/releases/direct-release'))
+      .toBe('direct-release')
+    expect(releaseIdFromCwd('/outer/releases/ignored/inner/releases/final-runtime/.next/standalone'))
+      .toBe('final-runtime')
+    for (const pathname of [
+      'runtime/releases/relative-runtime/standalone',
+      '/runtime/releases/../relative-runtime/standalone',
+      '/runtime/not-releases/runtime/standalone',
+      '/runtime/releases/',
+      '/runtime/releases/invalid release/standalone',
+    ]) expect(() => releaseIdFromCwd(pathname)).toThrow()
+  })
+
+  it('uses the shared release parser in the real deploy bootstrap inline gate', () => {
+    const deploy = readFileSync(resolve(projectRoot, 'scripts/deploy-blue-green.sh'), 'utf8')
+    const marker = '"$NODE_BIN" --input-type=module - "$evidence_generator" "$legacy_cwd" "$legacy_release" <<\'NODE\''
+    const commandIndex = deploy.indexOf(marker)
+    expect(commandIndex).toBeGreaterThan(0)
+    const bodyStart = deploy.indexOf("import { pathToFileURL } from 'node:url'", commandIndex)
+    expect(bodyStart).toBeGreaterThan(commandIndex)
+    const bodyEnd = deploy.indexOf('\nNODE\n', bodyStart)
+    expect(bodyEnd).toBeGreaterThan(bodyStart)
+    const inline = deploy.slice(bodyStart, bodyEnd)
+    expect(inline).toContain('releaseIdFromCwd')
+    const execute = (cwd: string, releaseId: string) => spawnSync(
+      process.execPath,
+      ['--input-type=module', '-', generator, cwd, releaseId],
+      { cwd: projectRoot, encoding: 'utf8', input: inline },
+    )
+    const realLayout = '/Users/heisenbergs-1/Documents/Phoenix/video-autoworker/.runtime/releases/57f6e6c-runtime/.next/standalone'
+    expect(execute(realLayout, '57f6e6c-runtime').status).toBe(0)
+    expect(execute(realLayout, 'another-runtime').status).not.toBe(0)
+  })
+
   it('fails before freeze attestation when a stale accepted run is attention', async () => {
     let freezeAttestations = 0
     const fetchQueue = async () => new Response(JSON.stringify({

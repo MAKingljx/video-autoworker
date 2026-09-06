@@ -1882,12 +1882,12 @@ NODE
   guard_token="$(dirname "$guard_socket")/guard.token"
   evidence_sha="$verified_evidence_sha"
   legacy_cwd="$(physical_path "$legacy_cwd")" || fail "unable to resolve legacy cwd"
-  "$NODE_BIN" - "$legacy_cwd" "$legacy_release" <<'NODE' \
+  "$NODE_BIN" --input-type=module - "$evidence_generator" "$legacy_cwd" "$legacy_release" <<'NODE' \
     || fail "legacy release ID is not bound to its physical cwd"
-const path = require('node:path')
-const [cwd, releaseId] = process.argv.slice(2)
-const candidate = path.basename(cwd) === 'standalone' ? path.basename(path.dirname(cwd)) : path.basename(cwd)
-if (candidate !== releaseId) process.exit(1)
+import { pathToFileURL } from 'node:url'
+const [generator, cwd, releaseId] = process.argv.slice(2)
+const { releaseIdFromCwd } = await import(pathToFileURL(generator).href)
+if (releaseIdFromCwd(cwd, 'legacy 3017') !== releaseId) process.exit(1)
 NODE
   BOOTSTRAP_MAINTENANCE=1
   command -v lsof >/dev/null 2>&1 || fail "bootstrap requires lsof for exact process verification"

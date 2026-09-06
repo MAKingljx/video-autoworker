@@ -104,6 +104,15 @@ function assertAbsolute(pathname, label) {
     || /[\u0000-\u001f\u007f]/u.test(pathname)) fail(`${label} must be one normalized absolute path`)
 }
 
+export function releaseIdFromCwd(pathname, label = 'legacy') {
+  assertAbsolute(pathname, `${label} cwd`)
+  const parts = relative(parse(pathname).root, pathname).split('/').filter(Boolean)
+  const releasesIndex = parts.lastIndexOf('releases')
+  const releaseId = releasesIndex >= 0 ? parts[releasesIndex + 1] : ''
+  if (!RELEASE_ID.test(releaseId || '')) fail(`${label} cwd is not inside a named release`)
+  return releaseId
+}
+
 export function assertNoSymlink(pathname, label) {
   assertAbsolute(pathname, label)
   const root = parse(pathname).root
@@ -353,9 +362,7 @@ function probeEvidencedLegacyProcess(descriptor, routerPort) {
       const fullProcess = processFields(expected.pid, records, 'legacy 3017')
       const database = identity(expected.database.path, 'Mission Control database')
       exactOpenIdentity(records, database, 'Mission Control database', /^\d+[A-Za-z]*$/u)
-      const releaseParts = fullProcess.cwd.path.split('/')
-      const releasesIndex = releaseParts.lastIndexOf('releases')
-      const releaseId = releasesIndex >= 0 ? releaseParts[releasesIndex + 1] : ''
+      const releaseId = releaseIdFromCwd(fullProcess.cwd.path, 'legacy 3017')
       current = { ...fullProcess, database, releaseId, routerPort }
     } catch (error) {
       try { process.kill(expected.pid, 0) } catch (secondError) {
@@ -557,10 +564,7 @@ export async function captureProduction(repositoryRoot = defaultRepositoryRoot) 
   const n8nRecords = openRecords(n8nPid)
   const legacyProcess = processFields(legacyPid, legacyRecords, 'legacy 3017')
   const n8nProcess = processFields(n8nPid, n8nRecords, 'n8n')
-  const releaseParts = legacyProcess.cwd.path.split('/')
-  const releasesIndex = releaseParts.lastIndexOf('releases')
-  const legacyReleaseId = releasesIndex >= 0 ? releaseParts[releasesIndex + 1] : ''
-  if (!RELEASE_ID.test(legacyReleaseId)) fail('legacy 3017 cwd is not inside a named release')
+  const legacyReleaseId = releaseIdFromCwd(legacyProcess.cwd.path, 'legacy 3017')
   const missionDatabase = findDatabase(legacyRecords, /\/mission-control\.db$/u, 'Mission Control database')
   const n8nDatabase = findDatabase(n8nRecords, /\/database\.sqlite$/u, 'n8n database')
   const n8nLaunchPid = launchPid(N8N_LABEL)
