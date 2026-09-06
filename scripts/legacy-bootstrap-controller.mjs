@@ -27,6 +27,7 @@ import {
   projectOfflineQueue,
   scanOfflineDurableBatchStates,
 } from './lib/runtime-safe-offline-queue.mjs'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import {
   claimBootstrapHandoff,
   inspectPreinstallAttempt,
@@ -365,7 +366,7 @@ function assertManagedRuntimeMember(pathname, relativePath, label) {
     let manifest
     try {
       manifest = readJson(manifestPath, 'standalone release manifest', {
-        maximumBytes: 32 * MAX_JSON_BYTES, nonempty: true,
+        maximumBytes: MAX_APPLICATION_RELEASE_MANIFEST_BYTES, nonempty: true,
       }).value
     } catch {
       fail(`${label} has neither Git HEAD nor standalone release provenance`)
@@ -881,8 +882,12 @@ function validateTarget(value, label) {
   safeEntry(value.releaseRoot, `${label} release root`, 'directory')
   if (realpathSync(value.releaseRoot) !== value.releaseRoot) fail(`${label} release root is not physical`)
   const manifestPath = join(value.releaseRoot, 'release-manifest.json')
-  const manifest = fileReference(manifestPath, `${label} release manifest`, { nonempty: true })
-  const digest = hashFileStable(manifestPath, `${label} release manifest`)
+  const manifestOptions = {
+    maximumBytes: MAX_APPLICATION_RELEASE_MANIFEST_BYTES,
+    nonempty: true,
+  }
+  const manifest = fileReference(manifestPath, `${label} release manifest`, manifestOptions)
+  const digest = hashFileStable(manifestPath, `${label} release manifest`, manifestOptions)
   if (digest !== value.manifestSha256) fail(`${label} release manifest digest changed`)
   return {
     slot: value.slot,

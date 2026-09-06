@@ -59,6 +59,7 @@ const runtimeSourcePaths = [
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -324,7 +325,9 @@ function createRuntime(root: string): RuntimeFixture {
     const target = join(release, pathname)
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
     copyFileSync(join(projectRoot, pathname), target)
-    chmodSync(target, pathname.startsWith('scripts/') || pathname.endsWith('/common.sh') ? 0o700 : 0o600)
+    chmodSync(target, pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+      ? 0o600
+      : pathname.startsWith('scripts/') || pathname.endsWith('/common.sh') ? 0o700 : 0o600)
   }
   const runtimeManifest = runtimeSourcePaths.map(pathname => (
     `${sha256(readFileSync(join(release, pathname)))}  ${pathname}`
@@ -750,6 +753,7 @@ function createDisasterReceipt(
   database: string,
   release: string,
   options: {
+    applicationManifestPaddingBytes?: number,
     evidenceSchema?: string,
     proofSchema?: string,
     workflowCombinedSha256?: string,
@@ -776,7 +780,12 @@ function createDisasterReceipt(
   const releaseRoot = join(root, 'application-releases', releaseId, 'standalone')
   mkdirSync(releaseRoot, { recursive: true, mode: 0o700 })
   const manifestPath = join(releaseRoot, 'release-manifest.json')
-  writeFileSync(manifestPath, '{"schema":"test-release/v1"}\n', { mode: 0o400 })
+  writeFileSync(manifestPath, `${JSON.stringify({
+    schema: 'test-release/v1',
+    ...(options.applicationManifestPaddingBytes
+      ? { padding: 'x'.repeat(options.applicationManifestPaddingBytes) }
+      : {}),
+  })}\n`, { mode: 0o400 })
   chmodSync(manifestPath, 0o400)
   const manifest = (() => {
     const entry = statSync(manifestPath, { bigint: true })
@@ -982,6 +991,30 @@ function unrelatedSnapshot(db: Database.Database): Record<string, unknown> {
 }
 
 describe('managed n8n workflow recovery chain', () => {
+  it('validates pending recovery bound to an application manifest above the receipt limit', () => {
+    const root = mkdtempSync(join(physicalTmp, 'n8n-managed-large-application-manifest-'))
+    cleanup.push(() => removeFixture(root))
+    const database = join(root, 'database.sqlite')
+    const live = createDatabase(database)
+    const runtime = createRuntime(root)
+    const packagePath = join(root, 'managed-workflows-backup')
+    live.close()
+    expect(backup(database, packagePath, runtime.runtimeDir).status).toBe(0)
+    const disaster = createDisasterReceipt(
+      join(root, 'bootstrap-attempt'), packagePath, database, runtime.release,
+      { applicationManifestPaddingBytes: 1024 * 1024 },
+    )
+    const pending = JSON.parse(readFileSync(disaster.pending, 'utf8')) as JsonRecord
+    const manifestPath = join(String(pending.releaseRoot), 'release-manifest.json')
+    expect(statSync(manifestPath).size).toBeGreaterThan(1024 * 1024)
+    expect(pending.manifestSha256).toBe(sha256(readFileSync(manifestPath)))
+
+    const verified = verifyDisasterReceipt(
+      disaster.receipt, packagePath, database, runtime.release,
+    )
+    expect(verified.status, `${verified.stdout}\n${verified.stderr}`).toBe(0)
+  })
+
   it('installs both recovery tools into current from one clean commit and covers them in the runtime digest', () => {
     const root = mkdtempSync(join(physicalTmp, 'n8n-managed-release-install-'))
     cleanup.push(() => removeFixture(root))
@@ -990,7 +1023,9 @@ describe('managed n8n workflow recovery chain', () => {
       const target = join(source, pathname)
       mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
       writeFileSync(target, readFileSync(join(projectRoot, pathname)), {
-        mode: pathname.startsWith('scripts/') || pathname.endsWith('common.sh') ? 0o700 : 0o600,
+        mode: pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+          ? 0o600
+          : pathname.startsWith('scripts/') || pathname.endsWith('common.sh') ? 0o700 : 0o600,
       })
     }
     execFileSync('/usr/bin/git', ['init', '-q', source])
@@ -1035,6 +1070,13 @@ printf '%s\\n' '#!/usr/bin/env node' > node_modules/n8n/bin/n8n
     const manifest = readFileSync(join(release, 'RUNTIME_SOURCE_SHA256SUMS'), 'utf8')
     const manifestPaths = manifest.trim().split('\n').map(line => line.slice(66))
     expect(manifestPaths).toEqual(runtimeSourcePaths)
+    const installedManifestContract = join(
+      release, 'scripts/lib/application-release-manifest-contract.mjs',
+    )
+    expect(Number(statSync(installedManifestContract).mode & 0o777)).toBe(0o600)
+    expect(manifest).toContain(
+      `${sha256(readFileSync(join(source, 'scripts/lib/application-release-manifest-contract.mjs')))}  scripts/lib/application-release-manifest-contract.mjs\n`,
+    )
     for (const file of [
       'n8n-maintenance-lock.mjs', 'n8n-workflow-transition-anchor.mjs', 'n8n-backup-managed-workflows.mjs',
       'n8n-restore-managed-workflows.sh',

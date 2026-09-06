@@ -13,6 +13,7 @@ import {
 import { fileURLToPath } from 'node:url'
 
 import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { assertConvergenceProof } from './lib/openclaw-runtime-convergence.mjs'
 import {
   DIRECTOR_EXTRACTION_PROVENANCE_NAME,
@@ -94,6 +95,14 @@ function safeFile(pathname, label) {
   }
   if (!entry.isFile() || entry.isSymbolicLink() || (entry.mode & 0o6022) !== 0) {
     fail(`${label}_unsafe`)
+  }
+  return entry
+}
+
+function safeApplicationReleaseManifest(pathname, label) {
+  const entry = safeFile(pathname, label)
+  if (entry.size <= 0 || entry.size > MAX_APPLICATION_RELEASE_MANIFEST_BYTES) {
+    fail(`${label}_size_invalid`)
   }
   return entry
 }
@@ -873,7 +882,7 @@ export function verifyDirectorExtractionReleaseProvenance({
     fail('app_release_build_source_anchor_mismatch')
   }
   const releaseManifestPath = join(releaseRoot, 'release-manifest.json')
-  safeFile(releaseManifestPath, 'app_release_manifest')
+  safeApplicationReleaseManifest(releaseManifestPath, 'app_release_manifest')
   const releaseManifest = parsedJsonObject(readFileSync(releaseManifestPath, 'utf8'))
   if (releaseManifest?.schemaVersion !== 2
     || !isStandaloneArtifactContentBinding(releaseManifest.artifactContent)
@@ -943,7 +952,7 @@ export async function verifyDirectorVideoReleasePreflight({
     fail('runtime_convergence_proof_invalid')
   }
   const releaseManifestPath = join(release, 'release-manifest.json')
-  safeFile(releaseManifestPath, 'app_release_manifest')
+  safeApplicationReleaseManifest(releaseManifestPath, 'app_release_manifest')
   return {
     schema: 'video-autoworker-director-video-preflight/v1',
     phase: 'pre-bootstrap',

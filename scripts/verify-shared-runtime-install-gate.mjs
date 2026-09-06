@@ -12,6 +12,7 @@ import {
   projectOfflineQueue,
   scanOfflineDurableBatchStates,
 } from './lib/runtime-safe-offline-queue.mjs'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -302,7 +303,11 @@ function defaultProcessAlive(pid) {
 function verifyStandaloneRelease(sourceRepositoryRoot, binding) {
   const auditor = join(sourceRepositoryRoot, 'scripts', 'check-standalone-artifact.mjs')
   const manifestPath = join(binding.releaseRoot, 'release-manifest.json')
-  if (sha256(readOwnedText(manifestPath, 'rolling_release_manifest', 8 * 1024 * 1024))
+  if (sha256(readOwnedText(
+    manifestPath,
+    'rolling_release_manifest',
+    MAX_APPLICATION_RELEASE_MANIFEST_BYTES,
+  ))
     !== binding.manifestSha256) fail('rolling_release_manifest_mismatch')
   try {
     execFileSync(process.execPath, [auditor, binding.releaseRoot], {

@@ -24,6 +24,7 @@ import {
   STANDALONE_PROVENANCE_SCHEMA,
   writeDirectorExtractionProvenance,
 } from './lib/director-extraction-release-provenance.mjs'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { scanStandaloneSensitiveContent } from './check-sensitive-content.mjs'
 
 export const FORBIDDEN_STANDALONE_NAMES = new Set([
@@ -161,6 +162,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/legacy-freeze-guard.mjs',
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/deploy-blue-green.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
@@ -274,6 +276,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'scripts/legacy-freeze-guard.mjs',
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/deploy-blue-green.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'scripts/lib/feishu-director-brain.mjs',
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
@@ -1131,7 +1134,11 @@ export async function writeStandaloneReleaseManifest(rootPath = resolve('.next/s
   const artifactContent = await computeStandaloneArtifactContentBinding(root)
   await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
   const manifest = await collectStandaloneManifestMembers(root, artifactContent)
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)
+  const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`
+  if (Buffer.byteLength(manifestSource) > MAX_APPLICATION_RELEASE_MANIFEST_BYTES) {
+    throw new Error('standalone_release_manifest_too_large')
+  }
+  await writeFile(manifestPath, manifestSource)
   const verified = await verifyStandaloneReleaseManifest(root)
   return {
     path: RELEASE_MANIFEST_NAME,
@@ -1147,6 +1154,9 @@ export async function verifyStandaloneReleaseManifest(rootPath = resolve('.next/
   const manifestStat = await lstat(manifestPath).catch(() => null)
   if (!manifestStat?.isFile() || manifestStat.isSymbolicLink() || manifestStat.size === 0) {
     throw new Error('standalone_release_manifest_missing')
+  }
+  if (manifestStat.size > MAX_APPLICATION_RELEASE_MANIFEST_BYTES) {
+    throw new Error('standalone_release_manifest_too_large')
   }
   let declared
   try {

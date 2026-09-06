@@ -23,6 +23,7 @@ import {
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 
 const PACKAGE_SCHEMA = 'video-autoworker-n8n-managed-workflow-backup/v1'
 const RECEIPT_SCHEMA = 'video-autoworker-n8n-managed-workflow-restore-confirmation/v2'
@@ -667,7 +668,11 @@ function validateDisasterPending(
     fail('pending release root identity changed')
   }
   const manifestPath = join(pending.releaseRoot, 'release-manifest.json')
-  const currentManifest = hashStableFile(manifestPath, 'pending release manifest', MAX_MANIFEST_BYTES)
+  const currentManifest = hashStableFile(
+    manifestPath,
+    'pending release manifest',
+    MAX_APPLICATION_RELEASE_MANIFEST_BYTES,
+  )
   if (prepareTarget.manifest.path !== manifestPath
     || prepareTarget.manifest.dev !== currentManifest.entry.dev.toString()
     || prepareTarget.manifest.ino !== currentManifest.entry.ino.toString()

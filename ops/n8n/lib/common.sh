@@ -209,6 +209,7 @@ n8n_runtime_source_manifest() {
       scripts/n8n-workflow-transition-anchor.mjs \
       scripts/n8n-backup-managed-workflows.mjs \
       scripts/n8n-restore-managed-workflows.sh \
+      scripts/lib/application-release-manifest-contract.mjs \
       ops/n8n/.env.example \
       ops/n8n/lib/common.sh \
       ops/n8n/package.json \

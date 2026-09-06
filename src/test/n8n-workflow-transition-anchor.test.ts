@@ -39,6 +39,7 @@ const runtimeSourcePaths = [
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -165,7 +166,9 @@ function createFixture() {
     const destination = join(runtimeRoot, pathname)
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 })
     copyFileSync(resolve(projectRoot, pathname), destination)
-    chmodSync(destination, pathname.startsWith('scripts/') || pathname === 'ops/n8n/lib/common.sh' ? 0o700 : 0o600)
+    chmodSync(destination, pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+      ? 0o600
+      : pathname.startsWith('scripts/') || pathname === 'ops/n8n/lib/common.sh' ? 0o700 : 0o600)
   }
   const runtimeManifest = `${runtimeSourcePaths.map(pathname =>
     `${sha256(readFileSync(join(runtimeRoot, pathname)))}  ${pathname}`).join('\n')}\n`

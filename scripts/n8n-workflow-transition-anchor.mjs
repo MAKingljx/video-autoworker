@@ -22,6 +22,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 
 const INTENT_SCHEMA = 'video-autoworker-n8n-workflow-upgrade-intent/v1'
 const CONFIRMATION_SCHEMA = 'video-autoworker-n8n-workflow-current-confirmation/v1'
@@ -54,6 +55,7 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -61,6 +63,8 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'ops/n8n/workflows/aiworker-task-intake.json',
   'ops/n8n/workflows/aiworker-video-analysis.json',
 ])
+const APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH =
+  'scripts/lib/application-release-manifest-contract.mjs'
 const ACTIONS = Object.freeze([
   'unpublish-existing-managed-workflows',
   'import-fixed-id-managed-workflows',
@@ -72,6 +76,10 @@ function nowSeconds() {
     return Number(process.env.AIWORKER_TEST_TRANSITION_NOW)
   }
   return Math.floor(Date.now() / 1000)
+}
+
+function runtimeSourceRequiredMode(pathname) {
+  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH ? 0o600 : null
 }
 
 function fail(message) {
@@ -208,6 +216,16 @@ function controlledDirectory(pathname, label) {
     fail(`${label} must be one controlled physical directory`)
   }
   return { path: pathname, dev: entry.dev.toString(), ino: entry.ino.toString(), uid: Number(entry.uid), mode: mode.toString(8) }
+}
+
+function applicationReleaseManifestSnapshot(pathname, label) {
+  noSymlink(pathname, label)
+  const entry = statSync(pathname, { bigint: true })
+  if (!entry.isFile() || entry.size <= 0n
+    || entry.size > BigInt(MAX_APPLICATION_RELEASE_MANIFEST_BYTES)) {
+    fail(`${label} size is invalid`)
+  }
+  return fileSnapshot(pathname, label)
 }
 
 function fileSnapshot(pathname, label, requiredMode = null, includeSha = true) {
@@ -495,7 +513,11 @@ function validateRuntime(runtimeRoot, targetCommit) {
       || match[2].startsWith('/') || match[2].split('/').includes('..')) {
       fail('runtime source manifest member list is invalid')
     }
-    const member = fileSnapshot(join(runtimeRoot, match[2]), `runtime source ${match[2]}`)
+    const member = fileSnapshot(
+      join(runtimeRoot, match[2]),
+      `runtime source ${match[2]}`,
+      runtimeSourceRequiredMode(match[2]),
+    )
     if (member.sha256 !== match[1]) fail(`runtime source member changed: ${match[2]}`)
     runtimeSourceFiles.push({ name: match[2], file: member })
   }
@@ -545,7 +567,10 @@ function validateApplicationRelease(releaseRoot, slot, releaseId, targetCommit) 
     slot,
     releaseId,
     releaseRoot: controlledDirectory(releaseRoot, 'target application release'),
-    manifest: fileSnapshot(join(releaseRoot, 'release-manifest.json'), 'target application release manifest'),
+    manifest: applicationReleaseManifestSnapshot(
+      join(releaseRoot, 'release-manifest.json'),
+      'target application release manifest',
+    ),
   }
 }
 

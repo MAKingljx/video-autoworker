@@ -8,6 +8,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 
 const PREPARED_SCHEMA = 'video-autoworker-legacy-preinstall-prepared/v1'
 const VERIFIED_SCHEMA = 'video-autoworker-legacy-preinstall-verified/v1'
@@ -188,7 +189,7 @@ function assertNoSymlink(pathname, label, allowMissing = false) {
   }
 }
 
-function safeEntry(pathname, label, kind, mode = null) {
+function safeEntry(pathname, label, kind, mode = null, maximumBytes = MAX_BYTES) {
   assertNoSymlink(pathname, label)
   const entry = lstatSync(pathname, { bigint: true })
   if (kind === 'file' && (!entry.isFile() || entry.nlink !== 1n)) fail(`${label} is not a safe regular file`)
@@ -196,12 +197,12 @@ function safeEntry(pathname, label, kind, mode = null) {
   if (entry.uid !== BigInt(process.getuid())) fail(`${label} owner is invalid`)
   const actualMode = Number(entry.mode & 0o7777n)
   if (mode === null ? (actualMode & 0o022) !== 0 : actualMode !== mode) fail(`${label} mode is unsafe`)
-  if (kind === 'file' && (entry.size <= 0n || entry.size > BigInt(MAX_BYTES))) fail(`${label} size is invalid`)
+  if (kind === 'file' && (entry.size <= 0n || entry.size > BigInt(maximumBytes))) fail(`${label} size is invalid`)
   return entry
 }
 
-function readStableFile(pathname, label, mode) {
-  const entry = safeEntry(pathname, label, 'file', mode)
+function readStableFile(pathname, label, mode, maximumBytes = MAX_BYTES) {
+  const entry = safeEntry(pathname, label, 'file', mode, maximumBytes)
   const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const opened = fstatSync(descriptor, { bigint: true })
@@ -224,8 +225,8 @@ function readStableFile(pathname, label, mode) {
   } finally { closeSync(descriptor) }
 }
 
-function reference(pathname, label, mode) {
-  return readStableFile(pathname, label, mode).reference
+function reference(pathname, label, mode, maximumBytes = MAX_BYTES) {
+  return readStableFile(pathname, label, mode, maximumBytes).reference
 }
 
 function readJson(pathname, label, mode) {
@@ -498,7 +499,12 @@ function evidenceContext(evidencePath, proofPath, sourceCommit) {
   }
   assertNoSymlink(target.releaseRoot, 'target release root')
   if (realpathSync(target.releaseRoot) !== target.releaseRoot) fail('target release root is not physical')
-  const manifest = reference(join(target.releaseRoot, 'release-manifest.json'), 'target release manifest', null)
+  const manifest = reference(
+    join(target.releaseRoot, 'release-manifest.json'),
+    'target release manifest',
+    null,
+    MAX_APPLICATION_RELEASE_MANIFEST_BYTES,
+  )
   if (manifest.sha256 !== target.manifestSha256) fail('target release manifest changed')
   const databases = {
     mission: databaseIdentity(evidence.legacy?.database, 'Mission Control database'),

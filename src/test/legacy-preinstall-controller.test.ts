@@ -355,6 +355,41 @@ function waitChild(child: ReturnType<typeof spawn>) {
 }
 
 describe('legacy preinstall controller', () => {
+  it('prepares a referenced application manifest above the receipt limit and rejects above its limit', () => {
+    const entry = fixture()
+    const manifest = join(entry.releaseRoot, 'release-manifest.json')
+    writeJson(manifest, {
+      schema: 'test-release/v1',
+      padding: 'x'.repeat(1024 * 1024),
+    })
+    expect(statSync(manifest).size).toBeGreaterThan(1024 * 1024)
+
+    const manifestSha256 = digest(readFileSync(manifest))
+    const evidence = JSON.parse(readFileSync(entry.evidence, 'utf8'))
+    evidence.target.manifestSha256 = manifestSha256
+    writeJson(entry.evidence, evidence)
+    const attestation = JSON.parse(readFileSync(entry.attestation, 'utf8'))
+    attestation.targetApplicationRelease.manifest.sha256 = manifestSha256
+    chmodSync(entry.attestation, 0o600)
+    writeJson(entry.attestation, attestation, 0o400)
+
+    const prepared = prepare(entry)
+    expect(prepared.status, prepared.stderr).toBe(0)
+    const preparedResult = JSON.parse(prepared.stdout)
+    expect(preparedResult).toMatchObject({ phase: 'INSTALL_PREPARED', revision: 1 })
+    expect(JSON.parse(readFileSync(preparedResult.prepared.path, 'utf8'))).toMatchObject({
+      sourceCommit: COMMIT,
+      target: { releaseId: `${COMMIT}-runtime`, manifestSha256 },
+    })
+
+    const oversized = fixture()
+    const oversizedManifest = join(oversized.releaseRoot, 'release-manifest.json')
+    writeFileSync(oversizedManifest, Buffer.alloc(32 * 1024 * 1024 + 1, 0x20))
+    const rejected = prepare(oversized)
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('target release manifest size is invalid')
+  })
+
   it('creates one transition-scoped owner and rejects a second attempt directory', () => {
     const entry = fixture()
     const first = prepare(entry)

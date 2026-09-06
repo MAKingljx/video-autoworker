@@ -46,6 +46,7 @@ const runtimeSourcePaths = [
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -154,6 +155,7 @@ function gitSource(pathname: string): Buffer {
   })
   if (result.status === 0 && result.stdout) return result.stdout
   const candidateOnly = new Set([
+    'scripts/lib/application-release-manifest-contract.mjs',
     'scripts/n8n-backup-managed-workflows.mjs',
     'scripts/n8n-maintenance-lock.mjs',
     'scripts/n8n-restore-managed-workflows.sh',
@@ -199,6 +201,9 @@ function createIdentityFixture(
     const target = join(runtimeRoot, pathname)
     mkdirSync(resolve(target, '..'), { recursive: true })
     writeFileSync(target, gitSource(pathname))
+    if (pathname === 'scripts/lib/application-release-manifest-contract.mjs') {
+      chmodSync(target, 0o600)
+    }
   }
   const cliPath = join(runtimeCwd, 'node_modules/n8n/bin/n8n')
   const packageDefinition = join(runtimeCwd, 'node_modules/n8n/package.json')

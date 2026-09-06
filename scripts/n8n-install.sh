@@ -131,6 +131,7 @@ if [[ ! -d "$release_dir" ]]; then
   staging_dir="$(mktemp -d "$release_root/.staging-${source_commit:0:12}.XXXXXX")"
   install -d -m 700 \
     "$staging_dir/scripts" \
+    "$staging_dir/scripts/lib" \
     "$staging_dir/ops/n8n/lib" \
     "$staging_dir/ops/n8n/workflows"
 
@@ -145,6 +146,9 @@ if [[ ! -d "$release_dir" ]]; then
     n8n-restore-managed-workflows.sh; do
     install -m 700 "$SCRIPT_DIR/$control_script" "$staging_dir/scripts/$control_script"
   done
+  install -m 600 \
+    "$SCRIPT_DIR/lib/application-release-manifest-contract.mjs" \
+    "$staging_dir/scripts/lib/application-release-manifest-contract.mjs"
   install -m 700 "$AIWORKER_N8N_SOURCE_DIR/lib/common.sh" "$staging_dir/ops/n8n/lib/common.sh"
   install -m 600 "$AIWORKER_N8N_SOURCE_DIR/.env.example" "$staging_dir/ops/n8n/.env.example"
   install -m 600 "$AIWORKER_N8N_SOURCE_DIR/package.json" "$staging_dir/ops/n8n/package.json"

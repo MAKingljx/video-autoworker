@@ -234,6 +234,8 @@ async function prepareRequiredStandaloneFixture(
     'scripts/legacy-freeze-guard.mjs': 'export {}\n',
     'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
     'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
+    'scripts/lib/application-release-manifest-contract.mjs':
+      'export const MAX_APPLICATION_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
@@ -2175,6 +2177,28 @@ describe('Feishu director brain contract', () => {
       await prepareRequiredStandaloneFixture(root)
       await artifactAudit.writeStandaloneReleaseAttestations(root)
       await expect(artifactAudit.auditStandaloneArtifact(root)).resolves.toMatchObject({ ok: true })
+
+      const originalStringify = JSON.stringify.bind(JSON)
+      const stringify = vi.spyOn(JSON, 'stringify').mockImplementation(
+        (value: unknown, replacer?: any, space?: string | number) => {
+          if ((value as { schemaVersion?: number })?.schemaVersion === 2 && space === 2) {
+            return 'x'.repeat(32 * 1024 * 1024 + 1)
+          }
+          return originalStringify(value, replacer, space)
+        },
+      )
+      try {
+        await expect(artifactAudit.writeStandaloneReleaseManifest(root))
+          .rejects.toThrow('standalone_release_manifest_too_large')
+      } finally {
+        stringify.mockRestore()
+      }
+
+      const releaseManifestPath = join(root, 'release-manifest.json')
+      await writeFile(releaseManifestPath, Buffer.alloc(32 * 1024 * 1024 + 1, 0x20))
+      await expect(artifactAudit.verifyStandaloneReleaseManifest(root))
+        .rejects.toThrow('standalone_release_manifest_too_large')
+      await artifactAudit.writeStandaloneReleaseManifest(root)
 
       const favicon = join(root, 'public', 'favicon.ico')
       const originalMode = (await stat(favicon)).mode & 0o777

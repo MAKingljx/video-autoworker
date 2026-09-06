@@ -21,6 +21,7 @@ import { createRequire } from 'node:module'
 import { userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 
 const SCHEMA = 'video-autoworker-legacy-freeze-evidence/v3'
 const GUARD_SCHEMA = 'video-autoworker-legacy-freeze-guard/v1'
@@ -691,7 +692,11 @@ export function resolveTrustedStandaloneTarget(argumentsValue, repositoryRoot = 
   }
   safeEntry(physical, 'target standalone root', 'directory')
   const manifestPath = join(physical, 'release-manifest.json')
-  safeEntry(manifestPath, 'target release manifest', 'file')
+  const manifestEntry = safeEntry(manifestPath, 'target release manifest', 'file')
+  if (manifestEntry.size <= 0n
+    || manifestEntry.size > BigInt(MAX_APPLICATION_RELEASE_MANIFEST_BYTES)) {
+    fail('target release manifest size is invalid')
+  }
   if (!testMode) {
     run(process.execPath, [
       join(repositoryRoot, 'scripts/check-standalone-artifact.mjs'), physical,

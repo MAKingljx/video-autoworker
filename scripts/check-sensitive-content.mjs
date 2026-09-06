@@ -11,6 +11,7 @@ import {
 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { scanHighConfidenceSensitiveValues } from './lib/sensitive-value-scanner.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -520,7 +521,8 @@ export function scanSourceSensitiveContent(options = {}) {
 function parsedStandaloneManifest(root) {
   const pathname = join(root, 'release-manifest.json')
   const stat = lstatSync(pathname)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) {
+  if (!stat.isFile() || stat.isSymbolicLink()
+    || stat.size > MAX_APPLICATION_RELEASE_MANIFEST_BYTES) {
     throw new Error('sensitive_scan_release_manifest_unsafe')
   }
   let manifest

@@ -113,7 +113,11 @@ function writePrivate(pathname: string, value: unknown): string {
 
 type Fixture = ReturnType<typeof fixture>
 
-function fixture(options: { guardExpiresAt?: number, observedAt?: number } = {}) {
+function fixture(options: {
+  applicationManifestPaddingBytes?: number,
+  guardExpiresAt?: number,
+  observedAt?: number,
+} = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-bootstrap-controller.')))
   roots.push(root)
   chmodSync(root, 0o700)
@@ -134,7 +138,12 @@ function fixture(options: { guardExpiresAt?: number, observedAt?: number } = {})
   mkdirSync(preinstallDirectory, { mode: 0o700 })
   chmodSync(preinstallDirectory, 0o700)
   const manifestPath = join(releaseRoot, 'release-manifest.json')
-  const manifestSource = '{"schema":"test-release/v1"}\n'
+  const manifestSource = `${JSON.stringify({
+    schema: 'test-release/v1',
+    ...(options.applicationManifestPaddingBytes
+      ? { padding: 'x'.repeat(options.applicationManifestPaddingBytes) }
+      : {}),
+  })}\n`
   writeFileSync(manifestPath, manifestSource, { mode: 0o600 })
   chmodSync(manifestPath, 0o600)
   const mission = join(databaseDirectory, 'mission-control.db')
@@ -894,7 +903,8 @@ process.stdout.write(JSON.stringify({
   })
 
   it('creates a private immutable prepare/confirm/shutdown receipt chain without service actions', () => {
-    const entry = fixture()
+    const entry = fixture({ applicationManifestPaddingBytes: 1024 * 1024 })
+    expect(statSync(entry.manifestPath).size).toBeGreaterThan(1024 * 1024)
     const prepared = prepare(entry)
     expect(prepared.status, prepared.stderr).toBe(0)
     const preparePath = join(entry.attempt, 'prepare.receipt.json')

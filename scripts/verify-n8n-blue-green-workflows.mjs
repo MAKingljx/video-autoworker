@@ -18,6 +18,7 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-workflow-transition-anchor.mjs',
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
+  'scripts/lib/application-release-manifest-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -25,6 +26,8 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'ops/n8n/workflows/aiworker-task-intake.json',
   'ops/n8n/workflows/aiworker-video-analysis.json',
 ])
+const APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH =
+  'scripts/lib/application-release-manifest-contract.mjs'
 const WORKFLOWS = Object.freeze([
   { id: 'aiworker-task-intake-v1', file: 'aiworker-task-intake.json', callbackCount: 4 },
   { id: 'aiworker-video-analysis-v1', file: 'aiworker-video-analysis.json', callbackCount: 5 },
@@ -223,6 +226,7 @@ function gitSource(repository, expectedCommit, pathname) {
       'scripts/n8n-maintenance-lock.mjs',
       'scripts/n8n-restore-managed-workflows.sh',
       'scripts/n8n-workflow-transition-anchor.mjs',
+      APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH,
     ].includes(pathname)) {
     try {
       return execFileSync('/usr/bin/git', [
@@ -235,6 +239,10 @@ function gitSource(repository, expectedCommit, pathname) {
   return run('/usr/bin/git', [
     '-C', repository, 'show', `${expectedCommit}:${pathname}`,
   ], `Git source read for ${pathname}`)
+}
+
+function runtimeSourceRequiredMode(pathname) {
+  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH ? '600' : null
 }
 
 function parseKeyValueManifest(source) {
@@ -282,7 +290,12 @@ function validateRuntimeFiles(runtimeRoot, repository, expectedCommit) {
   const runtimeSourceFiles = {}
   for (const pathname of RUNTIME_SOURCE_PATHS) {
     const absolute = join(runtimeRoot, pathname)
-    runtimeSourceFiles[pathname] = pathIdentity(absolute, `runtime source ${pathname}`, 'file')
+    const sourceIdentity = pathIdentity(absolute, `runtime source ${pathname}`, 'file')
+    const requiredMode = runtimeSourceRequiredMode(pathname)
+    if (requiredMode !== null && sourceIdentity.mode !== requiredMode) {
+      fail(`runtime source mode is invalid: ${pathname}`)
+    }
+    runtimeSourceFiles[pathname] = sourceIdentity
     if (sha256(readFileSync(absolute)) !== sha256(gitSource(repository, expectedCommit, pathname))) {
       fail(`runtime source differs from the bound commit: ${pathname}`)
     }

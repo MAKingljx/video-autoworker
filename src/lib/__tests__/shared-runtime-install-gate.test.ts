@@ -14,6 +14,9 @@ const verifierPath = resolve(repositoryRoot, 'scripts/verify-shared-runtime-inst
 const offlineQueueHelperPath = resolve(
   repositoryRoot, 'scripts/lib/runtime-safe-offline-queue.mjs',
 )
+const applicationReleaseManifestContractPath = resolve(
+  repositoryRoot, 'scripts/lib/application-release-manifest-contract.mjs',
+)
 const expectedSourceCommit = 'a'.repeat(40)
 const expectedReleaseId = `${expectedSourceCommit}-runtime`
 const digest = 'b'.repeat(64)
@@ -248,6 +251,7 @@ async function verifier() {
 async function createRollingRuntimeFixture(
   root: string,
   layout: 'repository' | 'production' = 'repository',
+  options: { applicationManifestPaddingBytes?: number } = {},
 ) {
   const physicalRoot = await realpath(root)
   await mkdir(resolve(physicalRoot, 'repository'), { mode: 0o700 })
@@ -283,7 +287,12 @@ async function createRollingRuntimeFixture(
     path: await realpath(n8nPath), dev: n8n.dev.toString(), ino: n8n.ino.toString(),
   }
   const statePath = resolve(deploymentRunDir, 'router-state.json')
-  const manifestSource = '{"fixture":true}\n'
+  const manifestSource = `${JSON.stringify({
+    fixture: true,
+    ...(options.applicationManifestPaddingBytes
+      ? { padding: 'x'.repeat(options.applicationManifestPaddingBytes) }
+      : {}),
+  })}\n`
   await writeFile(resolve(releaseRoot, 'release-manifest.json'), manifestSource, { mode: 0o600 })
   const manifestSha256 = sha256(manifestSource)
   const releaseId = 'active-release'
@@ -614,18 +623,26 @@ describe('shared runtime installation gate', () => {
       await mkdir(standaloneLib, { recursive: true })
       const copiedGate = resolve(standaloneScripts, 'verify-shared-runtime-install-gate.mjs')
       const copiedHelper = resolve(standaloneLib, 'runtime-safe-offline-queue.mjs')
+      const copiedManifestContract = resolve(
+        standaloneLib, 'application-release-manifest-contract.mjs',
+      )
       await Promise.all([
         copyFile(verifierPath, copiedGate),
         copyFile(offlineQueueHelperPath, copiedHelper),
+        copyFile(applicationReleaseManifestContractPath, copiedManifestContract),
       ])
 
       const gateSource = await readFile(copiedGate, 'utf8')
       const helperSource = await readFile(copiedHelper, 'utf8')
+      const manifestContractSource = await readFile(copiedManifestContract, 'utf8')
       expect(gateSource).not.toMatch(
         /(?:from\s+|import\s*\()[^\n]*legacy-bootstrap-controller\.mjs/u,
       )
       expect(helperSource).not.toMatch(
         /legacy-bootstrap-controller|generate-legacy-freeze-evidence|n8n-workflow-transition-anchor|verify-n8n-blue-green-workflows|\/Users\/|\/home\//u,
+      )
+      expect(manifestContractSource).toContain(
+        'MAX_APPLICATION_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024',
       )
       const imported = spawnSync(process.execPath, [
         '--input-type=module',
@@ -1113,7 +1130,11 @@ describe('shared runtime installation gate', () => {
   it('binds rolling authorization to the attested 3017 router, active slot, and 5678 database owner', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-rolling-binding-'))
     try {
-      const fixture = await createRollingRuntimeFixture(root)
+      const fixture = await createRollingRuntimeFixture(
+        root, 'repository', { applicationManifestPaddingBytes: 8 * 1024 * 1024 },
+      )
+      expect((await stat(resolve(fixture.releaseRoot, 'release-manifest.json'))).size)
+        .toBeGreaterThan(8 * 1024 * 1024)
       const { verifyRollingRuntimeBinding } = await verifier()
       expect(verifyRollingRuntimeBinding(fixture.input, fixture.dependencies)).toMatchObject({
         schema: 'video-autoworker-rolling-runtime-binding/v1',
