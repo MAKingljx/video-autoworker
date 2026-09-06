@@ -18,6 +18,10 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
+import {
+  projectPrivateGatewayResult,
+  serializePrivateGatewayResult,
+} from '../../../scripts/lib/openclaw-private-gateway-rpc.mjs'
 
 const execFileAsync = promisify(execFile)
 const repositoryRoot = process.cwd()
@@ -29,6 +33,10 @@ const manifestFile = resolve(
 const convergenceHelper = resolve(
   repositoryRoot,
   'scripts/lib/openclaw-runtime-convergence.mjs',
+)
+const privateGatewayRpc = resolve(
+  repositoryRoot,
+  'scripts/lib/openclaw-private-gateway-rpc.mjs',
 )
 const roots: string[] = []
 const gatewayProcesses: ChildProcess[] = []
@@ -656,7 +664,10 @@ if (operation === 'config-patch') {
 }
 if (operation === 'health') {
   fs.appendFileSync(callLog, 'gateway call health private-rpc\\n')
-  write({ configReload: { hotReloadStatus: process.env.FAKE_HOT_RELOAD_STATUS || 'active' } })
+  write({
+    ok: process.env.FAKE_HEALTH_OK !== '0',
+    configReload: { hotReloadStatus: process.env.FAKE_HOT_RELOAD_STATUS || 'active' },
+  })
   process.exit(0)
 }
 if (operation === 'logs-tail') {
@@ -1001,6 +1012,88 @@ describe('hot-reload log evidence', () => {
 })
 
 describe('qwen-current unified runtime convergence installer', () => {
+  it('projects health proof fields without persisting unrelated session metadata', () => {
+    const sessionKey = 'synthetic-session-key-never-persist'
+    const result = {
+      ok: true,
+      configReload: { hotReloadStatus: 'active' },
+      agents: { sessions: [{ sessionKey, metadata: { model: 'fixture' } }] },
+      diagnostics: { unrelated: true },
+    }
+    expect(projectPrivateGatewayResult('health', result)).toEqual({
+      ok: true,
+      configReload: { hotReloadStatus: 'active' },
+    })
+    const source = serializePrivateGatewayResult('health', result, '', sessionKey)
+    expect(source).toBe('{"ok":true,"configReload":{"hotReloadStatus":"active"}}\n')
+    expect(source).not.toContain(sessionKey)
+    expect(() => projectPrivateGatewayResult('health', {
+      ok: true,
+      configReload: {},
+    })).toThrow('private Gateway RPC failed')
+  })
+
+  it('rejects secrets in projected health fields and retains scanning for other operations', () => {
+    const category = (callback: () => unknown) => {
+      try { callback(); return null } catch (error) {
+        return (error as Error & { category?: string }).category
+      }
+    }
+    expect(category(() => serializePrivateGatewayResult('health', {
+      ok: true,
+      configReload: { hotReloadStatus: 'tokenvalue' },
+    }, 'tokenvalue'))).toBe('result_contains_secret')
+    for (const operation of ['catalog', 'effective', 'logs-tail', 'config-get', 'config-patch']) {
+      expect(category(() => serializePrivateGatewayResult(operation, {
+        ok: true,
+        nested: { sessionKey: 'nonhealth-session-secret' },
+      }, '', 'nonhealth-session-secret'))).toBe('result_contains_secret')
+    }
+  })
+
+  it('runs the real private RPC through a symlink alias and persists only health proof fields', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'private-gateway-rpc.')))
+    roots.push(root)
+    const packageRoot = join(root, 'openclaw')
+    const dist = join(packageRoot, 'dist')
+    const bin = join(packageRoot, 'bin')
+    const openclaw = join(bin, 'openclaw')
+    const alias = join(root, 'private-gateway-rpc.current.mjs')
+    const output = join(root, 'health.json')
+    const sessionKey = 'synthetic-session-metadata-never-persist'
+    await mkdir(dist, { recursive: true, mode: 0o700 })
+    await mkdir(bin, { mode: 0o700 })
+    await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify({
+      name: 'openclaw', version: '2026.7.1-2', type: 'module',
+    })}\n`, { mode: 0o600 })
+    await writeFile(openclaw, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+    await writeFile(join(dist, 'call-fixture.js'), `
+class GatewayCredentialsRequiredError extends Error {}
+async function callGatewayCli() { return JSON.parse(process.env.FAKE_GATEWAY_RESULT) }
+export { GatewayCredentialsRequiredError, callGatewayCli }
+`, { mode: 0o600 })
+    await writeFile(output, '', { mode: 0o600 })
+    await symlink(privateGatewayRpc, alias)
+
+    const invoked = await execFileAsync(process.execPath, [alias, 'health', output], {
+      env: {
+        ...process.env,
+        OPENCLAW_BIN: openclaw,
+        OPENCLAW_GATEWAY_TOKEN: 'synthetic-gateway-token',
+        AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: sessionKey,
+        FAKE_GATEWAY_RESULT: JSON.stringify({
+          ok: true,
+          configReload: { hotReloadStatus: 'active' },
+          agents: { sessions: [{ sessionKey, metadata: { model: 'fixture' } }] },
+        }),
+      },
+      encoding: 'utf8',
+    })
+    expect(invoked.stdout).toBe('')
+    expect(await readFile(output, 'utf8'))
+      .toBe('{"ok":true,"configReload":{"hotReloadStatus":"active"}}\n')
+  })
+
   it('pins one exact manifest and contains no Gateway lifecycle action', async () => {
     expect(JSON.parse(await readFile(manifestFile, 'utf8'))).toEqual({
       schema: 'video-autoworker-openclaw-runtime-convergence/v1',
@@ -1664,6 +1757,7 @@ describe('qwen-current unified runtime convergence installer', () => {
   }, 15_000)
 
   it.each([
+    ['Gateway health RPC is not ok', 'FAKE_HEALTH_OK', '0'],
     ['Gateway health is not active', 'FAKE_HOT_RELOAD_STATUS', 'failed'],
     ['config.patch requires a restart', 'FAKE_PATCH_REQUIRES_RESTART', '1'],
     ['config.patch returns a restart request', 'FAKE_PATCH_RESTART', '1'],

@@ -1295,7 +1295,7 @@ function verifyHotReload(
   )
   if (!Number.isSafeInteger(pid) || pid <= 0
     || !/^[a-f0-9]{64}$/u.test(baseHash)
-    || health?.configReload?.hotReloadStatus !== 'active'
+    || health?.ok !== true || health?.configReload?.hotReloadStatus !== 'active'
     || checkedLogs.cursor <= baseline.cursor
     || patch?.ok !== true || patch?.noop === true
     || patch?.sentinel?.payload?.stats?.requiresRestart !== false
@@ -1341,7 +1341,7 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
   const startTimeMs = Date.parse(runtime?.gateway?.startTime)
   const configMtimeMs = Number(BigInt(configFile.snapshot.mtimeNs) / 1_000_000n)
   if (!Number.isFinite(startTimeMs) || startTimeMs < configMtimeMs
-    || health?.configReload?.hotReloadStatus !== 'active') {
+    || health?.ok !== true || health?.configReload?.hotReloadStatus !== 'active') {
     fail('Gateway startup does not prove the current compaction config was loaded')
   }
   const compaction = stable(Object.fromEntries(

@@ -1,14 +1,22 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2'
 const LOOPBACK_URL = 'ws://127.0.0.1:18889'
 const TARGET_AGENT_ID = 'second-original'
 const MAX_RESULT_BYTES = 8 * 1024 * 1024
+const SUPPORTED_OPERATIONS = new Set([
+  'catalog', 'effective', 'health', 'logs-tail', 'config-get', 'config-patch',
+])
+const ERROR_CATEGORIES = new Set([
+  'contract_invalid', 'result_contains_secret', 'result_projection_invalid', 'rpc_call_failed',
+])
 
-function fail() {
-  throw new Error('private Gateway RPC failed')
+function fail(category = 'contract_invalid') {
+  const error = new Error('private Gateway RPC failed')
+  error.category = category
+  throw error
 }
 
 function secret(name, required = true) {
@@ -113,6 +121,30 @@ function operationRequest(operation) {
   fail()
 }
 
+export function projectPrivateGatewayResult(operation, result) {
+  if (!SUPPORTED_OPERATIONS.has(operation)) fail('contract_invalid')
+  if (operation !== 'health') return result
+  const hotReloadStatus = result?.configReload?.hotReloadStatus
+  if (typeof result?.ok !== 'boolean' || typeof hotReloadStatus !== 'string'
+    || !/^[a-z][a-z0-9_-]{0,63}$/u.test(hotReloadStatus)) {
+    fail('result_projection_invalid')
+  }
+  return { ok: result.ok, configReload: { hotReloadStatus } }
+}
+
+export function serializePrivateGatewayResult(
+  operation,
+  result,
+  gatewayToken = '',
+  sessionKey = '',
+) {
+  const source = `${JSON.stringify(projectPrivateGatewayResult(operation, result))}\n`
+  if ([gatewayToken, sessionKey].filter(Boolean).some(value => source.includes(value))) {
+    fail('result_contains_secret')
+  }
+  return source
+}
+
 async function main() {
   const [operation, outputPath, ...extra] = process.argv.slice(2)
   if (!operation || !outputPath || extra.length !== 0) fail()
@@ -120,18 +152,31 @@ async function main() {
   const sessionKey = process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''
   const callGatewayCli = await loadCallGatewayCli()
   const request = operationRequest(operation)
-  const result = await callGatewayCli({
-    ...request,
-    url: LOOPBACK_URL,
-    token: gatewayToken,
-    timeoutMs: 20_000,
-  })
-  const source = `${JSON.stringify(result)}\n`
-  if ([gatewayToken, sessionKey].filter(Boolean).some(value => source.includes(value))) fail()
+  let result
+  try {
+    result = await callGatewayCli({
+      ...request,
+      url: LOOPBACK_URL,
+      token: gatewayToken,
+      timeoutMs: 20_000,
+    })
+  } catch { fail('rpc_call_failed') }
+  const source = serializePrivateGatewayResult(operation, result, gatewayToken, sessionKey)
   safeOutput(outputPath, source)
 }
 
-main().catch(() => {
-  process.stderr.write('Private loopback Gateway RPC failed without exposing credentials.\n')
-  process.exitCode = 1
-})
+let isMain = false
+try {
+  isMain = process.argv[1] !== undefined
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url))
+} catch { /* imported modules and unavailable entry paths do not dispatch the CLI */ }
+if (isMain) {
+  const operation = SUPPORTED_OPERATIONS.has(process.argv[2]) ? process.argv[2] : 'invalid'
+  main().catch(error => {
+    const category = ERROR_CATEGORIES.has(error?.category) ? error.category : 'contract_invalid'
+    process.stderr.write(
+      `Private loopback Gateway RPC failed without exposing credentials (operation=${operation}, category=${category}).\n`,
+    )
+    process.exitCode = 1
+  })
+}
