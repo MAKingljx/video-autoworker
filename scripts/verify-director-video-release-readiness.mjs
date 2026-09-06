@@ -14,7 +14,10 @@ import { fileURLToPath } from 'node:url'
 
 import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
-import { assertConvergenceProof } from './lib/openclaw-runtime-convergence.mjs'
+import {
+  assertConvergenceProof,
+  validateOpenClawSdkLink,
+} from './lib/openclaw-runtime-convergence.mjs'
 import {
   DIRECTOR_EXTRACTION_PROVENANCE_NAME,
   isStandaloneArtifactContentBinding,
@@ -28,8 +31,10 @@ const SHA256 = /^[a-f0-9]{64}$/u
 const GIT_COMMIT = /^[a-f0-9]{40}$/u
 const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
+const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2'
 const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.14'
 const EXPECTED_DIRECTOR_BRAIN_VERSION = '0.4.0'
+const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
 const OUTBOX_CLOSURE_CONSTANTS = Object.freeze({
   DIRECTOR_BRAIN_CLI_SHA256: 'scripts/feishu-director-brain.mjs',
   DIRECTOR_BRAIN_SERVICE_SHA256: 'scripts/lib/feishu-director-brain.mjs',
@@ -221,6 +226,64 @@ function assertManifestMatches(repositoryRoot, installedRoot, members, label) {
     root: physicalRoot,
     manifestSha256: manifestDigest(actual),
     files: actual.files.length,
+  }
+}
+
+function assertVideoCommandManifestMatches(repositoryRoot, installedRoot) {
+  const physicalRoot = assertPhysicalDirectory(installedRoot, 'video_command')
+  const core = selectedSourceManifest(repositoryRoot, videoCommandMembers(repositoryRoot))
+  const coreFiles = core.files.map(item => item.path)
+  const coreFileSet = new Set(coreFiles)
+  const coreDirectorySet = new Set(core.directories)
+  const directories = []
+  const files = []
+  let sdk = null
+  const visit = (directory) => {
+    for (const name of readdirSync(directory).sort((left, right) => left.localeCompare(right))) {
+      if (/[/\\\u0000-\u001f\u007f]/u.test(name)) fail('video_command_unsafe_name')
+      const pathname = join(directory, name)
+      const member = relative(physicalRoot, pathname).split('\\').join('/')
+      const entry = lstatSync(pathname)
+      if (entry.uid !== process.getuid()) fail(`payload_owner_invalid:${member}`)
+      if (entry.isSymbolicLink()) {
+        if (member !== 'node_modules/openclaw' || sdk !== null) fail(`payload_symlink:${member}`)
+        sdk = validateOpenClawSdkLink(pathname, EXPECTED_OPENCLAW_VERSION)
+      } else if ((entry.mode & 0o0022) !== 0) {
+        fail(`payload_writable_by_others:${member}`)
+      } else if (entry.isDirectory()) {
+        if (!coreDirectorySet.has(member) && member !== 'node_modules'
+          && member !== 'test' && !member.startsWith('test/')) {
+          fail('video_command_manifest_mismatch')
+        }
+        directories.push(member)
+        visit(pathname)
+      } else if (entry.isFile()) {
+        if (entry.nlink !== 1 || (entry.mode & 0o6000) !== 0) {
+          fail(`payload_unsupported_member:${member}`)
+        }
+        if (!coreFileSet.has(member) && !VIDEO_COMMAND_AUXILIARY_ROOT_FILES.has(member)
+          && !member.startsWith('test/')) fail('video_command_manifest_mismatch')
+        files.push({ path: member, sha256: fileSha256(pathname) })
+      } else fail(`payload_unsupported_member:${member}`)
+    }
+  }
+  visit(physicalRoot)
+  directories.sort()
+  files.sort((left, right) => left.path.localeCompare(right.path))
+  const actualFiles = files.map(item => item.path)
+  if (coreFiles.some(item => !actualFiles.includes(item))
+    || [...coreDirectorySet].some(item => !directories.includes(item))
+    || !directories.includes('node_modules')
+    || sdk === null) fail('video_command_manifest_mismatch')
+  const actualByPath = new Map(files.map(item => [item.path, item.sha256]))
+  if (core.files.some(item => actualByPath.get(item.path) !== item.sha256)) {
+    fail('video_command_manifest_mismatch')
+  }
+  const manifest = { directories, files, symlinks: [sdk.evidence] }
+  return {
+    root: physicalRoot,
+    manifestSha256: manifestDigest(manifest),
+    files: files.length,
   }
 }
 
@@ -780,9 +843,7 @@ export function verifyInstalledReleasePayloads({
   const directorPluginRoot = join(profile, 'extensions', 'aiworker-director-brain')
   const directorSkillRoot = join(workspace, 'skills', 'aiworker-director-brain')
 
-  const videoCommand = assertManifestMatches(
-    repository, videoRoot, videoCommandMembers(repository), 'video_command',
-  )
+  const videoCommand = assertVideoCommandManifestMatches(repository, videoRoot)
   videoCommand.version = assertVersionPair(
     videoRoot, EXPECTED_VIDEO_COMMAND_VERSION, 'video_command',
   )

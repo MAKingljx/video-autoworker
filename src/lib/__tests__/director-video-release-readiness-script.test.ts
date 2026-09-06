@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  chmod, cp, mkdir, mkdtemp, readdir, realpath, rm, writeFile,
+  chmod, cp, mkdir, mkdtemp, readdir, realpath, rm, symlink, unlink, writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -93,18 +93,51 @@ async function copyPrivateTree(source: string, target: string) {
   await visit(target)
 }
 
-async function installVideoCommand(profileRoot: string) {
+async function installVideoCommand(profileRoot: string, managedNodeRoot: string) {
   const source = join(repositoryRoot, 'openclaw-plugins', 'aiworker-video-command')
   const target = join(profileRoot, 'extensions', 'aiworker-video-command')
-  await mkdir(target, { recursive: true, mode: 0o700 })
-  for (const member of ['index.js', 'openclaw.plugin.json', 'package.json']) {
-    await cp(join(source, member), join(target, member))
+  const sourcePrefix = 'openclaw-plugins/aiworker-video-command/'
+  const members = execFileSync('git', [
+    'ls-files', '--', 'openclaw-plugins/aiworker-video-command',
+  ], { cwd: repositoryRoot, encoding: 'utf8' }).trim().split('\n').map(pathname => (
+    pathname.slice(sourcePrefix.length)
+  ))
+  expect(members).toEqual(expect.arrayContaining([
+    'README.md', 'index.js', 'openclaw.plugin.json', 'package.json',
+    'scripts/validate-runtime-inspection.mjs', 'test/installer.test.mjs',
+    'vitest.config.mjs',
+  ]))
+  await mkdir(target, { recursive: true, mode: 0o755 })
+  await chmod(target, 0o755)
+  const directories = new Set(members.map(member => dirname(member)).filter(value => value !== '.'))
+  for (const directory of [...directories].sort((left, right) => left.length - right.length)) {
+    const targetDirectory = join(target, directory)
+    await mkdir(targetDirectory, { recursive: true, mode: 0o755 })
+    await chmod(targetDirectory, 0o755)
   }
-  for (const member of ['lib', 'scripts']) {
-    await copyPrivateTree(join(source, member), join(target, member))
+  for (const member of members) {
+    const sourcePath = join(source, member)
+    const targetPath = join(target, member)
+    await cp(sourcePath, targetPath)
+    await chmod(targetPath, member === 'test/installer.test.mjs' ? 0o600 : 0o644)
   }
-  await Promise.all(['index.js', 'openclaw.plugin.json', 'package.json']
-    .map(member => chmod(join(target, member), 0o600)))
+  const sdkRoot = join(managedNodeRoot, 'lib', 'node_modules', 'openclaw')
+  await mkdir(sdkRoot, { recursive: true, mode: 0o755 })
+  for (const directory of [
+    managedNodeRoot,
+    join(managedNodeRoot, 'lib'),
+    join(managedNodeRoot, 'lib', 'node_modules'),
+    sdkRoot,
+  ]) await chmod(directory, 0o755)
+  await writeFile(join(sdkRoot, 'package.json'), `${JSON.stringify({
+    name: 'openclaw', version: '2026.7.1-2',
+  })}\n`, { mode: 0o644 })
+  const installedNodeModules = join(target, 'node_modules')
+  await mkdir(installedNodeModules, { mode: 0o700 })
+  await chmod(installedNodeModules, 0o700)
+  const sdkLink = join(installedNodeModules, 'openclaw')
+  await symlink(sdkRoot, sdkLink)
+  execFileSync('/bin/chmod', ['-h', '700', sdkLink])
 }
 
 async function installTaskFlow(workspaceRoot: string) {
@@ -172,14 +205,18 @@ describe('director video release readiness verifier', () => {
   let root: string
   let profileRoot: string
   let workspaceRoot: string
+  let managedNodeRoot: string
 
   beforeEach(async () => {
     root = await realpath(await mkdtemp(join(tmpdir(), 'director-release-readiness-')))
     profileRoot = join(root, 'profile')
     workspaceRoot = join(root, 'workspace')
+    managedNodeRoot = join(root, 'managed-node')
     await mkdir(profileRoot, { mode: 0o700 })
     await mkdir(workspaceRoot, { mode: 0o700 })
-    await installVideoCommand(profileRoot)
+    process.env.AIWORKER_OPENCLAW_RUNTIME_TEST_MODE = '1'
+    process.env.AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT = managedNodeRoot
+    await installVideoCommand(profileRoot, managedNodeRoot)
     await installTaskFlow(workspaceRoot)
     await installDirectorBrain(profileRoot, workspaceRoot)
   })
@@ -211,9 +248,13 @@ describe('director video release readiness verifier', () => {
     ], { NODE_ENV: 'test' })).toThrow('director_scope_invalid')
   })
 
-  afterEach(async () => rm(root, { recursive: true, force: true }))
+  afterEach(async () => {
+    delete process.env.AIWORKER_OPENCLAW_RUNTIME_TEST_MODE
+    delete process.env.AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT
+    await rm(root, { recursive: true, force: true })
+  })
 
-  it('accepts only the exact compatible plugin, skill, and director-brain payload set', () => {
+  it('accepts the exact official video-command layout with unchanged director and task payloads', () => {
     const result = verifyInstalledReleasePayloads({
       repositoryRoot,
       profileStateRoot: profileRoot,
@@ -237,6 +278,147 @@ describe('director video release readiness verifier', () => {
       .toBe(directorEvidenceProjectionContractDigest())
     expect(readFileSync(join(repositoryRoot, 'src/lib/director-evidence-delivery-core.ts'), 'utf8'))
       .not.toContain('DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256')
+  })
+
+  it('accepts omission of non-runtime video-command auxiliaries', async () => {
+    const videoRoot = join(profileRoot, 'extensions', 'aiworker-video-command')
+    await unlink(join(videoRoot, 'README.md'))
+    await unlink(join(videoRoot, 'vitest.config.mjs'))
+    await rm(join(videoRoot, 'test'), { recursive: true })
+    expect(verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    }).videoCommand).toMatchObject({ version: '0.5.14' })
+  })
+
+  it('allows safe auxiliary content changes while binding them into the actual manifest', async () => {
+    const before = verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    }).videoCommand.manifestSha256
+    const videoRoot = join(profileRoot, 'extensions', 'aiworker-video-command')
+    await writeFile(join(videoRoot, 'README.md'), 'safe auxiliary replacement\n', { mode: 0o644 })
+    await writeFile(join(videoRoot, 'test', 'manifest.test.mjs'),
+      '// safe auxiliary replacement\n', { mode: 0o644 })
+    await mkdir(join(videoRoot, 'test', 'future'), { mode: 0o755 })
+    await writeFile(join(videoRoot, 'test', 'future', 'new-regression.test.mjs'),
+      '// newly added safe auxiliary test\n', { mode: 0o644 })
+    const after = verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    }).videoCommand.manifestSha256
+    expect(after).toMatch(/^[a-f0-9]{64}$/u)
+    expect(after).not.toBe(before)
+  })
+
+  it('rejects a missing core video-command member', async () => {
+    await unlink(join(profileRoot, 'extensions', 'aiworker-video-command',
+      'lib', 'task-chain-tool.js'))
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_manifest_mismatch')
+  })
+
+  it('rejects hash drift in a core video-command member', async () => {
+    await writeFile(join(profileRoot, 'extensions', 'aiworker-video-command',
+      'lib', 'task-chain-tool.js'), '// drifted core\n', { mode: 0o644 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_manifest_mismatch')
+  })
+
+  it('rejects an unknown top-level video-command file', async () => {
+    await writeFile(join(profileRoot, 'extensions', 'aiworker-video-command',
+      'unexpected.txt'), 'unexpected member\n', { mode: 0o600 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_manifest_mismatch')
+  })
+
+  it('rejects an extra ordinary member inside video-command node_modules', async () => {
+    await writeFile(join(profileRoot, 'extensions', 'aiworker-video-command',
+      'node_modules', 'unexpected.txt'), 'unexpected member\n', { mode: 0o600 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_manifest_mismatch')
+  })
+
+  it('rejects an extra video-command symlink outside the approved SDK path', async () => {
+    const target = join(root, 'unexpected-link-target')
+    await writeFile(target, 'unexpected target\n', { mode: 0o600 })
+    await symlink(target, join(profileRoot, 'extensions', 'aiworker-video-command',
+      'unexpected-link'))
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('payload_symlink:unexpected-link')
+  })
+
+  it('rejects a symlink inside the optional video-command test tree', async () => {
+    const target = join(root, 'auxiliary-link-target')
+    await writeFile(target, 'auxiliary target\n', { mode: 0o600 })
+    await symlink(target, join(profileRoot, 'extensions', 'aiworker-video-command',
+      'test', 'linked.test.mjs'))
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('payload_symlink:test/linked.test.mjs')
+  })
+
+  it('rejects a writable optional video-command auxiliary', async () => {
+    await chmod(join(profileRoot, 'extensions', 'aiworker-video-command', 'README.md'), 0o666)
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('payload_writable_by_others:README.md')
+  })
+
+  it('rejects an unsafe name inside the optional video-command test tree', async () => {
+    await writeFile(join(profileRoot, 'extensions', 'aiworker-video-command',
+      'test', 'unsafe\nname.test.mjs'), 'unsafe name\n', { mode: 0o600 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_unsafe_name')
+  })
+
+  it('rejects a video-command SDK link to any other target', async () => {
+    const link = join(profileRoot, 'extensions', 'aiworker-video-command',
+      'node_modules', 'openclaw')
+    const wrongTarget = join(root, 'wrong-openclaw')
+    await mkdir(wrongTarget, { mode: 0o700 })
+    await unlink(link)
+    await symlink(wrongTarget, link)
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video-command OpenClaw SDK link target is invalid')
+  })
+
+  it('rejects drift in the linked OpenClaw SDK package identity', async () => {
+    await writeFile(join(managedNodeRoot, 'lib', 'node_modules', 'openclaw', 'package.json'),
+      `${JSON.stringify({ name: 'not-openclaw', version: '2026.7.1-2' })}\n`, { mode: 0o644 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video-command OpenClaw SDK package identity is invalid')
   })
 
   it('reports incompatible contracts, invalid receipts, and rows outside the director scope', () => {

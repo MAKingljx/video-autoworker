@@ -503,6 +503,15 @@ function openClawSdkLinkEvidence(pathname, entry, expectedVersion) {
   }
 }
 
+export function validateOpenClawSdkLink(pathname, expectedVersion) {
+  normalizedAbsolute(pathname, 'video-command OpenClaw SDK link')
+  const entry = fs.lstatSync(pathname)
+  if (!entry.isSymbolicLink() || entry.uid !== process.getuid()) {
+    fail('video-command OpenClaw SDK link is unsafe')
+  }
+  return openClawSdkLinkEvidence(pathname, entry, expectedVersion)
+}
+
 function pluginTreeEvidence(stateDir, descriptor, openclawVersion) {
   secureStateDirectory(stateDir)
   const root = path.join(stateDir, 'extensions', descriptor.id)
@@ -532,7 +541,7 @@ function pluginTreeEvidence(stateDir, descriptor, openclawVersion) {
           || childRelative !== 'node_modules/openclaw') {
           fail('plugin tree contains an unsafe object')
         }
-        const sdk = openClawSdkLinkEvidence(childPath, entry, openclawVersion)
+        const sdk = validateOpenClawSdkLink(childPath, openclawVersion)
         entries.push(sdk.evidence)
         latestChangeMs = Math.max(latestChangeMs, sdk.latestChangeMs)
         continue
