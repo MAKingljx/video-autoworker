@@ -1274,6 +1274,7 @@ function verifyHotReload(
   manifestPath,
   pidSource,
   baseHash,
+  expectedHash,
   baselineSource,
   lastGoodPath,
 ) {
@@ -1293,25 +1294,29 @@ function verifyHotReload(
     'Gateway hot-reload log evidence',
     true,
   )
-  if (!Number.isSafeInteger(pid) || pid <= 0
-    || !/^[a-f0-9]{64}$/u.test(baseHash)
-    || health?.ok !== true || health?.configReload?.hotReloadStatus !== 'active'
-    || checkedLogs.cursor <= baseline.cursor
-    || patch?.ok !== true || patch?.noop === true
-    || patch?.sentinel?.payload?.stats?.requiresRestart !== false
-    || (patch.restart !== undefined && patch.restart !== null)
-    || postConfigGet?.exists !== true || postConfigGet?.valid !== true
-    || !/^[a-f0-9]{64}$/u.test(postConfigGet.hash)
-    || postConfigGet.hash === baseHash
-    || !same(postConfigGet.config, patch.config)) {
-    fail('Gateway hot-reload proof is invalid')
-  }
+  const invalidCondition = [
+    ['pid_invalid', !Number.isSafeInteger(pid) || pid <= 0],
+    ['base_hash_invalid', !/^[a-f0-9]{64}$/u.test(baseHash)],
+    ['expected_hash_invalid', !/^[a-f0-9]{64}$/u.test(expectedHash)
+      || expectedHash === baseHash],
+    ['health_not_active', health?.ok !== true
+      || health?.configReload?.hotReloadStatus !== 'active'],
+    ['log_cursor_not_advanced', checkedLogs.cursor <= baseline.cursor],
+    ['patch_not_hot_reload', patch?.ok !== true || patch?.noop === true
+      || patch?.sentinel?.payload?.stats?.requiresRestart !== false
+      || (patch.restart !== undefined && patch.restart !== null)],
+    ['post_config_invalid', postConfigGet?.exists !== true || postConfigGet?.valid !== true
+      || !/^[a-f0-9]{64}$/u.test(postConfigGet.hash)],
+    ['post_hash_mismatch', postConfigGet?.hash !== expectedHash],
+  ].find(([, failed]) => failed)?.[0]
+  if (invalidCondition) fail(`Gateway hot-reload proof is invalid: ${invalidCondition}`)
   assertTarget(patch.config, manifest)
   assertTarget(postConfigGet.config, manifest)
   const classification = classifyHotReloadMessages(checkedLogs.lines)
-  if (!classification.detected || classification.failed
-    || lastGoodPromotionStatus(lastGoodPath, baseHash, postConfigGet.hash) !== 'applied') {
-    fail('Gateway did not prove a clean compaction hot reload')
+  if (!classification.detected) fail('Gateway hot-reload proof is invalid: log_detection_missing')
+  if (classification.failed) fail('Gateway hot-reload proof is invalid: log_failure_detected')
+  if (lastGoodPromotionStatus(lastGoodPath, baseHash, postConfigGet.hash) !== 'applied') {
+    fail('Gateway hot-reload proof is invalid: last_good_not_promoted')
   }
   const compaction = stable(Object.fromEntries(
     Object.keys(manifest.compaction.set).map(key => [key, patch.config.agents.defaults.compaction[key]]),
@@ -1734,7 +1739,7 @@ else if (command === 'classify-last-good-promotion' && args.length === 3) {
 else if (command === 'classify-hot-reload-logs' && args.length === 2) {
   classifyHotReloadLogs(...args)
 }
-else if (command === 'verify-hot-reload' && args.length === 9) verifyHotReload(...args)
+else if (command === 'verify-hot-reload' && args.length === 10) verifyHotReload(...args)
 else if (command === 'verify-startup-loaded' && args.length === 4) verifyStartupLoaded(...args)
 else if (command === 'write-convergence-proof' && args.length === 5) writeConvergenceProof(...args)
 else if (command === 'assert-convergence-proof' && args.length === 4) assertConvergenceProof(...args)

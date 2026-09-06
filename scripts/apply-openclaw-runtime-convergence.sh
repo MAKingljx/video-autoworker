@@ -391,7 +391,7 @@ process.stdout.write(String(value.cursor))
   fi
   if ! "$NODE_BIN" "$CONVERGENCE_HELPER" verify-hot-reload \
     "$health" "$logs" "$HOT_RELOAD_PATCH_RESULT" "$post_config_get" \
-    "$MANIFEST_FILE" "$expected_pid" "$HOT_RELOAD_BASE_HASH" "$log_baseline" \
+    "$MANIFEST_FILE" "$expected_pid" "$HOT_RELOAD_BASE_HASH" "$expected_hash" "$log_baseline" \
     "$PROFILE_LAST_GOOD_CONFIG"; then
     printf 'qwen-current reported terminal hot-reload evidence.\n' >&2
     return 1

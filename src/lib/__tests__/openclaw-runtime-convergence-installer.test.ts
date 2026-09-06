@@ -618,14 +618,25 @@ if (operation === 'config-get') {
   const source = fs.readFileSync(configPath, 'utf8')
   const config = JSON.parse(source)
   if (process.env.FAKE_POST_CONFIG_MISMATCH === '1' && call >= 2) {
-    config.gateway.port = 19997
+    config.agents.defaults.compaction.model = 'unexpected/default_model'
+  }
+  if (process.env.FAKE_POST_CONFIG_NORMALIZED_DEFAULTS === '1' && call >= 2) {
+    config.agents.defaults.maxConcurrent = 1
+    config.agents.defaults.subagents = { maxConcurrent: 1 }
+    config.commands = { native: 'auto' }
+    config.cron = { enabled: true }
+    config.messages = { ackReactionScope: 'group-mentions' }
+    config.models = { providers: { synthetic: { models: [{
+      id: 'fixture', cost: { input: 0, output: 0 }, reasoning: false,
+    }] } } }
   }
   write({
     exists: true,
     valid: true,
     ...(!(process.env.FAKE_MISSING_BASE_HASH === '1' && call === 1)
       && !(process.env.FAKE_MISSING_POST_HASH === '1' && call >= 2)
-      ? { hash: hash(source) } : {}),
+      ? { hash: process.env.FAKE_POST_HASH_MISMATCH === '1' && call >= 2
+          ? 'f'.repeat(64) : hash(source) } : {}),
     config,
   })
   process.exit(0)
@@ -1787,6 +1798,23 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     // Three listener checks belong to the post-patch runtime proof; hot-reload adds at most one.
     expect(await callCountAfterPatch(entry, 'gateway lsof'))
       .toBe(restartRequested ? 0 : failedFromLog ? 3 : 4)
+  }, 15_000)
+
+  it('accepts normalized config.get defaults while binding its hash to disk', async () => {
+    const entry = await createFixture()
+    entry.env.FAKE_POST_CONFIG_NORMALIZED_DEFAULTS = '1'
+    const applied = await run(entry, '--apply')
+    expect(applied.stdout).toContain('Verified session-scoped runtime convergence proof:')
+  }, 15_000)
+
+  it('reports a post config source hash mismatch and restores the exact config', async () => {
+    const entry = await createFixture()
+    const before = await readFile(entry.config, 'utf8')
+    entry.env.FAKE_POST_HASH_MISMATCH = '1'
+    await expect(run(entry, '--apply')).rejects.toMatchObject({
+      stderr: expect.stringContaining('post_hash_mismatch'),
+    })
+    expect(await readFile(entry.config, 'utf8')).toBe(before)
   }, 15_000)
 
   it('bounds a pending hot-reload cursor without repeating health, config, or listener probes', async () => {
