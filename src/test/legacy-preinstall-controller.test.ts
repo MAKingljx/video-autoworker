@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  realpathSync, rmSync, statSync, writeFileSync,
+  realpathSync, rmSync, statSync, truncateSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -355,6 +355,23 @@ function waitChild(child: ReturnType<typeof spawn>) {
 }
 
 describe('legacy preinstall controller', () => {
+  it('checks large database identities without widening receipt reads', () => {
+    const entry = fixture()
+    const missionIdentity = statSync(entry.mission, { bigint: true })
+    truncateSync(entry.mission, 96 * 1024 * 1024)
+    truncateSync(entry.n8n, 2 * 1024 * 1024)
+    expect(statSync(entry.mission, { bigint: true }).ino).toBe(missionIdentity.ino)
+    const prepared = prepare(entry)
+    expect(prepared.status, prepared.stderr).toBe(0)
+    expect(JSON.parse(prepared.stdout)).toMatchObject({ phase: 'INSTALL_PREPARED' })
+
+    const oversizedReceipt = fixture()
+    truncateSync(oversizedReceipt.evidence, 1024 * 1024 + 1)
+    const rejected = prepare(oversizedReceipt)
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('legacy freeze evidence size is invalid')
+  })
+
   it('prepares a referenced application manifest above the receipt limit and rejects above its limit', () => {
     const entry = fixture()
     const manifest = join(entry.releaseRoot, 'release-manifest.json')

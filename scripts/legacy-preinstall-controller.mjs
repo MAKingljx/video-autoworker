@@ -189,7 +189,7 @@ function assertNoSymlink(pathname, label, allowMissing = false) {
   }
 }
 
-function safeEntry(pathname, label, kind, mode = null, maximumBytes = MAX_BYTES) {
+function safeEntry(pathname, label, kind, mode = null, maximumBytes = null) {
   assertNoSymlink(pathname, label)
   const entry = lstatSync(pathname, { bigint: true })
   if (kind === 'file' && (!entry.isFile() || entry.nlink !== 1n)) fail(`${label} is not a safe regular file`)
@@ -197,7 +197,10 @@ function safeEntry(pathname, label, kind, mode = null, maximumBytes = MAX_BYTES)
   if (entry.uid !== BigInt(process.getuid())) fail(`${label} owner is invalid`)
   const actualMode = Number(entry.mode & 0o7777n)
   if (mode === null ? (actualMode & 0o022) !== 0 : actualMode !== mode) fail(`${label} mode is unsafe`)
-  if (kind === 'file' && (entry.size <= 0n || entry.size > BigInt(maximumBytes))) fail(`${label} size is invalid`)
+  // Identity checks only stat the file. Content readers supply their own
+  // bounded budget; a database is not a small control-plane receipt.
+  if (kind === 'file' && (entry.size <= 0n
+    || (maximumBytes !== null && entry.size > BigInt(maximumBytes)))) fail(`${label} size is invalid`)
   return entry
 }
 
@@ -638,7 +641,7 @@ function revisionFiles(root) {
           fail('preinstall orchestrator artifact directory contains an unknown member')
         }
         safeEntry(join(artifactRoot, artifact), `preinstall orchestrator artifact ${artifact}`,
-          'file', 0o600)
+          'file', 0o600, MAX_BYTES)
       }
     } else if (IMMUTABLE_TEMPORARY_NAME.test(name)) {
       continue
