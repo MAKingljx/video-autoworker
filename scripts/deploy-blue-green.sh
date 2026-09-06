@@ -132,6 +132,7 @@ verify_deployment_source_gate() {
     scripts/legacy-preinstall-controller.mjs
     scripts/legacy-bootstrap-controller.mjs
     scripts/verify-n8n-blue-green-workflows.mjs
+    scripts/n8n-startup-witness.mjs
     ops/n8n/workflows/aiworker-task-intake.json
     ops/n8n/workflows/aiworker-video-analysis.json
   )

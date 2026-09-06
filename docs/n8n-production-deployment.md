@@ -272,6 +272,10 @@ bash "$runtime_release/scripts/n8n-start.sh"
 `n8n-start.sh --foreground` 会在真正打开 n8n 前取得与 importer/restore 相同的物理 lock，因此仍不会
 与离线数据库写入并发。不得把这解释为 installer 从开始到结束一直持锁。
 
+启动完成不能仅依据 `/healthz` 或端口监听。受管 `n8n-start.sh` 通过本次子进程输出观察两条受管工作流激活及完整启动标志，生成绑定 PID、启动身份、runtime 与来源的私有完成记录，再结合官方 `/healthz/readiness` 才返回成功。发布 verifier 和首次迁移 runner 复用该记录；记录缺失、过期进程或身份变化时不得进入数据库 freeze。
+
+当前该合同对应 n8n 2.31.6 的同步工作流初始化和默认 text/info 日志。异步 publication service 或其他不兼容日志模式必须先验证新的完成信号，不能把 HTTP server ready 冒充全部工作流初始化完成。不要手写启动完成记录，也不要用固定睡眠或短暂取得写锁替代它。
+
 启动后先复核 LaunchAgent、精确 n8n PID、5678 唯一 listener、数据库 FD、健康和 SQLite
 `quick_check`。权威结论由下一步 verifier 统一给出，以下命令是便于人工交叉检查的证据：
 

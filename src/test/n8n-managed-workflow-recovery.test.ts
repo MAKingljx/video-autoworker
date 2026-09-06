@@ -52,6 +52,7 @@ const betterSqlitePackage = resolve(betterSqliteEntry, '../..')
 const commit = 'a'.repeat(40)
 const runtimeSourcePaths = [
   'scripts/n8n-start.sh',
+  'scripts/n8n-startup-witness.mjs',
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',
@@ -1078,7 +1079,8 @@ printf '%s\\n' '#!/usr/bin/env node' > node_modules/n8n/bin/n8n
       `${sha256(readFileSync(join(source, 'scripts/lib/application-release-manifest-contract.mjs')))}  scripts/lib/application-release-manifest-contract.mjs\n`,
     )
     for (const file of [
-      'n8n-maintenance-lock.mjs', 'n8n-workflow-transition-anchor.mjs', 'n8n-backup-managed-workflows.mjs',
+      'n8n-startup-witness.mjs', 'n8n-maintenance-lock.mjs',
+      'n8n-workflow-transition-anchor.mjs', 'n8n-backup-managed-workflows.mjs',
       'n8n-restore-managed-workflows.sh',
     ]) {
       const installedTool = join(runtimeRoot, 'current/scripts', file)

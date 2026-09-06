@@ -5,12 +5,18 @@ import { execFileSync } from 'node:child_process'
 import { lstatSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, parse, relative } from 'node:path'
+import {
+  managedN8nStartupWitnessPath,
+  N8N_COMPLETE_STARTUP_WITNESS_SCHEMA,
+  verifyN8nCompleteStartupWitness,
+} from './n8n-startup-witness.mjs'
 
 const WORKFLOW_PROTOCOL = 'slot-v1-execution-owner-v1'
 const N8N_VERSION = '2.31.6'
 const N8N_LAUNCH_LABEL = 'com.video-autoworker.n8n'
 const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-start.sh',
+  'scripts/n8n-startup-witness.mjs',
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',
@@ -225,6 +231,7 @@ function gitSource(repository, expectedCommit, pathname) {
       'scripts/n8n-backup-managed-workflows.mjs',
       'scripts/n8n-maintenance-lock.mjs',
       'scripts/n8n-restore-managed-workflows.sh',
+      'scripts/n8n-startup-witness.mjs',
       'scripts/n8n-workflow-transition-anchor.mjs',
       APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH,
     ].includes(pathname)) {
@@ -468,6 +475,44 @@ function captureRuntimeIdentity({ database, expectedCommit, pid, port, repositor
   }
 }
 
+async function verifyCompleteStartup(argumentsValue, identity) {
+  const startupWitness = managedN8nStartupWitnessPath()
+  const values = {
+    '--witness': startupWitness,
+    '--pid-file': join(dirname(startupWitness), 'n8n.pid'),
+    '--runtime-root': identity.runtime.path,
+    '--node-bin': identity.node.argumentPath,
+    '--cli': identity.cli.argument.argumentPath,
+    '--readiness-url': `http://127.0.0.1:${argumentsValue.port}/healthz/readiness`,
+  }
+  const testVerifier = process.env.NODE_ENV === 'test'
+    && process.env.AIWORKER_TEST_N8N_IDENTITY === '1'
+    ? process.env.AIWORKER_TEST_N8N_STARTUP_WITNESS_VERIFIER : null
+  let verified
+  if (testVerifier) {
+    if (!isAbsolute(testVerifier) || /[\r\n]/u.test(testVerifier)) {
+      fail('test startup witness verifier path is invalid')
+    }
+    try {
+      verified = JSON.parse(execFileSync(testVerifier, Object.entries(values).flat(), {
+        encoding: 'utf8', maxBuffer: 1024 * 1024, timeout: 5_000,
+      }))
+    } catch {
+      fail('test startup witness verification failed')
+    }
+  } else {
+    try { verified = await verifyN8nCompleteStartupWitness(values) } catch {
+      fail('n8n process has no valid complete-startup witness')
+    }
+  }
+  if (verified?.schema !== N8N_COMPLETE_STARTUP_WITNESS_SCHEMA
+    || verified.pid !== argumentsValue.pid
+    || verified.sourceCommit !== argumentsValue.expectedCommit
+    || !Number.isSafeInteger(verified.observedAt) || verified.observedAt <= 0) {
+    fail('n8n complete-startup witness belongs to another runtime sample')
+  }
+}
+
 function parseStoredJson(value, label) {
   if (typeof value !== 'string') fail(`${label} is not stored JSON text`)
   try {
@@ -529,6 +574,7 @@ function requireColumns(db, table, names) {
 const argumentsValue = parseArguments(process.argv.slice(2))
 const { database, repository, expectedCommit, moduleRoot } = argumentsValue
 const identityBefore = captureRuntimeIdentity(argumentsValue)
+await verifyCompleteStartup(argumentsValue, identityBefore)
 let Database
 try {
   const scopedRequire = createRequire(import.meta.url)

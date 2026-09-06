@@ -32,6 +32,7 @@ const workflowDescriptors = [
 ]
 const runtimeSourcePaths = [
   'scripts/n8n-start.sh',
+  'scripts/n8n-startup-witness.mjs',
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',

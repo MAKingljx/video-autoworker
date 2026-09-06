@@ -276,6 +276,7 @@ describe('standalone runtime launcher', () => {
       './scripts/legacy-release-runner.mjs',
       './scripts/deploy-blue-green.sh',
       './scripts/legacy-preinstall-controller.mjs',
+      './scripts/n8n-startup-witness.mjs',
       './scripts/install-aiworker-task-flow-skill.sh',
       './scripts/install-aiworker-video-command-plugin.sh',
       './scripts/install-aiworker-director-brain.sh',

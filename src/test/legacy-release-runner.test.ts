@@ -117,6 +117,19 @@ describe('continuous legacy release execution', () => {
     expect(() => validateLegacyReleasePlan({ ...plan, missionDb: '/tmp/other.db' })).toThrow('production family')
   })
 
+  it('requires the complete n8n startup witness before creating the freeze guard', () => {
+    const source = readFileSync(join(process.cwd(), 'scripts/legacy-release-runner.mjs'), 'utf8')
+    const witness = source.indexOf('await verifyN8nCompleteStartupWitness({')
+    const sourceCommit = source.indexOf(
+      "completeStartup.sourceCommit !== plan.sourceCommit",
+      witness,
+    )
+    const guard = source.indexOf("guardChild = spawn(node, [guardScript, 'serve'", witness)
+    expect(witness).toBeGreaterThan(0)
+    expect(sourceCommit).toBeGreaterThan(witness)
+    expect(guard).toBeGreaterThan(sourceCommit)
+  })
+
   it('closes ingress but preserves the recovery hold after authorized shutdown or pending bootstrap', async () => {
     for (const scenario of [{ pending: true, mode: 'dual' }, { pending: false, mode: 'recovery-hold' }]) {
       const events: string[] = []

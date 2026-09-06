@@ -1,9 +1,9 @@
 // @vitest-environment node
 
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync,
-  unlinkSync, utimesSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -14,8 +14,12 @@ const tool = join(projectRoot, 'scripts/n8n-maintenance-lock.mjs')
 const start = join(projectRoot, 'scripts/n8n-start.sh')
 const common = join(projectRoot, 'ops/n8n/lib/common.sh')
 const roots: string[] = []
+const children: ChildProcess[] = []
 
 afterEach(() => {
+  for (const child of children.splice(0)) {
+    if (child.exitCode === null) child.kill('SIGKILL')
+  }
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
@@ -24,6 +28,72 @@ function fixtureRoot(name: string) {
   chmodSync(root, 0o700)
   roots.push(root)
   return root
+}
+
+async function waitFor(predicate: () => boolean, timeout = 10_000) {
+  const deadline = Date.now() + timeout
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for n8n start fixture')
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 20))
+  }
+}
+
+function foregroundStartFixture(mode: 'complete' | 'missing-activation') {
+  const root = fixtureRoot(`n8n-startup-${mode}-`)
+  const commit = 'a'.repeat(40)
+  const runtimeRoot = join(root, 'runtime')
+  const release = join(runtimeRoot, 'releases', commit)
+  const runtimeDir = join(release, 'ops/n8n')
+  const cli = join(runtimeDir, 'node_modules/n8n/bin/n8n')
+  const runDir = join(root, 'run')
+  const pidFile = join(runDir, 'n8n.pid')
+  const witness = join(runDir, 'n8n.complete-ready.json')
+  const childPid = join(root, 'n8n-child.pid')
+  const envFile = join(root, 'n8n.env')
+  for (const directory of [dirname(cli), join(runtimeDir, 'workflows'), join(release, 'scripts'),
+    join(root, 'state'), runDir, join(root, 'logs'), join(root, 'backups')]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    chmodSync(directory, 0o700)
+  }
+  writeFileSync(join(release, 'SOURCE_COMMIT'), `${commit}\n`, { mode: 0o600 })
+  writeFileSync(join(runtimeDir, 'node_modules/n8n/package.json'),
+    '{"name":"n8n","version":"2.31.6"}\n', { mode: 0o600 })
+  writeFileSync(join(runtimeDir, 'workflows/aiworker-task-intake.json'),
+    '{"id":"aiworker-task-intake-v1"}\n', { mode: 0o600 })
+  writeFileSync(join(runtimeDir, 'workflows/aiworker-video-analysis.json'),
+    '{"id":"aiworker-video-analysis-v1"}\n', { mode: 0o600 })
+  copyFileSync(join(projectRoot, 'scripts/n8n-startup-witness.mjs'),
+    join(release, 'scripts/n8n-startup-witness.mjs'))
+  chmodSync(join(release, 'scripts/n8n-startup-witness.mjs'), 0o700)
+  const activation = mode === 'complete'
+    ? "process.stdout.write('Activated workflow Intake (ID: aiworker-task-intake-v1)\\nActivated workflow Video (ID: aiworker-video-analysis-v1)\\n')"
+    : "process.stdout.write('Activated workflow Intake (ID: aiworker-task-intake-v1)\\n')"
+  writeFileSync(cli, `
+const fs=require('node:fs')
+fs.writeFileSync(${JSON.stringify(childPid)},String(process.pid))
+${activation}
+process.stdout.write('Editor is now accessible via:\\nhttp://127.0.0.1:5678\\n')
+process.on('SIGTERM',()=>process.exit(0))
+${mode === 'complete' ? 'setInterval(()=>{},1000)' : 'setTimeout(()=>process.exit(0),50)'}
+`, { mode: 0o700 })
+  symlinkSync(release, join(runtimeRoot, 'current'))
+  writeFileSync(envFile, [
+    `N8N_NODE_BIN=${process.execPath}`,
+    'N8N_ENCRYPTION_KEY=fixture-encryption-key-that-is-long-enough',
+    `AIWORKER_N8N_RUNTIME_ROOT=${runtimeRoot}`,
+    `N8N_USER_FOLDER=${join(root, 'state')}`,
+    `AIWORKER_N8N_RUN_DIR=${runDir}`,
+    `AIWORKER_N8N_LOG_DIR=${join(root, 'logs')}`,
+    `AIWORKER_N8N_BACKUP_DIR=${join(root, 'backups')}`,
+    `AIWORKER_N8N_PID_FILE=${pidFile}`,
+    `AIWORKER_N8N_LOG_FILE=${join(root, 'logs/n8n.log')}`,
+    'N8N_HOST=127.0.0.1',
+    'N8N_LISTEN_ADDRESS=127.0.0.1',
+    'N8N_PROTOCOL=http',
+    'N8N_PORT=5678',
+    '',
+  ].join('\n'), { mode: 0o600 })
+  return { root, envFile, pidFile, witness, childPid }
 }
 
 function lock(command: 'acquire' | 'release', pathname: string, owner: string, pid: number, nonce?: string) {
@@ -272,5 +342,56 @@ describe('n8n shared maintenance lock', () => {
     expect(restoreRace.stderr).toContain('held by restore')
     expect(existsSync(marker)).toBe(false)
     expect(lock('release', pathname, 'restore', process.pid, restoreHeld.stdout.trim()).status).toBe(0)
+  })
+
+  it('rejects a foreground child exit whose startup output lacks complete workflow activation', () => {
+    const fixture = foregroundStartFixture('missing-activation')
+    const result = spawnSync('/bin/bash', [start, '--foreground'], {
+      encoding: 'utf8',
+      env: { ...process.env, AIWORKER_N8N_ENV_FILE: fixture.envFile },
+      timeout: 10_000,
+    })
+    expect(result.status, JSON.stringify({
+      stdout: result.stdout,
+      stderr: result.stderr,
+      witness: existsSync(fixture.witness),
+      pidFile: existsSync(fixture.pidFile),
+      childPid: existsSync(fixture.childPid) ? readFileSync(fixture.childPid, 'utf8') : null,
+    })).not.toBe(0)
+    expect(existsSync(fixture.witness)).toBe(false)
+    expect(existsSync(fixture.pidFile)).toBe(false)
+    const pid = Number(readFileSync(fixture.childPid, 'utf8'))
+    expect(() => process.kill(pid, 0)).toThrow()
+  })
+
+  it('publishes and clears the complete foreground startup witness around the child lifetime', async () => {
+    const fixture = foregroundStartFixture('complete')
+    const wrapper = spawn('/bin/bash', [start, '--foreground'], {
+      env: { ...process.env, AIWORKER_N8N_ENV_FILE: fixture.envFile },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    children.push(wrapper)
+    let stderr = ''
+    wrapper.stderr?.on('data', value => { stderr += String(value) })
+    await waitFor(() => existsSync(fixture.witness) && existsSync(fixture.pidFile))
+    const witness = JSON.parse(readFileSync(fixture.witness, 'utf8'))
+    expect(witness).toMatchObject({
+      schema: 'video-autoworker-n8n-complete-startup-witness/v1',
+      sourceCommit: 'a'.repeat(40),
+      completion: {
+        workflowIds: ['aiworker-task-intake-v1', 'aiworker-video-analysis-v1'],
+      },
+    })
+    expect(lstatSync(fixture.witness).mode & 0o777).toBe(0o600)
+    expect(lstatSync(fixture.witness).nlink).toBe(1)
+    expect(() => process.kill(witness.child.pid, 0)).not.toThrow()
+
+    wrapper.kill('SIGTERM')
+    const exit = await new Promise<number | null>(resolvePromise => {
+      wrapper.once('exit', code => resolvePromise(code))
+    })
+    expect(exit, stderr).toBe(0)
+    expect(existsSync(fixture.witness)).toBe(false)
+    expect(existsSync(fixture.pidFile)).toBe(false)
   })
 })

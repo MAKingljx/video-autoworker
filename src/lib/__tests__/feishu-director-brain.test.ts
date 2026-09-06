@@ -233,6 +233,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
     'scripts/legacy-freeze-guard.mjs': 'export {}\n',
     'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
+    'scripts/n8n-startup-witness.mjs': 'export {}\n',
     'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
     'scripts/lib/application-release-manifest-contract.mjs':
       'export const MAX_APPLICATION_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024\n',

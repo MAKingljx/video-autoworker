@@ -48,6 +48,7 @@ const WORKFLOWS = Object.freeze([
 ])
 const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-start.sh',
+  'scripts/n8n-startup-witness.mjs',
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',

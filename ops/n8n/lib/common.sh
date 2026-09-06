@@ -202,6 +202,7 @@ n8n_runtime_source_manifest() {
     cd "$source_root"
     shasum -a 256 \
       scripts/n8n-start.sh \
+      scripts/n8n-startup-witness.mjs \
       scripts/n8n-stop.sh \
       scripts/n8n-status.sh \
       scripts/n8n-import-workflows.sh \

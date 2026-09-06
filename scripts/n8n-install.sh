@@ -137,6 +137,7 @@ if [[ ! -d "$release_dir" ]]; then
 
   for control_script in \
     n8n-start.sh \
+    n8n-startup-witness.mjs \
     n8n-stop.sh \
     n8n-status.sh \
     n8n-import-workflows.sh \

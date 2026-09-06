@@ -12,6 +12,10 @@ import { userInfo } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { redactSensitiveValues } from './lib/sensitive-value-scanner.mjs'
+import {
+  managedN8nStartupWitnessPath,
+  verifyN8nCompleteStartupWitness,
+} from './n8n-startup-witness.mjs'
 
 const scriptPath = realpathSync(fileURLToPath(import.meta.url))
 const repository = dirname(dirname(scriptPath))
@@ -261,6 +265,27 @@ export async function main(argv = process.argv.slice(2)) {
     return { proof, evidence }
   }
   try {
+    report({ step: 'n8n-complete-startup', status: 'running' })
+    const startupWitness = managedN8nStartupWitnessPath()
+    const completeStartup = await verifyN8nCompleteStartupWitness({
+      '--witness': startupWitness,
+      '--pid-file': join(dirname(startupWitness), 'n8n.pid'),
+      '--runtime-root': join(
+        home,
+        'ai-worker/services/video-autoworker-n8n/releases',
+        plan.sourceCommit,
+      ),
+      '--node-bin': join(home, 'ai-worker/node/current/bin/node'),
+      '--cli': join(
+        home,
+        'ai-worker/services/video-autoworker-n8n/current/ops/n8n/node_modules/n8n/bin/n8n',
+      ),
+      '--readiness-url': 'http://127.0.0.1:5678/healthz/readiness',
+    })
+    if (completeStartup.sourceCommit !== plan.sourceCommit) {
+      fail('n8n complete-startup witness belongs to another source commit')
+    }
+    report({ step: 'n8n-complete-startup', status: 'completed' })
     guardChild = spawn(node, [guardScript, 'serve', ...guardArgs, '--ttl-seconds', String(leaseFor(BUDGET.command, BUDGET.command, BUDGET.capture)), '--legacy-pid', String(plan.legacyPid), '--owner-receipt', ownerReceipt],
       { cwd: repository, env: environment, stdio: ['ignore', 'ignore', 'pipe'], detached: true })
     let guardError = ''

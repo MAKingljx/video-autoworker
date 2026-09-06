@@ -22,6 +22,7 @@ const standaloneRuntimeIncludes = [
   './scripts/generate-legacy-freeze-evidence.mjs',
   './scripts/generate-legacy-bootstrap-rollback-proof.mjs',
   './scripts/legacy-freeze-guard.mjs',
+  './scripts/n8n-startup-witness.mjs',
   './scripts/n8n-workflow-transition-anchor.mjs',
   './scripts/deploy-blue-green.sh',
   './scripts/lib/feishu-director-brain.mjs',

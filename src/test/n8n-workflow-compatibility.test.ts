@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 
@@ -39,6 +39,7 @@ const projectCommit = execFileSync('git', [
 ], { encoding: 'utf8' }).trim()
 const runtimeSourcePaths = [
   'scripts/n8n-start.sh',
+  'scripts/n8n-startup-witness.mjs',
   'scripts/n8n-stop.sh',
   'scripts/n8n-status.sh',
   'scripts/n8n-import-workflows.sh',
@@ -159,6 +160,7 @@ function gitSource(pathname: string): Buffer {
     'scripts/n8n-backup-managed-workflows.mjs',
     'scripts/n8n-maintenance-lock.mjs',
     'scripts/n8n-restore-managed-workflows.sh',
+    'scripts/n8n-startup-witness.mjs',
     'scripts/n8n-workflow-transition-anchor.mjs',
   ])
   if (!candidateOnly.has(pathname)) throw new Error(`tracked fixture source is unavailable: ${pathname}`)
@@ -174,6 +176,8 @@ interface IdentityFixture {
   cliArgument: string
   nodeArgument: string
   sourceManifest: string
+  startupWitness: string
+  startupWitnessVerifierLog: string
   runtimeManifest: string
   packageDefinition: string
   env: NodeJS.ProcessEnv
@@ -267,6 +271,9 @@ function createIdentityFixture(
   const launchctl = join(toolsRoot, 'launchctl')
   const lsof = join(toolsRoot, 'lsof')
   const ps = join(toolsRoot, 'ps')
+  const startupWitness = join(root, 'n8n.complete-ready.json')
+  const startupWitnessVerifier = join(toolsRoot, 'startup-witness-verifier')
+  const startupWitnessVerifierLog = join(root, 'startup-witness-verifier.log')
   writeFileSync(launchctl, `#!${process.execPath}\nprocess.stdout.write('state = running\\npid = ${launchPid}\\n')\n`)
   writeFileSync(lsof, `#!${process.execPath}
 const args = process.argv.slice(2)
@@ -290,7 +297,11 @@ if (args.some(value => value.startsWith('-iTCP:'))) {
   writeFileSync(ps, `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(
     `${launchPid} ${nodeArgument} ${cliArgument} start\n`,
   )})\n`)
-  for (const command of [launchctl, lsof, ps]) chmodSync(command, 0o700)
+  writeFileSync(startupWitnessVerifier, `#!${process.execPath}
+require('node:fs').writeFileSync(${JSON.stringify(startupWitnessVerifierLog)}, JSON.stringify(process.argv.slice(2)))
+process.stdout.write(JSON.stringify({schema:'video-autoworker-n8n-complete-startup-witness/v1',pid:${processPid},sourceCommit:${JSON.stringify(projectCommit)},observedAt:1800000000})+'\\n')
+`)
+  for (const command of [launchctl, lsof, ps, startupWitnessVerifier]) chmodSync(command, 0o700)
   return {
     runtimeRoot,
     runtimeCwd,
@@ -300,6 +311,8 @@ if (args.some(value => value.startsWith('-iTCP:'))) {
     cliArgument,
     nodeArgument,
     sourceManifest,
+    startupWitness,
+    startupWitnessVerifierLog,
     runtimeManifest,
     packageDefinition,
     env: {
@@ -309,6 +322,8 @@ if (args.some(value => value.startsWith('-iTCP:'))) {
       AIWORKER_TEST_N8N_LAUNCHCTL: launchctl,
       AIWORKER_TEST_N8N_LSOF: lsof,
       AIWORKER_TEST_N8N_PS: ps,
+      AIWORKER_TEST_N8N_STARTUP_WITNESS: startupWitness,
+      AIWORKER_TEST_N8N_STARTUP_WITNESS_VERIFIER: startupWitnessVerifier,
     },
   }
 }
@@ -410,7 +425,28 @@ resolve_baseline_source_commit "$1"
     expect(result.status, result.stderr).toBe(0)
     expect(fixture.cliArgument).toContain('/n8n-service/current/')
     expect(fixture.nodeArgument).toContain('/node-service/current/')
+    expect(JSON.parse(readFileSync(fixture.startupWitnessVerifierLog, 'utf8'))).toEqual([
+      '--witness', fixture.startupWitness,
+      '--pid-file', join(dirname(fixture.startupWitness), 'n8n.pid'),
+      '--runtime-root', fixture.runtimeRoot,
+      '--node-bin', fixture.nodeArgument,
+      '--cli', fixture.cliArgument,
+      '--readiness-url', 'http://127.0.0.1:5678/healthz/readiness',
+    ])
     expect(JSON.parse(result.stdout).runtimeIdentitySha256).toMatch(/^[a-f0-9]{64}$/u)
+
+    const wrongVerifier = join(root, 'wrong-startup-witness-verifier')
+    writeFileSync(wrongVerifier, `#!${process.execPath}
+process.stdout.write(JSON.stringify({schema:'video-autoworker-n8n-complete-startup-witness/v1',pid:${process.pid + 1},sourceCommit:${JSON.stringify(projectCommit)},observedAt:1800000000})+'\\n')
+`)
+    chmodSync(wrongVerifier, 0o700)
+    const wrongWitness = runVerifier(database, fixture, {
+      AIWORKER_TEST_N8N_STARTUP_WITNESS_VERIFIER: wrongVerifier,
+    })
+    expect(wrongWitness.status).not.toBe(0)
+    expect(wrongWitness.stderr).toContain(
+      'n8n complete-startup witness belongs to another runtime sample',
+    )
   })
 
   it('rejects current-symlink target drift and a CLI alias outside the managed service boundary', () => {
