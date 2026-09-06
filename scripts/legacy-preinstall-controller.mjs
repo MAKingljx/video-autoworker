@@ -245,6 +245,24 @@ function sameReference(actual, expected, label) {
   if (canonicalJson(actual) !== canonicalJson(expected)) fail(`${label} reference changed`)
 }
 
+function sameTransitionFileReference(actual, expected, label) {
+  exactKeys(expected, [
+    'dev', 'ino', 'path', 'sha256', 'size', 'mtimeNs', 'ctimeNs', 'uid', 'mode', 'nlink',
+  ], `${label} reference`)
+  // n8n's immutable attestation records the full filesystem snapshot. Verify
+  // those attributes together with the digest from our bounded stable read.
+  const entry = safeEntry(actual.path, label, 'file', 0o400, MAX_BYTES)
+  const snapshot = {
+    ...actual,
+    mtimeNs: entry.mtimeNs.toString(),
+    ctimeNs: entry.ctimeNs.toString(),
+    uid: Number(entry.uid),
+    mode: Number(entry.mode & 0o7777n).toString(8),
+    nlink: Number(entry.nlink),
+  }
+  if (canonicalJson(snapshot) !== canonicalJson(expected)) fail(`${label} reference changed`)
+}
+
 function directoryReference(pathname, label, mode = 0o700) {
   const entry = safeEntry(pathname, label, 'directory', mode)
   if (realpathSync(pathname) !== pathname) fail(`${label} must be physical`)
@@ -576,7 +594,7 @@ function assertTransitionMatches(transition, context) {
     || application?.manifest?.sha256 !== context.target.manifestSha256
     || !reportReference?.path) fail('committed workflow transition target changed')
   const report = readJson(reportReference.path, 'live workflow report', 0o400)
-  sameReference(report.reference, reportReference, 'live workflow report')
+  sameTransitionFileReference(report.reference, reportReference, 'live workflow report')
   if (report.value?.databasePath !== context.databases.n8n.path
     || report.value?.sourceCommit !== context.sourceCommit
     || report.value?.combinedSha256 !== transition.liveCombinedSha256) {

@@ -115,7 +115,15 @@ function fixture() {
       slot: 'blue', releaseId, releaseRoot: { path: releaseRoot },
       manifest: { sha256: digest(readFileSync(manifest)) },
     },
-    deployed: { report: reference(report), combinedSha256: liveCombinedSha256 },
+    deployed: {
+      report: {
+        ...reference(report),
+        mtimeNs: statSync(report, { bigint: true }).mtimeNs.toString(),
+        ctimeNs: statSync(report, { bigint: true }).ctimeNs.toString(),
+        uid: process.getuid!(), mode: '400', nlink: 1,
+      },
+      combinedSha256: liveCombinedSha256,
+    },
   }, 0o400)
   const evidenceVerifier = join(root, 'evidence-verifier.mjs')
   writeFileSync(evidenceVerifier, "import{readFileSync}from'node:fs';import{createHash}from'node:crypto';process.stdout.write(createHash('sha256').update(readFileSync(3)).digest('hex')+'\\n')\n", { mode: 0o700 })
@@ -355,6 +363,20 @@ function waitChild(child: ReturnType<typeof spawn>) {
 }
 
 describe('legacy preinstall controller', () => {
+  it('validates the rich n8n report reference and rejects changed metadata', () => {
+    const accepted = fixture()
+    const prepared = prepare(accepted)
+    expect(prepared.status, prepared.stderr).toBe(0)
+    const changed = fixture()
+    const attestation = JSON.parse(readFileSync(changed.attestation, 'utf8'))
+    attestation.deployed.report.uid += 1
+    chmodSync(changed.attestation, 0o600)
+    writeJson(changed.attestation, attestation, 0o400)
+    const rejected = prepare(changed)
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('live workflow report reference changed')
+  })
+
   it('checks large database identities without widening receipt reads', () => {
     const entry = fixture()
     const missionIdentity = statSync(entry.mission, { bigint: true })
