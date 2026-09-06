@@ -246,11 +246,14 @@ describe('standalone blue-green router', () => {
     expect(end).toBeGreaterThan(start)
     const runbook = document.slice(start, end)
     const anchors = [
-      'n8n-backup-managed-workflows.mjs" backup',
       'n8n-stop.sh"',
+      'n8n-install.sh"',
+      'n8n-backup-managed-workflows.mjs" backup',
+      'n8n-workflow-transition-anchor.mjs" prepare-intent',
+      'n8n-workflow-transition-anchor.mjs" current-confirm',
       'n8n-import-workflows.sh"',
       'n8n-start.sh"',
-      'verify-n8n-blue-green-workflows.mjs"',
+      'node "$repository_root/scripts/verify-n8n-blue-green-workflows.mjs"',
       'attest-transition',
       'legacy-bootstrap-controller.mjs prepare',
       'legacy-bootstrap-controller.mjs current-confirm',
