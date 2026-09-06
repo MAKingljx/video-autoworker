@@ -2147,12 +2147,19 @@ function normalizeRawInstallerResult(state, reservation, raw) {
         || value.backup !== null || value.requiresFreshRestart))
       || (value.status === 'applied' && (value.beforeManifestSha256 === value.afterManifestSha256
         || value.backup === null))) fail('raw installer apply result invariant is invalid')
-  } else if (value.status !== 'restored' || value.requiresFreshRestart) {
+  } else if (value.status !== 'restored') {
     fail('raw installer rollback result invariant is invalid')
   }
-  const expectedRestart = reservation.value.component !== 'task-flow'
-    && expectedRawOperation === 'apply' && value.status === 'applied'
-  if (value.requiresFreshRestart !== expectedRestart) {
+  const expectedApplyRestart = reservation.value.component !== 'task-flow'
+    && value.status === 'applied'
+  // A non-task rollback may restore bytes while deferring the reload. The
+  // orchestrator restarts only when its forward restart activated new bytes;
+  // otherwise the running Gateway is still on the old payload or is stopped.
+  const deferredRollbackRestartAllowed = expectedRawOperation === 'rollback'
+    && reservation.value.component !== 'task-flow' && value.backup !== null
+  if ((expectedRawOperation === 'apply' && value.requiresFreshRestart !== expectedApplyRestart)
+    || (expectedRawOperation === 'rollback' && value.requiresFreshRestart
+      && !deferredRollbackRestartAllowed)) {
     fail('raw installer restart contract is invalid')
   }
   let backup = null

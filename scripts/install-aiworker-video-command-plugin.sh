@@ -17,6 +17,7 @@ PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 RUNTIME_VALIDATOR="$PLUGIN_DIR/scripts/validate-runtime-inspection.mjs"
 SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
 SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
+RUNTIME_TREE_MANIFEST="$REPOSITORY_ROOT/scripts/lib/runtime-tree-manifest.mjs"
 PROFILE_STATE_DIR="$HOME/.openclaw-qwen-current"
 PROFILE_CONFIG="$PROFILE_STATE_DIR/openclaw.json"
 INSTALLED_PLUGIN_DIR="$PROFILE_STATE_DIR/extensions/$PLUGIN_ID"
@@ -412,6 +413,7 @@ validate_source() {
   [[ -d "$PLUGIN_DIR" && ! -L "$PLUGIN_DIR" ]] || return 1
   [[ -f "$SHARED_INSTALL_GATE" && ! -L "$SHARED_INSTALL_GATE" ]] || return 1
   [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || return 1
+  [[ -f "$RUNTIME_TREE_MANIFEST" && ! -L "$RUNTIME_TREE_MANIFEST" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/package.json")" == "$CURRENT_VERSION" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/openclaw.plugin.json")" == "$CURRENT_VERSION" ]] || return 1
   node - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'
@@ -579,29 +581,7 @@ NODE
 
 write_tree_manifest() {
   local tree_root="$1" output_path="$2"
-  (
-    cd "$tree_root"
-    while IFS= read -r path; do
-      local_path="${path#./}"
-      case "$local_path" in
-        MANIFEST.sha256|.verified) continue ;;
-      esac
-      mode="$(stat -f '%Lp' "$path")"
-      if [[ -L "$path" ]]; then
-        target="$(readlink "$path")"
-        digest="$(printf '%s' "$target" | shasum -a 256 | awk '{print $1}')"
-        printf '%s\tsymlink\t%s\t%s\t%s\n' "$local_path" "$mode" "$digest" "$target"
-      elif [[ -d "$path" ]]; then
-        printf '%s\tdirectory\t%s\t-\t-\n' "$local_path" "$mode"
-      elif [[ -f "$path" ]]; then
-        digest="$(shasum -a 256 "$path" | awk '{print $1}')"
-        printf '%s\tfile\t%s\t%s\t-\n' "$local_path" "$mode" "$digest"
-      else
-        printf 'Unsupported backup object: %s\n' "$path" >&2
-        return 1
-      fi
-    done < <(LC_ALL=C find . -mindepth 1 -print | LC_ALL=C sort)
-  ) > "$output_path"
+  node "$RUNTIME_TREE_MANIFEST" video-command "$tree_root" > "$output_path"
 }
 
 target_manifest_sha256() {

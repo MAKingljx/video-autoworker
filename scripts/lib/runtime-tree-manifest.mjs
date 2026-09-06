@@ -4,13 +4,15 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 
 const [profile, rootPath, excludedPath = ''] = process.argv.slice(2)
-if (!['task-flow', 'director-brain'].includes(profile) || typeof rootPath !== 'string'
-  || process.argv.length > 5) {
+if (!['task-flow', 'director-brain', 'video-command'].includes(profile)
+  || typeof rootPath !== 'string' || process.argv.length > 5
+  || (profile === 'video-command' && excludedPath !== '')) {
   throw new Error('Expected a supported manifest profile, root, and optional excluded path')
 }
 // Director trees admit only regular files and directories. Task-flow retains
 // its existing absent, symlink, and special-object manifest records.
 const strictTree = profile === 'director-brain'
+const videoTree = profile === 'video-command'
 const root = Buffer.from(rootPath)
 const excluded = excludedPath === '' ? null : Buffer.from(excludedPath)
 const slash = Buffer.from('/')
@@ -90,7 +92,7 @@ while (pending.length > 0) {
       : Buffer.concat([directory.relative, slash, name])
     const relative = Buffer.concat([dotSlash, bareRelative])
     const stat = fs.lstatSync(pathname, { bigint: true })
-    entries.push({ pathname, relative, stat })
+    entries.push({ pathname, relative, bareRelative, stat })
     if (stat.isDirectory() && !stat.isSymbolicLink()) {
       pending.push({ pathname, relative: bareRelative, stat })
     }
@@ -99,16 +101,19 @@ while (pending.length > 0) {
 entries.sort((left, right) => Buffer.compare(left.relative, right.relative))
 
 verifyPath(root, rootStat)
-write(`.\tdirectory\t${mode(rootStat)}\t-\n`)
+if (!videoTree) write(`.\tdirectory\t${mode(rootStat)}\t-\n`)
 for (const entry of entries) {
-  const isExcluded = excluded !== null && entry.relative.equals(excluded)
+  const isExcluded = videoTree
+    ? [Buffer.from('MANIFEST.sha256'), Buffer.from('.verified')]
+      .some(name => entry.bareRelative.equals(name))
+    : excluded !== null && entry.relative.equals(excluded)
   if (isExcluded && !strictTree) continue
   verifyPath(entry.pathname, entry.stat)
   if (strictTree && !entry.stat.isDirectory() && !entry.stat.isFile()) {
     throw new Error('Unsupported object in strict manifest tree')
   }
   if (isExcluded) continue
-  write(entry.relative)
+  write(videoTree ? entry.bareRelative : entry.relative)
   if (entry.stat.isSymbolicLink()) {
     let target = fs.readlinkSync(entry.pathname, { encoding: 'buffer' })
     while (target.length > 0 && target[target.length - 1] === 0x0a) {
@@ -118,13 +123,19 @@ for (const entry of entries) {
     if (!verified.isSymbolicLink() || !sameSnapshot(entry.stat, verified)) {
       throw new Error('Manifest symlink changed while reading')
     }
-    write(`\tsymlink\t${mode(entry.stat)}\t${sha256(target)}\n`)
+    if (videoTree && (target.includes(0x09) || target.includes(0x0a) || target.includes(0x0d))) {
+      throw new Error('Manifest symlink target contains an unsafe separator')
+    }
+    write(`\tsymlink\t${mode(entry.stat)}\t${sha256(target)}`)
+    if (videoTree) { write('\t'); write(target) }
+    write('\n')
   } else if (entry.stat.isDirectory()) {
-    write(`\tdirectory\t${mode(entry.stat)}\t-\n`)
+    write(`\tdirectory\t${mode(entry.stat)}\t-${videoTree ? '\t-' : ''}\n`)
   } else if (entry.stat.isFile()) {
-    const escapedDigest = entry.relative.includes(0x5c) ? '\\' : ''
-    write(`\tfile\t${mode(entry.stat)}\t${escapedDigest}${hashFile(entry.pathname, entry.stat)}\n`)
+    const escapedDigest = !videoTree && entry.relative.includes(0x5c) ? '\\' : ''
+    write(`\tfile\t${mode(entry.stat)}\t${escapedDigest}${hashFile(entry.pathname, entry.stat)}${videoTree ? '\t-' : ''}\n`)
   } else {
+    if (videoTree) throw new Error('Unsupported object in video-command manifest tree')
     write(`\tother\t${mode(entry.stat)}\t-\n`)
   }
 }

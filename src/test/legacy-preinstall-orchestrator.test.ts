@@ -116,7 +116,7 @@ const entries=(root,excluded)=>{
 }
 const shellManifest=(root,excluded=[],dot=true)=>{
   const lines=dot?['.\tdirectory\t'+mode(root)+'\t-']:[]
-  for(const {rel,p,s} of entries(root,excluded)){const n=dot?'./'+rel:rel,suffix=dot?'':'\t-';if(s.isDirectory())lines.push(n+'\tdirectory\t'+mode(p)+'\t-'+suffix);else lines.push(n+'\tfile\t'+mode(p)+'\t'+sha(fs.readFileSync(p))+suffix)}return lines.join('\n')+'\n'
+  for(const {rel,p,s} of entries(root,excluded)){const n=dot?'./'+rel:rel,suffix=dot?'':'\t-';if(s.isSymbolicLink()){const target=fs.readlinkSync(p);lines.push(n+'\tsymlink\t'+(s.mode&0o7777).toString(8)+'\t'+sha(target)+'\t'+target)}else if(s.isDirectory())lines.push(n+'\tdirectory\t'+mode(p)+'\t-'+suffix);else lines.push(n+'\tfile\t'+mode(p)+'\t'+sha(fs.readFileSync(p))+suffix)}return lines.join('\n')+'\n'
 }
 const log=x=>fs.appendFileSync(process.env.FAKE_LOG,x+'\n')
 if(name.includes('task')){
@@ -149,8 +149,10 @@ if(operation==='apply'){
   fs.mkdirSync(backup,{recursive:true,mode:0o700});fs.chmodSync(backup,0o700)
   fs.writeFileSync(path.join(backup,'STATE'),'backup\n',{mode:0o600})
   if(component==='video-command'){
-    fs.writeFileSync(path.join(backup,'metadata.json'),'{}\n',{mode:0o600});fs.mkdirSync(path.join(backup,'previous-plugin'),{mode:0o700});fs.writeFileSync(path.join(backup,'openclaw.json'),'{}\n',{mode:0o600})
+    fs.writeFileSync(path.join(backup,'metadata.json'),'{}\n',{mode:0o600});fs.mkdirSync(path.join(backup,'previous-plugin/node_modules'),{recursive:true,mode:0o700});fs.writeFileSync(path.join(backup,'openclaw.json'),'{}\n',{mode:0o600})
+    const openclaw=path.join(process.env.HOME,'ai-worker/node/node-v22.22.3-darwin-arm64/lib/node_modules/openclaw');fs.mkdirSync(openclaw,{recursive:true,mode:0o700});fs.chmodSync(openclaw,0o700);const link=path.join(backup,'previous-plugin/node_modules/openclaw');fs.symlinkSync(openclaw,link)
     const manifest=shellManifest(backup,['MANIFEST.sha256','.verified'],false);fs.writeFileSync(path.join(backup,'MANIFEST.sha256'),manifest,{mode:0o600});fs.writeFileSync(path.join(backup,'.verified'),sha(manifest)+'\n',{mode:0o600})
+    if(scenario==='video-link-tamper'){fs.unlinkSync(link);fs.symlinkSync(openclaw+'-other',link)}
   }else{
     fs.writeFileSync(path.join(backup,'openclaw.json'),'{}\n',{mode:0o600});fs.writeFileSync(path.join(backup,'MANIFEST.sha256'),shellManifest(backup,['MANIFEST.sha256'],true),{mode:0o600})
   }
@@ -364,6 +366,12 @@ describe('legacy preinstall orchestrator', () => {
     }
     expect(statSync(join(entry.attempt, 'preinstall', 'orchestrator',
       'qwen-current-fresh-restart.result.json')).mode & 0o777).toBe(0o600)
+    const videoBackup = join(entry.root, 'home/ai-worker/backups/aiworker-video-command',
+      'current-release-20260905-120000.Ab12')
+    const manifest = readFileSync(join(videoBackup, 'MANIFEST.sha256'), 'utf8')
+    expect(manifest).toMatch(
+      /^previous-plugin\/node_modules\/openclaw\tsymlink\t[0-7]+\t[a-f0-9]{64}\t\/.*\/openclaw$/mu,
+    )
   })
 
   it.each([
@@ -407,6 +415,14 @@ describe('legacy preinstall orchestrator', () => {
       'task:rollback', 'controller:record:rollback:task-flow',
     ])
     expect(events(entry)).not.toContain('controller:abandon')
+  })
+
+  it('rejects a video backup whose manifested symlink target changed without following it', () => {
+    const entry = fixture(); setScenario(entry, 'video-link-tamper')
+    const result = run(entry)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('video-command backup manifest changed')
+    expect(events(entry)).not.toContain('controller:record:install:video-command')
   })
 
   it('does not roll back or restart after a committed handoff on re-entry', () => {

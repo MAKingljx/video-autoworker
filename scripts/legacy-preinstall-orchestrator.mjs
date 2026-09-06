@@ -260,6 +260,8 @@ function initializePaths() {
       join(repositoryRoot, 'scripts/install-aiworker-director-brain.sh')),
     convergence: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_CONVERGENCE',
       join(repositoryRoot, 'scripts/apply-openclaw-runtime-convergence.sh')),
+    runtimeTreeManifest: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_TREE_MANIFEST',
+      join(repositoryRoot, 'scripts/lib/runtime-tree-manifest.mjs')),
     openclaw: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_OPENCLAW',
       testMode ? process.execPath : resolveCommand('openclaw')),
     lsof: managedPath('AIWORKER_TEST_LEGACY_PREINSTALL_LSOF', '/usr/sbin/lsof'),
@@ -376,6 +378,19 @@ function shellTreeManifest(root, excludeNames = ['MANIFEST.sha256'], leadingDot 
   }
   return `${lines.join('\n')}\n`
 }
+function videoBackupManifest(root) {
+  const result = spawnSync(process.execPath, [paths.runtimeTreeManifest, 'video-command', root], {
+    cwd: repositoryRoot,
+    env: baseEnvironment(currentValues, currentStatus || emptyStatus),
+    encoding: 'utf8',
+    maxBuffer: MAX_BYTES,
+    timeout: 30_000,
+  })
+  if (result.error || result.signal || result.status !== 0) {
+    fail('video-command backup manifest verification failed')
+  }
+  return result.stdout
+}
 function validateBackupDirectory(pathname, root, component, expectedManifestSha = null) {
   safeDirectory(root, `${component} backup root`)
   safeDirectory(pathname, `${component} backup`)
@@ -395,7 +410,7 @@ function validateBackupDirectory(pathname, root, component, expectedManifestSha 
     if (verified.source.toString('utf8').trim() !== manifest.reference.sha256) {
       fail('video-command backup verifier changed')
     }
-    const expected = shellTreeManifest(pathname, ['MANIFEST.sha256', '.verified'], false)
+    const expected = videoBackupManifest(pathname)
     if (manifest.source.toString('utf8') !== expected) fail('video-command backup manifest changed')
   } else {
     const expected = shellTreeManifest(pathname)

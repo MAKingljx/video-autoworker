@@ -282,6 +282,7 @@ async function reserveForDeadInstaller(
 function componentResult(
   entry: ReturnType<typeof fixture>, installAttemptId: string,
   component: typeof components[number], operation: 'install' | 'rollback', index: number,
+  options: { requiresFreshRestart?: boolean } = {},
 ) {
   const backup = join(entry.root, `${component}.backup`)
   if (!existsSync(backup)) mkdirSync(backup, { mode: 0o700 })
@@ -326,7 +327,8 @@ function componentResult(
     beforeManifestSha256: operation === 'install' ? before : after,
     afterManifestSha256: operation === 'install' ? after : before,
     backup: { path: backup, manifestSha256: digest(readFileSync(backupManifest)) },
-    requiresFreshRestart: operation === 'install' && component !== 'task-flow',
+    requiresFreshRestart: options.requiresFreshRestart
+      ?? (operation === 'install' && component !== 'task-flow'),
   }, 0o600)
   return result
 }
@@ -761,6 +763,48 @@ describe('legacy preinstall controller', () => {
         rolledBack: [...components].reverse(),
       },
     })
+  })
+
+  it('records a deferred video-command rollback without widening task-flow', () => {
+    const entry = fixture()
+    const prepared = JSON.parse(prepare(entry).stdout)
+    for (const [index, component] of components.slice(0, 2).entries()) {
+      const result = componentResult(entry, prepared.installAttemptId, component, 'install', index)
+      const recorded = run(entry,
+        'record-component', '--attempt-dir', entry.attempt,
+        '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+        '--operation', 'install', '--component', component, '--raw-result', result)
+      expect(recorded.status, recorded.stderr).toBe(0)
+    }
+
+    const rollback = componentResult(
+      entry, prepared.installAttemptId, 'video-command', 'rollback', 1,
+      { requiresFreshRestart: true },
+    )
+    const recorded = run(entry,
+      'record-component', '--attempt-dir', entry.attempt,
+      '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+      '--operation', 'rollback', '--component', 'video-command', '--raw-result', rollback)
+    expect(recorded.status, recorded.stderr).toBe(0)
+    const event = JSON.parse(readFileSync(JSON.parse(recorded.stdout).event.path, 'utf8'))
+    expect(JSON.parse(readFileSync(event.result.path, 'utf8'))).toMatchObject({
+      component: 'video-command', operation: 'rollback', requiresFreshRestart: true,
+    })
+    expect(JSON.parse(run(entry, 'status', '--attempt-dir', entry.attempt).stdout)).toMatchObject({
+      phase: 'INSTALL_ROLLBACK_PENDING',
+      components: { installed: ['task-flow', 'video-command'], rolledBack: ['video-command'] },
+    })
+
+    const taskRollback = componentResult(
+      entry, prepared.installAttemptId, 'task-flow', 'rollback', 0,
+      { requiresFreshRestart: true },
+    )
+    const rejected = run(entry,
+      'record-component', '--attempt-dir', entry.attempt,
+      '--install-attempt-id', prepared.installAttemptId, '--expected-revision', '1',
+      '--operation', 'rollback', '--component', 'task-flow', '--raw-result', taskRollback)
+    expect(rejected.status).not.toBe(0)
+    expect(rejected.stderr).toContain('raw installer restart contract is invalid')
   })
 
   it('blocks terminal and adjacent component branches while one reservation is active', () => {

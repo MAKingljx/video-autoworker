@@ -338,6 +338,7 @@ const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
   ]],
   ['scripts/install-aiworker-video-command-plugin.sh', [
     'scripts/lib/openclaw-secret-reference.mjs',
+    'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/verify-shared-runtime-install-gate.mjs',
     'scripts/lib/shared-deployment-lock.sh',
   ]],
