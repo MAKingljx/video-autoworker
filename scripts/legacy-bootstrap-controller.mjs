@@ -497,10 +497,35 @@ function transitionAnchorEnvironment() {
   return environment
 }
 
+export function readVerifiedTransitionClaimResult(output, expected) {
+  exactKeys(output, ['bootstrapAttemptId', 'claim', 'resumed', 'schema'], 'workflow transition bootstrap claim result')
+  if (output.schema !== 'video-autoworker-n8n-workflow-transition-bootstrap-claim/v1'
+    || typeof output.resumed !== 'boolean' || !/^[a-f0-9-]{36}$/u.test(output.bootstrapAttemptId)
+    || output.claim?.path !== expected.claimPath) {
+    fail('workflow transition bootstrap claim result is invalid')
+  }
+  validateFullReference(output.claim, 'workflow transition bootstrap claim')
+  const loaded = readJson(expected.claimPath, 'workflow transition bootstrap claim', {
+    mode: 0o400, maximumBytes: MAX_JSON_BYTES,
+  })
+  validateTransitionClaim(loaded, expected)
+  const compact = Object.fromEntries(
+    ['path', 'dev', 'ino', 'size', 'sha256'].map(key => [key, output.claim[key]]),
+  )
+  if (loaded.value.bootstrap.attemptId !== output.bootstrapAttemptId
+    || canonicalJson(compact) !== canonicalJson(loaded.reference)) {
+    fail('workflow transition bootstrap claim result changed')
+  }
+  // Keep the already verified full reference across every later receipt phase.
+  // The compact readJson reference is only a readback identity check.
+  return { claim: output.claim, bootstrapAttemptId: output.bootstrapAttemptId }
+}
+
 function invokeTransitionClaim(
   binding, target, database, preparePath, preinstallTerminalPath,
   preinstallHandoffPath, runtimeConvergenceProofPath,
 ) {
+  const expected = { claimPath: binding.claim.path, target, database, preparePath, attestation: binding.attestation }
   const testClaim = process.env.AIWORKER_TEST_LEGACY_BOOTSTRAP_TRANSITION_CLAIM
   if (testClaim !== undefined) {
     if (!testMode) fail('workflow transition claim override is forbidden outside isolated tests')
@@ -508,8 +533,12 @@ function invokeTransitionClaim(
     const loaded = readJson(testClaim, 'test workflow transition bootstrap claim', {
       mode: 0o400, maximumBytes: MAX_JSON_BYTES,
     })
-    validateTransitionClaim(loaded, { target, database, preparePath, attestation: binding.attestation })
-    return { claim: fullReference(testClaim, 'test workflow transition bootstrap claim'), bootstrapAttemptId: loaded.value.bootstrap.attemptId }
+    return readVerifiedTransitionClaimResult({
+      schema: 'video-autoworker-n8n-workflow-transition-bootstrap-claim/v1',
+      resumed: false,
+      claim: fullReference(testClaim, 'test workflow transition bootstrap claim'),
+      bootstrapAttemptId: loaded.value.bootstrap.attemptId,
+    }, expected)
   }
   assertManagedTransitionAnchorAtHead(managedTransitionAnchorPath)
   const result = spawnSync(process.execPath, [
@@ -541,21 +570,7 @@ function invokeTransitionClaim(
   try { output = strictJson(result.stdout, 'workflow transition bootstrap claim result') } catch {
     fail('workflow transition bootstrap claim result is invalid')
   }
-  exactKeys(output, ['bootstrapAttemptId', 'claim', 'resumed', 'schema'], 'workflow transition bootstrap claim result')
-  if (output.schema !== 'video-autoworker-n8n-workflow-transition-bootstrap-claim/v1'
-    || typeof output.resumed !== 'boolean' || !/^[a-f0-9-]{36}$/u.test(output.bootstrapAttemptId)) {
-    fail('workflow transition bootstrap claim result is invalid')
-  }
-  validateFullReference(output.claim, 'workflow transition bootstrap claim')
-  const loaded = readJson(binding.claim.path, 'workflow transition bootstrap claim', {
-    mode: 0o400, maximumBytes: MAX_JSON_BYTES,
-  })
-  validateTransitionClaim(loaded, { target, database, preparePath, attestation: binding.attestation })
-  if (loaded.value.bootstrap.attemptId !== output.bootstrapAttemptId
-    || output.claim?.path !== loaded.reference.path || output.claim?.sha256 !== loaded.reference.sha256) {
-    fail('workflow transition bootstrap claim result changed')
-  }
-  return { claim: loaded.reference, bootstrapAttemptId: output.bootstrapAttemptId }
+  return readVerifiedTransitionClaimResult(output, expected)
 }
 
 function captureTransitionBinding(

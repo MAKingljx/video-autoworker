@@ -20,6 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { pathToFileURL } from 'node:url'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
@@ -902,6 +903,44 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(join(entry.attempt, 'prepare.receipt.json'))).toBe(false)
   })
 
+  it('preserves the full anchor response reference through the shared production and test reader', async () => {
+    const entry = fixture()
+    const { readVerifiedTransitionClaimResult } = await import(
+      /* @vite-ignore */ pathToFileURL(controller).href
+    )
+    const claim = JSON.parse(readFileSync(entry.transitionClaim, 'utf8'))
+    const full = fullReference(entry.transitionClaim)
+    const output = {
+      schema: claim.schema,
+      claim: full,
+      bootstrapAttemptId: claim.bootstrap.attemptId,
+      resumed: false,
+    }
+    const expected = {
+      ...claim.bootstrap.request,
+      claimPath: entry.transitionClaim,
+      attestation: fullReference(entry.transitionAttestation),
+    }
+    const read = readVerifiedTransitionClaimResult(output, expected)
+    expect(read.claim).toEqual(full)
+    expect(Object.keys(read.claim)).toHaveLength(10)
+    expect(() => readVerifiedTransitionClaimResult({
+      ...output, claim: reference(entry.transitionClaim),
+    }, expected)).toThrow('full reference fields are invalid')
+    for (const claimReference of [
+      { ...full, ino: String(BigInt(full.ino) + BigInt(1)) },
+      { ...full, mode: '600' },
+      { ...full, sha256: '0'.repeat(64) },
+    ]) {
+      expect(() => readVerifiedTransitionClaimResult({ ...output, claim: claimReference }, expected))
+        .toThrow('full reference changed')
+    }
+    expect(() => readVerifiedTransitionClaimResult(output, {
+      ...expected, claimPath: entry.transitionAttestation,
+    })).toThrow('claim result is invalid')
+    expect(existsSync(join(entry.attempt, 'prepare.receipt.json'))).toBe(false)
+  })
+
   it('creates a private immutable prepare/confirm/shutdown receipt chain without service actions', () => {
     const entry = fixture({ applicationManifestPaddingBytes: 1024 * 1024 })
     expect(statSync(entry.manifestPath).size).toBeGreaterThan(1024 * 1024)
@@ -910,6 +949,8 @@ process.stdout.write(JSON.stringify({
     const preparePath = join(entry.attempt, 'prepare.receipt.json')
     expect(lstatSync(preparePath).mode & 0o777).toBe(0o400)
     expect(lstatSync(preparePath).nlink).toBe(1)
+    expect(JSON.parse(readFileSync(preparePath, 'utf8')).transition.claim)
+      .toEqual(fullReference(entry.transitionClaim))
 
     const confirmed = confirm(entry)
     expect(confirmed.status, confirmed.stderr).toBe(0)
