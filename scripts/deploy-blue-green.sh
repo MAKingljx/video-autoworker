@@ -23,6 +23,7 @@ DRAIN_PATH="${AIWORKER_BG_DRAIN_PATH:-/api/n8n/drain-status}"
 SCHEDULER_PATH="${AIWORKER_BG_SCHEDULER_PATH:-/api/scheduler}"
 LIVE_DB_PATH="${AIWORKER_BG_LIVE_DB_PATH:-}"
 N8N_DB_PATH="${AIWORKER_BG_N8N_DB_PATH:-}"
+PLATFORM_ENV_FILE="${AIWORKER_PLATFORM_ENV_FILE:-$HOME/.config/video-autoworker/platform.env}"
 CONTROL_TOKEN_FILE="${AIWORKER_BG_CONTROL_TOKEN_FILE:-}"
 CONTROL_TOKEN="${AIWORKER_BG_CONTROL_TOKEN:-${API_KEY:-}}"
 HTTP_TIMEOUT_MS="${AIWORKER_BG_HTTP_TIMEOUT_MS:-8000}"
@@ -48,6 +49,50 @@ cleanup_operation() {
   if (( BOOTSTRAP_MAINTENANCE == 1 )); then
     printf 'error: bootstrap remains in externally frozen maintenance mode; do not reopen ingress\n' >&2
   fi
+}
+
+openclaw_scope_values() {
+  local file mode values tenant workspace
+  local -a files=("$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.local" "$PLATFORM_ENV_FILE")
+  for file in "${files[@]}"; do
+    [[ "$file" == /* && "$file" != *[$'\r\n']* ]] \
+      || { printf 'error: scope environment path is invalid\n' >&2; return 1; }
+    if [[ -e "$file" || -L "$file" ]]; then
+      [[ -f "$file" && ! -L "$file" && -O "$file" ]] \
+        || { printf 'error: scope environment file is unsafe\n' >&2; return 1; }
+      mode="$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file")"
+      [[ "$mode" == 600 ]] \
+        || { printf 'error: scope environment file mode must be 0600\n' >&2; return 1; }
+    fi
+  done
+  values="$(/usr/bin/env -i \
+    HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    MC_AUTH_MODE="${MC_AUTH_MODE:-}" \
+    MC_OPENCLAW_TENANT_ID="${MC_OPENCLAW_TENANT_ID:-}" \
+    MC_OPENCLAW_WORKSPACE_ID="${MC_OPENCLAW_WORKSPACE_ID:-}" \
+    /bin/bash -s -- "${files[@]}" <<'BASH'
+set -euo pipefail
+for file in "$@"; do
+  if [[ -f "$file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$file" >/dev/null 2>&1
+    set +a
+  fi
+done
+[[ "${MC_AUTH_MODE:-openclaw-loopback}" == openclaw-loopback ]]
+tenant="${MC_OPENCLAW_TENANT_ID:-1}"
+workspace="${MC_OPENCLAW_WORKSPACE_ID:-1}"
+[[ "$tenant" =~ ^[1-9][0-9]*$ && "$workspace" =~ ^[1-9][0-9]*$ ]]
+printf '%s\t%s\n' "$tenant" "$workspace"
+BASH
+  )" || { printf 'error: OpenClaw loopback scope is invalid\n' >&2; return 1; }
+  tenant="${values%%$'\t'*}"
+  workspace="${values#*$'\t'}"
+  [[ "$tenant" =~ ^[1-9][0-9]*$ && "$workspace" =~ ^[1-9][0-9]*$ \
+    && "$values" == "$tenant"$'\t'"$workspace" ]] \
+    || { printf 'error: OpenClaw loopback scope is invalid\n' >&2; return 1; }
+  printf '%s\t%s\n' "$tenant" "$workspace"
 }
 
 usage() {
@@ -173,12 +218,17 @@ verify_director_video_release_chain() {
   local release_id="$1"
   local release_root="$2"
   local repository_release_mode="${3:-head}"
-  local report
+  local report scope tenant workspace
   [[ "$repository_release_mode" == head || "$repository_release_mode" == ancestor ]] \
     || { printf 'error: invalid director/video repository release mode\n' >&2; return 1; }
   [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
     || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
-  report="$("$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
+  scope="$(openclaw_scope_values)" || return 1
+  tenant="${scope%%$'\t'*}"
+  workspace="${scope#*$'\t'}"
+  report="$(MC_AUTH_MODE=openclaw-loopback \
+    MC_OPENCLAW_TENANT_ID="$tenant" MC_OPENCLAW_WORKSPACE_ID="$workspace" \
+    "$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
     --repository-root "$PROJECT_ROOT" \
     --releases-root "$RELEASES_DIR" \
     --release-id "$release_id" \

@@ -566,10 +566,19 @@ export function assertDirectorExtractionReleaseReady(extraction) {
 }
 
 function directorBrainScope(source = process.env) {
-  const tenantId = Number(source.MC_OPENCLAW_TENANT_ID)
-  const workspaceId = Number(source.MC_OPENCLAW_WORKSPACE_ID)
-  if (!Number.isSafeInteger(tenantId) || tenantId < 1
-    || !Number.isSafeInteger(workspaceId) || workspaceId < 1) {
+  const missingTenant = !source.MC_OPENCLAW_TENANT_ID
+  const missingWorkspace = !source.MC_OPENCLAW_WORKSPACE_ID
+  if ((missingTenant || missingWorkspace) && source.MC_AUTH_MODE !== 'openclaw-loopback') {
+    fail('director_scope_invalid')
+  }
+  const tenantSource = missingTenant ? '1' : source.MC_OPENCLAW_TENANT_ID
+  const workspaceSource = missingWorkspace ? '1' : source.MC_OPENCLAW_WORKSPACE_ID
+  if (!/^[1-9]\d*$/u.test(tenantSource) || !/^[1-9]\d*$/u.test(workspaceSource)) {
+    fail('director_scope_invalid')
+  }
+  const tenantId = Number(tenantSource)
+  const workspaceId = Number(workspaceSource)
+  if (!Number.isSafeInteger(tenantId) || !Number.isSafeInteger(workspaceId)) {
     fail('director_scope_invalid')
   }
   return { tenantId, workspaceId }
@@ -1014,7 +1023,7 @@ export async function verifyDirectorVideoReleaseReadiness(options) {
   }
 }
 
-function parseArguments(argv) {
+export function parseDirectorVideoReleaseReadinessArguments(argv, source = process.env) {
   const values = new Map()
   const allowed = new Set([
     '--repository-root', '--releases-root', '--release-root', '--release-id',
@@ -1047,7 +1056,9 @@ function parseArguments(argv) {
   }
   return {
     repositoryRoot, releasesRoot, releaseRoot, releaseId, profileStateRoot, workspaceRoot,
-    liveDbPath, scope: directorBrainScope(), runtimeConvergenceProofPath,
+    liveDbPath,
+    scope: verificationPhase === 'full' ? directorBrainScope(source) : null,
+    runtimeConvergenceProofPath,
     repositoryReleaseMode, verificationPhase,
   }
 }
@@ -1055,7 +1066,7 @@ function parseArguments(argv) {
 const invokedPath = process.argv[1] ? realpathSync.native(process.argv[1]) : null
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    const options = parseArguments(process.argv.slice(2))
+    const options = parseDirectorVideoReleaseReadinessArguments(process.argv.slice(2))
     const result = options.verificationPhase === 'pre-bootstrap'
       ? await verifyDirectorVideoReleasePreflight(options)
       : await verifyDirectorVideoReleaseReadiness(options)

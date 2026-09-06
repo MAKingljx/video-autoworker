@@ -22,6 +22,7 @@ import {
   assertRepositoryRelease,
   inspectDirectorEvidenceOutboxCompatibility,
   inspectDirectorExtractionIntegrity,
+  parseDirectorVideoReleaseReadinessArguments,
   verifyDirectorExtractionReleaseProvenance,
   verifyInstalledReleasePayloads,
 } from '../../../scripts/verify-director-video-release-readiness.mjs'
@@ -181,6 +182,33 @@ describe('director video release readiness verifier', () => {
     await installVideoCommand(profileRoot)
     await installTaskFlow(workspaceRoot)
     await installDirectorBrain(profileRoot, workspaceRoot)
+  })
+
+  it('resolves scope only for full verification through the OpenClaw loopback mapping', () => {
+    const common = [
+      '--release-id', 'abcdef0-runtime',
+      '--release-root', '/private/releases/abcdef0-runtime/standalone',
+      '--runtime-convergence-proof', '/private/proof.json',
+    ]
+    expect(parseDirectorVideoReleaseReadinessArguments([
+      ...common, '--verification-phase', 'pre-bootstrap',
+    ], { NODE_ENV: 'test' })).toMatchObject({ verificationPhase: 'pre-bootstrap', scope: null })
+    expect(parseDirectorVideoReleaseReadinessArguments([
+      ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
+    ], { NODE_ENV: 'test', MC_AUTH_MODE: 'openclaw-loopback' })).toMatchObject({
+      verificationPhase: 'full', scope: { tenantId: 1, workspaceId: 1 },
+    })
+    expect(parseDirectorVideoReleaseReadinessArguments([
+      ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
+    ], {
+      NODE_ENV: 'test',
+      MC_AUTH_MODE: 'openclaw-loopback',
+      MC_OPENCLAW_TENANT_ID: '8',
+      MC_OPENCLAW_WORKSPACE_ID: '13',
+    })).toMatchObject({ scope: { tenantId: 8, workspaceId: 13 } })
+    expect(() => parseDirectorVideoReleaseReadinessArguments([
+      ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
+    ], { NODE_ENV: 'test' })).toThrow('director_scope_invalid')
   })
 
   afterEach(async () => rm(root, { recursive: true, force: true }))
@@ -637,7 +665,15 @@ describe('director video release readiness verifier', () => {
 DIRECTOR_VIDEO_READINESS="$1"
 verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone
 `)
-    const environment = { ...process.env, NODE_BIN: process.execPath }
+    const environment = {
+      ...process.env,
+      HOME: root,
+      NODE_BIN: process.execPath,
+      AIWORKER_PLATFORM_ENV_FILE: join(root, 'missing-platform.env'),
+      MC_AUTH_MODE: '',
+      MC_OPENCLAW_TENANT_ID: '',
+      MC_OPENCLAW_WORKSPACE_ID: '',
+    }
     const accepted = spawnSync('bash', [harnessPath, verifierPath], {
       env: environment,
       encoding: 'utf8',

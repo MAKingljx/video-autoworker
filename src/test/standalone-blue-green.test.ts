@@ -820,6 +820,241 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     expect(result.stderr).toContain('environment file must have mode 0600')
   })
 
+  it('propagates one precedence-resolved OpenClaw scope to full readiness and slots without leaking other values', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-scope-precedence-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const project = join(root, 'project')
+    const scripts = join(project, 'scripts')
+    const platformEnv = join(root, 'custom-platform.env')
+    const capture = join(root, 'readiness-scope.txt')
+    mkdirSync(scripts, { recursive: true, mode: 0o700 })
+    writeFileSync(join(project, '.env'), [
+      'MC_AUTH_MODE=openclaw-loopback',
+      'MC_OPENCLAW_TENANT_ID=11',
+      'MC_OPENCLAW_WORKSPACE_ID=12',
+      'SCOPE_FIXTURE_SECRET=base-must-not-leak',
+      '',
+    ].join('\n'), { mode: 0o600 })
+    writeFileSync(join(project, '.env.local'), [
+      'MC_OPENCLAW_WORKSPACE_ID=22',
+      'SCOPE_FIXTURE_SECRET=local-must-not-leak',
+      '',
+    ].join('\n'), { mode: 0o600 })
+    writeFileSync(platformEnv, [
+      'MC_OPENCLAW_TENANT_ID=31',
+      'SCOPE_FIXTURE_SECRET=platform-must-not-leak',
+      '',
+    ].join('\n'), { mode: 0o600 })
+    const readiness = join(scripts, 'verify-director-video-release-readiness.mjs')
+    writeFileSync(readiness, '// fixture path checked by the real deploy function\n', { mode: 0o600 })
+
+    const deploySource = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const deployHarness = join(scripts, 'scope-full-harness.sh')
+    writeFileSync(deployHarness, `${deploySource.slice(0, deploySource.indexOf('\ncommand="${1:-}"'))}
+CAPTURE_PATH="$1"
+scope_node() {
+  if [[ "$1" == "$DIRECTOR_VIDEO_READINESS" ]]; then
+    printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_WORKSPACE_ID" > "$CAPTURE_PATH"
+    printf '{}'
+    return 0
+  fi
+  [[ "$1" == - ]]
+}
+NODE_BIN=scope_node
+verify_director_video_release_chain '${'a'.repeat(40)}-runtime' "$PROJECT_ROOT/release" head
+`, { mode: 0o700 })
+    chmodSync(deployHarness, 0o700)
+
+    const slotSource = readFileSync(resolve(process.cwd(), 'scripts/start-standalone-slot.sh'), 'utf8')
+    const slotHarness = join(scripts, 'scope-slot-harness.sh')
+    writeFileSync(slotHarness, `${slotSource.slice(0, slotSource.indexOf('\nBINDING_FILE='))}
+printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_WORKSPACE_ID"
+`, { mode: 0o700 })
+    chmodSync(slotHarness, 0o700)
+
+    const environment = {
+      ...process.env,
+      HOME: root,
+      AIWORKER_PLATFORM_ENV_FILE: platformEnv,
+      MC_AUTH_MODE: '',
+      MC_OPENCLAW_TENANT_ID: '',
+      MC_OPENCLAW_WORKSPACE_ID: '',
+      SCOPE_FIXTURE_SECRET: '',
+    }
+    const full = spawnSync('/bin/bash', [deployHarness, capture], {
+      encoding: 'utf8', env: environment,
+    })
+    const slot = spawnSync('/bin/bash', [slotHarness, 'blue', 'probe'], {
+      encoding: 'utf8', env: environment,
+    })
+
+    expect(full.status, full.stderr).toBe(0)
+    expect(slot.status, slot.stderr).toBe(0)
+    expect(readFileSync(capture, 'utf8')).toBe('openclaw-loopback\t31\t22\n')
+    expect(slot.stdout).toBe('openclaw-loopback\t31\t22\n')
+    const visible = `${full.stdout}\n${full.stderr}\n${slot.stdout}\n${slot.stderr}\n${readFileSync(capture, 'utf8')}`
+    expect(visible).not.toContain('must-not-leak')
+    expect(readFileSync(platformEnv, 'utf8')).toContain('platform-must-not-leak')
+  })
+
+  it('defaults full readiness and slot scope to OpenClaw loopback 1/1 when scope files are absent', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-scope-default-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const project = join(root, 'project')
+    const scripts = join(project, 'scripts')
+    const capture = join(root, 'readiness-scope.txt')
+    const missingPlatform = join(root, 'missing-platform.env')
+    mkdirSync(scripts, { recursive: true, mode: 0o700 })
+    writeFileSync(join(scripts, 'verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o600 })
+
+    const deploySource = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const deployHarness = join(scripts, 'scope-full-harness.sh')
+    writeFileSync(deployHarness, `${deploySource.slice(0, deploySource.indexOf('\ncommand="${1:-}"'))}
+CAPTURE_PATH="$1"
+scope_node() {
+  if [[ "$1" == "$DIRECTOR_VIDEO_READINESS" ]]; then
+    printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_WORKSPACE_ID" > "$CAPTURE_PATH"
+    printf '{}'
+    return 0
+  fi
+  [[ "$1" == - ]]
+}
+NODE_BIN=scope_node
+verify_director_video_release_chain '${'a'.repeat(40)}-runtime' "$PROJECT_ROOT/release" head
+`, { mode: 0o700 })
+    chmodSync(deployHarness, 0o700)
+    const slotSource = readFileSync(resolve(process.cwd(), 'scripts/start-standalone-slot.sh'), 'utf8')
+    const slotHarness = join(scripts, 'scope-slot-harness.sh')
+    writeFileSync(slotHarness, `${slotSource.slice(0, slotSource.indexOf('\nBINDING_FILE='))}
+printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_WORKSPACE_ID"
+`, { mode: 0o700 })
+    chmodSync(slotHarness, 0o700)
+    const environment = {
+      ...process.env,
+      HOME: root,
+      AIWORKER_PLATFORM_ENV_FILE: missingPlatform,
+      MC_AUTH_MODE: '',
+      MC_OPENCLAW_TENANT_ID: '',
+      MC_OPENCLAW_WORKSPACE_ID: '',
+    }
+
+    const full = spawnSync('/bin/bash', [deployHarness, capture], { encoding: 'utf8', env: environment })
+    const slot = spawnSync('/bin/bash', [slotHarness, 'green', 'probe'], { encoding: 'utf8', env: environment })
+    expect(full.status, full.stderr).toBe(0)
+    expect(slot.status, slot.stderr).toBe(0)
+    expect(readFileSync(capture, 'utf8')).toBe('openclaw-loopback\t1\t1\n')
+    expect(slot.stdout).toBe('openclaw-loopback\t1\t1\n')
+    expect(existsSync(missingPlatform)).toBe(false)
+  })
+
+  it('suppresses sourced scope-file output while preserving its full-readiness assignments', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-scope-source-output-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const project = join(root, 'project')
+    const scripts = join(project, 'scripts')
+    const capture = join(root, 'readiness-scope.txt')
+    const missingPlatform = join(root, 'missing-platform.env')
+    const stdoutSecret = 'synthetic-scope-stdout-secret'
+    const stderrSecret = 'synthetic-scope-stderr-secret'
+    mkdirSync(scripts, { recursive: true, mode: 0o700 })
+    writeFileSync(join(project, '.env'), [
+      `printf '${stdoutSecret}\\n'`,
+      `printf '${stderrSecret}\\n' >&2`,
+      'MC_AUTH_MODE=openclaw-loopback',
+      'MC_OPENCLAW_TENANT_ID=41',
+      'MC_OPENCLAW_WORKSPACE_ID=42',
+      '',
+    ].join('\n'), { mode: 0o600 })
+    writeFileSync(join(scripts, 'verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o600 })
+    const deploySource = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(scripts, 'scope-full-harness.sh')
+    writeFileSync(harness, `${deploySource.slice(0, deploySource.indexOf('\ncommand="${1:-}"'))}
+CAPTURE_PATH="$1"
+scope_node() {
+  if [[ "$1" == "$DIRECTOR_VIDEO_READINESS" ]]; then
+    printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_WORKSPACE_ID" > "$CAPTURE_PATH"
+    printf '{}'
+    return 0
+  fi
+  [[ "$1" == - ]]
+}
+NODE_BIN=scope_node
+verify_director_video_release_chain '${'a'.repeat(40)}-runtime' "$PROJECT_ROOT/release" head
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+
+    const result = spawnSync('/bin/bash', [harness, capture], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: root,
+        AIWORKER_PLATFORM_ENV_FILE: missingPlatform,
+        MC_AUTH_MODE: '',
+        MC_OPENCLAW_TENANT_ID: '',
+        MC_OPENCLAW_WORKSPACE_ID: '',
+      },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(capture, 'utf8')).toBe('openclaw-loopback\t41\t42\n')
+    expect(`${result.stdout}\n${result.stderr}\n${readFileSync(capture, 'utf8')}`)
+      .not.toMatch(/synthetic-scope-(?:stdout|stderr)-secret/u)
+  })
+
+  it.each([
+    ['symlinked .env', '.env', 'symlink'],
+    ['non-0600 .env', '.env', 'mode'],
+    ['symlinked .env.local', '.env.local', 'symlink'],
+    ['non-0600 .env.local', '.env.local', 'mode'],
+    ['symlinked platform env', 'platform.env', 'symlink'],
+    ['non-0600 platform env', 'platform.env', 'mode'],
+  ] as const)('rejects %s before full readiness without exposing its contents', (_label, relative, kind) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-scope-unsafe-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const project = join(root, 'project')
+    const scripts = join(project, 'scripts')
+    const platformEnv = join(root, 'platform.env')
+    const capture = join(root, 'must-not-exist.txt')
+    mkdirSync(scripts, { recursive: true, mode: 0o700 })
+    writeFileSync(join(scripts, 'verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o600 })
+    const pathname = relative === 'platform.env' ? platformEnv : join(project, relative)
+    const secret = 'scope-secret-must-not-be-exposed'
+    if (kind === 'symlink') {
+      const target = join(root, `${relative.replaceAll('.', '-')}-target`)
+      writeFileSync(target, `SCOPE_FIXTURE_SECRET=${secret}\n`, { mode: 0o600 })
+      symlinkSync(target, pathname)
+    } else {
+      writeFileSync(pathname, `SCOPE_FIXTURE_SECRET=${secret}\n`, { mode: 0o600 })
+      chmodSync(pathname, 0o640)
+    }
+    const deploySource = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(scripts, 'scope-full-harness.sh')
+    writeFileSync(harness, `${deploySource.slice(0, deploySource.indexOf('\ncommand="${1:-}"'))}
+CAPTURE_PATH="$1"
+scope_node() { printf 'unexpected verifier call' > "$CAPTURE_PATH"; }
+NODE_BIN=scope_node
+verify_director_video_release_chain '${'a'.repeat(40)}-runtime' "$PROJECT_ROOT/release" head
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+
+    const result = spawnSync('/bin/bash', [harness, capture], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: root,
+        AIWORKER_PLATFORM_ENV_FILE: platformEnv,
+        MC_AUTH_MODE: '',
+        MC_OPENCLAW_TENANT_ID: '',
+        MC_OPENCLAW_WORKSPACE_ID: '',
+      },
+    })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain(kind === 'symlink'
+      ? 'scope environment file is unsafe'
+      : 'scope environment file mode must be 0600')
+    expect(`${result.stdout}\n${result.stderr}`).not.toContain(secret)
+    expect(existsSync(capture)).toBe(false)
+  })
+
   it('defaults slot material access to local Python while preserving explicit overrides', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-slot-material-env-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
