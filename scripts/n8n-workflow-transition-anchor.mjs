@@ -23,6 +23,13 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
+import {
+  buildLegacyPreinstallHandoffPayload,
+  LEGACY_PREINSTALL_FINALIZE_KEYS,
+  LEGACY_PREINSTALL_HANDOFF_CORE_KEYS,
+  LEGACY_PREINSTALL_HANDOFF_PAYLOAD_KEYS,
+  projectLegacyPreinstallHandoffCore,
+} from './lib/legacy-preinstall-handoff-contract.mjs'
 
 const INTENT_SCHEMA = 'video-autoworker-n8n-workflow-upgrade-intent/v1'
 const CONFIRMATION_SCHEMA = 'video-autoworker-n8n-workflow-current-confirmation/v1'
@@ -33,6 +40,7 @@ const BOOTSTRAP_CLAIM_SCHEMA = 'video-autoworker-n8n-workflow-transition-bootstr
 const TRANSITION_FINALIZE_SCHEMA = 'video-autoworker-n8n-workflow-transition-finalize-claim/v1'
 const TRANSITION_ROLLBACK_AUTHORIZATION_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-authorization/v1'
 const TRANSITION_ROLLBACK_JOURNAL_SCHEMA = 'video-autoworker-n8n-workflow-transition-rollback-journal/v1'
+const FINAL_GATE_SCHEMA = 'video-autoworker-shared-runtime-final-gate/v1'
 const PACKAGE_SCHEMA = 'video-autoworker-n8n-managed-workflow-backup/v1'
 const LIVE_REPORT_SCHEMA = 'video-autoworker-n8n-workflow-compatibility/v2'
 const PROTOCOL = 'slot-v1-execution-owner-v1'
@@ -57,6 +65,7 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
   'scripts/lib/application-release-manifest-contract.mjs',
+  'scripts/lib/legacy-preinstall-handoff-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -80,7 +89,8 @@ function nowSeconds() {
 }
 
 function runtimeSourceRequiredMode(pathname) {
-  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH ? 0o600 : null
+  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH
+    || pathname === 'scripts/lib/legacy-preinstall-handoff-contract.mjs' ? 0o600 : null
 }
 
 function fail(message) {
@@ -1468,6 +1478,77 @@ function claimBootstrap(values) {
   return withTransitionMaintenanceLock(values, () => claimBootstrapLocked(values))
 }
 
+function compactReference(reference) {
+  return {
+    path: reference.path,
+    dev: reference.dev,
+    ino: reference.ino,
+    size: reference.size,
+    sha256: reference.sha256,
+  }
+}
+
+function validateLegacyPreinstallGatewayActivation(value, payload, verification) {
+  exactKeys(value, ['convergence', 'gateway', 'restart'], 'preinstall Gateway activation')
+  exactKeys(value.gateway, ['catalogSha256', 'effectiveSha256', 'pid', 'pluginTreesSha256'],
+    'preinstall Gateway activation identity')
+  if (!Number.isSafeInteger(value.gateway.pid) || value.gateway.pid < 1
+    || !SHA256.test(value.gateway.catalogSha256 || '')
+    || !SHA256.test(value.gateway.effectiveSha256 || '')
+    || !SHA256.test(value.gateway.pluginTreesSha256 || '')
+    || canonicalJson(value) !== canonicalJson(verification.gatewayActivation)
+    || canonicalJson(value.convergence) !== canonicalJson(payload.runtimeConvergenceProof)) {
+    fail('preinstall Gateway activation changed')
+  }
+  exactKeys(value.restart, ['dev', 'ino', 'path', 'sha256', 'size'],
+    'preinstall Gateway restart reference')
+  exactKeys(value.convergence, ['dev', 'ino', 'path', 'sha256', 'size'],
+    'preinstall Gateway convergence reference')
+  if (canonicalJson(compactReference(fileSnapshot(
+    value.restart.path, 'preinstall Gateway restart evidence', 0o600,
+  ))) !== canonicalJson(value.restart)) {
+    fail('preinstall Gateway restart evidence reference changed')
+  }
+}
+
+function validateLegacyPreinstallFinalGate(value, terminal, payload, expectedFinalize, label) {
+  exactKeys(value, [
+    'activity', 'finalize', 'installAttemptId', 'mode', 'observedAt', 'revision', 'schema',
+    'sourceCommit', 'statusIdentitySha256', 'targetReleaseId', 'verifier',
+  ], label)
+  if (value.schema !== FINAL_GATE_SCHEMA || value.mode !== 'legacy-preinstall'
+    || value.installAttemptId !== terminal.installAttemptId
+    || value.revision !== terminal.revision
+    || value.sourceCommit !== payload.binding.sourceCommit
+    || value.targetReleaseId !== payload.binding.target?.releaseId
+    || !Number.isSafeInteger(value.observedAt)
+    || !SHA256.test(value.statusIdentitySha256 || '')
+    || canonicalJson(value.finalize) !== canonicalJson(expectedFinalize)) {
+    fail(`${label} identity or finalize binding changed`)
+  }
+  exactKeys(value.verifier, ['dev', 'ino', 'path', 'sha256', 'size'], `${label} verifier reference`)
+  if (canonicalJson(compactReference(fileSnapshot(value.verifier.path, `${label} verifier`)))
+    !== canonicalJson(value.verifier)) {
+    fail(`${label} verifier reference changed`)
+  }
+  exactKeys(value.activity, [
+    'activeMediaNodes', 'activeN8nExecutions', 'activeTasks', 'attentionStale',
+    'mission', 'n8n', 'pendingOutbox', 'running', 'snapshotSha256', 'waiting',
+  ], `${label} activity`)
+  const activity = { ...value.activity }
+  delete activity.snapshotSha256
+  if (canonicalJson(value.activity.mission) !== canonicalJson(payload.binding.databases?.mission)
+    || canonicalJson(value.activity.n8n) !== canonicalJson(payload.binding.databases?.n8n)
+    || !SHA256.test(value.activity.snapshotSha256 || '')
+    || value.activity.snapshotSha256 !== sha256(canonicalJson(activity))
+    || ['activeMediaNodes', 'activeN8nExecutions', 'activeTasks', 'pendingOutbox', 'running', 'waiting']
+      .some(name => value.activity[name] !== 0)
+    || !Number.isSafeInteger(value.activity.attentionStale)
+    || value.activity.attentionStale < 0) {
+    fail(`${label} activity is invalid or not idle`)
+  }
+}
+
 function claimBootstrapLocked(values) {
   const transition = verifyTransition(values, true)
   assertForwardTransitionOpen(transition.state.intent)
@@ -1510,10 +1591,6 @@ function claimBootstrapLocked(values) {
     || !terminal.handoff?.path || !SHA256.test(terminal.handoffPayloadSha256 || '')) {
     fail('preinstall bootstrap handoff is invalid')
   }
-  const subset = reference => ({
-    path: reference.path, dev: reference.dev, ino: reference.ino,
-    size: reference.size, sha256: reference.sha256,
-  })
   const preparedLoaded = readJsonFile(terminal.prepared.path,
     'preinstall prepared receipt', 0o400)
   const verificationLoaded = readJsonFile(terminal.verification.path,
@@ -1523,9 +1600,9 @@ function claimBootstrapLocked(values) {
   }
   const handoffLoaded = readJsonFile(values['--preinstall-handoff'],
     'preinstall bootstrap handoff action', 0o400)
-  if (canonicalJson(subset(preparedLoaded.reference)) !== canonicalJson(terminal.prepared)
-    || canonicalJson(subset(verificationLoaded.reference)) !== canonicalJson(terminal.verification)
-    || canonicalJson(subset(handoffLoaded.reference)) !== canonicalJson(terminal.handoff)) {
+  if (canonicalJson(compactReference(preparedLoaded.reference)) !== canonicalJson(terminal.prepared)
+    || canonicalJson(compactReference(verificationLoaded.reference)) !== canonicalJson(terminal.verification)
+    || canonicalJson(compactReference(handoffLoaded.reference)) !== canonicalJson(terminal.handoff)) {
     fail('preinstall bootstrap handoff file references changed')
   }
   const preparedBindingMismatch = [
@@ -1567,10 +1644,8 @@ function claimBootstrapLocked(values) {
     || handoff.revision !== terminal.revision || !Number.isSafeInteger(handoff.claimedAt)) {
     fail('preinstall bootstrap handoff action is invalid')
   }
-  exactKeys(payload, [
-    'binding', 'componentJournalHead', 'finalize', 'freshReadinessSha256', 'payloads', 'readiness',
-    'runtimeConvergenceProof', 'verification',
-  ], 'preinstall bootstrap handoff payload')
+  exactKeys(payload, LEGACY_PREINSTALL_HANDOFF_PAYLOAD_KEYS,
+    'preinstall bootstrap handoff payload')
   if (terminal.handoffPayloadSha256 !== sha256(canonicalJson(payload))
     || !SHA256.test(payload.freshReadinessSha256 || '')
     || canonicalJson(payload.verification) !== canonicalJson(terminal.verification)) {
@@ -1578,12 +1653,11 @@ function claimBootstrapLocked(values) {
   }
   const finalizeLoaded = readJsonFile(payload.finalize?.path,
     'preinstall coordinator finalize request', 0o400)
-  if (canonicalJson(subset(finalizeLoaded.reference)) !== canonicalJson(payload.finalize)) {
+  if (canonicalJson(compactReference(finalizeLoaded.reference)) !== canonicalJson(payload.finalize)) {
     fail('preinstall coordinator finalize request reference changed')
   }
-  exactKeys(finalizeLoaded.value, [
-    'choice', 'claimedAt', 'installAttemptId', 'journalHead', 'revision', 'schema', 'uid',
-  ], 'preinstall coordinator finalize request')
+  exactKeys(finalizeLoaded.value, LEGACY_PREINSTALL_FINALIZE_KEYS,
+    'preinstall coordinator finalize request')
   if (finalizeLoaded.value.schema !== 'video-autoworker-legacy-preinstall-finalize-claim/v1'
     || finalizeLoaded.value.choice !== 'bootstrap-handoff'
     || finalizeLoaded.value.installAttemptId !== terminal.installAttemptId
@@ -1593,9 +1667,27 @@ function claimBootstrapLocked(values) {
       !== canonicalJson(payload.componentJournalHead)) {
     fail('preinstall coordinator finalize request changed')
   }
+  exactKeys(finalizeLoaded.value.handoffCore, LEGACY_PREINSTALL_HANDOFF_CORE_KEYS,
+    'preinstall coordinator finalize handoff core')
+  const projectedCore = projectLegacyPreinstallHandoffCore(payload)
+  if (canonicalJson(projectedCore) !== canonicalJson(finalizeLoaded.value.handoffCore)
+    || canonicalJson(payload) !== canonicalJson(buildLegacyPreinstallHandoffPayload(
+      finalizeLoaded.value.handoffCore, payload.finalize, payload.finalGate,
+    ))) {
+    fail('preinstall coordinator finalize handoff core changed')
+  }
+  validateLegacyPreinstallGatewayActivation(
+    payload.gatewayActivation, payload, verificationLoaded.value,
+  )
+  validateLegacyPreinstallFinalGate(
+    payload.initialFinalGate, terminal, payload, null, 'preinstall initial final gate',
+  )
+  validateLegacyPreinstallFinalGate(
+    payload.finalGate, terminal, payload, payload.finalize, 'preinstall final gate',
+  )
   const journalHeadLoaded = readJsonFile(payload.componentJournalHead?.path,
     'preinstall component journal head', 0o400)
-  if (canonicalJson(subset(journalHeadLoaded.reference))
+  if (canonicalJson(compactReference(journalHeadLoaded.reference))
     !== canonicalJson(payload.componentJournalHead)
     || journalHeadLoaded.value?.schema !== 'video-autoworker-legacy-preinstall-component-event/v1'
     || journalHeadLoaded.value?.installAttemptId !== terminal.installAttemptId
@@ -1624,11 +1716,10 @@ function claimBootstrapLocked(values) {
   }
   const convergenceLoaded = readJsonFile(values['--runtime-convergence-proof'],
     'fresh runtime convergence proof', 0o600)
-  if (canonicalJson(subset(convergenceLoaded.reference))
+  if (canonicalJson(compactReference(convergenceLoaded.reference))
     !== canonicalJson(payload.runtimeConvergenceProof)) {
     fail('preinstall bootstrap handoff runtime convergence proof changed')
   }
-  claimTransitionFinalize(transition.state.intent, 'bootstrap-handoff')
   if (existsSync(values['--output'])) {
     if (existsSync(values['--prepare-path'])) {
       fileSnapshot(values['--prepare-path'], 'existing bootstrap prepare receipt', 0o400)
@@ -1661,6 +1752,7 @@ function claimBootstrapLocked(values) {
       || existing.value.transition?.liveCombinedSha256 !== transition.live.report.combinedSha256) {
       fail('workflow transition was already claimed by a different bootstrap request')
     }
+    claimTransitionFinalize(transition.state.intent, 'bootstrap-handoff')
     process.stdout.write(`${JSON.stringify({ schema: BOOTSTRAP_CLAIM_SCHEMA, claim: existing.reference, bootstrapAttemptId: existing.value.bootstrap.attemptId, resumed: true })}\n`)
     return
   }
@@ -1679,6 +1771,7 @@ function claimBootstrapLocked(values) {
       request: requested,
     },
   }
+  claimTransitionFinalize(transition.state.intent, 'bootstrap-handoff')
   const written = writeImmutable(values['--output'], claim)
   process.stdout.write(`${JSON.stringify({ schema: BOOTSTRAP_CLAIM_SCHEMA, claim: written.reference, bootstrapAttemptId: claim.bootstrap.attemptId, resumed: false })}\n`)
 }

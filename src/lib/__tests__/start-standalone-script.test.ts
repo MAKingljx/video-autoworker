@@ -59,6 +59,10 @@ function createLauncherFixture(): LauncherFixture {
     artifactProvenancePath,
     join(projectRoot, 'scripts', 'lib', 'director-extraction-release-provenance.mjs'),
   )
+  copyFileSync(
+    resolve(process.cwd(), 'scripts/lib/application-release-manifest-contract.mjs'),
+    join(projectRoot, 'scripts/lib/application-release-manifest-contract.mjs'),
+  )
   writeFileSync(
     join(projectRoot, 'scripts', 'write-fixture-attestations.mjs'),
     `import { writeStandaloneReleaseAttestations } from './check-standalone-artifact.mjs'\nawait writeStandaloneReleaseAttestations(process.argv[2])\n`,
@@ -141,6 +145,10 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/generate-legacy-bootstrap-rollback-proof.mjs': 'export {}\n',
     'scripts/legacy-freeze-guard.mjs': 'export {}\n',
     'scripts/n8n-workflow-transition-anchor.mjs': 'export {}\n',
+    'scripts/n8n-startup-witness.mjs': 'export {}\n',
+    'scripts/lib/application-release-manifest-contract.mjs':
+      'export const MAX_APPLICATION_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024\n',
+    'scripts/lib/legacy-preinstall-handoff-contract.mjs': 'export {}\n',
     'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
     'scripts/verify-n8n-blue-green-workflows.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',

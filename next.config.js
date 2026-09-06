@@ -34,6 +34,7 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/render-managed-markdown-section.mjs',
   './scripts/lib/runtime-tree-manifest.mjs',
   './scripts/lib/application-release-manifest-contract.mjs',
+  './scripts/lib/legacy-preinstall-handoff-contract.mjs',
   './scripts/lib/director-extraction-release-provenance.mjs',
   './scripts/lib/sensitive-value-scanner.mjs',
   './scripts/lib/shared-deployment-lock.mjs',

@@ -41,6 +41,7 @@ const runtimeSourcePaths = [
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
   'scripts/lib/application-release-manifest-contract.mjs',
+  'scripts/lib/legacy-preinstall-handoff-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -167,7 +168,7 @@ function createFixture() {
     const destination = join(runtimeRoot, pathname)
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 })
     copyFileSync(resolve(projectRoot, pathname), destination)
-    chmodSync(destination, pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+    chmodSync(destination, pathname.startsWith('scripts/lib/')
       ? 0o600
       : pathname.startsWith('scripts/') || pathname === 'ops/n8n/lib/common.sh' ? 0o700 : 0o600)
   }
@@ -810,6 +811,14 @@ describe('n8n workflow transition dual anchor producer', () => {
       .filter(name => /^\d{6}-/u.test(name)).sort().at(-1)!
     const journalHeadSha256 = sha256(readFileSync(join(fixture.journal, journalHeadName)))
     const live = JSON.parse(readFileSync(fixture.liveReport, 'utf8'))
+    const mission = join(preinstallRoot, 'mission-control.db')
+    writeControlled(mission, 'mission-control-fixture\n', 0o600)
+    const missionEntry = statSync(mission, { bigint: true })
+    const missionIdentity = {
+      path: mission,
+      dev: missionEntry.dev.toString(),
+      ino: missionEntry.ino.toString(),
+    }
     const preparedPath = join(preinstallRoot, 'install-prepared.r000001.receipt.json')
     writeControlled(preparedPath, `${JSON.stringify({
       schema: 'video-autoworker-legacy-preinstall-prepared/v1',
@@ -822,26 +831,53 @@ describe('n8n workflow transition dual anchor producer', () => {
         releaseRoot: fixture.appReleaseRoot,
         manifestSha256: sha256(readFileSync(fixture.appManifest)),
       },
-      databases: { n8n: intent.database[0] },
+      databases: { mission: missionIdentity, n8n: intent.database[0] },
       transition: {
         attestation,
         committedJournalHeadSha256: journalHeadSha256,
         liveCombinedSha256: live.combinedSha256,
       },
     })}\n`, 0o400)
-    const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
     const preparedReference = immutableReference(preparedPath)
-    writeControlled(verificationPath, `${JSON.stringify({
-      schema: 'video-autoworker-legacy-preinstall-verified/v1',
-      installAttemptId,
-      revision: 1,
-      prepared: preparedReference,
-    })}\n`, 0o400)
+    const readinessPath = join(preinstallRoot, 'install-readiness.r000001.report.json')
+    writeControlled(readinessPath, '{"schema":"video-autoworker-director-video-preflight/v1"}\n', 0o400)
     const convergenceProof = join(preinstallRoot, 'runtime-convergence-proof.json')
     writeControlled(convergenceProof, `${JSON.stringify({
       schema: 'video-autoworker-openclaw-runtime-convergence-proof/v1',
       observedAt: 1_800_000_000,
     })}\n`, 0o600)
+    const restartPath = join(preinstallRoot, 'gateway-restart.json')
+    writeControlled(restartPath,
+      '{"schema":"video-autoworker-legacy-preinstall-protected-pids/v1"}\n', 0o600)
+    const gatewayActivation = {
+      restart: immutableReference(restartPath),
+      convergence: immutableReference(convergenceProof),
+      gateway: {
+        pid: 4242,
+        catalogSha256: '1'.repeat(64),
+        effectiveSha256: '2'.repeat(64),
+        pluginTreesSha256: '3'.repeat(64),
+      },
+    }
+    const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
+    const verificationPayloads = {
+      videoCommandManifestSha256: 'e'.repeat(64),
+      taskFlowManifestSha256: 'f'.repeat(64),
+      directorBrainManifestSha256: '0'.repeat(64),
+      runtimeConvergenceProofSha256: immutableReference(convergenceProof).sha256,
+    }
+    writeControlled(verificationPath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-verified/v1',
+      installAttemptId,
+      revision: 1,
+      uid: process.getuid!(),
+      verifiedAt: 1_800_000_000,
+      prepared: preparedReference,
+      readiness: immutableReference(readinessPath),
+      runtimeConvergenceProof: immutableReference(convergenceProof),
+      payloads: verificationPayloads,
+      gatewayActivation,
+    })}\n`, 0o400)
     const componentJournalHead = join(preinstallRoot, 'install-component-event.000003.receipt.json')
     writeControlled(componentJournalHead, `${JSON.stringify({
       schema: 'video-autoworker-legacy-preinstall-component-event/v1',
@@ -849,6 +885,61 @@ describe('n8n workflow transition dual anchor producer', () => {
       operation: 'install',
       component: 'director-brain',
     })}\n`, 0o400)
+    const gateVerifier = join(preinstallRoot, 'verify-shared-runtime-install-gate.mjs')
+    writeControlled(gateVerifier, '#!/usr/bin/env node\n', 0o644)
+    const activity = {
+      mission: missionIdentity,
+      n8n: intent.database[0],
+      activeTasks: 0,
+      activeMediaNodes: 0,
+      activeN8nExecutions: 0,
+      waiting: 0,
+      running: 0,
+      attentionStale: 0,
+      pendingOutbox: 0,
+    }
+    const initialFinalGate = {
+      schema: 'video-autoworker-shared-runtime-final-gate/v1',
+      mode: 'legacy-preinstall',
+      installAttemptId,
+      revision: 1,
+      sourceCommit: targetCommit,
+      targetReleaseId: `${targetCommit}-runtime`,
+      observedAt: 1_800_000_000,
+      statusIdentitySha256: '4'.repeat(64),
+      activity: { ...activity, snapshotSha256: sha256(canonicalJson(activity)) },
+      finalize: null,
+      verifier: immutableReference(gateVerifier),
+    }
+    const handoffCore = {
+      componentJournalHead: immutableReference(componentJournalHead),
+      verification: immutableReference(verificationPath),
+      readiness: immutableReference(readinessPath),
+      runtimeConvergenceProof: immutableReference(convergenceProof),
+      freshReadinessSha256: 'd'.repeat(64),
+      payloads: {
+        videoCommandManifestSha256: verificationPayloads.videoCommandManifestSha256,
+        taskFlowManifestSha256: verificationPayloads.taskFlowManifestSha256,
+        directorBrainManifestSha256: verificationPayloads.directorBrainManifestSha256,
+      },
+      gatewayActivation,
+      initialFinalGate,
+      binding: {
+        sourceCommit: targetCommit,
+        target: {
+          slot: 'blue',
+          releaseId: `${targetCommit}-runtime`,
+          releaseRoot: fixture.appReleaseRoot,
+          manifestSha256: sha256(readFileSync(fixture.appManifest)),
+        },
+        databases: { mission: missionIdentity, n8n: intent.database[0] },
+        transition: {
+          attestationSha256: attestation.sha256,
+          committedJournalHeadSha256: journalHeadSha256,
+          liveCombinedSha256: live.combinedSha256,
+        },
+      },
+    }
     const finalizePath = join(preinstallRoot, 'install-finalize-claim.receipt.json')
     writeControlled(finalizePath, `${JSON.stringify({
       schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
@@ -858,34 +949,17 @@ describe('n8n workflow transition dual anchor producer', () => {
       uid: process.getuid!(),
       claimedAt: 1_800_000_000,
       journalHead: immutableReference(componentJournalHead),
+      handoffCore,
     })}\n`, 0o400)
     const handoffPath = join(preinstallRoot, 'install-postverify-action.r000001.claim.json')
     const handoffPayload = {
+      ...handoffCore,
       finalize: immutableReference(finalizePath),
-      componentJournalHead: immutableReference(componentJournalHead),
-      verification: immutableReference(verificationPath),
-      readiness: immutableReference(verificationPath),
-      runtimeConvergenceProof: immutableReference(convergenceProof),
-      freshReadinessSha256: 'd'.repeat(64),
-      payloads: {
-        videoCommandManifestSha256: 'e'.repeat(64),
-        taskFlowManifestSha256: 'f'.repeat(64),
-        directorBrainManifestSha256: '0'.repeat(64),
-      },
-      binding: {
-        sourceCommit: targetCommit,
-        target: {
-          slot: 'blue',
-          releaseId: `${targetCommit}-runtime`,
-          releaseRoot: fixture.appReleaseRoot,
-          manifestSha256: sha256(readFileSync(fixture.appManifest)),
-        },
-        databases: { n8n: intent.database[0] },
-        transition: {
-          attestationSha256: attestation.sha256,
-          committedJournalHeadSha256: journalHeadSha256,
-          liveCombinedSha256: live.combinedSha256,
-        },
+      finalGate: {
+        ...initialFinalGate,
+        observedAt: 1_800_000_001,
+        statusIdentitySha256: '5'.repeat(64),
+        finalize: immutableReference(finalizePath),
       },
     }
     writeControlled(handoffPath, `${JSON.stringify({
@@ -926,6 +1000,111 @@ describe('n8n workflow transition dual anchor producer', () => {
       '--runtime-convergence-proof', convergenceProof,
       '--output', claimPath,
     ]
+    const transitionFinalizePath = join(
+      fixture.state, 'transition-finalize-claim.receipt.json',
+    )
+    const writeFinalize = (core: typeof handoffCore) => {
+      chmodSync(finalizePath, 0o600)
+      writeControlled(finalizePath, `${JSON.stringify({
+        schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
+        choice: 'bootstrap-handoff',
+        installAttemptId,
+        revision: 1,
+        uid: process.getuid!(),
+        claimedAt: 1_800_000_000,
+        journalHead: immutableReference(componentJournalHead),
+        handoffCore: core,
+      })}\n`, 0o400)
+      return immutableReference(finalizePath)
+    }
+    const publishHandoff = (
+      core: typeof handoffCore,
+      mutate?: (payload: Record<string, any>) => void,
+    ) => {
+      const finalize = writeFinalize(core)
+      const payload: Record<string, any> = {
+        ...core,
+        finalize,
+        finalGate: {
+          ...initialFinalGate,
+          observedAt: 1_800_000_001,
+          statusIdentitySha256: '5'.repeat(64),
+          finalize,
+        },
+      }
+      mutate?.(payload)
+      chmodSync(handoffPath, 0o600)
+      writeControlled(handoffPath, `${JSON.stringify({
+        schema: 'video-autoworker-legacy-preinstall-postverify-action/v1',
+        choice: 'bootstrap-handoff',
+        installAttemptId,
+        revision: 1,
+        uid: process.getuid!(),
+        claimedAt: 1_800_000_000,
+        payload,
+      })}\n`, 0o400)
+      chmodSync(preinstallTerminal, 0o600)
+      writeControlled(preinstallTerminal, `${JSON.stringify({
+        schema: 'video-autoworker-legacy-preinstall-terminal-claim/v1',
+        choice: 'bootstrap-handoff',
+        installAttemptId,
+        revision: 1,
+        uid: process.getuid!(),
+        claimedAt: 1_800_000_000,
+        prepared: preparedReference,
+        verification: immutableReference(verificationPath),
+        handoff: immutableReference(handoffPath),
+        handoffPayloadSha256: sha256(canonicalJson(payload)),
+      })}\n`, 0o400)
+      return payload
+    }
+    const expectRejectedBeforeClaim = (expected: RegExp) => {
+      const rejected = run(...args)
+      expect(rejected.status).not.toBe(0)
+      expect(rejected.stderr).toMatch(expected)
+      expect(existsSync(claimPath)).toBe(false)
+      expect(existsSync(transitionFinalizePath)).toBe(false)
+    }
+
+    const staleSummaryPayload = structuredClone(handoffPayload)
+    staleSummaryPayload.gatewayActivation.gateway.pid += 1
+    chmodSync(handoffPath, 0o600)
+    writeControlled(handoffPath, `${JSON.stringify({
+      schema: 'video-autoworker-legacy-preinstall-postverify-action/v1',
+      choice: 'bootstrap-handoff',
+      installAttemptId,
+      revision: 1,
+      uid: process.getuid!(),
+      claimedAt: 1_800_000_000,
+      payload: staleSummaryPayload,
+    })}\n`, 0o400)
+    expectRejectedBeforeClaim(/file references changed/)
+
+    const driftedGatewayCore = {
+      ...handoffCore,
+      gatewayActivation: {
+        ...gatewayActivation,
+        gateway: { ...gatewayActivation.gateway, pid: gatewayActivation.gateway.pid + 1 },
+      },
+    }
+    publishHandoff(driftedGatewayCore)
+    expectRejectedBeforeClaim(/Gateway activation changed/)
+
+    publishHandoff(handoffCore, payload => {
+      payload.initialFinalGate = {
+        ...payload.initialFinalGate,
+        observedAt: payload.initialFinalGate.observedAt + 1,
+      }
+    })
+    expectRejectedBeforeClaim(/finalize handoff core changed/)
+
+    publishHandoff(handoffCore, payload => { payload.finalGate.finalize = null })
+    expectRejectedBeforeClaim(/final gate identity or finalize binding changed/)
+
+    publishHandoff(handoffCore, payload => { delete payload.gatewayActivation })
+    expectRejectedBeforeClaim(/handoff payload fields are invalid/)
+
+    publishHandoff(handoffCore)
     const first = run(...args)
     expect(first.status, first.stderr).toBe(0)
     const second = run(...args)

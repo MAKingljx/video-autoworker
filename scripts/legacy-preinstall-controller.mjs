@@ -9,6 +9,12 @@ import {
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
+import {
+  buildLegacyPreinstallHandoffPayload,
+  LEGACY_PREINSTALL_FINALIZE_KEYS,
+  LEGACY_PREINSTALL_HANDOFF_CORE_KEYS,
+  LEGACY_PREINSTALL_HANDOFF_PAYLOAD_KEYS,
+} from './lib/legacy-preinstall-handoff-contract.mjs'
 
 const PREPARED_SCHEMA = 'video-autoworker-legacy-preinstall-prepared/v1'
 const VERIFIED_SCHEMA = 'video-autoworker-legacy-preinstall-verified/v1'
@@ -965,9 +971,7 @@ function readFinalize(root, current, components) {
   if (!existsSync(pathname)) return null
   const loaded = readJson(pathname, 'preinstall finalize claim', 0o400)
   const value = loaded.value
-  exactKeys(value, [
-    'choice', 'claimedAt', 'handoffCore', 'installAttemptId', 'journalHead', 'revision', 'schema', 'uid',
-  ], 'preinstall finalize claim')
+  exactKeys(value, LEGACY_PREINSTALL_FINALIZE_KEYS, 'preinstall finalize claim')
   if (value.schema !== FINALIZE_SCHEMA || !['bootstrap-handoff', 'rollback'].includes(value.choice)
     || value.installAttemptId !== current.installAttemptId || value.uid !== process.getuid()
     || !Number.isSafeInteger(value.revision) || value.revision < 1
@@ -1826,18 +1830,13 @@ function buildHandoffCore(state, readiness, initialFinalGate) {
 }
 
 function handoffPayload(state, finalGate) {
-  return {
-    ...state.finalize.value.handoffCore,
-    finalize: state.finalize.reference,
-    finalGate,
-  }
+  return buildLegacyPreinstallHandoffPayload(
+    state.finalize.value.handoffCore, state.finalize.reference, finalGate,
+  )
 }
 
 function validateHandoffCore(state, core) {
-  exactKeys(core, [
-    'binding', 'componentJournalHead', 'freshReadinessSha256', 'gatewayActivation',
-    'initialFinalGate', 'payloads', 'readiness', 'runtimeConvergenceProof', 'verification',
-  ], 'preinstall bootstrap handoff core')
+  exactKeys(core, LEGACY_PREINSTALL_HANDOFF_CORE_KEYS, 'preinstall bootstrap handoff core')
   if (!SHA256.test(core.freshReadinessSha256 || '')
     || canonicalJson(core.verification) !== canonicalJson(state.verified.reference)
     || canonicalJson(core.componentJournalHead) !== canonicalJson(state.components.head)
@@ -1863,10 +1862,8 @@ function validateHandoffCore(state, core) {
 }
 
 function validateHandoffPayload(state, payload, runtimeConvergenceProofPath) {
-  exactKeys(payload, [
-    'binding', 'componentJournalHead', 'finalGate', 'finalize', 'freshReadinessSha256',
-    'gatewayActivation', 'initialFinalGate', 'payloads', 'readiness', 'runtimeConvergenceProof', 'verification',
-  ], 'preinstall bootstrap handoff payload')
+  exactKeys(payload, LEGACY_PREINSTALL_HANDOFF_PAYLOAD_KEYS,
+    'preinstall bootstrap handoff payload')
   validateHandoffCore(state, state.finalize.value.handoffCore)
   if (canonicalJson(payload) !== canonicalJson(handoffPayload(state, payload.finalGate))
     || !SHA256.test(payload.freshReadinessSha256 || '')

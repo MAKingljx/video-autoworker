@@ -150,6 +150,9 @@ if [[ ! -d "$release_dir" ]]; then
   install -m 600 \
     "$SCRIPT_DIR/lib/application-release-manifest-contract.mjs" \
     "$staging_dir/scripts/lib/application-release-manifest-contract.mjs"
+  install -m 600 \
+    "$SCRIPT_DIR/lib/legacy-preinstall-handoff-contract.mjs" \
+    "$staging_dir/scripts/lib/legacy-preinstall-handoff-contract.mjs"
   install -m 700 "$AIWORKER_N8N_SOURCE_DIR/lib/common.sh" "$staging_dir/ops/n8n/lib/common.sh"
   install -m 600 "$AIWORKER_N8N_SOURCE_DIR/.env.example" "$staging_dir/ops/n8n/.env.example"
   install -m 600 "$AIWORKER_N8N_SOURCE_DIR/package.json" "$staging_dir/ops/n8n/package.json"

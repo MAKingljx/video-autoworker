@@ -61,6 +61,7 @@ const runtimeSourcePaths = [
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
   'scripts/lib/application-release-manifest-contract.mjs',
+  'scripts/lib/legacy-preinstall-handoff-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -326,7 +327,7 @@ function createRuntime(root: string): RuntimeFixture {
     const target = join(release, pathname)
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
     copyFileSync(join(projectRoot, pathname), target)
-    chmodSync(target, pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+    chmodSync(target, pathname.startsWith('scripts/lib/')
       ? 0o600
       : pathname.startsWith('scripts/') || pathname.endsWith('/common.sh') ? 0o700 : 0o600)
   }
@@ -501,6 +502,13 @@ function createTransitionBinding(options: {
   const journalHeadName = readdirSync(journal)
     .filter(name => /^\d{6}-/u.test(name)).sort().at(-1)!
   const liveReportValue = JSON.parse(readFileSync(options.workflowReport, 'utf8')) as JsonRecord
+  const mission = join(options.root, 'mission-control.db')
+  const missionEntry = statSync(mission, { bigint: true })
+  const missionIdentity = {
+    path: mission,
+    dev: missionEntry.dev.toString(),
+    ino: missionEntry.ino.toString(),
+  }
   const preparedPath = join(preinstallRoot, 'install-prepared.r000001.receipt.json')
   const prepared = {
     schema: 'video-autoworker-legacy-preinstall-prepared/v1',
@@ -511,7 +519,7 @@ function createTransitionBinding(options: {
       slot: 'blue', releaseId: options.releaseId, releaseRoot: options.releaseRoot,
       manifestSha256: options.manifestSha256,
     },
-    databases: { n8n: databaseFamily[0] },
+    databases: { mission: missionIdentity, n8n: databaseFamily[0] },
     transition: {
       attestation: fileReference(attestation),
       committedJournalHeadSha256: sha256(readFileSync(join(journal, journalHeadName))),
@@ -519,19 +527,49 @@ function createTransitionBinding(options: {
     },
   }
   writeReferencedJson(preparedPath, prepared, 0o400)
-  const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
   const preparedReference = fileReference(preparedPath)
-  writeReferencedJson(verificationPath, {
-    schema: 'video-autoworker-legacy-preinstall-verified/v1',
-    installAttemptId,
-    revision: 1,
-    prepared: preparedReference,
+  const readinessPath = join(preinstallRoot, 'install-readiness.r000001.report.json')
+  writeReferencedJson(readinessPath, {
+    schema: 'video-autoworker-director-video-preflight/v1',
   }, 0o400)
   const convergenceProof = join(preinstallRoot, 'runtime-convergence-proof.json')
   writeReferencedJson(convergenceProof, {
     schema: 'video-autoworker-openclaw-runtime-convergence-proof/v1',
     observedAt: 1_800_000_000,
   }, 0o600)
+  const restartPath = join(preinstallRoot, 'gateway-restart.json')
+  writeReferencedJson(restartPath, {
+    schema: 'video-autoworker-legacy-preinstall-protected-pids/v1',
+  }, 0o600)
+  const gatewayActivation = {
+    restart: fileReference(restartPath),
+    convergence: fileReference(convergenceProof),
+    gateway: {
+      pid: 4242,
+      catalogSha256: '1'.repeat(64),
+      effectiveSha256: '2'.repeat(64),
+      pluginTreesSha256: '3'.repeat(64),
+    },
+  }
+  const verificationPath = join(preinstallRoot, 'install-verified.r000001.receipt.json')
+  const verificationPayloads = {
+    videoCommandManifestSha256: 'e'.repeat(64),
+    taskFlowManifestSha256: 'f'.repeat(64),
+    directorBrainManifestSha256: '0'.repeat(64),
+    runtimeConvergenceProofSha256: fileReference(convergenceProof).sha256,
+  }
+  writeReferencedJson(verificationPath, {
+    schema: 'video-autoworker-legacy-preinstall-verified/v1',
+    installAttemptId,
+    revision: 1,
+    uid: process.getuid!(),
+    verifiedAt: 1_800_000_000,
+    prepared: preparedReference,
+    readiness: fileReference(readinessPath),
+    runtimeConvergenceProof: fileReference(convergenceProof),
+    payloads: verificationPayloads,
+    gatewayActivation,
+  }, 0o400)
   const componentJournalHead = join(preinstallRoot, 'install-component-event.000003.receipt.json')
   writeReferencedJson(componentJournalHead, {
     schema: 'video-autoworker-legacy-preinstall-component-event/v1',
@@ -539,29 +577,45 @@ function createTransitionBinding(options: {
     operation: 'install',
     component: 'director-brain',
   }, 0o400)
-  const finalizePath = join(preinstallRoot, 'install-finalize-claim.receipt.json')
-  writeReferencedJson(finalizePath, {
-    schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
-    choice: 'bootstrap-handoff',
+  const gateVerifier = join(preinstallRoot, 'verify-shared-runtime-install-gate.mjs')
+  writeReferencedJson(gateVerifier, { schema: 'fixture-final-gate-verifier/v1' }, 0o644)
+  const activity = {
+    mission: missionIdentity,
+    n8n: databaseFamily[0],
+    activeTasks: 0,
+    activeMediaNodes: 0,
+    activeN8nExecutions: 0,
+    waiting: 0,
+    running: 0,
+    attentionStale: 0,
+    pendingOutbox: 0,
+  }
+  const initialFinalGate = {
+    schema: 'video-autoworker-shared-runtime-final-gate/v1',
+    mode: 'legacy-preinstall',
     installAttemptId,
     revision: 1,
-    uid: process.getuid!(),
-    claimedAt: 1_800_000_000,
-    journalHead: fileReference(componentJournalHead),
-  }, 0o400)
-  const handoffPath = join(preinstallRoot, 'install-postverify-action.r000001.claim.json')
-  const handoffPayload = {
-    finalize: fileReference(finalizePath),
+    sourceCommit: commit,
+    targetReleaseId: options.releaseId,
+    observedAt: 1_800_000_000,
+    statusIdentitySha256: '4'.repeat(64),
+    activity: { ...activity, snapshotSha256: sha256(canonicalJson(activity)) },
+    finalize: null,
+    verifier: fileReference(gateVerifier),
+  }
+  const handoffCore = {
     componentJournalHead: fileReference(componentJournalHead),
     verification: fileReference(verificationPath),
-    readiness: fileReference(verificationPath),
+    readiness: fileReference(readinessPath),
     runtimeConvergenceProof: fileReference(convergenceProof),
     freshReadinessSha256: 'd'.repeat(64),
     payloads: {
-      videoCommandManifestSha256: 'e'.repeat(64),
-      taskFlowManifestSha256: 'f'.repeat(64),
-      directorBrainManifestSha256: '0'.repeat(64),
+      videoCommandManifestSha256: verificationPayloads.videoCommandManifestSha256,
+      taskFlowManifestSha256: verificationPayloads.taskFlowManifestSha256,
+      directorBrainManifestSha256: verificationPayloads.directorBrainManifestSha256,
     },
+    gatewayActivation,
+    initialFinalGate,
     binding: {
       sourceCommit: commit,
       target: prepared.target,
@@ -571,6 +625,28 @@ function createTransitionBinding(options: {
         committedJournalHeadSha256: prepared.transition.committedJournalHeadSha256,
         liveCombinedSha256: prepared.transition.liveCombinedSha256,
       },
+    },
+  }
+  const finalizePath = join(preinstallRoot, 'install-finalize-claim.receipt.json')
+  writeReferencedJson(finalizePath, {
+    schema: 'video-autoworker-legacy-preinstall-finalize-claim/v1',
+    choice: 'bootstrap-handoff',
+    installAttemptId,
+    revision: 1,
+    uid: process.getuid!(),
+    claimedAt: 1_800_000_000,
+    journalHead: fileReference(componentJournalHead),
+    handoffCore,
+  }, 0o400)
+  const handoffPath = join(preinstallRoot, 'install-postverify-action.r000001.claim.json')
+  const handoffPayload = {
+    ...handoffCore,
+    finalize: fileReference(finalizePath),
+    finalGate: {
+      ...initialFinalGate,
+      observedAt: 1_800_000_001,
+      statusIdentitySha256: '5'.repeat(64),
+      finalize: fileReference(finalizePath),
     },
   }
   writeReferencedJson(handoffPath, {
@@ -1024,7 +1100,7 @@ describe('managed n8n workflow recovery chain', () => {
       const target = join(source, pathname)
       mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
       writeFileSync(target, readFileSync(join(projectRoot, pathname)), {
-        mode: pathname === 'scripts/lib/application-release-manifest-contract.mjs'
+        mode: pathname.startsWith('scripts/lib/')
           ? 0o600
           : pathname.startsWith('scripts/') || pathname.endsWith('common.sh') ? 0o700 : 0o600,
       })

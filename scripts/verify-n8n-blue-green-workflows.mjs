@@ -25,6 +25,7 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
   'scripts/n8n-backup-managed-workflows.mjs',
   'scripts/n8n-restore-managed-workflows.sh',
   'scripts/lib/application-release-manifest-contract.mjs',
+  'scripts/lib/legacy-preinstall-handoff-contract.mjs',
   'ops/n8n/.env.example',
   'ops/n8n/lib/common.sh',
   'ops/n8n/package.json',
@@ -34,6 +35,8 @@ const RUNTIME_SOURCE_PATHS = Object.freeze([
 ])
 const APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH =
   'scripts/lib/application-release-manifest-contract.mjs'
+const LEGACY_PREINSTALL_HANDOFF_CONTRACT_PATH =
+  'scripts/lib/legacy-preinstall-handoff-contract.mjs'
 const WORKFLOWS = Object.freeze([
   { id: 'aiworker-task-intake-v1', file: 'aiworker-task-intake.json', callbackCount: 4 },
   { id: 'aiworker-video-analysis-v1', file: 'aiworker-video-analysis.json', callbackCount: 5 },
@@ -234,6 +237,7 @@ function gitSource(repository, expectedCommit, pathname) {
       'scripts/n8n-startup-witness.mjs',
       'scripts/n8n-workflow-transition-anchor.mjs',
       APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH,
+      LEGACY_PREINSTALL_HANDOFF_CONTRACT_PATH,
     ].includes(pathname)) {
     try {
       return execFileSync('/usr/bin/git', [
@@ -249,7 +253,8 @@ function gitSource(repository, expectedCommit, pathname) {
 }
 
 function runtimeSourceRequiredMode(pathname) {
-  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH ? '600' : null
+  return pathname === APPLICATION_RELEASE_MANIFEST_CONTRACT_PATH
+    || pathname === LEGACY_PREINSTALL_HANDOFF_CONTRACT_PATH ? '600' : null
 }
 
 function parseKeyValueManifest(source) {

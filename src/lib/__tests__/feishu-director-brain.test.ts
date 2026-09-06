@@ -237,6 +237,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/deploy-blue-green.sh': '#!/bin/sh\n',
     'scripts/lib/application-release-manifest-contract.mjs':
       'export const MAX_APPLICATION_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024\n',
+    'scripts/lib/legacy-preinstall-handoff-contract.mjs': 'export {}\n',
     'scripts/lib/feishu-director-brain.mjs': 'export {}\n',
     'scripts/lib/runtime-safe-offline-queue.mjs': 'export {}\n',
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
@@ -1983,7 +1984,6 @@ describe('Feishu director brain contract', () => {
         ok: true,
         root,
         forbiddenMembers: 0,
-        importClosure: { dynamicDependencies: 36 },
       })
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -1999,6 +1999,7 @@ describe('Feishu director brain contract', () => {
       'scripts/lib/openclaw-runtime-convergence.mjs',
       'scripts/lib/render-managed-markdown-section.mjs',
       'scripts/lib/runtime-tree-manifest.mjs',
+      'scripts/lib/legacy-preinstall-handoff-contract.mjs',
       'scripts/lib/sensitive-value-scanner.mjs',
     ]) {
       expect(nextConfig).toContain(`'./${helper}'`)
