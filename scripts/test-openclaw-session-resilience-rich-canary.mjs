@@ -376,7 +376,6 @@ const config = {
         model: COMPACTION_MODEL,
         mode: 'safeguard',
         timeoutSeconds: COMPACTION_TIMEOUT_SECONDS,
-        truncateAfterCompaction: true,
         reserveTokens: 8_192,
         keepRecentTokens: KEEP_RECENT_TOKENS,
         maxHistoryShare: 0.5,
