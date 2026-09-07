@@ -1642,7 +1642,7 @@ bootstrap_baseline() {
   local workflow_report bootstrap_preflight_contract baseline_verified_contract
   local evidence_fd=9 evidence_generator rollback_generator verified_evidence_sha guard_controller guard_socket guard_token
   local evidence_verify_mode=--verify-evidence-fd evidence_static_recovery=0 pending_probe pending_legacy_pid pending_evidence_sha
-  local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status guard_mode
+  local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status="" guard_mode
   local guard_mode_status
   local n8n_listener_pid n8n_runtime_cwd n8n_runtime_release recovery_attempt recovery_parent recovery_guard_pid
   local legacy_state

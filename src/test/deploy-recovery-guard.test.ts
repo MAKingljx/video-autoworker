@@ -52,6 +52,17 @@ exit "$status"
     expect(deploySource).not.toContain('if [[ "$guard_mode" == dual ]]; then')
   })
 
+  it('initializes attested status before the existing recovery-hold path reads it', () => {
+    const bootstrap = deploySource.slice(
+      deploySource.indexOf('bootstrap_baseline() {'),
+      deploySource.indexOf('\nbind_slot() {'),
+    )
+    const initialization = bootstrap.indexOf('guard_status=""')
+    const existingGuardRead = bootstrap.indexOf('if [[ -z "$guard_status" ]]')
+    expect(initialization).toBeGreaterThan(0)
+    expect(existingGuardRead).toBeGreaterThan(initialization)
+  })
+
   it('bounds each guard status subprocess independently', () => {
     const root = mkdtempSync(`${tmpdir()}/video-autoworker-guard-status-`)
     roots.push(root)
