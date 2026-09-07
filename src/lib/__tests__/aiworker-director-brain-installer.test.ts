@@ -362,6 +362,7 @@ async function initializeCleanInstallerRepository() {
     'scripts/feishu-director-brain.mjs',
     'scripts/verify-shared-runtime-install-gate.mjs',
     'scripts/lib/feishu-director-brain.mjs',
+    'scripts/lib/application-release-manifest-contract.mjs',
     'scripts/lib/runtime-safe-offline-queue.mjs',
     'scripts/lib/sensitive-value-scanner.mjs',
     'scripts/lib/runtime-tree-manifest.mjs',
