@@ -532,9 +532,12 @@ const liveArgv = execFileSync('/bin/ps', ['-o', 'command=', '-p', String(process
 })
 fs.appendFileSync(process.env.FAKE_RPC_ARGV_LOG, liveArgv.trim() + '\\n')
 if (!operation || !outputPath || process.argv.length !== 4
-  || process.argv.includes(token) || process.argv.includes(sessionKey)
-  || liveArgv.includes(token) || liveArgv.includes(sessionKey)
-  || token !== process.env.FAKE_GATEWAY_TOKEN) process.exit(98)
+  || process.argv.includes(token) || liveArgv.includes(token)
+  || (sessionKey && (process.argv.includes(sessionKey) || liveArgv.includes(sessionKey)))
+  || token !== process.env.FAKE_GATEWAY_TOKEN
+  || (operation === 'effective'
+    ? sessionKey !== process.env.FAKE_RUNTIME_SESSION_KEY
+    : sessionKey !== '')) process.exit(98)
 const configPath = process.env.FAKE_ACTIVE_CONFIG_PATH
   || process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR + '/openclaw.json'
 const read = pathname => JSON.parse(fs.readFileSync(pathname, 'utf8'))
@@ -1122,6 +1125,35 @@ export async function callGatewayFromCli(method, options, params, extra) {
     expect(invoked.stdout).toBe('')
     expect(await readFile(output, 'utf8'))
       .toBe('{"ok":true,"configReload":{"hotReloadStatus":"active"}}\n')
+
+    const logsOutput = join(root, 'logs.json')
+    await writeFile(logsOutput, '', { mode: 0o600 })
+    const logs = await execFileAsync(process.execPath, [alias, 'logs-tail', logsOutput], {
+      env: {
+        ...process.env,
+        OPENCLAW_BIN: openclaw,
+        OPENCLAW_GATEWAY_TOKEN: 'synthetic-gateway-token',
+        AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: sessionKey,
+        FAKE_GATEWAY_RESULT: JSON.stringify({ lines: [`session=${sessionKey}`] }),
+      },
+      encoding: 'utf8',
+    })
+    expect(logs.stderr).toBe('')
+    expect(await readFile(logsOutput, 'utf8')).toContain(sessionKey)
+
+    const effectiveOutput = join(root, 'effective.json')
+    await writeFile(effectiveOutput, '', { mode: 0o600 })
+    await expect(execFileAsync(process.execPath, [alias, 'effective', effectiveOutput], {
+      env: {
+        ...process.env,
+        OPENCLAW_BIN: openclaw,
+        OPENCLAW_GATEWAY_TOKEN: 'synthetic-gateway-token',
+        AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY: sessionKey,
+        FAKE_GATEWAY_RESULT: JSON.stringify({ agentId: 'second-original', sessionKey }),
+      },
+      encoding: 'utf8',
+    })).rejects.toMatchObject({ stderr: expect.stringContaining('category=result_contains_secret') })
+    expect(await readFile(effectiveOutput, 'utf8')).toBe('')
   })
 
   it('pins one exact manifest and contains no Gateway lifecycle action', async () => {

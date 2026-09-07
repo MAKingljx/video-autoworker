@@ -149,7 +149,9 @@ async function main() {
   const [operation, outputPath, ...extra] = process.argv.slice(2)
   if (!operation || !outputPath || extra.length !== 0) fail()
   const gatewayToken = secret('OPENCLAW_GATEWAY_TOKEN')
-  const sessionKey = process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''
+  const sessionKey = operation === 'effective'
+    ? process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''
+    : ''
   const callGatewayFromCli = await loadCallGatewayFromCli()
   const request = operationRequest(operation)
   let result

@@ -203,6 +203,10 @@ run_openclaw_gateway() {
 
 run_private_gateway_rpc() {
   local operation="$1" output_path="$2" timeout_ms="${3:-}" gateway_token status
+  local -a session_environment=(-u AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY)
+  if [[ "$operation" == effective ]]; then
+    session_environment+=("AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY=$RUNTIME_SESSION_KEY")
+  fi
   gateway_token="$(resolve_gateway_token)" || {
     printf 'Unable to resolve the qwen-current Gateway token through its configured exec SecretRef.\n' >&2
     return 1
@@ -215,9 +219,9 @@ run_private_gateway_rpc() {
     if env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
       -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
       -u GATEWAY_TOKEN -u OPENCLAW_GATEWAY_PASSWORD -u GATEWAY_PASSWORD \
+      "${session_environment[@]}" \
       OPENCLAW_BIN="$(command -v "$OPENCLAW_BIN" 2>/dev/null || printf '%s' "$OPENCLAW_BIN")" \
       OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
-      AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY="$RUNTIME_SESSION_KEY" \
       AIWORKER_OPENCLAW_RUNTIME_RPC_TIMEOUT_MS="$timeout_ms" \
       "$NODE_BIN" - "$NODE_BIN" "$PRIVATE_GATEWAY_RPC_HELPER" \
         "$operation" "$output_path" "$timeout_ms" <<'NODE'
@@ -242,9 +246,9 @@ NODE
   elif env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
     -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
     -u GATEWAY_TOKEN -u OPENCLAW_GATEWAY_PASSWORD -u GATEWAY_PASSWORD \
+    "${session_environment[@]}" \
     OPENCLAW_BIN="$(command -v "$OPENCLAW_BIN" 2>/dev/null || printf '%s' "$OPENCLAW_BIN")" \
     OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
-    AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY="$RUNTIME_SESSION_KEY" \
     "$NODE_BIN" "$PRIVATE_GATEWAY_RPC_HELPER" "$operation" "$output_path"; then
     status=0
   else
