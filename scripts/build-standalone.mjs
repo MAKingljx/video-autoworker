@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,7 +16,29 @@ const repositoryRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const standaloneRoot = resolve(repositoryRoot, '.next', 'standalone')
 const moduleRequire = createRequire(import.meta.url)
 
+export function verifyStandaloneBuildRuntime() {
+  const requiredMajor = readFileSync(resolve(repositoryRoot, '.nvmrc'), 'utf8').trim()
+  const actualMajor = process.versions.node.split('.')[0]
+  if (!/^\d+$/.test(requiredMajor) || actualMajor !== requiredMajor) {
+    throw new Error(`Standalone builds require the .nvmrc Node major ${requiredMajor}; running ${process.version} (${process.execPath}). Put the pinned Node bin directory first in PATH before installing dependencies and building.`)
+  }
+
+  // Loading the JS wrapper alone does not load the native addon. Open a real
+  // in-memory database so an incompatible cached ABI fails before Next builds.
+  const Database = moduleRequire('better-sqlite3')
+  const probe = new Database(':memory:')
+  try {
+    if (probe.prepare('SELECT 1 AS ok').get().ok !== 1) {
+      throw new Error('Standalone SQLite native runtime probe failed')
+    }
+  } finally {
+    probe.close()
+  }
+  return { nodeVersion: process.versions.node, nodeAbi: process.versions.modules }
+}
+
 export async function buildStandalone() {
+  const runtime = verifyStandaloneBuildRuntime()
   // Dirty local builds remain available for development and are attested as
   // ineligible for release. Only a clean build-start anchor can pass readiness.
   const buildSourceAnchor = createStandaloneBuildSourceAnchor(repositoryRoot, { allowDirty: true })
@@ -27,7 +50,7 @@ export async function buildStandalone() {
   })
   const sanitized = await sanitizeStandaloneArtifact(standaloneRoot, { buildSourceAnchor })
   const audited = await auditStandaloneArtifact(standaloneRoot)
-  return { sanitized, audited }
+  return { runtime, sanitized, audited }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
