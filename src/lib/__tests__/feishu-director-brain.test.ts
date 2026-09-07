@@ -243,6 +243,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/lib/openclaw-secret-reference.mjs': 'export {}\n',
     'scripts/lib/openclaw-runtime-contract.mjs': 'export {}\n',
     'scripts/lib/openclaw-private-gateway-rpc.mjs': 'export {}\n',
+    'scripts/lib/openclaw-agent-config.mjs': 'export {}\n',
     'scripts/lib/openclaw-runtime-convergence.mjs': 'export {}\n',
     'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',

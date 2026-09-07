@@ -11,7 +11,7 @@
 ## 执行顺序
 
 1. 完成 canonical Git 提交/推送及 Quality Gate，交付同一来源的 clean 控制仓库和完整应用制品。历史 canonical 目录保持原 HEAD 与文件身份。
-2. 读取安装 manifest、三套 plist 的当前摘要，先 dry-run execve adapter；复用 9.2 SDK 已验证合同和原工具基线，验证 fresh convergence 的无配置变化预期。计划引用唯一历史 session 的摘要，实际 session key 只在受控进程内解析。
+2. 读取安装 manifest、三套 plist 的当前摘要，先 dry-run execve adapter；复用已验证的 9.2 SDK 合同。历史升级前工具基线保持原样，先记录与现有 9.2 工具面的差异，再通过官方只读采集命令为已运行的 9.2 建立单独基线，验证本次 fresh convergence 不改变配置与当前能力。计划引用唯一历史 session 的摘要，实际 session key 只在受控进程内解析。新基线只能证明当前恢复前后的一致性，不能反向证明升级前后的能力语义完全相同。
 3. 在当前用户确认具体生产数据动作后，以四项旧摘要 CAS 应用 execve adapter，保留安装器事务备份；现场验证安装、来源与三套 plist。通过官方收敛命令生成当前运行证明，若发现超出已分析范围的配置差异则保持暂停。
 4. 从私有计划启动 Git 绑定 successor runner。再次检查旧 pending/resume、保护进程、两库、空队列、端口、兼容性与 readiness，随后消费新的一次性 successor 能力。历史 f78 resume 只做 alreadyConsumed 回验，不重新消费；不导入 n8n 工作流。
 5. 精确映射 blue/router 到新应用，受管启动 blue，在首次数据库使用时执行迁移 051–059；创建 baseline 前保持全局 intake 暂停。完成页面、路由、版本、数据库与 readiness 验证后，由官方流程解除原 guard、完成 pending。

@@ -769,7 +769,7 @@ function validateEffectiveInventory(value, manifest) {
   }
 }
 
-function validateGatewayStatus(value, pid, port) {
+function validateGatewayStatus(value, pid, port, expectedVersion) {
   const listenerPids = (value?.port?.listeners || []).map(listener => listener?.pid)
   if (value?.service?.runtime?.pid !== pid
     || value.service.runtime.status !== 'running'
@@ -780,9 +780,10 @@ function validateGatewayStatus(value, pid, port) {
     || value.port.status !== 'busy'
     || listenerPids.length === 0
     || listenerPids.some(listenerPid => listenerPid !== pid)
-    || value?.connections?.port !== port
     || value?.rpc?.ok !== true
-    || value.rpc.url !== `ws://127.0.0.1:${port}`) {
+    || value.rpc.url !== `ws://127.0.0.1:${port}`
+    || value?.gateway?.version !== expectedVersion
+    || value?.rpc?.server?.version !== expectedVersion) {
     fail('Gateway status is not bound to the qwen-current listener')
   }
 }
@@ -816,7 +817,7 @@ function verifyRuntimeHooks(
   const inspection = readEvidenceJson(inspectionPath, 'plugin runtime inspection evidence')
   const catalog = readEvidenceJson(catalogPath, 'tool catalog evidence')
   const effective = readEvidenceJson(effectivePath, 'effective tool evidence')
-  validateGatewayStatus(gatewayStatus.value, pid, GATEWAY_PORT)
+  validateGatewayStatus(gatewayStatus.value, pid, GATEWAY_PORT, manifest.openclawVersion)
   validateRuntimeInspection(inspection.value, descriptor)
   const inventory = validateRuntimeCatalog(catalog.value, manifest, descriptor)
   const effectiveInventory = validateEffectiveInventory(effective.value, manifest)

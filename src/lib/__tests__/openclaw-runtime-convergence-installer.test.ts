@@ -405,14 +405,23 @@ if (args[0] === 'config' && args[1] === 'patch') {
 }
 if (args[0] === 'gateway' && args[1] === 'status') {
   const pid = Number(process.env.FAKE_STATUS_GATEWAY_PID || process.env.FAKE_GATEWAY_PID)
+  const version = process.env.FAKE_STATUS_GATEWAY_VERSION || '2026.9.2'
   process.stdout.write(JSON.stringify({
     service: { runtime: { pid, status: 'running', state: 'active' } },
-    gateway: { bindHost: '127.0.0.1', port: 18889 },
+    cli: { version: '2026.9.2', entrypoint: process.argv[1] },
+    gateway: {
+      bindMode: 'loopback',
+      bindHost: '127.0.0.1',
+      port: 18889,
+      probeUrl: 'ws://127.0.0.1:18889',
+      version,
+    },
     port: { port: 18889, status: 'busy', listeners: [{ pid }] },
-    connections: { port: 18889 },
     rpc: {
       ok: true,
       url: process.env.FAKE_GATEWAY_RPC_URL || 'ws://127.0.0.1:18889',
+      version,
+      server: { version },
     },
   }) + '\\n')
   process.exit(0)
@@ -1648,6 +1657,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
 
   it.each([
     ['Gateway status PID mismatch', 'FAKE_STATUS_GATEWAY_PID', '999999'],
+    ['Gateway status version mismatch', 'FAKE_STATUS_GATEWAY_VERSION', '2026.9.1'],
     ['missing persistence hook', 'FAKE_MISSING_PERSISTENCE_HOOK', '1'],
     ['invalid typed hook priority', 'FAKE_TYPED_HOOK_INVALID_PRIORITY', '1'],
     ['Gateway was not freshly restarted after plugin install', 'AIWORKER_OPENCLAW_RUNTIME_TEST_GATEWAY_START_MS', '1'],
