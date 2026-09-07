@@ -58,6 +58,7 @@ const COMPACTION_TIMEOUT_SECONDS = Number(
 const COMPACTION_BENCHMARK_MODE = (process.env.CANARY_COMPACTION_BENCHMARK || '0') === '1'
 const PRECOMPACTION_HOOK_PROBE = (process.env.CANARY_PRECOMPACTION_HOOK_PROBE || '0') === '1'
 const MAIN_MODEL = process.env.CANARY_MAIN_MODEL || 'qwen38-local/default_model'
+const THINKING_DEFAULT = process.env.CANARY_THINKING_DEFAULT || 'off'
 const REPORT_PATH = process.env.CANARY_REPORT_PATH
   ? resolve(process.env.CANARY_REPORT_PATH)
   : null
@@ -190,6 +191,9 @@ if (!['qwen36-tools-local/default_model', 'qwen38-local/default_model'].includes
 }
 if (!['qwen36-tools-local/default_model', 'qwen38-local/default_model'].includes(MAIN_MODEL)) {
   throw new Error('CANARY_MAIN_MODEL must be an isolated qwen36 or qwen38 model id')
+}
+if (!['off', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(THINKING_DEFAULT)) {
+  throw new Error('CANARY_THINKING_DEFAULT must be a supported thinking level')
 }
 if (!Number.isSafeInteger(COMPACTION_TIMEOUT_SECONDS)
   || COMPACTION_TIMEOUT_SECONDS < 30
@@ -393,7 +397,7 @@ const config = {
         alsoAllow: ['aiworker_analyze_video', 'aiworker_director_brain'],
         codeMode: false,
       },
-      thinkingDefault: 'off',
+      thinkingDefault: THINKING_DEFAULT,
     }],
   },
   gateway: {
@@ -2193,6 +2197,7 @@ try {
       configuredCompactionModel: COMPACTION_MODEL,
       configuredCompactionTimeoutSeconds: COMPACTION_TIMEOUT_SECONDS,
       configuredMainModel: MAIN_MODEL,
+      configuredThinkingDefault: THINKING_DEFAULT,
       compactionBenchmarkMode: COMPACTION_BENCHMARK_MODE,
       precompactionHookProbe: hookProbe,
       builtinSafeguardVerified,
