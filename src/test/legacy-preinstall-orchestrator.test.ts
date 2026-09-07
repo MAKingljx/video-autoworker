@@ -486,7 +486,27 @@ describe('legacy preinstall orchestrator', () => {
     expect(state.phase).toBe('BOOTSTRAP_HANDOFF')
     const renewalRoot = join(entry.root, 'control', 'preinstall-renewals')
     expect(readdirSync(renewalRoot)).toHaveLength(1)
-    expect(readdirSync(join(entry.root, 'control', 'progress'))).toEqual(['000001.json'])
+    const progressRoot = join(entry.root, 'control', 'progress')
+    const progressNames = readdirSync(progressRoot)
+    expect([
+      ['000001.json'],
+      ['000001.json', '000002.json'],
+    ]).toContainEqual(progressNames)
+    const firstProgress = JSON.parse(readFileSync(join(progressRoot, progressNames[0]), 'utf8'))
+    expect(firstProgress).toMatchObject({
+      sequence: 1,
+      previousSha256: null,
+      controllerRevision: 0,
+      step: 'preinstall-preflight-complete',
+    })
+    if (progressNames.length === 2) {
+      expect(JSON.parse(readFileSync(join(progressRoot, progressNames[1]), 'utf8'))).toMatchObject({
+        sequence: 2,
+        previousSha256: digest(readFileSync(join(progressRoot, progressNames[0]))),
+        controllerRevision: 1,
+        step: 'preinstall-task-flow',
+      })
+    }
   })
 
   it('rejects protected application PID drift and never reaches handoff', () => {
