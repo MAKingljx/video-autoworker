@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 PROFILE="qwen-current"
-OPENCLAW_VERSION="2026.7.1-2"
+OPENCLAW_VERSION=""
 MODE=""
 ROLLBACK_BACKUP=""
 TOOL_BASELINE=""
@@ -13,6 +13,7 @@ RUNTIME_SESSION_KEY_SHA256=""
 HOT_RELOAD_DEADLINE_MS=15000
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
 MANIFEST_FILE="$REPOSITORY_ROOT/ops/openclaw/qwen-current-runtime-convergence.manifest.json"
 CONVERGENCE_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-convergence.mjs"
 SECRET_REFERENCE_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-secret-reference.mjs"
@@ -110,6 +111,8 @@ fi
   exit 1
 }
 [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { printf 'Node.js is required.\n' >&2; exit 1; }
+OPENCLAW_VERSION="$("$NODE_BIN" "$OPENCLAW_RUNTIME_CONTRACT" runtime-version)" \
+  || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 [[ -x "$OPENCLAW_BIN" ]] || command -v "$OPENCLAW_BIN" >/dev/null 2>&1 || {
   printf 'OpenClaw is unavailable.\n' >&2
   exit 1
@@ -268,26 +271,33 @@ run_config_patch() {
 }
 
 apply_config_patch_cas() {
-  local patch_file="$1" config_get patch_result base_hash
+  local patch_file="$1" config_get patch_result base_revision_hash base_snapshot base_file_sha256
   config_get="$(mktemp "$WORK_ROOT/gateway-config-get.XXXXXXXX")"
   patch_result="$(mktemp "$WORK_ROOT/gateway-config-patch.XXXXXXXX")"
   run_private_gateway_rpc config-get "$config_get" || return 1
   "$NODE_BIN" "$CONVERGENCE_HELPER" assert-hot-reload-preconditions \
-    "$config_get" "$MANIFEST_FILE" || return 1
-  base_hash="$("$NODE_BIN" "$CONVERGENCE_HELPER" read-config-base-hash \
-    "$config_get" "$MANIFEST_FILE")" \
+    "$config_get" "$MANIFEST_FILE" "$PROFILE_CONFIG" || return 1
+  base_revision_hash="$("$NODE_BIN" "$CONVERGENCE_HELPER" read-config-base-hash \
+    "$config_get" "$MANIFEST_FILE" "$PROFILE_CONFIG")" \
     || return 1
+  base_snapshot="$(safe_config_snapshot)" || return 1
+  base_file_sha256="$("$NODE_BIN" -e '
+const value = JSON.parse(process.argv[1])
+if (!/^[a-f0-9]{64}$/u.test(value?.sha256)) process.exit(1)
+process.stdout.write(value.sha256)
+' "$base_snapshot")" || return 1
   "$NODE_BIN" "$CONVERGENCE_HELPER" assert-last-good-baseline \
-    "$PROFILE_LAST_GOOD_CONFIG" "$base_hash" || return 1
-  if ! AIWORKER_OPENCLAW_RUNTIME_BASE_HASH="$base_hash" \
+    "$PROFILE_LAST_GOOD_CONFIG" "$base_file_sha256" || return 1
+  if ! AIWORKER_OPENCLAW_RUNTIME_REVISION_TOKEN="$base_revision_hash" \
     AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE="$patch_file" \
     run_private_gateway_rpc config-patch "$patch_result"; then
     return 1
   fi
-  HOT_RELOAD_BASE_HASH="$base_hash"
+  HOT_RELOAD_BASE_HASH="$base_file_sha256"
+  HOT_RELOAD_BASE_REVISION_HASH="$base_revision_hash"
   HOT_RELOAD_PATCH_RESULT="$patch_result"
   if ! "$NODE_BIN" "$CONVERGENCE_HELPER" assert-config-patch-hot-reload \
-    "$patch_result" "$MANIFEST_FILE"; then
+    "$patch_result" "$MANIFEST_FILE" "$PROFILE_CONFIG"; then
     return 2
   fi
 }
@@ -392,7 +402,7 @@ process.stdout.write(String(value.cursor))
   if ! "$NODE_BIN" "$CONVERGENCE_HELPER" verify-hot-reload \
     "$health" "$logs" "$HOT_RELOAD_PATCH_RESULT" "$post_config_get" \
     "$MANIFEST_FILE" "$expected_pid" "$HOT_RELOAD_BASE_HASH" "$expected_hash" "$log_baseline" \
-    "$PROFILE_LAST_GOOD_CONFIG"; then
+    "$PROFILE_LAST_GOOD_CONFIG" "$HOT_RELOAD_BASE_REVISION_HASH" "$PROFILE_CONFIG"; then
     printf 'qwen-current reported terminal hot-reload evidence.\n' >&2
     return 1
   fi
@@ -776,6 +786,7 @@ HOT_RELOAD_PID="$(gateway_listener_pid)" || exit 1
 HOT_RELOAD_CURSOR="$(capture_gateway_log_cursor)" || exit 1
 HOT_RELOAD_PATCH_RESULT=""
 HOT_RELOAD_BASE_HASH=""
+HOT_RELOAD_BASE_REVISION_HASH=""
 apply_config_patch_cas "$PATCH_FILE" || APPLY_STATUS=$?
 if [[ "$APPLY_STATUS" == 1 ]]; then
   assert_config_snapshot "$BEFORE_SNAPSHOT" 2>/dev/null \
