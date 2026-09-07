@@ -5,6 +5,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  isOpenClawConfigRevisionToken,
+  OPENCLAW_RUNTIME_VERSION,
+} from './openclaw-runtime-contract.mjs'
+import {
   fingerprintOpenClawToolInventory,
   normalizeOpenClawToolPolicyNotices,
   validateNormalizedOpenClawToolPolicyNotices,
@@ -45,7 +49,7 @@ function validateManifest(pathname) {
   const manifest = readJson(pathname, 'runtime convergence manifest')
   const expected = {
     schema: 'video-autoworker-openclaw-runtime-convergence/v1',
-    openclawVersion: '2026.7.1-2',
+    openclawVersion: OPENCLAW_RUNTIME_VERSION,
     profile: 'qwen-current',
     compaction: {
       set: {
@@ -53,11 +57,10 @@ function validateManifest(pathname) {
         timeoutSeconds: 240,
         keepRecentTokens: 8_192,
         recentTurnsPreserve: 4,
-        truncateAfterCompaction: true,
         maxActiveTranscriptBytes: '128kb',
         midTurnPrecheck: { enabled: true },
       },
-      remove: ['identifierInstructions'],
+      remove: ['identifierInstructions', 'truncateAfterCompaction'],
     },
     agent: { id: 'second-original' },
     requiredPlugins: [
@@ -994,11 +997,32 @@ function assertConfigScopeSnapshot(configPath, snapshotSource, manifestPath) {
   if (!same(current, parseSnapshot(snapshotSource))) fail('file snapshot changed')
 }
 
-function readConfigBaseHash(pathname, manifestPath) {
+function validConfigGetRevisions(value) {
+  return isOpenClawConfigRevisionToken(value?.hash)
+    && isOpenClawConfigRevisionToken(value?.configRevisionHash)
+    && isOpenClawConfigRevisionToken(value?.appliedConfigHash)
+    && value.configRevisionHash === value.appliedConfigHash
+    && value.hash !== value.configRevisionHash
+}
+
+function hasConfigGetRepresentations(value) {
+  return ['sourceConfig', 'runtimeConfig', 'config'].every(key => value?.[key]
+    && typeof value[key] === 'object' && !Array.isArray(value[key]))
+}
+
+function assertConfigGetTargets(value, manifest) {
+  if (!hasConfigGetRepresentations(value)) fail('Gateway config.get representations are invalid')
+  for (const key of ['sourceConfig', 'runtimeConfig', 'config']) {
+    assertTarget(value[key], manifest)
+  }
+}
+
+function readConfigBaseHash(pathname, manifestPath, expectedConfigPath) {
   const value = readEvidenceJson(pathname, 'Gateway config.get evidence').value
   const manifest = validateManifest(manifestPath)
-  if (value?.exists !== true || value.valid !== true || !/^[a-f0-9]{64}$/u.test(value.hash)
-    || !value.config || typeof value.config !== 'object' || Array.isArray(value.config)) {
+  if (value?.exists !== true || value.valid !== true
+    || value.path !== expectedConfigPath
+    || !validConfigGetRevisions(value) || !hasConfigGetRepresentations(value)) {
     fail('Gateway config.get evidence is invalid')
   }
   exclusiveProfileAgent(value.config, manifest.agent.id)
@@ -1229,15 +1253,14 @@ function classifyLastGoodPromotion(pathname, baseHash, expectedHash) {
   }
 }
 
-function assertHotReloadPreconditions(configGetPath, manifestPath) {
+function assertHotReloadPreconditions(configGetPath, manifestPath, expectedConfigPath) {
   const value = readEvidenceJson(
     configGetPath,
     'pre-patch Gateway config.get evidence',
   ).value
   const manifest = validateManifest(manifestPath)
-  if (value?.exists !== true || value.valid !== true
-    || !/^[a-f0-9]{64}$/u.test(value.hash)
-    || !value.config || typeof value.config !== 'object' || Array.isArray(value.config)) {
+  if (value?.exists !== true || value.valid !== true || value.path !== expectedConfigPath
+    || !validConfigGetRevisions(value) || !hasConfigGetRepresentations(value)) {
     fail('pre-patch Gateway config.get evidence is invalid')
   }
   exclusiveProfileAgent(value.config, manifest.agent.id)
@@ -1247,10 +1270,11 @@ function assertHotReloadPreconditions(configGetPath, manifestPath) {
   }
 }
 
-function assertConfigPatchHotReload(pathname, manifestPath) {
+function assertConfigPatchHotReload(pathname, manifestPath, expectedConfigPath) {
   const patch = readEvidenceJson(pathname, 'Gateway config.patch evidence').value
   const manifest = validateManifest(manifestPath)
-  if (patch?.ok !== true || patch.noop === true
+  if (patch?.ok !== true || patch.noop === true || patch.path !== expectedConfigPath
+    || !isOpenClawConfigRevisionToken(patch.hash)
     || patch?.sentinel?.payload?.stats?.requiresRestart !== false
     || (patch.restart !== undefined && patch.restart !== null)
     || !patch.config || typeof patch.config !== 'object' || Array.isArray(patch.config)) {
@@ -1286,6 +1310,8 @@ function verifyHotReload(
   expectedHash,
   baselineSource,
   lastGoodPath,
+  baseRevisionHash,
+  expectedConfigPath,
 ) {
   const manifest = validateManifest(manifestPath)
   const health = readEvidenceJson(healthPath, 'Gateway hot-reload health evidence').value
@@ -1305,40 +1331,47 @@ function verifyHotReload(
   )
   const invalidCondition = [
     ['pid_invalid', !Number.isSafeInteger(pid) || pid <= 0],
-    ['base_hash_invalid', !/^[a-f0-9]{64}$/u.test(baseHash)],
+    ['base_file_sha_invalid', !/^[a-f0-9]{64}$/u.test(baseHash)],
     ['expected_hash_invalid', !/^[a-f0-9]{64}$/u.test(expectedHash)
       || expectedHash === baseHash],
     ['health_not_active', health?.ok !== true
       || health?.configReload?.hotReloadStatus !== 'active'],
     ['log_cursor_not_advanced', checkedLogs.cursor <= baseline.cursor],
     ['patch_not_hot_reload', patch?.ok !== true || patch?.noop === true
+      || patch.path !== expectedConfigPath || !isOpenClawConfigRevisionToken(patch.hash)
       || patch?.sentinel?.payload?.stats?.requiresRestart !== false
       || (patch.restart !== undefined && patch.restart !== null)],
     ['post_config_invalid', postConfigGet?.exists !== true || postConfigGet?.valid !== true
-      || !/^[a-f0-9]{64}$/u.test(postConfigGet.hash)],
-    ['post_hash_mismatch', postConfigGet?.hash !== expectedHash],
+      || postConfigGet.path !== expectedConfigPath
+      || !validConfigGetRevisions(postConfigGet)
+      || !hasConfigGetRepresentations(postConfigGet)],
+    ['base_revision_invalid', !isOpenClawConfigRevisionToken(baseRevisionHash)],
+    ['revision_mismatch', patch?.hash !== postConfigGet?.hash
+      || postConfigGet?.hash === baseRevisionHash],
   ].find(([, failed]) => failed)?.[0]
   if (invalidCondition) fail(`Gateway hot-reload proof is invalid: ${invalidCondition}`)
   assertTarget(patch.config, manifest)
-  assertTarget(postConfigGet.config, manifest)
+  assertConfigGetTargets(postConfigGet, manifest)
   const classification = classifyHotReloadMessages(checkedLogs.lines)
   if (!classification.detected) fail('Gateway hot-reload proof is invalid: log_detection_missing')
   if (classification.failed) fail('Gateway hot-reload proof is invalid: log_failure_detected')
-  if (lastGoodPromotionStatus(lastGoodPath, baseHash, postConfigGet.hash) !== 'applied') {
+  if (lastGoodPromotionStatus(lastGoodPath, baseHash, expectedHash) !== 'applied') {
     fail('Gateway hot-reload proof is invalid: last_good_not_promoted')
   }
   const compaction = stable(Object.fromEntries(
     Object.keys(manifest.compaction.set).map(key => [key, patch.config.agents.defaults.compaction[key]]),
   ))
   process.stdout.write(`${JSON.stringify(stable({
-    schema: 'video-autoworker-openclaw-hot-reload-proof/v2',
+    schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
     pid,
     hotReloadStatus: health.configReload.hotReloadStatus,
     restartPending: false,
     reloadFailure: false,
     compaction,
-    baseHash,
-    newHash: postConfigGet.hash,
+    baseFileSha256: baseHash,
+    newFileSha256: expectedHash,
+    baseRevisionHash,
+    newRevisionHash: postConfigGet.hash,
     logCursorStart: baseline.cursor,
     logCursorEnd: checkedLogs.cursor,
     logSha256: sha256(JSON.stringify(checkedLogs.lines)),
@@ -1362,15 +1395,17 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
     Object.keys(manifest.compaction.set).map(key => [key, config.agents.defaults.compaction[key]]),
   ))
   process.stdout.write(`${JSON.stringify(stable({
-    schema: 'video-autoworker-openclaw-hot-reload-proof/v2',
+    schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
     pid: runtime.gateway.pid,
     hotReloadStatus: health.configReload.hotReloadStatus,
     restartPending: false,
     reloadFailure: false,
     loadSource: 'gateway-startup-after-config',
     compaction,
-    baseHash: null,
-    newHash: configFile.snapshot.sha256,
+    baseFileSha256: null,
+    newFileSha256: configFile.snapshot.sha256,
+    baseRevisionHash: null,
+    newRevisionHash: null,
     logCursorStart: null,
     logCursorEnd: null,
     logSha256: null,
@@ -1378,20 +1413,25 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
 }
 
 function validateHotReloadProof(value, configSha256) {
-  if (value?.schema !== 'video-autoworker-openclaw-hot-reload-proof/v2'
+  if (value?.schema !== 'video-autoworker-openclaw-hot-reload-proof/v3'
     || value.hotReloadStatus !== 'active'
     || value.restartPending !== false
     || value.reloadFailure !== false
-    || !/^[a-f0-9]{64}$/u.test(value.newHash)
-    || value.newHash !== configSha256) return false
+    || !/^[a-f0-9]{64}$/u.test(value.newFileSha256)
+    || value.newFileSha256 !== configSha256) return false
   if (value.loadSource === 'gateway-startup-after-config') {
-    return value.baseHash === null
+    return value.baseFileSha256 === null
+      && value.baseRevisionHash === null
+      && value.newRevisionHash === null
       && value.logCursorStart === null
       && value.logCursorEnd === null
       && value.logSha256 === null
   }
-  return /^[a-f0-9]{64}$/u.test(value.baseHash)
-    && value.baseHash !== value.newHash
+  return /^[a-f0-9]{64}$/u.test(value.baseFileSha256)
+    && value.baseFileSha256 !== value.newFileSha256
+    && isOpenClawConfigRevisionToken(value.baseRevisionHash)
+    && isOpenClawConfigRevisionToken(value.newRevisionHash)
+    && value.baseRevisionHash !== value.newRevisionHash
     && Number.isSafeInteger(value.logCursorStart)
     && value.logCursorStart >= 0
     && Number.isSafeInteger(value.logCursorEnd)
@@ -1731,12 +1771,12 @@ else if (command === 'write-tool-baseline' && args.length === 5) writeToolBaseli
 else if (command === 'render' && args.length === 4) render(...args)
 else if (command === 'verify-difference' && args.length === 4) verifyDifference(...args)
 else if (command === 'semantic-equal' && args.length === 3) semanticEqual(...args)
-else if (command === 'read-config-base-hash' && args.length === 2) readConfigBaseHash(...args)
+else if (command === 'read-config-base-hash' && args.length === 3) readConfigBaseHash(...args)
 else if (command === 'read-log-cursor' && args.length === 1) readLogCursor(args[0])
-else if (command === 'assert-hot-reload-preconditions' && args.length === 2) {
+else if (command === 'assert-hot-reload-preconditions' && args.length === 3) {
   assertHotReloadPreconditions(...args)
 }
-else if (command === 'assert-config-patch-hot-reload' && args.length === 2) {
+else if (command === 'assert-config-patch-hot-reload' && args.length === 3) {
   assertConfigPatchHotReload(...args)
 }
 else if (command === 'assert-last-good-baseline' && args.length === 2) {
@@ -1748,7 +1788,7 @@ else if (command === 'classify-last-good-promotion' && args.length === 3) {
 else if (command === 'classify-hot-reload-logs' && args.length === 2) {
   classifyHotReloadLogs(...args)
 }
-else if (command === 'verify-hot-reload' && args.length === 10) verifyHotReload(...args)
+else if (command === 'verify-hot-reload' && args.length === 12) verifyHotReload(...args)
 else if (command === 'verify-startup-loaded' && args.length === 4) verifyStartupLoaded(...args)
 else if (command === 'write-convergence-proof' && args.length === 5) writeConvergenceProof(...args)
 else if (command === 'assert-convergence-proof' && args.length === 4) assertConvergenceProof(...args)

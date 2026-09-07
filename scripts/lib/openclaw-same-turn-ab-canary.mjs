@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 
-export const DEFAULT_EXPECTED_OPENCLAW_VERSION = '2026.7.1-2'
+export const DEFAULT_EXPECTED_OPENCLAW_VERSION = '2026.9.2'
 export const DEFAULT_TOOL_CALLS = 10
 export const DEFAULT_TOOL_RESULT_BYTES = 24 * 1024
 export const MIN_TOOL_CALLS = 8
