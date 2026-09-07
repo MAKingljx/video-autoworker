@@ -201,6 +201,12 @@ async function installDirectorBrain(profileRoot: string, workspaceRoot: string) 
   )
 }
 
+async function setInstalledPluginPeer(packagePath: string, peer: string) {
+  const value = JSON.parse(readFileSync(packagePath, 'utf8'))
+  value.peerDependencies.openclaw = peer
+  await writeFile(packagePath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+}
+
 describe('director video release readiness verifier', () => {
   let root: string
   let profileRoot: string
@@ -278,6 +284,48 @@ describe('director video release readiness verifier', () => {
       .toBe(directorEvidenceProjectionContractDigest())
     expect(readFileSync(join(repositoryRoot, 'src/lib/director-evidence-delivery-core.ts'), 'utf8'))
       .not.toContain('DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256')
+  })
+
+  it('accepts only the declared legacy installed peer difference in both plugin packages', async () => {
+    const videoPackage = join(
+      profileRoot, 'extensions', 'aiworker-video-command', 'package.json',
+    )
+    const directorPackage = join(
+      profileRoot, 'extensions', 'aiworker-director-brain', 'package.json',
+    )
+    await setInstalledPluginPeer(videoPackage, '>=2026.7.1-2')
+    await setInstalledPluginPeer(directorPackage, '2026.7.1-2')
+
+    const result = verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })
+    expect(result.videoCommand).toMatchObject({ version: '0.5.14' })
+    expect(result.directorBrain).toMatchObject({ version: '0.4.0' })
+
+    const drifted = JSON.parse(readFileSync(videoPackage, 'utf8'))
+    drifted.description = 'unexpected package drift'
+    await writeFile(videoPackage, `${JSON.stringify(drifted, null, 2)}\n`, { mode: 0o600 })
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('video_command_package_mismatch')
+  })
+
+  it.each([
+    ['video_command', 'aiworker-video-command'],
+    ['director_brain', 'aiworker-director-brain'],
+  ])('rejects an undeclared %s installed peer', async (label, pluginId) => {
+    await setInstalledPluginPeer(join(
+      profileRoot, 'extensions', pluginId, 'package.json',
+    ), '>=2026.8.0')
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow(`${label}_installed_package_peer_invalid`)
   })
 
   it('accepts omission of non-runtime video-command auxiliaries', async () => {

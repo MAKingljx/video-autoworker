@@ -17,6 +17,7 @@ import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-releas
 import {
   acceptedInstalledOpenClawPeer,
   OPENCLAW_RUNTIME_VERSION,
+  OPENCLAW_SOURCE_PLUGIN_PEER,
 } from './lib/openclaw-runtime-contract.mjs'
 import {
   assertConvergenceProof,
@@ -164,6 +165,40 @@ function selectedSourceManifest(repositoryRoot, members) {
   return { directories: [...directorySet].sort(), files }
 }
 
+function maskedCompatiblePluginPackage(pathname, pluginId, label, requireSourcePeer = false) {
+  safeFile(pathname, label)
+  const source = readFileSync(pathname, 'utf8')
+  let value
+  try { value = JSON.parse(source) } catch { fail(`${label}_invalid`) }
+  const peer = value?.peerDependencies?.openclaw
+  if (typeof peer !== 'string'
+    || (requireSourcePeer
+      ? peer !== OPENCLAW_SOURCE_PLUGIN_PEER
+      : !acceptedInstalledOpenClawPeer(pluginId, peer))) fail(`${label}_peer_invalid`)
+  const encoded = JSON.stringify(peer)
+  const first = source.indexOf(encoded)
+  if (first < 0 || first !== source.lastIndexOf(encoded)) fail(`${label}_peer_ambiguous`)
+  return `${source.slice(0, first)}"<openclaw-peer-policy>"${source.slice(first + encoded.length)}`
+}
+
+function compatiblePluginPackageSha256(
+  repositoryRoot,
+  installedRoot,
+  sourceRelative,
+  pluginId,
+  label,
+) {
+  const source = maskedCompatiblePluginPackage(
+    join(repositoryRoot, sourceRelative), pluginId, `${label}_source_package`, true,
+  )
+  const installedPath = join(installedRoot, 'package.json')
+  const installed = maskedCompatiblePluginPackage(
+    installedPath, pluginId, `${label}_installed_package`, false,
+  )
+  if (source !== installed) fail(`${label}_package_mismatch`)
+  return fileSha256(installedPath)
+}
+
 function recursiveSourceMembers(repositoryRoot, sourceRelative, targetPrefix = '') {
   const sourceRoot = assertPhysicalDirectory(join(repositoryRoot, sourceRelative), 'source_tree')
   return walkTree(sourceRoot).files.map(file => ({
@@ -221,9 +256,20 @@ function directorBrainPluginMembers(repositoryRoot) {
   ]
 }
 
-function assertManifestMatches(repositoryRoot, installedRoot, members, label) {
+function assertManifestMatches(repositoryRoot, installedRoot, members, label, pluginPackage = null) {
   const physicalRoot = assertPhysicalDirectory(installedRoot, label)
   const expected = selectedSourceManifest(repositoryRoot, members)
+  if (pluginPackage) {
+    const packageFile = expected.files.find(file => file.path === 'package.json')
+    if (!packageFile) fail(`${label}_package_missing`)
+    packageFile.sha256 = compatiblePluginPackageSha256(
+      repositoryRoot,
+      physicalRoot,
+      pluginPackage.sourceRelative,
+      pluginPackage.id,
+      label,
+    )
+  }
   const actual = walkTree(physicalRoot)
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail(`${label}_manifest_mismatch`)
   return {
@@ -236,6 +282,15 @@ function assertManifestMatches(repositoryRoot, installedRoot, members, label) {
 function assertVideoCommandManifestMatches(repositoryRoot, installedRoot) {
   const physicalRoot = assertPhysicalDirectory(installedRoot, 'video_command')
   const core = selectedSourceManifest(repositoryRoot, videoCommandMembers(repositoryRoot))
+  const packageFile = core.files.find(file => file.path === 'package.json')
+  if (!packageFile) fail('video_command_package_missing')
+  packageFile.sha256 = compatiblePluginPackageSha256(
+    repositoryRoot,
+    physicalRoot,
+    'openclaw-plugins/aiworker-video-command/package.json',
+    'aiworker-video-command',
+    'video_command',
+  )
   const coreFiles = core.files.map(item => item.path)
   const coreFileSet = new Set(coreFiles)
   const coreDirectorySet = new Set(core.directories)
@@ -857,7 +912,14 @@ export function verifyInstalledReleasePayloads({
     repository, taskFlowRoot, taskFlowMembers(repository), 'task_flow',
   )
   const directorBrain = assertManifestMatches(
-    repository, directorPluginRoot, directorBrainPluginMembers(repository), 'director_brain',
+    repository,
+    directorPluginRoot,
+    directorBrainPluginMembers(repository),
+    'director_brain',
+    {
+      sourceRelative: 'openclaw-plugins/aiworker-director-brain/package.json',
+      id: 'aiworker-director-brain',
+    },
   )
   directorBrain.version = assertVersionPair(
     directorPluginRoot, EXPECTED_DIRECTOR_BRAIN_VERSION, 'director_brain',
