@@ -1,10 +1,8 @@
-import { stat } from 'node:fs/promises'
-import { createReadStream } from 'node:fs'
 import path from 'node:path'
-import { Readable } from 'node:stream'
 import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMaterialsRequest } from '../route'
 import { getMaterialsBotLearningRoot } from '@/lib/openclaw-materials'
+import { openSafeRootedFile, SafeRootedFileError } from '@/lib/safe-rooted-file'
 
 export const runtime = 'nodejs'
 
@@ -36,65 +34,59 @@ export async function GET(request: NextRequest) {
 
   const root = path.resolve(getMaterialsBotLearningRoot())
   const resolvedPath = path.resolve(rawPath)
-  if (!isPathInsideRoot(root, resolvedPath)) {
-    return NextResponse.json({ error: '素材路径不在允许范围内' }, { status: 403 })
-  }
-
-  let info
+  let file
   try {
-    info = await stat(resolvedPath)
-  } catch {
+    file = await openSafeRootedFile(root, resolvedPath)
+  } catch (error) {
+    if (error instanceof SafeRootedFileError) {
+      if (error.code === 'outside_root' || error.code === 'unsafe_path') {
+        return NextResponse.json({ error: '素材路径不在允许范围内' }, { status: 403 })
+      }
+      if (error.code === 'not_file') {
+        return NextResponse.json({ error: '只能读取文件素材' }, { status: 400 })
+      }
+    }
     return NextResponse.json({ error: '素材文件不存在' }, { status: 404 })
   }
 
-  if (!info.isFile()) {
-    return NextResponse.json({ error: '只能读取文件素材' }, { status: 400 })
-  }
-
-  const mimeType = MIME_TYPES[path.extname(resolvedPath).toLowerCase()] || 'application/octet-stream'
+  const mimeType = MIME_TYPES[path.extname(file.path).toLowerCase()] || 'application/octet-stream'
   const range = request.headers.get('range')
 
   if (range) {
-    const parsed = parseRange(range, info.size)
+    const parsed = parseRange(range, file.stat.size)
     if (!parsed) {
+      await file.close()
       return new NextResponse(null, {
         status: 416,
         headers: {
           'Accept-Ranges': 'bytes',
-          'Content-Range': `bytes */${info.size}`,
+          'Content-Range': `bytes */${file.stat.size}`,
         },
       })
     }
 
-    const stream = Readable.toWeb(createReadStream(resolvedPath, { start: parsed.start, end: parsed.end })) as ReadableStream
-    return new NextResponse(stream, {
+    return new NextResponse(file.createWebStream(parsed), {
       status: 206,
       headers: {
         'Accept-Ranges': 'bytes',
         'Cache-Control': 'no-store',
         'Content-Length': String(parsed.end - parsed.start + 1),
-        'Content-Range': `bytes ${parsed.start}-${parsed.end}/${info.size}`,
+        'Content-Range': `bytes ${parsed.start}-${parsed.end}/${file.stat.size}`,
         'Content-Type': mimeType,
-        'Last-Modified': info.mtime.toUTCString(),
+        'Last-Modified': file.stat.mtime.toUTCString(),
       },
     })
   }
 
-  const stream = Readable.toWeb(createReadStream(resolvedPath)) as ReadableStream
-  return new NextResponse(stream, {
+  return new NextResponse(file.createWebStream(), {
     headers: {
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store',
-      'Content-Length': String(info.size),
+      'Content-Length': String(file.stat.size),
       'Content-Type': mimeType,
-      'Last-Modified': info.mtime.toUTCString(),
+      'Last-Modified': file.stat.mtime.toUTCString(),
     },
   })
-}
-
-function isPathInsideRoot(root: string, target: string): boolean {
-  if (target === root) return true
-  return target.startsWith(`${root}${path.sep}`)
 }
 
 function parseRange(value: string, totalSize: number): { start: number; end: number } | null {

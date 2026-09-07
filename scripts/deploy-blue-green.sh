@@ -36,6 +36,31 @@ RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
 STAGING_WORK_ROOT=""
 BOOTSTRAP_MAINTENANCE=0
 DEPLOYMENT_SOURCE_GATE_COMPLETE=0
+BOOTSTRAP_SUCCESSOR_MODE=0
+BOOTSTRAP_HISTORICAL_PROJECT_ROOT="$PROJECT_ROOT"
+BOOTSTRAP_HISTORICAL_SOURCE_COMMIT=""
+BOOTSTRAP_HISTORICAL_CONTROLLER=""
+BOOTSTRAP_SUCCESSOR_CONTROLLER=""
+BOOTSTRAP_SUCCESSOR_RECEIPT=""
+BOOTSTRAP_SUCCESSOR_TOKEN=""
+BOOTSTRAP_SUCCESSOR_CONSUMED=""
+BOOTSTRAP_SUCCESSOR_COMPATIBILITY=""
+BOOTSTRAP_SUCCESSOR_READINESS=""
+BOOTSTRAP_SUCCESSOR_GUARD_STATUS=""
+BOOTSTRAP_SUCCESSOR_PREFLIGHT=""
+BOOTSTRAP_SUCCESSOR_ATTEMPT_ID=""
+BOOTSTRAP_SUCCESSOR_COMPLETION=""
+BOOTSTRAP_SUCCESSOR_MAPPING=""
+BOOTSTRAP_CONTROL_SOURCE_COMMIT=""
+BOOTSTRAP_TARGET_APP_SOURCE_COMMIT=""
+BOOTSTRAP_HISTORICAL_RELEASE_ID=""
+BOOTSTRAP_HISTORICAL_RELEASE_ROOT=""
+BOOTSTRAP_HISTORICAL_MANIFEST_SHA256=""
+BOOTSTRAP_N8N_WORKFLOW_SOURCE_COMMIT=""
+BOOTSTRAP_HISTORICAL_PENDING=""
+BOOTSTRAP_HISTORICAL_RUN_DIRECTORY=""
+BOOTSTRAP_HISTORICAL_ROUTER_STATE=""
+BOOTSTRAP_HISTORICAL_SLOT=""
 
 cleanup_operation() {
   if [[ -n "$STAGING_WORK_ROOT" ]]; then
@@ -103,6 +128,7 @@ usage() {
 Usage:
   deploy-blue-green.sh init [blue|green]
   deploy-blue-green.sh bootstrap <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir>
+  deploy-blue-green.sh bootstrap-successor <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir> <successor-controller> <successor-receipt> <successor-token> <successor-consumed> <current-compatibility> <current-readiness> <current-guard-status>
   deploy-blue-green.sh stage <release-id> <absolute-source-standalone-root>
   deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh probe <blue|green>
@@ -275,6 +301,7 @@ verify_deployment_source_gate() {
     scripts/legacy-preinstall-orchestrator.mjs
     scripts/legacy-preinstall-controller.mjs
     scripts/legacy-bootstrap-controller.mjs
+    scripts/legacy-bootstrap-sdk-successor-controller.mjs
     scripts/verify-n8n-blue-green-workflows.mjs
     scripts/n8n-startup-witness.mjs
     ops/n8n/workflows/aiworker-task-intake.json
@@ -435,6 +462,193 @@ if (value?.schema !== 'video-autoworker-director-video-preflight/v1'
   || value?.contracts?.sessionScopedRuntimeConvergence !== true) process.exit(3)
 process.stdout.write(digest)
 NODE
+}
+
+verify_bootstrap_sdk_successor() {
+  local raw mode
+  [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] || return 2
+  for path in "$BOOTSTRAP_SUCCESSOR_CONTROLLER" "$BOOTSTRAP_SUCCESSOR_RECEIPT" \
+    "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+    "$BOOTSTRAP_SUCCESSOR_READINESS" "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS"; do
+    assert_absolute "bootstrap SDK successor input" "$path"
+    [[ -f "$path" && ! -L "$path" ]] || fail "bootstrap SDK successor input is unavailable"
+  done
+  if [[ -f "$BOOTSTRAP_SUCCESSOR_TOKEN" && ! -L "$BOOTSTRAP_SUCCESSOR_TOKEN" ]]; then
+    mode=verify
+    raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify \
+      --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --token "$BOOTSTRAP_SUCCESSOR_TOKEN" \
+      --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
+      --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
+      || fail "bootstrap SDK successor authorization is invalid"
+  elif [[ -f "$BOOTSTRAP_SUCCESSOR_CONSUMED" && ! -L "$BOOTSTRAP_SUCCESSOR_CONSUMED" ]]; then
+    mode=verify-consumed
+    raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify-consumed \
+      --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --consumed "$BOOTSTRAP_SUCCESSOR_CONSUMED" \
+      --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
+      --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
+      || fail "consumed bootstrap SDK successor authorization is invalid"
+  else
+    fail "bootstrap SDK successor has no usable capability or consumed receipt"
+  fi
+  "$NODE_BIN" - "$raw" <<'NODE'
+const value = JSON.parse(process.argv[2])
+if (!['verify', 'verify-consumed'].includes(value?.mode) || value.ok !== true
+  || typeof value.historicalRepository !== 'string' || !value.historicalRepository.startsWith('/')
+  || typeof value.historicalSourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.historicalSourceCommit)
+  || typeof value.historicalController?.path !== 'string' || !value.historicalController.path.startsWith('/')
+  || typeof value.historicalAttemptId !== 'string'
+  || typeof value.requestedTarget?.sourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.requestedTarget.sourceCommit)
+  || typeof value.requestedTarget?.releaseId !== 'string' || typeof value.requestedTarget?.releaseRoot !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.requestedTarget?.manifestSha256 || '')
+  || typeof value.historicalTarget?.releaseId !== 'string' || typeof value.historicalTarget?.releaseRoot !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.historicalTarget?.manifest?.sha256 || '')
+  || typeof value.n8nWorkflowSourceCommit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.n8nWorkflowSourceCommit)
+  || typeof value.historicalPending?.path !== 'string' || !value.historicalPending.path.startsWith('/')
+  || typeof value.historicalRunDirectory?.path !== 'string' || !value.historicalRunDirectory.path.startsWith('/')
+  || typeof value.historicalRouterStatePath !== 'string' || !value.historicalRouterStatePath.startsWith('/')
+  || !['blue', 'green'].includes(value.historicalSlot)
+  || value.readiness?.schema !== 'video-autoworker-director-video-preflight/v1'
+  || value.readiness.phase !== 'pre-bootstrap' || value.readiness.ok !== true
+  || typeof value.readiness?.payloads?.projectionContract?.currentDigest !== 'string'
+  || !/^[a-f0-9]{64}$/u.test(value.readiness.payloads.projectionContract.currentDigest)) process.exit(2)
+process.stdout.write(`${value.historicalRepository}\n${value.historicalSourceCommit}\n`
+  + `${value.historicalController.path}\n${value.historicalAttemptId}\n`
+  + `${value.readiness.payloads.projectionContract.currentDigest}\n`
+  + `${value.requestedTarget.sourceCommit}\n${value.requestedTarget.releaseId}\n`
+  + `${value.requestedTarget.releaseRoot}\n${value.requestedTarget.manifestSha256}\n`
+  + `${value.historicalTarget.releaseId}\n${value.historicalTarget.releaseRoot}\n`
+  + `${value.historicalTarget.manifest.sha256}\n${value.n8nWorkflowSourceCommit}\n`
+  + `${value.controlSourceCommit}\n${value.historicalPending.path}\n`
+  + `${value.historicalRunDirectory.path}\n${value.historicalRouterStatePath}\n${value.historicalSlot}\n`)
+NODE
+}
+
+consume_bootstrap_sdk_successor() {
+  local raw
+  [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] || return 0
+  if [[ -f "$BOOTSTRAP_SUCCESSOR_TOKEN" && ! -L "$BOOTSTRAP_SUCCESSOR_TOKEN" ]]; then
+    raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" consume \
+      --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --token "$BOOTSTRAP_SUCCESSOR_TOKEN" \
+      --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
+      --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
+      || fail "unable to consume bootstrap SDK successor authorization"
+    BOOTSTRAP_SUCCESSOR_CONSUMED="$("$NODE_BIN" -e '
+      const value = JSON.parse(process.argv[1])
+      if (value?.mode !== "consume" || value.ok !== true
+        || typeof value.consumed?.path !== "string") process.exit(2)
+      process.stdout.write(value.consumed.path)
+    ' "$raw")" || fail "bootstrap SDK successor consumption result is invalid"
+  fi
+  [[ -f "$BOOTSTRAP_SUCCESSOR_CONSUMED" && ! -L "$BOOTSTRAP_SUCCESSOR_CONSUMED" ]] \
+    || fail "bootstrap SDK successor consumed receipt is unavailable"
+  "$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify-consumed \
+    --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --consumed "$BOOTSTRAP_SUCCESSOR_CONSUMED" \
+    --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+    --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
+    --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS" >/dev/null \
+    || fail "bootstrap SDK successor changed immediately after consumption"
+}
+
+assert_bootstrap_target_mapping_snapshot() {
+  local snapshot="$1" member="$2" pathname="$3"
+  "$NODE_BIN" - "$snapshot" "$member" "$pathname" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const [rawSnapshot, member, pathname] = process.argv.slice(2)
+const expected = JSON.parse(rawSnapshot)?.[member]
+if (!['binding', 'state'].includes(member) || expected?.path !== pathname) process.exit(2)
+const before = fs.lstatSync(pathname, { bigint: true })
+if (!before.isFile() || before.isSymbolicLink() || before.uid !== BigInt(process.getuid())
+  || before.nlink !== 1n || (before.mode & 0o7777n) !== 0o600n) process.exit(3)
+const fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+try {
+  const opened = fs.fstatSync(fd, { bigint: true })
+  const source = fs.readFileSync(fd)
+  const after = fs.lstatSync(pathname, { bigint: true })
+  const actual = {
+    path: pathname,
+    dev: opened.dev.toString(),
+    ino: opened.ino.toString(),
+    size: Number(opened.size),
+    mtimeNs: opened.mtimeNs.toString(),
+    ctimeNs: opened.ctimeNs.toString(),
+    sha256: crypto.createHash('sha256').update(source).digest('hex'),
+  }
+  if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size
+    || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+    || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs
+    || JSON.stringify(actual) !== JSON.stringify(expected)) process.exit(4)
+} finally { fs.closeSync(fd) }
+NODE
+}
+
+publish_bootstrap_sdk_successor_completion() {
+  local source_commit="$1" release_id="$2" release_root="$3" manifest_sha256="$4" intake_revision="$5"
+  local successor_receipt_sha target_mapping_sha recovery_completion
+  [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] || return 0
+  successor_receipt_sha="$(shasum -a 256 "$BOOTSTRAP_SUCCESSOR_RECEIPT" | awk '{print $1}')"
+  assert_immutable_private_file "bootstrap successor target mapping" "$BOOTSTRAP_SUCCESSOR_MAPPING"
+  target_mapping_sha="$(shasum -a 256 "$BOOTSTRAP_SUCCESSOR_MAPPING" | awk '{print $1}')"
+  if [[ -e "$BOOTSTRAP_SUCCESSOR_COMPLETION" || -L "$BOOTSTRAP_SUCCESSOR_COMPLETION" ]]; then
+    assert_immutable_private_file "bootstrap SDK successor recovery completion" "$BOOTSTRAP_SUCCESSOR_COMPLETION"
+    "$NODE_BIN" - "$BOOTSTRAP_SUCCESSOR_COMPLETION" "$source_commit" \
+      "$BOOTSTRAP_HISTORICAL_SOURCE_COMMIT" "$BOOTSTRAP_SUCCESSOR_ATTEMPT_ID" "$release_id" \
+      "$release_root" "$manifest_sha256" "$intake_revision" "$BOOTSTRAP_CONTROL_SOURCE_COMMIT" \
+      "$BOOTSTRAP_SUCCESSOR_RECEIPT" "$successor_receipt_sha" "$BOOTSTRAP_SUCCESSOR_MAPPING" \
+      "$target_mapping_sha" <<'NODE' \
+      || fail "existing recovery completion differs from the completed successor recovery"
+const fs = require('node:fs')
+const [pathname, sourceCommit, historicalSourceCommit, attempt, releaseId, releaseRoot,
+  manifestSha256, rawIntakeRevision, controlSourceCommit, receipt, receiptSha256, mapping,
+  mappingSha256] = process.argv.slice(2)
+const value = JSON.parse(fs.readFileSync(pathname, 'utf8'))
+if (value.schema !== 'video-autoworker-legacy-bootstrap-sdk-successor-completion/v1'
+  || value.ok !== true || value.recovered !== true || value.sourceCommit !== sourceCommit
+  || value.historicalSourceCommit !== historicalSourceCommit || value.attempt !== attempt
+  || value.releaseId !== releaseId || value.releaseRoot !== releaseRoot
+  || value.manifestSha256 !== manifestSha256 || value.intakeRevision !== Number(rawIntakeRevision)
+  || value.controlSourceCommit !== controlSourceCommit
+  || value.successorReceipt?.path !== receipt || value.successorReceipt?.sha256 !== receiptSha256
+  || value.targetMapping?.path !== mapping || value.targetMapping?.sha256 !== mappingSha256
+  || !Number.isSafeInteger(value.completedAt) || value.completedAt < 1_000_000_000_000
+  || value.completedAt > Date.now() + 5_000) process.exit(2)
+NODE
+    return
+  fi
+  recovery_completion="$($NODE_BIN -e '
+    const [sourceCommit, historicalSourceCommit, attempt, releaseId, releaseRoot, manifestSha256,
+      intakeRevision, controlSourceCommit, receipt, receiptSha256, mapping, mappingSha256] = process.argv.slice(1)
+    if (!/^[a-f0-9]{40}$/u.test(sourceCommit) || !/^[a-f0-9]{40}$/u.test(controlSourceCommit)
+      || !/^[a-f0-9]{40}$/u.test(historicalSourceCommit)
+      || !/^[0-9a-f-]{36}$/u.test(attempt) || !/^[1-9][0-9]*$/u.test(intakeRevision)
+      || !/^[a-f0-9]{64}$/u.test(receiptSha256)
+      || !/^[a-f0-9]{64}$/u.test(manifestSha256) || !releaseRoot.startsWith("/")) process.exit(2)
+    process.stdout.write(JSON.stringify({
+      schema: "video-autoworker-legacy-bootstrap-sdk-successor-completion/v1",
+      ok: true,
+      recovered: true,
+      sourceCommit,
+      historicalSourceCommit,
+      attempt,
+      releaseId,
+      releaseRoot,
+      manifestSha256,
+      intakeRevision: Number(intakeRevision),
+      completedAt: Date.now(),
+      controlSourceCommit,
+      successorReceipt: { path: receipt, sha256: receiptSha256 },
+      targetMapping: { path: mapping, sha256: mappingSha256 },
+    }))
+  ' "$source_commit" "$BOOTSTRAP_HISTORICAL_SOURCE_COMMIT" \
+    "$BOOTSTRAP_SUCCESSOR_ATTEMPT_ID" "$release_id" "$release_root" "$manifest_sha256" \
+    "$intake_revision" "$BOOTSTRAP_CONTROL_SOURCE_COMMIT" "$BOOTSTRAP_SUCCESSOR_RECEIPT" \
+    "$successor_receipt_sha" "$BOOTSTRAP_SUCCESSOR_MAPPING" "$target_mapping_sha")" \
+    || fail "unable to build recovery completion"
+  write_json_immutable "$BOOTSTRAP_SUCCESSOR_COMPLETION" "$recovery_completion" \
+    || fail "unable to publish recovery completion"
 }
 
 verify_active_director_projection_chain() {
@@ -640,6 +854,11 @@ assert_bootstrap_operation_gate() {
     bootstrap)
       [[ "$#" -eq 6 ]] \
         || fail "bootstrap recovery requires the complete release, evidence, proof, and confirmed-attempt binding"
+      return
+      ;;
+    bootstrap-successor)
+      [[ "$#" -eq 13 ]] \
+        || fail "bootstrap successor recovery requires the historical target and complete successor binding"
       return
       ;;
     *) fail "bootstrap recovery hold is active; only status or the fully bound bootstrap recovery may run" ;;
@@ -1245,6 +1464,13 @@ resolve_baseline_source_commit() {
     || fail "bootstrap release ID must be a 7-40 character Git commit prefix with optional -runtime suffix"
   resolved="$(git -C "$PROJECT_ROOT" rev-parse --verify "${candidate}^{commit}" 2>/dev/null)" \
     || fail "bootstrap release ID does not resolve to a Git commit"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    [[ "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ \
+      && "$resolved" == "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" ]] \
+      || fail "bootstrap successor target app source does not match the target release"
+    printf '%s\n' "$resolved"
+    return
+  fi
   head="$(git -C "$PROJECT_ROOT" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" \
     || fail "bootstrap requires a full Git HEAD"
   [[ "$resolved" == "$head" ]] \
@@ -1253,8 +1479,9 @@ resolve_baseline_source_commit() {
 }
 
 check_n8n_workflow_compatibility() {
-  local n8n_pid="$1" n8n_db="$2" expected_commit="$3" verifier canonical_db relative
-  verifier="$PROJECT_ROOT/scripts/verify-n8n-blue-green-workflows.mjs"
+  local n8n_pid="$1" n8n_db="$2" expected_commit="$3" verifier canonical_db relative verifier_root
+  verifier_root="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT"
+  verifier="$verifier_root/scripts/verify-n8n-blue-green-workflows.mjs"
   [[ "$n8n_pid" =~ ^[1-9][0-9]*$ ]] || fail "n8n workflow verification PID is invalid"
   [[ "$expected_commit" =~ ^[a-f0-9]{40}$ ]] || fail "n8n workflow verification commit is invalid"
   kill -0 "$n8n_pid" 2>/dev/null || fail "n8n workflow verification requires the evidenced live PID"
@@ -1272,9 +1499,9 @@ check_n8n_workflow_compatibility() {
   for relative in \
     ops/n8n/workflows/aiworker-task-intake.json \
     ops/n8n/workflows/aiworker-video-analysis.json; do
-    git -C "$PROJECT_ROOT" ls-files --error-unmatch "$relative" >/dev/null 2>&1 \
+    git -C "$verifier_root" ls-files --error-unmatch "$relative" >/dev/null 2>&1 \
       || fail "n8n workflow compatibility source is not tracked: $relative"
-    git -C "$PROJECT_ROOT" diff --quiet HEAD -- "$relative" \
+    git -C "$verifier_root" diff --quiet HEAD -- "$relative" \
       || fail "n8n workflow compatibility source differs from Git HEAD: $relative"
   done
   env -u NODE_ENV \
@@ -1287,9 +1514,9 @@ check_n8n_workflow_compatibility() {
     -u AIWORKER_TEST_N8N_AFTER_QUERY \
     "$NODE_BIN" "$verifier" \
     --database "$canonical_db" \
-    --repository "$PROJECT_ROOT" \
+    --repository "$verifier_root" \
     --expected-commit "$expected_commit" \
-    --module-root "$PROJECT_ROOT" \
+    --module-root "$verifier_root" \
     --pid "$n8n_pid" \
     --port 5678
 }
@@ -1512,7 +1739,7 @@ if (value.schema !== 'video-autoworker-blue-green-baseline/v3'
   || typeof value.n8nDbPath !== 'string' || !value.n8nDbPath.startsWith('/')
   || /[\r\n]/u.test(value.n8nDbPath)
   || value.n8nWorkflowProtocol !== 'slot-v1-execution-owner-v1'
-  || value.n8nWorkflowSourceCommit !== value.baselineSourceCommit
+  || !/^[a-f0-9]{40}$/u.test(value.n8nWorkflowSourceCommit)
   || !/^[a-f0-9]{64}$/u.test(value.n8nWorkflowDigest)
   || !Number.isSafeInteger(value.completedAt) || value.completedAt <= 0
   || value.dbPath !== dbPath || value.routerStatePath !== routerStatePath
@@ -1645,6 +1872,10 @@ bootstrap_baseline() {
   local evidence_verify_mode=--verify-evidence-fd evidence_static_recovery=0 pending_probe pending_legacy_pid pending_evidence_sha
   local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status="" guard_mode
   local guard_mode_status
+  local successor_values successor_release_id successor_release_root successor_manifest
+  local control_source_commit successor_receipt_sha recovery_completion
+  local evidence_release_id evidence_release_root n8n_source_commit
+  local authorization_source_commit authorization_release_id authorization_release_root authorization_manifest
   local n8n_listener_pid n8n_runtime_cwd n8n_runtime_release recovery_attempt recovery_parent recovery_guard_pid
   local legacy_state
   local guard_available=0
@@ -1658,7 +1889,40 @@ bootstrap_baseline() {
     && -n "$attempt_dir" ]] \
     || { usage >&2; exit 2; }
   acquire_lock
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    physical_root="$(assert_release "$release_id" "$standalone_root")"
+    manifest="$(release_manifest_sha "$physical_root")"
+    successor_values="$(verify_bootstrap_sdk_successor)" \
+      || fail "bootstrap SDK successor could not be verified"
+    BOOTSTRAP_HISTORICAL_PROJECT_ROOT="$(printf '%s\n' "$successor_values" | sed -n '1p')"
+    BOOTSTRAP_HISTORICAL_SOURCE_COMMIT="$(printf '%s\n' "$successor_values" | sed -n '2p')"
+    BOOTSTRAP_HISTORICAL_CONTROLLER="$(printf '%s\n' "$successor_values" | sed -n '3p')"
+    BOOTSTRAP_SUCCESSOR_ATTEMPT_ID="$(printf '%s\n' "$successor_values" | sed -n '4p')"
+    BOOTSTRAP_SUCCESSOR_PREFLIGHT="$(printf '%s\n' "$successor_values" | sed -n '5p')"
+    BOOTSTRAP_TARGET_APP_SOURCE_COMMIT="$(printf '%s\n' "$successor_values" | sed -n '6p')"
+    successor_release_id="$(printf '%s\n' "$successor_values" | sed -n '7p')"
+    successor_release_root="$(printf '%s\n' "$successor_values" | sed -n '8p')"
+    successor_manifest="$(printf '%s\n' "$successor_values" | sed -n '9p')"
+    BOOTSTRAP_HISTORICAL_RELEASE_ID="$(printf '%s\n' "$successor_values" | sed -n '10p')"
+    BOOTSTRAP_HISTORICAL_RELEASE_ROOT="$(printf '%s\n' "$successor_values" | sed -n '11p')"
+    BOOTSTRAP_HISTORICAL_MANIFEST_SHA256="$(printf '%s\n' "$successor_values" | sed -n '12p')"
+    BOOTSTRAP_N8N_WORKFLOW_SOURCE_COMMIT="$(printf '%s\n' "$successor_values" | sed -n '13p')"
+    BOOTSTRAP_CONTROL_SOURCE_COMMIT="$(printf '%s\n' "$successor_values" | sed -n '14p')"
+    BOOTSTRAP_HISTORICAL_PENDING="$(printf '%s\n' "$successor_values" | sed -n '15p')"
+    BOOTSTRAP_HISTORICAL_RUN_DIRECTORY="$(printf '%s\n' "$successor_values" | sed -n '16p')"
+    BOOTSTRAP_HISTORICAL_ROUTER_STATE="$(printf '%s\n' "$successor_values" | sed -n '17p')"
+    BOOTSTRAP_HISTORICAL_SLOT="$(printf '%s\n' "$successor_values" | sed -n '18p')"
+    [[ "$successor_release_id" == "$release_id" && "$successor_release_root" == "$physical_root" \
+      && "$successor_manifest" == "$manifest" && "$slot" == "$BOOTSTRAP_HISTORICAL_SLOT" ]] \
+      || fail "bootstrap SDK successor requested target differs from the release arguments"
+  fi
   pending="$(bootstrap_pending_file)"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    [[ "$(physical_path "$RUN_DIR")" == "$BOOTSTRAP_HISTORICAL_RUN_DIRECTORY" \
+      && "$STATE_FILE" == "$BOOTSTRAP_HISTORICAL_ROUTER_STATE" \
+      && "$pending" == "$BOOTSTRAP_HISTORICAL_PENDING" ]] \
+      || fail "bootstrap SDK successor routing differs from the immutable historical recovery"
+  fi
   if [[ -e "$(baseline_file)" || -L "$(baseline_file)" ]]; then
     validate_state
     local completed_baseline completed_binding
@@ -1668,9 +1932,13 @@ bootstrap_baseline() {
     existing_release="$(read_state_slot_release "$existing_active")"
     existing_generation="$(read_state_field generation)"
     assert_router_identity "$existing_active" "$existing_release" "$existing_generation" >/dev/null
-    [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
-      && "$SCRIPT_DIR/manage-blue-green-services.sh" status router >/dev/null \
-      && "$SCRIPT_DIR/manage-blue-green-services.sh" status "$existing_active" >/dev/null \
+    local completed_manager="$SCRIPT_DIR/manage-blue-green-services.sh"
+    if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+      completed_manager="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/manage-blue-green-services.sh"
+    fi
+    [[ -x "$completed_manager" ]] \
+      && "$completed_manager" status router >/dev/null \
+      && "$completed_manager" status "$existing_active" >/dev/null \
       || fail "completed baseline is not under the expected service manager"
     if [[ -e "$pending" || -L "$pending" ]]; then
       assert_immutable_private_file "bootstrap pending marker" "$pending"
@@ -1679,27 +1947,36 @@ bootstrap_baseline() {
       completed_binding="$(binding_values "$existing_active")"
       "$NODE_BIN" - "$(baseline_file)" "$pending" "$slot" "$release_id" "$physical_root" \
         "$manifest" "$evidence_file" "$rollback_proof" "$attempt_dir" "$existing_active" \
-        "$existing_release" "$existing_generation" "$completed_binding" "$(slot_port "$slot")" <<'NODE' \
+        "$existing_release" "$existing_generation" "$completed_binding" "$(slot_port "$slot")" \
+        "$BOOTSTRAP_SUCCESSOR_MODE" "$BOOTSTRAP_HISTORICAL_RELEASE_ID" \
+        "$BOOTSTRAP_HISTORICAL_RELEASE_ROOT" "$BOOTSTRAP_HISTORICAL_MANIFEST_SHA256" \
+        "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" "$BOOTSTRAP_N8N_WORKFLOW_SOURCE_COMMIT" <<'NODE' \
         || fail "completed baseline does not exactly match the pending bootstrap operation"
 const fs = require('node:fs')
 const path = require('node:path')
 const [baselinePath, pendingPath, slot, releaseId, releaseRoot, manifestSha256,
   evidencePath, proofPath, attemptDir, active, activeRelease, rawGeneration,
-  rawBinding, rawSlotPort] = process.argv.slice(2)
+  rawBinding, rawSlotPort, successorMode, historicalReleaseId, historicalReleaseRoot,
+  historicalManifestSha256, targetSourceCommit, workflowSourceCommit] = process.argv.slice(2)
 const baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8'))
 const pending = JSON.parse(fs.readFileSync(pendingPath, 'utf8'))
 const binding = rawBinding.trimEnd().split('\n')
+const expectedPendingReleaseId = successorMode === '1' ? historicalReleaseId : releaseId
+const expectedPendingReleaseRoot = successorMode === '1' ? historicalReleaseRoot : releaseRoot
+const expectedPendingManifest = successorMode === '1' ? historicalManifestSha256 : manifestSha256
+const expectedBaselineSource = successorMode === '1' ? targetSourceCommit : pending.baselineSourceCommit
+const expectedWorkflowSource = successorMode === '1' ? workflowSourceCommit : pending.n8n?.workflowSourceCommit
 if (pending.schema !== 'video-autoworker-blue-green-bootstrap-pending/v4'
   || baseline.schema !== 'video-autoworker-blue-green-baseline/v3'
   || Number(rawGeneration) !== 1 || active !== slot || activeRelease !== releaseId
-  || pending.slot !== slot || pending.releaseId !== releaseId
-  || pending.releaseRoot !== releaseRoot || pending.manifestSha256 !== manifestSha256
+  || pending.slot !== slot || pending.releaseId !== expectedPendingReleaseId
+  || pending.releaseRoot !== expectedPendingReleaseRoot || pending.manifestSha256 !== expectedPendingManifest
   || pending.evidence?.path !== evidencePath || pending.proof?.path !== proofPath
   || path.dirname(pending.authorization?.prepare?.path || '') !== attemptDir
-  || baseline.baselineSlot !== pending.slot
-  || baseline.baselineReleaseId !== pending.releaseId
-  || baseline.baselineReleaseRoot !== pending.releaseRoot
-  || baseline.baselineManifestSha256 !== pending.manifestSha256
+  || baseline.baselineSlot !== slot
+  || baseline.baselineReleaseId !== releaseId
+  || baseline.baselineReleaseRoot !== releaseRoot
+  || baseline.baselineManifestSha256 !== manifestSha256
   || baseline.legacyReleaseId !== pending.legacyReleaseId
   || baseline.legacyPid !== pending.legacyPid
   || baseline.evidenceSha256 !== pending.evidence?.sha256
@@ -1708,8 +1985,8 @@ if (pending.schema !== 'video-autoworker-blue-green-bootstrap-pending/v4'
   || baseline.routerPort !== pending.router?.port
   || baseline.n8nPid !== pending.n8n?.pid
   || baseline.n8nDbPath !== pending.n8n?.dbPath
-  || baseline.baselineSourceCommit !== pending.baselineSourceCommit
-  || baseline.n8nWorkflowSourceCommit !== pending.n8n?.workflowSourceCommit
+  || baseline.baselineSourceCommit !== expectedBaselineSource
+  || baseline.n8nWorkflowSourceCommit !== expectedWorkflowSource
   || baseline.n8nWorkflowProtocol !== pending.n8n?.workflowProtocol
   || baseline.n8nWorkflowDigest !== pending.n8n?.workflowDigest
   || binding.length !== 5 || binding[0] !== releaseId || binding[1] !== releaseRoot
@@ -1762,6 +2039,9 @@ NODE
       if [[ -e "$completed_guard_socket" || -L "$completed_guard_socket" \
         || -e "$completed_guard_token" || -L "$completed_guard_token" ]]; then
         guard_controller="$PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
+        if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+          guard_controller="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
+        fi
         [[ -S "$completed_guard_socket" && ! -L "$completed_guard_socket" \
           && -f "$completed_guard_token" && ! -L "$completed_guard_token" ]] \
           || fail "completed baseline has partial recovery-hold state"
@@ -1778,10 +2058,24 @@ NODE
             || fail "unable to remove stale completed baseline recovery-hold state"
         fi
       fi
+      if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+        intake_revision="$(ensure_bootstrap_intake_paused 127.0.0.1 "$(slot_port "$slot")")" \
+          || fail "unable to confirm the completed baseline intake pause"
+        publish_bootstrap_sdk_successor_completion "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" \
+          "$release_id" "$physical_root" "$manifest" "$intake_revision"
+      fi
       remove_immutable_file_durable "completed bootstrap pending marker" "$pending" \
         || fail "unable to durably finalize the completed bootstrap marker"
       printf 'Finalized previously completed blue-green baseline; legacy shutdown was not repeated\n'
       return
+    fi
+    if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+      [[ "$existing_active" == "$slot" && "$existing_release" == "$release_id" ]] \
+        || fail "completed baseline differs from the successor target"
+      intake_revision="$(ensure_bootstrap_intake_paused 127.0.0.1 "$(slot_port "$slot")")" \
+        || fail "unable to confirm the completed baseline intake pause"
+      publish_bootstrap_sdk_successor_completion "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" \
+        "$release_id" "$physical_root" "$manifest" "$intake_revision"
     fi
     printf 'Blue-green baseline already completed; legacy shutdown was not repeated\n'
     return
@@ -1803,41 +2097,68 @@ NODE
   physical_root="$(assert_release "$release_id" "$standalone_root")"
   manifest="$(release_manifest_sha "$physical_root")"
   source_commit="$(resolve_baseline_source_commit "$release_id")"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 && "$source_commit" != "$BOOTSTRAP_TARGET_APP_SOURCE_COMMIT" ]]; then
+    fail "bootstrap SDK successor target app source differs from the release commit"
+  fi
+  evidence_release_id="$release_id"
+  evidence_release_root="$physical_root"
+  n8n_source_commit="$source_commit"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    evidence_release_id="$BOOTSTRAP_HISTORICAL_RELEASE_ID"
+    evidence_release_root="$BOOTSTRAP_HISTORICAL_RELEASE_ROOT"
+    n8n_source_commit="$BOOTSTRAP_N8N_WORKFLOW_SOURCE_COMMIT"
+  fi
+  authorization_source_commit="$source_commit"
+  authorization_release_id="$release_id"
+  authorization_release_root="$physical_root"
+  authorization_manifest="$manifest"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    authorization_source_commit="$BOOTSTRAP_HISTORICAL_SOURCE_COMMIT"
+    authorization_release_id="$BOOTSTRAP_HISTORICAL_RELEASE_ID"
+    authorization_release_root="$BOOTSTRAP_HISTORICAL_RELEASE_ROOT"
+    authorization_manifest="$BOOTSTRAP_HISTORICAL_MANIFEST_SHA256"
+  fi
   # Phase 1 is intentionally process-independent: the immutable application
   # release, installed OpenClaw payloads, and runtime-convergence proof must all
   # pass before any pending marker is written or the legacy PID can be stopped.
   # The database/extraction half remains a phase-2 check after the new release
   # has run its append-only migrations.
-  bootstrap_preflight_contract="$(verify_director_video_release_preflight \
-    "$release_id" "$physical_root")" \
-    || fail "baseline immutable release preflight failed before legacy shutdown"
-  evidence_generator="$PROJECT_ROOT/scripts/generate-legacy-freeze-evidence.mjs"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    bootstrap_preflight_contract="$BOOTSTRAP_SUCCESSOR_PREFLIGHT"
+  else
+    bootstrap_preflight_contract="$(verify_director_video_release_preflight \
+      "$release_id" "$physical_root")" \
+      || fail "baseline immutable release preflight failed before legacy shutdown"
+  fi
+  evidence_generator="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/generate-legacy-freeze-evidence.mjs"
   [[ -f "$evidence_generator" && ! -L "$evidence_generator" ]] \
     || fail "managed legacy freeze evidence generator is unavailable"
-  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-freeze-evidence.mjs >/dev/null 2>&1 \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-freeze-evidence.mjs >/dev/null 2>&1 \
     || fail "managed legacy freeze evidence generator is not tracked"
-  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-freeze-evidence.mjs \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-freeze-evidence.mjs \
     || fail "managed legacy freeze evidence generator differs from Git HEAD"
-  rollback_generator="$PROJECT_ROOT/scripts/generate-legacy-bootstrap-rollback-proof.mjs"
+  rollback_generator="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/generate-legacy-bootstrap-rollback-proof.mjs"
   [[ -f "$rollback_generator" && ! -L "$rollback_generator" ]] \
     || fail "managed rollback proof generator is unavailable"
-  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-bootstrap-rollback-proof.mjs >/dev/null 2>&1 \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" ls-files --error-unmatch scripts/generate-legacy-bootstrap-rollback-proof.mjs >/dev/null 2>&1 \
     || fail "managed rollback proof generator is not tracked"
-  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-bootstrap-rollback-proof.mjs \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" diff --quiet HEAD -- scripts/generate-legacy-bootstrap-rollback-proof.mjs \
     || fail "managed rollback proof generator differs from Git HEAD"
-  guard_controller="$PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
+  guard_controller="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/legacy-freeze-guard.mjs"
   [[ -f "$guard_controller" && ! -L "$guard_controller" ]] \
     || fail "managed legacy freeze guard is unavailable"
-  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-freeze-guard.mjs >/dev/null 2>&1 \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-freeze-guard.mjs >/dev/null 2>&1 \
     || fail "managed legacy freeze guard is not tracked"
-  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-freeze-guard.mjs \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-freeze-guard.mjs \
     || fail "managed legacy freeze guard differs from Git HEAD"
-  bootstrap_controller="$PROJECT_ROOT/scripts/legacy-bootstrap-controller.mjs"
+  bootstrap_controller="$([[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] \
+    && printf '%s' "$BOOTSTRAP_HISTORICAL_CONTROLLER" \
+    || printf '%s' "$PROJECT_ROOT/scripts/legacy-bootstrap-controller.mjs")"
   [[ -f "$bootstrap_controller" && ! -L "$bootstrap_controller" ]] \
     || fail "managed legacy bootstrap confirmation controller is unavailable"
-  git -C "$PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-bootstrap-controller.mjs >/dev/null 2>&1 \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" ls-files --error-unmatch scripts/legacy-bootstrap-controller.mjs >/dev/null 2>&1 \
     || fail "managed legacy bootstrap confirmation controller is not tracked"
-  git -C "$PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-bootstrap-controller.mjs \
+  git -C "$BOOTSTRAP_HISTORICAL_PROJECT_ROOT" diff --quiet HEAD -- scripts/legacy-bootstrap-controller.mjs \
     || fail "managed legacy bootstrap confirmation controller differs from Git HEAD"
   if ( : <&9 ) 2>/dev/null; then fail "reserved bootstrap evidence FD 9 is already open"; fi
   exec 9<"$evidence_file" || fail "unable to open bootstrap evidence"
@@ -1859,16 +2180,16 @@ NODE
     -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
     -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
     "$NODE_BIN" "$evidence_generator" "$evidence_verify_mode" "$evidence_fd" \
-      --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
-      --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" \
+      --output "$evidence_file" --slot "$slot" --release-id "$evidence_release_id" \
+      --standalone-root "$evidence_release_root" --rollback-proof "$rollback_proof")" \
     || fail "managed bootstrap evidence signature or target binding is invalid"
   [[ "$verified_evidence_sha" =~ ^[a-f0-9]{64}$ ]] \
     || fail "managed bootstrap evidence digest is invalid"
   if (( pending_exists == 1 )) && [[ "$verified_evidence_sha" != "$pending_evidence_sha" ]]; then
     fail "bootstrap retry evidence does not match the pending digest"
   fi
-  manager="$SCRIPT_DIR/manage-blue-green-services.sh"
-  installer="$SCRIPT_DIR/install-blue-green-launch-agents.sh"
+  manager="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/manage-blue-green-services.sh"
+  installer="$BOOTSTRAP_HISTORICAL_PROJECT_ROOT/scripts/install-blue-green-launch-agents.sh"
   [[ -x "$manager" && -x "$installer" ]] \
     || fail "managed blue-green service scripts are required before legacy shutdown"
   "$installer" --dry-run >/dev/null \
@@ -1997,7 +2318,7 @@ NODE
     || fail "evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH"
   check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
     || fail "legacy databases are not quiescent before workflow verification"
-  workflow_compatibility="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+  workflow_compatibility="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$n8n_source_commit")" \
     || fail "published n8n workflows are not compatible with slot-v1"
   workflow_digest="$($NODE_BIN -e '
     const value = JSON.parse(process.argv[1])
@@ -2189,8 +2510,8 @@ NODE
   bootstrap_authorization="$("$NODE_BIN" "$bootstrap_controller" status --attempt-dir "$attempt_dir")" \
     || fail "legacy bootstrap confirmation chain is invalid"
   proof_sha="$(shasum -a 256 "$rollback_proof" | awk '{print $1}')"
-  "$NODE_BIN" - "$bootstrap_authorization" "$allow_expired_authorization" "$source_commit" \
-    "$slot" "$release_id" "$physical_root" "$manifest" "$evidence_file" "$evidence_sha" \
+  "$NODE_BIN" - "$bootstrap_authorization" "$allow_expired_authorization" "$authorization_source_commit" \
+    "$slot" "$authorization_release_id" "$authorization_release_root" "$authorization_manifest" "$evidence_file" "$evidence_sha" \
     "$rollback_proof" "$proof_sha" "$live_db" "$n8n_db" "$(physical_path "$RUN_DIR")" \
     "$STATE_FILE" "$ROUTER_PORT" <<'NODE' \
     || fail "legacy bootstrap confirmation is expired or bound to another operation"
@@ -2212,9 +2533,9 @@ if (value.phase !== 'SHUTDOWN_REQUESTED' || typeof value.attemptId !== 'string'
   || binding.routing?.runDirectory?.path !== runDirectory
   || binding.routing?.statePath !== statePath || binding.routing?.port !== Number(rawPort)) process.exit(2)
 NODE
-  pending_payload="$($NODE_BIN - "$bootstrap_authorization" "$attempt_dir" "$slot" "$release_id" \
-    "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
-    "$evidence_observed" "$source_commit" "$n8n_pid" "$workflow_digest" "$workflow_report" <<'NODE'
+  pending_payload="$($NODE_BIN - "$bootstrap_authorization" "$attempt_dir" "$slot" "$authorization_release_id" \
+    "$authorization_release_root" "$authorization_manifest" "$legacy_release" "$legacy_pid" "$legacy_cwd" \
+    "$evidence_observed" "$authorization_source_commit" "$n8n_pid" "$workflow_digest" "$workflow_report" <<'NODE'
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const path = require('node:path')
@@ -2299,8 +2620,8 @@ NODE
       -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
       -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
       "$NODE_BIN" "$evidence_generator" --verify-evidence-fd "$evidence_fd" \
-        --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
-        --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
+        --output "$evidence_file" --slot "$slot" --release-id "$evidence_release_id" \
+        --standalone-root "$evidence_release_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
       || fail "legacy or n8n full identity changed immediately before SIGTERM"
     kill -TERM "$legacy_pid"
     deadline=$(( $(date +%s) + 30 ))
@@ -2322,15 +2643,15 @@ NODE
     -u AIWORKER_TEST_LEGACY_FREEZE_SAMPLE_DELAY_MS \
     -u AIWORKER_TEST_LEGACY_FREEZE_SNAPSHOT_COMMAND \
     "$NODE_BIN" "$evidence_generator" --verify-evidence-static-fd "$evidence_fd" \
-      --output "$evidence_file" --slot "$slot" --release-id "$release_id" \
-      --standalone-root "$physical_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
+      --output "$evidence_file" --slot "$slot" --release-id "$evidence_release_id" \
+      --standalone-root "$evidence_release_root" --rollback-proof "$rollback_proof")" == "$evidence_sha" ]] \
     || fail "bootstrap evidence or external ingress freeze changed during legacy shutdown"
   kill -0 "$n8n_pid" 2>/dev/null || fail "n8n PID changed or stopped during bootstrap"
   lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
     || fail "n8n database identity changed during bootstrap"
   check_legacy_databases_quiescent "$live_db" "$n8n_db" >/dev/null \
     || fail "legacy databases changed after ingress shutdown"
-  workflow_compatibility_after="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+  workflow_compatibility_after="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$n8n_source_commit")" \
     || fail "published n8n workflow compatibility changed during legacy shutdown"
   [[ "$workflow_compatibility_after" == "$workflow_compatibility" ]] \
     || fail "published n8n workflow digest changed during legacy shutdown"
@@ -2356,6 +2677,7 @@ NODE
   listeners="$(lsof_listener_pids "$ROUTER_PORT")" \
     || fail "router listener query failed before managed baseline startup"
   [[ -z "$listeners" ]] || fail "router port was reclaimed before managed baseline startup"
+  consume_bootstrap_sdk_successor
 
   binding_payload="$($NODE_BIN -e '
     const [slot, releaseId, releaseRoot, manifestSha, port] = process.argv.slice(1)
@@ -2363,7 +2685,6 @@ NODE
       releaseId, releaseRoot, manifestSha256: manifestSha, host: "127.0.0.1", port: Number(port),
       boundAt: new Date().toISOString() }))
   ' "$slot" "$release_id" "$physical_root" "$manifest" "$(slot_port "$slot")")"
-  write_json_atomic "$(binding_file "$slot")" "$binding_payload"
   state_payload="$($NODE_BIN -e '
     const [active, other, activePort, otherPort, releaseId] = process.argv.slice(1)
     const slots = {}
@@ -2372,6 +2693,98 @@ NODE
     process.stdout.write(JSON.stringify({ schema: "video-autoworker-standalone-router/v1", generation: 1,
       active, previous: null, updatedAt: new Date().toISOString(), slots }))
   ' "$slot" "$other_slot" "$(slot_port "$slot")" "$(slot_port "$other_slot")" "$release_id")"
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    local target_mapping_snapshot
+    target_mapping_snapshot="$($NODE_BIN - "$(binding_file "$slot")" "$STATE_FILE" "$slot" \
+      "$BOOTSTRAP_HISTORICAL_RELEASE_ID" "$BOOTSTRAP_HISTORICAL_RELEASE_ROOT" \
+      "$BOOTSTRAP_HISTORICAL_MANIFEST_SHA256" "$release_id" "$physical_root" "$manifest" \
+      "$(slot_port "$slot")" "$other_slot" "$(slot_port "$other_slot")" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const [bindingPath, statePath, slot, historicalReleaseId, historicalReleaseRoot,
+  historicalManifest, requestedReleaseId, requestedReleaseRoot, requestedManifest,
+  rawSlotPort, otherSlot, rawOtherPort] = process.argv.slice(2)
+const stableJson = pathname => {
+  const before = fs.lstatSync(pathname, { bigint: true })
+  if (!before.isFile() || before.isSymbolicLink() || before.uid !== BigInt(process.getuid())
+    || before.nlink !== 1n || (before.mode & 0o7777n) !== 0o600n) process.exit(3)
+  const fd = fs.openSync(pathname, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true })
+    const source = fs.readFileSync(fd)
+    const after = fs.lstatSync(pathname, { bigint: true })
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size
+      || after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs) process.exit(4)
+    return {
+      value: JSON.parse(source),
+      reference: { path: pathname, dev: opened.dev.toString(), ino: opened.ino.toString(),
+        size: Number(opened.size), mtimeNs: opened.mtimeNs.toString(), ctimeNs: opened.ctimeNs.toString(),
+        sha256: crypto.createHash('sha256').update(source).digest('hex') },
+    }
+  } finally { fs.closeSync(fd) }
+}
+const bindingLoaded = stableJson(bindingPath)
+const stateLoaded = stableJson(statePath)
+const binding = bindingLoaded.value
+const state = stateLoaded.value
+const bindingTarget = binding.releaseId === requestedReleaseId ? 'requested'
+  : binding.releaseId === historicalReleaseId ? 'historical' : null
+const stateRelease = state?.slots?.[slot]?.releaseId
+const stateTarget = stateRelease === requestedReleaseId ? 'requested'
+  : stateRelease === historicalReleaseId ? 'historical' : null
+const validBinding = binding.schema === 'video-autoworker-standalone-slot/v1'
+  && binding.slot === slot
+  && binding.host === '127.0.0.1' && binding.port === Number(rawSlotPort)
+  && ((bindingTarget === 'historical' && binding.releaseRoot === historicalReleaseRoot
+      && binding.manifestSha256 === historicalManifest)
+    || (bindingTarget === 'requested' && binding.releaseRoot === requestedReleaseRoot
+      && binding.manifestSha256 === requestedManifest))
+const validState = state?.schema === 'video-autoworker-standalone-router/v1'
+  && state.generation === 1 && state.active === slot && state.previous === null && stateTarget !== null
+  && state.slots?.[slot]?.host === '127.0.0.1'
+  && state.slots?.[slot]?.port === Number(rawSlotPort)
+  && state.slots?.[otherSlot]?.host === '127.0.0.1'
+  && state.slots?.[otherSlot]?.port === Number(rawOtherPort)
+  && state.slots?.[otherSlot]?.releaseId === `unbound-${otherSlot}`
+if (!validBinding || !validState) process.exit(2)
+process.stdout.write(JSON.stringify({
+  classification: `${bindingTarget}:${stateTarget}`,
+  binding: bindingLoaded.reference,
+  state: stateLoaded.reference,
+}))
+NODE
+    )" || fail "bootstrap successor target mapping CAS does not match historical or requested target"
+    target_mapping_state="$($NODE_BIN -e '
+      const value = JSON.parse(process.argv[1])
+      if (typeof value?.classification !== "string") process.exit(2)
+      process.stdout.write(value.classification)
+    ' "$target_mapping_snapshot")" || fail "bootstrap successor target mapping snapshot is invalid"
+    case "$target_mapping_state" in
+      historical:historical)
+        assert_bootstrap_target_mapping_snapshot "$target_mapping_snapshot" binding "$(binding_file "$slot")" \
+          || fail "bootstrap successor binding changed before target mapping"
+        write_json_atomic "$(binding_file "$slot")" "$binding_payload"
+        assert_bootstrap_target_mapping_snapshot "$target_mapping_snapshot" state "$STATE_FILE" \
+          || fail "bootstrap successor router state changed before target mapping"
+        write_router_state_atomic "$state_payload"
+        ;;
+      requested:historical)
+        assert_bootstrap_target_mapping_snapshot "$target_mapping_snapshot" state "$STATE_FILE" \
+          || fail "bootstrap successor router state changed before target mapping"
+        write_router_state_atomic "$state_payload"
+        ;;
+      historical:requested)
+        assert_bootstrap_target_mapping_snapshot "$target_mapping_snapshot" binding "$(binding_file "$slot")" \
+          || fail "bootstrap successor binding changed before target mapping"
+        write_json_atomic "$(binding_file "$slot")" "$binding_payload"
+        ;;
+      requested:requested) ;;
+      *) fail "bootstrap successor target mapping state is invalid" ;;
+    esac
+  else
+    write_json_atomic "$(binding_file "$slot")" "$binding_payload"
+  fi
   if [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
     validate_state
     [[ "$(read_state_field generation)" == 1 && "$(read_state_field active)" == "$slot" \
@@ -2380,6 +2793,86 @@ NODE
   else
     write_router_state_atomic "$state_payload"
     validate_state
+  fi
+  if [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]]; then
+    [[ "$(binding_values "$slot" | sed -n '1p')" == "$release_id" \
+      && "$(binding_values "$slot" | sed -n '2p')" == "$physical_root" \
+      && "$(binding_values "$slot" | sed -n '3p')" == "$manifest" \
+      && "$(binding_values "$slot" | sed -n '4p')" == 127.0.0.1 \
+      && "$(binding_values "$slot" | sed -n '5p')" == "$(slot_port "$slot")" ]] \
+      || fail "bootstrap successor binding did not converge to the requested target"
+    local target_mapping_payload mapping_receipt_sha mapping_consumed_sha
+    mapping_receipt_sha="$(shasum -a 256 "$BOOTSTRAP_SUCCESSOR_RECEIPT" | awk '{print $1}')"
+    mapping_consumed_sha="$(shasum -a 256 "$BOOTSTRAP_SUCCESSOR_CONSUMED" | awk '{print $1}')"
+    if [[ -e "$BOOTSTRAP_SUCCESSOR_MAPPING" || -L "$BOOTSTRAP_SUCCESSOR_MAPPING" ]]; then
+      assert_immutable_private_file "bootstrap successor target mapping" "$BOOTSTRAP_SUCCESSOR_MAPPING"
+      "$NODE_BIN" - "$BOOTSTRAP_SUCCESSOR_MAPPING" "$BOOTSTRAP_SUCCESSOR_ATTEMPT_ID" "$slot" \
+        "$BOOTSTRAP_HISTORICAL_RELEASE_ID" "$BOOTSTRAP_HISTORICAL_RELEASE_ROOT" \
+        "$BOOTSTRAP_HISTORICAL_MANIFEST_SHA256" "$release_id" "$physical_root" "$manifest" \
+        "$(binding_file "$slot")" "$STATE_FILE" "$BOOTSTRAP_SUCCESSOR_RECEIPT" \
+        "$mapping_receipt_sha" "$BOOTSTRAP_SUCCESSOR_CONSUMED" "$mapping_consumed_sha" <<'NODE' \
+        || fail "bootstrap successor target mapping receipt differs from the active mapping"
+const fs = require('node:fs')
+const [pathname, attempt, slot, historicalReleaseId, historicalReleaseRoot, historicalManifestSha256,
+  requestedReleaseId, requestedReleaseRoot, requestedManifestSha256, bindingPath, statePath,
+  receiptPath, receiptSha256, consumedPath, consumedSha256] = process.argv.slice(2)
+const value = JSON.parse(fs.readFileSync(pathname, 'utf8'))
+const snapshot = item => item && typeof item.path === 'string' && item.path.startsWith('/')
+  && /^\d+$/u.test(item.dev) && /^\d+$/u.test(item.ino) && Number.isSafeInteger(item.size)
+  && item.size > 0 && /^\d+$/u.test(item.mtimeNs) && /^\d+$/u.test(item.ctimeNs)
+  && /^[a-f0-9]{64}$/u.test(item.sha256)
+if (value.schema !== 'video-autoworker-legacy-bootstrap-sdk-target-mapping/v1'
+  || value.attempt !== attempt || value.slot !== slot
+  || value.historical?.releaseId !== historicalReleaseId
+  || value.historical?.releaseRoot !== historicalReleaseRoot
+  || value.historical?.manifestSha256 !== historicalManifestSha256
+  || value.requested?.releaseId !== requestedReleaseId
+  || value.requested?.releaseRoot !== requestedReleaseRoot
+  || value.requested?.manifestSha256 !== requestedManifestSha256
+  || value.bindingPath !== bindingPath || value.routerStatePath !== statePath
+  || value.authorization?.receipt?.path !== receiptPath
+  || value.authorization?.receipt?.sha256 !== receiptSha256
+  || value.authorization?.consumed?.path !== consumedPath
+  || value.authorization?.consumed?.sha256 !== consumedSha256
+  || !snapshot(value.sourceSnapshots?.binding) || !snapshot(value.sourceSnapshots?.state)
+  || !['historical:historical', 'requested:historical', 'historical:requested', 'requested:requested']
+    .includes(value.initialState)
+  || !Number.isSafeInteger(value.mappedAt) || value.mappedAt <= 0) process.exit(2)
+NODE
+    else
+      target_mapping_payload="$($NODE_BIN -e '
+        const [attempt, slot, historicalReleaseId, historicalReleaseRoot, historicalManifestSha256,
+          requestedReleaseId, requestedReleaseRoot, requestedManifestSha256, bindingPath,
+          routerStatePath, initialState, rawSnapshots, receiptPath, receiptSha256,
+          consumedPath, consumedSha256] = process.argv.slice(1)
+        const snapshots = JSON.parse(rawSnapshots)
+        process.stdout.write(JSON.stringify({
+          schema: "video-autoworker-legacy-bootstrap-sdk-target-mapping/v1",
+          attempt,
+          slot,
+          historical: { releaseId: historicalReleaseId, releaseRoot: historicalReleaseRoot,
+            manifestSha256: historicalManifestSha256 },
+          requested: { releaseId: requestedReleaseId, releaseRoot: requestedReleaseRoot,
+            manifestSha256: requestedManifestSha256 },
+          bindingPath,
+          routerStatePath,
+          initialState,
+          sourceSnapshots: { binding: snapshots.binding, state: snapshots.state },
+          authorization: {
+            receipt: { path: receiptPath, sha256: receiptSha256 },
+            consumed: { path: consumedPath, sha256: consumedSha256 },
+          },
+          mappedAt: Date.now(),
+        }))
+      ' "$BOOTSTRAP_SUCCESSOR_ATTEMPT_ID" "$slot" "$BOOTSTRAP_HISTORICAL_RELEASE_ID" \
+        "$BOOTSTRAP_HISTORICAL_RELEASE_ROOT" "$BOOTSTRAP_HISTORICAL_MANIFEST_SHA256" \
+        "$release_id" "$physical_root" "$manifest" "$(binding_file "$slot")" "$STATE_FILE" \
+        "$target_mapping_state" "$target_mapping_snapshot" "$BOOTSTRAP_SUCCESSOR_RECEIPT" \
+        "$mapping_receipt_sha" "$BOOTSTRAP_SUCCESSOR_CONSUMED" "$mapping_consumed_sha")" \
+        || fail "unable to build bootstrap successor target mapping receipt"
+      write_json_immutable "$BOOTSTRAP_SUCCESSOR_MAPPING" "$target_mapping_payload" \
+        || fail "unable to publish bootstrap successor target mapping receipt"
+    fi
   fi
   canonical_router_state="$(physical_path "$STATE_FILE")"
   "$manager" start "$slot" || fail "managed baseline slot failed to start"
@@ -2404,14 +2897,15 @@ NODE
   baseline_epoch="$(printf '%s\n' "$baseline_readiness" | sed -n '2p')"
   verify_routed_release "$slot" "$release_id" 1 "$intake_revision" "$baseline_epoch" \
     || fail "baseline routed health, page, or read-only API verification failed"
-  baseline_verified_contract="$(verify_director_video_release_chain "$release_id" "$physical_root")" \
+  baseline_verified_contract="$(verify_director_video_release_chain "$release_id" "$physical_root" \
+    "$([[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] && printf ancestor || printf head)")" \
     || fail "baseline director/video release chain is incompatible"
   [[ "$baseline_verified_contract" == "$bootstrap_preflight_contract" ]] \
     || fail "post-migration projection contract differs from the pre-shutdown release preflight"
   "$manager" status "$slot" >/dev/null \
     && "$manager" status router >/dev/null \
     || fail "baseline processes are healthy but not under the expected service manager"
-  workflow_compatibility_final="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$source_commit")" \
+  workflow_compatibility_final="$(check_n8n_workflow_compatibility "$n8n_pid" "$n8n_db" "$n8n_source_commit")" \
     || fail "published n8n workflow compatibility changed before baseline commit"
   [[ "$workflow_compatibility_final" == "$workflow_compatibility_after" ]] \
     || fail "published n8n workflow digest changed before baseline commit"
@@ -2426,17 +2920,17 @@ NODE
   baseline_payload="$($NODE_BIN -e '
     const [baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
       legacyReleaseId, rawLegacyPid, evidenceSha256, dbPath, routerStatePath, rawRouterPort,
-      rawN8nPid, n8nDbPath, sourceCommit, n8nWorkflowDigest] = process.argv.slice(1)
+      rawN8nPid, n8nDbPath, sourceCommit, n8nWorkflowSourceCommit, n8nWorkflowDigest] = process.argv.slice(1)
     process.stdout.write(JSON.stringify({ schema: "video-autoworker-blue-green-baseline/v3",
       baselineSlot, baselineReleaseId, baselineReleaseRoot, baselineManifestSha256,
       legacyReleaseId, legacyPid: Number(rawLegacyPid), evidenceSha256, dbPath, routerStatePath,
       n8nPid: Number(rawN8nPid), n8nDbPath,
       baselineSourceCommit: sourceCommit, n8nWorkflowProtocol: "slot-v1-execution-owner-v1",
-      n8nWorkflowSourceCommit: sourceCommit, n8nWorkflowDigest,
+      n8nWorkflowSourceCommit, n8nWorkflowDigest,
       routerPort: Number(rawRouterPort), completedAt: Math.floor(Date.now() / 1000) }))
   ' "$slot" "$release_id" "$physical_root" "$manifest" "$legacy_release" "$legacy_pid" \
     "$evidence_sha" "$live_db" "$canonical_router_state" "$ROUTER_PORT" "$n8n_pid" "$n8n_db" \
-    "$source_commit" "$workflow_digest")"
+    "$source_commit" "$n8n_source_commit" "$workflow_digest")"
   write_json_atomic "$(baseline_file)" "$baseline_payload"
   assert_baseline >/dev/null
   "$NODE_BIN" "$guard_controller" revoke --socket "$guard_socket" \
@@ -2446,6 +2940,8 @@ NODE
     || fail "post-shutdown n8n recovery hold did not remove its private socket and token"
   kill -0 "$n8n_pid" 2>/dev/null || fail "n8n stopped while releasing the recovery hold"
   exec 9<&-
+  publish_bootstrap_sdk_successor_completion "$source_commit" "$release_id" "$physical_root" \
+    "$manifest" "$intake_revision"
   remove_immutable_file_durable "completed bootstrap pending marker" "$pending" \
     || fail "unable to durably finalize the completed bootstrap marker"
   BOOTSTRAP_MAINTENANCE=0
@@ -3409,13 +3905,26 @@ attest_current() {
 command="${1:-}"
 shift || true
 case "$command" in
-  init|bootstrap|stage|bind|retire|switch|rollback|status|attest-current)
+  init|bootstrap|bootstrap-successor|stage|bind|retire|switch|rollback|status|attest-current)
     assert_bootstrap_operation_gate "$command" "$@"
     ;;
 esac
 case "$command" in
   init) init_state "$@" ;;
   bootstrap) bootstrap_baseline "$@" ;;
+  bootstrap-successor)
+    BOOTSTRAP_SUCCESSOR_MODE=1
+    BOOTSTRAP_SUCCESSOR_CONTROLLER="${7:-}"
+    BOOTSTRAP_SUCCESSOR_RECEIPT="${8:-}"
+    BOOTSTRAP_SUCCESSOR_TOKEN="${9:-}"
+    BOOTSTRAP_SUCCESSOR_CONSUMED="${10:-}"
+    BOOTSTRAP_SUCCESSOR_COMPATIBILITY="${11:-}"
+    BOOTSTRAP_SUCCESSOR_READINESS="${12:-}"
+    BOOTSTRAP_SUCCESSOR_GUARD_STATUS="${13:-}"
+    BOOTSTRAP_SUCCESSOR_COMPLETION="$(dirname "$BOOTSTRAP_SUCCESSOR_RECEIPT")/recovery-completion.json"
+    BOOTSTRAP_SUCCESSOR_MAPPING="$(dirname "$BOOTSTRAP_SUCCESSOR_RECEIPT")/target-mapping.json"
+    bootstrap_baseline "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}"
+    ;;
   stage) stage_release "$@" ;;
   bind) bind_slot "$@" ;;
   probe) probe_slot "$@" ;;

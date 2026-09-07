@@ -8,7 +8,7 @@ const TEST_HOME = '/Users/secretref-test'
 const TEST_KEYCHAIN = `${TEST_HOME}/Library/Keychains/login.keychain-db`
 
 function runRejected(args: string[], includeHome = true) {
-  const environment: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin' }
+  const environment: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', NODE_ENV: 'test' }
   if (includeHome) environment.HOME = TEST_HOME
   return spawnSync('/bin/sh', [SCRIPT, ...args], {
     encoding: 'utf8',
