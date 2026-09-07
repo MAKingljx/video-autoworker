@@ -182,6 +182,14 @@ lsof_listener_pids() {
   lsof_listener_pids_with_binary "$LSOF_BIN" "${1:-}"
 }
 
+guard_mode_requires_handoff() {
+  case "${1:-}" in
+    dual|dual-recovery) return 0 ;;
+    recovery-hold) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 verify_deployment_source_gate() {
   (( DEPLOYMENT_SOURCE_GATE_COMPLETE == 0 )) || return 0
   local invoked_path expected_path git_root head relative absolute worktree_blob head_blob status
@@ -1582,6 +1590,7 @@ bootstrap_baseline() {
   local evidence_fd=9 evidence_generator rollback_generator verified_evidence_sha guard_controller guard_socket guard_token
   local evidence_verify_mode=--verify-evidence-fd evidence_static_recovery=0 pending_probe pending_legacy_pid pending_evidence_sha
   local bootstrap_controller bootstrap_authorization proof_sha allow_expired_authorization guard_status guard_mode
+  local guard_mode_status
   local n8n_listener_pid n8n_runtime_cwd n8n_runtime_release recovery_attempt recovery_parent recovery_guard_pid
   local legacy_state
   local guard_available=0
@@ -2275,10 +2284,13 @@ NODE
 
   [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
     || fail "legacy freeze guard recovery state is incomplete"
-  if [[ "$guard_mode" == dual ]]; then
+  if guard_mode_requires_handoff "$guard_mode"; then
     "$NODE_BIN" "$guard_controller" handoff --socket "$guard_socket" \
       --token-file "$guard_token" --database "$live_db" --n8n-database "$n8n_db" >/dev/null \
       || fail "unable to enter the managed post-shutdown n8n recovery hold"
+  else
+    guard_mode_status=$?
+    (( guard_mode_status == 1 )) || fail "post-shutdown guard mode cannot be handed off safely"
   fi
   guard_status="$("$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
     --database "$live_db" --n8n-database "$n8n_db")" \
