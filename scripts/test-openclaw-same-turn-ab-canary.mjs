@@ -227,7 +227,6 @@ function writeCellConfig({
         timeoutSeconds: 720,
         compaction: {
           mode: 'safeguard',
-          truncateAfterCompaction: true,
           keepRecentTokens: 4_096,
           recentTurnsPreserve: 4,
           maxActiveTranscriptBytes: '128kb',

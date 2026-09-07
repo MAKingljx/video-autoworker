@@ -247,7 +247,7 @@ async function createFixture() {
     mkdir(openclawSdkRoot, { recursive: true, mode: 0o755 }),
   ])
   await writeFile(openclawSdkPackage, `${JSON.stringify({
-    name: 'openclaw', version: '2026.7.1-2', type: 'module',
+    name: 'openclaw', version: '2026.9.2', type: 'module',
   })}\n`, { mode: 0o644 })
   await writeFile(config, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 })
   await writeFile(`${config}.last-good`, await readFile(config), { mode: 0o600 })
@@ -284,7 +284,7 @@ if (args[0] === '--version') {
     process.env.GATEWAY_PASSWORD,
   ].some(Boolean)) process.exit(99)
   fs.appendFileSync(process.env.FAKE_OPENCLAW_AUTH_LOG, 'version=absent\\n')
-  process.stdout.write('OpenClaw ' + (process.env.FAKE_OPENCLAW_VERSION || '2026.7.1-2') + ' (fixture)\\n')
+  process.stdout.write('OpenClaw ' + (process.env.FAKE_OPENCLAW_VERSION || '2026.9.2') + ' (fixture)\\n')
   process.exit(0)
 }
 if (args[0] !== '--profile' || args[1] !== 'qwen-current') process.exit(90)
@@ -367,7 +367,7 @@ if (args[0] === 'config' && args[1] === 'patch') {
     && compactionPatch.keepRecentTokens === 8192
     && compactionPatch.identifierInstructions === null
     && compactionPatch.recentTurnsPreserve === 4
-    && compactionPatch.truncateAfterCompaction === true
+    && compactionPatch.truncateAfterCompaction === null
     && compactionPatch.maxActiveTranscriptBytes === '128kb'
     && isObject(compactionPatch.midTurnPrecheck)
     && Object.keys(compactionPatch.midTurnPrecheck).length === 1
@@ -392,7 +392,7 @@ if (args[0] === 'config' && args[1] === 'patch') {
     const current = read(configPath)
     const updated = mergePatch(current, patch)
     updated.meta ??= {}
-    updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.7.1-2'
+    updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.2'
     updated.meta.lastTouchedAt = new Date().toISOString()
     if (process.env.FAKE_EXTRA_CONFIG_ON_APPLY === '1') updated.gateway.port = 19993
     if (process.env.FAKE_EXTRA_META_ON_APPLY === '1') updated.meta.owner = 'unexpected'
@@ -550,6 +550,8 @@ const mergePatch = (current, patch) => {
   return next
 }
 const hash = source => createHash('sha256').update(source).digest('hex')
+const revision = source => 'hmac-sha256:v1:' + createHash('sha256').update(source).digest('base64url')
+const casRevision = source => revision('cas:' + source)
 const callLog = process.env.FAKE_OPENCLAW_CALL_LOG
 const authLog = process.env.FAKE_OPENCLAW_AUTH_LOG
 const runtimeLog = process.env.FAKE_RPC_RUNTIME_LOG
@@ -630,24 +632,36 @@ if (operation === 'config-get') {
       id: 'fixture', cost: { input: 0, output: 0 }, reasoning: false,
     }] } } }
   }
+  const sourceConfig = structuredClone(config)
+  const runtimeConfig = structuredClone(config)
+  if (process.env.FAKE_POST_SOURCE_CONFIG_MISMATCH === '1' && call >= 2) {
+    sourceConfig.agents.defaults.compaction.model = 'unexpected/source_model'
+  }
   write({
     exists: true,
     valid: true,
+    path: process.env.FAKE_POST_CONFIG_PATH_MISMATCH === '1' && call >= 2
+      ? configPath + '.wrong' : configPath,
     ...(!(process.env.FAKE_MISSING_BASE_HASH === '1' && call === 1)
       && !(process.env.FAKE_MISSING_POST_HASH === '1' && call >= 2)
       ? { hash: process.env.FAKE_POST_HASH_MISMATCH === '1' && call >= 2
-          ? 'f'.repeat(64) : hash(source) } : {}),
+          ? 'hmac-sha256:v1:' + 'f'.repeat(43) : casRevision(source) } : {}),
+    configRevisionHash: revision(source),
+    appliedConfigHash: process.env.FAKE_POST_REVISION_STATE_MISMATCH === '1' && call >= 2
+      ? revision('unexpected-applied-revision') : revision(source),
+    sourceConfig,
+    runtimeConfig,
     config,
   })
   process.exit(0)
 }
 if (operation === 'config-patch') {
   const source = fs.readFileSync(configPath, 'utf8')
-  if (process.env.AIWORKER_OPENCLAW_RUNTIME_BASE_HASH !== hash(source)) process.exit(95)
+  if (process.env.AIWORKER_OPENCLAW_RUNTIME_REVISION_TOKEN !== casRevision(source)) process.exit(95)
   const patch = read(process.env.AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE)
   const updated = mergePatch(JSON.parse(source), patch)
   updated.meta ??= {}
-  updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.7.1-2'
+  updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.2'
   updated.meta.lastTouchedAt = new Date().toISOString()
     if (process.env.FAKE_EXTRA_CONFIG_ON_APPLY === '1') updated.gateway.port = 19993
     if (process.env.FAKE_EXTRA_META_ON_APPLY === '1') updated.meta.owner = 'unexpected'
@@ -667,7 +681,10 @@ if (operation === 'config-patch') {
     && !process.env.FAKE_LAST_GOOD_PENDING_POLLS) {
     fs.writeFileSync(configPath + '.last-good', fs.readFileSync(configPath), { mode: 0o600 })
   }
+  const updatedSource = fs.readFileSync(configPath, 'utf8')
   write({ ok: true, config: updated,
+    path: process.env.FAKE_PATCH_CONFIG_PATH_MISMATCH === '1' ? configPath + '.wrong' : configPath,
+    hash: casRevision(updatedSource),
     restart: process.env.FAKE_PATCH_RESTART === '1' ? { pending: true } : null,
     sentinel: { persisted: true, payload: { stats: { mode: 'config.patch',
       requiresRestart: process.env.FAKE_PATCH_REQUIRES_RESTART === '1' } } } })
@@ -1075,13 +1092,15 @@ describe('qwen-current unified runtime convergence installer', () => {
     await mkdir(dist, { recursive: true, mode: 0o700 })
     await mkdir(bin, { mode: 0o700 })
     await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify({
-      name: 'openclaw', version: '2026.7.1-2', type: 'module',
+      name: 'openclaw', version: '2026.9.2', type: 'module',
+      exports: { './plugin-sdk/gateway-runtime': './dist/gateway-runtime.js' },
     })}\n`, { mode: 0o600 })
     await writeFile(openclaw, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
-    await writeFile(join(dist, 'call-fixture.js'), `
-class GatewayCredentialsRequiredError extends Error {}
-async function callGatewayCli() { return JSON.parse(process.env.FAKE_GATEWAY_RESULT) }
-export { GatewayCredentialsRequiredError, callGatewayCli }
+    await writeFile(join(dist, 'gateway-runtime.js'), `
+export async function callGatewayFromCli(method, options, params, extra) {
+  if (!method || !options?.token || !params || extra?.sharedStateMode !== 'read-only') process.exit(91)
+  return JSON.parse(process.env.FAKE_GATEWAY_RESULT)
+}
 `, { mode: 0o600 })
     await writeFile(output, '', { mode: 0o600 })
     await symlink(privateGatewayRpc, alias)
@@ -1108,7 +1127,7 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
   it('pins one exact manifest and contains no Gateway lifecycle action', async () => {
     expect(JSON.parse(await readFile(manifestFile, 'utf8'))).toEqual({
       schema: 'video-autoworker-openclaw-runtime-convergence/v1',
-      openclawVersion: '2026.7.1-2',
+      openclawVersion: '2026.9.2',
       profile: 'qwen-current',
       compaction: {
         set: {
@@ -1116,11 +1135,10 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
           timeoutSeconds: 240,
           keepRecentTokens: 8192,
           recentTurnsPreserve: 4,
-          truncateAfterCompaction: true,
           maxActiveTranscriptBytes: '128kb',
           midTurnPrecheck: { enabled: true },
         },
-        remove: ['identifierInstructions'],
+        remove: ['identifierInstructions', 'truncateAfterCompaction'],
       },
       agent: { id: 'second-original' },
       requiredPlugins: [
@@ -1453,7 +1471,6 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
       timeoutSeconds: 240,
       keepRecentTokens: 8192,
       maxHistoryShare: 0.75,
-      truncateAfterCompaction: true,
       maxActiveTranscriptBytes: '128kb',
       notifyUser: false,
       customInstructions: 'Preserve every tool value.',
@@ -1463,6 +1480,7 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     })
     expect(target.tools).toEqual(entry.initial.agents.list[0].tools)
     expect(installed.agents.defaults.compaction).not.toHaveProperty('identifierInstructions')
+    expect(installed.agents.defaults.compaction).not.toHaveProperty('truncateAfterCompaction')
     expect(installed.agents.list).toHaveLength(1)
     expect(installed.plugins).toEqual(entry.initial.plugins)
     expect(installed.gateway).toEqual(entry.initial.gateway)
@@ -1473,6 +1491,16 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     expect(proof).toBeTruthy()
     expect((await stat(join(entry.backupRoot, rollback!))).mode & 0o777).toBe(0o600)
     expect((await stat(join(entry.backupRoot, proof!))).mode & 0o777).toBe(0o600)
+    const proofValue = JSON.parse(await readFile(join(entry.backupRoot, proof!), 'utf8'))
+    expect(proofValue.hotReload).toMatchObject({
+      schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
+      baseFileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      newFileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      baseRevisionHash: expect.stringMatching(/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u),
+      newRevisionHash: expect.stringMatching(/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u),
+    })
+    expect(proofValue.hotReload.baseFileSha256).not.toBe(proofValue.hotReload.newFileSha256)
+    expect(proofValue.hotReload.baseRevisionHash).not.toBe(proofValue.hotReload.newRevisionHash)
     const calls = await readFile(entry.callLog, 'utf8')
     expect(calls.match(/config patch/gu)).toHaveLength(1)
     expect(calls).toContain('config rpc-patch')
@@ -1654,7 +1682,7 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     }, 'video-command OpenClaw SDK link target is invalid'],
     ['an SDK package name drift', async (entry: Fixture) => {
       await writeFile(entry.openclawSdkPackage,
-        '{"name":"not-openclaw","version":"2026.7.1-2"}\n', { mode: 0o644 })
+        '{"name":"not-openclaw","version":"2026.9.2"}\n', { mode: 0o644 })
     }, 'video-command OpenClaw SDK package identity is invalid'],
     ['an SDK package version drift', async (entry: Fixture) => {
       await writeFile(entry.openclawSdkPackage,
@@ -1775,6 +1803,10 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     ['Gateway logs a reload failure', 'FAKE_RELOAD_FAILURE_LOG', '1'],
     ['post-patch config hash is missing', 'FAKE_MISSING_POST_HASH', '1'],
     ['post-patch config.get differs from config.patch', 'FAKE_POST_CONFIG_MISMATCH', '1'],
+    ['config.patch reports another config path', 'FAKE_PATCH_CONFIG_PATH_MISMATCH', '1'],
+    ['post-patch config.get reports another config path', 'FAKE_POST_CONFIG_PATH_MISMATCH', '1'],
+    ['post-patch config revisions disagree', 'FAKE_POST_REVISION_STATE_MISMATCH', '1'],
+    ['post-patch sourceConfig misses the target', 'FAKE_POST_SOURCE_CONFIG_MISMATCH', '1'],
   ])('rejects %s and restores only its own exact patch', async (_label, variable, value) => {
     const entry = await createFixture()
     const before = await readFile(entry.config, 'utf8')
@@ -1788,31 +1820,32 @@ export { GatewayCredentialsRequiredError, callGatewayCli }
     expect(await exists(entry.gatewayLog)).toBe(false)
     const restartRequested = variable === 'FAKE_PATCH_REQUIRES_RESTART'
       || variable === 'FAKE_PATCH_RESTART'
+    const rejectedAtPatch = restartRequested || variable === 'FAKE_PATCH_CONFIG_PATH_MISMATCH'
     const failedFromLog = variable === 'FAKE_RELOAD_FAILURE_LOG'
     expect(await callCountAfterPatch(entry, 'gateway call logs-tail private-rpc'))
-      .toBe(restartRequested ? 0 : failedFromLog ? 1 : 2)
+      .toBe(rejectedAtPatch ? 0 : failedFromLog ? 1 : 2)
     expect(await callCountAfterPatch(entry, 'gateway call health private-rpc'))
-      .toBe(failedFromLog || restartRequested ? 0 : 1)
+      .toBe(failedFromLog || rejectedAtPatch ? 0 : 1)
     expect(await callCountAfterPatch(entry, 'gateway call config.get private-rpc'))
-      .toBe(failedFromLog || restartRequested ? 0 : 1)
+      .toBe(failedFromLog || rejectedAtPatch ? 0 : 1)
     // Three listener checks belong to the post-patch runtime proof; hot-reload adds at most one.
     expect(await callCountAfterPatch(entry, 'gateway lsof'))
-      .toBe(restartRequested ? 0 : failedFromLog ? 3 : 4)
+      .toBe(rejectedAtPatch ? 0 : failedFromLog ? 3 : 4)
   }, 15_000)
 
-  it('accepts normalized config.get defaults while binding its hash to disk', async () => {
+  it('accepts normalized config.get defaults while keeping API revision and disk SHA separate', async () => {
     const entry = await createFixture()
     entry.env.FAKE_POST_CONFIG_NORMALIZED_DEFAULTS = '1'
     const applied = await run(entry, '--apply')
     expect(applied.stdout).toContain('Verified session-scoped runtime convergence proof:')
   }, 15_000)
 
-  it('reports a post config source hash mismatch and restores the exact config', async () => {
+  it('reports a post config revision mismatch and restores the exact config', async () => {
     const entry = await createFixture()
     const before = await readFile(entry.config, 'utf8')
     entry.env.FAKE_POST_HASH_MISMATCH = '1'
     await expect(run(entry, '--apply')).rejects.toMatchObject({
-      stderr: expect.stringContaining('post_hash_mismatch'),
+      stderr: expect.stringContaining('revision_mismatch'),
     })
     expect(await readFile(entry.config, 'utf8')).toBe(before)
   }, 15_000)

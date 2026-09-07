@@ -179,8 +179,8 @@ test('matrix validation requires exact runtime and identical full tool inventori
     schemaVersion: 1,
     evidenceClass: 'live-model-real-openclaw-loop',
     nodeVersion: 'v22.22.3',
-    openclawVersion: '2026.7.1-2',
-    expectedOpenclawVersion: '2026.7.1-2',
+    openclawVersion: '2026.9.2',
+    expectedOpenclawVersion: '2026.9.2',
     cells,
   }
   assert.deepEqual(validateMatrixReport(report), { accepted: true, reasons: [] })
@@ -216,8 +216,8 @@ test('matrix rejects a projection-on false positive that regresses calls or the 
     schemaVersion: 1,
     evidenceClass: 'live-model-real-openclaw-loop',
     nodeVersion: 'v22.22.3',
-    openclawVersion: '2026.7.1-2',
-    expectedOpenclawVersion: '2026.7.1-2',
+    openclawVersion: '2026.9.2',
+    expectedOpenclawVersion: '2026.9.2',
     cells,
   }
   const rejected = validateMatrixReport(report)
