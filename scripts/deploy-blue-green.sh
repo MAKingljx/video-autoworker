@@ -13,6 +13,7 @@ AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
 DIRECTOR_VIDEO_READINESS="$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs"
 SHARED_DEPLOYMENT_LOCK_SHELL="$PROJECT_ROOT/scripts/lib/shared-deployment-lock.sh"
 NODE_BIN="${NODE_BIN:-node}"
+LSOF_BIN=/usr/sbin/lsof
 ROUTER_HOST="${AIWORKER_BG_ROUTER_HOST:-127.0.0.1}"
 ROUTER_PORT="${AIWORKER_BG_ROUTER_PORT:-3017}"
 BLUE_PORT="${AIWORKER_BG_BLUE_PORT:-3317}"
@@ -144,6 +145,41 @@ EOF
 fail() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+lsof_listener_pids_with_binary() {
+  local binary="${1:-}" port="${2:-}" temporary stdout stderr sorted status=0 sort_status=0
+  [[ "$port" =~ ^[1-9][0-9]*$ && ${#port} -le 5 ]] \
+    && (( 10#$port <= 65535 )) || return 2
+  [[ "$binary" == /* && -x "$binary" && ! -L "$binary" ]] || return 127
+  temporary="$(/usr/bin/mktemp -d /tmp/video-autoworker-lsof.XXXXXX)" || return 1
+  /bin/chmod 700 "$temporary" || { /bin/rm -rf -- "$temporary"; return 1; }
+  stdout="$temporary/stdout"
+  stderr="$temporary/stderr"
+  sorted="$temporary/sorted"
+  : >"$stdout"
+  : >"$stderr"
+  "$binary" -tiTCP:"$port" -sTCP:LISTEN >"$stdout" 2>"$stderr" || status=$?
+  if (( status == 0 )); then
+    /usr/bin/sort -u "$stdout" >"$sorted" || sort_status=$?
+    /bin/cat "$stderr" >&2
+    if (( sort_status == 0 )); then /bin/cat "$sorted"; fi
+    /bin/rm -rf -- "$temporary"
+    return "$sort_status"
+  fi
+  if (( status == 1 )) && [[ ! -s "$stdout" && ! -s "$stderr" ]]; then
+    /bin/rm -rf -- "$temporary"
+    return 0
+  fi
+  /bin/cat "$stdout"
+  /bin/cat "$stderr" >&2
+  /bin/rm -rf -- "$temporary"
+  return "$status"
+}
+
+lsof_listener_pids() {
+  [[ "$LSOF_BIN" == /usr/sbin/lsof ]] || return 127
+  lsof_listener_pids_with_binary "$LSOF_BIN" "${1:-}"
 }
 
 verify_deployment_source_gate() {
@@ -1228,8 +1264,8 @@ assert_router_identity() {
     || fail "standalone router runtime attestation is invalid"
   [[ "$attested_pid" == "$pid" ]] || fail "router health PID does not match its runtime attestation"
   kill -0 "$pid" 2>/dev/null || fail "attested standalone router PID is not running"
-  command -v lsof >/dev/null 2>&1 || fail "router identity verification requires lsof"
-  listener="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+  listener="$(lsof_listener_pids "$ROUTER_PORT")" \
+    || fail "router listener query failed"
   [[ "$listener" == "$pid" ]] || fail "port $ROUTER_PORT listener does not match the attested router PID"
   [[ -z "$transport_summary" ]] || printf '%s' "$transport_summary"
 }
@@ -1870,7 +1906,8 @@ NODE
   n8n_pid="$(printf '%s\n' "$evidence_values" | sed -n '4p')"
   legacy_state="$(probe_evidenced_legacy_state)"
   if (( pending_exists == 1 )) && [[ "$legacy_state" == stopped ]]; then
-    n8n_listener_pid="$(lsof -tiTCP:5678 -sTCP:LISTEN 2>/dev/null | sort -u)"
+    n8n_listener_pid="$(lsof_listener_pids 5678)" \
+      || fail "managed n8n listener query failed"
     [[ "$n8n_listener_pid" =~ ^[1-9][0-9]*$ ]] \
       || fail "bootstrap disaster recovery requires exactly one managed n8n listener"
     n8n_pid="$n8n_listener_pid"
@@ -1890,7 +1927,8 @@ const { releaseIdFromCwd } = await import(pathToFileURL(generator).href)
 if (releaseIdFromCwd(cwd, 'legacy 3017') !== releaseId) process.exit(1)
 NODE
   BOOTSTRAP_MAINTENANCE=1
-  command -v lsof >/dev/null 2>&1 || fail "bootstrap requires lsof for exact process verification"
+  [[ -x "$LSOF_BIN" && ! -L "$LSOF_BIN" ]] \
+    || fail "bootstrap requires the fixed lsof for exact process verification"
   kill -0 "$n8n_pid" 2>/dev/null || fail "evidenced n8n PID is not running"
   lsof -a -p "$n8n_pid" -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$n8n_db" \
     || fail "evidenced n8n PID is not using AIWORKER_BG_N8N_DB_PATH"
@@ -2210,7 +2248,8 @@ NODE
   [[ "$(probe_evidenced_legacy_state)" == stopped ]] \
     || fail "legacy PID did not exit after SIGTERM; no force kill was attempted"
   for _ in 1 2 3 4 5; do
-    listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+    listeners="$(lsof_listener_pids "$ROUTER_PORT")" \
+      || fail "router listener query failed after legacy shutdown"
     [[ -z "$listeners" ]] || fail "router port $ROUTER_PORT was reclaimed after legacy shutdown; supervisor is not quiesced"
     sleep 1
   done
@@ -2249,7 +2288,8 @@ NODE
     if (value?.mode !== "recovery-hold") process.exit(2)
     process.stdout.write(value.mode)
   ' "$guard_status")" || fail "post-shutdown n8n recovery hold did not become active"
-  listeners="$(lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u)"
+  listeners="$(lsof_listener_pids "$ROUTER_PORT")" \
+    || fail "router listener query failed before managed baseline startup"
   [[ -z "$listeners" ]] || fail "router port was reclaimed before managed baseline startup"
 
   binding_payload="$($NODE_BIN -e '
@@ -2816,8 +2856,8 @@ probe_slot() {
   pid="$(tr -d '[:space:]' < "$pid_file")"
   [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null || fail "$slot PID is not running"
   [[ "$attested_pid" == "$pid" ]] || fail "$slot runtime attestation PID does not match its PID file"
-  if command -v lsof >/dev/null 2>&1; then
-    listener="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u)"
+  if [[ -x "$LSOF_BIN" && ! -L "$LSOF_BIN" ]]; then
+    listener="$(lsof_listener_pids "$port")" || fail "$slot listener query failed"
     [[ "$listener" == "$pid" ]] || fail "$slot listener PID does not match $pid"
     lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | grep -Fxq "$release_root" \
       || fail "$slot process cwd does not match its immutable release"
