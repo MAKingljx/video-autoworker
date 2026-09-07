@@ -46,7 +46,16 @@ describe('runSecurityScan gateway SecretRef handling', () => {
       },
       secrets: {
         providers: {
-          keychain: { source: 'exec', command: '/usr/bin/security', args: ['find-generic-password'] },
+          keychain: {
+            source: 'exec',
+            command: path.join(process.env.HOME || '', 'ai-worker/bin/aiworker-openclaw-keychain-secretref'),
+            args: ['account-ref', 'service-ref', path.join(
+              process.env.HOME || '', 'Library/Keychains/login.keychain-db',
+            )],
+            trustedDirs: [path.join(process.env.HOME || '', 'ai-worker/bin')],
+            passEnv: ['HOME'],
+            jsonOnly: false,
+          },
         },
       },
     }), 'utf8')

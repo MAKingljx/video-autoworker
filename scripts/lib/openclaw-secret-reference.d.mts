@@ -13,7 +13,7 @@ export interface ExecSecretProvider {
   maxOutputBytes?: number
   jsonOnly?: false
   trustedDirs?: string[]
-  allowInsecurePath?: boolean
+  passEnv?: string[]
 }
 
 export function isValidExecSecretReference(

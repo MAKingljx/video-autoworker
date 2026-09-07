@@ -1,6 +1,8 @@
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -35,26 +37,23 @@ const reference = {
 
 let fixtureDir = ''
 let fixtureCommand = ''
+let originalHome = ''
 
 function productionProvider(overrides: Record<string, unknown> = {}) {
   return {
     source: 'exec' as const,
     command: fixtureCommand,
     args: [
-      'find-generic-password',
-      '-w',
-      '-s',
+      'runtime-account',
       'aiworker.gateway',
-      '-a',
-      'runtime',
-      '/Library/Keychains/System.keychain',
+      `${process.env.HOME}/Library/Keychains/login.keychain-db`,
     ],
     timeoutMs: 5_000,
     noOutputTimeoutMs: 5_000,
     maxOutputBytes: 4_096,
     jsonOnly: false as const,
     trustedDirs: [fixtureDir],
-    allowInsecurePath: true,
+    passEnv: ['HOME'],
     ...overrides,
   }
 }
@@ -66,14 +65,18 @@ function providers(provider: ExecSecretProvider = productionProvider()) {
 describe('OpenClaw exec SecretRef compatibility', () => {
   beforeEach(() => {
     spawnSyncMock.mockReset()
-    fixtureDir = mkdtempSync(path.join(os.tmpdir(), 'secret-reference-'))
-    fixtureCommand = path.join(fixtureDir, 'fixture-provider')
-    writeFileSync(fixtureCommand, '#!/bin/sh\nexit 99\n', { mode: 0o700 })
+    originalHome = process.env.HOME || ''
+    process.env.HOME = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'secret-reference-')))
+    fixtureDir = path.join(process.env.HOME, 'ai-worker/bin')
+    mkdirSync(fixtureDir, { recursive: true, mode: 0o700 })
+    fixtureCommand = path.join(fixtureDir, 'aiworker-openclaw-keychain-secretref')
+    writeFileSync(fixtureCommand, readFileSync('scripts/openclaw-keychain-secretref.sh'), { mode: 0o700 })
     chmodSync(fixtureCommand, 0o700)
   })
 
   afterEach(() => {
     rmSync(fixtureDir, { recursive: true, force: true })
+    process.env.HOME = originalHome
   })
 
   it('resolves a lowercase gateway token with the production OpenClaw provider fields', () => {
@@ -92,7 +95,7 @@ describe('OpenClaw exec SecretRef compatibility', () => {
       productionProvider().args,
       expect.objectContaining({
         cwd: realpathSync(fixtureDir),
-        env: {},
+        env: { HOME: process.env.HOME },
         maxBuffer: 4_096,
         shell: false,
         timeout: 5_000,
@@ -103,8 +106,8 @@ describe('OpenClaw exec SecretRef compatibility', () => {
   it.each([
     ['an unknown provider field', { shell: true }],
     ['an env passthrough field', { env: { HOME: '/tmp' } }],
-    ['a passEnv field', { passEnv: ['HOME'] }],
-    ['a non-boolean allowInsecurePath', { allowInsecurePath: 'yes' }],
+    ['another passEnv field', { passEnv: ['HOME', 'PATH'] }],
+    ['allowInsecurePath', { allowInsecurePath: true }],
     ['JSON output mode', { jsonOnly: true }],
     ['a relative trusted directory', { trustedDirs: ['usr/bin'] }],
     ['a zero output byte limit', { maxOutputBytes: 0 }],
@@ -132,7 +135,7 @@ describe('OpenClaw exec SecretRef compatibility', () => {
   it('rejects a symlink command during filesystem validation', () => {
     const symlinkCommand = path.join(fixtureDir, 'provider-link')
     symlinkSync(fixtureCommand, symlinkCommand)
-    const symlinkProvider = providers(productionProvider({ command: symlinkCommand }))
+    const symlinkProvider = providers(productionProvider({ command: symlinkCommand, passEnv: undefined }))
 
     expect(isValidExecSecretReference(reference, symlinkProvider)).toBe(true)
     expect(resolveOpenClawGatewaySecret(reference, symlinkProvider)).toBe('')
@@ -153,7 +156,7 @@ describe('OpenClaw exec SecretRef compatibility', () => {
         allowInsecurePath: true,
       }))
 
-      expect(isValidExecSecretReference(reference, escapedProvider)).toBe(true)
+      expect(isValidExecSecretReference(reference, escapedProvider)).toBe(false)
       expect(resolveOpenClawGatewaySecret(reference, escapedProvider)).toBe('')
       expect(spawnSyncMock).not.toHaveBeenCalled()
     } finally {
@@ -163,14 +166,14 @@ describe('OpenClaw exec SecretRef compatibility', () => {
 
   it('rejects a writable command unless insecure paths are explicitly allowed', () => {
     chmodSync(fixtureCommand, 0o777)
-    const writableProvider = providers(productionProvider({ allowInsecurePath: false }))
+    const writableProvider = providers(productionProvider())
 
     expect(isValidExecSecretReference(reference, writableProvider)).toBe(true)
     expect(resolveOpenClawGatewaySecret(reference, writableProvider)).toBe('')
     expect(spawnSyncMock).not.toHaveBeenCalled()
   })
 
-  it('keeps the legacy four-key raw provider compatible', () => {
+  it('keeps a safe no-env raw provider compatible', () => {
     const token = 'c'.repeat(64)
     const legacyProviders = providers({
       source: 'exec' as const,
@@ -179,18 +182,12 @@ describe('OpenClaw exec SecretRef compatibility', () => {
       timeoutMs: 4_000,
     })
     spawnSyncMock.mockReturnValue({
-      error: undefined,
-      signal: null,
-      status: 0,
-      stdout: token,
-      stderr: '',
+      error: undefined, signal: null, status: 0, stdout: token, stderr: '',
     })
-
     expect(resolveOpenClawGatewaySecret(reference, legacyProviders)).toBe(token)
     expect(spawnSyncMock).toHaveBeenCalledWith(
-      realpathSync(fixtureCommand),
-      ['fixture-argument'],
-      expect.objectContaining({ maxBuffer: 4_096, timeout: 4_000 }),
+      realpathSync(fixtureCommand), ['fixture-argument'],
+      expect.objectContaining({ env: {}, maxBuffer: 4_096, timeout: 4_000 }),
     )
   })
 

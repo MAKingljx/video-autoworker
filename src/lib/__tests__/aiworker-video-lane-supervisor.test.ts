@@ -21,6 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 const execFileAsync = promisify(execFile)
 const sourceRoot = process.cwd()
 const sourceInstaller = resolve(sourceRoot, 'scripts/install-aiworker-video-lane-supervisor.sh')
+const sourceRuntimeContract = resolve(sourceRoot, 'scripts/lib/openclaw-runtime-contract.mjs')
 const sourceValidator = resolve(sourceRoot, 'scripts/validate-aiworker-video-lane-supervisor.mjs')
 const sourceSharedDeploymentLock = resolve(sourceRoot, 'scripts/lib/shared-deployment-lock.sh')
 const sourceSharedDeploymentLockNode = resolve(sourceRoot, 'scripts/lib/shared-deployment-lock.mjs')
@@ -57,6 +58,7 @@ async function fixture() {
   const validator = join(repo, 'scripts', 'validate-aiworker-video-lane-supervisor.mjs')
   const sharedDeploymentLock = join(repo, 'scripts', 'lib', 'shared-deployment-lock.sh')
   const sharedDeploymentLockNode = join(repo, 'scripts', 'lib', 'shared-deployment-lock.mjs')
+  const runtimeContract = join(repo, 'scripts', 'lib', 'openclaw-runtime-contract.mjs')
   const template = join(repo, 'ops', 'video-lane', 'launchd', 'ai.aiworker.video-lane-supervisor.plist.template')
   const nodeBinary = await realpath(process.execPath)
   const launchState = join(root, 'launch-state.json')
@@ -78,6 +80,7 @@ async function fixture() {
     cp(sourceValidator, validator),
     cp(sourceSharedDeploymentLock, sharedDeploymentLock),
     cp(sourceSharedDeploymentLockNode, sharedDeploymentLockNode),
+    cp(sourceRuntimeContract, runtimeContract),
     cp(sourceTemplate, template),
     cp(sourceSkill, join(repo, 'openclaw-skills', 'aiworker-task-flow'), { recursive: true }),
     cp(sourceSkill, installedSkill, { recursive: true }),
@@ -92,6 +95,7 @@ async function fixture() {
   await chmod(installer, 0o755)
   await chmod(validator, 0o755)
   await chmod(sharedDeploymentLock, 0o600)
+  await chmod(runtimeContract, 0o600)
   await chmod(join(installedSkill, 'SKILL.md'), 0o600)
   for (const name of await readdir(join(installedSkill, 'lib'))) {
     await chmod(join(installedSkill, 'lib', name), 0o600)
@@ -126,7 +130,7 @@ process.stdout.write(values[match[1]] + '\\n')
 let args = process.argv.slice(2)
 if (args[0] === '--profile') args = args.slice(2)
 if (args[0] === '--version') {
-  process.stdout.write('OpenClaw 2026.7.1-2 (fake)\\n')
+  process.stdout.write('OpenClaw 2026.9.2 (fake)\\n')
   process.exit(0)
 }
 if (args[0] === 'gateway' && args[1] === 'status') {
