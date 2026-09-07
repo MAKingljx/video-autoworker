@@ -260,6 +260,7 @@ verify_deployment_source_gate() {
     scripts/lib/render-managed-markdown-section.mjs
     scripts/lib/runtime-tree-manifest.mjs
     scripts/lib/legacy-preinstall-handoff-contract.mjs
+    scripts/lib/blue-green-execve-contract.mjs
     scripts/manage-blue-green-services.sh
     scripts/install-blue-green-launch-agents.sh
     scripts/start-standalone-slot.sh

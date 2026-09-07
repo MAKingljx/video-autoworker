@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
+import { blueGreenExecveSourceSha256 } from '../../../scripts/lib/blue-green-execve-contract.mjs'
 
 const execFileAsync = promisify(execFile)
 const projectRoot = process.cwd()
@@ -24,6 +25,7 @@ const installer = resolve(projectRoot, 'scripts/install-blue-green-launch-agents
 const manager = resolve(projectRoot, 'scripts/manage-blue-green-services.sh')
 const routerScript = resolve(projectRoot, 'scripts/standalone-router.mjs')
 const slotStartScript = resolve(projectRoot, 'scripts/start-standalone-slot.sh')
+const execveContract = resolve(projectRoot, 'scripts/lib/blue-green-execve-contract.mjs')
 const routerTemplate = resolve(
   projectRoot,
   'ops/video-autoworker/launchd/com.video-autoworker.blue-green.router.plist.template',
@@ -81,14 +83,17 @@ async function executable(pathname: string, source: string) {
 async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
   const isolatedRoot = join(entry.root, 'isolated-project')
   const scriptsDir = join(isolatedRoot, 'scripts')
+  const scriptsLibDir = join(scriptsDir, 'lib')
   const templatesDir = join(isolatedRoot, 'ops', 'video-autoworker', 'launchd')
   await mkdir(scriptsDir, { recursive: true, mode: 0o700 })
+  await mkdir(scriptsLibDir, { recursive: true, mode: 0o700 })
   await mkdir(templatesDir, { recursive: true, mode: 0o700 })
   const files = {
     installer: join(scriptsDir, 'install-blue-green-launch-agents.sh'),
     manager: join(scriptsDir, 'manage-blue-green-services.sh'),
     routerScript: join(scriptsDir, 'standalone-router.mjs'),
     slotStartScript: join(scriptsDir, 'start-standalone-slot.sh'),
+    execveContract: join(scriptsLibDir, 'blue-green-execve-contract.mjs'),
     routerTemplate: join(templatesDir, 'com.video-autoworker.blue-green.router.plist.template'),
     slotTemplate: join(templatesDir, 'com.video-autoworker.blue-green.slot.plist.template'),
   }
@@ -97,6 +102,7 @@ async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
     copyFile(manager, files.manager),
     copyFile(routerScript, files.routerScript),
     copyFile(slotStartScript, files.slotStartScript),
+    copyFile(execveContract, files.execveContract),
     copyFile(routerTemplate, files.routerTemplate),
     copyFile(slotTemplate, files.slotTemplate),
   ])
@@ -105,6 +111,7 @@ async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
     chmod(files.manager, 0o755),
     chmod(files.routerScript, 0o755),
     chmod(files.slotStartScript, 0o755),
+    chmod(files.execveContract, 0o644),
     chmod(files.routerTemplate, 0o644),
     chmod(files.slotTemplate, 0o644),
   ])
@@ -128,6 +135,10 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
     }
     expect(router).toContain('__ROUTER_SCRIPT__')
     expect(slot).toContain('__START_SCRIPT__')
+    expect(router).toContain('__EXECVE_SOURCE__')
+    expect(slot).toContain('__EXECVE_SOURCE__')
+    expect(router).toContain('__WORKING_DIRECTORY__')
+    expect(slot).toContain('__WORKING_DIRECTORY__')
     expect(slot).toContain('<string>active</string>')
     expect(slot).not.toContain('<string>probe</string>')
   })
@@ -150,6 +161,8 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
       const payload = await readFile(plist, 'utf8')
       expect(payload).toContain(`<string>com.video-autoworker.blue-green.${service}</string>`)
       expect(payload).toContain('<key>RunAtLoad</key>\n  <false/>')
+      expect(payload).toContain('<string>-e</string>')
+      expect(payload).toContain(`<string>${entry.runDir}/supervisor</string>`)
       expect(payload).toContain(`${entry.runDir}/supervisor/enabled/${service}.enabled`)
       await expect(stat(join(entry.runDir, 'supervisor', 'enabled', `${service}.enabled`)))
         .rejects.toMatchObject({ code: 'ENOENT' })
@@ -185,6 +198,16 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
           mode: 0o755,
           sha256: await sha256(slotStartScript),
         },
+      },
+      execve: {
+        schema: 'video-autoworker-blue-green-execve/v1',
+        contract: {
+          path: execveContract,
+          sha256: await sha256(execveContract),
+          mode: 0o644,
+        },
+        workingDirectory: join(entry.runDir, 'supervisor'),
+        sourceSha256: blueGreenExecveSourceSha256(),
       },
     })
     expect(await readdir(join(entry.runDir, 'supervisor', 'logs'))).toEqual([])
@@ -303,6 +326,13 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
     const entry = await fixture()
     await runInstaller(entry)
     const manifestPath = join(entry.runDir, 'supervisor', 'installation.json')
+    const missingExecve = JSON.parse(await readFile(manifestPath, 'utf8'))
+    delete missingExecve.execve
+    await writeFile(manifestPath, `${JSON.stringify(missingExecve)}\n`)
+    await expect(runManager(entry, 'preflight', 'all')).rejects.toMatchObject({
+      stderr: expect.stringContaining('invalid execve launch contract'),
+    })
+    await runInstaller(entry, '--apply')
     const legacy = JSON.parse(await readFile(manifestPath, 'utf8'))
     legacy.schema = 'video-autoworker-blue-green-launchd/v1'
     delete legacy.executables

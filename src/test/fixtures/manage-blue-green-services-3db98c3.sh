@@ -17,7 +17,6 @@ BLUE_PORT="${AIWORKER_BG_BLUE_PORT:-3317}"
 GREEN_PORT="${AIWORKER_BG_GREEN_PORT:-3417}"
 ROUTER_SCRIPT="$PROJECT_ROOT/scripts/standalone-router.mjs"
 START_SCRIPT="$PROJECT_ROOT/scripts/start-standalone-slot.sh"
-EXECVE_CONTRACT="$PROJECT_ROOT/scripts/lib/blue-green-execve-contract.mjs"
 DOMAIN="gui/$(id -u)"
 LOCK_DIR="$SUPERVISOR_DIR/.service-operation.lock"
 LOCK_OWNED=0
@@ -71,12 +70,6 @@ NODE_BIN_INPUT="${AIWORKER_BG_NODE_BIN:-${NODE_BIN:-$(command -v node)}}"
 [[ "$NODE_BIN_INPUT" == /* ]] || fail "Node.js executable must be an absolute path"
 NODE_BIN="$("$NODE_BIN_INPUT" -e 'process.stdout.write(require("node:fs").realpathSync.native(process.execPath))')" \
   || fail "unable to resolve Node.js executable"
-EXECVE_SOURCE_SHA256="$("$NODE_BIN" --input-type=module - "$EXECVE_CONTRACT" <<'NODE'
-import { pathToFileURL } from 'node:url'
-const { blueGreenExecveSourceSha256 } = await import(pathToFileURL(process.argv[2]).href)
-process.stdout.write(blueGreenExecveSourceSha256())
-NODE
-)" || fail "unable to load the blue-green execve contract"
 
 service_label() {
   printf 'com.video-autoworker.blue-green.%s\n' "$1"
@@ -180,14 +173,12 @@ validate_installation() {
   assert_private_file "$INSTALLATION_FILE" "LaunchAgent installation manifest"
   "$NODE_BIN" - "$INSTALLATION_FILE" "$PROJECT_ROOT" "$RUN_DIR" "$RELEASES_DIR" \
     "$LAUNCH_AGENTS_DIR" "$NODE_BIN" "$ROUTER_PORT" "$BLUE_PORT" "$GREEN_PORT" \
-    "$ROUTER_SCRIPT" "$START_SCRIPT" "$EXECVE_CONTRACT" "$SUPERVISOR_DIR" \
-    "$EXECVE_SOURCE_SHA256" <<'NODE'
+    "$ROUTER_SCRIPT" "$START_SCRIPT" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const [manifestPath, projectRoot, runDir, releasesDir, launchAgentsDir, nodeBin,
-  routerPort, bluePort, greenPort, routerScript, slotStartScript,
-  execveContract, supervisorDir, execveSourceSha256] = process.argv.slice(2)
+  routerPort, bluePort, greenPort, routerScript, slotStartScript] = process.argv.slice(2)
 const fail = message => { process.stderr.write(`LaunchAgent installation manifest ${message}\n`); process.exit(1) }
 let manifest
 try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) } catch { fail('is not valid JSON') }
@@ -222,20 +213,6 @@ const assertExecutable = (name, binding, expectedPath, expectedMode) => {
 }
 assertExecutable('router', manifest.executables?.routerScript, routerScript, 0o755)
 assertExecutable('slot start', manifest.executables?.slotStartScript, slotStartScript, 0o755)
-const contractEntry = fs.lstatSync(execveContract)
-const contractSha256 = crypto.createHash('sha256').update(fs.readFileSync(execveContract)).digest('hex')
-if (manifest.execve?.schema !== 'video-autoworker-blue-green-execve/v1'
-  || manifest.execve?.contract?.path !== execveContract
-  || manifest.execve.contract.sha256 !== contractSha256
-  || manifest.execve.contract.mode !== 0o644
-  || !contractEntry.isFile() || contractEntry.isSymbolicLink()
-  || fs.realpathSync.native(execveContract) !== execveContract
-  || (contractEntry.mode & 0o777) !== 0o644 || contractEntry.uid !== currentUid
-  || manifest.execve.sourceSha256 !== execveSourceSha256
-  || manifest.execve.workingDirectory !== supervisorDir
-  || fs.realpathSync.native(supervisorDir) !== supervisorDir) {
-  fail('has an invalid execve launch contract')
-}
 const expectedPorts = { router: Number(routerPort), blue: Number(bluePort), green: Number(greenPort) }
 if (new Set(Object.values(expectedPorts)).size !== 3
   || Object.values(expectedPorts).some(port => !Number.isInteger(port) || port < 1 || port > 65535)) {

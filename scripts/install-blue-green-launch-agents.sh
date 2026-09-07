@@ -17,6 +17,8 @@ ROUTER_TEMPLATE="$PROJECT_ROOT/ops/video-autoworker/launchd/com.video-autoworker
 SLOT_TEMPLATE="$PROJECT_ROOT/ops/video-autoworker/launchd/com.video-autoworker.blue-green.slot.plist.template"
 ROUTER_SCRIPT="$PROJECT_ROOT/scripts/standalone-router.mjs"
 START_SCRIPT="$PROJECT_ROOT/scripts/start-standalone-slot.sh"
+EXECVE_CONTRACT="$PROJECT_ROOT/scripts/lib/blue-green-execve-contract.mjs"
+LAUNCH_WORKING_DIRECTORY="$SUPERVISOR_DIR"
 ROUTER_STATE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
 ROUTER_PORT="${AIWORKER_BG_ROUTER_PORT:-3017}"
 BLUE_PORT="${AIWORKER_BG_BLUE_PORT:-3317}"
@@ -66,6 +68,21 @@ NODE_BIN="$("$NODE_BIN_INPUT" -e 'process.stdout.write(require("node:fs").realpa
 [[ -f "$NODE_BIN" && -x "$NODE_BIN" && ! -L "$NODE_BIN" ]] \
   || fail "Node.js executable must resolve to an executable regular file"
 NODE_BIN_DIR="$(dirname "$NODE_BIN")"
+EXECVE_SOURCE="$($NODE_BIN --input-type=module - "$EXECVE_CONTRACT" <<'NODE'
+import { pathToFileURL } from 'node:url'
+const { BLUE_GREEN_EXECVE_SOURCE } = await import(pathToFileURL(process.argv[2]).href)
+process.stdout.write(BLUE_GREEN_EXECVE_SOURCE)
+NODE
+)" || fail "unable to load the blue-green execve contract"
+EXECVE_CONTRACT_SHA256="$(shasum -a 256 "$EXECVE_CONTRACT" | awk '{print $1}')"
+EXECVE_SOURCE_SHA256="$($NODE_BIN --input-type=module - "$EXECVE_CONTRACT" <<'NODE'
+import { pathToFileURL } from 'node:url'
+const { blueGreenExecveSourceSha256 } = await import(pathToFileURL(process.argv[2]).href)
+process.stdout.write(blueGreenExecveSourceSha256())
+NODE
+)" || fail "unable to hash the blue-green execve source"
+ROUTER_SCRIPT_SHA256="$(shasum -a 256 "$ROUTER_SCRIPT" | awk '{print $1}')"
+START_SCRIPT_SHA256="$(shasum -a 256 "$START_SCRIPT" | awk '{print $1}')"
 
 service_label() {
   printf 'com.video-autoworker.blue-green.%s\n' "$1"
@@ -198,10 +215,12 @@ render_service() {
       __NODE_BIN__ "$NODE_BIN" \
       __NODE_BIN_DIR__ "$NODE_BIN_DIR" \
       __ROUTER_SCRIPT__ "$ROUTER_SCRIPT" \
+      __ROUTER_SCRIPT_SHA256__ "$ROUTER_SCRIPT_SHA256" \
+      __EXECVE_SOURCE__ "$EXECVE_SOURCE" \
+      __WORKING_DIRECTORY__ "$LAUNCH_WORKING_DIRECTORY" \
       __ROUTER_STATE__ "$ROUTER_STATE" \
       __PORT__ "$port" \
       __ATTESTATION__ "$RUN_DIR/router.runtime.json" \
-      __PROJECT_ROOT__ "$PROJECT_ROOT" \
       __HOME__ "$HOME" \
       __ENABLED_MARKER__ "$marker" \
       __STDOUT_LOG__ "$LOG_DIR/router.log" \
@@ -211,10 +230,12 @@ render_service() {
       __LABEL__ "$label" \
       __START_SCRIPT__ "$START_SCRIPT" \
       __SLOT__ "$service" \
-      __PROJECT_ROOT__ "$PROJECT_ROOT" \
       __HOME__ "$HOME" \
       __NODE_BIN_DIR__ "$NODE_BIN_DIR" \
       __NODE_BIN__ "$NODE_BIN" \
+      __EXECVE_SOURCE__ "$EXECVE_SOURCE" \
+      __START_SCRIPT_SHA256__ "$START_SCRIPT_SHA256" \
+      __WORKING_DIRECTORY__ "$LAUNCH_WORKING_DIRECTORY" \
       __RUN_DIR__ "$RUN_DIR" \
       __RELEASES_DIR__ "$RELEASES_DIR" \
       __ROUTER_STATE__ "$ROUTER_STATE" \
@@ -232,13 +253,15 @@ write_installation_manifest() {
   "$NODE_BIN" - "$destination" "$PROJECT_ROOT" "$RUN_DIR" "$RELEASES_DIR" \
     "$LAUNCH_AGENTS_DIR" "$NODE_BIN" "$WORK_ROOT/router.plist" "$WORK_ROOT/blue.plist" \
     "$WORK_ROOT/green.plist" "$ROUTER_PORT" "$BLUE_PORT" "$GREEN_PORT" \
-    "$ROUTER_SCRIPT" "$START_SCRIPT" <<'NODE'
+    "$ROUTER_SCRIPT" "$START_SCRIPT" "$EXECVE_CONTRACT" "$EXECVE_CONTRACT_SHA256" "$EXECVE_SOURCE_SHA256" \
+    "$LAUNCH_WORKING_DIRECTORY" <<'NODE'
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const [destination, projectRoot, runDir, releasesDir, launchAgentsDir, nodeBin,
   routerSource, blueSource, greenSource, routerPort, bluePort, greenPort,
-  routerScript, slotStartScript] = process.argv.slice(2)
+  routerScript, slotStartScript, execveContract, execveContractSha256, execveSourceSha256,
+  launchWorkingDirectory] = process.argv.slice(2)
 const digest = pathname => crypto.createHash('sha256').update(fs.readFileSync(pathname)).digest('hex')
 const executable = (pathname, expectedMode) => {
   const fail = message => { throw new Error(`executable ${message}: ${pathname}`) }
@@ -250,6 +273,16 @@ const executable = (pathname, expectedMode) => {
   const uid = typeof process.getuid === 'function' ? process.getuid() : entry.uid
   if (entry.uid !== uid) fail('is not owned by the current user')
   return { path: pathname, uid, mode: expectedMode, sha256: digest(pathname) }
+}
+const sourceFile = (pathname, expectedMode, expectedSha256) => {
+  const entry = fs.lstatSync(pathname)
+  if (!path.isAbsolute(pathname) || path.resolve(pathname) !== pathname
+    || !entry.isFile() || entry.isSymbolicLink() || fs.realpathSync.native(pathname) !== pathname
+    || (entry.mode & 0o777) !== expectedMode || entry.uid !== process.getuid()
+    || !/^[a-f0-9]{64}$/u.test(expectedSha256) || digest(pathname) !== expectedSha256) {
+    throw new Error(`source file binding is invalid: ${pathname}`)
+  }
+  return { path: pathname, sha256: expectedSha256, mode: expectedMode }
 }
 const service = (name, source, port) => ({
   label: `com.video-autoworker.blue-green.${name}`,
@@ -265,6 +298,12 @@ const payload = {
   releasesDir,
   launchAgentsDir,
   nodeBin,
+  execve: {
+    schema: 'video-autoworker-blue-green-execve/v1',
+    contract: sourceFile(execveContract, 0o644, execveContractSha256),
+    sourceSha256: execveSourceSha256,
+    workingDirectory: launchWorkingDirectory,
+  },
   executables: {
     routerScript: executable(routerScript, 0o755),
     slotStartScript: executable(slotStartScript, 0o755),
@@ -355,13 +394,23 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for source_path in "$PROJECT_ROOT" "$ROUTER_TEMPLATE" "$SLOT_TEMPLATE" "$ROUTER_SCRIPT" "$START_SCRIPT"; do
+for source_path in "$PROJECT_ROOT" "$ROUTER_TEMPLATE" "$SLOT_TEMPLATE" "$ROUTER_SCRIPT" "$START_SCRIPT" "$EXECVE_CONTRACT"; do
   if [[ -d "$source_path" ]]; then
     assert_safe_path "$source_path" directory "source directory"
   else
     assert_safe_path "$source_path" file "source file"
   fi
 done
+[[ "$LAUNCH_WORKING_DIRECTORY" == "$SUPERVISOR_DIR" \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$RELEASES_DIR" \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$RELEASES_DIR"/* \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Documents" \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Documents"/* \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Desktop" \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Desktop"/* \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Downloads" \
+  && "$LAUNCH_WORKING_DIRECTORY" != "$HOME/Downloads"/* ]] \
+  || fail "LaunchAgent working directory must be the external supervisor directory"
 for executable_path in "$ROUTER_SCRIPT" "$START_SCRIPT"; do
   executable_mode="$(stat -f '%Lp' "$executable_path" 2>/dev/null || stat -c '%a' "$executable_path")"
   [[ "$executable_mode" == "755" ]] || fail "managed executable must have mode 0755: $executable_path"

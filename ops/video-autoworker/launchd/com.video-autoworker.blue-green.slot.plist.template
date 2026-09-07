@@ -6,12 +6,18 @@
   <string>__LABEL__</string>
   <key>ProgramArguments</key>
   <array>
+    <string>__NODE_BIN__</string>
+    <string>-e</string>
+    <string>__EXECVE_SOURCE__</string>
+    <string>slot</string>
     <string>__START_SCRIPT__</string>
+    <string>__START_SCRIPT_SHA256__</string>
+    <string>__WORKING_DIRECTORY__</string>
     <string>__SLOT__</string>
     <string>active</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>__PROJECT_ROOT__</string>
+  <string>__WORKING_DIRECTORY__</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
