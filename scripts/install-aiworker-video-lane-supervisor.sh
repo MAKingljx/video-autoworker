@@ -5,11 +5,14 @@ umask 077
 LABEL="ai.aiworker.video-lane-supervisor"
 PROFILE="qwen-current"
 AGENT_ID="second-original"
-OPENCLAW_VERSION="2026.7.1-2"
+OPENCLAW_VERSION=""
 EXPECTED_USER="${AIWORKER_EXPECTED_USER:-heisenbergs-1}"
 EXPECTED_HOST="${AIWORKER_EXPECTED_HOST:-HEISENBERGS-1deMac-Studio.local}"
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
+OPENCLAW_VERSION="$(node "$OPENCLAW_RUNTIME_CONTRACT" runtime-version)" \
+  || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 SOURCE_SKILL="$REPOSITORY_ROOT/openclaw-skills/aiworker-task-flow"
 TEMPLATE="$REPOSITORY_ROOT/ops/video-lane/launchd/$LABEL.plist.template"
 VALIDATOR="$REPOSITORY_ROOT/scripts/validate-aiworker-video-lane-supervisor.mjs"

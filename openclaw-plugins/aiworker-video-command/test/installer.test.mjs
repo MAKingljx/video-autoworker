@@ -48,6 +48,7 @@ async function createVideoInstallerFixture() {
   for (const relative of [
     'scripts/install-aiworker-video-command-plugin.sh',
     'scripts/lib/openclaw-secret-reference.mjs',
+    'scripts/lib/openclaw-runtime-contract.mjs',
     'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
@@ -164,7 +165,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const args = process.argv.slice(2)
 if (args.length === 1 && args[0] === '--version') {
-  console.log('OpenClaw 2026.7.1-2 (fixture)')
+  console.log('OpenClaw 2026.9.2 (fixture)')
   process.exit(0)
 }
 fs.appendFileSync(process.env.AIWORKER_TEST_OPENCLAW_LOG, JSON.stringify(args) + '\\n')

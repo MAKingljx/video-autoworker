@@ -365,6 +365,7 @@ async function initializeCleanInstallerRepository() {
     'scripts/lib/runtime-safe-offline-queue.mjs',
     'scripts/lib/sensitive-value-scanner.mjs',
     'scripts/lib/runtime-tree-manifest.mjs',
+    'scripts/lib/openclaw-runtime-contract.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
   ]

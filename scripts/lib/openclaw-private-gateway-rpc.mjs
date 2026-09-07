@@ -1,8 +1,14 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  OPENCLAW_GATEWAY_RUNTIME_EXPORT,
+  OPENCLAW_PACKAGE_NAME,
+  OPENCLAW_RUNTIME_VERSION,
+  isOpenClawConfigRevisionToken,
+} from './openclaw-runtime-contract.mjs'
 
-const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2'
 const LOOPBACK_URL = 'ws://127.0.0.1:18889'
 const TARGET_AGENT_ID = 'second-original'
 const MAX_RESULT_BYTES = 8 * 1024 * 1024
@@ -41,7 +47,7 @@ function readOpenClawPackageRoot() {
       const packageEntry = fs.lstatSync(packagePath)
       if (!packageEntry.isFile() || packageEntry.isSymbolicLink()) fail()
       const manifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
-      if (manifest?.name === 'openclaw' && manifest?.version === EXPECTED_OPENCLAW_VERSION) {
+      if (manifest?.name === OPENCLAW_PACKAGE_NAME && manifest?.version === OPENCLAW_RUNTIME_VERSION) {
         return current
       }
     }
@@ -52,21 +58,14 @@ function readOpenClawPackageRoot() {
   fail()
 }
 
-async function loadCallGatewayCli() {
+async function loadCallGatewayFromCli() {
   const root = readOpenClawPackageRoot()
-  const dist = path.join(root, 'dist')
-  const candidates = fs.readdirSync(dist, { withFileTypes: true })
-    .filter(entry => entry.isFile() && /^call-[A-Za-z0-9_-]+\.js$/u.test(entry.name))
-    .map(entry => path.join(dist, entry.name))
-    .filter(candidate => {
-      const source = fs.readFileSync(candidate, 'utf8')
-      return source.includes('export { GatewayCredentialsRequiredError')
-        && source.includes('callGatewayCli')
-    })
-  if (candidates.length !== 1) fail()
-  const loaded = await import(pathToFileURL(candidates[0]).href)
-  if (typeof loaded.callGatewayCli !== 'function') fail()
-  return loaded.callGatewayCli
+  const scopedRequire = createRequire(path.join(root, 'package.json'))
+  let exportedPath
+  try { exportedPath = scopedRequire.resolve(OPENCLAW_GATEWAY_RUNTIME_EXPORT) } catch { fail() }
+  const loaded = await import(pathToFileURL(exportedPath).href)
+  if (typeof loaded.callGatewayFromCli !== 'function') fail()
+  return loaded.callGatewayFromCli
 }
 
 function safeOutput(pathname, source) {
@@ -106,8 +105,9 @@ function operationRequest(operation) {
   }
   if (operation === 'config-get') return { method: 'config.get', params: {} }
   if (operation === 'config-patch') {
-    const baseHash = secret('AIWORKER_OPENCLAW_RUNTIME_BASE_HASH')
-    if (!/^[a-f0-9]{64}$/u.test(baseHash)) fail()
+    const baseHash = secret('AIWORKER_OPENCLAW_RUNTIME_REVISION_TOKEN', false)
+      || secret('AIWORKER_OPENCLAW_RUNTIME_BASE_HASH')
+    if (!isOpenClawConfigRevisionToken(baseHash)) fail()
     const patchPath = normalizedAbsolute(process.env.AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE || '')
     const patchEntry = fs.lstatSync(patchPath)
     if (!patchEntry.isFile() || patchEntry.isSymbolicLink() || patchEntry.uid !== process.getuid()
@@ -150,16 +150,15 @@ async function main() {
   if (!operation || !outputPath || extra.length !== 0) fail()
   const gatewayToken = secret('OPENCLAW_GATEWAY_TOKEN')
   const sessionKey = process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''
-  const callGatewayCli = await loadCallGatewayCli()
+  const callGatewayFromCli = await loadCallGatewayFromCli()
   const request = operationRequest(operation)
   let result
   try {
-    result = await callGatewayCli({
-      ...request,
+    result = await callGatewayFromCli(request.method, {
       url: LOOPBACK_URL,
       token: gatewayToken,
-      timeoutMs: 20_000,
-    })
+      timeout: 20_000,
+    }, request.params, { expectFinal: true, sharedStateMode: 'read-only' })
   } catch { fail('rpc_call_failed') }
   const source = serializePrivateGatewayResult(operation, result, gatewayToken, sessionKey)
   safeOutput(outputPath, source)

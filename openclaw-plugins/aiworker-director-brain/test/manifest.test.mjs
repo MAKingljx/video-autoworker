@@ -11,7 +11,7 @@ describe('director brain plugin package', () => {
 
     expect(packageJson.type).toBe('module')
     expect(packageJson.version).toBe('0.4.0')
-    expect(packageJson.peerDependencies).toEqual({ openclaw: '2026.7.1-2' })
+    expect(packageJson.peerDependencies).toEqual({ openclaw: '>=2026.9.2' })
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(manifest).toMatchObject({
       id: 'aiworker-director-brain',

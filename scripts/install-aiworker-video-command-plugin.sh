@@ -8,11 +8,14 @@ AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
 SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13")
 CURRENT_VERSION="0.5.14"
-OPENCLAW_VERSION="2026.7.1-2"
+OPENCLAW_VERSION=""
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
+OPENCLAW_VERSION="$(node "$OPENCLAW_RUNTIME_CONTRACT" runtime-version)" \
+  || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 RUNTIME_VALIDATOR="$PLUGIN_DIR/scripts/validate-runtime-inspection.mjs"
 SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"

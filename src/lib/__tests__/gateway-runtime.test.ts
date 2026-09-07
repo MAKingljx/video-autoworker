@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -37,11 +38,14 @@ describe('registerMcAsDashboard', () => {
 
   beforeEach(async () => {
     tempDir = mkdtempSync(path.join(os.tmpdir(), 'mc-gateway-runtime-'))
+    const home = path.join(tempDir, 'home')
+    process.env = { ...originalEnv, HOME: home }
+    const bin = path.join(home, 'ai-worker/bin')
+    mkdirSync(bin, { recursive: true, mode: 0o700 })
     configPath = path.join(tempDir, 'openclaw.json')
-    providerCommand = path.join(tempDir, 'fixture-secret-provider')
-    writeFileSync(providerCommand, '#!/bin/sh\nexit 99\n', { mode: 0o700 })
+    providerCommand = path.join(bin, 'aiworker-openclaw-keychain-secretref')
+    writeFileSync(providerCommand, readFileSync('scripts/openclaw-keychain-secretref.sh'), { mode: 0o700 })
     chmodSync(providerCommand, 0o700)
-    process.env = { ...originalEnv }
     delete process.env.OPENCLAW_GATEWAY_TOKEN
     delete process.env.GATEWAY_TOKEN
     delete process.env.OPENCLAW_GATEWAY_PASSWORD
@@ -50,6 +54,15 @@ describe('registerMcAsDashboard', () => {
 
     const { config } = await import('@/lib/config')
     config.openclawConfigPath = configPath
+  })
+
+  const validProvider = () => ({
+    source: 'exec',
+    command: providerCommand,
+    args: ['account-ref', 'service-ref', `${process.env.HOME}/Library/Keychains/login.keychain-db`],
+    trustedDirs: [path.dirname(providerCommand)],
+    passEnv: ['HOME'],
+    jsonOnly: false,
   })
 
   afterEach(() => {
@@ -130,11 +143,7 @@ describe('registerMcAsDashboard', () => {
       },
       secrets: {
         providers: {
-          'login-keychain': {
-            source: 'exec',
-            command: providerCommand,
-            args: ['find-generic-password', '-w', '-s', 'gateway-token'],
-          },
+          'login-keychain': validProvider(),
         },
       },
     }), 'utf-8')
@@ -151,8 +160,8 @@ describe('registerMcAsDashboard', () => {
     expect(withDetectedGatewayProcessEnvironment({ NODE_ENV: 'test' }).OPENCLAW_GATEWAY_TOKEN).toBe(token)
     expect(spawnSyncMock).toHaveBeenCalledWith(
       realpathSync(providerCommand),
-      ['find-generic-password', '-w', '-s', 'gateway-token'],
-      expect.objectContaining({ env: {}, maxBuffer: 4096, timeout: 10_000 }),
+      validProvider().args,
+      expect.objectContaining({ env: { HOME: process.env.HOME }, maxBuffer: 4096, timeout: 10_000 }),
     )
     const { logger } = await import('@/lib/logger')
     expect(JSON.stringify(vi.mocked(logger.debug).mock.calls)).not.toContain(token)
@@ -169,12 +178,7 @@ describe('registerMcAsDashboard', () => {
       },
       secrets: {
         providers: {
-          'login-keychain': {
-            source: 'exec',
-            command: providerCommand,
-            args: ['find-generic-password', '-w', '-s', 'gateway-token'],
-            timeoutMs: 5_000,
-          },
+          'login-keychain': { ...validProvider(), timeoutMs: 5_000 },
         },
       },
     }), 'utf-8')
@@ -191,8 +195,8 @@ describe('registerMcAsDashboard', () => {
     expect(withDetectedGatewayProcessEnvironment({ NODE_ENV: 'test' }).OPENCLAW_GATEWAY_TOKEN).toBe(token)
     expect(spawnSyncMock).toHaveBeenCalledWith(
       realpathSync(providerCommand),
-      ['find-generic-password', '-w', '-s', 'gateway-token'],
-      expect.objectContaining({ env: {}, maxBuffer: 4096, timeout: 5_000 }),
+      validProvider().args,
+      expect.objectContaining({ env: { HOME: process.env.HOME }, maxBuffer: 4096, timeout: 5_000 }),
     )
   })
 
@@ -227,11 +231,7 @@ describe('registerMcAsDashboard', () => {
       },
       secrets: {
         providers: {
-          'login-keychain': {
-            source: 'exec',
-            command: providerCommand,
-            args: ['find-generic-password', '-w', '-s', 'gateway-token'],
-          },
+          'login-keychain': validProvider(),
         },
       },
     }), 'utf-8')

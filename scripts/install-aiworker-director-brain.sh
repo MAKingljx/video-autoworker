@@ -7,6 +7,9 @@ TOOL_ID="aiworker_director_brain"
 DEFAULT_AGENT_ID="second-original"
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
+OPENCLAW_SOURCE_PLUGIN_PEER="$(node "$OPENCLAW_RUNTIME_CONTRACT" source-plugin-peer)" \
+  || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 SKILL_SOURCE="$REPOSITORY_ROOT/openclaw-skills/$PLUGIN_ID"
 SERVICE_SOURCE="$REPOSITORY_ROOT/scripts/lib/feishu-director-brain.mjs"
@@ -720,9 +723,9 @@ if [[ "$MODE" != "rollback" ]]; then
   node --check "$SERVICE_SOURCE"
   node --check "$SENSITIVE_VALUE_SCANNER_SOURCE"
   node --check "$TREE_MANIFEST_HELPER"
-  node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" <<'NODE'
+  node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" "$OPENCLAW_SOURCE_PLUGIN_PEER" <<'NODE'
 const fs = require('node:fs')
-const [manifestPath, packagePath] = process.argv.slice(2)
+const [manifestPath, packagePath, expectedPeer] = process.argv.slice(2)
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
 const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
@@ -733,7 +736,7 @@ if (manifest?.id !== 'aiworker-director-brain'
   || !same(manifest?.contracts?.tools, ['aiworker_director_brain'])
   || manifest?.toolMetadata?.aiworker_director_brain?.optional !== true
   || packageManifest?.version !== '0.4.0'
-  || packageManifest?.peerDependencies?.openclaw !== '2026.7.1-2') {
+  || packageManifest?.peerDependencies?.openclaw !== expectedPeer) {
   throw new Error('director_brain_plugin_contract_mismatch')
 }
 NODE

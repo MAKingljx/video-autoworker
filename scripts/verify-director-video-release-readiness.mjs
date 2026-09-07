@@ -15,6 +15,10 @@ import { fileURLToPath } from 'node:url'
 import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import {
+  acceptedInstalledOpenClawPeer,
+  OPENCLAW_RUNTIME_VERSION,
+} from './lib/openclaw-runtime-contract.mjs'
+import {
   assertConvergenceProof,
   validateOpenClawSdkLink,
 } from './lib/openclaw-runtime-convergence.mjs'
@@ -31,7 +35,7 @@ const SHA256 = /^[a-f0-9]{64}$/u
 const GIT_COMMIT = /^[a-f0-9]{40}$/u
 const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
-const EXPECTED_OPENCLAW_VERSION = '2026.7.1-2'
+const EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
 const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.14'
 const EXPECTED_DIRECTOR_BRAIN_VERSION = '0.4.0'
 const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
@@ -326,7 +330,9 @@ function assertDirectorBrainPluginContract(root) {
     || JSON.stringify(capabilities) !== JSON.stringify(['hook', 'tool'])
     || JSON.stringify(manifest?.contracts?.tools) !== JSON.stringify(['aiworker_director_brain'])
     || manifest?.toolMetadata?.aiworker_director_brain?.optional !== true
-    || packageManifest?.peerDependencies?.openclaw !== '2026.7.1-2') {
+    || !acceptedInstalledOpenClawPeer(
+      'aiworker-director-brain', packageManifest?.peerDependencies?.openclaw,
+    )) {
     fail('director_brain_plugin_contract_mismatch')
   }
 }

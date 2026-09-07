@@ -130,7 +130,7 @@ async function installVideoCommand(profileRoot: string, managedNodeRoot: string)
     sdkRoot,
   ]) await chmod(directory, 0o755)
   await writeFile(join(sdkRoot, 'package.json'), `${JSON.stringify({
-    name: 'openclaw', version: '2026.7.1-2',
+    name: 'openclaw', version: '2026.9.2',
   })}\n`, { mode: 0o644 })
   const installedNodeModules = join(target, 'node_modules')
   await mkdir(installedNodeModules, { mode: 0o700 })
@@ -413,7 +413,7 @@ describe('director video release readiness verifier', () => {
 
   it('rejects drift in the linked OpenClaw SDK package identity', async () => {
     await writeFile(join(managedNodeRoot, 'lib', 'node_modules', 'openclaw', 'package.json'),
-      `${JSON.stringify({ name: 'not-openclaw', version: '2026.7.1-2' })}\n`, { mode: 0o644 })
+      `${JSON.stringify({ name: 'not-openclaw', version: '2026.9.2' })}\n`, { mode: 0o644 })
     expect(() => verifyInstalledReleasePayloads({
       repositoryRoot,
       profileStateRoot: profileRoot,
