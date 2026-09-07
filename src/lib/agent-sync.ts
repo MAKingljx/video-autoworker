@@ -13,6 +13,10 @@ import { existsSync, readFileSync, statSync } from 'fs'
 import { resolveWithin } from './paths'
 import { logger } from './logger'
 import { parseJsonRelaxed } from './json-relaxed'
+import {
+  readOpenClawAgentEntries,
+  writeOpenClawAgentEntries,
+} from '../../scripts/lib/openclaw-agent-config.mjs'
 
 interface OpenClawAgent {
   id: string
@@ -185,7 +189,7 @@ export function enrichAgentConfigFromWorkspace(configData: any): any {
   }
 }
 
-/** Read and parse openclaw.json agents list */
+/** Read and normalize OpenClaw's current or historical agent layout. */
 async function readOpenClawAgents(): Promise<OpenClawAgent[]> {
   const configPath = getConfigPath()
   if (!configPath) throw new Error('OPENCLAW_CONFIG_PATH not configured')
@@ -193,7 +197,7 @@ async function readOpenClawAgents(): Promise<OpenClawAgent[]> {
   const { readFile } = require('fs/promises')
   const raw = await readFile(configPath, 'utf-8')
   const parsed = parseJsonRelaxed<any>(raw)
-  return parsed?.agents?.list || []
+  return readOpenClawAgentEntries(parsed) as OpenClawAgent[]
 }
 
 /** Extract MC-friendly fields from an OpenClaw agent config */
@@ -346,7 +350,7 @@ export async function previewSyncDiff(): Promise<SyncDiff> {
   }
 }
 
-/** Write an agent config back to openclaw.json agents.list */
+/** Write an agent config back while preserving OpenClaw's configured layout. */
 export async function writeAgentToConfig(agentConfig: any): Promise<void> {
   const configPath = getConfigPath()
   if (!configPath) throw new Error('OPENCLAW_CONFIG_PATH not configured')
@@ -354,23 +358,22 @@ export async function writeAgentToConfig(agentConfig: any): Promise<void> {
   const { readFile, writeFile } = require('fs/promises')
   const raw = await readFile(configPath, 'utf-8')
   const parsed = parseJsonRelaxed<any>(raw)
-
-  if (!parsed.agents) parsed.agents = {}
-  if (!parsed.agents.list) parsed.agents.list = []
+  const agents = readOpenClawAgentEntries(parsed) as OpenClawAgent[]
 
   const normalizedAgentConfig = normalizeAgentConfigForOpenClaw(agentConfig)
 
   // Find existing by id
-  const idx = parsed.agents.list.findIndex((a: any) => a.id === normalizedAgentConfig.id)
+  const idx = agents.findIndex((agent) => agent.id === normalizedAgentConfig.id)
   if (idx >= 0) {
     // Deep merge: preserve fields not in update
-    parsed.agents.list[idx] = normalizeAgentConfigForOpenClaw(
-      deepMerge(parsed.agents.list[idx], normalizedAgentConfig),
+    agents[idx] = normalizeAgentConfigForOpenClaw(
+      deepMerge(agents[idx], normalizedAgentConfig),
     )
   } else {
-    parsed.agents.list.push(normalizedAgentConfig)
+    agents.push(normalizedAgentConfig)
   }
 
+  writeOpenClawAgentEntries(parsed, agents)
   await writeFile(configPath, JSON.stringify(parsed, null, 2) + '\n')
 }
 
@@ -390,7 +393,7 @@ export async function removeAgentFromConfig(match: {
   const { readFile, writeFile } = require('fs/promises')
   const raw = await readFile(configPath, 'utf-8')
   const parsed = parseJsonRelaxed<any>(raw)
-  const existingList = Array.isArray(parsed?.agents?.list) ? parsed.agents.list : []
+  const existingList = readOpenClawAgentEntries(parsed) as OpenClawAgent[]
 
   const nextList = existingList.filter((agent: any) => {
     const agentId = String(agent?.id || '').trim()
@@ -406,8 +409,7 @@ export async function removeAgentFromConfig(match: {
     return { removed: false }
   }
 
-  if (!parsed.agents) parsed.agents = {}
-  parsed.agents.list = nextList
+  writeOpenClawAgentEntries(parsed, nextList)
   await writeFile(configPath, JSON.stringify(parsed, null, 2) + '\n')
   return { removed: true }
 }

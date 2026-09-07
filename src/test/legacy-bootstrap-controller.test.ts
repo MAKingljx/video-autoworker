@@ -342,7 +342,7 @@ function fixture(options: {
   writeFileSync(transitionAttestation, `${JSON.stringify({
     producer: { path: transitionAnchor, sha256: hash(readFileSync(transitionAnchor)) },
     deployed: {
-      report: reference(workflowReportPath),
+      report: fullReference(workflowReportPath),
       combinedSha256: workflowDigest,
     },
   })}\n`, { mode: 0o400 })

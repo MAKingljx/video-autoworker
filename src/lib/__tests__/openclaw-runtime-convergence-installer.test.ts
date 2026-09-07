@@ -1189,6 +1189,33 @@ export async function callGatewayFromCli(method, options, params, extra) {
     expect(await exists(entry.gatewayLog)).toBe(false)
   }, 15_000)
 
+  it('preflights the 9.2 keyed agent layout without converting or changing config', async () => {
+    const entry = await createFixture()
+    const config = JSON.parse(await readFile(entry.config, 'utf8'))
+    const { id, ...agent } = config.agents.list[0]
+    delete config.agents.list
+    config.agents.entries = { [id]: agent }
+    await writeFile(entry.config, JSON.stringify(config), { mode: 0o600 })
+    const before = await readFile(entry.config, 'utf8')
+    const result = await run(entry, '--dry-run')
+    expect(result.stdout).toContain('runtime convergence dry-run passed')
+    expect(await readFile(entry.config, 'utf8')).toBe(before)
+    expect(await exists(entry.backupRoot)).toBe(false)
+    expect(await exists(entry.gatewayLog)).toBe(false)
+  }, 20_000)
+
+  it('rejects multiple keyed agents before any runtime convergence writes', async () => {
+    const entry = await createFixture()
+    const config = JSON.parse(await readFile(entry.config, 'utf8'))
+    delete config.agents.list
+    config.agents.entries = { 'second-original': {}, unexpected: {} }
+    await writeFile(entry.config, JSON.stringify(config), { mode: 0o600 })
+    const before = await readFile(entry.config, 'utf8')
+    await expect(run(entry, '--apply')).rejects.toThrow(/agents.entries must contain only/u)
+    expect(await readFile(entry.config, 'utf8')).toBe(before)
+    expect(await exists(entry.backupRoot)).toBe(false)
+  }, 15_000)
+
   it('captures the supported effective policy notice and rejects post-baseline policy drift', async () => {
     const entry = await createFixture()
     entry.env.FAKE_EFFECTIVE_PROFILE_NOTICE = '1'

@@ -1,10 +1,12 @@
 # 2026-09-07 优化与同次部署恢复计划
 
-目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用来源固定为 3332b06718eb2c8ab592bd0a6c1881afb8f18540；控制来源为包含本计划和 successor 收口修复的 clean Git commit；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。
+目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用与控制来源使用包含本计划、successor 收口和 OpenClaw 9.2 keyed agent 修复的 clean Git commit，具体完整 SHA 在私有执行计划与交付记录绑定；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。此前交付的 3332b067 制品未激活，因缺少 keyed agent 修复不再作为最终目标。
 
 ## 已具备证据
 
 应用在 Node 22.22.3 构建，ABI 127 原生 SQLite 验证通过；本地与远端制品内容摘要一致，普通文件无共享 inode。实际接口、素材边界和主题切换通过。生产一致性备份副本的 051–059 迁移通过，原 53 张业务表内容保持一致，519 条视频任务未变。两库备份经 SHA 和 SQLite 完整性验证。
+
+只读现场 dry-run 发现 9.2 已把 agent 身份迁移为 `agents.entries` 的键；旧 convergence 与应用同步只读 `agents.list`。共享配置合同现同时读取两种布局，拒绝混合、畸形与重复身份，写回保留原布局及未修改字段。最终制品须重建并验证 keyed agent 读取，数据库迁移实现未变，复用上述迁移证据。
 
 ## 执行顺序
 

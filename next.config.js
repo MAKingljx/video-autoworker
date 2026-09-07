@@ -29,6 +29,7 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/runtime-safe-offline-queue.mjs',
   './scripts/lib/openclaw-secret-reference.mjs',
   './scripts/lib/openclaw-private-gateway-rpc.mjs',
+  './scripts/lib/openclaw-agent-config.mjs',
   './scripts/lib/openclaw-runtime-convergence.mjs',
   './scripts/lib/openclaw-runtime-contract.mjs',
   './scripts/lib/openclaw-tool-capability-fingerprint.mjs',

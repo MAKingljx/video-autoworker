@@ -169,6 +169,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
   'scripts/lib/openclaw-private-gateway-rpc.mjs',
+  'scripts/lib/openclaw-agent-config.mjs',
   'scripts/lib/openclaw-runtime-convergence.mjs',
   'scripts/lib/openclaw-runtime-contract.mjs',
   'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
@@ -286,6 +287,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'scripts/lib/runtime-safe-offline-queue.mjs',
   'scripts/lib/openclaw-secret-reference.mjs',
   'scripts/lib/openclaw-private-gateway-rpc.mjs',
+  'scripts/lib/openclaw-agent-config.mjs',
   'scripts/lib/openclaw-runtime-convergence.mjs',
   'scripts/lib/openclaw-runtime-contract.mjs',
   'scripts/lib/openclaw-tool-capability-fingerprint.mjs',
@@ -356,6 +358,7 @@ const EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES = new Map([
   ]],
   ['scripts/apply-openclaw-runtime-convergence.sh', [
     'scripts/lib/openclaw-private-gateway-rpc.mjs',
+    'scripts/lib/openclaw-agent-config.mjs',
     'scripts/lib/openclaw-runtime-convergence.mjs',
     'scripts/lib/openclaw-secret-reference.mjs',
     'scripts/lib/shared-deployment-lock.sh',

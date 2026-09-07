@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readOpenClawAgentEntries } from './openclaw-agent-config.mjs'
 import {
   isOpenClawConfigRevisionToken,
   OPENCLAW_RUNTIME_VERSION,
@@ -87,10 +88,10 @@ function validateManifest(pathname) {
 }
 
 function exclusiveProfileAgent(config, agentId) {
-  const agents = config?.agents?.list
-  if (!Array.isArray(agents)) fail('agents.list must be an array')
+  const agents = readOpenClawAgentEntries(config)
   if (agents.length !== 1 || agents[0]?.id !== agentId) {
-    fail(`agents.list must contain only the ${agentId} profile agent`)
+    const layout = Object.hasOwn(config?.agents ?? {}, 'list') ? 'list' : 'entries'
+    fail(`agents.${layout} must contain only the ${agentId} profile agent`)
   }
   return agents[0]
 }
