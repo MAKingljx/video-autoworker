@@ -30,6 +30,7 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/openclaw-secret-reference.mjs',
   './scripts/lib/openclaw-private-gateway-rpc.mjs',
   './scripts/lib/openclaw-runtime-convergence.mjs',
+  './scripts/lib/openclaw-runtime-contract.mjs',
   './scripts/lib/openclaw-tool-capability-fingerprint.mjs',
   './scripts/lib/render-managed-markdown-section.mjs',
   './scripts/lib/runtime-tree-manifest.mjs',

@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, normalize, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { OPENCLAW_SECRETREF_WRAPPER } from './openclaw-runtime-contract.mjs'
 
 const TOKEN_PATTERN = /^[a-f0-9]{64}$/u
 const MAX_OUTPUT_BYTES = 4_096
@@ -10,7 +12,7 @@ const MAX_TIMEOUT_MS = 120_000
 const MAX_PROVIDER_OUTPUT_BYTES = 20 * 1024 * 1024
 const OPTIONAL_PROVIDER_KEYS = [
   'timeoutMs', 'noOutputTimeoutMs', 'maxOutputBytes', 'jsonOnly',
-  'trustedDirs', 'allowInsecurePath',
+  'trustedDirs', 'passEnv',
 ]
 
 function isSafeAbsolutePath(value) {
@@ -47,7 +49,11 @@ export function isValidExecSecretReference(reference, providers) {
   if (typeof reference.id !== 'string' || !reference.id) return false
   if (typeof reference.provider !== 'string' || !reference.provider) return false
   const provider = providers?.[reference.provider]
-  return Boolean(provider
+  const home = process.env.HOME || ''
+  const trustedDirectory = join(home, 'ai-worker/bin')
+  const expectedCommand = join(home, OPENCLAW_SECRETREF_WRAPPER.relativePath)
+  const expectedKeychain = join(home, 'Library/Keychains/login.keychain-db')
+  const common = Boolean(provider
     && hasOnlyKeys(provider, ['args', 'command', 'source'], OPTIONAL_PROVIDER_KEYS)
     && provider.source === 'exec'
     && isSafeAbsolutePath(provider.command)
@@ -61,11 +67,29 @@ export function isValidExecSecretReference(reference, providers) {
     // This shared adapter resolves one raw value, as required by security -w.
     // JSON/stdin and inherited-environment providers remain unsupported.
     && (provider.jsonOnly === undefined || provider.jsonOnly === false)
-    && (provider.allowInsecurePath === undefined || typeof provider.allowInsecurePath === 'boolean')
     && (provider.trustedDirs === undefined || (Array.isArray(provider.trustedDirs)
       && provider.trustedDirs.length > 0 && provider.trustedDirs.length <= 64
       && provider.trustedDirs.every(isSafeAbsolutePath)
       && provider.trustedDirs.some(directory => isWithinDirectory(directory, provider.command)))))
+  if (!common) return false
+  if (provider.passEnv === undefined) return true
+  return Boolean(home && provider.command === expectedCommand
+    && provider.args.length === 3
+    && provider.args[0] && !provider.args[0].startsWith('-')
+    && provider.args[1] && !provider.args[1].startsWith('-')
+    && provider.args[2] === expectedKeychain
+    && provider.jsonOnly === false
+    && Array.isArray(provider.trustedDirs)
+    && provider.trustedDirs.length === 1 && provider.trustedDirs[0] === trustedDirectory
+    && Array.isArray(provider.passEnv)
+    && provider.passEnv.length === 1 && provider.passEnv[0] === 'HOME')
+}
+
+function isApprovedHomeWrapper(provider) {
+  const home = process.env.HOME || ''
+  return home && provider.command === join(home, OPENCLAW_SECRETREF_WRAPPER.relativePath)
+    && Array.isArray(provider.passEnv) && provider.passEnv.length === 1
+    && provider.passEnv[0] === 'HOME'
 }
 
 function resolveProviderCommand(provider) {
@@ -80,9 +104,13 @@ function resolveProviderCommand(provider) {
     const physical = realpathSync(directory)
     return lstatSync(physical).isDirectory() && isWithinDirectory(physical, command)
   })) return ''
-  if (provider.allowInsecurePath !== true
-    && ((entry.mode & 0o022) !== 0
-      || (typeof process.getuid === 'function' && entry.uid !== process.getuid()))) return ''
+  if (isApprovedHomeWrapper(provider)) {
+    if ((entry.mode & 0o777) !== OPENCLAW_SECRETREF_WRAPPER.mode
+      || (typeof process.getuid === 'function' && entry.uid !== process.getuid())
+      || createHash('sha256').update(readFileSync(command)).digest('hex')
+        !== OPENCLAW_SECRETREF_WRAPPER.sha256) return ''
+  } else if ((entry.mode & 0o022) !== 0
+    || (typeof process.getuid === 'function' && entry.uid !== process.getuid())) return ''
   return command
 }
 
@@ -111,7 +139,7 @@ export function resolveExecSecretReference(reference, providers, {
     result = spawnSync(command, provider.args, {
       encoding: 'utf8',
       cwd: dirname(command),
-      env: {},
+      env: isApprovedHomeWrapper(provider) ? { HOME: process.env.HOME } : {},
       shell: false,
       maxBuffer: effectiveMaxBuffer,
       timeout: effectiveTimeoutMs,
