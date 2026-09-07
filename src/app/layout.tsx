@@ -95,6 +95,7 @@ export default async function RootLayout({
       <body className="font-sans antialiased" suppressHydrationWarning>
         <NextIntlClientProvider messages={messages}>
           <ThemeProvider
+            nonce={nonce}
             attribute="class"
             defaultTheme="github-dark"
             themes={THEME_IDS}
