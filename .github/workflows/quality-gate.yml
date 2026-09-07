@@ -50,6 +50,13 @@ jobs:
       - name: Unit tests
         run: pnpm test
 
+      - name: OpenClaw session QA contracts
+        run: >-
+          node --test
+          scripts/test-openclaw-rich-canary-session-runtime.test.mjs
+          scripts/test-openclaw-owned-synthetic-session.test.mjs
+          scripts/test-openclaw-session-resilience-matrix.test.mjs
+
       - name: Prepare E2E environment
         run: cp .env.test .env
 

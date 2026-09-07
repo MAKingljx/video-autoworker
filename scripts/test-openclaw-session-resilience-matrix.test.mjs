@@ -437,7 +437,10 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
     'activeTranscriptWithinConfiguredLimit',
     'activeBranchEvidenceVerified',
     'activeTranscriptBytesBefore',
-    'activeTranscriptBytesAfter',
+    'storedTranscriptBytesBefore',
+    'storedTranscriptBytesAfter',
+    'latestObservedActiveTranscriptBytes',
+    'finalStoredTranscriptBytes',
     'preflightEvidence',
     'successorRotation',
     'toolCapabilitiesReduced',
@@ -488,9 +491,17 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
     'appendFutureCleanToolHistoryThroughHooks',
     'completeProjectedPairs',
     'legacySingleTurnRisk',
-    'preexisting-unprojected-tool-history',
-    'legacy-polluted-cannot-auto-recover',
-    'sessions.reset-exact-polluted-session-after-deployment',
+    'loadOpenClawRichCanarySessionRuntime',
+    'captureOpenClawRichCanarySessionSnapshot',
+    'openClawLinearActiveTranscriptEntryIds',
+    'openClawSessionReferenceMatchesSnapshot',
+    'sessionSnapshot',
+    'stats.sizeBytes',
+    "call('chat.inject'",
+    'semanticUserSeedsPersisted',
+    'semanticAssistantAcknowledgementsPersisted',
+    'semanticSeedRoleSequenceVerified',
+    'successorBound',
     'answerAvoidsInternalTerms',
     'sensitiveLeakage',
     "call('tools.effective'",
@@ -519,15 +530,21 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
   assert.ok(source.includes('SYNTHETIC_SENSITIVE_VALUES'))
   assert.ok(source.includes('SYNTHETIC_INTERNAL_IDENTIFIERS'))
   assert.ok(source.includes('prompts[turnIndex % prompts.length]'))
-  assert.ok(source.includes("role: 'user'"))
+  assert.ok(source.includes('...(index === 0 ? [SYNTHETIC_TECHNIQUE_LOGIC_CONTEXT] : [])'))
   assert.ok(source.includes('历史边界标记，不包含当前问题答案'))
   assert.ok(!source.includes('请依据此前工具返回的观察'))
   assert.ok(source.includes('privateMetadata: {'))
   assert.ok(source.includes('...SYNTHETIC_SENSITIVE_FIELDS'))
   assert.ok(source.includes('internalIdentifiers: SYNTHETIC_INTERNAL_IDENTIFIERS'))
   assert.ok(!source.includes('syntheticInternalIdentifiers:'))
-  assert.ok(source.indexOf('const techniqueContextId = randomUUID()')
-    > source.indexOf("if (index > 128) throw new Error('failed to reach target transcript size')"))
+  assert.ok(source.includes("if (safePaddingTurns > 128) throw new Error('failed to reach future-clean target size')"))
+  assert.ok(source.includes("'这是隔离测试的已确认历史，禁止调用工具。'"))
+  assert.ok(source.includes('const semanticRoleEvidence = semanticSeedRoleEvidence('))
+  assert.ok(source.includes("throw new Error('semantic seeds compacted before the acceptance turns')"))
+  assert.ok(!source.includes('appendFileSync'))
+  assert.ok(!source.includes('sessions.json'))
+  assert.ok(!source.includes('list: [{'))
+  assert.ok(source.includes('entries: {'))
   assert.ok(!source.includes('techniqueLearning:'))
   assert.ok(!source.includes('COMPACTION_IDENTIFIER_INSTRUCTIONS'))
   assert.ok(!source.includes('SAFE_INTERNAL_TASK_ID'))
@@ -540,15 +557,15 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
   assert.ok(!source.includes('checkpointSensitiveReferenceLeaked'))
   assert.ok(!source.includes('answerSensitiveMaterialLeaked'))
   assert.ok(!source.includes('checkpointSensitiveMaterialLeaked'))
-  assert.ok(source.includes('HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE'))
   assert.ok(source.includes('maximumObservedToolResultBytes <= TRANSCRIPT_PROJECTION_MAX_BYTES'))
   assert.ok(source.includes('attempts === 1'))
   assert.ok(source.includes('globalThis.__aiworkerResilienceCanaryPayloadUsed'))
   assert.ok(source.includes("toolRoute.calls[0].arguments.action === 'explain'"))
   assert.match(source, /readDirectorBrainSystemAnswer\(\s*'technique_learning'/u)
-  assert.ok(source.includes('HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE'))
   assert.ok(source.includes("const FUTURE_CLEAN_HISTORY_MODE = 'future-clean'"))
   assert.ok(source.includes("const LEGACY_POLLUTED_HISTORY_MODE = 'legacy-polluted'"))
+  assert.ok(source.includes("const ACCIDENT_REPLAY_HISTORY_MODE = 'accident-replay'"))
+  assert.ok(source.includes('supports only future-clean history'))
   assert.ok(source.includes('migrationRequired: legacyMigrationRequired'))
   assert.match(source, /let liveCanonicalAuthorityVerified = false/u)
   assert.match(source, /canonicalTechniqueAnswer = await readDirectorBrainSystemAnswer\([\s\S]+liveCanonicalAuthorityVerified = true/u)
@@ -594,11 +611,10 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
       timeoutSeconds: 240,
       keepRecentTokens: 8192,
       recentTurnsPreserve: 4,
-      truncateAfterCompaction: true,
       maxActiveTranscriptBytes: '128kb',
       midTurnPrecheck: { enabled: true },
     },
-    remove: ['identifierInstructions'],
+    remove: ['identifierInstructions', 'truncateAfterCompaction'],
   })
   assert.deepEqual(manifest.agent, { id: 'second-original' })
   assert.equal(Object.hasOwn(manifest, 'expectedEffectiveTools'), false)
@@ -639,20 +655,21 @@ test('rich canary rejects unsupported retention before starting a Gateway', () =
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /gateway.*listening/iu)
 })
 
-test('rich canary reserves eight-turn acceptance for future-clean history', () => {
-  const result = spawnSync(process.execPath, [richCanaryPath], {
-    env: {
-      ...process.env,
-      CANARY_HISTORY_MODE: 'legacy-polluted',
-      CANARY_TURNS: '8',
-    },
-    encoding: 'utf8',
-    timeout: 5_000,
+for (const historyMode of ['legacy-polluted', 'accident-replay']) {
+  test(`rich canary rejects ${historyMode} without a structured transcript injection API`, () => {
+    const result = spawnSync(process.execPath, [richCanaryPath], {
+      env: {
+        ...process.env,
+        CANARY_HISTORY_MODE: historyMode,
+      },
+      encoding: 'utf8',
+      timeout: 5_000,
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /supports only future-clean history/u)
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /gateway.*listening/iu)
   })
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /run 8 turns only for future-clean/u)
-  assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /gateway.*listening/iu)
-})
+}
 
 test('rich canary accepts production value 4 and rejects unsupported preserved-turn values', () => {
   const source = readFileSync(richCanaryPath, 'utf8')

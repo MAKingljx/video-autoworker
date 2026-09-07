@@ -1,6 +1,6 @@
 # 2026-09-07 优化与同次部署恢复计划
 
-目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用与控制来源使用包含本计划、successor 收口和 OpenClaw 9.2 keyed agent 修复的 clean Git commit，具体完整 SHA 在私有执行计划与交付记录绑定；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。此前交付的 3332b067 制品未激活，因缺少 keyed agent 修复不再作为最终目标。
+目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用来源固定为 d96cad249b56ed8506f30e4d8b76148f5f8ac13e，部署控制固定为 cbcbd258e30a94821df8225c0204b4148199baa6（完整 Quality Gate 已通过）。独立 QA 脚本来源在其输入与验收结果中另行绑定，不改变应用与恢复控制；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。此前交付的 3332b067 制品未激活，因缺少 keyed agent 修复不再作为最终目标。
 
 ## 已具备证据
 
@@ -16,13 +16,15 @@
 4. 从私有计划启动 Git 绑定 successor runner。再次检查旧 pending/resume、保护进程、两库、空队列、端口、兼容性与 readiness，随后消费新的一次性 successor 能力。历史 f78 resume 只做 alreadyConsumed 回验，不重新消费；不导入 n8n 工作流。
 5. 精确映射 blue/router 到新应用，受管启动 blue，在首次数据库使用时执行迁移 051–059；创建 baseline 前保持全局 intake 暂停。完成页面、路由、版本、数据库与 readiness 验证后，由官方流程解除原 guard、完成 pending。
 6. deploy 释放共享锁后，runner 使用 paused revision 恢复 intake；前后核对同一 release/generation，记录不可变 resumed 证明并发布最终 recovered result。复核 3017/3317、三套 Gateway、n8n、数据库身份与任务计数，视频 lane 保持 disabled/unloaded。
-7. 按已授权范围执行既有隔离模型对话/压缩验收包并收口脱敏记录；不向用户通道发送消息，不启用剪辑、渲染、导出或视频 lane。
+7. 使用绑定独立 QA 来源的 9.2 对话/压缩验收包：会话经官方 session-store-runtime 读取；隔离压缩的历史只用官方 chat.send/chat.inject 构造，不直接改 SQLite/JSONL。对话验收创建一个预先证明不存在的随机合成 session，五轮完成后按确切 sessionId/updatedAt CAS 调用官方 sessions.delete，关闭 lifecycle hooks，再回读活动会话不存在；如平台保留归档则如实记录。只输出计数、摘要和校验结果，不向用户通道发送消息，不启用剪辑、渲染、导出或视频 lane。
 
 ## 生产数据对象和影响
 
 Mission Control 数据库为 `~/.mission-control-openclaw-profiles/mission-control.db`。051–059 新增清理债务、全局准入与审计、调度/派发/子执行租约、父任务 claim、导演证据 outbox 与 checkpoint/projection/review receipt 共 12 张表及索引，并追加 schema_migrations。准入控制先 paused 后按 revision 恢复，正常 scheduler 后续按现有设置写入自身运行状态与同步元数据。当前普通 tasks 表为空，视频队列无活动任务；此次不重试历史失败任务。
 
 n8n 数据库 `~/ai-worker/state/n8n/.n8n/database.sqlite` 保持既有工作流与任务记录，不重复 schema/工作流导入。原一致性备份位于 `~/ai-worker/state/video-autoworker/maint/auto-3db98c3-0ada7686/postinstall-inputs/mission-control.db` 和同目录 `database.sqlite`，摘要绑定在原 rollback-proof.json；执行前再次核对来源与是否出现新增业务数据。
+
+OpenClaw 验收另涉及 qwen-current / second-original 下一个新建的随机合成会话。既有会话不作为写入或清理对象；测试所有权在首次调用前单独落受控记录，失败时也只按该记录清理同一会话。若官方接口报告身份变化、忙碌或清理失败，保留失败证据和该会话的受控定位信息，不扩大删除范围。平台内部可能按自己的策略保留归档，不把活动会话删除表述为从未持久化或物理擦除。
 
 ## 失败与回退
 

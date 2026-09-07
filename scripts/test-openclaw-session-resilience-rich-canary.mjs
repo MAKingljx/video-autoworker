@@ -3,7 +3,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   cpSync,
@@ -23,8 +22,6 @@ import { pathToFileURL } from 'node:url'
 import {
   MAX_AIWORKER_TRANSCRIPT_PROJECTION_BYTES,
   MAX_AIWORKER_TRANSCRIPT_TOOL_CALL_BYTES,
-  projectAiworkerToolCallForTranscript,
-  projectAiworkerToolResultForTranscript,
 } from '../openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js'
 import { readDirectorBrainSystemAnswer } from '../openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js'
 import {
@@ -33,6 +30,12 @@ import {
   missingGeneralCompactionAnchors,
   validatesGeneralCompactionAnswer,
 } from './lib/openclaw-general-compaction-anchors.mjs'
+import {
+  captureOpenClawRichCanarySessionSnapshot,
+  loadOpenClawRichCanarySessionRuntime,
+  openClawLinearActiveTranscriptEntryIds,
+  openClawSessionReferenceMatchesSnapshot,
+} from './lib/openclaw-rich-canary-session-runtime.mjs'
 import { fingerprintOpenClawToolInventory } from './lib/openclaw-tool-capability-fingerprint.mjs'
 
 const OPENCLAW_BIN = process.env.OPENCLAW_BIN || 'openclaw'
@@ -121,9 +124,6 @@ const COMPACTION_STRATEGY = 'builtin-safeguard'
 const FUTURE_CLEAN_HISTORY_MODE = 'future-clean'
 const LEGACY_POLLUTED_HISTORY_MODE = 'legacy-polluted'
 const ACCIDENT_REPLAY_HISTORY_MODE = 'accident-replay'
-const ACCIDENT_REPLAY_TOOL_CALLS = 26
-const ACCIDENT_REPLAY_TOOL_RESULT_BYTES = 126_556
-const ACCIDENT_REPLAY_THINKING_BYTES = 57 * 1024
 const PERSISTED_BUSINESS_TOOL_STATUS =
   '完整结果保留在业务数据源中，需要时可由原工具重新读取。'
 const RAW_RESULT_ACKNOWLEDGEMENT = '鹭羽四七'
@@ -170,12 +170,11 @@ if (!Number.isSafeInteger(MINIMUM_TOOL_PAIRS)
 if (TRANSCRIPT_PROJECTION_MAX_BYTES !== MAX_AIWORKER_TRANSCRIPT_PROJECTION_BYTES) {
   throw new Error('CANARY_TRANSCRIPT_PROJECTION_MAX_BYTES must match the plugin contract')
 }
-if (![FUTURE_CLEAN_HISTORY_MODE, LEGACY_POLLUTED_HISTORY_MODE, ACCIDENT_REPLAY_HISTORY_MODE]
-  .includes(HISTORY_MODE)) {
-  throw new Error('CANARY_HISTORY_MODE must be future-clean, legacy-polluted, or accident-replay')
-}
-if (HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE && TURN_COUNT > 2) {
-  throw new Error('legacy-polluted diagnostics are limited to 1 or 2 turns; run 8 turns only for future-clean')
+if (HISTORY_MODE !== FUTURE_CLEAN_HISTORY_MODE) {
+  throw new Error(
+    'OpenClaw 2026.9.2 rich canary supports only future-clean history; '
+    + `${LEGACY_POLLUTED_HISTORY_MODE} and ${ACCIDENT_REPLAY_HISTORY_MODE} require an official structured transcript injection API`,
+  )
 }
 if (!['0', '1'].includes(process.env.CANARY_MIDTURN_PRECHECK || '0')) {
   throw new Error('CANARY_MIDTURN_PRECHECK must be 0 or 1')
@@ -386,18 +385,19 @@ const config = {
         midTurnPrecheck: { enabled: MID_TURN_PRECHECK_ENABLED },
       },
     },
-    list: [{
-      id: 'second-original',
-      name: 'second-original',
-      workspace: workspaceDir,
+    entries: {
+      'second-original': {
+        name: 'second-original',
+        workspace: workspaceDir,
         model: MAIN_MODEL,
-      tools: {
-        profile: 'full',
-        alsoAllow: ['aiworker_analyze_video', 'aiworker_director_brain'],
-        codeMode: false,
+        tools: {
+          profile: 'full',
+          alsoAllow: ['aiworker_analyze_video', 'aiworker_director_brain'],
+          codeMode: false,
+        },
+        thinkingDefault: THINKING_DEFAULT,
       },
-      thinkingDefault: THINKING_DEFAULT,
-    }],
+    },
   },
   gateway: {
     mode: 'local',
@@ -441,6 +441,8 @@ let liveCanonicalAuthorityVerified = false
 let gateway = null
 let logFd = null
 let cleaned = false
+let sessionRuntimeBinding = null
+let openclawCommand = OPENCLAW_BIN
 
 function waitForChildExit(child, timeoutMs) {
   if (!child || child.exitCode !== null) return Promise.resolve(true)
@@ -504,7 +506,7 @@ process.once('SIGINT', async () => { await cleanup(); process.exit(130) })
 process.once('SIGTERM', async () => { await cleanup(); process.exit(143) })
 
 function call(method, params, timeoutMs = 10_000) {
-  const result = spawnSync(OPENCLAW_BIN, [
+  const result = spawnSync(openclawCommand, [
     'gateway', 'call', method,
     '--token', GATEWAY_TOKEN,
     '--timeout', String(timeoutMs),
@@ -546,7 +548,7 @@ async function waitForGateway() {
 
 async function startGateway() {
   logFd = openSync(logPath, 'a', 0o600)
-  gateway = spawn(OPENCLAW_BIN, [
+  gateway = spawn(openclawCommand, [
     'gateway', '--port', String(PORT), '--auth', 'token', '--token', GATEWAY_TOKEN, '--verbose',
   ], {
     env: childEnv,
@@ -574,15 +576,13 @@ function waitForRun(runId) {
   }, 485_000))
 }
 
-function transcriptPaths() {
-  const storePath = join(stateDir, 'agents', 'second-original', 'sessions', 'sessions.json')
-  const store = JSON.parse(readFileSync(storePath, 'utf8'))
-  const entry = store[SESSION_KEY]
-  if (!entry || typeof entry.sessionFile !== 'string') {
-    throw new Error('canary session was not persisted')
-  }
-  const sessionFile = resolve(dirname(storePath), entry.sessionFile)
-  return { store, storePath, entry, sessionFile }
+function sessionSnapshot() {
+  if (!sessionRuntimeBinding) throw new Error('OpenClaw session runtime is unavailable')
+  return captureOpenClawRichCanarySessionSnapshot(sessionRuntimeBinding, {
+    agentId: 'second-original',
+    env: childEnv,
+    sessionKey: SESSION_KEY,
+  })
 }
 
 function syntheticObservation(index, offset) {
@@ -622,8 +622,8 @@ function syntheticToolPayload(index, minimumBytes, maximumBytes = Number.POSITIV
   return payload
 }
 
-function persistedToolPairEvidence(sessionFile) {
-  const rows = transcriptRows(sessionFile)
+function persistedToolPairEvidence(events) {
+  const rows = transcriptRows(events)
   const projectedCalls = new Map()
   let currentTurnRawResultAcknowledgements = 0
   let blindSemanticProjectedResults = 0
@@ -689,9 +689,9 @@ function persistedToolPairEvidence(sessionFile) {
 }
 
 async function appendFutureCleanToolHistoryThroughHooks() {
-  const before = transcriptPaths()
+  const before = sessionSnapshot()
   const compactionCountBefore = Number(before.entry.compactionCount || 0)
-  let evidence = persistedToolPairEvidence(before.sessionFile)
+  let evidence = persistedToolPairEvidence(before.events)
   let attempts = 0
   const maximumAttempts = MINIMUM_TOOL_PAIRS * 2
   while (evidence.completeProjectedPairs < MINIMUM_TOOL_PAIRS && attempts < maximumAttempts) {
@@ -715,11 +715,11 @@ async function appendFutureCleanToolHistoryThroughHooks() {
     if (waited.status !== 'ok') {
       throw new Error(`future-clean hook seed ${attempts} did not complete`)
     }
-    const after = transcriptPaths()
-    const nextEvidence = persistedToolPairEvidence(after.sessionFile)
+    const after = sessionSnapshot()
+    const nextEvidence = persistedToolPairEvidence(after.events)
     evidence = nextEvidence
   }
-  const after = transcriptPaths()
+  const after = sessionSnapshot()
   const compactionCountAfter = Number(after.entry.compactionCount || 0)
   if (evidence.completeProjectedPairs < MINIMUM_TOOL_PAIRS) {
     throw new Error(
@@ -749,63 +749,114 @@ async function appendFutureCleanToolHistoryThroughHooks() {
   }
 }
 
-function appendFutureCleanSafeHistory(hookEvidence) {
-  const { store, storePath, entry, sessionFile } = transcriptPaths()
-  const rows = transcriptRows(sessionFile)
-  let parentId = rows.at(-1)?.id
-  if (typeof parentId !== 'string') throw new Error('future-clean transcript leaf is invalid')
-  let sequence = 0
-  const appendMessage = message => {
-    sequence += 1
-    const id = randomUUID()
-    appendFileSync(sessionFile, `${JSON.stringify({
-      type: 'message',
-      id,
-      parentId,
-      timestamp: new Date(Date.now() + sequence).toISOString(),
-      message: {
-        ...message,
-        timestamp: Date.now() + sequence,
-      },
-    })}\n`)
-    parentId = id
+function injectCanaryMessage(message, label) {
+  const result = unwrap(call('chat.inject', {
+    sessionKey: SESSION_KEY,
+    agentId: 'second-original',
+    message,
+    label,
+  }, 15_000))
+  if (result?.ok !== true || typeof result.messageId !== 'string' || !result.messageId) {
+    throw new Error(`chat.inject failed for ${label}`)
   }
-  const generalAnchorMessages = generalCompactionSeedMessages()
-  for (const anchorMessage of generalAnchorMessages) {
-    appendMessage({
-      ...anchorMessage,
-      ...(anchorMessage.role === 'assistant'
-        ? {
-            api: 'openai-completions',
-            provider: 'qwen38-local',
-            model: 'default_model',
-            stopReason: 'stop',
-          }
-        : {}),
-    })
+}
+
+function semanticSeedRoleEvidence(events, userSeeds) {
+  let cursor = -1
+  let userSeedCount = 0
+  let assistantAcknowledgementCount = 0
+  for (const seed of userSeeds) {
+    const userIndex = events.findIndex((event, index) => (
+      index > cursor
+      && event?.type === 'message'
+      && event.message?.role === 'user'
+      && messageText(event.message) === seed
+    ))
+    if (userIndex < 0) continue
+    userSeedCount += 1
+    const assistantIndex = events.findIndex((event, index) => (
+      index > userIndex
+      && event?.type === 'message'
+      && event.message?.role === 'assistant'
+      && /^好[。！!]?$/u.test(messageText(event.message).trim())
+    ))
+    const nextUserIndex = events.findIndex((event, index) => (
+      index > userIndex
+      && event?.type === 'message'
+      && event.message?.role === 'user'
+    ))
+    if (assistantIndex < 0 || (nextUserIndex >= 0 && nextUserIndex < assistantIndex)) continue
+    assistantAcknowledgementCount += 1
+    cursor = assistantIndex
   }
-  appendMessage({ role: 'user', content: [{ type: 'text', text: SYNTHETIC_TECHNIQUE_LOGIC_CONTEXT }] })
-  let safePaddingTurns = 0
-  while (statSync(sessionFile).size < TARGET_TRANSCRIPT_BYTES) {
-    safePaddingTurns += 1
-    const safeContext = `隔离测试的非敏感上下文 ${safePaddingTurns}：${'只保留用户目标、事实、决策、约束、未解问题和任务连续性。'.repeat(80)}`
-    appendMessage({ role: 'user', content: [{ type: 'text', text: safeContext }] })
-    appendMessage({
-      role: 'assistant',
-      content: [{ type: 'text', text: '已保留这组非敏感上下文。' }],
-      api: 'openai-completions',
-      provider: 'qwen38-local',
-      model: 'default_model',
-      stopReason: 'stop',
-    })
-    if (safePaddingTurns > 128) throw new Error('failed to reach future-clean target size')
-  }
-  entry.updatedAt = Date.now()
-  entry.totalTokensFresh = false
-  writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 })
   return {
-    sessionFile,
-    beforeBytes: statSync(sessionFile).size,
+    assistantAcknowledgementCount,
+    roleSequenceVerified: userSeedCount === userSeeds.length
+      && assistantAcknowledgementCount === userSeeds.length,
+    userSeedCount,
+  }
+}
+
+async function appendFutureCleanSafeHistory(hookEvidence) {
+  const generalAnchorMessages = generalCompactionSeedMessages()
+  if (generalAnchorMessages.length === 0 || generalAnchorMessages.length % 2 !== 0) {
+    throw new Error('general compaction seed message pairs are invalid')
+  }
+  const compactionCountBeforeSemanticSeeds = Number(sessionSnapshot().entry.compactionCount || 0)
+  const semanticUserSeeds = []
+  for (let index = 0; index < generalAnchorMessages.length; index += 2) {
+    const userMessage = generalAnchorMessages[index]
+    const confirmedAssistantMessage = generalAnchorMessages[index + 1]
+    if (userMessage?.role !== 'user' || confirmedAssistantMessage?.role !== 'assistant') {
+      throw new Error('general compaction seed roles are invalid')
+    }
+    const seed = [
+      '这是隔离测试的已确认历史，禁止调用工具。',
+      `问题：${messageText(userMessage)}`,
+      `已确认事实：${messageText(confirmedAssistantMessage)}`,
+      ...(index === 0 ? [SYNTHETIC_TECHNIQUE_LOGIC_CONTEXT] : []),
+      '请记住上述事实供后续问答，只回复：好',
+    ].join('\n')
+    semanticUserSeeds.push(seed)
+    const sent = unwrap(call('chat.send', {
+      sessionKey: SESSION_KEY,
+      message: seed,
+      idempotencyKey: randomUUID(),
+      deliver: false,
+    }, 15_000))
+    if (typeof sent.runId !== 'string') throw new Error(`semantic seed ${index / 2 + 1} returned no runId`)
+    const waited = waitForRun(sent.runId)
+    if (waited.status !== 'ok') throw new Error(`semantic seed ${index / 2 + 1} did not complete`)
+  }
+
+  let snapshot = sessionSnapshot()
+  const semanticRoleEvidence = semanticSeedRoleEvidence(snapshot.events, semanticUserSeeds)
+  if (!semanticRoleEvidence.roleSequenceVerified) {
+    throw new Error(`semantic seed roles were not persisted (${JSON.stringify(semanticRoleEvidence)})`)
+  }
+  if (Number(snapshot.entry.compactionCount || 0) !== compactionCountBeforeSemanticSeeds) {
+    throw new Error('semantic seeds compacted before the acceptance turns')
+  }
+
+  let safePaddingTurns = 0
+  while (snapshot.stats.sizeBytes < TARGET_TRANSCRIPT_BYTES) {
+    safePaddingTurns += 1
+    if (safePaddingTurns > 128) throw new Error('failed to reach future-clean target size')
+    const previousBytes = snapshot.stats.sizeBytes
+    const safeContext = `隔离测试的非敏感上下文 ${safePaddingTurns}：${
+      '只保留用户目标、事实、决策、约束、未解问题和任务连续性。'.repeat(80)
+    }`
+    injectCanaryMessage(safeContext, `aiworker-rich-canary-padding-${safePaddingTurns}`)
+    snapshot = sessionSnapshot()
+    if (snapshot.stats.sizeBytes <= previousBytes) {
+      throw new Error('chat.inject did not advance transcript storage')
+    }
+  }
+  if (Number(snapshot.entry.compactionCount || 0) !== compactionCountBeforeSemanticSeeds) {
+    throw new Error('future-clean history compacted before the acceptance turns')
+  }
+  return {
+    storedTranscriptBytesBeforeAcceptance: snapshot.stats.sizeBytes,
     toolPairs: hookEvidence.completeProjectedPairs,
     userBoundedToolTurns: hookEvidence.attempts,
     completedToolTurns: hookEvidence.attempts,
@@ -824,438 +875,19 @@ function appendFutureCleanSafeHistory(hookEvidence) {
       && hookEvidence.completeProjectedPairs >= MINIMUM_TOOL_PAIRS
       && hookEvidence.projectedToolCalls === hookEvidence.projectedToolResults
       && hookEvidence.currentTurnRawToolResultVisibilityVerified === true
-      && hookEvidence.blindSemanticProjectionVerified === true,
+      && hookEvidence.blindSemanticProjectionVerified === true
+      && semanticRoleEvidence.roleSequenceVerified === true,
     actualGatewayHookWritesVerified: hookEvidence.actualGatewayHookWritesVerified,
     currentTurnRawToolResultVisibilityVerified:
       hookEvidence.currentTurnRawToolResultVisibilityVerified,
     blindSemanticProjectionVerified: hookEvidence.blindSemanticProjectionVerified,
     deterministicFullToolResultBytes: hookEvidence.deterministicFullToolResultBytes,
     safePaddingTurns,
+    semanticAssistantAcknowledgementsPersisted:
+      semanticRoleEvidence.assistantAcknowledgementCount,
+    semanticSeedRoleSequenceVerified: semanticRoleEvidence.roleSequenceVerified,
+    semanticUserSeedsPersisted: semanticRoleEvidence.userSeedCount,
     legacySingleTurnRisk: false,
-    techniqueContextSeeded: true,
-    generalAnchorMessagesSeeded: generalAnchorMessages.length,
-  }
-}
-
-function deterministicReplaySizes({ count, total, base, step, modulus }) {
-  const sizes = Array.from({ length: count }, (_, index) => base + ((index * step) % modulus))
-  sizes[sizes.length - 1] += total - sizes.reduce((sum, value) => sum + value, 0)
-  if (sizes.some(value => !Number.isSafeInteger(value) || value <= 0)
-    || sizes.reduce((sum, value) => sum + value, 0) !== total
-    || new Set(sizes).size === 1) {
-    throw new Error('failed to build deterministic accident-replay sizes')
-  }
-  return sizes
-}
-
-function exactSyntheticReplayResult(sequence, targetBytes) {
-  const value = {
-    ok: true,
-    sequence,
-    observation: `synthetic-accident-replay-${sequence}`,
-    padding: '',
-  }
-  const remaining = targetBytes - Buffer.byteLength(JSON.stringify(value), 'utf8')
-  if (remaining < 0) throw new Error('accident-replay result target is too small')
-  value.padding = 'r'.repeat(remaining)
-  const text = JSON.stringify(value)
-  if (Buffer.byteLength(text, 'utf8') !== targetBytes) {
-    throw new Error('accident-replay result size mismatch')
-  }
-  return text
-}
-
-function appendAccidentReplayHistory() {
-  const { store, storePath, entry, sessionFile } = transcriptPaths()
-  const rows = transcriptRows(sessionFile)
-  let parentId = rows.at(-1)?.id
-  if (typeof parentId !== 'string') throw new Error('accident-replay transcript leaf is invalid')
-  let timestampOffset = 0
-  const appendMessage = message => {
-    timestampOffset += 1
-    const id = randomUUID()
-    appendFileSync(sessionFile, `${JSON.stringify({
-      type: 'message',
-      id,
-      parentId,
-      timestamp: new Date(Date.now() + timestampOffset).toISOString(),
-      message: { ...message, timestamp: Date.now() + timestampOffset },
-    })}\n`)
-    parentId = id
-  }
-  const resultSizes = deterministicReplaySizes({
-    count: ACCIDENT_REPLAY_TOOL_CALLS,
-    total: ACCIDENT_REPLAY_TOOL_RESULT_BYTES,
-    base: 4_200,
-    step: 137,
-    modulus: 1_200,
-  })
-  const thinkingSizes = deterministicReplaySizes({
-    count: ACCIDENT_REPLAY_TOOL_CALLS,
-    total: ACCIDENT_REPLAY_THINKING_BYTES,
-    base: 1_800,
-    step: 73,
-    modulus: 700,
-  })
-  appendMessage({
-    role: 'user',
-    content: [{ type: 'text', text: '隔离事故回放：连续读取二十六组无敏感合成观察。' }],
-  })
-  for (let index = 0; index < ACCIDENT_REPLAY_TOOL_CALLS; index += 1) {
-    const sequence = index + 1
-    const toolCallId = `synthetic-accident-call-${sequence}`
-    appendMessage({
-      role: 'assistant',
-      content: [{
-        type: 'thinking',
-        thinking: 't'.repeat(thinkingSizes[index]),
-      }, {
-        type: 'toolCall',
-        id: toolCallId,
-        name: 'aiworker_director_brain',
-        arguments: { action: 'health' },
-      }],
-      api: 'openai-completions',
-      provider: MAIN_MODEL.split('/')[0],
-      model: 'default_model',
-      stopReason: 'toolUse',
-    })
-    appendMessage({
-      role: 'toolResult',
-      toolCallId,
-      toolName: 'aiworker_director_brain',
-      content: [{ type: 'text', text: exactSyntheticReplayResult(sequence, resultSizes[index]) }],
-      isError: false,
-    })
-  }
-  appendMessage({
-    role: 'assistant',
-    content: [{ type: 'text', text: '二十六组无敏感合成观察已读取。' }],
-    api: 'openai-completions',
-    provider: MAIN_MODEL.split('/')[0],
-    model: 'default_model',
-    stopReason: 'stop',
-  })
-  entry.updatedAt = Date.now()
-  entry.totalTokensFresh = false
-  entry.compactionCount = 0
-  writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 })
-  return {
-    sessionFile,
-    beforeBytes: statSync(sessionFile).size,
-    toolPairs: ACCIDENT_REPLAY_TOOL_CALLS,
-    userBoundedToolTurns: 1,
-    completedToolTurns: 1,
-    projectedToolCallTurns: 0,
-    validToolCallProjections: 0,
-    projectedToolTurns: 0,
-    validPersistedResultProjections: 0,
-    maximumObservedFullToolResultBytes: Math.max(...resultSizes),
-    maximumObservedToolResultBytes: Math.max(...resultSizes),
-    projectedToolResultBytesTotal: resultSizes.reduce((sum, value) => sum + value, 0),
-    projectedToolResultBytesP95: resultSizes.toSorted((left, right) => left - right)[24],
-    maximumObservedFullToolCallBytes: null,
-    maximumObservedProjectedToolCallBytes: null,
-    toolResultByteCap: null,
-    historyShapeSafe: false,
-    actualGatewayHookWritesVerified: false,
-    currentTurnRawToolResultVisibilityVerified: false,
-    blindSemanticProjectionVerified: false,
-    deterministicFullToolResultBytes: Math.max(...resultSizes),
-    safePaddingTurns: 0,
-    legacySingleTurnRisk: true,
-    techniqueContextSeeded: false,
-    generalAnchorMessagesSeeded: 0,
-    accidentReplay: {
-      toolCalls: ACCIDENT_REPLAY_TOOL_CALLS,
-      toolResultBytesTotal: resultSizes.reduce((sum, value) => sum + value, 0),
-      thinkingBytesTotal: thinkingSizes.reduce((sum, value) => sum + value, 0),
-      unequalToolResultSizes: new Set(resultSizes).size > 1,
-      unequalThinkingSizes: new Set(thinkingSizes).size > 1,
-    },
-  }
-}
-
-function appendRichToolHistory() {
-  const { store, storePath, entry, sessionFile } = transcriptPaths()
-  const rows = readFileSync(sessionFile, 'utf8').trimEnd().split('\n').map(JSON.parse)
-  let parentId = rows.at(-1)?.id
-  if (typeof parentId !== 'string') throw new Error('canary transcript leaf is invalid')
-  let index = 0
-  let maximumObservedFullToolResultBytes = 0
-  let maximumObservedToolResultBytes = 0
-  let maximumObservedFullToolCallBytes = 0
-  let maximumObservedProjectedToolCallBytes = 0
-  let userBoundedToolTurns = 0
-  let completedToolTurns = 0
-  let projectedToolCallTurns = 0
-  let validToolCallProjections = 0
-  let projectedToolTurns = 0
-  let validPersistedResultProjections = 0
-  const sizes = [16_000, 14_000, 9_000, 9_000, 6_000, 5_500, 5_000, 4_500]
-  while (statSync(sessionFile).size < TARGET_TRANSCRIPT_BYTES || index < MINIMUM_TOOL_PAIRS) {
-    const now = new Date(Date.now() + index).toISOString()
-    const callId = `synthetic-call-${index}`
-    if (HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE) {
-      const userId = randomUUID()
-      appendFileSync(sessionFile, `${JSON.stringify({
-        type: 'message',
-        id: userId,
-        parentId,
-        timestamp: now,
-        message: {
-          role: 'user',
-          content: [{
-            type: 'text',
-            text: `隔离测试第 ${index + 1} 轮：只读取一组已审核导演观察。`,
-          }],
-          timestamp: Date.now() + index,
-        },
-      })}\n`)
-      parentId = userId
-      userBoundedToolTurns += 1
-    }
-    const assistantId = randomUUID()
-    const toolName = HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-      ? (index % 4 === 0 ? 'exec' : 'read')
-      : (index % 2 === 0 ? 'aiworker_director_brain' : 'aiworker_analyze_video')
-    const toolCallPart = {
-      type: 'toolCall',
-      id: callId,
-      name: toolName,
-      arguments: HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-        ? (toolName === 'read'
-            ? { path: `/synthetic/material-${index}.json` }
-            : { command: `synthetic-inspect-${index}` })
-        : (toolName === 'aiworker_director_brain'
-            ? {
-                action: 'search',
-                query: '人物冲突与变化',
-                credentialReference: SYNTHETIC_SENSITIVE_FIELDS.credentialReference,
-              }
-            : {
-                action: 'status',
-                query: SYNTHETIC_INTERNAL_IDENTIFIERS[0],
-              }),
-    }
-    const fullToolCallMessage = {
-      role: 'assistant',
-      content: [
-        {
-          type: 'thinking',
-          thinking: `隔离推理包含 /synthetic/private-${index}.json 与 ${SYNTHETIC_INTERNAL_IDENTIFIERS[0]}。${'内部推理'.repeat(14_000)}`,
-          thinkingSignature: 'synthetic-private-thinking-signature',
-        },
-        {
-          type: 'reasoning',
-          text: SYNTHETIC_SENSITIVE_FIELDS.authorization,
-          encrypted_content: 'synthetic-private-reasoning-signature',
-        },
-        toolCallPart,
-      ],
-      api: 'openai-completions',
-      provider: 'qwen38-local',
-      model: 'default_model',
-      stopReason: 'toolUse',
-      timestamp: Date.now() + index,
-    }
-    const persistedToolCallMessage = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      ? projectAiworkerToolCallForTranscript({ message: fullToolCallMessage })?.message
-      : fullToolCallMessage
-    if (!persistedToolCallMessage) throw new Error('tool-call projection was not produced')
-    if (HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE) {
-      projectedToolCallTurns += 1
-      const projectedPart = persistedToolCallMessage.content?.[0]
-      const projectedArguments = projectedPart?.arguments
-      const fullToolCallBytes = Buffer.byteLength(JSON.stringify(fullToolCallMessage), 'utf8')
-      const projectedToolCallBytes = Buffer.byteLength(
-        JSON.stringify(persistedToolCallMessage),
-        'utf8',
-      )
-      maximumObservedFullToolCallBytes = Math.max(
-        maximumObservedFullToolCallBytes,
-        fullToolCallBytes,
-      )
-      maximumObservedProjectedToolCallBytes = Math.max(
-        maximumObservedProjectedToolCallBytes,
-        projectedToolCallBytes,
-      )
-      if (projectedPart?.id === callId
-        && projectedPart?.name === toolName
-        && projectedArguments?.action === toolCallPart.arguments.action
-        && Object.keys(projectedArguments).length === 1
-        && persistedToolCallMessage.content.length === 1
-        && fullToolCallBytes > projectedToolCallBytes
-        && projectedToolCallBytes <= MAX_AIWORKER_TRANSCRIPT_TOOL_CALL_BYTES
-        && !containsSyntheticMarker(
-          JSON.stringify(persistedToolCallMessage),
-          [...SYNTHETIC_SENSITIVE_VALUES, ...SYNTHETIC_INTERNAL_IDENTIFIERS],
-        )) {
-        validToolCallProjections += 1
-      }
-    }
-    appendFileSync(sessionFile, `${JSON.stringify({
-      type: 'message',
-      id: assistantId,
-      parentId,
-      timestamp: now,
-      message: persistedToolCallMessage,
-    })}\n`)
-    const toolResultText = syntheticToolPayload(
-      index,
-      sizes[index % sizes.length],
-      Number.POSITIVE_INFINITY,
-    )
-    maximumObservedFullToolResultBytes = Math.max(
-      maximumObservedFullToolResultBytes,
-      Buffer.byteLength(toolResultText, 'utf8'),
-    )
-    const fullToolResultMessage = {
-      role: 'toolResult',
-      toolCallId: callId,
-      toolName,
-      content: [{ type: 'text', text: toolResultText }],
-      details: {
-        privateMetadata: SYNTHETIC_SENSITIVE_FIELDS,
-        internalIdentifiers: SYNTHETIC_INTERNAL_IDENTIFIERS,
-      },
-      isError: false,
-      timestamp: Date.now() + index,
-    }
-    const persistedToolResultMessage = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      ? projectAiworkerToolResultForTranscript({
-          toolName,
-          toolCallId: callId,
-          message: fullToolResultMessage,
-        })?.message
-      : fullToolResultMessage
-    if (!persistedToolResultMessage) throw new Error('tool-result projection was not produced')
-    const persistedToolResultBytes = Buffer.byteLength(
-      JSON.stringify(persistedToolResultMessage),
-      'utf8',
-    )
-    if (HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE) {
-      projectedToolTurns += 1
-      const fullMessageBytes = Buffer.from(JSON.stringify(fullToolResultMessage), 'utf8')
-      const sourceDigest = createHash('sha256').update(fullMessageBytes).digest('hex')
-      const projectedDigest = createHash('sha256')
-        .update(Buffer.from(JSON.stringify(persistedToolResultMessage), 'utf8'))
-        .digest('hex')
-      const persistedText = persistedToolResultMessage.content?.[0]?.text
-      if (persistedToolResultMessage.details === undefined
-        && typeof persistedText === 'string'
-        && !/(?:schema|authority|sha256|reference|\/Users\/|https?:\/\/)/iu.test(persistedText)
-        && fullMessageBytes.byteLength > persistedToolResultBytes
-        && sourceDigest !== projectedDigest) {
-        validPersistedResultProjections += 1
-      }
-    }
-    maximumObservedToolResultBytes = Math.max(
-      maximumObservedToolResultBytes,
-      persistedToolResultBytes,
-    )
-    const toolResultId = randomUUID()
-    appendFileSync(sessionFile, `${JSON.stringify({
-      type: 'message',
-      id: toolResultId,
-      parentId: assistantId,
-      timestamp: now,
-      message: persistedToolResultMessage,
-    })}\n`)
-    parentId = toolResultId
-    if (HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE) {
-      const completionId = randomUUID()
-      appendFileSync(sessionFile, `${JSON.stringify({
-        type: 'message',
-        id: completionId,
-        parentId,
-        timestamp: now,
-        message: {
-          role: 'assistant',
-          content: [{ type: 'text', text: '已记录这组已审核导演观察。' }],
-          api: 'openai-completions',
-          provider: 'qwen38-local',
-          model: 'default_model',
-          stopReason: 'stop',
-          timestamp: Date.now() + index,
-        },
-      })}\n`)
-      parentId = completionId
-      completedToolTurns += 1
-    }
-    index += 1
-    if (index > 128) throw new Error('failed to reach target transcript size')
-  }
-  const generalAnchorMessages = generalCompactionSeedMessages()
-  for (const [anchorIndex, anchorMessage] of generalAnchorMessages.entries()) {
-    const anchorId = randomUUID()
-    const isAssistant = anchorMessage.role === 'assistant'
-    appendFileSync(sessionFile, `${JSON.stringify({
-      type: 'message',
-      id: anchorId,
-      parentId,
-      timestamp: new Date(Date.now() + index + anchorIndex).toISOString(),
-      message: {
-        ...anchorMessage,
-        ...(isAssistant
-          ? {
-              api: 'openai-completions',
-              provider: 'qwen38-local',
-              model: 'default_model',
-              stopReason: 'stop',
-            }
-          : {}),
-        timestamp: Date.now() + index + anchorIndex,
-      },
-    })}\n`)
-    parentId = anchorId
-  }
-  const techniqueContextId = randomUUID()
-  appendFileSync(sessionFile, `${JSON.stringify({
-    type: 'message',
-    id: techniqueContextId,
-    parentId,
-    timestamp: new Date().toISOString(),
-    message: {
-      role: 'user',
-      content: [{ type: 'text', text: SYNTHETIC_TECHNIQUE_LOGIC_CONTEXT }],
-      timestamp: Date.now(),
-    },
-  })}\n`)
-  entry.updatedAt = Date.now()
-  entry.totalTokens = 55_111
-  entry.totalTokensFresh = true
-  entry.compactionCount = 0
-  writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 })
-  return {
-    sessionFile,
-    beforeBytes: statSync(sessionFile).size,
-    toolPairs: index,
-    userBoundedToolTurns,
-    completedToolTurns,
-    projectedToolCallTurns,
-    validToolCallProjections,
-    projectedToolTurns,
-    validPersistedResultProjections,
-    maximumObservedFullToolResultBytes,
-    maximumObservedToolResultBytes,
-    maximumObservedFullToolCallBytes,
-    maximumObservedProjectedToolCallBytes,
-    toolResultByteCap: HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      ? TRANSCRIPT_PROJECTION_MAX_BYTES
-      : null,
-    historyShapeSafe: HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      && userBoundedToolTurns === index
-      && completedToolTurns === index
-      && projectedToolCallTurns === index
-      && validToolCallProjections === index
-      && projectedToolTurns === index
-      && validPersistedResultProjections === index
-      && maximumObservedToolResultBytes <= TRANSCRIPT_PROJECTION_MAX_BYTES
-      && maximumObservedFullToolResultBytes > maximumObservedToolResultBytes,
-    legacySingleTurnRisk: HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-      && userBoundedToolTurns === 0
-      && completedToolTurns === 0,
     techniqueContextSeeded: true,
     generalAnchorMessagesSeeded: generalAnchorMessages.length,
   }
@@ -1429,8 +1061,13 @@ function serializedCheckpointPayloads(checkpoints) {
   return checkpoints.map(checkpoint => JSON.stringify(checkpoint))
 }
 
-function transcriptRows(sessionFile) {
-  return readFileSync(sessionFile, 'utf8').trimEnd().split('\n').filter(Boolean).map(JSON.parse)
+function transcriptRows(events) {
+  if (!Array.isArray(events) || events.some(event => (
+    !event || typeof event !== 'object' || Array.isArray(event)
+  ))) {
+    throw new Error('OpenClaw transcript event snapshot is invalid')
+  }
+  return events
 }
 
 function checkpointSuccessorIds(checkpoints) {
@@ -1489,24 +1126,31 @@ function checkpointSuccessorEvidence({
       checkpointPostSessionMatchesActive: null,
       checkpointPostFileMatchesActive: null,
       checkpointPostLeafInActiveBranch: null,
+      mode: null,
       rotated: null,
+      successorBound: null,
     }
   }
-  const resolveCheckpointFile = value => (
-    typeof value === 'string' && value.trim()
-      ? resolve(dirname(afterSnapshot.storePath), value)
-      : null
-  )
   const activeSessionIdChanged = beforeSnapshot.entry.sessionId !== afterSnapshot.entry.sessionId
   const activeSessionFileChanged = beforeSnapshot.sessionFile !== afterSnapshot.sessionFile
   const checkpointPostSessionMatchesActive = createdCheckpoints.every(checkpoint => (
     checkpoint?.postCompaction?.sessionId === afterSnapshot.entry.sessionId
   ))
   const checkpointPostFileMatchesActive = createdCheckpoints.every(checkpoint => (
-    resolveCheckpointFile(checkpoint?.postCompaction?.sessionFile) === afterSnapshot.sessionFile
+    openClawSessionReferenceMatchesSnapshot(
+      sessionRuntimeBinding,
+      checkpoint?.postCompaction?.sessionFile,
+      afterSnapshot,
+    )
   ))
   const checkpointPostLeafInActiveBranch = checkpointSuccessorIds(createdCheckpoints)
     .every(id => activeEntryIds.has(id))
+  const generationRotated = activeSessionIdChanged && activeSessionFileChanged
+  const inPlace = !activeSessionIdChanged && !activeSessionFileChanged
+  const successorBound = (generationRotated || inPlace)
+    && checkpointPostSessionMatchesActive
+    && checkpointPostFileMatchesActive
+    && checkpointPostLeafInActiveBranch
   return {
     expected: true,
     activeSessionIdChanged,
@@ -1514,11 +1158,9 @@ function checkpointSuccessorEvidence({
     checkpointPostSessionMatchesActive,
     checkpointPostFileMatchesActive,
     checkpointPostLeafInActiveBranch,
-    rotated: activeSessionIdChanged
-      && activeSessionFileChanged
-      && checkpointPostSessionMatchesActive
-      && checkpointPostFileMatchesActive
-      && checkpointPostLeafInActiveBranch,
+    mode: generationRotated ? 'generation-rotation' : inPlace ? 'in-place' : 'inconsistent',
+    rotated: generationRotated && successorBound,
+    successorBound,
   }
 }
 
@@ -1592,6 +1234,12 @@ function checkpointLeakDiagnostics(summaries) {
 }
 
 try {
+  sessionRuntimeBinding = await loadOpenClawRichCanarySessionRuntime({
+    openclawBin: OPENCLAW_BIN,
+    expectedVersion: '2026.9.2',
+    pathEnv: childEnv.PATH,
+  })
+  openclawCommand = sessionRuntimeBinding.openclawBin
   if (CANONICAL_SOURCE_MODE === LIVE_CANONICAL_MODE) {
     const runtimeModule = await import(pathToFileURL(isolatedDirectorServicePath).href)
     if (typeof runtimeModule.executeDirectorBrainOperation !== 'function') {
@@ -1639,36 +1287,27 @@ try {
   const fullCatalogToolIdsBefore = catalogProfileToolIds(toolsCatalogBefore, 'full')
   const requiredEffectiveToolsPresent = REQUIRED_EFFECTIVE_TOOL_IDS
     .every(id => toolIdsBefore.includes(id))
-  const hookEvidence = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-    ? (COMPACTION_BENCHMARK_MODE
-        ? {
-            completeProjectedPairs: 0,
-            attempts: 0,
-            projectedToolCalls: 0,
-            projectedToolResults: 0,
-            projectedToolResultBytesTotal: 0,
-            projectedToolResultBytesP95: 0,
-            maximumProjectedToolResultBytes: 0,
-            actualGatewayHookWritesVerified: false,
-            currentTurnRawResultVisibilityVerified: false,
-            blindSemanticProjectionVerified: false,
-            deterministicFullToolResultBytes:
-              Buffer.byteLength(DETERMINISTIC_LARGE_TOOL_RESULT, 'utf8'),
-          }
-        : await appendFutureCleanToolHistoryThroughHooks())
-    : null
-  await stopGateway()
-
-  const seeded = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-    ? appendFutureCleanSafeHistory(hookEvidence)
-    : HISTORY_MODE === ACCIDENT_REPLAY_HISTORY_MODE
-      ? appendAccidentReplayHistory()
-      : appendRichToolHistory()
-  await startGateway()
+  const hookEvidence = COMPACTION_BENCHMARK_MODE
+    ? {
+        completeProjectedPairs: 0,
+        attempts: 0,
+        projectedToolCalls: 0,
+        projectedToolResults: 0,
+        projectedToolResultBytesTotal: 0,
+        projectedToolResultBytesP95: 0,
+        maximumProjectedToolResultBytes: 0,
+        actualGatewayHookWritesVerified: false,
+        currentTurnRawResultVisibilityVerified: false,
+        blindSemanticProjectionVerified: false,
+        deterministicFullToolResultBytes:
+          Buffer.byteLength(DETERMINISTIC_LARGE_TOOL_RESULT, 'utf8'),
+      }
+    : await appendFutureCleanToolHistoryThroughHooks()
+  const seeded = await appendFutureCleanSafeHistory(hookEvidence)
   let hookProbe = null
   if (PRECOMPACTION_HOOK_PROBE) {
-    const beforeHookProbe = transcriptPaths()
-    const transcriptBytesBefore = statSync(beforeHookProbe.sessionFile).size
+    const beforeHookProbe = sessionSnapshot()
+    const storedTranscriptBytesBefore = beforeHookProbe.stats.sizeBytes
     const logOffsetBefore = existsSync(logPath) ? statSync(logPath).size : 0
     const sent = unwrap(call('chat.send', {
       sessionKey: SESSION_KEY,
@@ -1691,13 +1330,14 @@ try {
     const compactionStarts = (logSegment.match(/\[compaction-diag\] start/gu) || []).length
     hookProbe = {
       waitStatus: waited.status || null,
-      transcriptBytesBefore,
-      thresholdExceededBefore: transcriptBytesBefore >= MAX_ACTIVE_TRANSCRIPT_BYTES,
+      storedTranscriptBytesBefore,
+      storedThresholdExceededBefore:
+        storedTranscriptBytesBefore >= MAX_ACTIVE_TRANSCRIPT_BYTES,
       preflight,
       modelFetches,
       compactionStarts,
       answerMatchedCanonical: answer === canonicalTechniqueAnswer,
-      handledWithoutPreflight: transcriptBytesBefore >= MAX_ACTIVE_TRANSCRIPT_BYTES
+      handledWithoutPreflight: storedTranscriptBytesBefore >= MAX_ACTIVE_TRANSCRIPT_BYTES
         && answer === canonicalTechniqueAnswer
         && preflight.observed === false
         && modelFetches === 0
@@ -1714,8 +1354,8 @@ try {
   const turns = []
   const sentAt = Date.now()
   for (let turnIndex = 0; turnIndex < TURN_COUNT; turnIndex += 1) {
-    const beforeSnapshot = transcriptPaths()
-    const transcriptBytesBefore = statSync(beforeSnapshot.sessionFile).size
+    const beforeSnapshot = sessionSnapshot()
+    const storedTranscriptBytesBefore = beforeSnapshot.stats.sizeBytes
     const compactionCountBefore = Number(beforeSnapshot.entry.compactionCount || 0)
     const checkpointsBefore = unwrap(call('sessions.compaction.list', {
       key: SESSION_KEY,
@@ -1738,8 +1378,8 @@ try {
     const checkpointsAfter = unwrap(call('sessions.compaction.list', {
       key: SESSION_KEY,
     }, 15_000)).checkpoints || []
-    const afterSnapshot = transcriptPaths()
-    const transcriptBytesAfter = statSync(afterSnapshot.sessionFile).size
+    const afterSnapshot = sessionSnapshot()
+    const storedTranscriptBytesAfter = afterSnapshot.stats.sizeBytes
     const currentLog = existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0)
     const turnLog = currentLog.subarray(logOffsetBefore).toString('utf8')
     const turnPreflight = preflightEvidence(turnLog)
@@ -1756,7 +1396,7 @@ try {
       : createdCheckpoints.length === compactionDelta
         && createdCheckpoints.every(checkpointUsesBuiltinSafeguard)
     const checkpointPayloads = serializedCheckpointPayloads(checkpointsAfter)
-    const activeRows = transcriptRows(afterSnapshot.sessionFile)
+    const activeRows = transcriptRows(afterSnapshot.events)
     const toolRoute = currentTurnToolRoute(activeRows, prompts[turnIndex % prompts.length])
     const canonicalToolRouteVerified = COMPACTION_BENCHMARK_MODE
       ? toolRoute.foundPrompt && toolRoute.calls.length === 0
@@ -1770,7 +1410,7 @@ try {
       callEntry.name !== 'aiworker_director_brain'
     ))
     const activeTranscriptPayload = activeRows.map(row => JSON.stringify(row.message || null)).join('\n')
-    const activeEntryIds = new Set(activeRows.map(row => row.id).filter(Boolean))
+    const activeEntryIds = openClawLinearActiveTranscriptEntryIds(activeRows)
     const createdSuccessorIds = checkpointSuccessorIds(createdCheckpoints)
     const successorRotation = checkpointSuccessorEvidence({
       beforeSnapshot,
@@ -1781,7 +1421,7 @@ try {
     const checkpointSuccessorsResolved = createdCheckpoints.length === 0
       ? true
       : createdSuccessorIds.length === createdCheckpoints.length
-        && successorRotation.rotated === true
+        && successorRotation.successorBound === true
     const leakDiagnostics = checkpointLeakDiagnostics(checkpointPayloads)
     const splitTurnCheckpointCount = createdCheckpoints.filter(checkpoint => (
       typeof checkpoint?.summary === 'string'
@@ -1833,12 +1473,13 @@ try {
       elapsedMs: Date.now() - turnSentAt,
       transcriptThresholdReachedBefore: turnPreflight.sizeTrigger,
       activeTranscriptBytesBefore: turnPreflight.activeTranscriptBytes,
-      activeTranscriptBytesAfter: transcriptBytesAfter,
-      persistedTranscriptBytesAfter: transcriptBytesAfter,
+      storedTranscriptBytesBefore,
+      storedTranscriptBytesAfter,
+      persistedTranscriptBytesAfter: storedTranscriptBytesAfter,
       preflight: turnPreflight,
       compaction: turnCompaction,
       successorRotation,
-      transcriptReducedOrStable: transcriptBytesAfter <= transcriptBytesBefore,
+      transcriptReducedOrStable: storedTranscriptBytesAfter <= storedTranscriptBytesBefore,
       compactionCountBefore,
       compactionCountAfter,
       compactionDelta,
@@ -1870,6 +1511,7 @@ try {
       activeTranscriptSensitiveValueLeaked,
       activeTranscriptInternalIdentifierLeaked,
       checkpointSuccessorsResolved,
+      activeBranchEntryCount: activeEntryIds.size,
       leakDiagnostics,
       generalAnchorContractApplied: true,
       answerAvoidsInternalTerms,
@@ -1918,9 +1560,10 @@ try {
     === JSON.stringify(fullCatalogToolIdsAfter)
   await stopGateway()
 
-  const { entry, sessionFile } = transcriptPaths()
-  const finalHistory = readFileSync(sessionFile, 'utf8')
-    .trimEnd().split('\n').map(JSON.parse).map(row => JSON.stringify(row.message || '')).join('\n')
+  const finalSnapshot = sessionSnapshot()
+  const { entry } = finalSnapshot
+  const finalHistory = finalSnapshot.events
+    .map(row => JSON.stringify(row.message || '')).join('\n')
   const log = existsSync(logPath) ? readFileSync(logPath, 'utf8') : ''
   const storedCheckpoints = entry.compactionCheckpoints || []
   const finalCompactionCount = Number(entry.compactionCount || 0)
@@ -1958,7 +1601,7 @@ try {
     && turn.fallbackToolCalls.length === 0
     && !turn.repeatedCompaction
     && (turn.compactionDelta === 0 || turn.builtinCheckpointVerified === true)
-    && (turn.compactionDelta === 0 || turn.successorRotation.rotated === true)
+    && (turn.compactionDelta === 0 || turn.successorRotation.successorBound === true)
     && (turn.compactionExpected ? turn.compactionDelta === 1 : turn.compactionDelta === 0)
   ))
   const sensitiveLeakage = {
@@ -1980,10 +1623,8 @@ try {
       .some(turn => turn.activeTranscriptInternalIdentifierLeaked),
   }
   const legacySuffixLeakage = turns.some(turn => turn.checkpointLegacySuffixReferenceLeaked)
-  const legacyMigrationRequired = HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-    && seeded.legacySingleTurnRisk === true
-  const futureCleanHistoryShapeSafe = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-    && seeded.historyShapeSafe === true
+  const legacyMigrationRequired = false
+  const futureCleanHistoryShapeSafe = seeded.historyShapeSafe === true
     && seeded.actualGatewayHookWritesVerified === true
     && seeded.currentTurnRawToolResultVisibilityVerified === true
     && seeded.blindSemanticProjectionVerified === true
@@ -1992,12 +1633,21 @@ try {
   const noRepeatedCompactionAcrossTurns = finalCompactionCount === 1
     && turns[0]?.compactionDelta === 1
     && turns.slice(1).every(turn => turn.compactionDelta === 0)
-  const finalActiveTranscriptBytes = statSync(sessionFile).size
-  const activeTranscriptWithinConfiguredLimit = finalActiveTranscriptBytes
-    <= MAX_ACTIVE_TRANSCRIPT_BYTES
-  const activeBranchEvidenceVerified = turns.every(turn => turn.preflight.observed)
+  const finalStoredTranscriptBytes = finalSnapshot.stats.sizeBytes
+  const postCompactionActiveTranscriptBytes = turns.slice(1)
+    .map(turn => turn.preflight.activeTranscriptBytes)
+  const activeTranscriptWithinConfiguredLimit =
+    postCompactionActiveTranscriptBytes.length === turns.length - 1
+    && postCompactionActiveTranscriptBytes.every(bytes => (
+      Number.isSafeInteger(bytes) && bytes <= MAX_ACTIVE_TRANSCRIPT_BYTES
+    ))
+  const latestObservedActiveTranscriptBytes =
+    postCompactionActiveTranscriptBytes.at(-1) ?? null
+  const activeBranchEvidenceVerified = turns.every(turn => (
+    turn.preflight.observed && turn.activeBranchEntryCount > 0
+  ))
     && turns.filter(turn => turn.compactionDelta > 0)
-      .every(turn => turn.successorRotation.rotated === true)
+      .every(turn => turn.successorRotation.successorBound === true)
   const canonicalRereadCoverage = {
     sourceMode: CANONICAL_SOURCE_MODE,
     liveAuthorityVerified: liveCanonicalAuthorityVerified,
@@ -2020,8 +1670,7 @@ try {
     allConfiguredTurnsCovered: turns.slice(2)
       .every(turn => turn.answerMatchesTurnSemantics === true),
   }
-  const futureCleanAcceptanceEligible = HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-    && [2, 8].includes(TURN_COUNT)
+  const futureCleanAcceptanceEligible = [2, 8].includes(TURN_COUNT)
   const futureCleanAccepted = futureCleanAcceptanceEligible
     && noPreflightError
     && futureTurnsValid
@@ -2044,29 +1693,27 @@ try {
   const productionAcceptanceEligible = futureCleanAcceptanceEligible
     && canonicalRereadCoverage.liveAuthorityVerified === true
   const productionAccepted = productionAcceptanceEligible && futureCleanAccepted
-  const legacyRepeatedCheckpoint = HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-    && turns.slice(1).some(turn => turn.compactionDelta > 0)
-  const legacyAutomaticRecoverySupported = HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE
-    ? false
-    : null
+  const legacyRepeatedCheckpoint = false
+  const legacyAutomaticRecoverySupported = null
   const result = {
     ok: CANONICAL_SOURCE_MODE === LIVE_CANONICAL_MODE
       ? productionAccepted
       : futureCleanAccepted,
-    acceptanceClass: HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      ? HISTORY_MODE + '-' + CANONICAL_SOURCE_MODE
-      : HISTORY_MODE,
-    conclusion: HISTORY_MODE === FUTURE_CLEAN_HISTORY_MODE
-      ? (CANONICAL_SOURCE_MODE === LIVE_CANONICAL_MODE
-          ? (productionAccepted
-              ? 'future-clean-live-canonical-accepted'
-              : 'future-clean-live-canonical-not-accepted')
-          : (futureCleanAccepted
-              ? 'future-clean-fixture-accepted-not-production-evidence'
-              : 'future-clean-fixture-not-accepted'))
-      : 'legacy-polluted-cannot-auto-recover',
+    acceptanceClass: HISTORY_MODE + '-' + CANONICAL_SOURCE_MODE,
+    conclusion: CANONICAL_SOURCE_MODE === LIVE_CANONICAL_MODE
+      ? (productionAccepted
+          ? 'future-clean-live-canonical-accepted'
+          : 'future-clean-live-canonical-not-accepted')
+      : (futureCleanAccepted
+          ? 'future-clean-fixture-accepted-not-production-evidence'
+          : 'future-clean-fixture-not-accepted'),
     inputShape: {
-      transcriptThresholdReached: seeded.beforeBytes >= MAX_ACTIVE_TRANSCRIPT_BYTES,
+      storedTranscriptBytesBeforeAcceptance:
+        seeded.storedTranscriptBytesBeforeAcceptance,
+      transcriptThresholdReached: turns[0]?.preflight.observed === true
+        && turns[0]?.preflight.sizeTrigger === true
+        && Number.isSafeInteger(turns[0]?.preflight.activeTranscriptBytes)
+        && turns[0].preflight.activeTranscriptBytes >= MAX_ACTIVE_TRANSCRIPT_BYTES,
       toolPairs: seeded.toolPairs,
       userBoundedToolTurns: seeded.userBoundedToolTurns,
       completedToolTurns: seeded.completedToolTurns,
@@ -2104,6 +1751,10 @@ try {
       completeTurnCompactionPolicy,
       techniqueContextSeeded: seeded.techniqueContextSeeded,
       generalAnchorMessagesSeeded: seeded.generalAnchorMessagesSeeded,
+      semanticUserSeedsPersisted: seeded.semanticUserSeedsPersisted,
+      semanticAssistantAcknowledgementsPersisted:
+        seeded.semanticAssistantAcknowledgementsPersisted,
+      semanticSeedRoleSequenceVerified: seeded.semanticSeedRoleSequenceVerified,
       accidentReplay: seeded.accidentReplay || null,
     },
     policy: {
@@ -2151,8 +1802,11 @@ try {
     turns,
     outcome: {
       finalCompactionCount,
-      finalActiveTranscriptBytes,
-      finalPersistedTranscriptBytes: finalActiveTranscriptBytes,
+      latestObservedActiveTranscriptBytes,
+      postCompactionActiveTranscriptObservationCount:
+        postCompactionActiveTranscriptBytes.length,
+      finalStoredTranscriptBytes,
+      finalPersistedTranscriptBytes: finalStoredTranscriptBytes,
       stopReasons: turns.map(turn => turn.stopReason),
       splitTurnCheckpointCount: turns
         .reduce((total, turn) => total + turn.splitTurnCheckpointCount, 0),
@@ -2185,7 +1839,7 @@ try {
       futureCleanAcceptanceEligible,
       productionAccepted,
       productionAcceptanceEligible,
-      legacyResultDoesNotInvalidateFutureClean: HISTORY_MODE === LEGACY_POLLUTED_HISTORY_MODE,
+      legacyResultDoesNotInvalidateFutureClean: false,
       generalAnchorCoverage,
       canonicalRereadCoverage,
     },
