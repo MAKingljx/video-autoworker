@@ -82,4 +82,3 @@ export interface RuntimeProvider {
   /** Delete/remove a session from the runtime. */
   deleteSession(sessionKey: string): Promise<any>
 }
-

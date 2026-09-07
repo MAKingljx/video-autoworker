@@ -157,4 +157,3 @@ export class OpenClawRuntimeProvider implements RuntimeProvider {
     return callOpenClawGateway('session_delete', { sessionKey }, 10_000)
   }
 }
-

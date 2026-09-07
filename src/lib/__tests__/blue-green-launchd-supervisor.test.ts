@@ -301,7 +301,7 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
   })
 
   it('fails preflight, start, and status closed when either installed executable drifts', async () => {
-    for (const executableName of ['routerScript', 'slotStartScript'] as const) {
+    await Promise.all((['routerScript', 'slotStartScript'] as const).map(async executableName => {
       const entry = await fixture()
       const isolated = await isolatedSupervisor(entry)
       await execFileAsync('bash', [isolated.installer], {
@@ -319,35 +319,45 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
           stderr: expect.stringContaining('executable digest changed'),
         })
       }
-    }
+    }))
   })
 
   it('rejects legacy manifests until a transactional reinstall upgrades them to v2', async () => {
-    const entry = await fixture()
-    await runInstaller(entry)
-    const manifestPath = join(entry.runDir, 'supervisor', 'installation.json')
-    const missingExecve = JSON.parse(await readFile(manifestPath, 'utf8'))
-    delete missingExecve.execve
-    await writeFile(manifestPath, `${JSON.stringify(missingExecve)}\n`)
-    await expect(runManager(entry, 'preflight', 'all')).rejects.toMatchObject({
-      stderr: expect.stringContaining('invalid execve launch contract'),
-    })
-    await runInstaller(entry, '--apply')
-    const legacy = JSON.parse(await readFile(manifestPath, 'utf8'))
-    legacy.schema = 'video-autoworker-blue-green-launchd/v1'
-    delete legacy.executables
-    await writeFile(manifestPath, `${JSON.stringify(legacy)}\n`)
-
-    await expect(runManager(entry, 'status', 'router')).rejects.toMatchObject({
-      stderr: expect.stringContaining('legacy schema; rerun install-blue-green-launch-agents.sh --apply'),
-    })
-    await runInstaller(entry, '--apply')
-    expect(JSON.parse(await readFile(manifestPath, 'utf8')).schema)
-      .toBe('video-autoworker-blue-green-launchd/v2')
-    await expect(runManager(entry, 'status', 'router')).rejects.toMatchObject({
-      code: 1,
-      stderr: expect.stringContaining('not managed'),
-    })
+    await Promise.all([
+      (async () => {
+        const entry = await fixture()
+        await runInstaller(entry)
+        const manifestPath = join(entry.runDir, 'supervisor', 'installation.json')
+        const missingExecve = JSON.parse(await readFile(manifestPath, 'utf8'))
+        delete missingExecve.execve
+        await writeFile(manifestPath, `${JSON.stringify(missingExecve)}\n`)
+        await expect(runManager(entry, 'preflight', 'all')).rejects.toMatchObject({
+          stderr: expect.stringContaining('invalid execve launch contract'),
+        })
+        await runInstaller(entry, '--apply')
+        expect(JSON.parse(await readFile(manifestPath, 'utf8')).schema)
+          .toBe('video-autoworker-blue-green-launchd/v2')
+      })(),
+      (async () => {
+        const entry = await fixture()
+        await runInstaller(entry)
+        const manifestPath = join(entry.runDir, 'supervisor', 'installation.json')
+        const legacy = JSON.parse(await readFile(manifestPath, 'utf8'))
+        legacy.schema = 'video-autoworker-blue-green-launchd/v1'
+        delete legacy.executables
+        await writeFile(manifestPath, `${JSON.stringify(legacy)}\n`)
+        await expect(runManager(entry, 'status', 'router')).rejects.toMatchObject({
+          stderr: expect.stringContaining(
+            'legacy schema; rerun install-blue-green-launch-agents.sh --apply',
+          ),
+        })
+        await runInstaller(entry, '--apply')
+        await expect(runManager(entry, 'status', 'router')).rejects.toMatchObject({
+          code: 1,
+          stderr: expect.stringContaining('not managed'),
+        })
+      })(),
+    ])
   })
 
   it('preflights the user launchd domain and verifies a managed router label, PID, attestation, and port', async () => {
