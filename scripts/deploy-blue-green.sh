@@ -29,6 +29,8 @@ CONTROL_TOKEN_FILE="${AIWORKER_BG_CONTROL_TOKEN_FILE:-}"
 CONTROL_TOKEN="${AIWORKER_BG_CONTROL_TOKEN:-${API_KEY:-}}"
 HTTP_TIMEOUT_MS="${AIWORKER_BG_HTTP_TIMEOUT_MS:-8000}"
 BOOTSTRAP_EVIDENCE_MAX_AGE="${AIWORKER_BG_BOOTSTRAP_EVIDENCE_MAX_AGE:-300}"
+BOOTSTRAP_RECOVERY_GUARD_READY_SECONDS=120
+GUARD_STATUS_TIMEOUT_MS=10000
 LEADER_TIMEOUT_SECONDS="${AIWORKER_BG_LEADER_TIMEOUT_SECONDS:-90}"
 RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
 STAGING_WORK_ROOT=""
@@ -188,6 +190,57 @@ guard_mode_requires_handoff() {
     recovery-hold) return 1 ;;
     *) return 2 ;;
   esac
+}
+
+guard_status_bounded() {
+  local timeout_ms="${1:-}" controller="${2:-}" socket="${3:-}" database="${4:-}" n8n_database="${5:-}"
+  [[ "$timeout_ms" =~ ^[1-9][0-9]*$ && ${#timeout_ms} -le 5 ]] \
+    && (( 10#$timeout_ms <= GUARD_STATUS_TIMEOUT_MS )) || return 2
+  "$NODE_BIN" - "$NODE_BIN" "$controller" "$socket" "$database" "$n8n_database" "$timeout_ms" <<'NODE'
+const { spawnSync } = require('node:child_process')
+const [node, controller, socket, database, n8nDatabase, rawTimeout] = process.argv.slice(2)
+const timeout = Number(rawTimeout)
+const result = spawnSync(node, [
+  controller, 'status', '--socket', socket, '--database', database, '--n8n-database', n8nDatabase,
+], { encoding: 'utf8', timeout, maxBuffer: 1024 * 1024 })
+if (result.stdout) process.stdout.write(result.stdout)
+if (result.stderr) process.stderr.write(result.stderr)
+if (result.error || result.signal || result.status !== 0) {
+  process.exit(result.error?.code === 'ETIMEDOUT' ? 124 : (result.status ?? 1))
+}
+NODE
+}
+
+wait_for_recovery_guard_ready() {
+  local child_pid="${1:-}" controller="${2:-}" socket="${3:-}" token="${4:-}"
+  local database="${5:-}" n8n_database="${6:-}" log="${7:-}"
+  local deadline now remaining_ms status_timeout_ms grep_status
+  [[ "$child_pid" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ -f "$log" && ! -L "$log" && -O "$log" ]] || return 2
+  now="$(date +%s)" || return 2
+  deadline=$(( now + BOOTSTRAP_RECOVERY_GUARD_READY_SECONDS ))
+  while true; do
+    kill -0 "$child_pid" 2>/dev/null || return 1
+    [[ -f "$log" && ! -L "$log" && -O "$log" ]] || return 2
+    if [[ ( -e "$socket" || -L "$socket" ) && ( ! -S "$socket" || -L "$socket" ) ]]; then return 2; fi
+    if [[ ( -e "$token" || -L "$token" ) && ( ! -f "$token" || -L "$token" ) ]]; then return 2; fi
+    grep_status=0
+    /usr/bin/grep -Fxq 'Legacy freeze guard active: pid='"$child_pid" "$log" || grep_status=$?
+    (( grep_status == 0 || grep_status == 1 )) || return 2
+    if [[ -S "$socket" && ! -L "$socket" && -f "$token" && ! -L "$token" ]] \
+      && (( grep_status == 0 )); then
+      now="$(date +%s)" || return 2
+      (( now < deadline )) || return 2
+      remaining_ms=$(( (deadline - now) * 1000 ))
+      status_timeout_ms="$GUARD_STATUS_TIMEOUT_MS"
+      if (( remaining_ms < status_timeout_ms )); then status_timeout_ms="$remaining_ms"; fi
+      guard_status_bounded "$status_timeout_ms" "$controller" "$socket" "$database" "$n8n_database"
+      return $?
+    fi
+    now="$(date +%s)" || return 2
+    (( now < deadline )) || return 2
+    sleep 1 || return 2
+  done
 }
 
 verify_deployment_source_gate() {
@@ -2105,19 +2158,18 @@ NODE
       >"$recovery_attempt/guard.log" 2>&1 &
     recovery_guard_pid=$!
     chmod 600 "$recovery_attempt/guard.log"
-    deadline=$(( $(date +%s) + 15 ))
-    while [[ ! -S "$guard_socket" || ! -f "$guard_token" ]]; do
-      kill -0 "$recovery_guard_pid" 2>/dev/null \
-        || fail "bootstrap recovery guard exited before becoming ready"
-      (( $(date +%s) < deadline )) || fail "bootstrap recovery guard did not become ready"
-      sleep 1
-    done
+    guard_status="$(wait_for_recovery_guard_ready \
+      "$recovery_guard_pid" "$guard_controller" "$guard_socket" "$guard_token" \
+      "$live_db" "$n8n_db" "$recovery_attempt/guard.log")" \
+      || fail "bootstrap recovery guard did not become ready within its bounded phase budget"
   fi
   [[ -S "$guard_socket" && ! -L "$guard_socket" && -f "$guard_token" && ! -L "$guard_token" ]] \
     || fail "verified dual-database freeze guard is unavailable before bootstrap authorization"
-  guard_status="$("$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
-    --database "$live_db" --n8n-database "$n8n_db")" \
-    || fail "unable to attest the dual-database freeze guard before bootstrap authorization"
+  if [[ -z "$guard_status" ]]; then
+    guard_status="$(guard_status_bounded "$GUARD_STATUS_TIMEOUT_MS" \
+      "$guard_controller" "$guard_socket" "$live_db" "$n8n_db")" \
+      || fail "unable to attest the dual-database freeze guard before bootstrap authorization"
+  fi
   guard_mode="$("$NODE_BIN" -e '
     const value = JSON.parse(process.argv[1])
     if (!value || !["dual", "dual-recovery", "recovery-hold"].includes(value.mode)) process.exit(2)
@@ -2292,8 +2344,8 @@ NODE
     guard_mode_status=$?
     (( guard_mode_status == 1 )) || fail "post-shutdown guard mode cannot be handed off safely"
   fi
-  guard_status="$("$NODE_BIN" "$guard_controller" status --socket "$guard_socket" \
-    --database "$live_db" --n8n-database "$n8n_db")" \
+  guard_status="$(guard_status_bounded "$GUARD_STATUS_TIMEOUT_MS" \
+    "$guard_controller" "$guard_socket" "$live_db" "$n8n_db")" \
     || fail "post-shutdown n8n recovery hold is unavailable"
   guard_mode="$("$NODE_BIN" -e '
     const value = JSON.parse(process.argv[1])
