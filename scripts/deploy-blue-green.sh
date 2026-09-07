@@ -45,6 +45,7 @@ BOOTSTRAP_SUCCESSOR_RECEIPT=""
 BOOTSTRAP_SUCCESSOR_TOKEN=""
 BOOTSTRAP_SUCCESSOR_CONSUMED=""
 BOOTSTRAP_SUCCESSOR_COMPATIBILITY=""
+BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER=""
 BOOTSTRAP_SUCCESSOR_READINESS=""
 BOOTSTRAP_SUCCESSOR_GUARD_STATUS=""
 BOOTSTRAP_SUCCESSOR_PREFLIGHT=""
@@ -128,7 +129,7 @@ usage() {
 Usage:
   deploy-blue-green.sh init [blue|green]
   deploy-blue-green.sh bootstrap <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir>
-  deploy-blue-green.sh bootstrap-successor <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir> <successor-controller> <successor-receipt> <successor-token> <successor-consumed> <current-compatibility> <current-readiness> <current-guard-status>
+  deploy-blue-green.sh bootstrap-successor <blue|green> <baseline-release-id> <absolute-standalone-root> <absolute-evidence-json> <absolute-rollback-proof-json> <absolute-confirmed-attempt-dir> <successor-controller> <successor-receipt> <successor-token> <successor-consumed> <current-compatibility> <current-execve-adapter> <current-readiness> <current-guard-status>
   deploy-blue-green.sh stage <release-id> <absolute-source-standalone-root>
   deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh probe <blue|green>
@@ -469,7 +470,8 @@ verify_bootstrap_sdk_successor() {
   [[ "$BOOTSTRAP_SUCCESSOR_MODE" == 1 ]] || return 2
   for path in "$BOOTSTRAP_SUCCESSOR_CONTROLLER" "$BOOTSTRAP_SUCCESSOR_RECEIPT" \
     "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
-    "$BOOTSTRAP_SUCCESSOR_READINESS" "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS"; do
+    "$BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER" "$BOOTSTRAP_SUCCESSOR_READINESS" \
+    "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS"; do
     assert_absolute "bootstrap SDK successor input" "$path"
     [[ -f "$path" && ! -L "$path" ]] || fail "bootstrap SDK successor input is unavailable"
   done
@@ -478,6 +480,7 @@ verify_bootstrap_sdk_successor() {
     raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify \
       --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --token "$BOOTSTRAP_SUCCESSOR_TOKEN" \
       --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --execve-adapter "$BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER" \
       --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
       --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
       || fail "bootstrap SDK successor authorization is invalid"
@@ -486,6 +489,7 @@ verify_bootstrap_sdk_successor() {
     raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify-consumed \
       --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --consumed "$BOOTSTRAP_SUCCESSOR_CONSUMED" \
       --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --execve-adapter "$BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER" \
       --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
       --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
       || fail "consumed bootstrap SDK successor authorization is invalid"
@@ -532,6 +536,7 @@ consume_bootstrap_sdk_successor() {
     raw="$("$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" consume \
       --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --token "$BOOTSTRAP_SUCCESSOR_TOKEN" \
       --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+      --execve-adapter "$BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER" \
       --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
       --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS")" \
       || fail "unable to consume bootstrap SDK successor authorization"
@@ -547,6 +552,7 @@ consume_bootstrap_sdk_successor() {
   "$NODE_BIN" "$BOOTSTRAP_SUCCESSOR_CONTROLLER" verify-consumed \
     --receipt "$BOOTSTRAP_SUCCESSOR_RECEIPT" --consumed "$BOOTSTRAP_SUCCESSOR_CONSUMED" \
     --compatibility "$BOOTSTRAP_SUCCESSOR_COMPATIBILITY" \
+    --execve-adapter "$BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER" \
     --readiness "$BOOTSTRAP_SUCCESSOR_READINESS" \
     --guard-status "$BOOTSTRAP_SUCCESSOR_GUARD_STATUS" >/dev/null \
     || fail "bootstrap SDK successor changed immediately after consumption"
@@ -605,16 +611,18 @@ const [pathname, sourceCommit, historicalSourceCommit, attempt, releaseId, relea
   manifestSha256, rawIntakeRevision, controlSourceCommit, receipt, receiptSha256, mapping,
   mappingSha256] = process.argv.slice(2)
 const value = JSON.parse(fs.readFileSync(pathname, 'utf8'))
-if (value.schema !== 'video-autoworker-legacy-bootstrap-sdk-successor-completion/v1'
-  || value.ok !== true || value.recovered !== true || value.sourceCommit !== sourceCommit
+if (value.schema !== 'video-autoworker-legacy-bootstrap-sdk-successor-baseline-established/v1'
+  || value.baselineEstablished !== true || value.intakePaused !== true
+  || value.sourceCommit !== sourceCommit
   || value.historicalSourceCommit !== historicalSourceCommit || value.attempt !== attempt
   || value.releaseId !== releaseId || value.releaseRoot !== releaseRoot
-  || value.manifestSha256 !== manifestSha256 || value.intakeRevision !== Number(rawIntakeRevision)
+  || value.manifestSha256 !== manifestSha256
+  || value.pausedIntakeRevision !== Number(rawIntakeRevision)
   || value.controlSourceCommit !== controlSourceCommit
   || value.successorReceipt?.path !== receipt || value.successorReceipt?.sha256 !== receiptSha256
   || value.targetMapping?.path !== mapping || value.targetMapping?.sha256 !== mappingSha256
-  || !Number.isSafeInteger(value.completedAt) || value.completedAt < 1_000_000_000_000
-  || value.completedAt > Date.now() + 5_000) process.exit(2)
+  || !Number.isSafeInteger(value.establishedAt) || value.establishedAt < 1_000_000_000_000
+  || value.establishedAt > Date.now() + 5_000) process.exit(2)
 NODE
     return
   fi
@@ -627,17 +635,17 @@ NODE
       || !/^[a-f0-9]{64}$/u.test(receiptSha256)
       || !/^[a-f0-9]{64}$/u.test(manifestSha256) || !releaseRoot.startsWith("/")) process.exit(2)
     process.stdout.write(JSON.stringify({
-      schema: "video-autoworker-legacy-bootstrap-sdk-successor-completion/v1",
-      ok: true,
-      recovered: true,
+      schema: "video-autoworker-legacy-bootstrap-sdk-successor-baseline-established/v1",
+      baselineEstablished: true,
+      intakePaused: true,
       sourceCommit,
       historicalSourceCommit,
       attempt,
       releaseId,
       releaseRoot,
       manifestSha256,
-      intakeRevision: Number(intakeRevision),
-      completedAt: Date.now(),
+      pausedIntakeRevision: Number(intakeRevision),
+      establishedAt: Date.now(),
       controlSourceCommit,
       successorReceipt: { path: receipt, sha256: receiptSha256 },
       targetMapping: { path: mapping, sha256: mappingSha256 },
@@ -857,7 +865,7 @@ assert_bootstrap_operation_gate() {
       return
       ;;
     bootstrap-successor)
-      [[ "$#" -eq 13 ]] \
+      [[ "$#" -eq 14 ]] \
         || fail "bootstrap successor recovery requires the historical target and complete successor binding"
       return
       ;;
@@ -3919,8 +3927,9 @@ case "$command" in
     BOOTSTRAP_SUCCESSOR_TOKEN="${9:-}"
     BOOTSTRAP_SUCCESSOR_CONSUMED="${10:-}"
     BOOTSTRAP_SUCCESSOR_COMPATIBILITY="${11:-}"
-    BOOTSTRAP_SUCCESSOR_READINESS="${12:-}"
-    BOOTSTRAP_SUCCESSOR_GUARD_STATUS="${13:-}"
+    BOOTSTRAP_SUCCESSOR_EXECVE_ADAPTER="${12:-}"
+    BOOTSTRAP_SUCCESSOR_READINESS="${13:-}"
+    BOOTSTRAP_SUCCESSOR_GUARD_STATUS="${14:-}"
     BOOTSTRAP_SUCCESSOR_COMPLETION="$(dirname "$BOOTSTRAP_SUCCESSOR_RECEIPT")/recovery-completion.json"
     BOOTSTRAP_SUCCESSOR_MAPPING="$(dirname "$BOOTSTRAP_SUCCESSOR_RECEIPT")/target-mapping.json"
     bootstrap_baseline "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}"

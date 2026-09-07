@@ -12,6 +12,8 @@ import { fileURLToPath } from 'node:url'
 const PLAN_SCHEMA = 'video-autoworker-legacy-bootstrap-sdk-successor-plan/v1'
 const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
+const INTAKE_SCHEMA = 'video-autoworker-intake-control/v1'
+const INTAKE_URL = 'http://127.0.0.1:3017/api/n8n/intake-control'
 const scriptPath = realpathSync(fileURLToPath(import.meta.url))
 
 function fail(message) { throw new Error(`legacy bootstrap SDK successor runner failed: ${message}`) }
@@ -109,6 +111,16 @@ function writeExclusive(pathname, value, mode) {
   try { fsyncSync(parent) } finally { closeSync(parent) }
   return source
 }
+function writeImmutable(pathname, value) {
+  const source = Buffer.from(`${canonicalJson(value)}\n`)
+  if (existsSync(pathname)) {
+    const existing = stableFile(pathname, 'immutable recovery output', 0o400)
+    if (existing.sha256 !== sha256(source)) fail('immutable recovery output changed')
+    return existing
+  }
+  writeExclusive(pathname, value, 0o400)
+  return { source, sha256: sha256(source) }
+}
 function runJson(command, args, label, options = {}) {
   let stdout
   try {
@@ -164,7 +176,7 @@ function sanitizedEnvironment(source = process.env) {
 function loadPlan(pathname) {
   const value = readJson(normalized(pathname, 'plan'), 'successor plan', 0o600)
   requiredObject(value, [
-    'schema', 'control', 'historical', 'successorAttempt', 'runtime', 'guard', 'target', 'environment',
+    'schema', 'control', 'historical', 'successorAttempt', 'runtime', 'guard', 'target', 'environment', 'execve',
   ], 'successor plan')
   if (value.schema !== PLAN_SCHEMA) fail('plan schema is invalid')
   requiredObject(value.control, ['repository', 'commit'], 'control source')
@@ -180,6 +192,7 @@ function loadPlan(pathname) {
     'slot', 'releaseId', 'releaseRoot', 'releasesRoot', 'evidence', 'rollbackProof',
   ], 'historical target')
   requiredObject(value.environment, ['runDir', 'routerState'], 'bootstrap environment')
+  requiredObject(value.execve, ['installation', 'launchAgentsDir'], 'execve adapter')
   if (!COMMIT.test(value.control.commit) || !COMMIT.test(value.historical.commit)
     || !['blue', 'green'].includes(value.target.slot)
     || !Number.isSafeInteger(value.historical.n8nPid) || value.historical.n8nPid <= 0) {
@@ -210,10 +223,103 @@ function loadPlan(pathname) {
     rollbackProof: value.target.rollbackProof,
     runDir: value.environment.runDir,
     routerState: value.environment.routerState,
+    execveInstallation: value.execve.installation,
+    launchAgentsDir: value.execve.launchAgentsDir,
   })) normalized(path, label)
   return value
 }
-function publishRecoveredResult(plan, deploy, env, required = false) {
+function intakeResumeReason(recoveryReceiptSha256) {
+  return `SDK successor 恢复完成，恢复新任务入口 [${recoveryReceiptSha256.slice(0, 24)}]`
+}
+function validIntakeControl(value) {
+  return value?.schema === INTAKE_SCHEMA && value.globalScope === true && value.canManage === true
+    && Number.isSafeInteger(value.revision) && value.revision >= 1
+    && value.counts && Number.isSafeInteger(value.counts.active) && value.counts.active >= 0
+}
+function validRecoveredAttestation(attestation, plan, completion, expectedRevision) {
+  return attestation?.schema === 'video-autoworker-transition-release-evidence/v1'
+    && attestation.payload?.slot === plan.target.slot
+    && attestation.payload?.releaseId === completion.releaseId
+    && attestation.payload?.releaseRoot === completion.releaseRoot
+    && attestation.payload?.manifestSha256 === completion.manifestSha256
+    && attestation.payload?.readiness?.revision === expectedRevision
+    && attestation.payload?.route?.activeSlot === plan.target.slot
+    && attestation.payload?.route?.releaseId === completion.releaseId
+    && Number.isSafeInteger(attestation.payload?.route?.generation)
+    && attestation.payload.route.generation >= 1
+}
+async function responseJson(response, label) {
+  let value
+  try { value = await response.json() } catch { fail(`${label} returned invalid JSON`) }
+  if (!response.ok) fail(`${label} returned HTTP ${response.status}`)
+  return value
+}
+export async function verifyRecoveredRouter({
+  slot,
+  releaseId,
+  generation,
+  request = fetch,
+}) {
+  if (!['blue', 'green'].includes(slot) || typeof releaseId !== 'string' || !releaseId
+    || !Number.isSafeInteger(generation) || generation < 1) {
+    fail('recovered router binding is invalid')
+  }
+  const router = await responseJson(await request('http://127.0.0.1:3017/__router/health', {
+    cache: 'no-store', signal: AbortSignal.timeout(8_000),
+  }), 'recovered router status')
+  if (router?.schema !== 'video-autoworker-standalone-router-health/v1'
+    || router.ok !== true || router.active !== slot || router.releaseId !== releaseId
+    || router.generation !== generation || !Number.isSafeInteger(router.pid) || router.pid < 1) {
+    fail('recovered router differs from the baseline attestation')
+  }
+  return {
+    activeSlot: router.active,
+    releaseId: router.releaseId,
+    generation: router.generation,
+  }
+}
+export async function reconcileRecoveredIntake({
+  pausedRevision,
+  recoveryReceiptSha256,
+  request = fetch,
+}) {
+  if (!Number.isSafeInteger(pausedRevision) || pausedRevision < 1 || !SHA256.test(recoveryReceiptSha256)) {
+    fail('intake resume binding is invalid')
+  }
+  const reason = intakeResumeReason(recoveryReceiptSha256)
+  const initial = (await responseJson(await request(INTAKE_URL, {
+    cache: 'no-store', signal: AbortSignal.timeout(8_000),
+  }), 'intake status'))?.control
+  if (!validIntakeControl(initial)) fail('intake status is invalid')
+
+  let control = initial
+  if (!control.accepting) {
+    if (control.mode !== 'paused' || control.revision !== pausedRevision || control.counts.active !== 0) {
+      fail('paused intake differs from the recovered completion')
+    }
+    control = (await responseJson(await request(INTAKE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'resume', reason, expectedRevision: pausedRevision }),
+      signal: AbortSignal.timeout(8_000),
+    }), 'intake resume'))?.control
+  }
+  if (!validIntakeControl(control) || control.accepting !== true || control.mode !== 'active'
+    || control.revision !== pausedRevision + 1 || control.reason !== reason
+    || !Number.isSafeInteger(control.changedAt) || control.changedAt < 1
+    || !control.changedBy || !Number.isSafeInteger(control.changedBy.id)
+    || typeof control.changedBy.name !== 'string' || !control.changedBy.name) {
+    fail('resumed intake is not bound to this recovery')
+  }
+  return {
+    pausedRevision,
+    resumedRevision: control.revision,
+    reason,
+    changedAt: control.changedAt,
+    changedBy: control.changedBy,
+  }
+}
+async function publishRecoveredResult(plan, deploy, env, required = false) {
   const completionPath = join(plan.successorAttempt, 'recovery-completion.json')
   if (!existsSync(completionPath)) {
     if (required) fail('recovery completion is unavailable')
@@ -226,8 +332,9 @@ function publishRecoveredResult(plan, deploy, env, required = false) {
   const completion = readJson(completionPath, 'recovery completion', 0o400)
   const releaseManifest = stableFile(join(completion.releaseRoot, 'release-manifest.json'),
     'target release manifest')
-  if (completion?.schema !== 'video-autoworker-legacy-bootstrap-sdk-successor-completion/v1'
-    || completion.ok !== true || completion.recovered !== true || !COMMIT.test(completion.sourceCommit || '')
+  if (completion?.schema !== 'video-autoworker-legacy-bootstrap-sdk-successor-baseline-established/v1'
+    || completion.baselineEstablished !== true || completion.intakePaused !== true
+    || !COMMIT.test(completion.sourceCommit || '')
     || completion.historicalSourceCommit !== plan.historical.commit
     || completion.sourceCommit !== successorReceipt.requestedTarget?.sourceCommit
     || completion.attempt !== successorReceipt.historical?.attemptId
@@ -239,10 +346,11 @@ function publishRecoveredResult(plan, deploy, env, required = false) {
     || completion.releaseRoot !== plan.target.releaseRoot
     || !SHA256.test(completion.manifestSha256 || '')
     || completion.manifestSha256 !== releaseManifest.sha256
-    || typeof completion.attempt !== 'string' || !Number.isSafeInteger(completion.intakeRevision)
-    || completion.intakeRevision < 1 || !Number.isSafeInteger(completion.completedAt)
-    || completion.completedAt < 1_000_000_000_000
-    || completion.completedAt > Date.now() + 5_000
+    || typeof completion.attempt !== 'string'
+    || !Number.isSafeInteger(completion.pausedIntakeRevision)
+    || completion.pausedIntakeRevision < 1 || !Number.isSafeInteger(completion.establishedAt)
+    || completion.establishedAt < 1_000_000_000_000
+    || completion.establishedAt > Date.now() + 5_000
     || completion.controlSourceCommit !== plan.control.commit
     || completion.successorReceipt?.path !== receiptPath
     || completion.successorReceipt?.sha256 !== stableFile(receiptPath, 'successor receipt', 0o400).sha256
@@ -250,19 +358,60 @@ function publishRecoveredResult(plan, deploy, env, required = false) {
     || completion.targetMapping?.sha256 !== targetMapping.sha256) {
     fail('recovery completion is invalid')
   }
-  const attestation = runJson('/bin/bash', [deploy, 'attest-current'],
-    'current recovered release attestation', { env, timeout: 120_000 })
-  if (attestation?.schema !== 'video-autoworker-transition-release-evidence/v1'
-    || attestation.payload?.slot !== plan.target.slot
-    || attestation.payload?.releaseId !== completion.releaseId
-    || attestation.payload?.releaseRoot !== completion.releaseRoot
-    || attestation.payload?.manifestSha256 !== completion.manifestSha256
-    || attestation.payload?.readiness?.revision !== completion.intakeRevision
-    || attestation.payload?.route?.activeSlot !== plan.target.slot
-    || attestation.payload?.route?.releaseId !== completion.releaseId
-    || !Number.isSafeInteger(attestation.payload?.route?.generation)
-    || attestation.payload.route.generation < 1) {
-    fail('current recovered release differs from recovery completion')
+  const completionReference = {
+    path: completionPath,
+    sha256: stableFile(completionPath, 'recovery completion', 0o400).sha256,
+  }
+  const attestationPath = join(plan.successorAttempt, 'baseline-attestation.json')
+  let attestation
+  if (existsSync(attestationPath)) {
+    attestation = readJson(attestationPath, 'baseline attestation', 0o400)
+  } else {
+    attestation = runJson('/bin/bash', [deploy, 'attest-current'],
+      'current recovered release attestation', { env, timeout: 120_000 })
+    if (!validRecoveredAttestation(
+      attestation, plan, completion, completion.pausedIntakeRevision,
+    )) fail('paused baseline attestation differs from recovery completion')
+    writeImmutable(attestationPath, attestation)
+  }
+  if (!validRecoveredAttestation(
+    attestation, plan, completion, completion.pausedIntakeRevision,
+  )) fail('paused baseline attestation differs from recovery completion')
+  const attestationReference = {
+    path: attestationPath,
+    sha256: stableFile(attestationPath, 'baseline attestation', 0o400).sha256,
+  }
+  await verifyRecoveredRouter({
+    slot: plan.target.slot,
+    releaseId: completion.releaseId,
+    generation: attestation.payload.route.generation,
+  })
+  const intake = await reconcileRecoveredIntake({
+    pausedRevision: completion.pausedIntakeRevision,
+    recoveryReceiptSha256: completionReference.sha256,
+  })
+  const router = await verifyRecoveredRouter({
+    slot: plan.target.slot,
+    releaseId: completion.releaseId,
+    generation: attestation.payload.route.generation,
+  })
+  const intakeProofPath = join(plan.successorAttempt, 'intake-resumed.json')
+  const intakeProof = {
+    schema: 'video-autoworker-legacy-bootstrap-sdk-successor-intake-resumed/v1',
+    intakeResumed: true,
+    authorizationId: successorReceipt.authorizationId,
+    completion: completionReference,
+    baselineAttestation: attestationReference,
+    route: {
+      activeSlot: router.activeSlot,
+      releaseId: router.releaseId,
+      generation: router.generation,
+    },
+    ...intake,
+  }
+  const intakeProofReference = {
+    path: intakeProofPath,
+    sha256: writeImmutable(intakeProofPath, intakeProof).sha256,
   }
   const controlRoot = dirname(plan.historical.bootstrapAttempt)
   safeDirectory(controlRoot, 'historical control root')
@@ -274,16 +423,17 @@ function publishRecoveredResult(plan, deploy, env, required = false) {
     sourceCommit: completion.sourceCommit,
     historicalSourceCommit: plan.historical.commit,
     attempt: completion.attempt,
-    intakeRevision: completion.intakeRevision,
-    completedAt: completion.completedAt,
+    pausedIntakeRevision: completion.pausedIntakeRevision,
+    intakeRevision: intake.resumedRevision,
+    intakeResumed: true,
+    completedAt: intake.changedAt * 1_000,
     controlSourceCommit: plan.control.commit,
     releaseId: completion.releaseId,
     releaseRoot: completion.releaseRoot,
     manifestSha256: completion.manifestSha256,
-    recoveryReceipt: {
-      path: completionPath,
-      sha256: stableFile(completionPath, 'recovery completion', 0o400).sha256,
-    },
+    recoveryReceipt: completionReference,
+    baselineAttestation: attestationReference,
+    intakeResume: intakeProofReference,
   }
   if (existsSync(resultPath)) {
     const existing = readJson(resultPath, 'historical result', 0o600)
@@ -293,7 +443,7 @@ function publishRecoveredResult(plan, deploy, env, required = false) {
   }
   return true
 }
-function main(planPath) {
+async function main(planPath) {
   const cleanEnvironment = sanitizedEnvironment()
   const plan = loadPlan(planPath)
   safeDirectory(plan.successorAttempt, 'successor attempt')
@@ -311,7 +461,7 @@ function main(planPath) {
     AIWORKER_BG_N8N_DB_PATH: plan.guard.n8nDatabase,
     AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: plan.runtime.liveProof,
   }
-  if (!existsSync(plan.historical.pending) && publishRecoveredResult(plan, deploy, env)) return
+  if (!existsSync(plan.historical.pending) && await publishRecoveredResult(plan, deploy, env)) return
   const compatibilityPath = join(plan.successorAttempt, 'openclaw-runtime-compatibility.json')
   const readinessPath = join(plan.successorAttempt, 'current-readiness.json')
   const guardStatusPath = join(plan.successorAttempt, 'current-guard-status.json')
@@ -321,6 +471,20 @@ function main(planPath) {
     'scripts/verify-openclaw-runtime-compatibility.mjs', 0o755)
   const readinessCli = gitBoundFile(plan.control.repository, plan.control.commit,
     'scripts/verify-director-video-release-readiness.mjs', 0o644)
+  const execveAdapter = gitBoundFile(plan.control.repository, plan.control.commit,
+    'ops/recovery/install-blue-green-execve-adapter.mjs', 0o755)
+
+  const execveAdapterPath = join(plan.successorAttempt, 'execve-adapter.json')
+  const execveAdapterProof = runJson(process.execPath, [
+    execveAdapter, '--verify-installed',
+    '--source-root', plan.historical.repository,
+    '--expected-commit', plan.historical.commit,
+    '--adapter-source-root', plan.control.repository,
+    '--expected-adapter-commit', plan.control.commit,
+    '--installation', plan.execve.installation,
+    '--launch-agents-dir', plan.execve.launchAgentsDir,
+  ], 'installed execve adapter', { env: cleanEnvironment })
+  writeStable(execveAdapterPath, execveAdapterProof)
 
   const compatibility = runJson(process.execPath, [
     compatibilityCli,
@@ -370,6 +534,7 @@ function main(planPath) {
       '--control-repository', plan.control.repository,
       '--control-commit', plan.control.commit,
       '--compatibility', compatibilityPath,
+      '--execve-adapter', execveAdapterPath,
       '--guard-status', guardStatusPath,
       '--requested-readiness', readinessPath,
     ], 'successor authorization', { env: cleanEnvironment })
@@ -377,7 +542,7 @@ function main(planPath) {
   if (existsSync(tokenPath)) {
     runJson(process.execPath, [
       controller, 'verify', '--receipt', receiptPath, '--token', tokenPath,
-      '--compatibility', compatibilityPath, '--readiness', readinessPath,
+      '--compatibility', compatibilityPath, '--execve-adapter', execveAdapterPath, '--readiness', readinessPath,
       '--guard-status', guardStatusPath,
     ], 'successor verification', { env: cleanEnvironment })
   } else if (!existsSync(consumedPath)) {
@@ -386,7 +551,7 @@ function main(planPath) {
   if (existsSync(consumedPath)) {
     runJson(process.execPath, [
       controller, 'verify-consumed', '--receipt', receiptPath, '--consumed', consumedPath,
-      '--compatibility', compatibilityPath, '--readiness', readinessPath,
+      '--compatibility', compatibilityPath, '--execve-adapter', execveAdapterPath, '--readiness', readinessPath,
       '--guard-status', guardStatusPath,
     ], 'consumed successor verification', { env: cleanEnvironment })
   }
@@ -395,17 +560,18 @@ function main(planPath) {
     deploy, 'bootstrap-successor',
     plan.target.slot, plan.target.releaseId, plan.target.releaseRoot,
     plan.target.evidence, plan.target.rollbackProof, plan.historical.bootstrapAttempt,
-    controller, receiptPath, tokenPath, consumedPath, compatibilityPath, readinessPath, guardStatusPath,
+    controller, receiptPath, tokenPath, consumedPath, compatibilityPath, execveAdapterPath,
+    readinessPath, guardStatusPath,
   ], { env, stdio: 'inherit', timeout: 20 * 60_000 })
 
-  publishRecoveredResult(plan, deploy, env, true)
+  await publishRecoveredResult(plan, deploy, env, true)
 }
 
 if (process.argv[1] && scriptPath === realpathSync(process.argv[1])) {
   try {
     const argv = process.argv.slice(2)
     if (argv.length !== 2 || argv[0] !== '--plan') fail('expected --plan <path>')
-    main(argv[1])
+    await main(argv[1])
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
     process.exitCode = 1

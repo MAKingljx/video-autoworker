@@ -7,10 +7,14 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { adaptedProgramArguments } from '../../ops/recovery/install-blue-green-execve-adapter.mjs'
+import { blueGreenExecveSourceSha256 } from '../../scripts/lib/blue-green-execve-contract.mjs'
 
 const cleanup: string[] = []
 const sourceController = resolve(process.cwd(), 'scripts/legacy-bootstrap-sdk-successor-controller.mjs')
 const sourceRuntimeContract = resolve(process.cwd(), 'scripts/lib/openclaw-runtime-contract.mjs')
+const sourceExecveAdapter = resolve(process.cwd(), 'ops/recovery/install-blue-green-execve-adapter.mjs')
+const sourceExecveContract = resolve(process.cwd(), 'scripts/lib/blue-green-execve-contract.mjs')
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const stable = (value: any): any => Array.isArray(value)
   ? value.map(stable)
@@ -38,6 +42,15 @@ function writeJson(pathname: string, value: any, mode: number) {
   mkdirSync(dirname(pathname), { recursive: true, mode: 0o700 })
   writeFileSync(pathname, `${canonical(value)}\n`, { mode })
   chmodSync(pathname, mode)
+}
+
+function plist(label: string, args: string[], workingDirectory: string) {
+  const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>${escape(label)}</string>
+<key>ProgramArguments</key><array>${args.map(value => `<string>${escape(value)}</string>`).join('')}</array>
+<key>WorkingDirectory</key><string>${escape(workingDirectory)}</string></dict></plist>\n`
 }
 
 function commitRepository(root: string) {
@@ -71,6 +84,13 @@ function fixture() {
   mkdirSync(dirname(runtimeContractPath), { recursive: true, mode: 0o700 })
   copyFileSync(sourceRuntimeContract, runtimeContractPath)
   chmodSync(runtimeContractPath, 0o644)
+  const execveAdapterPath = join(control, 'ops/recovery/install-blue-green-execve-adapter.mjs')
+  mkdirSync(dirname(execveAdapterPath), { recursive: true, mode: 0o700 })
+  copyFileSync(sourceExecveAdapter, execveAdapterPath)
+  chmodSync(execveAdapterPath, 0o755)
+  const execveContractPath = join(control, 'scripts/lib/blue-green-execve-contract.mjs')
+  copyFileSync(sourceExecveContract, execveContractPath)
+  chmodSync(execveContractPath, 0o644)
   writeFileSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), '#!/usr/bin/env node\n', { mode: 0o755 })
   chmodSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), 0o755)
   writeFileSync(join(control, 'scripts/verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o644 })
@@ -102,8 +122,74 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
   writeFileSync(guardController,
     `process.stdout.write(${JSON.stringify(JSON.stringify(guardValue))}+'\\n')\n`, { mode: 0o644 })
   chmodSync(guardController, 0o644)
+  const historicalRouter = join(historical, 'scripts/standalone-router.mjs')
+  const historicalSlot = join(historical, 'scripts/start-standalone-slot.sh')
+  copyFileSync(resolve(process.cwd(), 'scripts/standalone-router.mjs'), historicalRouter)
+  copyFileSync(resolve(process.cwd(), 'scripts/start-standalone-slot.sh'), historicalSlot)
+  chmodSync(historicalRouter, 0o755)
+  chmodSync(historicalSlot, 0o755)
   const historicalCommit = commitRepository(historical)
   const controlCommit = commitRepository(control)
+
+  const runDir = join(root, 'run')
+  const supervisor = join(runDir, 'supervisor')
+  const launchAgents = join(root, 'LaunchAgents')
+  for (const directory of [runDir, supervisor, join(supervisor, 'enabled'), launchAgents]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    chmodSync(directory, 0o700)
+  }
+  const routerTarget = { path: historicalRouter, sha256: sha256(readFileSync(historicalRouter)), mode: 0o755 }
+  const slotTarget = { path: historicalSlot, sha256: sha256(readFileSync(historicalSlot)), mode: 0o755 }
+  const services: Record<string, Record<string, any>> = {}
+  const ports = { router: 43017, blue: 43317, green: 43417 }
+  for (const name of ['router', 'blue', 'green']) {
+    const label = `com.video-autoworker.blue-green.${name}`
+    const pathname = join(launchAgents, `${label}.plist`)
+    const args = name === 'router'
+      ? adaptedProgramArguments({
+        nodeBin: process.execPath, kind: 'router', target: routerTarget.path,
+        targetSha256: routerTarget.sha256, workingDirectory: supervisor,
+        args: ['--state-file', join(runDir, 'router-state.json'), '--host', '127.0.0.1',
+          '--port', String(ports.router), '--attestation-file', join(runDir, 'router.runtime.json')],
+      })
+      : adaptedProgramArguments({
+        nodeBin: process.execPath, kind: 'slot', target: slotTarget.path,
+        targetSha256: slotTarget.sha256, workingDirectory: supervisor, args: [name, 'active'],
+      })
+    writeFileSync(pathname, plist(label, args, supervisor), { mode: 0o600 })
+    chmodSync(pathname, 0o600)
+    services[name] = {
+      label, plist: pathname, enabledMarker: join(supervisor, 'enabled', `${name}.enabled`),
+      port: ports[name as keyof typeof ports], sha256: sha256(readFileSync(pathname)),
+    }
+  }
+  const contractRef = { path: execveContractPath, sha256: sha256(readFileSync(execveContractPath)), mode: 0o644 }
+  const targetBinding = { router: routerTarget, slot: slotTarget }
+  const installationPath = join(supervisor, 'installation.json')
+  writeJson(installationPath, {
+    schema: 'video-autoworker-blue-green-launchd/v2', projectRoot: historical, runDir,
+    releasesDir: join(root, 'releases'), launchAgentsDir: launchAgents, nodeBin: process.execPath,
+    execve: {
+      schema: 'video-autoworker-blue-green-execve/v1', contract: contractRef,
+      sourceSha256: blueGreenExecveSourceSha256(),
+      workingDirectory: supervisor,
+    },
+    executables: { routerScript: routerTarget, slotStartScript: slotTarget }, services,
+    recoveryCompatibility: {
+      schema: 'video-autoworker-blue-green-execve-adapter/v1', sourceCommit: historicalCommit,
+      adapterCommit: controlCommit, installedAt: 1,
+      installerSha256: sha256(readFileSync(execveAdapterPath)),
+      launcherSourceSha256: blueGreenExecveSourceSha256(),
+      execveContract: contractRef, workingDirectory: supervisor, targets: targetBinding,
+    },
+  }, 0o600)
+  const execveProofPath = join(successorAttempt, 'execve-adapter.json')
+  const verifiedExecve = execFileSync(process.execPath, [execveAdapterPath, '--verify-installed',
+    '--source-root', historical, '--expected-commit', historicalCommit,
+    '--adapter-source-root', control, '--expected-adapter-commit', controlCommit,
+    '--installation', installationPath, '--launch-agents-dir', launchAgents,
+  ], { encoding: 'utf8' })
+  writeJson(execveProofPath, JSON.parse(verifiedExecve), 0o600)
 
   const pendingPath = join(root, 'bootstrap.pending.json')
   writeJson(pendingPath, {
@@ -188,6 +274,7 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
     root, historical, historicalCommit, control, controlCommit, controlPath,
     bootstrapAttempt, resumeAttempt, successorAttempt, pendingPath, runtimeRelease,
     compatibilityPath, guardPath, readinessPath, historicalTarget, requestedTarget,
+    execveProofPath, services,
   }
 }
 
@@ -203,7 +290,8 @@ function authorize(entry: ReturnType<typeof fixture>) {
     '--pending', entry.pendingPath, '--resume-attempt', entry.resumeAttempt,
     '--runtime-release', entry.runtimeRelease, '--n8n-pid', String(process.pid),
     '--control-repository', entry.control, '--control-commit', entry.controlCommit,
-    '--compatibility', entry.compatibilityPath, '--guard-status', entry.guardPath,
+    '--compatibility', entry.compatibilityPath, '--execve-adapter', entry.execveProofPath,
+    '--guard-status', entry.guardPath,
     '--requested-readiness', entry.readinessPath,
   ])
 }
@@ -217,7 +305,8 @@ describe('legacy bootstrap SDK successor controller', () => {
     const auth = JSON.parse(authorized.stdout)
     const consumed = run(entry, 'consume', [
       '--receipt', auth.receipt.path, '--token', auth.token,
-      '--compatibility', entry.compatibilityPath, '--readiness', entry.readinessPath,
+      '--compatibility', entry.compatibilityPath, '--execve-adapter', entry.execveProofPath,
+      '--readiness', entry.readinessPath,
       '--guard-status', entry.guardPath,
     ])
     expect(consumed.status, consumed.stderr).toBe(0)
@@ -228,7 +317,8 @@ describe('legacy bootstrap SDK successor controller', () => {
     writeJson(entry.readinessPath, readiness, 0o600)
     const verified = run(entry, 'verify-consumed', [
       '--receipt', auth.receipt.path, '--consumed', consumedOutput.consumed.path,
-      '--compatibility', entry.compatibilityPath, '--readiness', entry.readinessPath,
+      '--compatibility', entry.compatibilityPath, '--execve-adapter', entry.execveProofPath,
+      '--readiness', entry.readinessPath,
       '--guard-status', entry.guardPath,
     ])
     expect(verified.status, verified.stderr).toBe(0)
@@ -252,6 +342,23 @@ describe('legacy bootstrap SDK successor controller', () => {
     const result = authorize(entry)
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('OpenClaw compatibility is invalid')
+  })
+
+  it('rejects a missing or drifted installed execve adapter before authorization', () => {
+    const missing = fixture()
+    rmSync(missing.execveProofPath)
+    const absent = authorize(missing)
+    expect(absent.status).toBe(1)
+    expect(absent.stderr).toContain('execve adapter proof')
+
+    const drifted = fixture()
+    writeFileSync(drifted.services.router.plist, readFileSync(drifted.services.router.plist, 'utf8').replace(
+      '<string>--state-file</string>', '<string>--changed-state-file</string>',
+    ), { mode: 0o600 })
+    chmodSync(drifted.services.router.plist, 0o600)
+    const rejected = authorize(drifted)
+    expect(rejected.status).toBe(1)
+    expect(rejected.stderr).toContain('router installed execve service binding is invalid')
   })
 
   it('rejects a successor that reuses the immutable historical application target', () => {
@@ -300,12 +407,42 @@ describe('legacy bootstrap SDK successor controller', () => {
     }, 0o400)
     const recovered = run(entry, 'consume', [
       '--receipt', auth.receipt.path, '--token', tokenPath,
-      '--compatibility', entry.compatibilityPath, '--readiness', entry.readinessPath,
+      '--compatibility', entry.compatibilityPath, '--execve-adapter', entry.execveProofPath,
+      '--readiness', entry.readinessPath,
       '--guard-status', entry.guardPath,
     ])
     expect(recovered.status, recovered.stderr).toBe(0)
     expect(JSON.parse(recovered.stdout)).toMatchObject({ mode: 'consume', ok: true })
     expect(existsSync(tokenPath)).toBe(false)
     expect(existsSync(consumedPath)).toBe(true)
+  })
+
+  it('preserves expired immutable authorization and requires a new attempt', () => {
+    const entry = fixture()
+    const authorized = authorize(entry)
+    expect(authorized.status, authorized.stderr).toBe(0)
+    const auth = JSON.parse(authorized.stdout)
+    const receipt = JSON.parse(readFileSync(auth.receipt.path, 'utf8'))
+    const token = JSON.parse(readFileSync(auth.token, 'utf8'))
+    receipt.expiresAt = 1
+    token.expiresAt = 1
+    chmodSync(auth.receipt.path, 0o600)
+    writeJson(auth.receipt.path, receipt, 0o400)
+    token.receiptSha256 = reference(auth.receipt.path).sha256
+    writeJson(auth.token, token, 0o600)
+
+    const expired = run(entry, 'verify', [
+      '--receipt', auth.receipt.path, '--token', auth.token,
+      '--compatibility', entry.compatibilityPath, '--execve-adapter', entry.execveProofPath,
+      '--readiness', entry.readinessPath, '--guard-status', entry.guardPath,
+    ])
+    expect(expired.status).toBe(1)
+    expect(expired.stderr).toContain('preserve immutable artifacts and create a new successor attempt directory and plan')
+    expect(existsSync(auth.receipt.path)).toBe(true)
+    expect(existsSync(auth.token)).toBe(true)
+
+    const repeated = authorize(entry)
+    expect(repeated.status).toBe(1)
+    expect(repeated.stderr).toContain('create a new successor attempt directory and plan')
   })
 })

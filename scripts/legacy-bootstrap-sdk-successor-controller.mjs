@@ -9,6 +9,7 @@ import {
 import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { validateOpenClawRuntimeCompatibility } from './lib/openclaw-runtime-contract.mjs'
+import { verifyInstalledExecveAdapter } from '../ops/recovery/install-blue-green-execve-adapter.mjs'
 
 const RECEIPT_SCHEMA = 'video-autoworker-legacy-bootstrap-sdk-successor/v1'
 const TOKEN_SCHEMA = 'video-autoworker-legacy-bootstrap-sdk-successor-capability/v1'
@@ -214,11 +215,11 @@ function parseArguments(argv) {
       '--successor-attempt', '--historical-repository', '--historical-commit',
       '--historical-bootstrap-attempt', '--pending', '--resume-attempt', '--runtime-release',
       '--n8n-pid', '--control-repository', '--control-commit', '--compatibility', '--guard-status',
-      '--requested-readiness',
+      '--execve-adapter', '--requested-readiness',
     ],
-    verify: ['--receipt', '--token', '--compatibility', '--readiness', '--guard-status'],
-    consume: ['--receipt', '--token', '--compatibility', '--readiness', '--guard-status'],
-    'verify-consumed': ['--receipt', '--consumed', '--compatibility', '--readiness', '--guard-status'],
+    verify: ['--receipt', '--token', '--compatibility', '--execve-adapter', '--readiness', '--guard-status'],
+    consume: ['--receipt', '--token', '--compatibility', '--execve-adapter', '--readiness', '--guard-status'],
+    'verify-consumed': ['--receipt', '--consumed', '--compatibility', '--execve-adapter', '--readiness', '--guard-status'],
   }
   const allowed = definitions[command]
   if (!allowed) fail('command is invalid')
@@ -309,7 +310,7 @@ function validateConsumedArtifact(consumed, receipt, tokenReference = null) {
 }
 function validateReceiptBindings(receipt) {
   exactKeys(receipt.value, [
-    'authorizationId', 'compatibility', 'control', 'expiresAt', 'historical', 'issuedAt',
+    'authorizationId', 'compatibility', 'control', 'execveAdapter', 'expiresAt', 'historical', 'issuedAt',
     'nonceSha256', 'recoveryHold', 'requestedTarget', 'schema', 'uid',
   ], 'successor receipt')
   const value = receipt.value
@@ -327,6 +328,7 @@ function validateReceiptBindings(receipt) {
   ], 'successor requested target')
   exactKeys(value.compatibility, ['compatibilitySha256', 'reference', 'source'],
     'successor compatibility binding')
+  exactKeys(value.execveAdapter, ['reference'], 'successor execve adapter binding')
   if (!COMMIT.test(value.historical.sourceCommit || '') || !COMMIT.test(value.control.sourceCommit || '')
     || value.historical.runtime?.workflow?.sourceCommit !== value.historical.sourceCommit
     || !SHA256.test(value.historical.resumeRuntimeSnapshotSha256 || '')
@@ -383,6 +385,20 @@ function validateReceiptBindings(receipt) {
     0o644,
   )
   sameReference(runtimeContract, value.control.runtimeContract, 'OpenClaw runtime contract')
+  const execveAdapter = readJson(value.execveAdapter?.reference?.path,
+    'successor execve adapter proof', 0o600)
+  sameReference(execveAdapter.reference, value.execveAdapter.reference, 'successor execve adapter proof')
+  const currentExecveAdapter = verifyInstalledExecveAdapter({
+    sourceRoot: value.historical.repository,
+    expectedCommit: value.historical.sourceCommit,
+    adapterSourceRoot: value.control.repository,
+    expectedAdapterCommit: value.control.sourceCommit,
+    installationPath: execveAdapter.value.installation?.path,
+    launchAgentsDir: execveAdapter.value.launchAgentsDir,
+  })
+  if (canonicalJson(currentExecveAdapter) !== canonicalJson(execveAdapter.value)) {
+    fail('installed execve adapter changed')
+  }
   const historicalGuardController = gitFile(
     value.historical.repository,
     value.historical.sourceCommit,
@@ -451,7 +467,7 @@ function authorize(values) {
     unlinkDurable(output.token)
   }
   if (existsSync(output.receipt) || existsSync(output.token) || existsSync(output.consumed)) {
-    fail('successor attempt already contains authorization artifacts')
+    fail('successor attempt already contains immutable authorization artifacts; create a new successor attempt directory and plan')
   }
   const historical = historicalResume(values)
   const controlRepository = normalized(values['--control-repository'], 'control repository')
@@ -483,6 +499,20 @@ function authorize(values) {
   if (compatibilityValue.source.commit !== controlCommit
     || compatibilityValue.source.contractSha256 !== runtimeContract.sha256) {
     fail('OpenClaw compatibility source is not the control source')
+  }
+  const execveAdapterPath = normalized(values['--execve-adapter'], 'execve adapter proof')
+  if (!existsSync(execveAdapterPath)) fail('execve adapter proof is unavailable')
+  const execveAdapter = readJson(execveAdapterPath, 'execve adapter proof', 0o600)
+  const currentExecveAdapter = verifyInstalledExecveAdapter({
+    sourceRoot: historical.repository,
+    expectedCommit: historical.commit,
+    adapterSourceRoot: controlRepository,
+    expectedAdapterCommit: controlCommit,
+    installationPath: execveAdapter.value.installation?.path,
+    launchAgentsDir: execveAdapter.value.launchAgentsDir,
+  })
+  if (canonicalJson(currentExecveAdapter) !== canonicalJson(execveAdapter.value)) {
+    fail('installed execve adapter proof is not current')
   }
   const guard = readJson(normalized(values['--guard-status'], 'guard status'), 'guard status', 0o600)
   const hold = normalizeGuard(guard.value)
@@ -544,6 +574,7 @@ function authorize(values) {
       compatibilitySha256: compatibilityValue.compatibilitySha256,
       source: compatibilityValue.source,
     },
+    execveAdapter: { reference: execveAdapter.reference },
     requestedTarget,
     recoveryHold: hold,
   }
@@ -587,6 +618,10 @@ function loadCurrent(values, consumedMode) {
     || currentValue.source.contractSha256 !== receipt.value.control.runtimeContract.sha256) {
     fail('OpenClaw compatibility source changed')
   }
+  const execveAdapter = readJson(normalized(values['--execve-adapter'], 'current execve adapter proof'),
+    'current execve adapter proof', 0o600)
+  sameReference(execveAdapter.reference, receipt.value.execveAdapter.reference,
+    'current execve adapter proof')
   const guard = readJson(normalized(values['--guard-status'], 'current guard status'),
     'current guard status', 0o600)
   const currentHold = normalizeGuard(guard.value)
@@ -639,13 +674,17 @@ function outputVerification(chain, mode) {
 }
 function verify(values) {
   const chain = loadCurrent(values, false)
-  if (Math.floor(Date.now() / 1000) >= chain.receipt.value.expiresAt) fail('successor capability expired')
+  if (Math.floor(Date.now() / 1000) >= chain.receipt.value.expiresAt) {
+    fail('successor capability expired; preserve immutable artifacts and create a new successor attempt directory and plan')
+  }
   outputVerification(chain, 'verify')
 }
 function consume(values) {
   const chain = loadCurrent(values, false)
   const now = Math.floor(Date.now() / 1000)
-  if (now >= chain.receipt.value.expiresAt) fail('successor capability expired')
+  if (now >= chain.receipt.value.expiresAt) {
+    fail('successor capability expired; preserve immutable artifacts and create a new successor attempt directory and plan')
+  }
   const consumedPath = join(dirname(chain.receipt.reference.path), 'sdk-successor.consumed.json')
   if (existsSync(consumedPath)) {
     chain.consumed = validateConsumedArtifact(
