@@ -20,6 +20,9 @@ RUN if [ -f pnpm-lock.yaml ]; then \
 RUN node -e 'const Database=require("better-sqlite3");const db=new Database(":memory:");db.prepare("SELECT 1").get();db.close()'
 
 FROM base AS build
+# Keep the diagnostic source root distinct from normal Next route and manifest
+# names so build-root leak checks can distinguish filesystem provenance.
+WORKDIR /opt/video-autoworker-docker-diagnostic/source
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Docker is a diagnostic-only build. Create an isolated source identity instead
@@ -46,7 +49,7 @@ LABEL org.opencontainers.image.version="${MC_VERSION}"
 WORKDIR /app
 ENV NODE_ENV=production
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
-COPY --from=build /app/.next/standalone ./release
+COPY --from=build /opt/video-autoworker-docker-diagnostic/source/.next/standalone ./release
 # Create data directory with correct ownership for SQLite
 RUN mkdir -p data && chown nextjs:nodejs data
 RUN echo 'const http=require("http");const r=http.get("http://127.0.0.1:"+(process.env.PORT||3000)+"/api/status?action=health",s=>{process.exit(s.statusCode===200?0:1)});r.on("error",()=>process.exit(1));r.setTimeout(4000,()=>{r.destroy();process.exit(1)})' > /app/healthcheck.js
