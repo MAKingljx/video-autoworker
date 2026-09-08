@@ -39,7 +39,7 @@ function fixture() {
     schema: 'video-autoworker-legacy-bootstrap-sdk-successor/v1', authorizationId: 'authorization',
     control: { sourceCommit: plan.control.commit },
     historical: {
-      sourceCommit: historical, target: { releaseId: 'historical' },
+      sourceCommit: historical, target: { releaseId: 'historical-target' },
       databases: { mission: { path: '/mission.db' }, n8n: { path: '/n8n.db' } },
     },
     compatibility: { compatibilitySha256: 'b'.repeat(64) },
@@ -57,11 +57,13 @@ function fixture() {
     },
     requested: { releaseId, releaseRoot, manifestSha256 },
   }
-  const pending = { schema: 'video-autoworker-blue-green-bootstrap-pending/v4' }
+  const pending = {
+    schema: 'video-autoworker-blue-green-bootstrap-pending/v4', legacyReleaseId: 'legacy-live',
+  }
   const baseline = {
     schema: 'video-autoworker-blue-green-baseline/v3', baselineSlot: 'blue',
     baselineReleaseId: releaseId, baselineReleaseRoot: releaseRoot, baselineManifestSha256: manifestSha256,
-    baselineSourceCommit: commit, legacyReleaseId: 'historical', dbPath: '/mission.db',
+    baselineSourceCommit: commit, legacyReleaseId: 'legacy-live', dbPath: '/mission.db',
     n8nDbPath: '/n8n.db', n8nPid: 20, n8nWorkflowSourceCommit: historical,
     routerStatePath: '/run/router-state.json', routerPort: 3017,
   }
@@ -134,6 +136,10 @@ describe('committed bootstrap successor finisher', () => {
     })).toThrow('paused runtime readiness differs')
     expect(() => validateCommittedState({
       ...value, baseline: { ...value.baseline, baselineReleaseId: 'other' },
+    })).toThrow('committed baseline differs')
+    expect(() => validateCommittedState({
+      ...value,
+      baseline: { ...value.baseline, legacyReleaseId: value.receipt.historical.target.releaseId },
     })).toThrow('committed baseline differs')
   })
 
@@ -233,7 +239,9 @@ describe('committed bootstrap successor finisher', () => {
     const resumeConsumedPath = join(root, 'resume-consumed.json')
     writeJson(resumePath, { schema: 'resume' }, 0o400)
     writeJson(resumeConsumedPath, { schema: 'resume-consumed' }, 0o400)
-    writeJson(pendingPath, { schema: 'video-autoworker-blue-green-bootstrap-pending/v4' }, 0o400)
+    writeJson(pendingPath, {
+      schema: 'video-autoworker-blue-green-bootstrap-pending/v4', legacyReleaseId: 'legacy-live',
+    }, 0o400)
     const compatibilityPath = join(attempt, 'openclaw-runtime-compatibility.json')
     writeJson(compatibilityPath, {
       compatibilitySha256: 'b'.repeat(64), source: { commit: controlCommit },
@@ -265,7 +273,7 @@ describe('committed bootstrap successor finisher', () => {
         controller: reference(join(historical, 'scripts/legacy-bootstrap-controller.mjs')),
         guardController: reference(join(historical, 'scripts/legacy-freeze-guard.mjs')),
         resume: reference(resumePath), resumeConsumed: reference(resumeConsumedPath),
-        target: { releaseId: 'historical' },
+        target: { releaseId: 'historical-target' },
         databases: { mission: databaseIdentity(mission), n8n: databaseIdentity(n8n) },
       },
       compatibility: { compatibilitySha256: 'b'.repeat(64), reference: reference(compatibilityPath) },
@@ -316,7 +324,7 @@ describe('committed bootstrap successor finisher', () => {
       schema: 'video-autoworker-blue-green-baseline/v3', baselineSlot: 'blue',
       baselineReleaseId: releaseId, baselineReleaseRoot: releaseRoot,
       baselineManifestSha256: actualManifest, baselineSourceCommit: 'd'.repeat(40),
-      legacyReleaseId: 'historical', dbPath: mission, n8nDbPath: n8n,
+      legacyReleaseId: 'legacy-live', dbPath: mission, n8nDbPath: n8n,
       n8nPid: 20, n8nWorkflowSourceCommit: historicalCommit,
       routerStatePath: join(runDir, 'router-state.json'), routerPort: 3017,
     })

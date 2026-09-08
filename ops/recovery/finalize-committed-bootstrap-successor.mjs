@@ -175,7 +175,8 @@ export function validateCommittedState({ plan, receipt, consumed, mapping, pendi
     || baseline.baselineReleaseRoot !== target.releaseRoot
     || baseline.baselineManifestSha256 !== target.manifestSha256
     || baseline.baselineSourceCommit !== target.sourceCommit
-    || baseline.legacyReleaseId !== receipt.historical?.target?.releaseId
+    || typeof pending.legacyReleaseId !== 'string' || !pending.legacyReleaseId
+    || baseline.legacyReleaseId !== pending.legacyReleaseId
     || baseline.dbPath !== receipt.historical?.databases?.mission?.path
     || baseline.n8nDbPath !== receipt.historical?.databases?.n8n?.path
     || baseline.n8nWorkflowSourceCommit !== receipt.historical?.sourceCommit
