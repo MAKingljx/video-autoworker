@@ -55,10 +55,12 @@ flowchart TD
 | 工具调用与结果配对验收 | `scripts/lib/openclaw-rich-canary-contract.mjs`；隔离执行观测由 `openclaw-canary-tool-observer.mjs` 提供 | 原始执行参数与脱敏持久化分开验证，按调用摘要绑定同一轮成功结果 |
 | 真实对话验收 | `pnpm qa:dialogue --config /绝对路径/私有inputs.json` | 每次一个自有合成会话、实际配置与版本绑定、官方 CAS 清理、脱敏报告 |
 | 本地及 CI 的 QA 合同测试 | `pnpm qa:contracts` | 共用一份测试入口；变更影响之外的已验证证据继续复用 |
+| 浏览器同源与蓝绿路由转发 | `scripts/standalone-router.mjs` | 校验并保留原始Host，剥离伪造转发身份；真实同源、跨源和WebSocket回归 |
+| 常规应用发布与控制层安装 | `pnpm deploy:blue-green <命令>`；`install-blue-green-execve-adapter.mjs` | 固定Node父进程；v3分别绑定routerRuntime和slotRuntime，旧v2安装及旧应用制品可验证回滚 |
 
 托管 Gateway 的健康状态不代表浏览器建立了 WebSocket。界面与轮询统一消费 selector：托管模式仍通过 HTTP 取数，实际浏览器 WebSocket 才能替代相应轮询。选择或探测失败不能写入虚假的已连接状态，也不能将 Gateway 凭据交给浏览器。
 
-每次发布保留独立、不可变的代码与制品版本；主机路径、运行输入和报告存放在私有目录。验收代码固定纳入 Git，后续只替换一次运行的配置，不复制新的测试实现。历史恢复脚本及收据继续按原绑定保留，常规更新使用既有蓝绿发布入口。入口按安装记录解析现役服务管理器，不假设发布仓库就是安装仓库；自有 launcher/auditor 升级先验证旧安装的完整 Git 与文件绑定，在服务停止后 CAS 更新并保留备份，历史源码不原地修改。新审计器同时接受已验证的旧应用制品，保留回滚能力。
+每次发布保留独立、不可变的代码与制品版本；主机路径、运行输入和报告存放在私有目录。验收代码固定纳入 Git，后续只替换一次运行的配置，不复制新的测试实现。历史恢复脚本及收据继续按原绑定保留，常规更新使用既有蓝绿发布入口。入口按安装记录解析现役服务管理器，不假设发布仓库就是安装仓库；自有router、launcher与auditor升级先验证旧安装的完整Git与文件绑定，在服务停止后CAS更新并保留备份，历史源码不原地修改。新审计器同时接受已验证的旧应用制品，保留回滚能力。仅更新控制层时可继续运行原已验收应用，分别记录控制源码与应用制品版本；具体操作见[常规蓝绿维护入口](../operations/blue-green-maintenance.md)。
 
 ## 仍需迁移的耦合点
 
