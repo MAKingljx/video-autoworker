@@ -20,6 +20,7 @@ import {
   gitBoundFile,
   reconcileRecoveredIntake,
   sanitizedEnvironment,
+  verifyTargetArtifactWithSlotRuntime,
   verifyRecoveredRouter,
 } from '../../ops/recovery/run-legacy-bootstrap-sdk-successor.mjs'
 
@@ -144,6 +145,37 @@ describe('legacy bootstrap SDK successor entry', () => {
       expect(realpathSync(resolvedNode)).toBe(realpathSync(process.execPath))
     } finally {
       rmSync(maliciousBin, { recursive: true, force: true })
+    }
+  })
+
+  it('runs the Git-bound slot auditor against the requested artifact before authorization', () => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), 'successor-slot-auditor-'))
+    try {
+      const auditor = join(root, 'auditor.mjs')
+      const target = join(root, 'standalone')
+      mkdirSync(target, { mode: 0o700 })
+      writeFileSync(auditor, `
+if (process.argv[2] !== ${JSON.stringify(target)}) process.exit(41)
+if (process.env.FORBIDDEN_CALLER_VALUE) process.exit(42)
+`, { mode: 0o644 })
+      chmodSync(auditor, 0o644)
+      const proof = {
+        slotRuntime: {
+          sourceCommit: 'a'.repeat(40),
+          launcher: {},
+          auditor: { path: auditor, sha256: createHash('sha256').update(readFileSync(auditor)).digest('hex'), mode: 0o644 },
+          dependencies: {},
+        },
+      }
+      expect(() => verifyTargetArtifactWithSlotRuntime(proof, target, {
+        PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+      })).not.toThrow()
+      writeFileSync(auditor, 'process.exit(43)\n', { mode: 0o644 })
+      expect(() => verifyTargetArtifactWithSlotRuntime(proof, target, {
+        PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+      })).toThrow('target artifact is incompatible with the installed slot runtime')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 

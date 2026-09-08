@@ -175,6 +175,20 @@ export function sanitizedEnvironment(source = process.env) {
   }
   return clean
 }
+export function verifyTargetArtifactWithSlotRuntime(execveAdapterProof, targetRoot, environment) {
+  const slotRuntime = requiredObject(execveAdapterProof?.slotRuntime,
+    ['sourceCommit', 'launcher', 'auditor', 'dependencies'], 'slot runtime proof')
+  const auditor = requiredObject(slotRuntime.auditor, ['path', 'sha256', 'mode'], 'slot runtime auditor')
+  if (!COMMIT.test(slotRuntime.sourceCommit) || auditor.mode !== 0o644
+    || !SHA256.test(auditor.sha256) || normalized(auditor.path, 'slot runtime auditor') !== auditor.path) {
+    fail('slot runtime auditor binding is invalid')
+  }
+  try {
+    execFileSync(process.execPath, [auditor.path, normalized(targetRoot, 'target release root')], {
+      env: environment, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 120_000,
+    })
+  } catch { fail('target artifact is incompatible with the installed slot runtime') }
+}
 function loadPlan(pathname) {
   const value = readJson(normalized(pathname, 'plan'), 'successor plan', 0o600)
   requiredObject(value, [
@@ -486,6 +500,7 @@ async function main(planPath) {
     '--installation', plan.execve.installation,
     '--launch-agents-dir', plan.execve.launchAgentsDir,
   ], 'installed execve adapter', { env: cleanEnvironment })
+  verifyTargetArtifactWithSlotRuntime(execveAdapterProof, plan.target.releaseRoot, cleanEnvironment)
   writeStable(execveAdapterPath, execveAdapterProof)
 
   const compatibility = runJson(process.execPath, [

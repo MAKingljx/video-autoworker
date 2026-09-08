@@ -91,6 +91,19 @@ function fixture(options: { historicalControllerMode?: number } = {}) {
   const execveContractPath = join(control, 'scripts/lib/blue-green-execve-contract.mjs')
   copyFileSync(sourceExecveContract, execveContractPath)
   chmodSync(execveContractPath, 0o644)
+  for (const [relativePath, mode] of [
+    ['scripts/start-standalone-slot.sh', 0o755],
+    ['scripts/check-standalone-artifact.mjs', 0o644],
+    ['scripts/check-sensitive-content.mjs', 0o644],
+    ['scripts/lib/sensitive-value-scanner.mjs', 0o644],
+    ['scripts/lib/director-extraction-release-provenance.mjs', 0o644],
+    ['scripts/lib/application-release-manifest-contract.mjs', 0o644],
+  ] as const) {
+    const destination = join(control, relativePath)
+    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 })
+    copyFileSync(resolve(process.cwd(), relativePath), destination)
+    chmodSync(destination, mode)
+  }
   writeFileSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), '#!/usr/bin/env node\n', { mode: 0o644 })
   chmodSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), 0o644)
   writeFileSync(join(control, 'scripts/verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o644 })
@@ -140,6 +153,23 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
   }
   const routerTarget = { path: historicalRouter, sha256: sha256(readFileSync(historicalRouter)), mode: 0o755 }
   const slotTarget = { path: historicalSlot, sha256: sha256(readFileSync(historicalSlot)), mode: 0o755 }
+  const slotRuntime = {
+    sourceCommit: controlCommit,
+    launcher: reference(join(control, 'scripts/start-standalone-slot.sh')),
+    auditor: reference(join(control, 'scripts/check-standalone-artifact.mjs')),
+    dependencies: Object.fromEntries([
+      ['sensitiveContent', 'scripts/check-sensitive-content.mjs'],
+      ['sensitiveValueScanner', 'scripts/lib/sensitive-value-scanner.mjs'],
+      ['directorExtractionProvenance', 'scripts/lib/director-extraction-release-provenance.mjs'],
+      ['applicationReleaseManifestContract', 'scripts/lib/application-release-manifest-contract.mjs'],
+    ].map(([name, relativePath]) => [name, reference(join(control, relativePath))])),
+  }
+  for (const binding of [slotRuntime.launcher, slotRuntime.auditor, ...Object.values(slotRuntime.dependencies)]) {
+    delete (binding as Record<string, unknown>).dev
+    delete (binding as Record<string, unknown>).ino
+    delete (binding as Record<string, unknown>).size
+    ;(binding as Record<string, unknown>).mode = binding.path === slotRuntime.launcher.path ? 0o755 : 0o644
+  }
   const services: Record<string, Record<string, any>> = {}
   const ports = { router: 43017, blue: 43317, green: 43417 }
   for (const name of ['router', 'blue', 'green']) {
@@ -153,8 +183,8 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
           '--port', String(ports.router), '--attestation-file', join(runDir, 'router.runtime.json')],
       })
       : adaptedProgramArguments({
-        nodeBin: process.execPath, kind: 'slot', target: slotTarget.path,
-        targetSha256: slotTarget.sha256, workingDirectory: supervisor, args: [name, 'active'],
+        nodeBin: process.execPath, kind: 'slot', target: slotRuntime.launcher.path,
+        targetSha256: slotRuntime.launcher.sha256, workingDirectory: supervisor, args: [name, 'active'],
       })
     writeFileSync(pathname, plist(label, args, supervisor), { mode: 0o600 })
     chmodSync(pathname, 0o600)
@@ -164,7 +194,7 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
     }
   }
   const contractRef = { path: execveContractPath, sha256: sha256(readFileSync(execveContractPath)), mode: 0o644 }
-  const targetBinding = { router: routerTarget, slot: slotTarget }
+  const targetBinding = { router: routerTarget, slot: slotRuntime.launcher }
   const installationPath = join(supervisor, 'installation.json')
   writeJson(installationPath, {
     schema: 'video-autoworker-blue-green-launchd/v2', projectRoot: historical, runDir,
@@ -176,11 +206,12 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
     },
     executables: { routerScript: routerTarget, slotStartScript: slotTarget }, services,
     recoveryCompatibility: {
-      schema: 'video-autoworker-blue-green-execve-adapter/v1', sourceCommit: historicalCommit,
+      schema: 'video-autoworker-blue-green-execve-adapter/v2', sourceCommit: historicalCommit,
       adapterCommit: controlCommit, installedAt: 1,
       installerSha256: sha256(readFileSync(execveAdapterPath)),
       launcherSourceSha256: blueGreenExecveSourceSha256(),
       execveContract: contractRef, workingDirectory: supervisor, targets: targetBinding,
+      historicalTargets: { router: routerTarget, slot: slotTarget }, slotRuntime,
     },
   }, 0o600)
   const execveProofPath = join(successorAttempt, 'execve-adapter.json')
@@ -306,6 +337,12 @@ describe('legacy bootstrap SDK successor controller', () => {
       [entry.control, entry.controlCommit, 'scripts/verify-openclaw-runtime-compatibility.mjs', '100644'],
       [entry.control, entry.controlCommit, 'scripts/verify-director-video-release-readiness.mjs', '100644'],
       [entry.control, entry.controlCommit, 'scripts/lib/openclaw-runtime-contract.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/start-standalone-slot.sh', '100755'],
+      [entry.control, entry.controlCommit, 'scripts/check-standalone-artifact.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/check-sensitive-content.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/lib/sensitive-value-scanner.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/lib/director-extraction-release-provenance.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/lib/application-release-manifest-contract.mjs', '100644'],
     ] as const
 
     for (const [repository, commit, relativePath, mode] of expected) {

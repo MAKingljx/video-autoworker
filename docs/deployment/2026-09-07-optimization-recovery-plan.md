@@ -37,3 +37,10 @@ successor 能力消费前失败只停止准备，不改变应用映射或数据�
 用户已在收到本计划的数据影响、备份和回退说明后明确确认部署，满足 RULE-PROD-DATA-CONFIRM-001 的本次具体确认要求。9 月 8 日新入口已通过原主机密钥校验，执行前现场核查通过。CBC adapter 已安装并验证，官方 fresh convergence apply 成功且配置未变；首次 successor 在权限检查处停止，尚未产生授权或数据库迁移。
 
 控制程序需修复 Node 显式执行的兼容性 CLI 权限合同后，以新的 clean 控制提交交付独立 recovery-20260908 目录，并重绑 adapter 与当前运行证明再继续。旧 CBC 目录与历史 3db 保留。应用 d96 制品不变，独立 QA 固定为 f6ded076dc71bf799ec93016e9bd0f1d9e6a53b7，其完整 Quality Gate 34116762086 已通过。具体执行与本次缺陷见 2026-09-08 运维记录；应用仍未恢复上线。
+
+
+### 托管slot的当前校验器与数据路径
+
+历史安装记录和manager继续绑定历史源码，实际slot启动脚本通过execve adapter明确绑定当前控制源码，并记录制品校验器及其依赖的Git文件摘要；router继续使用已验证的历史目标。授权前必须由该同一校验器检查待部署制品，不能通过删除新制品必要模块来迁就旧校验器。
+
+更换slot源码根时，必须在启动前验证有效MISSION_CONTROL_DATA_DIR、MISSION_CONTROL_DB_PATH和MISSION_CONTROL_TOKENS_PATH与原部署逐项一致，避免回落到新源码目录的默认.data。当前独立控制根的私有.env.local仅保存这三个无密钥路径，并受Git排除；共享n8n凭据仍读取原外部platform.env。应用制品、历史恢复收据和原权威数据库保持各自独立来源。
