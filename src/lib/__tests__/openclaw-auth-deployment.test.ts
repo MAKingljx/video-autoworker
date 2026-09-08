@@ -89,8 +89,11 @@ describe('OpenClaw-only production launch contract', () => {
     expect(dockerfile).toContain('HOSTNAME=127.0.0.1')
     expect(dockerfile).toContain('http://127.0.0.1:')
     expect(dockerfile).not.toContain('http://localhost:')
-    expect(dockerfile).toContain('COPY --from=build /app/.next/standalone ./release')
-    expect(dockerfile).not.toMatch(/COPY --from=build \/app\/(?:\.next\/static|public|src) /u)
+    expect(dockerfile).toContain('WORKDIR /opt/video-autoworker-docker-diagnostic/source')
+    expect(dockerfile).toContain(
+      'COPY --from=build /opt/video-autoworker-docker-diagnostic/source/.next/standalone ./release',
+    )
+    expect(dockerfile).not.toMatch(/COPY --from=build \S+\/(?:\.next\/static|public|src) /u)
     expect(dockerfile).toContain('git init')
     expect(dockerfile).toContain('touch .docker-diagnostic-untracked')
     expect(dockerfile).toContain("git status --porcelain | grep -q '^?? .docker-diagnostic-untracked$'")

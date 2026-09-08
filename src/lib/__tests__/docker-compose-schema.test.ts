@@ -36,9 +36,11 @@ describe('Dockerfile runtime stage', () => {
   )
 
   it('copies the complete audited standalone tree into one release root', () => {
-    expect(content).toContain('COPY --from=build /app/.next/standalone ./release')
-    expect(content).not.toContain('COPY --from=build /app/public ./public')
-    expect(content).not.toContain('COPY --from=build /app/.next/static ./.next/static')
+    expect(content).toContain('WORKDIR /opt/video-autoworker-docker-diagnostic/source')
+    expect(content).toContain(
+      'COPY --from=build /opt/video-autoworker-docker-diagnostic/source/.next/standalone ./release',
+    )
+    expect(content).not.toMatch(/COPY --from=build \S+\/(?:\.next\/static|public|src) /u)
   })
 
   it('audits and starts the server from the immutable release root', () => {

@@ -106,7 +106,12 @@ BOOTSTRAP_RECOVERY_GUARD_READY_SECONDS=3
 GUARD_STATUS_TIMEOUT_MS=1000
 guard_status_bounded() { printf '%s\\n' '{"mode":"dual-recovery","ready":true}'; }
 ${shellFunction('wait_for_recovery_guard_ready', 'verify_deployment_source_gate')}
-( sleep 1; printf 'Legacy freeze guard active: pid=%s\\n' "$1" >> "$5" ) &
+READY_PID="$1"
+READY_LOG="$5"
+sleep() {
+  [[ "$1" == 1 ]] || return 2
+  printf 'Legacy freeze guard active: pid=%s\\n' "$READY_PID" >> "$READY_LOG"
+}
 wait_for_recovery_guard_ready "$1" /controller "$2" "$3" /mission /n8n "$5"
 `
     const result = spawnSync('/bin/bash', [
