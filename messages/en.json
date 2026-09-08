@@ -1,5 +1,6 @@
 {
   "common": {
+    "runtimeUsageUnavailable": "Runtime session usage is temporarily unavailable. Showing recorded usage only; totals may be incomplete.",
     "save": "Save",
     "cancel": "Cancel",
     "loading": "Loading...",

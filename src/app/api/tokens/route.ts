@@ -42,6 +42,7 @@ interface ExportData {
   summary: TokenStats
   models: Record<string, TokenStats>
   sessions: Record<string, TokenStats>
+  runtimeSessionsAvailable: boolean
 }
 
 interface TaskMetadataRow extends TaskCostMetadata {}
@@ -171,21 +172,32 @@ async function loadTokenDataFromFile(workspaceId: number, providerSubscriptions:
 }
 
 /**
- * Load token data from all sources: DB, file, and gateway session stores.
- * All sources are merged and deduplicated so session-derived data is always included.
+ * Recorded usage remains readable when the optional runtime source is offline.
+ * Surface that source's availability instead of treating it as an empty session list.
  */
-async function loadTokenData(workspaceId: number): Promise<TokenUsageRecord[]> {
+async function loadTokenData(workspaceId: number): Promise<{
+  records: TokenUsageRecord[]
+  runtimeSessionsAvailable: boolean
+}> {
   const providerSubscriptions = getProviderSubscriptionFlags()
   const dbRecords = loadTokenDataFromDb(workspaceId, providerSubscriptions)
   const fileRecords = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
-  const sessions = await getRuntimeProvider().listSessions({ activeWithinMs: Infinity })
-  const sessionRecords = deriveFromSessions(sessions, workspaceId, providerSubscriptions)
-  return dedupeTokenRecords([...dbRecords, ...fileRecords, ...sessionRecords])
-    .sort((a, b) => b.timestamp - a.timestamp)
+  let sessions: RuntimeSessionSummary[] | null = null
+  try {
+    sessions = await getRuntimeProvider().listSessions({ activeWithinMs: Infinity })
+  } catch {
+    logger.warn('Runtime session usage is unavailable; returning recorded usage')
+  }
+  const sessionRecords = sessions === null ? [] : deriveFromSessions(sessions, workspaceId, providerSubscriptions)
+  return {
+    records: dedupeTokenRecords([...dbRecords, ...fileRecords, ...sessionRecords])
+      .sort((a, b) => b.timestamp - a.timestamp),
+    runtimeSessionsAvailable: sessions !== null,
+  }
 }
 
 /**
- * Derive token usage records from OpenClaw session stores.
+ * Derive token usage records from provider-neutral session metadata.
  * Each session has totalTokens, inputTokens, outputTokens, model, etc.
  */
 function deriveFromSessions(
@@ -317,7 +329,7 @@ export async function GET(request: NextRequest) {
     const format = searchParams.get('format') || 'json'
 
     const workspaceId = auth.user.workspace_id ?? 1
-    const tokenData = await loadTokenData(workspaceId)
+    const { records: tokenData, runtimeSessionsAvailable } = await loadTokenData(workspaceId)
     const filteredData = filterByTimeframe(tokenData, timeframe)
 
     if (action === 'list') {
@@ -325,6 +337,7 @@ export async function GET(request: NextRequest) {
         usage: filteredData.slice(0, 100),
         total: filteredData.length,
         timeframe,
+        runtimeSessionsAvailable,
       })
     }
 
@@ -373,6 +386,7 @@ export async function GET(request: NextRequest) {
         agents: agentStats,
         timeframe,
         recordCount: filteredData.length,
+        runtimeSessionsAvailable,
       })
     }
 
@@ -428,6 +442,7 @@ export async function GET(request: NextRequest) {
         agents,
         timeframe,
         recordCount: filteredData.length,
+        runtimeSessionsAvailable,
       })
     }
 
@@ -456,6 +471,7 @@ export async function GET(request: NextRequest) {
         timeframe,
         recordCount: filteredData.length,
         attributedRecordCount: filteredData.filter((record) => Number.isFinite(record.taskId)).length,
+        runtimeSessionsAvailable,
       })
     }
 
@@ -489,6 +505,7 @@ export async function GET(request: NextRequest) {
         summary: overallStats,
         models: modelStats,
         sessions: sessionStats,
+        runtimeSessionsAvailable,
       }
 
       if (format === 'csv') {
@@ -513,7 +530,8 @@ export async function GET(request: NextRequest) {
         return new NextResponse(csvRows.join('\n'), {
           headers: {
             'Content-Type': 'text/csv',
-            'Content-Disposition': `attachment; filename=token-usage-${timeframe}-${new Date().toISOString().split('T')[0]}.csv`,
+            'X-MC-Runtime-Sessions-Available': String(runtimeSessionsAvailable),
+            'Content-Disposition': `attachment; filename=token-usage-${timeframe}-${new Date().toISOString().split('T')[0]}${runtimeSessionsAvailable ? '' : '-partial'}.csv`,
           },
         })
       }
@@ -521,7 +539,8 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(exportData, {
         headers: {
           'Content-Type': 'application/json',
-          'Content-Disposition': `attachment; filename=token-usage-${timeframe}-${new Date().toISOString().split('T')[0]}.json`,
+          'X-MC-Runtime-Sessions-Available': String(runtimeSessionsAvailable),
+          'Content-Disposition': `attachment; filename=token-usage-${timeframe}-${new Date().toISOString().split('T')[0]}${runtimeSessionsAvailable ? '' : '-partial'}.json`,
         },
       })
     }
@@ -547,7 +566,7 @@ export async function GET(request: NextRequest) {
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([timestamp, data]) => ({ timestamp, ...data }))
 
-      return NextResponse.json({ trends, timeframe })
+      return NextResponse.json({ trends, timeframe, runtimeSessionsAvailable })
     }
 
     return NextResponse.json({ error: 'Invalid action', action }, { status: 400 })

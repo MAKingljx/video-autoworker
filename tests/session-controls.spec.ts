@@ -4,12 +4,14 @@ import { API_KEY_HEADER } from './helpers'
 test.describe('Session Controls API', () => {
   // ── GET /api/sessions ─────────────────────────
 
-  test('GET /api/sessions returns sessions', async ({ request }) => {
+  test('GET /api/sessions reports runtime unavailable without a configured runtime', async ({ request }) => {
     const res = await request.get('/api/sessions', { headers: API_KEY_HEADER })
-    expect(res.status()).toBe(200)
+    expect(res.status()).toBe(503)
     const body = await res.json()
-    expect(body).toHaveProperty('sessions')
-    expect(Array.isArray(body.sessions)).toBe(true)
+    expect(body).toEqual({
+      available: false,
+      error: 'Runtime sessions are unavailable',
+    })
   })
 
   // ── POST /api/sessions – set-thinking ─────────

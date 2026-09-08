@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
+import { RuntimeUsageNotice } from '@/components/ui/runtime-usage-notice'
 import { useMissionControl } from '@/store'
 import { createClientLogger } from '@/lib/client-logger'
 import { detectProvider } from '@/lib/token-utils'
@@ -12,6 +13,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, Responsi
 const log = createClientLogger('TokenDashboard')
 
 interface UsageStats {
+  runtimeSessionsAvailable?: boolean
   summary: {
     totalTokens: number
     totalCost: number
@@ -254,7 +256,7 @@ export function TokenDashboardPanel() {
       const a = document.createElement('a')
       a.style.display = 'none'
       a.href = url
-      a.download = `usage-${selectedTimeframe}-${new Date().toISOString().split('T')[0]}.csv`
+      a.download = `usage-${selectedTimeframe}-${new Date().toISOString().split('T')[0]}${usageStats?.runtimeSessionsAvailable === false ? '-partial' : ''}.csv`
       document.body.appendChild(a)
       a.click()
       URL.revokeObjectURL(url)
@@ -264,7 +266,7 @@ export function TokenDashboardPanel() {
     } finally {
       setIsExporting(false)
     }
-  }, [filteredUsageStats, sessionCosts, selectedTimeframe])
+  }, [filteredUsageStats, sessionCosts, selectedTimeframe, usageStats?.runtimeSessionsAvailable])
 
   const exportData = async (format: 'json' | 'csv') => {
     setIsExporting(true)
@@ -280,7 +282,7 @@ export function TokenDashboardPanel() {
       const a = document.createElement('a')
       a.style.display = 'none'
       a.href = url
-      a.download = `token-usage-${selectedTimeframe}-${new Date().toISOString().split('T')[0]}.${format}`
+      a.download = `token-usage-${selectedTimeframe}-${new Date().toISOString().split('T')[0]}${response.headers.get('X-MC-Runtime-Sessions-Available') === 'false' ? '-partial' : ''}.${format}`
       document.body.appendChild(a)
       a.click()
       window.URL.revokeObjectURL(url)
@@ -554,6 +556,7 @@ export function TokenDashboardPanel() {
 
   return (
     <div className="p-6 space-y-6">
+      <RuntimeUsageNotice available={usageStats?.runtimeSessionsAvailable} />
       <div className="border-b border-border pb-4">
         <div className="flex items-center justify-between">
           <div>

@@ -2,8 +2,8 @@
  * Docker-mode integration tests
  *
  * Covers the three regressions fixed before this test was added:
- *   1. 404 on gateway health check  — onboarding wizard was using GET
- *      but the endpoint only exposes POST (#334)
+ *   1. Gateway health routing — POST performs the persisted all-gateway probe,
+ *      while GET performs a read-only probe for one explicit gateway id
  *   2. EROFS / busy-init write errors — db.ts eager init at build time
  *      caused "read-only filesystem" failures in Docker (#337)
  *   3. Missing OPENCLAW_HOME env — gateway-config path resolution relied
@@ -16,7 +16,7 @@
 import { expect, test } from '@playwright/test'
 import { API_KEY_HEADER } from './helpers'
 
-// ─── 1. Gateway health endpoint accepts POST, not GET ────────────────────────
+// ─── 1. Gateway health endpoint separates persisted and read-only probes ────
 
 test.describe('Docker mode – gateway health check endpoint contract', () => {
   test('POST /api/gateways/health returns 200 with results array', async ({ request }) => {
@@ -29,12 +29,75 @@ test.describe('Docker mode – gateway health check endpoint contract', () => {
     expect(typeof body.probed_at).toBe('number')
   })
 
-  test('GET /api/gateways/health returns 405 (method not allowed)', async ({ request }) => {
+  test('GET /api/gateways/health requires one explicit gateway id', async ({ request }) => {
     const res = await request.get('/api/gateways/health', {
       headers: API_KEY_HEADER,
     })
-    // Next.js returns 405 for unregistered methods on route handlers
-    expect(res.status()).toBe(405)
+    expect(res.status()).toBe(400)
+    expect(await res.json()).toEqual({ error: 'id is required' })
+  })
+
+  test('GET /api/gateways/health probes one gateway without persisting status or history', async ({ request }) => {
+    const createRes = await request.post('/api/gateways', {
+      headers: API_KEY_HEADER,
+      data: {
+        name: `docker-mode-readonly-health-${Date.now()}`,
+        host: 'http://127.0.0.1',
+        port: 9,
+      },
+    })
+    expect(createRes.status()).toBe(201)
+    const gatewayId = (await createRes.json()).gateway?.id as number
+
+    try {
+      const beforeGatewaysRes = await request.get('/api/gateways', { headers: API_KEY_HEADER })
+      expect(beforeGatewaysRes.status()).toBe(200)
+      const beforeGateway = (await beforeGatewaysRes.json()).gateways
+        .find((gateway: { id: number }) => gateway.id === gatewayId)
+      expect(beforeGateway).toBeDefined()
+
+      const beforeHistoryRes = await request.get('/api/gateways/health/history', {
+        headers: API_KEY_HEADER,
+      })
+      expect(beforeHistoryRes.status()).toBe(200)
+      const beforeHistory = (await beforeHistoryRes.json()).history
+        .find((gateway: { gatewayId: number }) => gateway.gatewayId === gatewayId)
+      expect(beforeHistory).toBeUndefined()
+
+      const healthRes = await request.get(`/api/gateways/health?id=${gatewayId}`, {
+        headers: API_KEY_HEADER,
+      })
+      expect(healthRes.status()).toBe(200)
+      const health = await healthRes.json()
+      expect(typeof health.probed_at).toBe('number')
+      expect(health.results).toHaveLength(1)
+      expect(health.results[0]).toMatchObject({
+        id: gatewayId,
+        status: 'offline',
+        latency: null,
+        agents: [],
+        sessions_count: 0,
+      })
+
+      const afterGatewaysRes = await request.get('/api/gateways', { headers: API_KEY_HEADER })
+      expect(afterGatewaysRes.status()).toBe(200)
+      const afterGateway = (await afterGatewaysRes.json()).gateways
+        .find((gateway: { id: number }) => gateway.id === gatewayId)
+      expect(afterGateway).toEqual(beforeGateway)
+
+      const afterHistoryRes = await request.get('/api/gateways/health/history', {
+        headers: API_KEY_HEADER,
+      })
+      expect(afterHistoryRes.status()).toBe(200)
+      const afterHistory = (await afterHistoryRes.json()).history
+        .find((gateway: { gatewayId: number }) => gateway.gatewayId === gatewayId)
+      expect(afterHistory).toBeUndefined()
+    } finally {
+      await request.delete('/api/gateways', {
+        headers: API_KEY_HEADER,
+        data: { id: gatewayId },
+      })
+    }
   })
 
   test('POST /api/gateways/health requires auth', async ({ request }) => {

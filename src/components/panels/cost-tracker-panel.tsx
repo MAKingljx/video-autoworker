@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { Loader } from '@/components/ui/loader'
+import { RuntimeUsageNotice } from '@/components/ui/runtime-usage-notice'
 import { useMissionControl } from '@/store'
 import { createClientLogger } from '@/lib/client-logger'
 import {
@@ -21,6 +22,7 @@ interface TokenStats {
 }
 
 interface UsageStats {
+  runtimeSessionsAvailable?: boolean
   summary: TokenStats
   models: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>
   sessions: Record<string, { totalTokens: number; totalCost: number; requestCount: number }>
@@ -177,7 +179,7 @@ export function CostTrackerPanel() {
       const url = window.URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.style.display = 'none'; a.href = url
-      a.download = `cost-tracker-${timeframe}-${new Date().toISOString().split('T')[0]}.${format}`
+      a.download = `cost-tracker-${timeframe}-${new Date().toISOString().split('T')[0]}${res.headers.get('X-MC-Runtime-Sessions-Available') === 'false' ? '-partial' : ''}.${format}`
       document.body.appendChild(a); a.click()
       window.URL.revokeObjectURL(url); document.body.removeChild(a)
     } catch (err) {
@@ -202,6 +204,7 @@ export function CostTrackerPanel() {
 
   return (
     <div className="p-6 space-y-6">
+      <RuntimeUsageNotice available={usageStats?.runtimeSessionsAvailable} />
       {/* Header */}
       <div className="border-b border-border pb-4">
         <div className="flex items-center justify-between flex-wrap gap-3">

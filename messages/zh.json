@@ -1,5 +1,6 @@
 {
   "common": {
+    "runtimeUsageUnavailable": "运行时会话用量暂不可用，当前仅显示已记录用量，汇总可能不完整。",
     "save": "保存",
     "cancel": "取消",
     "loading": "加载中...",

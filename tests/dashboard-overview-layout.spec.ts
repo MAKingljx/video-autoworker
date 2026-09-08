@@ -78,6 +78,7 @@ async function installDashboardRoutes(
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({
+        available: true,
         sessions: Array.from(
           { length: sessionCount() },
           (_, index) => sessionFixture(index, mode === 'gateway' && index === 0),

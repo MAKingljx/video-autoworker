@@ -16,17 +16,36 @@ test.describe('OpenClaw Offline Harness', () => {
     expect(Boolean(body.gateway)).toBe(EXPECT_GATEWAY)
   })
 
-  test('sessions API reads fixture sessions without OpenClaw install', async ({ request }) => {
+  test('sessions API follows the configured runtime mode', async ({ request }) => {
     const res = await request.get('/api/sessions', {
       headers: API_KEY_HEADER,
     })
-    expect(res.status()).toBe(200)
-
     const body = await res.json()
-    expect(Array.isArray(body.sessions)).toBe(true)
-    expect(body.sessions.length).toBeGreaterThan(0)
-    expect(body.sessions[0]).toHaveProperty('agent')
-    expect(body.sessions[0]).toHaveProperty('tokens')
+
+    if (!EXPECT_GATEWAY) {
+      expect(res.status()).toBe(503)
+      expect(body).toEqual({
+        available: false,
+        error: 'Runtime sessions are unavailable',
+      })
+      return
+    }
+
+    expect(res.status()).toBe(200)
+    expect(body.available).toBe(true)
+    expect(body.sessions).toHaveLength(2)
+    expect(body.sessions.map((session: { key: string }) => session.key)).toEqual([
+      'agent:engineering-bot:main',
+      'agent:research-bot:main',
+    ])
+    expect(body.sessions[0]).toMatchObject({
+      id: 'sess-eng-main',
+      agent: 'engineering-bot',
+      model: 'openai/gpt-5',
+      active: true,
+      source: 'gateway',
+    })
+    expect(body.sessions[0].tokens).toContain('25k/120k')
   })
 
   test('cron API reads fixture jobs', async ({ request }) => {

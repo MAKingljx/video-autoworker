@@ -7866,10 +7866,17 @@
         ],
         "responses": {
           "200": {
-            "description": "Token usage data. Shape varies by action.",
+            "description": "Token usage data. Shape varies by action. All JSON responses include runtimeSessionsAvailable; false means runtime session usage is unavailable while recorded usage remains readable. Exports also include X-MC-Runtime-Sessions-Available and use a -partial filename when that source is unavailable.",
             "content": {
               "application/json": {
                 "schema": {
+                  "type": "object",
+                  "properties": {
+                    "runtimeSessionsAvailable": {
+                      "type": "boolean",
+                      "description": "Whether the selected runtime session usage source was available for this response."
+                    }
+                  },
                   "oneOf": [
                     {
                       "type": "object",
