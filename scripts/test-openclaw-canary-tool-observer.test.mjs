@@ -27,7 +27,7 @@ test('observes original execution without changing its arguments or response', a
 
 test('wrong or extra arguments, unstructured replies and failures cannot prove execution', async () => {
   for (const params of [null, {}, { action: 'explain' }, { ...parameters, topic: 'architecture' },
-    { ...parameters, secret: 'do-not-record' }]) {
+    { ...parameters, unexpectedMetadata: 'do-not-record' }]) {
     const records = []
     await observeCanaryTool({ async execute() { return reply } }, value => records.push(value))
       .execute('owned-call', params)
