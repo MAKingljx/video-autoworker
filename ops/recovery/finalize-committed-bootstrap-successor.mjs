@@ -204,7 +204,7 @@ export function validateCommittedState({ plan, receipt, consumed, mapping, pendi
     || ready.runtime?.runtimeSlot !== plan.target.slot || ready.runtime?.runtimeReleaseId !== target.releaseId
     || ready.runtime?.port !== runtime.port
     || ready.intake?.schema !== 'video-autoworker-intake-control/v1'
-    || ready.intake.globalScope !== true || ready.intake.accepting !== false || ready.intake.mode !== 'paused'
+    || ready.intake.accepting !== false || ready.intake.mode !== 'paused'
     || !nonNegative(ready.intake.counts?.active) || ready.intake.counts.active !== 0
     || ready.projection?.schema !== 'video-autoworker-director-evidence-outbox-readiness/v1'
     || ready.projection.incompatiblePending !== 0

@@ -92,7 +92,10 @@ function fixture() {
   const readiness = { readiness: {
     schema: 'video-autoworker-release-readiness/v1', globalScope: true,
     runtime: { callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: releaseId, port: 3317 },
-    intake,
+    intake: {
+      schema: intake.schema, accepting: intake.accepting, mode: intake.mode,
+      revision: intake.revision, counts: intake.counts,
+    },
     projection: {
       schema: 'video-autoworker-director-evidence-outbox-readiness/v1', incompatiblePending: 0,
     },
@@ -353,7 +356,10 @@ describe('committed bootstrap successor finisher', () => {
       } : url.includes('release-readiness') ? { readiness: {
         schema: 'video-autoworker-release-readiness/v1', globalScope: true,
         runtime: { callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: releaseId, port: 3317 },
-        intake, projection: {
+        intake: {
+          schema: intake.schema, accepting: intake.accepting, mode: intake.mode,
+          revision: intake.revision, counts: intake.counts,
+        }, projection: {
           schema: 'video-autoworker-director-evidence-outbox-readiness/v1', incompatiblePending: 0,
         }, scheduler: { routerGeneration: 1 },
       } } : { control: intake },
