@@ -1,6 +1,6 @@
 # 2026-09-07 优化与同次部署恢复计划
 
-目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用来源固定为 d96cad249b56ed8506f30e4d8b76148f5f8ac13e，部署控制固定为 cbcbd258e30a94821df8225c0204b4148199baa6（完整 Quality Gate 已通过）。独立 QA 脚本来源在其输入与验收结果中另行绑定，不改变应用与恢复控制；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。此前交付的 3332b067 制品未激活，因缺少 keyed agent 修复不再作为最终目标。
+目标为在第二台 heisenbergs-1 恢复 Video AutoWorker 控制台与正常任务准入。应用来源固定为 d96cad249b56ed8506f30e4d8b76148f5f8ac13e，部署控制使用同一 Git lineage 上完成权限合同修复的 clean 提交，在执行输入及最终收据中精确绑定；d3f8d3d 完整 Quality Gate 已通过，后续仅权限合同变化按影响范围补充验证。独立 QA 脚本来源在其输入与验收结果中另行绑定，不改变应用与恢复控制；历史 pending/controller/n8n 来源固定为 3db98c30f70126b78a0575b6e69023d70407c490。此前交付的 3332b067 制品未激活，因缺少 keyed agent 修复不再作为最终目标。
 
 ## 已具备证据
 
@@ -10,7 +10,7 @@
 
 ## 执行顺序
 
-1. 完成 canonical Git 提交/推送及 Quality Gate，交付同一来源的 clean 控制仓库和完整应用制品。历史 canonical 目录保持原 HEAD 与文件身份。
+1. 完成 canonical Git 提交/推送及覆盖变更范围的质量检查，复用不受本次变动影响的完整 Quality Gate，交付同一来源的 clean 控制仓库和完整应用制品。历史 canonical 目录保持原 HEAD 与文件身份。
 2. 读取安装 manifest、三套 plist 的当前摘要，先 dry-run execve adapter；复用已验证的 9.2 SDK 合同。历史升级前工具基线保持原样，先记录与现有 9.2 工具面的差异，再通过官方只读采集命令为已运行的 9.2 建立单独基线，验证本次 fresh convergence 不改变配置与当前能力。计划引用唯一历史 session 的摘要，实际 session key 只在受控进程内解析。新基线只能证明当前恢复前后的一致性，不能反向证明升级前后的能力语义完全相同。
 3. 在当前用户确认具体生产数据动作后，以四项旧摘要 CAS 应用 execve adapter，保留安装器事务备份；现场验证安装、来源与三套 plist。通过官方收敛命令生成当前运行证明，若发现超出已分析范围的配置差异则保持暂停。
 4. 从私有计划启动 Git 绑定 successor runner。再次检查旧 pending/resume、保护进程、两库、空队列、端口、兼容性与 readiness，随后消费新的一次性 successor 能力。历史 f78 resume 只做 alreadyConsumed 回验，不重新消费；不导入 n8n 工作流。

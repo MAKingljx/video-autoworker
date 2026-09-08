@@ -61,7 +61,7 @@ function commitRepository(root: string) {
   return execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
 }
 
-function fixture() {
+function fixture(options: { historicalControllerMode?: number } = {}) {
   const root = mkdtempSync('/private/tmp/legacy-sdk-successor-')
   cleanup.push(root)
   chmodSync(root, 0o700)
@@ -116,8 +116,8 @@ import fs from 'node:fs';import crypto from 'node:crypto';
 const a=process.argv.slice(2),v=n=>a[a.indexOf(n)+1],p=v('--recovery-attempt-dir')+'/resume.receipt.json';
 const e=fs.statSync(p,{bigint:true}),s=fs.readFileSync(p),ref={path:p,dev:e.dev.toString(),ino:e.ino.toString(),size:Number(e.size),sha256:crypto.createHash('sha256').update(s).digest('hex')};
 process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JSON.stringify(recoveryAttemptId)},receipt:ref})+'\\n');
-`, { mode: 0o644 })
-  chmodSync(historicalController, 0o644)
+`, { mode: options.historicalControllerMode ?? 0o755 })
+  chmodSync(historicalController, options.historicalControllerMode ?? 0o755)
   const guardController = join(historical, 'scripts/legacy-freeze-guard.mjs')
   writeFileSync(guardController,
     `process.stdout.write(${JSON.stringify(JSON.stringify(guardValue))}+'\\n')\n`, { mode: 0o644 })
@@ -297,6 +297,40 @@ function authorize(entry: ReturnType<typeof fixture>) {
 }
 
 describe('legacy bootstrap SDK successor controller', () => {
+  it('matches every controller-bound fixture file to its real Git tree mode', () => {
+    const entry = fixture()
+    const expected = [
+      [entry.historical, entry.historicalCommit, 'scripts/legacy-bootstrap-controller.mjs', '100755'],
+      [entry.historical, entry.historicalCommit, 'scripts/legacy-freeze-guard.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/legacy-bootstrap-sdk-successor-controller.mjs', '100755'],
+      [entry.control, entry.controlCommit, 'scripts/verify-openclaw-runtime-compatibility.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/verify-director-video-release-readiness.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/lib/openclaw-runtime-contract.mjs', '100644'],
+    ] as const
+
+    for (const [repository, commit, relativePath, mode] of expected) {
+      const treeEntry = execFileSync('/usr/bin/git', [
+        '-C', repository, 'ls-tree', commit, '--', relativePath,
+      ], { encoding: 'utf8' })
+      expect(treeEntry, relativePath).toMatch(new RegExp(`^${mode} blob [a-f0-9]{40}\\t`))
+    }
+  })
+
+  it('rejects a clean historical Git source that records the resume controller as 100644', () => {
+    const entry = fixture({ historicalControllerMode: 0o644 })
+    const treeEntry = execFileSync('/usr/bin/git', [
+      '-C', entry.historical, 'ls-tree', entry.historicalCommit, '--',
+      'scripts/legacy-bootstrap-controller.mjs',
+    ], { encoding: 'utf8' })
+    expect(treeEntry).toMatch(/^100644 blob [a-f0-9]{40}\t/u)
+
+    const result = authorize(entry)
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('scripts/legacy-bootstrap-controller.mjs is unsafe')
+    expect(existsSync(join(entry.successorAttempt, 'sdk-successor.receipt.json'))).toBe(false)
+    expect(existsSync(join(entry.successorAttempt, 'sdk-successor.token.json'))).toBe(false)
+  })
+
   it('references one consumed historical resume and permits refreshed live readiness after consume', () => {
     const entry = fixture()
     const authorized = authorize(entry)

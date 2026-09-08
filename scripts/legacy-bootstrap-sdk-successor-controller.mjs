@@ -238,7 +238,7 @@ function historicalResume(values) {
   const commit = values['--historical-commit']
   if (!COMMIT.test(commit)) fail('historical commit is invalid')
   const controllerPath = join(repository, 'scripts/legacy-bootstrap-controller.mjs')
-  const controller = gitFile(repository, commit, 'scripts/legacy-bootstrap-controller.mjs', controllerPath, 0o644)
+  const controller = gitFile(repository, commit, 'scripts/legacy-bootstrap-controller.mjs', controllerPath, 0o755)
   const attempt = normalized(values['--historical-bootstrap-attempt'], 'historical bootstrap attempt')
   const resumeAttempt = normalized(values['--resume-attempt'], 'historical resume attempt')
   safeDirectory(attempt, 'historical bootstrap attempt')
@@ -348,7 +348,7 @@ function validateReceiptBindings(receipt) {
     value.historical.sourceCommit,
     'scripts/legacy-bootstrap-controller.mjs',
     value.historical.controller.path,
-    0o644,
+    0o755,
   )
   sameReference(historicalController, value.historical.controller, 'historical controller')
   const controlController = gitFile(
