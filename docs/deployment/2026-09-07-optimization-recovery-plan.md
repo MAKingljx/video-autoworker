@@ -44,3 +44,12 @@ successor 能力消费前失败只停止准备，不改变应用映射或数据�
 历史安装记录和manager继续绑定历史源码，实际slot启动脚本通过execve adapter明确绑定当前控制源码，并记录制品校验器及其依赖的Git文件摘要；router继续使用已验证的历史目标。授权前必须由该同一校验器检查待部署制品，不能通过删除新制品必要模块来迁就旧校验器。
 
 更换slot源码根时，必须在启动前验证有效MISSION_CONTROL_DATA_DIR、MISSION_CONTROL_DB_PATH和MISSION_CONTROL_TOKENS_PATH与原部署逐项一致，避免回落到新源码目录的默认.data。当前独立控制根的私有.env.local仅保存这三个无密钥路径，并受Git排除；共享n8n凭据仍读取原外部platform.env。应用制品、历史恢复收据和原权威数据库保持各自独立来源。
+
+
+## 基线已建立但收尾中断
+
+若同一successor已经消费、目标映射与baseline完成、应用和router健康，但历史guard异步revoke收尾使pending仍在，不新建attempt，不重跑迁移。使用独立、clean且提交绑定的 `ops/recovery/finalize-committed-bootstrap-successor.mjs`：先传 `--verify-only --plan <原计划> --finisher-repository <独立源码根> --finisher-commit <精确提交>`，核验来源、已消费授权、不可变preflight摘要、adapter、历史pending、数据库inode与打开句柄、当前应用cwd、监听PID、guard消失以及paused revision。
+
+只读预检通过后，以相同参数将模式改为 `--apply`；工具仅发布原completion格式并CAS移除该pending。随后用原控制源码的 `deploy-blue-green.sh attest-current`、显式 `MC_AUTH_MODE=openclaw-loopback` 和有效的官方收敛证明取得当前attestation，以0400保存，再运行原successor runner的完成分支恢复入口。原控制、应用、历史源码、收据和target mapping保持绑定，独立finisher提交另行记录。pending存在时attest-current会被operation gate拒绝，不能倒置顺序。
+
+这是一条针对已建立基线的收尾路径；基线缺失、应用不健康、数据库身份变化、guard仍在、入口revision漂移或来源不匹配时应拒绝，保留证据并修复根因。最终完成状态仍以原runner的result、intake-resumed凭据及实际HTTP/进程/数据验收为准。

@@ -44,7 +44,7 @@ describe('legacy bootstrap SDK successor entry', () => {
       }
       const fileIdentity = (path: string) => ({ path, dev: '1', ino: '2' })
       const processIdentity = (pid: number, database: string) => ({
-        pid, ppid: 2, uid: process.getuid(), startTime: 'now', argvSha256: 'b'.repeat(64),
+        pid, ppid: 2, uid: process.getuid?.() ?? 0, startTime: 'now', argvSha256: 'b'.repeat(64),
         cwd: fileIdentity('/runtime/cwd'), database: fileIdentity(database),
         executable: fileIdentity('/runtime/node'),
       })
@@ -60,7 +60,7 @@ describe('legacy bootstrap SDK successor entry', () => {
         supervisor: { disabled: true, loaded: false, lockAbsent: true, workerPids: [] },
         frozen: {
           schema: 'video-autoworker-legacy-freeze-guard/v1', mode: 'dual', ready: true,
-          pid: 5, uid: process.getuid(), startedAt: 'now', issuedAt: now - 60, expiresAt: now + 60,
+          pid: 5, uid: process.getuid?.() ?? 0, startedAt: 'now', issuedAt: now - 60, expiresAt: now + 60,
           argvSha256: 'f'.repeat(64), guardNonceSha256: '1'.repeat(64),
           legacyBindingSha256: '2'.repeat(64), scriptSha256: '3'.repeat(64),
           database: fileIdentity('/mission.db'), n8nDatabase: fileIdentity('/n8n.db'),
@@ -126,6 +126,7 @@ describe('legacy bootstrap SDK successor entry', () => {
       writeFileSync(fakeNode, '#!/bin/sh\nexit 99\n', { mode: 0o755 })
       chmodSync(fakeNode, 0o755)
       const environment = sanitizedEnvironment({
+        NODE_ENV: 'production',
         HOME: '/safe-home',
         PATH: `${maliciousBin}:/untrusted/bin`,
       })
@@ -140,7 +141,7 @@ describe('legacy bootstrap SDK successor entry', () => {
       })
       expect(environment.PATH).not.toContain(maliciousBin)
       const resolvedNode = execFileSync('/bin/sh', ['-c', 'command -v node'], {
-        encoding: 'utf8', env: environment,
+        encoding: 'utf8', env: { ...environment, NODE_ENV: 'production' },
       }).trim()
       expect(realpathSync(resolvedNode)).toBe(realpathSync(process.execPath))
     } finally {
