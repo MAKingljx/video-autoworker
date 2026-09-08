@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { projectAiworkerToolResultForTranscript } from '../openclaw-plugins/aiworker-director-brain/lib/transcript-tool-result-projection.js'
+
 import {
   BASELINE_EFFECTIVE_TOOLS,
   MATRIX_KEEP_RECENT_TOKENS,
@@ -29,9 +31,20 @@ import {
   GENERAL_COMPACTION_ANCHORS,
   GENERAL_COMPACTION_OMNIBUS_PROMPT,
 } from './lib/openclaw-general-compaction-anchors.mjs'
+import {
+  RICH_CANARY_CONTRACT,
+  canonicalTechniqueToolRouteVerified,
+  exactSuccessfulToolRouteVerified,
+  inspectCurrentTurnToolRoute,
+  missingCanonicalTechniqueFactAnchors,
+  validatesCanonicalTechniqueFacts,
+} from './lib/openclaw-rich-canary-contract.mjs'
 
 const richCanaryPath = fileURLToPath(
   new URL('./test-openclaw-session-resilience-rich-canary.mjs', import.meta.url),
+)
+const richCanaryContractPath = fileURLToPath(
+  new URL('./lib/openclaw-rich-canary-contract.mjs', import.meta.url),
 )
 const matrixCliPath = fileURLToPath(
   new URL('./test-openclaw-session-resilience-matrix.mjs', import.meta.url),
@@ -402,10 +415,236 @@ test('migrates a polluted session by sealing the old identity and seeding a dist
   })
 })
 
+test('rich canary validates canonical technique facts as relationships', () => {
+  const canonical = '导演脑从已审核素材证据和导演判断中记录原因、上下文与采用结果，形成案例后再提炼适用条件、执行方法和原理；每次复用仍受导演意图和人工审核约束。'
+  const paraphrase = '系统先把审核通过的素材证据与导演判断记录并形成案例，再从案例归纳适用范围、执行方式和为什么有效；实际复用时受导演意图以及人工复核把关。'
+  assert.equal(validatesCanonicalTechniqueFacts(canonical), true)
+  assert.equal(validatesCanonicalTechniqueFacts(paraphrase), true)
+  assert.deepEqual(missingCanonicalTechniqueFactAnchors(canonical), [])
+
+  const keywordBag = '已审核证据、导演判断和案例都很重要；适用条件、执行方法、原理、导演意图和人工审核也都存在。'
+  assert.equal(validatesCanonicalTechniqueFacts(keywordBag), false)
+  assert.ok(missingCanonicalTechniqueFactAnchors(keywordBag).length > 0)
+
+  const missingGovernance = '已审核素材证据与导演判断共同形成案例，再从案例提炼适用条件、执行方法和原理。'
+  assert.deepEqual(
+    missingCanonicalTechniqueFactAnchors(missingGovernance),
+    ['reuse-governed-by-intent-and-review'],
+  )
+
+  for (const reversed of [
+    '无需已审核素材证据，导演判断也能形成案例，再提炼适用条件、执行方法和原理；复用受导演意图与人工审核约束。',
+    '已审核素材证据与导演判断形成案例，再从案例提炼适用条件、执行方法和原理；复用不受导演意图和人工审核约束。',
+  ]) {
+    assert.deepEqual(
+      missingCanonicalTechniqueFactAnchors(reversed),
+      ['canonical-technique-fact-reversed'],
+    )
+  }
+})
+
+test('rich canary requires an exact canonical tool call and successful paired result', () => {
+  const prompt = RICH_CANARY_CONTRACT.canonicalExplainPrompt
+  const rows = [
+    { message: { role: 'user', content: [{ type: 'text', text: prompt }] } },
+    { message: { role: 'assistant', content: [{
+      type: 'toolCall',
+      id: 'synthetic-call',
+      name: 'aiworker_director_brain',
+      arguments: JSON.stringify({
+        topic: RICH_CANARY_CONTRACT.canonicalTechniqueTopic,
+        action: 'explain',
+      }),
+    }] } },
+    { message: {
+      role: 'toolResult',
+      toolCallId: 'synthetic-call',
+      toolName: 'aiworker_director_brain',
+      content: [{
+        type: 'text',
+        text: `已读取权威业务事实。\n${RICH_CANARY_CONTRACT.persistedBusinessToolStatus}`,
+      }],
+      isError: false,
+    } },
+  ]
+  const route = inspectCurrentTurnToolRoute(rows, prompt)
+  assert.equal(canonicalTechniqueToolRouteVerified(route), true)
+  assert.equal(route.completedPairs, 1)
+
+  const withoutTopic = structuredClone(rows)
+  withoutTopic[1].message.content[0].arguments = JSON.stringify({ action: 'explain' })
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(withoutTopic, prompt),
+  ), false)
+
+  const withExtraArgument = structuredClone(rows)
+  withExtraArgument[1].message.content[0].arguments = JSON.stringify({
+    action: 'explain',
+    topic: RICH_CANARY_CONTRACT.canonicalTechniqueTopic,
+    query: 'extra',
+  })
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(withExtraArgument, prompt),
+  ), false)
+
+  const withoutResult = rows.slice(0, 2)
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(withoutResult, prompt),
+  ), false)
+
+  const failedResult = structuredClone(rows)
+  failedResult[2].message.isError = true
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(failedResult, prompt),
+  ), false)
+
+  const mismatchedResult = structuredClone(rows)
+  mismatchedResult[2].message.toolCallId = 'other-call'
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(mismatchedResult, prompt),
+  ), false)
+
+  const expectedCall = {
+    name: 'aiworker_director_brain',
+    arguments: {
+      action: 'explain',
+      topic: RICH_CANARY_CONTRACT.canonicalTechniqueTopic,
+    },
+  }
+  const rawStructuredResult = structuredClone(rows)
+  delete rawStructuredResult[2].message.isError
+  rawStructuredResult[2].message.content[0].text = JSON.stringify({
+    ok: true,
+    action: 'explain',
+    responseContract: {
+      mustQuoteUserVisibleAnswerExactly: true,
+      userVisibleAnswer: '隔离测试短答。',
+    },
+  })
+  assert.equal(exactSuccessfulToolRouteVerified(
+    inspectCurrentTurnToolRoute(rawStructuredResult, prompt),
+    expectedCall,
+    { requireStructuredOk: true },
+  ), true)
+  assert.equal(canonicalTechniqueToolRouteVerified(
+    inspectCurrentTurnToolRoute(rawStructuredResult, prompt),
+  ), false)
+
+  const ambiguousPlainResult = structuredClone(rows)
+  delete ambiguousPlainResult[2].message.isError
+  ambiguousPlainResult[2].message.content[0].text = '工具似乎完成。'
+  assert.equal(exactSuccessfulToolRouteVerified(
+    inspectCurrentTurnToolRoute(ambiguousPlainResult, prompt),
+    expectedCall,
+  ), false)
+
+  const resolvePrompt = '请查找隔离测试作品。'
+  const resolveCall = {
+    name: 'aiworker_director_brain',
+    arguments: { action: 'resolve_work', query: '不存在的隔离测试作品' },
+  }
+  const resolutionRows = structuredClone(rows)
+  resolutionRows[0].message.content[0].text = resolvePrompt
+  resolutionRows[1].message.content[0].arguments = JSON.stringify(resolveCall.arguments)
+  delete resolutionRows[2].message.isError
+  resolutionRows[2].message.content[0].text = JSON.stringify({
+    ok: true,
+    action: 'resolve_work',
+    handled: true,
+    outcome: 'not_found',
+    responseContract: {
+      mustQuoteUserVisibleAnswerExactly: true,
+      stopAfterReply: true,
+      userVisibleAnswer: RICH_CANARY_CONTRACT.resolutionNotFoundAnswer,
+    },
+  })
+  const resolutionRoute = inspectCurrentTurnToolRoute(resolutionRows, resolvePrompt)
+  assert.equal(exactSuccessfulToolRouteVerified(
+    resolutionRoute,
+    resolveCall,
+    { requireStructuredOk: true },
+  ), true)
+  assert.equal(resolutionRoute.results[0].resolutionNotFound, true)
+
+  for (const invalidResult of [
+    { outcome: 'ambiguous', stopAfterReply: true },
+    { outcome: 'not_found', stopAfterReply: false },
+  ]) {
+    const invalidRows = structuredClone(resolutionRows)
+    const payload = JSON.parse(invalidRows[2].message.content[0].text)
+    payload.outcome = invalidResult.outcome
+    payload.responseContract.stopAfterReply = invalidResult.stopAfterReply
+    invalidRows[2].message.content[0].text = JSON.stringify(payload)
+    const invalidRoute = inspectCurrentTurnToolRoute(invalidRows, resolvePrompt)
+    assert.equal(invalidRoute.results[0].resolutionNotFound, false)
+  }
+
+  const projectedResolutionRows = structuredClone(resolutionRows)
+  projectedResolutionRows[2].message.isError = false
+  projectedResolutionRows[2].message.content[0].text = [
+    RICH_CANARY_CONTRACT.resolutionNotFoundAnswer,
+    RICH_CANARY_CONTRACT.persistedBusinessToolStatus,
+  ].join('\n')
+  const projectedResolutionRoute = inspectCurrentTurnToolRoute(
+    projectedResolutionRows,
+    resolvePrompt,
+  )
+  assert.equal(projectedResolutionRoute.results[0].resolutionNotFound, true)
+  assert.equal(exactSuccessfulToolRouteVerified(
+    projectedResolutionRoute,
+    resolveCall,
+    { requireProjectedStatus: true },
+  ), true)
+
+  for (const mutate of [
+    rowsToChange => {
+      rowsToChange[2].message.content[0].text = [
+        '我找到了这个作品。',
+        RICH_CANARY_CONTRACT.persistedBusinessToolStatus,
+      ].join('\n')
+    },
+    rowsToChange => {
+      rowsToChange[2].message.content[0].text = RICH_CANARY_CONTRACT.resolutionNotFoundAnswer
+    },
+    rowsToChange => {
+      rowsToChange[2].message.isError = true
+    },
+  ]) {
+    const invalidProjectedRows = structuredClone(projectedResolutionRows)
+    mutate(invalidProjectedRows)
+    const invalidProjectedRoute = inspectCurrentTurnToolRoute(
+      invalidProjectedRows,
+      resolvePrompt,
+    )
+    assert.equal(invalidProjectedRoute.results[0].resolutionNotFound, false)
+  }
+
+  const actualProjection = projectAiworkerToolResultForTranscript({
+    toolName: 'aiworker_director_brain',
+    message: resolutionRows[2].message,
+  })
+  const actualProjectedRoute = inspectCurrentTurnToolRoute([
+    resolutionRows[0],
+    resolutionRows[1],
+    { message: actualProjection.message },
+  ], resolvePrompt)
+  assert.equal(actualProjectedRoute.results[0].persistedSuccessStatus, true)
+  assert.equal(actualProjectedRoute.results[0].structuredOk, false)
+  assert.equal(actualProjectedRoute.results[0].responseContractPresent, false)
+  assert.equal(actualProjectedRoute.results[0].resolutionNotFound, false)
+  assert.equal(exactSuccessfulToolRouteVerified(
+    actualProjectedRoute,
+    resolveCall,
+    { requireProjectedStatus: true },
+  ), true)
+})
+
 test('rich canary exposes the comparison inputs and per-turn evidence without production paths', () => {
   const source = readFileSync(richCanaryPath, 'utf8')
-  assert.match(source, /process\.env\.CANARY_MIDTURN_PRECHECK \|\| '0'/u)
-  assert.doesNotMatch(source, /process\.env\.CANARY_MIDTURN_PRECHECK \|\| '1'/u)
+  const contractSource = readFileSync(richCanaryContractPath, 'utf8')
+  const implementation = `${source}\n${contractSource}`
+  assert.equal(RICH_CANARY_CONTRACT.midTurnPrecheckEnabled, false)
+  assert.match(source, /String\(Number\(RICH_CANARY_CONTRACT\.midTurnPrecheckEnabled\)\)/u)
   for (const marker of [
     'CANARY_KEEP_RECENT_TOKENS',
     'CANARY_MAX_ACTIVE_TRANSCRIPT_BYTES',
@@ -482,7 +721,7 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
     'fixtureDoesNotProveFeishuAuthority',
     'productionAcceptanceEligible',
     'productionAccepted',
-    'currentTurnToolRoute',
+    'inspectCurrentTurnToolRoute',
     'canonicalToolRouteVerified',
     'fallbackToolCalls',
     'canonicalRereadCoverage',
@@ -508,7 +747,7 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
     "call('tools.catalog'",
     "child.kill('SIGKILL')",
   ]) {
-    assert.ok(source.includes(marker), `missing ${marker}`)
+    assert.ok(implementation.includes(marker), `missing ${marker}`)
   }
   assert.ok(source.includes('OPENCLAW_STATE_DIR: stateDir'))
   assert.ok(source.includes("const COMPACTION_STRATEGY = 'builtin-safeguard'"))
@@ -549,9 +788,9 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
   assert.ok(!source.includes('COMPACTION_IDENTIFIER_INSTRUCTIONS'))
   assert.ok(!source.includes('SAFE_INTERNAL_TASK_ID'))
   assert.ok(!source.includes('identifierInstructions:'))
-  assert.ok(source.includes('Retain safe user goals, facts, decisions, constraints'))
-  assert.ok(source.includes('Exclude tool-call and tool-result structures'))
-  assert.ok(source.includes('Preserve the safe semantic anchors'))
+  assert.ok(contractSource.includes('Retain safe user goals, facts, decisions, constraints'))
+  assert.ok(contractSource.includes('Exclude tool-call and tool-result structures'))
+  assert.ok(contractSource.includes('Preserve the safe semantic anchors'))
   assert.ok(!source.includes('apiKey, privateKey, connectionString'))
   assert.ok(!source.includes('answerSensitiveReferenceLeaked'))
   assert.ok(!source.includes('checkpointSensitiveReferenceLeaked'))
@@ -560,7 +799,11 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
   assert.ok(source.includes('maximumObservedToolResultBytes <= TRANSCRIPT_PROJECTION_MAX_BYTES'))
   assert.ok(source.includes('attempts === 1'))
   assert.ok(source.includes('globalThis.__aiworkerResilienceCanaryPayloadUsed'))
-  assert.ok(source.includes("toolRoute.calls[0].arguments.action === 'explain'"))
+  assert.ok(contractSource.includes("action: 'explain'"))
+  assert.ok(contractSource.includes("topic: RICH_CANARY_CONTRACT.canonicalTechniqueTopic"))
+  assert.ok(contractSource.includes('{ requireProjectedStatus: true }'))
+  assert.ok(source.includes('cpSync(directorSkillSourcePath, isolatedDirectorSkillPath'))
+  assert.ok(source.includes('directorSkillSha256'))
   assert.match(source, /readDirectorBrainSystemAnswer\(\s*'technique_learning'/u)
   assert.ok(source.includes("const FUTURE_CLEAN_HISTORY_MODE = 'future-clean'"))
   assert.ok(source.includes("const LEGACY_POLLUTED_HISTORY_MODE = 'legacy-polluted'"))
@@ -674,7 +917,8 @@ for (const historyMode of ['legacy-polluted', 'accident-replay']) {
 test('rich canary accepts production value 4 and rejects unsupported preserved-turn values', () => {
   const source = readFileSync(richCanaryPath, 'utf8')
   assert.ok(source.includes('if (![0, 1, 3, 4].includes(RECENT_TURNS_PRESERVE))'))
-  assert.ok(source.includes('?? 4'))
+  assert.equal(RICH_CANARY_CONTRACT.recentTurnsPreserve, 4)
+  assert.ok(source.includes('?? RICH_CANARY_CONTRACT.recentTurnsPreserve'))
   assert.ok(!source.includes('fixes CANARY_RECENT_TURNS_PRESERVE at 0'))
   const result = spawnSync(process.execPath, [richCanaryPath], {
     env: {

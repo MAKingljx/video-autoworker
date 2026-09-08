@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { parseOpenClawAgentJsonResult } from './lib/openclaw-agent-json-result.mjs'
+import {
+  parseOpenClawAgentJsonResult,
+  summarizeNonDeliveryVerification,
+} from './lib/openclaw-agent-json-result.mjs'
 
 const argv = [
   '--profile', 'qwen-current', 'agent', '--agent', 'second-original',
@@ -53,7 +56,7 @@ test('uses only visible successful payload text when metadata text is absent', (
   assert.equal(parseOpenClawAgentJsonResult(value, { argv, expectedModel }).visibleText, 'first\nsecond')
 })
 
-test('does not accept nested legacy output or payload model fields as authority', () => {
+test('does not accept arbitrary nested output or payload model fields as authority', () => {
   assert.throws(() => parseOpenClawAgentJsonResult({
     outputs: [{ text: 'legacy', provider: 'provider', model: 'model-id' }],
     result: { payloads: [{ text: 'legacy' }] },
@@ -61,6 +64,49 @@ test('does not accept nested legacy output or payload model fields as authority'
   assert.throws(() => parseOpenClawAgentJsonResult({
     payloads: [{ text: 'reply', provider: 'provider', model: 'model-id' }], meta: {},
   }, { argv, expectedModel }), /agent_meta_missing/u)
+})
+
+test('normalizes the successful Gateway run response to the same AgentRunResult', () => {
+  const direct = parseOpenClawAgentJsonResult(result(), { argv, expectedModel })
+  for (const status of ['ok', 'completed']) {
+    assert.deepEqual(parseOpenClawAgentJsonResult({
+      runId: 'owned-run', status, summary: 'completed', result: result(),
+    }, { argv, expectedModel }), direct)
+  }
+})
+
+test('rejects failed or still running Gateway responses even when payloads exist', () => {
+  for (const status of ['error', 'timeout', 'in_flight', 'accepted', undefined]) {
+    assert.throws(() => parseOpenClawAgentJsonResult({
+      runId: 'owned-run', status, result: result(),
+    }, { argv, expectedModel }), /run_not_completed/u)
+  }
+})
+
+test('checks delivery evidence at both public Gateway response layers', () => {
+  for (const extra of [{ deliverySucceeded: true }, { deliveryStatus: null }]) {
+    for (const value of [
+      { runId: 'owned-run', status: 'ok', result: result(), ...extra },
+      { runId: 'owned-run', status: 'ok', result: result(extra) },
+    ]) {
+      assert.throws(() => parseOpenClawAgentJsonResult(value, {
+        argv, expectedModel,
+      }), /unexpected_delivery_evidence/u)
+    }
+  }
+})
+
+test('rejects mixed envelopes and missing run identity instead of guessing an authority', () => {
+  for (const value of [
+    { runId: 'owned-run', status: 'ok', result: result(), payloads: [] },
+    { runId: 'owned-run', status: 'ok', result: result(), meta: {} },
+    { status: 'ok', result: result() },
+    { runId: 'owned-run', status: 'ok', result: { result: result() } },
+  ]) {
+    assert.throws(() => parseOpenClawAgentJsonResult(value, {
+      argv, expectedModel,
+    }), /envelope_invalid/u)
+  }
 })
 
 test('rejects a delivering invocation and every explicit delivery-status envelope', () => {
@@ -106,4 +152,26 @@ test('treats the official silent reply marker as no visible text', () => {
     meta: { finalAssistantVisibleText: 'NO_REPLY', agentMeta: { provider: 'provider', model: 'model-id' } },
   })
   assert.equal(parseOpenClawAgentJsonResult(value, { argv, expectedModel }).visibleText, '')
+})
+
+test('reports non-delivery only when every attempted turn has authoritative evidence', () => {
+  assert.deepEqual(summarizeNonDeliveryVerification({ attemptedTurns: 5, verifiedTurns: 5 }), {
+    externalDelivery: false,
+    externalDeliveryVerified: true,
+    explicitDeliveryEvidenceDetected: false,
+  })
+  assert.deepEqual(summarizeNonDeliveryVerification({ attemptedTurns: 2, verifiedTurns: 1 }), {
+    externalDelivery: null,
+    externalDeliveryVerified: false,
+    explicitDeliveryEvidenceDetected: false,
+  })
+  assert.deepEqual(summarizeNonDeliveryVerification({
+    attemptedTurns: 1, verifiedTurns: 0, explicitDeliveryEvidenceDetected: true,
+  }), {
+    externalDelivery: null,
+    externalDeliveryVerified: false,
+    explicitDeliveryEvidenceDetected: true,
+  })
+  assert.throws(() => summarizeNonDeliveryVerification({ attemptedTurns: 1, verifiedTurns: 2 }),
+    /non_delivery_verification_invalid/u)
 })

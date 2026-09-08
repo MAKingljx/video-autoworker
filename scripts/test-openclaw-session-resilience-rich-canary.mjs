@@ -31,6 +31,13 @@ import {
   validatesGeneralCompactionAnswer,
 } from './lib/openclaw-general-compaction-anchors.mjs'
 import {
+  RICH_CANARY_CONTRACT,
+  canonicalTechniqueToolRouteVerified,
+  inspectCurrentTurnToolRoute,
+  missingCanonicalTechniqueFactAnchors,
+  validatesCanonicalTechniqueFacts,
+} from './lib/openclaw-rich-canary-contract.mjs'
+import {
   captureOpenClawRichCanarySessionSnapshot,
   loadOpenClawRichCanarySessionRuntime,
   openClawCheckpointPostReferenceMatchesSnapshot,
@@ -43,16 +50,22 @@ const PORT = Number(process.env.CANARY_GATEWAY_PORT || 19_889)
 const HISTORY_MODE = process.env.CANARY_HISTORY_MODE || 'future-clean'
 const RECENT_TURNS_PRESERVE = Number(
   process.env.CANARY_RECENT_TURNS_PRESERVE
-    ?? 4,
+    ?? RICH_CANARY_CONTRACT.recentTurnsPreserve,
 )
-const KEEP_RECENT_TOKENS = Number(process.env.CANARY_KEEP_RECENT_TOKENS || 4_096)
+const KEEP_RECENT_TOKENS = Number(
+  process.env.CANARY_KEEP_RECENT_TOKENS || RICH_CANARY_CONTRACT.keepRecentTokens,
+)
 const MAX_ACTIVE_TRANSCRIPT_BYTES = Number(
-  process.env.CANARY_MAX_ACTIVE_TRANSCRIPT_BYTES || 131_072,
+  process.env.CANARY_MAX_ACTIVE_TRANSCRIPT_BYTES
+    || RICH_CANARY_CONTRACT.maxActiveTranscriptBytes,
 )
 const TARGET_TRANSCRIPT_BYTES = Number(process.env.CANARY_TRANSCRIPT_BYTES || 147_456)
-const TURN_COUNT = Number(process.env.CANARY_TURNS || 2)
-const MINIMUM_TOOL_PAIRS = Number(process.env.CANARY_MINIMUM_TOOL_PAIRS || 19)
-const MID_TURN_PRECHECK_ENABLED = (process.env.CANARY_MIDTURN_PRECHECK || '0') === '1'
+const TURN_COUNT = Number(process.env.CANARY_TURNS || RICH_CANARY_CONTRACT.turns)
+const MINIMUM_TOOL_PAIRS = Number(
+  process.env.CANARY_MINIMUM_TOOL_PAIRS || RICH_CANARY_CONTRACT.minimumToolPairs,
+)
+const MID_TURN_PRECHECK_ENABLED = (process.env.CANARY_MIDTURN_PRECHECK
+  || String(Number(RICH_CANARY_CONTRACT.midTurnPrecheckEnabled))) === '1'
 const COMPACTION_MODEL = process.env.CANARY_COMPACTION_MODEL
   || 'qwen36-tools-local/default_model'
 const COMPACTION_TIMEOUT_SECONDS = Number(
@@ -72,7 +85,7 @@ const TRANSCRIPT_PROJECTION_MAX_BYTES = Number(
 const SESSION_KEY = 'agent:second-original:main'
 const PREFIX = join(tmpdir(), 'aiworker-openclaw-rich-canary-')
 const GATEWAY_TOKEN = `canary-${randomUUID()}`
-const COMPACTION_SAFETY_INSTRUCTIONS = 'Retain safe user goals, facts, decisions, constraints, unresolved questions, and task continuity across every topic, including ordinary programming, operations plans, general questions, long-form summaries, and director work. Exclude tool-call and tool-result structures, metadata fields, identifiers, locations, links, filenames, commands, credential-bearing details, and operational internals. Never copy, quote, list, transform, describe, or mention excluded material. Preserve the safe semantic anchors needed to answer later user questions.'
+const COMPACTION_SAFETY_INSTRUCTIONS = RICH_CANARY_CONTRACT.compactionSafetyInstructions
 const SYNTHETIC_SENSITIVE_FIELDS = Object.freeze({
   credentialReference: 'KEYCHAIN_REF_REDACTED',
   apiKey: 'sk-local-mock-never-emit-1234567890',
@@ -124,18 +137,17 @@ const COMPACTION_STRATEGY = 'builtin-safeguard'
 const FUTURE_CLEAN_HISTORY_MODE = 'future-clean'
 const LEGACY_POLLUTED_HISTORY_MODE = 'legacy-polluted'
 const ACCIDENT_REPLAY_HISTORY_MODE = 'accident-replay'
-const PERSISTED_BUSINESS_TOOL_STATUS =
-  '完整结果保留在业务数据源中，需要时可由原工具重新读取。'
+const PERSISTED_BUSINESS_TOOL_STATUS = RICH_CANARY_CONTRACT.persistedBusinessToolStatus
 const RAW_RESULT_ACKNOWLEDGEMENT = '鹭羽四七'
 const BLIND_SEMANTIC_PERSON = '顾青'
 const BLIND_SEMANTIC_ACTION = '把第三个镜头留白七秒'
 const FIXTURE_CANONICAL_TECHNIQUE_ANSWER = '导演脑从已审核素材证据和导演判断中记录原因、上下文与采用结果，形成案例后再提炼适用条件、执行方法和原理；每次复用仍受导演意图和人工审核约束。'
-const CANONICAL_EXPLAIN_PROMPT = '导演脑提炼技法的底层逻辑是什么？请用两句以内回答。'
+const CANONICAL_EXPLAIN_PROMPT = RICH_CANARY_CONTRACT.canonicalExplainPrompt
 const HOOK_PROBE_PROMPT = '导演脑提炼技法的底层逻辑是什么？'
 const FIXTURE_CANONICAL_MODE = 'fixture'
 const LIVE_CANONICAL_MODE = 'live'
 const CANONICAL_SOURCE_MODE =
-  process.env.CANARY_CANONICAL_SOURCE_MODE || FIXTURE_CANONICAL_MODE
+  process.env.CANARY_CANONICAL_SOURCE_MODE || RICH_CANARY_CONTRACT.canonicalSourceMode
 const REQUIRED_EFFECTIVE_TOOL_IDS = Object.freeze([
   'aiworker_analyze_video',
   'aiworker_director_brain',
@@ -236,6 +248,21 @@ const logPath = join(root, 'gateway.log')
 for (const directory of [stateDir, homeDir, workspaceDir]) {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
 }
+const directorSkillSourcePath = resolve(
+  process.cwd(),
+  'openclaw-skills',
+  'aiworker-director-brain',
+)
+const isolatedDirectorSkillPath = join(
+  workspaceDir,
+  'skills',
+  'aiworker-director-brain',
+)
+mkdirSync(dirname(isolatedDirectorSkillPath), { recursive: true, mode: 0o700 })
+cpSync(directorSkillSourcePath, isolatedDirectorSkillPath, { recursive: true })
+const directorSkillSha256 = createHash('sha256')
+  .update(readFileSync(join(isolatedDirectorSkillPath, 'SKILL.md')))
+  .digest('hex')
 for (const pluginId of ['aiworker-director-brain', 'aiworker-video-command']) {
   const pluginSource = resolve(process.cwd(), 'openclaw-plugins', pluginId)
   const pluginDestination = join(stateDir, 'extensions', pluginId)
@@ -929,39 +956,6 @@ function messageText(message) {
   }).join('\n')
 }
 
-function parsedToolArguments(part) {
-  const source = Object.hasOwn(part, 'input') ? part.input : part.arguments
-  if (source && typeof source === 'object' && !Array.isArray(source)) return source
-  if (typeof source !== 'string') return {}
-  try {
-    const parsed = JSON.parse(source)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
-
-function currentTurnToolRoute(rows, prompt) {
-  let promptIndex = -1
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (rows[index]?.message?.role === 'user' && messageText(rows[index].message).includes(prompt)) {
-      promptIndex = index
-      break
-    }
-  }
-  if (promptIndex < 0) return { foundPrompt: false, calls: [] }
-  const calls = []
-  for (const row of rows.slice(promptIndex + 1)) {
-    const message = row?.message
-    if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue
-    for (const part of message.content) {
-      if (part?.type !== 'toolCall' || typeof part.name !== 'string') continue
-      calls.push({ name: part.name, arguments: parsedToolArguments(part) })
-    }
-  }
-  return { foundPrompt: true, calls }
-}
-
 function validateCheckpoints(checkpoints, minimumCount) {
   if (!Array.isArray(checkpoints) || checkpoints.length < minimumCount) return false
   return checkpoints.every(checkpoint => (
@@ -1029,7 +1023,7 @@ function answerMatchesTurnSemantics(text, turnIndex) {
     return validatesGeneralCompactionAnswer(text, turnIndex)
   }
   if (turnIndex < 2) {
-    return text === canonicalTechniqueAnswer
+    return validatesCanonicalTechniqueFacts(text)
   }
   return validatesGeneralCompactionAnswer(text, turnIndex)
 }
@@ -1039,7 +1033,7 @@ function missingTurnSemanticAnchors(text, turnIndex) {
     return missingGeneralCompactionAnchors(text, turnIndex)
   }
   if (turnIndex < 2) {
-    return text === canonicalTechniqueAnswer ? [] : ['canonical-technique-answer']
+    return missingCanonicalTechniqueFactAnchors(text)
   }
   return missingGeneralCompactionAnchors(text, turnIndex)
 }
@@ -1399,15 +1393,13 @@ try {
         && createdCheckpoints.every(checkpointUsesBuiltinSafeguard)
     const checkpointPayloads = serializedCheckpointPayloads(checkpointsAfter)
     const activeRows = transcriptRows(afterSnapshot.events)
-    const toolRoute = currentTurnToolRoute(activeRows, prompts[turnIndex % prompts.length])
+    const toolRoute = inspectCurrentTurnToolRoute(
+      activeRows,
+      prompts[turnIndex % prompts.length],
+    )
     const canonicalToolRouteVerified = COMPACTION_BENCHMARK_MODE
       ? toolRoute.foundPrompt && toolRoute.calls.length === 0
-      : turnIndex >= 2 || (
-          toolRoute.foundPrompt
-          && toolRoute.calls.length === 1
-          && toolRoute.calls[0].name === 'aiworker_director_brain'
-          && toolRoute.calls[0].arguments.action === 'explain'
-        )
+      : turnIndex >= 2 || canonicalTechniqueToolRouteVerified(toolRoute)
     const fallbackToolCalls = toolRoute.calls.filter(callEntry => (
       callEntry.name !== 'aiworker_director_brain'
     ))
@@ -1631,7 +1623,8 @@ try {
     && seeded.currentTurnRawToolResultVisibilityVerified === true
     && seeded.blindSemanticProjectionVerified === true
     && seeded.toolPairs >= MINIMUM_TOOL_PAIRS
-  const completeTurnCompactionPolicy = MID_TURN_PRECHECK_ENABLED === false
+  const completeTurnCompactionPolicy =
+    config.agents.defaults.compaction.midTurnPrecheck.enabled === false
   const noRepeatedCompactionAcrossTurns = finalCompactionCount === 1
     && turns[0]?.compactionDelta === 1
     && turns.slice(1).every(turn => turn.compactionDelta === 0)
@@ -1757,9 +1750,14 @@ try {
       semanticAssistantAcknowledgementsPersisted:
         seeded.semanticAssistantAcknowledgementsPersisted,
       semanticSeedRoleSequenceVerified: seeded.semanticSeedRoleSequenceVerified,
+      directorSkillSha256,
       accidentReplay: seeded.accidentReplay || null,
     },
     policy: {
+      isolatedDirectorSkill: {
+        installed: existsSync(join(isolatedDirectorSkillPath, 'SKILL.md')),
+        sha256: directorSkillSha256,
+      },
       effectiveToolIdsBefore: toolIdsBefore,
       effectiveToolIdsAfter: toolIdsAfter,
       requiredEffectiveToolIds: REQUIRED_EFFECTIVE_TOOL_IDS,

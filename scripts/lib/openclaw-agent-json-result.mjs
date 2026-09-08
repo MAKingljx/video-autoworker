@@ -44,14 +44,26 @@ function hasExplicitDeliveryEvidence(value) {
 }
 
 /**
- * Parse the public OpenClaw 2026.9 agent --json envelope without accepting
- * historical nested result/output shapes. The caller owns and must clear the
- * returned visible text after deriving bounded evidence from it.
+ * OpenClaw 2026.9 local execution returns AgentRunResult directly; Gateway
+ * execution wraps that same result in a terminal run response. Normalize those
+ * two public contracts once, then read model/text only from AgentRunResult.
+ * The caller owns the visible text and must clear it after deriving evidence.
  */
 export function parseOpenClawAgentJsonResult(value, { argv, expectedModel } = {}) {
   assertNonDeliveringAgentInvocation(argv)
-  const envelope = record(value)
-  if (!envelope || !Array.isArray(envelope.payloads)) fail('envelope_invalid')
+  const response = record(value)
+  if (!response) fail('envelope_invalid')
+  if (hasExplicitDeliveryEvidence(response)) fail('unexpected_delivery_evidence')
+  let envelope = response
+  if (Object.hasOwn(response, 'result')) {
+    if (Object.hasOwn(response, 'payloads') || Object.hasOwn(response, 'meta')
+      || !nonEmpty(response.runId) || !record(response.result)) fail('envelope_invalid')
+    if (!['ok', 'completed'].includes(response.status)) fail('run_not_completed')
+    envelope = response.result
+  } else if (Object.hasOwn(response, 'status') && !['ok', 'completed'].includes(response.status)) {
+    fail('run_not_completed')
+  }
+  if (!Array.isArray(envelope.payloads)) fail('envelope_invalid')
   const meta = record(envelope.meta)
   const agentMeta = record(meta?.agentMeta)
   if (!meta || !agentMeta) fail('agent_meta_missing')
@@ -87,5 +99,24 @@ export function parseOpenClawAgentJsonResult(value, { argv, expectedModel } = {}
     totalTokens,
     externalDelivery: false,
     deliveryEvidence: 'agent-cli-without-deliver-and-no-explicit-delivery-evidence',
+  })
+}
+
+export function summarizeNonDeliveryVerification({
+  attemptedTurns,
+  verifiedTurns,
+  explicitDeliveryEvidenceDetected = false,
+} = {}) {
+  if (!Number.isSafeInteger(attemptedTurns) || attemptedTurns < 0
+    || !Number.isSafeInteger(verifiedTurns) || verifiedTurns < 0
+    || verifiedTurns > attemptedTurns
+    || typeof explicitDeliveryEvidenceDetected !== 'boolean') {
+    fail('non_delivery_verification_invalid')
+  }
+  const verified = verifiedTurns === attemptedTurns && explicitDeliveryEvidenceDetected === false
+  return Object.freeze({
+    externalDelivery: verified ? false : null,
+    externalDeliveryVerified: verified,
+    explicitDeliveryEvidenceDetected,
   })
 }
