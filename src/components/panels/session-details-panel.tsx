@@ -6,6 +6,10 @@ import { Button } from '@/components/ui/button'
 import { useMissionControl } from '@/store'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 import { createClientLogger } from '@/lib/client-logger'
+import {
+  parseSessionListResponse,
+  SESSION_READ_UNAVAILABLE_MESSAGE,
+} from '@/components/session-list-response'
 
 const log = createClientLogger('SessionDetails')
 
@@ -26,14 +30,21 @@ export function SessionDetailsPanel() {
     setSessions,
     availableModels
   } = useMissionControl()
+  const [sessionReadUnavailable, setSessionReadUnavailable] = useState(false)
 
   // Smart polling for sessions (60s, visibility-aware)
   const loadSessions = useCallback(async () => {
     try {
       const response = await fetch('/api/sessions')
-      const data = await response.json()
-      setSessions(data.sessions || data)
+      const result = parseSessionListResponse(await response.json().catch(() => null))
+      if (!response.ok || !result.available) {
+        setSessionReadUnavailable(true)
+        return
+      }
+      setSessionReadUnavailable(false)
+      setSessions(result.sessions as Parameters<typeof setSessions>[0])
     } catch (error) {
+      setSessionReadUnavailable(true)
       log.error('Failed to load sessions:', error)
     }
   }, [setSessions])
@@ -219,7 +230,14 @@ export function SessionDetailsPanel() {
         <p className="text-muted-foreground mt-2">
           {t('subtitle')}
         </p>
+        <p className="mt-1 text-xs text-muted-foreground">范围：默认运行时会话</p>
       </div>
+
+      {sessionReadUnavailable && (
+        <div role="status" className="rounded-lg border border-warning/30 bg-warning/5 px-4 py-3 text-sm text-warning">
+          {SESSION_READ_UNAVAILABLE_MESSAGE}
+        </div>
+      )}
 
       {/* Filters and Controls */}
       <div className="bg-card border border-border rounded-lg p-4">

@@ -46,10 +46,16 @@ function cleanDeployScriptFixture(root: string): string {
     join(repository, 'ops/n8n/workflows'),
     { recursive: true },
   )
+  mkdirSync(join(repository, 'ops', 'recovery'), { recursive: true, mode: 0o700 })
+  cpSync(
+    resolve(process.cwd(), 'ops/recovery/install-blue-green-execve-adapter.mjs'),
+    join(repository, 'ops/recovery/install-blue-green-execve-adapter.mjs'),
+  )
   execFileSync('git', ['init', '-b', 'main'], { cwd: repository, stdio: 'ignore' })
   execFileSync('git', ['config', 'user.name', 'Blue Green Test'], { cwd: repository })
   execFileSync('git', ['config', 'user.email', 'blue-green-test@example.invalid'], { cwd: repository })
-  execFileSync('git', ['add', '--', 'scripts', 'ops/n8n/workflows'], { cwd: repository })
+  execFileSync('git', ['add', '--', 'scripts', 'ops/n8n/workflows',
+    'ops/recovery/install-blue-green-execve-adapter.mjs'], { cwd: repository })
   execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repository, stdio: 'ignore' })
   return join(repository, 'scripts/deploy-blue-green.sh')
 }
@@ -2245,6 +2251,8 @@ check_legacy_databases_quiescent "$1" "$2"
     )
     expect(sourceGate).toContain('scripts/deploy-blue-green.sh')
     expect(sourceGate).toContain('scripts/lib/shared-deployment-lock.mjs')
+    expect(sourceGate).toContain('scripts/lib/blue-green-installed-manager.mjs')
+    expect(sourceGate).toContain('ops/recovery/install-blue-green-execve-adapter.mjs')
     expect(sourceGate).toContain('scripts/check-sensitive-content.mjs')
     expect(sourceGate).toContain('scripts/lib/sensitive-value-scanner.mjs')
     expect(sourceGate).toContain('scripts/lib/openclaw-private-gateway-rpc.mjs')
@@ -2257,6 +2265,22 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(sourceGate).toContain('scripts/install-aiworker-director-brain.sh')
     expect(sourceGate).toContain('scripts/apply-openclaw-runtime-convergence.sh')
     expect(sourceGate).toContain('GIT_OPTIONAL_LOCKS=0')
+    const managerResolver = deployScript.slice(
+      deployScript.indexOf('assert_normal_service_manager_installation()'),
+      deployScript.indexOf('verify_director_video_release_chain()'),
+    )
+    expect(managerResolver).toContain('"$INSTALLED_MANAGER_RESOLVER" resolve')
+    expect(managerResolver).toContain('"$NORMAL_SERVICE_MANAGER" preflight all')
+    expect(managerResolver).toContain('assert_normal_service_manager_installation')
+    expect(deployScript).toContain('! normal_service_manager status "$slot"')
+    expect(retireBody).toContain('manager="normal_service_manager"')
+    const managerTransitionBody = deployScript.slice(
+      deployScript.indexOf('preflight_transition()'),
+      deployScript.indexOf('transition_with_verification()'),
+    )
+    expect(managerTransitionBody).toContain('normal_service_manager status router')
+    expect(managerTransitionBody).toContain('normal_service_manager start "$target"')
+    expect(managerTransitionBody).not.toContain('$SCRIPT_DIR/manage-blue-green-services.sh')
     const preShutdownReleaseGate = bootstrapBody.indexOf(
       'bootstrap_preflight_contract="$(verify_director_video_release_preflight',
     )

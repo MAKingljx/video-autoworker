@@ -12,6 +12,7 @@ import { DigitalClock } from '@/components/ui/digital-clock'
 import { ThemeSelector } from '@/components/ui/theme-selector'
 import { SystemNotificationsMenu } from '@/components/layout/system-notifications-menu'
 import { getNavigationMetrics, navigationMetricEventName } from '@/lib/navigation-metrics'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 interface SearchResult {
   type: string
@@ -43,7 +44,7 @@ const QUICK_NAV_COMMANDS: Array<{ panel: string; titleKey: string; title: string
 
 export function HeaderBar() {
   const { connection, sessions, activeTenant, activeProject } = useMissionControl()
-  const { isConnected, reconnect } = useWebSocket()
+  const { reconnect } = useWebSocket()
   const navigateToPanel = useNavigateToPanel()
   const prefetchPanel = usePrefetchPanel()
   const th = useTranslations('header')
@@ -462,8 +463,10 @@ function ModeBadge({
     )
   }
 
-  const isConnected = connection.isConnected
-  const isReconnecting = !isConnected && connection.reconnectAttempts > 0
+  const gateway = selectGatewayConnection(connection)
+  const isConnected = gateway.operational
+  const isChecking = gateway.state === 'checking'
+  const canReconnect = connection.mode === 'browser-websocket' && !gateway.browserTransportConnected
 
   let dotClass: string
   let borderClass: string
@@ -474,12 +477,14 @@ function ModeBadge({
     dotClass = 'bg-green-500'
     borderClass = 'border-green-500/25 bg-green-500/10'
     textClass = 'text-green-400'
-    statusLabel = connection.latency != null ? `${connection.latency}ms` : th('connected')
-  } else if (isReconnecting) {
+    statusLabel = gateway.latency != null ? `${gateway.latency}ms` : th('connected')
+  } else if (isChecking) {
     dotClass = 'bg-amber-500 animate-pulse'
     borderClass = 'border-amber-500/25 bg-amber-500/10'
     textClass = 'text-amber-400'
-    statusLabel = th('retry', { count: connection.reconnectAttempts })
+    statusLabel = connection.mode === 'browser-websocket'
+      ? th('retry', { count: connection.reconnectAttempts })
+      : '…'
   } else {
     dotClass = 'bg-red-500 animate-pulse'
     borderClass = 'border-red-500/25 bg-red-500/10'
@@ -496,9 +501,9 @@ function ModeBadge({
       onMouseLeave={() => setShowTooltip(false)}
     >
       <button
-        onClick={!isConnected ? onReconnect : undefined}
+        onClick={canReconnect ? onReconnect : undefined}
         className={`flex items-center gap-1.5 px-2 py-1 rounded-md text-2xs border ${borderClass} ${
-          !isConnected ? 'cursor-pointer hover:brightness-125' : 'cursor-default'
+          canReconnect ? 'cursor-pointer hover:brightness-125' : 'cursor-default'
         } transition-all`}
       >
         <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
@@ -512,24 +517,24 @@ function ModeBadge({
           <div className="space-y-1.5 text-muted-foreground">
             <div className="flex justify-between">
               <span>{th('status')}</span>
-              <span className={isConnected ? 'text-green-400' : isReconnecting ? 'text-amber-400' : 'text-red-400'}>
-                {isConnected ? th('connected') : isReconnecting ? th('reconnecting') : th('disconnected')}
+              <span className={isConnected ? 'text-green-400' : isChecking ? 'text-amber-400' : 'text-red-400'}>
+                {isConnected ? th('connected') : isChecking ? '…' : th('disconnected')}
               </span>
             </div>
             <div className="flex justify-between">
               <span>{th('host')}</span>
               <span className="font-mono text-foreground/80 truncate ml-2">{wsHost}</span>
             </div>
-            {connection.latency != null && (
+            {gateway.latency != null && (
               <div className="flex justify-between">
                 <span>{th('latency')}</span>
-                <span className="font-mono text-foreground/80">{connection.latency}ms</span>
+                <span className="font-mono text-foreground/80">{gateway.latency}ms</span>
               </div>
             )}
             <div className="flex justify-between">
               <span>{th('webSocket')}</span>
-              <span className={isConnected ? 'text-green-400' : 'text-red-400'}>
-                {isConnected ? th('live') : th('down')}
+              <span className={gateway.browserTransportConnected ? 'text-green-400' : 'text-muted-foreground/50'}>
+                {gateway.browserTransportConnected ? th('live') : th('off')}
               </span>
             </div>
             <div className="flex justify-between">
@@ -538,14 +543,14 @@ function ModeBadge({
                 {connection.sseConnected ? th('live') : th('off')}
               </span>
             </div>
-            {!isConnected && connection.reconnectAttempts > 0 && (
+            {connection.mode === 'browser-websocket' && !isConnected && connection.reconnectAttempts > 0 && (
               <div className="flex justify-between">
                 <span>{th('retries')}</span>
                 <span className="text-amber-400">{connection.reconnectAttempts}</span>
               </div>
             )}
           </div>
-          {!isConnected && (
+          {canReconnect && (
             <div className="mt-2 pt-2 border-t border-border/40 text-muted-foreground/60 text-[10px]">
               {th('clickToReconnect')}
             </div>

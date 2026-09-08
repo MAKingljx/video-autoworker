@@ -22,13 +22,19 @@ export async function GET(request: NextRequest) {
     const mappedGatewaySessions = mapGatewaySessions(gatewaySessions)
 
     if (mappedGatewaySessions.length === 0) {
-      return NextResponse.json({ sessions: [] })
+      return NextResponse.json({ available: true, sessions: [] })
     }
 
-    return NextResponse.json({ sessions: dedupeAndSortSessions(mappedGatewaySessions) })
+    return NextResponse.json({
+      available: true,
+      sessions: dedupeAndSortSessions(mappedGatewaySessions),
+    })
   } catch (error) {
     logger.error({ err: error }, 'Sessions API error')
-    return NextResponse.json({ sessions: [] })
+    return NextResponse.json(
+      { available: false, error: 'Runtime sessions are unavailable' },
+      { status: 503 },
+    )
   }
 }
 
@@ -139,7 +145,12 @@ export async function POST(request: NextRequest) {
       { session_key: sessionKey, action }
     )
 
-    return NextResponse.json({ success: true, action, sessionKey, result })
+    return NextResponse.json({
+      success: true,
+      action,
+      sessionKey,
+      result,
+    })
   } catch (error: any) {
     logger.error({ err: error }, 'Session POST error')
     return NextResponse.json({ error: error.message || 'Session action failed' }, { status: 500 })
@@ -173,7 +184,11 @@ export async function DELETE(request: NextRequest) {
       { session_key: sessionKey, action: 'delete' }
     )
 
-    return NextResponse.json({ success: true, sessionKey, result })
+    return NextResponse.json({
+      success: true,
+      sessionKey,
+      result,
+    })
   } catch (error: any) {
     logger.error({ err: error }, 'Session DELETE error')
     return NextResponse.json({ error: error.message || 'Session deletion failed' }, { status: 500 })

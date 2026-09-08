@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { config } from '@/lib/config'
-import { getAllGatewaySessions } from '@/lib/openclaw-session-source'
-import { parseJsonlTranscript, readSessionJsonl, type TranscriptMessage, type MessageContentPart } from '@/lib/transcript-parser'
+import { getRuntimeProvider } from '@/lib/runtime-provider'
+import type { RuntimeSessionMessage as TranscriptMessage, RuntimeSessionMessagePart as MessageContentPart } from '@/lib/runtime/contracts'
+import { logger } from '@/lib/logger'
 
 export interface AggregateEvent {
   id: string
@@ -18,8 +18,8 @@ export interface AggregateEvent {
 /**
  * GET /api/sessions/transcript/aggregate?limit=100&since=<unix-ms>
  *
- * Fan out to all active session JSONL files on disk, parse, merge into
- * a single chronological event stream for the agent-feed panel.
+ * Fan out to recent sessions through the selected runtime and merge a single
+ * chronological event stream for the agent-feed panel.
  */
 export async function GET(request: NextRequest) {
   const auth = requireRole(request, 'viewer')
@@ -29,42 +29,46 @@ export async function GET(request: NextRequest) {
   const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '100', 10), 1), 500)
   const since = parseInt(searchParams.get('since') || '0', 10) || 0
 
-  const stateDir = config.openclawStateDir
-  if (!stateDir) {
-    return NextResponse.json({ events: [], sessionCount: 0 })
-  }
+  try {
+    const runtimeProvider = getRuntimeProvider()
+    const sessions = await runtimeProvider.listSessions({ updatedWithinMs: 60 * 60 * 1000 })
+    const allEvents: AggregateEvent[] = []
 
-  const sessions = getAllGatewaySessions()
-  const allEvents: AggregateEvent[] = []
+    // Keep pressure on the selected runtime bounded while reading independent histories.
+    for (let offset = 0; offset < sessions.length; offset += 6) {
+      const batch = sessions.slice(offset, offset + 6)
+      const histories = await Promise.all(
+        batch.map((session) => runtimeProvider.getSessionHistory(session.key, { limit: 500 })),
+      )
+      for (let index = 0; index < batch.length; index += 1) {
+        const session = batch[index]
+        const messages = histories[index].messages
+        let lineIndex = 0
 
-  for (const session of sessions) {
-    if (!session.sessionId) continue
+        for (const msg of messages) {
+          const ts = msg.timestamp ?? session.updatedAt
+          if (since && ts <= since) { lineIndex++; continue }
 
-    const raw = readSessionJsonl(stateDir, session.agent, session.sessionId)
-    if (!raw) continue
-
-    const messages = parseJsonlTranscript(raw, 500)
-    let lineIndex = 0
-
-    for (const msg of messages) {
-      const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : session.updatedAt
-      if (since && ts <= since) { lineIndex++; continue }
-
-      for (const part of msg.parts) {
-        allEvents.push(partToEvent(part, msg.role, ts, session.key, session.agent, lineIndex))
-        lineIndex++
+          for (const part of msg.parts) {
+            allEvents.push(partToEvent(part, msg.role, ts, session.key, session.agent, lineIndex))
+            lineIndex++
+          }
+        }
       }
     }
+
+    // Sort chronologically (newest last), take the last `limit` entries
+    allEvents.sort((a, b) => a.ts - b.ts)
+    const trimmed = allEvents.slice(-limit)
+
+    return NextResponse.json({
+      events: trimmed,
+      sessionCount: sessions.length,
+    })
+  } catch (error) {
+    logger.warn({ err: error }, 'Runtime session transcript aggregation failed')
+    return NextResponse.json({ error: 'Runtime session history unavailable' }, { status: 503 })
   }
-
-  // Sort chronologically (newest last), take the last `limit` entries
-  allEvents.sort((a, b) => a.ts - b.ts)
-  const trimmed = allEvents.slice(-limit)
-
-  return NextResponse.json({
-    events: trimmed,
-    sessionCount: sessions.length,
-  })
 }
 
 function partToEvent(

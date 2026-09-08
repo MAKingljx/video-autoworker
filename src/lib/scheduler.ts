@@ -6,7 +6,8 @@ import { readdirSync, statSync, unlinkSync } from 'fs'
 import { logger } from './logger'
 import { processWebhookRetries } from './webhooks'
 import { syncClaudeSessions } from './claude-sessions'
-import { pruneGatewaySessionsOlderThan, getAgentLiveStatuses } from './openclaw-session-source'
+import { getRuntimeProvider } from './runtime-provider'
+import { deriveAgentLiveStatuses } from './runtime/sessions'
 import { eventBus } from './event-bus'
 import { syncSkillsFromDisk } from './skill-sync'
 import { syncLocalAgents } from './local-agent-sync'
@@ -344,6 +345,10 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
     const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
     const ret = config.retention
+    const runtimeProvider = getRuntimeProvider()
+    if (ret.gatewaySessions > 0 && !runtimeProvider.sessionCapabilities.bulkPrune) {
+      return { ok: false, message: 'Cleanup failed: runtime session bulk pruning is unavailable' }
+    }
     let totalDeleted = 0
 
     const targets = [
@@ -384,7 +389,7 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
     }
 
     if (ret.gatewaySessions > 0) {
-      const sessionCleanup = pruneGatewaySessionsOlderThan(ret.gatewaySessions)
+      const sessionCleanup = await runtimeProvider.pruneSessionsOlderThan(ret.gatewaySessions)
       totalDeleted += sessionCleanup.deleted
     }
 
@@ -539,7 +544,8 @@ async function runHeartbeatCheck(): Promise<{ ok: boolean; message: string }> {
 
 /** Sync live agent statuses from gateway session files into the DB */
 async function syncAgentLiveStatuses(): Promise<number> {
-  const liveStatuses = getAgentLiveStatuses()
+  const sessions = await getRuntimeProvider().listSessions()
+  const liveStatuses = deriveAgentLiveStatuses(sessions)
   if (liveStatuses.size === 0) return 0
 
   const db = getDatabase()

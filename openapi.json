@@ -4001,10 +4001,23 @@
                     },
                     "credential_source": {
                       "type": "string",
-                      "enum": ["environment", "inline-config", "exec-reference", "none"]
+                      "enum": [
+                        "environment",
+                        "inline-config",
+                        "exec-reference",
+                        "none"
+                      ]
                     },
                     "server_managed": {
                       "type": "boolean"
+                    },
+                    "connection_mode": {
+                      "type": "string",
+                      "enum": [
+                        "server-managed",
+                        "browser-websocket"
+                      ],
+                      "description": "Managed service health and browser transport are separate states"
                     }
                   }
                 }
@@ -4031,22 +4044,8 @@
         "tags": [
           "Admin"
         ],
-        "summary": "Probe gateway health",
+        "summary": "Probe all configured gateways and persist health results",
         "operationId": "probeGatewayHealth",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "gateway_id": {
-                    "type": "integer"
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Health check results",
@@ -4054,15 +4053,48 @@
               "application/json": {
                 "schema": {
                   "type": "object",
+                  "required": [
+                    "results",
+                    "probed_at"
+                  ],
                   "properties": {
-                    "healthy": {
-                      "type": "boolean"
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "status",
+                          "latency"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "online",
+                              "offline",
+                              "error"
+                            ]
+                          },
+                          "latency": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        }
+                      }
                     },
-                    "latency_ms": {
-                      "type": "number"
-                    },
-                    "details": {
-                      "type": "object"
+                    "probed_at": {
+                      "type": "integer",
+                      "description": "Probe completion time in Unix milliseconds"
                     }
                   }
                 }
@@ -4074,6 +4106,93 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Read-only health probe for one configured gateway",
+        "operationId": "readGatewayHealth",
+        "description": "Probes the selected configured gateway without writing health history or returning credentials. This selection does not change the application default session runtime.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Selected gateway health",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "results",
+                    "probed_at"
+                  ],
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "status",
+                          "latency"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "online",
+                              "offline",
+                              "error"
+                            ]
+                          },
+                          "latency": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "error": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "probed_at": {
+                      "type": "integer",
+                      "description": "Probe completion time in Unix milliseconds"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         }
       }
@@ -5759,25 +5878,8 @@
         "tags": [
           "Sessions"
         ],
-        "summary": "List gateway sessions",
+        "summary": "List sessions from the application default runtime",
         "operationId": "listSessions",
-        "parameters": [
-          {
-            "name": "agent",
-            "in": "query",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "schema": {
-              "type": "integer",
-              "default": 50
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Session list",
@@ -5791,36 +5893,99 @@
                       "items": {
                         "type": "object",
                         "properties": {
+                          "id": {
+                            "type": "string"
+                          },
                           "key": {
                             "type": "string"
                           },
                           "agent": {
                             "type": "string"
                           },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "age": {
+                            "type": "string"
+                          },
                           "model": {
                             "type": "string"
                           },
-                          "status": {
+                          "tokens": {
                             "type": "string"
                           },
-                          "totalTokens": {
+                          "channel": {
+                            "type": "string"
+                          },
+                          "flags": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "active": {
+                            "type": "boolean"
+                          },
+                          "startTime": {
                             "type": "integer"
                           },
-                          "updatedAt": {
+                          "lastActivity": {
                             "type": "integer"
+                          },
+                          "source": {
+                            "type": "string",
+                            "enum": [
+                              "gateway"
+                            ]
                           }
                         }
                       }
+                    },
+                    "available": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
                     }
-                  }
+                  },
+                  "required": [
+                    "available",
+                    "sessions"
+                  ]
                 }
               }
             }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "503": {
+            "description": "The selected runtime could not provide a session list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "available",
+                    "error"
+                  ],
+                  "properties": {
+                    "available": {
+                      "type": "boolean",
+                      "enum": [
+                        false
+                      ]
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
           }
-        }
+        },
+        "description": "Returns up to 100 recent sessions from the process-bound runtime. Gateway health selection does not change this scope. Failure is unavailable, never an empty successful list."
       },
       "delete": {
         "tags": [

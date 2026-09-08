@@ -48,6 +48,12 @@ import { Loader } from '@/components/ui/loader'
 import { ProjectManagerModal } from '@/components/modals/project-manager-modal'
 import { ExecApprovalOverlay } from '@/components/modals/exec-approval-overlay'
 import { useWebSocket } from '@/lib/websocket'
+import {
+  connectionPatchFromDescriptor,
+  parseGatewayConnectResponse,
+} from '@/lib/gateway-connection-state'
+import { useManagedGatewayHealth } from '@/lib/use-managed-gateway-health'
+import { parseSessionListResponse } from '@/components/session-list-response'
 import { useServerEvents } from '@/lib/use-server-events'
 import { completeNavigationTiming } from '@/lib/navigation-metrics'
 import { panelHref, useNavigateToPanel } from '@/lib/navigation'
@@ -103,7 +109,8 @@ export default function Home() {
   const tb = useTranslations('boot')
   const tp = useTranslations('page')
   const tc = useTranslations('common')
-  const { activeTab, setActiveTab, setCurrentUser, setDashboardMode, setGatewayAvailable, setLocalSessionsAvailable, setCapabilitiesChecked, setSubscription, setDefaultOrgName, setUpdateAvailable, setOpenclawUpdate, showOnboarding, setShowOnboarding, liveFeedOpen, toggleLiveFeed, showProjectManagerModal, setShowProjectManagerModal, fetchProjects, bootComplete, setBootComplete, setAgents, setSessions, setProjects, setInterfaceMode, setMemoryGraphAgents, setSkillsData } = useMissionControl()
+  const { activeTab, setActiveTab, setCurrentUser, setDashboardMode, setGatewayAvailable, setLocalSessionsAvailable, setCapabilitiesChecked, setSubscription, setDefaultOrgName, setUpdateAvailable, setOpenclawUpdate, showOnboarding, setShowOnboarding, liveFeedOpen, toggleLiveFeed, showProjectManagerModal, setShowProjectManagerModal, fetchProjects, bootComplete, setBootComplete, setAgents, setSessions, setProjects, setInterfaceMode, setMemoryGraphAgents, setSkillsData, setConnection } = useMissionControl()
+  useManagedGatewayHealth()
 
   // Sync URL → Zustand activeTab
   const pathname = usePathname()
@@ -218,14 +225,15 @@ export default function Home() {
         })
         if (!connectRes.ok) return { attempted: true, connected: false }
 
-        const payload = await connectRes.json().catch(() => ({}))
-        if (payload?.server_managed) {
+        const descriptor = parseGatewayConnectResponse(await connectRes.json().catch(() => null))
+        if (!descriptor || descriptor.gatewayId !== primaryGateway.id) {
+          return { attempted: true, connected: false }
+        }
+        setConnection(connectionPatchFromDescriptor(descriptor))
+        if (descriptor.mode === 'server-managed') {
           return { attempted: true, connected: true }
         }
-        const wsUrl = typeof payload?.ws_url === 'string' ? payload.ws_url : ''
-        if (!wsUrl) return { attempted: true, connected: false }
-
-        connect(wsUrl)
+        connect(descriptor.browserWebSocketUrl)
         return { attempted: true, connected: true }
       } catch {
         return { attempted: false, connected: false }
@@ -380,9 +388,10 @@ export default function Home() {
         })
         .finally(() => { markStep('agents') }),
       fetch('/api/sessions')
-        .then(r => r.ok ? r.json() : null)
+        .then(r => r.json().catch(() => null))
         .then((sessionsData) => {
-          if (sessionsData?.sessions) setSessions(sessionsData.sessions)
+          const result = parseSessionListResponse(sessionsData)
+          if (result.available) setSessions(result.sessions as Parameters<typeof setSessions>[0])
         })
         .finally(() => { markStep('sessions') }),
       fetch('/api/projects')
@@ -406,7 +415,7 @@ export default function Home() {
     ]).catch(() => { /* panels will lazy-load as fallback */ })
 
   // eslint-disable-next-line react-hooks/exhaustive-deps -- boot once on mount, not on every pathname change
-  }, [connect, router, setCurrentUser, setDashboardMode, setGatewayAvailable, setLocalSessionsAvailable, setCapabilitiesChecked, setSubscription, setUpdateAvailable, setShowOnboarding, setAgents, setSessions, setProjects, setInterfaceMode, setMemoryGraphAgents, setSkillsData])
+  }, [connect, router, setCurrentUser, setDashboardMode, setGatewayAvailable, setLocalSessionsAvailable, setCapabilitiesChecked, setSubscription, setUpdateAvailable, setShowOnboarding, setAgents, setSessions, setProjects, setInterfaceMode, setMemoryGraphAgents, setSkillsData, setConnection])
 
   if (!isClient || !bootComplete) {
     return <Loader variant="page" steps={isClient ? initSteps : undefined} />

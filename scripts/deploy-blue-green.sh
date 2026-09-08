@@ -12,6 +12,7 @@ LOCK_DIR="$RUN_DIR/.deployment.lock"
 AUDITOR="$PROJECT_ROOT/scripts/check-standalone-artifact.mjs"
 DIRECTOR_VIDEO_READINESS="$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs"
 SHARED_DEPLOYMENT_LOCK_SHELL="$PROJECT_ROOT/scripts/lib/shared-deployment-lock.sh"
+INSTALLED_MANAGER_RESOLVER="$PROJECT_ROOT/scripts/lib/blue-green-installed-manager.mjs"
 NODE_BIN="${NODE_BIN:-node}"
 LSOF_BIN=/usr/sbin/lsof
 ROUTER_HOST="${AIWORKER_BG_ROUTER_HOST:-127.0.0.1}"
@@ -36,6 +37,11 @@ RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
 STAGING_WORK_ROOT=""
 BOOTSTRAP_MAINTENANCE=0
 DEPLOYMENT_SOURCE_GATE_COMPLETE=0
+NORMAL_SERVICE_MANAGER_RESOLVED=0
+NORMAL_SERVICE_MANAGER=""
+NORMAL_SERVICE_MANAGER_INSTALLATION=""
+NORMAL_SERVICE_MANAGER_INSTALLATION_SHA256=""
+NORMAL_SERVICE_MANAGER_LAUNCH_AGENTS_DIR=""
 BOOTSTRAP_SUCCESSOR_MODE=0
 BOOTSTRAP_HISTORICAL_PROJECT_ROOT="$PROJECT_ROOT"
 BOOTSTRAP_HISTORICAL_SOURCE_COMMIT=""
@@ -288,6 +294,8 @@ verify_deployment_source_gate() {
     scripts/lib/runtime-tree-manifest.mjs
     scripts/lib/legacy-preinstall-handoff-contract.mjs
     scripts/lib/blue-green-execve-contract.mjs
+    scripts/lib/blue-green-installed-manager.mjs
+    ops/recovery/install-blue-green-execve-adapter.mjs
     scripts/manage-blue-green-services.sh
     scripts/install-blue-green-launch-agents.sh
     scripts/start-standalone-slot.sh
@@ -339,6 +347,70 @@ verify_deployment_source_gate() {
   [[ -z "$status" ]] \
     || fail "deployment source worktree and index must be clean before any blue-green mutation"
   DEPLOYMENT_SOURCE_GATE_COMPLETE=1
+}
+
+assert_normal_service_manager_installation() {
+  (( NORMAL_SERVICE_MANAGER_RESOLVED == 1 )) \
+    || fail "installed blue-green service manager is not resolved"
+  "$NODE_BIN" "$INSTALLED_MANAGER_RESOLVER" assert-installation \
+    "$NORMAL_SERVICE_MANAGER_INSTALLATION" "$NORMAL_SERVICE_MANAGER_INSTALLATION_SHA256" \
+    || fail "blue-green service installation changed during the operation"
+}
+
+resolve_normal_service_manager() {
+  (( NORMAL_SERVICE_MANAGER_RESOLVED == 0 )) || return 0
+  local values manager installation installation_sha launch_agents
+  launch_agents="${AIWORKER_BG_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
+  values="$("$NODE_BIN" "$INSTALLED_MANAGER_RESOLVER" resolve \
+    --project-root "$PROJECT_ROOT" \
+    --run-dir "$RUN_DIR" \
+    --releases-dir "$RELEASES_DIR" \
+    --launch-agents-dir "$launch_agents")" \
+    || fail "unable to resolve the installed blue-green service manager"
+  [[ "$(printf '%s\n' "$values" | wc -l | tr -d '[:space:]')" == 3 ]] \
+    || fail "installed blue-green service manager resolution is invalid"
+  manager="$(printf '%s\n' "$values" | sed -n '1p')"
+  installation="$(printf '%s\n' "$values" | sed -n '2p')"
+  installation_sha="$(printf '%s\n' "$values" | sed -n '3p')"
+  [[ "$manager" == /* && "$manager" != *[$'\r\n']* && -x "$manager" && ! -L "$manager" ]] \
+    || fail "installed blue-green service manager path is invalid"
+  [[ "$installation" == "$RUN_DIR/supervisor/installation.json" \
+    && "$installation_sha" =~ ^[a-f0-9]{64}$ ]] \
+    || fail "installed blue-green service manager binding is invalid"
+  NORMAL_SERVICE_MANAGER="$manager"
+  NORMAL_SERVICE_MANAGER_INSTALLATION="$installation"
+  NORMAL_SERVICE_MANAGER_INSTALLATION_SHA256="$installation_sha"
+  NORMAL_SERVICE_MANAGER_LAUNCH_AGENTS_DIR="$launch_agents"
+  NORMAL_SERVICE_MANAGER_RESOLVED=1
+  assert_normal_service_manager_installation
+  AIWORKER_BG_RUN_DIR="$RUN_DIR" \
+    AIWORKER_BG_RELEASES_DIR="$RELEASES_DIR" \
+    AIWORKER_BG_SUPERVISOR_DIR="$RUN_DIR/supervisor" \
+    AIWORKER_BG_LAUNCH_AGENTS_DIR="$launch_agents" \
+    AIWORKER_BG_ROUTER_STATE="$STATE_FILE" \
+    AIWORKER_BG_ROUTER_PORT="$ROUTER_PORT" \
+    AIWORKER_BG_BLUE_PORT="$BLUE_PORT" \
+    AIWORKER_BG_GREEN_PORT="$GREEN_PORT" \
+    "$NORMAL_SERVICE_MANAGER" preflight all >/dev/null \
+    || fail "installed blue-green service manager preflight failed"
+  assert_normal_service_manager_installation
+}
+
+normal_service_manager() {
+  local manager_status=0
+  resolve_normal_service_manager
+  assert_normal_service_manager_installation
+  AIWORKER_BG_RUN_DIR="$RUN_DIR" \
+    AIWORKER_BG_RELEASES_DIR="$RELEASES_DIR" \
+    AIWORKER_BG_SUPERVISOR_DIR="$RUN_DIR/supervisor" \
+    AIWORKER_BG_LAUNCH_AGENTS_DIR="$NORMAL_SERVICE_MANAGER_LAUNCH_AGENTS_DIR" \
+    AIWORKER_BG_ROUTER_STATE="$STATE_FILE" \
+    AIWORKER_BG_ROUTER_PORT="$ROUTER_PORT" \
+    AIWORKER_BG_BLUE_PORT="$BLUE_PORT" \
+    AIWORKER_BG_GREEN_PORT="$GREEN_PORT" \
+    "$NORMAL_SERVICE_MANAGER" "$@" || manager_status=$?
+  assert_normal_service_manager_installation
+  return "$manager_status"
 }
 
 verify_director_video_release_chain() {
@@ -3154,9 +3226,7 @@ assert_retirement_proof() {
   ! kill -0 "$pid" 2>/dev/null || fail "retired $slot PID is still running"
   [[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ]] \
     || fail "retired $slot port is still listening"
-  [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
-    || fail "blue-green service manager is required before rebind"
-  ! "$SCRIPT_DIR/manage-blue-green-services.sh" status "$slot" >/dev/null 2>&1 \
+  ! normal_service_manager status "$slot" >/dev/null 2>&1 \
     || fail "retired $slot is still enabled or loaded in the service manager"
   "$NODE_BIN" - "$proof" "$freeze" "$slot" "$release_id" "$manifest" "$pid" "$live_db" \
     "$canonical_router_state" "$generation" "$active" "$state_updated_at" <<'NODE' \
@@ -3248,8 +3318,7 @@ retire_slot() {
   assert_private_file "$slot PID file" "$pid_file"
   recorded_pid="$(tr -d '[:space:]' < "$pid_file")"
   [[ "$recorded_pid" == "$pid" ]] || fail "$slot PID file does not match its runtime attestation"
-  manager="$SCRIPT_DIR/manage-blue-green-services.sh"
-  [[ -x "$manager" ]] || fail "blue-green service manager is required for retirement"
+  manager="normal_service_manager"
 
   if [[ ! -e "$(callback_freeze_file "$slot")" && ! -L "$(callback_freeze_file "$slot")" ]]; then
     probe_slot "$slot" active
@@ -3717,12 +3786,10 @@ preflight_transition() {
   assert_existing_candidate_runtime_compatible "$target"
   baseline_values="$(assert_baseline)"
   legacy_release="$(printf '%s\n' "$baseline_values" | sed -n '1p')"
-  [[ -x "$SCRIPT_DIR/manage-blue-green-services.sh" ]] \
-    || fail "blue-green service manager is required for switch and rollback"
-  "$SCRIPT_DIR/manage-blue-green-services.sh" status router >/dev/null \
-    && "$SCRIPT_DIR/manage-blue-green-services.sh" status "$source" >/dev/null \
+  normal_service_manager status router >/dev/null \
+    && normal_service_manager status "$source" >/dev/null \
     || fail "router and source slot must remain under the service manager"
-  "$SCRIPT_DIR/manage-blue-green-services.sh" start "$target" >/dev/null \
+  normal_service_manager start "$target" >/dev/null \
     || fail "candidate slot could not be started under the service manager"
   probe_slot "$target" active
   source_release="$(read_state_slot_release "$source")"

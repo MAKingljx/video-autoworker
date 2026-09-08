@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
@@ -35,6 +35,7 @@ vi.mock('@/lib/db', () => ({
 
 import { GET } from '@/app/api/gateways/route'
 import { POST as connectGateway } from '@/app/api/gateways/connect/route'
+import { GET as getGatewayHealth } from '@/app/api/gateways/health/route'
 
 function gateway(overrides: Record<string, unknown> = {}) {
   return {
@@ -46,6 +47,10 @@ function gateway(overrides: Record<string, unknown> = {}) {
 }
 
 describe('gateway credential boundary', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.allQueue = []
@@ -104,7 +109,11 @@ describe('gateway credential boundary', () => {
     const body = await response.json()
 
     expect(body).toMatchObject({
-      id: 1, token_set: true, credential_source: 'exec-reference', server_managed: true,
+      id: 1,
+      token_set: true,
+      credential_source: 'exec-reference',
+      connection_mode: 'server-managed',
+      server_managed: true,
     })
     expect(body).not.toHaveProperty('token')
     expect(JSON.stringify(body)).not.toContain(stale)
@@ -134,5 +143,27 @@ describe('gateway credential boundary', () => {
       if (previous === undefined) delete process.env.NEXT_PUBLIC_GATEWAY_URL
       else process.env.NEXT_PUBLIC_GATEWAY_URL = previous
     }
+  })
+
+  it('probes one managed gateway without persisting health history or credentials', async () => {
+    mocks.gateway = gateway()
+    const upstream = vi.fn().mockResolvedValue(new Response('', {
+      status: 200,
+      headers: { 'x-openclaw-version': '2026.9.2' },
+    }))
+    vi.stubGlobal('fetch', upstream)
+
+    const response = await getGatewayHealth(new NextRequest(
+      'http://127.0.0.1:3017/api/gateways/health?id=1',
+    ))
+    const body = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(body.results).toHaveLength(1)
+    expect(body.results[0]).toMatchObject({ id: 1, status: 'online' })
+    expect(mocks.runs).toEqual([])
+    expect(mocks.prepare.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toMatch(/\btoken\b/iu)
+    expect(JSON.stringify(body)).not.toContain('z'.repeat(64))
+    expect(upstream).toHaveBeenCalledTimes(1)
   })
 })

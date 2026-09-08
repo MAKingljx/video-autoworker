@@ -218,6 +218,28 @@ function runLauncher(fixture: LauncherFixture, overrides: Partial<NodeJS.Process
 }
 
 describe('standalone runtime launcher', () => {
+  it('keeps rollback artifacts valid and requires the new manager closure when used', async () => {
+    const fixture = createLauncherFixture()
+    try {
+      const checker = await import(pathToFileURL(artifactCheckerPath).href)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+      const deploy = join(fixture.standaloneRoot, 'scripts/deploy-blue-green.sh')
+      writeFileSync(deploy, '#!/bin/sh\nnode "$PROJECT_ROOT/scripts/lib/blue-green-installed-manager.mjs"\n')
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_dynamic_dependency_missing')
+      writeFileSync(join(fixture.standaloneRoot, 'scripts/lib/blue-green-installed-manager.mjs'),
+        "import '../../ops/recovery/install-blue-green-execve-adapter.mjs'\n")
+      const ops = join(fixture.standaloneRoot, 'ops/recovery')
+      mkdirSync(ops, { recursive: true })
+      writeFileSync(join(ops, 'install-blue-green-execve-adapter.mjs'),
+        "import '../../scripts/lib/blue-green-execve-contract.mjs'\n")
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing')
+      writeFileSync(join(fixture.standaloneRoot, 'scripts/lib/blue-green-execve-contract.mjs'), 'export {}\n')
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+    } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
+  })
+
   it('requires every runtime file consumed by the three OpenClaw installers', async () => {
     const repositoryRoot = process.cwd()
     const walk = (relativeRoot: string): string[] => {

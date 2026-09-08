@@ -43,11 +43,28 @@ flowchart TD
 
 本次 9.2 `agents.entries`、SecretRef、Gateway 状态 DTO 与工具目录兼容属于 OpenClaw 适配器的维护责任。既有恢复脚本路径因不可变来源与恢复凭据绑定保留；不能为目录美观移动历史源码或绕过发布合同。
 
+## 2026-09-08 维护约定与共享入口
+
+用户进一步明确：尽量少修改 OpenClaw 基础代码，把业务对接问题集中在我方适配层。本轮不修改 OpenClaw 核心或 npm dist。官方配置与 SDK 能解决的问题采用官方入口；平台版本、会话格式、工具调用和返回结构差异在适配层归一化，业务规则继续由同一应用服务负责。
+
+| 维护事项 | 唯一入口 | 验证方式 |
+| --- | --- | --- |
+| 会话能力、列表、历史与受控删除 | `src/lib/runtime/contracts.ts` 与 `runtime/providers/openclaw.ts`；应用通过 `runtime/sessions.ts` 读取 | provider 合同及 API 定向测试；读取失败明确 unavailable，不能当成空会话 |
+| Gateway 托管健康与浏览器连接 | `src/lib/gateway-connection-state.ts`；`use-managed-gateway-health.ts` 执行只读探测 | DTO、selector、轮询策略和凭据边界测试 |
+| OpenClaw agent CLI 结果 | `scripts/lib/openclaw-agent-json-result.mjs` | 本地执行/Gateway 包装、成功终态、模型身份与外送负例 |
+| 工具调用与结果配对验收 | `scripts/lib/openclaw-rich-canary-contract.mjs`；隔离执行观测由 `openclaw-canary-tool-observer.mjs` 提供 | 原始执行参数与脱敏持久化分开验证，按调用摘要绑定同一轮成功结果 |
+| 真实对话验收 | `pnpm qa:dialogue --config /绝对路径/私有inputs.json` | 每次一个自有合成会话、实际配置与版本绑定、官方 CAS 清理、脱敏报告 |
+| 本地及 CI 的 QA 合同测试 | `pnpm qa:contracts` | 共用一份测试入口；变更影响之外的已验证证据继续复用 |
+
+托管 Gateway 的健康状态不代表浏览器建立了 WebSocket。界面与轮询统一消费 selector：托管模式仍通过 HTTP 取数，实际浏览器 WebSocket 才能替代相应轮询。选择或探测失败不能写入虚假的已连接状态，也不能将 Gateway 凭据交给浏览器。
+
+每次发布保留独立、不可变的代码与制品版本；主机路径、运行输入和报告存放在私有目录。验收代码固定纳入 Git，后续只替换一次运行的配置，不复制新的测试实现。历史恢复脚本及收据继续按原绑定保留，常规更新使用既有蓝绿发布入口。入口按安装记录解析现役服务管理器，不假设发布仓库就是安装仓库；自有 launcher/auditor 升级先验证旧安装的完整 Git 与文件绑定，在服务停止后 CAS 更新并保留备份，历史源码不原地修改。新审计器同时接受已验证的旧应用制品，保留回滚能力。
+
 ## 仍需迁移的耦合点
 
 | 现有位置 | 当前事实 | 后续迁移方式 |
 | --- | --- | --- |
-| 会话合同和 chat 调用方 | 兼容保留 `sessionKey`、`raw` 与部分旧响应解析；本轮只隔离合同和实现 | 逐步改为不透明 session 引用、规范化 text/tool/error 结果及能力声明，原始平台 DTO 只留适配器；注册表可替换不等于整个聊天流程已脱离平台 |
+| 会话合同和 chat 调用方 | 兼容保留 `sessionKey`、`raw` 与部分旧响应解析；列表、历史、统计及受控删除已归入运行时适配器；消息发送与部分控制响应仍保留兼容字段 | 逐步改为不透明 session 引用、规范化 text/tool/error 结果及能力声明，原始平台 DTO 只留适配器；注册表可替换不等于整个聊天流程已脱离平台 |
 | `src/lib/task-dispatch.ts` | 普通任务派发仍直接调用 OpenClaw，且包含直接模型请求和模型路由 | 提取 TaskExecutionPort；模型选择留在策略层，平台调用和 DTO 解析进适配器 |
 | `src/lib/agent-sync.ts` | 当前代理目录来源仍为 OpenClaw 配置；新旧配置布局已共享处理 | 提取 AgentDirectoryPort；把平台外部 ID 映射为应用 agent ID，保留旧 openclawId 的读取兼容 |
 | `src/lib/auth.ts` 与 loopback 边界 | 生产外部身份仍统一来自 OpenClaw | 提取可信 IdentityContext；新平台完成身份映射与负例验收后一次性替换外部权威 |
@@ -57,10 +74,12 @@ flowchart TD
 
 ## 迁移顺序与验收
 
-1. 本轮完成会话接口隔离、可替换组合测试和当前 OpenClaw 恢复部署；现有数据库主键与迁移历史保持兼容。
+1. 本轮完成会话接口隔离、可替换组合测试和当前应用恢复后的正常发布；现有数据库主键与迁移历史保持兼容。
 2. 后续围绕同一应用服务逐个迁移任务执行、代理目录和身份接口。每个接口保留一套当前业务逻辑，调用方迁完后清理失去调用方的旧实现。
 3. 用户选定第二个平台后，使用真实平台侧装验证注册、消息、任务提交、幂等重试、回调乱序、取消、附件、权限拒绝、超时和平台不可用场景。提供者不支持的能力必须明确呈现。
 4. 在无 OpenClaw 二进制、配置目录、Gateway 与凭据的隔离环境运行真实端到端任务；确认业务数据可读、同一任务状态与结果可恢复。完成这一项，才可声明相应业务已脱离 OpenClaw。
 5. 实际平台切换先暂停新准入，保留进行中任务的原平台与 release 归属，排空后退役旧平台；不得在任务执行中途热改 provider 默认值。数据库迁移、身份切换和生产启用分别按具体影响确认。
 
 当前发布不引入新的数据库、任务状态机、平台账号或公开网络入口。未来可替换性通过稳定业务合同、平台适配器和真实脱离环境验收建立，而非通过重命名现有平台字段建立。
+
+应用的 OpenClaw doctor 修复入口只调用官方 doctor --fix 并复查，不再附带强制 session cleanup 或自行识别、归档孤立历史文件。批量历史清理必须由提供者声明能力；当前适配器明确不支持，界面和调度器不得静默执行文件删除。

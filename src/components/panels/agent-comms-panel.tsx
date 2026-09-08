@@ -384,14 +384,14 @@ export function AgentCommsPanel() {
           {/* Connection indicator */}
           <span
             className={`text-[10px] px-2 py-0.5 rounded-full border ${
-              connection.isConnected
+              connection.browserTransportConnected
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                 : connection.sseConnected
                   ? 'bg-primary/10 text-primary border-primary/25'
                   : 'bg-muted text-muted-foreground border-border/40'
             }`}
           >
-            {connection.isConnected ? t('connectionGateway') : connection.sseConnected ? t('connectionSse') : t('connectionPolling')}
+            {connection.browserTransportConnected ? t('connectionGateway') : connection.sseConnected ? t('connectionSse') : t('connectionPolling')}
           </span>
           {sourceMode !== 'empty' && (
             <span

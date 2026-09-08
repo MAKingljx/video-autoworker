@@ -4,7 +4,6 @@ import { runOpenClaw } from '@/lib/command'
 import { config } from '@/lib/config'
 import { getDatabase } from '@/lib/db'
 import { logger } from '@/lib/logger'
-import { archiveOrphanTranscriptsForStateDir } from '@/lib/openclaw-doctor-fix'
 import { parseOpenClawDoctorOutput } from '@/lib/openclaw-doctor'
 
 function getCommandDetail(error: unknown): { detail: string; code: number | null } {
@@ -63,23 +62,6 @@ export async function POST(request: Request) {
 
     const fixResult = await runOpenClaw(['doctor', '--fix'], { timeoutMs: 120000 })
     progress.push({ step: 'doctor', detail: 'Applied OpenClaw doctor config fixes.' })
-
-    try {
-      await runOpenClaw(['sessions', 'cleanup', '--all-agents', '--enforce', '--fix-missing'], { timeoutMs: 120000 })
-      progress.push({ step: 'sessions', detail: 'Pruned missing transcript entries from session stores.' })
-    } catch (error) {
-      const { detail } = getCommandDetail(error)
-      progress.push({ step: 'sessions', detail: detail || 'Session cleanup skipped.' })
-    }
-
-    const orphanFix = archiveOrphanTranscriptsForStateDir(config.openclawStateDir)
-    progress.push({
-      step: 'orphans',
-      detail:
-        orphanFix.archivedOrphans > 0
-          ? `Archived ${orphanFix.archivedOrphans} orphan transcript file(s) across ${orphanFix.storesScanned} session store(s).`
-          : `No orphan transcript files found across ${orphanFix.storesScanned} session store(s).`,
-    })
 
     const postFix = await runOpenClaw(['doctor'], { timeoutMs: 15000 })
     const status = parseOpenClawDoctorOutput(`${postFix.stdout}\n${postFix.stderr}`, postFix.code ?? 0, {

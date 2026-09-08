@@ -1,14 +1,5 @@
-export type { GatewaySession } from './openclaw-session-source'
-export {
-  countStaleGatewaySessions,
-  getAllGatewaySessions,
-  getGatewaySessionByKey,
-  getGatewaySessionStoreFiles,
-  getGatewayTranscriptPath,
-  getOpenClawAgentLiveStatuses as getAgentLiveStatuses,
-  invalidateSessionCache,
-  pruneGatewaySessionsOlderThan,
-} from './openclaw-session-source'
+export type { RuntimeSessionSummary as GatewaySession } from './runtime/contracts'
+export { deriveAgentLiveStatuses as getAgentLiveStatuses } from './runtime/sessions'
 
 export type GatewaySessionMatchOptions = {
   preferredSessionKey?: string | null
@@ -16,7 +7,7 @@ export type GatewaySessionMatchOptions = {
   fallbackToMain?: boolean
 }
 
-import type { GatewaySession } from './openclaw-session-source'
+import type { RuntimeSessionSummary as GatewaySession } from './runtime/contracts'
 
 export function resolveActiveGatewaySession(
   sessions: GatewaySession[],

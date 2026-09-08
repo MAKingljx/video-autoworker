@@ -6,6 +6,10 @@ import { useSmartPoll } from '@/lib/use-smart-poll'
 import { createClientLogger } from '@/lib/client-logger'
 import { Button } from '@/components/ui/button'
 import { SessionKindAvatar, SessionKindPill } from './session-kind-brand'
+import {
+  parseSessionListResponse,
+  SESSION_READ_UNAVAILABLE_MESSAGE,
+} from '@/components/session-list-response'
 
 const log = createClientLogger('ConversationList')
 
@@ -135,6 +139,7 @@ export function ConversationList({ onNewConversation: _onNewConversation }: Conv
     markConversationRead,
   } = useMissionControl()
   const [search, setSearch] = useState('')
+  const [sessionReadUnavailable, setSessionReadUnavailable] = useState(false)
 
   // Context menu state
   const [ctxMenu, setCtxMenu] = useState<{ convId: string; x: number; y: number } | null>(null)
@@ -252,8 +257,15 @@ export function ConversationList({ onNewConversation: _onNewConversation }: Conv
       ]
 
       const [sessionsRes, prefsRes] = await Promise.all(requests)
-      const sessionsData = sessionsRes.ok ? readSessions(await sessionsRes.json()) : []
+      const sessionResult = parseSessionListResponse(await sessionsRes.json().catch(() => null))
       const prefs = prefsRes.ok ? readSessionPrefs(await prefsRes.json().catch(() => null)) : {}
+
+      if (!sessionsRes.ok || !sessionResult.available) {
+        setSessionReadUnavailable(true)
+        return
+      }
+      setSessionReadUnavailable(false)
+      const sessionsData = readSessions({ sessions: sessionResult.sessions })
 
       const providerSessions = sessionsData
         .map((s, idx: number) => {
@@ -432,7 +444,7 @@ export function ConversationList({ onNewConversation: _onNewConversation }: Conv
       {/* Header */}
       <div className="p-3 border-b border-border flex-shrink-0">
         <div className="mb-2 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-      Sessions
+      默认运行时会话
         </div>
         <div className="relative">
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground/50">
@@ -451,6 +463,11 @@ export function ConversationList({ onNewConversation: _onNewConversation }: Conv
 
       {/* Conversation list */}
       <div className="flex-1 overflow-y-auto">
+        {sessionReadUnavailable && (
+          <div role="status" className="mx-3 mt-3 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-warning">
+            {SESSION_READ_UNAVAILABLE_MESSAGE}
+          </div>
+        )}
         {filteredConversations.length === 0 ? (
           <div className="p-4 text-center text-xs text-muted-foreground/50">
             No conversations yet

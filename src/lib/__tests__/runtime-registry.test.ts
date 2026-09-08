@@ -5,12 +5,18 @@ import type { RuntimeProvider } from '../runtime/contracts'
 function externalProvider(): RuntimeProvider {
   return {
     id: 'external',
+    sessionCapabilities: { list: true, history: true, delete: true, bulkPrune: false },
     sendMessage: vi.fn(async ({ message, idempotencyKey }) => ({
       status: 'accepted', runId: 'external-run', raw: { message, idempotencyKey },
     })),
     waitForRun: vi.fn(async () => ({ status: 'completed', raw: { text: 'done' } })),
     spawnSession: vi.fn(), controlSession: vi.fn(),
-    listSessions: vi.fn(async () => []), updateSessionConfig: vi.fn(), deleteSession: vi.fn(),
+    listSessions: vi.fn(async () => []),
+    getSessionHistory: vi.fn(async () => ({ messages: [] })),
+    updateSessionConfig: vi.fn(),
+    deleteSession: vi.fn(),
+    countSessionsOlderThan: vi.fn(),
+    pruneSessionsOlderThan: vi.fn(),
   }
 }
 

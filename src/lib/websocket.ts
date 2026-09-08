@@ -3,6 +3,7 @@
 import { useCallback, useEffect } from 'react'
 import { useMissionControl } from '@/store'
 import { normalizeModel } from '@/lib/utils'
+import { browserWebSocketConnectionPatch } from '@/lib/gateway-connection-state'
 import { buildGatewayPathFallbackUrls, buildGatewayWebSocketUrl } from '@/lib/gateway-url'
 import {
   getOrCreateDeviceIdentity,
@@ -403,7 +404,7 @@ export function useWebSocket() {
         cacheDeviceToken(deviceToken)
       }
       setConnection({
-        isConnected: true,
+        browserTransportConnected: true,
         lastConnected: new Date(),
         reconnectAttempts: 0
       })
@@ -698,6 +699,7 @@ export function useWebSocket() {
     authTokenRef.current = ''
 
     const normalizedUrl = normalizeWebSocketUrl(url)
+    setConnection(browserWebSocketConnectionPatch(normalizedUrl))
     if (reconnectUrl.current !== normalizedUrl) {
       wsPathFallbackTriedRef.current.clear()
     }
@@ -713,7 +715,7 @@ export function useWebSocket() {
 
       ws.onopen = () => {
         log.info(`Connected to ${normalizedUrl}`)
-        // Don't set isConnected yet - wait for handshake
+        // Don't mark the browser transport connected until the handshake succeeds.
         setConnection({
           url: normalizedUrl,
           reconnectAttempts: 0
@@ -740,7 +742,7 @@ export function useWebSocket() {
 
       ws.onclose = (event) => {
         log.info(`Disconnected from Gateway: ${event.code} ${event.reason}`)
-        setConnection({ isConnected: false })
+        setConnection({ browserTransportConnected: false })
         handshakeCompleteRef.current = false
         stopHeartbeat()
 
@@ -827,7 +829,7 @@ export function useWebSocket() {
           message: errorMessage
         })
       }
-      setConnection({ isConnected: false })
+      setConnection({ browserTransportConnected: false })
     }
   }, [setConnection, handleGatewayFrame, addLog, stopHeartbeat, normalizeWebSocketUrl, shouldSuppressWebSocketError])
 
@@ -856,7 +858,7 @@ export function useWebSocket() {
 
     handshakeCompleteRef.current = false
     setConnection({
-      isConnected: false,
+      browserTransportConnected: false,
       reconnectAttempts: 0,
       latency: undefined
     })
@@ -878,7 +880,7 @@ export function useWebSocket() {
   }, [connect, disconnect])
 
   return {
-    isConnected: connection.isConnected,
+    isConnected: connection.browserTransportConnected,
     connectionState: connection,
     connect,
     disconnect,

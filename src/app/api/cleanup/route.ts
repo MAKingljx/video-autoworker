@@ -3,7 +3,7 @@ import { requireRole } from '@/lib/auth'
 import { getDatabase, logAuditEvent } from '@/lib/db'
 import { config } from '@/lib/config'
 import { heavyLimiter } from '@/lib/rate-limit'
-import { countStaleGatewaySessions, pruneGatewaySessionsOlderThan } from '@/lib/openclaw-session-source'
+import { getRuntimeProvider } from '@/lib/runtime-provider'
 
 interface CleanupResult {
   table: string
@@ -64,14 +64,23 @@ export async function GET(request: NextRequest) {
   }
 
   if (ret.gatewaySessions > 0) {
-    preview.push({
-      table: 'Gateway Session Store',
-      retention_days: ret.gatewaySessions,
-      stale_count: countStaleGatewaySessions(ret.gatewaySessions),
-      note: 'Stored under ~/.openclaw/agents/*/sessions/sessions.json',
-    })
+    const runtimeProvider = getRuntimeProvider()
+    if (!runtimeProvider.sessionCapabilities.bulkPrune) {
+      preview.push({
+        table: 'Runtime Sessions',
+        retention_days: ret.gatewaySessions,
+        stale_count: null,
+        note: 'Selected runtime does not support safe bulk session pruning',
+      })
+    } else {
+      preview.push({
+        table: 'Runtime Sessions',
+        retention_days: ret.gatewaySessions,
+        stale_count: await runtimeProvider.countSessionsOlderThan(ret.gatewaySessions),
+      })
+    }
   } else {
-    preview.push({ table: 'Gateway Session Store', retention_days: 0, stale_count: 0, note: 'Retention disabled (keep forever)' })
+    preview.push({ table: 'Runtime Sessions', retention_days: 0, stale_count: 0, note: 'Retention disabled (keep forever)' })
   }
 
   return NextResponse.json({ retention: config.retention, preview })
@@ -90,6 +99,14 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => ({}))
   const dryRun = body.dry_run === true
+  const runtimeProvider = getRuntimeProvider()
+
+  if (config.retention.gatewaySessions > 0 && !runtimeProvider.sessionCapabilities.bulkPrune) {
+    return NextResponse.json(
+      { error: 'Selected runtime does not support safe bulk session pruning' },
+      { status: 409 },
+    )
+  }
 
   const db = getDatabase()
   const workspaceId = auth.user.workspace_id ?? 1
@@ -157,10 +174,10 @@ export async function POST(request: NextRequest) {
 
   if (ret.gatewaySessions > 0) {
     const sessionPrune = dryRun
-      ? { deleted: countStaleGatewaySessions(ret.gatewaySessions), filesTouched: 0 }
-      : pruneGatewaySessionsOlderThan(ret.gatewaySessions)
+      ? { deleted: await runtimeProvider.countSessionsOlderThan(ret.gatewaySessions) }
+      : await runtimeProvider.pruneSessionsOlderThan(ret.gatewaySessions)
     results.push({
-      table: 'Gateway Session Store',
+      table: 'Runtime Sessions',
       deleted: sessionPrune.deleted,
       cutoff_date: new Date(Date.now() - ret.gatewaySessions * 86400000).toISOString().split('T')[0],
       retention_days: ret.gatewaySessions,

@@ -5,6 +5,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useMissionControl } from '@/store'
 import { useSmartPoll } from '@/lib/use-smart-poll'
+import { parseSessionListResponse } from '@/components/session-list-response'
 
 import { createClientLogger } from '@/lib/client-logger'
 
@@ -131,10 +132,11 @@ function useAgentSessions(agentName: string | undefined) {
     if (!agentName) { setSessions([]); return }
     let cancelled = false
     fetch('/api/sessions')
-      .then(r => r.json())
-      .then(data => {
+      .then(async response => ({ response, result: parseSessionListResponse(await response.json().catch(() => null)) }))
+      .then(({ response, result }) => {
         if (cancelled) return
-        const all = (data.sessions || []) as Array<{ key: string; id: string; agent?: string; channel?: string; kind?: string; label?: string; active?: boolean }>
+        if (!response.ok || !result.available) return
+        const all = result.sessions as Array<{ key: string; id: string; agent?: string; channel?: string; kind?: string; label?: string; active?: boolean }>
         const filtered = all.filter(s =>
           s.agent?.toLowerCase() === agentName.toLowerCase() ||
           s.key?.toLowerCase().includes(agentName.toLowerCase())
@@ -148,7 +150,7 @@ function useAgentSessions(agentName: string | undefined) {
           displayLabel: formatSessionLabel(s),
         })))
       })
-      .catch(() => { if (!cancelled) setSessions([]) })
+      .catch(() => {})
     return () => { cancelled = true }
   }, [agentName])
   return sessions

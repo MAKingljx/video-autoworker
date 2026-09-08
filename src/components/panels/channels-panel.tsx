@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { useMissionControl } from '@/store'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -741,7 +742,7 @@ export function ChannelsPanel() {
   const channels = snapshot?.channels ?? {}
   const channelAccounts = snapshot?.channelAccounts ?? {}
   const channelLabels = snapshot?.channelLabels ?? {}
-  const gatewayConnected = snapshot?.connected ?? connection.isConnected
+  const gatewayConnected = snapshot?.connected ?? selectGatewayConnection(connection).operational
 
   // Sort: active/connected first, then by original order
   const sortedOrder = [...channelOrder].sort((a, b) => {

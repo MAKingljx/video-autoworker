@@ -4,11 +4,13 @@ import { useState, useCallback } from 'react'
 import { useMissionControl } from '@/store'
 import { useNavigateToPanel } from '@/lib/navigation'
 import { useSmartPoll } from '@/lib/use-smart-poll'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 import { SignalPill, getLocalOsStatus, getProviderHealth, getMcHealth } from './widget-primitives'
 import { OnboardingChecklistWidget } from './widgets/onboarding-checklist-widget'
 import { EmptyStateLaunchpad } from './empty-state-launchpad'
 import { WidgetGrid } from './widget-grid'
 import type { DbStats, ClaudeStats, LogLike, DashboardData } from './widget-primitives'
+import { parseSessionListResponse } from '@/components/session-list-response'
 
 export function Dashboard() {
   const {
@@ -24,6 +26,7 @@ export function Dashboard() {
 
   const navigateToPanel = useNavigateToPanel()
   const isLocal = dashboardMode === 'local'
+  const gatewayConnection = selectGatewayConnection(connection)
 
   const subscriptionLabel = subscription?.type
     ? subscription.type.charAt(0).toUpperCase() + subscription.type.slice(1)
@@ -43,6 +46,7 @@ export function Dashboard() {
   const [claudeStats, setClaudeStats] = useState<ClaudeStats | null>(null)
   const [githubStats, setGithubStats] = useState<any>(null)
   const [hermesCronJobCount, setHermesCronJobCount] = useState(0)
+  const [sessionsUnavailable, setSessionsUnavailable] = useState(false)
   const [loading, setLoading] = useState({
     system: true,
     sessions: true,
@@ -70,11 +74,15 @@ export function Dashboard() {
     requests.push(
       fetch('/api/sessions')
         .then(async (res) => {
-          if (!res.ok) return
-          const data = await res.json()
-          if (data && !data.error) setSessions(data.sessions || data)
+          const result = parseSessionListResponse(await res.json().catch(() => null))
+          if (!res.ok || !result.available) {
+            setSessionsUnavailable(true)
+            return
+          }
+          setSessionsUnavailable(false)
+          setSessions(result.sessions as Parameters<typeof setSessions>[0])
         })
-        .catch(() => {})
+        .catch(() => { setSessionsUnavailable(true) })
         .finally(() => setLoading(prev => ({ ...prev, sessions: false })))
     )
 
@@ -139,11 +147,15 @@ export function Dashboard() {
     ? { value: '加载中...', status: 'warn' as const }
     : getProviderHealth(claudeStats?.active_sessions ?? claudeActive, claudeStats?.total_sessions ?? claudeLocalSessions.length)
 
-  const codexHealth = isSessionsLoading
+  const codexHealth = sessionsUnavailable
+    ? { value: '暂不可用', status: 'warn' as const }
+    : isSessionsLoading
     ? { value: '加载中...', status: 'warn' as const }
     : getProviderHealth(codexActive, codexLocalSessions.length)
 
-  const hermesHealth = isSessionsLoading
+  const hermesHealth = sessionsUnavailable
+    ? { value: '暂不可用', status: 'warn' as const }
+    : isSessionsLoading
     ? { value: '加载中...', status: 'warn' as const }
     : getProviderHealth(hermesActive, hermesLocalSessions.length)
 
@@ -179,7 +191,11 @@ export function Dashboard() {
     .slice(0, 10)
 
   const recentErrorLogs = mergedRecentLogs.filter((log) => log.level === 'error').length
-  const gatewayHealthStatus = connection.isConnected ? 'good' as const : 'bad' as const
+  const gatewayHealthStatus = gatewayConnection.state === 'online'
+    ? 'good' as const
+    : gatewayConnection.state === 'checking'
+      ? 'warn' as const
+      : 'bad' as const
 
   const openSession = useCallback((_session: any) => {
     navigateToPanel('profiles')
@@ -228,6 +244,7 @@ export function Dashboard() {
     gatewayHealthStatus,
     isSystemLoading,
     isSessionsLoading,
+    sessionsUnavailable,
     isClaudeLoading,
     isGithubLoading,
     hermesCronJobCount,

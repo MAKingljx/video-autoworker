@@ -5,6 +5,13 @@ import { useTranslations } from 'next-intl'
 import { Button } from '@/components/ui/button'
 import { useMissionControl } from '@/store'
 import { useWebSocket } from '@/lib/websocket'
+import {
+  connectionPatchFromDescriptor,
+  managedGatewayHealthPatch,
+  parseGatewayConnectResponse,
+  parseManagedGatewayHealth,
+  selectGatewayConnection,
+} from '@/lib/gateway-connection-state'
 
 interface Gateway {
   id: number
@@ -81,8 +88,9 @@ export function MultiGatewayPanel() {
   const [probing, setProbing] = useState<number | null>(null)
   const [healthByGatewayId, setHealthByGatewayId] = useState<Map<number, GatewayHealthProbe>>(new Map())
   const [historyByGatewayId, setHistoryByGatewayId] = useState<Record<number, GatewayHistory>>({})
-  const { connection } = useMissionControl()
+  const { connection, setConnection } = useMissionControl()
   const { connect } = useWebSocket()
+  const gatewayConnection = selectGatewayConnection(connection)
 
   const fetchGateways = useCallback(async () => {
     try {
@@ -126,6 +134,10 @@ export function MultiGatewayPanel() {
   useEffect(() => { fetchGateways(); fetchDirectConnections(); fetchDiscovered(); fetchHistory() }, [fetchGateways, fetchDirectConnections, fetchDiscovered, fetchHistory])
 
   const gatewayMatchesConnection = useCallback((gw: Gateway): boolean => {
+    if (connection.mode === 'server-managed') {
+      return connection.serverGatewayId === gw.id && gatewayConnection.operational
+    }
+    if (!gatewayConnection.browserTransportConnected) return false
     const url = connection.url
     if (!url) return false
     const normalizedConn = url.toLowerCase()
@@ -136,7 +148,7 @@ export function MultiGatewayPanel() {
     if (normalizedHost && normalizedHost !== '127.0.0.1' && normalizedHost !== 'localhost' && normalizedConn.includes(normalizedHost)) return true
     if (normalizedConn.includes(`:${gw.port}`)) return true
     return false
-  }, [connection.url])
+  }, [connection.mode, connection.serverGatewayId, connection.url, gatewayConnection])
 
   const shouldShowConnectionSummary =
     gateways.length === 0 ||
@@ -170,17 +182,17 @@ export function MultiGatewayPanel() {
         body: JSON.stringify({ id: gw.id }),
       })
       if (!res.ok) return
-      const payload = await res.json()
+      const descriptor = parseGatewayConnectResponse(await res.json().catch(() => null))
+      if (!descriptor || descriptor.gatewayId !== gw.id) return
+      setConnection(connectionPatchFromDescriptor(descriptor))
 
       // The primary credential remains server-side. A browser must never
       // receive it merely to establish a direct WebSocket.
-      if (payload?.server_managed) return
+      if (descriptor.mode === 'server-managed') return
 
       // Use server-resolved URL only — it respects NEXT_PUBLIC_GATEWAY_URL,
       // Tailscale Serve, and reverse-proxy configurations.
-      const wsUrl = payload?.ws_url
-      if (!wsUrl) return
-      connect(wsUrl)
+      connect(descriptor.browserWebSocketUrl)
     } catch {
       // ignore: connection status will remain disconnected
     }
@@ -196,6 +208,10 @@ export function MultiGatewayPanel() {
         if (typeof row?.id === 'number') mapped.set(row.id, row)
       }
       setHealthByGatewayId(mapped)
+      if (connection.mode === 'server-managed' && connection.serverGatewayId) {
+        const health = parseManagedGatewayHealth(data, connection.serverGatewayId)
+        if (health) setConnection(managedGatewayHealthPatch(health))
+      }
     } catch { /* ignore */ }
     fetchGateways()
     fetchHistory()
@@ -249,10 +265,10 @@ export function MultiGatewayPanel() {
       {shouldShowConnectionSummary && (
         <div className="bg-card border border-border rounded-lg p-4">
           <div className="flex items-center gap-3">
-            <span className={`w-2.5 h-2.5 rounded-full ${connection.isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`} />
+            <span className={`w-2.5 h-2.5 rounded-full ${gatewayConnection.operational ? 'bg-green-500' : gatewayConnection.state === 'checking' ? 'bg-amber-500 animate-pulse' : 'bg-red-500 animate-pulse'}`} />
             <div>
               <div className="text-sm font-medium text-foreground">
-                {connection.isConnected ? t('connected') : t('disconnected')}
+                {gatewayConnection.operational ? t('connected') : gatewayConnection.state === 'checking' ? t('probing') : t('disconnected')}
               </div>
               <div className="text-xs text-muted-foreground">
                 {connection.url || t('noActiveConnection')}

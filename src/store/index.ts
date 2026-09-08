@@ -3,6 +3,7 @@
 import { create } from 'zustand'
 import { subscribeWithSelector } from 'zustand/middleware'
 import { MODEL_CATALOG } from '@/lib/models'
+import type { GatewayConnectionStatus } from '@/lib/gateway-connection-state'
 
 export type JsonPrimitive = string | number | boolean | null
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue | undefined }
@@ -343,14 +344,7 @@ export interface Project {
   github_default_branch?: string
 }
 
-export interface ConnectionStatus {
-  isConnected: boolean
-  url: string
-  lastConnected?: Date
-  reconnectAttempts: number
-  latency?: number
-  sseConnected?: boolean
-}
+export type ConnectionStatus = GatewayConnectionStatus
 
 export interface ExecApprovalRequest {
   id: string
@@ -660,7 +654,9 @@ export const useMissionControl = create<MissionControlStore>()(
 
     // Connection state
     connection: {
-      isConnected: false,
+      mode: 'browser-websocket',
+      browserTransportConnected: false,
+      serverHealth: 'unknown',
       url: '',
       reconnectAttempts: 0
     },

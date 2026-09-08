@@ -3,7 +3,8 @@ import { readFile, writeFile, access } from 'fs/promises'
 import { dirname } from 'path'
 import { config, ensureDirExists } from '@/lib/config'
 import { requireRole } from '@/lib/auth'
-import { getAllGatewaySessions } from '@/lib/openclaw-session-source'
+import { getRuntimeProvider } from '@/lib/runtime-provider'
+import type { RuntimeSessionSummary } from '@/lib/runtime/contracts'
 import { logger } from '@/lib/logger'
 import { getDatabase } from '@/lib/db'
 import { calculateTokenCost } from '@/lib/token-pricing'
@@ -177,7 +178,8 @@ async function loadTokenData(workspaceId: number): Promise<TokenUsageRecord[]> {
   const providerSubscriptions = getProviderSubscriptionFlags()
   const dbRecords = loadTokenDataFromDb(workspaceId, providerSubscriptions)
   const fileRecords = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
-  const sessionRecords = deriveFromSessions(workspaceId, providerSubscriptions)
+  const sessions = await getRuntimeProvider().listSessions({ activeWithinMs: Infinity })
+  const sessionRecords = deriveFromSessions(sessions, workspaceId, providerSubscriptions)
   return dedupeTokenRecords([...dbRecords, ...fileRecords, ...sessionRecords])
     .sort((a, b) => b.timestamp - a.timestamp)
 }
@@ -186,8 +188,11 @@ async function loadTokenData(workspaceId: number): Promise<TokenUsageRecord[]> {
  * Derive token usage records from OpenClaw session stores.
  * Each session has totalTokens, inputTokens, outputTokens, model, etc.
  */
-function deriveFromSessions(workspaceId: number, providerSubscriptions: Record<string, boolean>): TokenUsageRecord[] {
-  const sessions = getAllGatewaySessions(Infinity) // Get ALL sessions regardless of age
+function deriveFromSessions(
+  sessions: RuntimeSessionSummary[],
+  workspaceId: number,
+  providerSubscriptions: Record<string, boolean>,
+): TokenUsageRecord[] {
   const records: TokenUsageRecord[] = []
 
   for (const session of sessions) {

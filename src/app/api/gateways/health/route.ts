@@ -154,6 +154,120 @@ function buildGatewayProbeUrl(host: string, port: number): string | null {
   return `http://${rawHost}:${port}/health`
 }
 
+function configuredGatewayHosts(gateways: GatewayEntry[]): Set<string> {
+  const configuredHosts = new Set<string>()
+  for (const gateway of gateways) {
+    const host = (gateway.host || '').trim()
+    if (!host) continue
+    try {
+      configuredHosts.add(new URL(host.includes('://') ? host : `http://${host}`).hostname)
+    } catch {
+      configuredHosts.add(host)
+    }
+  }
+  return configuredHosts
+}
+
+async function probeGateway(
+  gateway: GatewayEntry,
+  configuredHosts: Set<string>,
+): Promise<{ result: HealthResult; probedAt: number }> {
+  const probedAt = Math.floor(Date.now() / 1000)
+  const probeUrl = buildGatewayProbeUrl(gateway.host, gateway.port)
+  if (!probeUrl) {
+    return {
+      probedAt,
+      result: {
+        id: gateway.id,
+        name: gateway.name,
+        status: 'error',
+        latency: null,
+        agents: [],
+        sessions_count: 0,
+        error: 'Invalid gateway address',
+      },
+    }
+  }
+  if (isBlockedUrl(probeUrl, configuredHosts)) {
+    return {
+      probedAt,
+      result: {
+        id: gateway.id,
+        name: gateway.name,
+        status: 'error',
+        latency: null,
+        agents: [],
+        sessions_count: 0,
+        error: 'Blocked URL',
+      },
+    }
+  }
+
+  const start = Date.now()
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 5000)
+  try {
+    const response = await fetch(probeUrl, { signal: controller.signal })
+    const latency = Date.now() - start
+    const gatewayVersion = parseGatewayVersion(response)
+    const compatibilityWarning = hasOpenClaw32ToolsProfileRisk(gatewayVersion)
+      ? 'OpenClaw 2026.3.2+ defaults tools.profile=messaging; Mission Control should enforce coding profile when spawning.'
+      : undefined
+    const error = response.ok ? undefined : `HTTP ${response.status}`
+    return {
+      probedAt,
+      result: {
+        id: gateway.id,
+        name: gateway.name,
+        status: response.ok ? 'online' : 'error',
+        latency,
+        agents: [],
+        sessions_count: 0,
+        gateway_version: gatewayVersion,
+        compatibility_warning: compatibilityWarning,
+        ...(error ? { error } : {}),
+      },
+    }
+  } catch (error: unknown) {
+    const reason = error instanceof Error && error.name === 'AbortError'
+      ? 'timeout'
+      : error instanceof Error && error.message
+        ? error.message
+        : 'connection failed'
+    return {
+      probedAt,
+      result: {
+        id: gateway.id,
+        name: gateway.name,
+        status: 'offline',
+        latency: null,
+        agents: [],
+        sessions_count: 0,
+        error: reason,
+      },
+    }
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+/** Read-only targeted probe used by server-managed browser status polling. */
+export async function GET(request: NextRequest) {
+  const auth = requireRole(request, 'viewer')
+  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  const id = Number(request.nextUrl.searchParams.get('id'))
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return NextResponse.json({ error: 'id is required' }, { status: 400 })
+  }
+  const db = getDatabase()
+  const gateway = db.prepare(
+    'SELECT id, name, host, port, is_primary, status FROM gateways WHERE id = ?',
+  ).get(id) as GatewayEntry | undefined
+  if (!gateway) return NextResponse.json({ error: 'Gateway not found' }, { status: 404 })
+  const { result } = await probeGateway(gateway, configuredGatewayHosts([gateway]))
+  return NextResponse.json({ results: [result], probed_at: Date.now() })
+}
+
 /**
  * POST /api/gateways/health - Server-side health probe for all gateways
  * Probes gateways from the server where loopback addresses are reachable.
@@ -169,13 +283,7 @@ export async function POST(request: NextRequest) {
   ).all() as GatewayEntry[]
 
   // Build set of user-configured gateway hosts so the SSRF filter allows them
-  const configuredHosts = new Set<string>()
-  for (const gw of gateways) {
-    const h = (gw.host || '').trim()
-    if (h) {
-      try { configuredHosts.add(new URL(h.includes('://') ? h : `http://${h}`).hostname) } catch { configuredHosts.add(h) }
-    }
-  }
+  const configuredHosts = configuredGatewayHosts(gateways)
 
   // Prepare update statements once (avoids N+1)
   const updateOnlineStmt = db.prepare(
@@ -191,66 +299,9 @@ export async function POST(request: NextRequest) {
   const results: HealthResult[] = []
 
   for (const gw of gateways) {
-    const probedAt = Math.floor(Date.now() / 1000)
-    const probeUrl = buildGatewayProbeUrl(gw.host, gw.port)
-    if (!probeUrl) {
-      const error = 'Invalid gateway address'
-      insertLogStmt.run(gw.id, 'error', null, probedAt, error)
-      results.push({ id: gw.id, name: gw.name, status: 'error', latency: null, agents: [], sessions_count: 0, error })
-      continue
-    }
-
-    if (isBlockedUrl(probeUrl, configuredHosts)) {
-      const error = 'Blocked URL'
-      insertLogStmt.run(gw.id, 'error', null, probedAt, error)
-      results.push({ id: gw.id, name: gw.name, status: 'error', latency: null, agents: [], sessions_count: 0, error })
-      continue
-    }
-
-    const start = Date.now()
-    try {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 5000)
-
-      const res = await fetch(probeUrl, {
-        signal: controller.signal,
-      })
-      clearTimeout(timeout)
-
-      const latency = Date.now() - start
-      const status = res.ok ? "online" : "error"
-      const gatewayVersion = parseGatewayVersion(res)
-      const compatibilityWarning = hasOpenClaw32ToolsProfileRisk(gatewayVersion)
-        ? 'OpenClaw 2026.3.2+ defaults tools.profile=messaging; Mission Control should enforce coding profile when spawning.'
-        : undefined
-
-      const errorMessage = res.ok ? null : `HTTP ${res.status}`
-      insertLogStmt.run(gw.id, status, latency, probedAt, errorMessage)
-
-      results.push({
-        id: gw.id,
-        name: gw.name,
-        status: status as "online" | "error",
-        latency,
-        agents: [],
-        sessions_count: 0,
-        gateway_version: gatewayVersion,
-        compatibility_warning: compatibilityWarning,
-        ...(errorMessage ? { error: errorMessage } : {}),
-      })
-    } catch (err: any) {
-      const errorMessage = err.name === "AbortError" ? "timeout" : (err.message || "connection failed")
-      insertLogStmt.run(gw.id, "offline", null, probedAt, errorMessage)
-      results.push({
-        id: gw.id,
-        name: gw.name,
-        status: "offline" as const,
-        latency: null,
-        agents: [],
-        sessions_count: 0,
-        error: errorMessage,
-      })
-    }
+    const { result, probedAt } = await probeGateway(gw, configuredHosts)
+    insertLogStmt.run(gw.id, result.status, result.latency, probedAt, result.error || null)
+    results.push(result)
   }
 
   // Persist all probe results in a single transaction

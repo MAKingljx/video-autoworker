@@ -5,12 +5,14 @@ const requireRole = vi.fn()
 const heavyLimiter = vi.fn()
 const getDatabase = vi.fn()
 const logAuditEvent = vi.fn()
-const countStaleGatewaySessions = vi.fn()
-const pruneGatewaySessionsOlderThan = vi.fn()
+const getRuntimeProvider = vi.fn()
+const countSessionsOlderThan = vi.fn()
+const pruneSessionsOlderThan = vi.fn()
 
 vi.mock('@/lib/auth', () => ({ requireRole }))
 vi.mock('@/lib/rate-limit', () => ({ heavyLimiter }))
 vi.mock('@/lib/db', () => ({ getDatabase, logAuditEvent }))
+vi.mock('@/lib/runtime-provider', () => ({ getRuntimeProvider }))
 vi.mock('@/lib/config', () => ({
   config: {
     retention: {
@@ -24,7 +26,6 @@ vi.mock('@/lib/config', () => ({
     tokensPath: '/tmp/tokens.json',
   },
 }))
-vi.mock('@/lib/openclaw-session-source', () => ({ countStaleGatewaySessions, pruneGatewaySessionsOlderThan }))
 
 describe('/api/cleanup route', () => {
   beforeEach(() => {
@@ -32,64 +33,48 @@ describe('/api/cleanup route', () => {
     vi.clearAllMocks()
     requireRole.mockReturnValue({ user: { id: 1, username: 'admin', workspace_id: 1 } })
     heavyLimiter.mockReturnValue(null)
-    countStaleGatewaySessions.mockReturnValue(2)
-    pruneGatewaySessionsOlderThan.mockReturnValue({ deleted: 4, filesTouched: 1 })
-
-    const prepare = vi.fn((sql: string) => {
-      if (sql.includes('SELECT COUNT(*) as c')) {
-        return { get: vi.fn(() => ({ c: 0 })) }
-      }
-      if (sql.startsWith('DELETE FROM')) {
-        return { run: vi.fn(() => ({ changes: 0 })) }
-      }
-      throw new Error(`Unexpected SQL: ${sql}`)
+    getRuntimeProvider.mockReturnValue({
+      sessionCapabilities: { bulkPrune: false },
+      countSessionsOlderThan,
+      pruneSessionsOlderThan,
     })
-
-    getDatabase.mockReturnValue({ prepare })
+    getDatabase.mockReturnValue({
+      prepare: vi.fn(() => ({
+        get: vi.fn(() => ({ c: 0 })),
+        run: vi.fn(() => ({ changes: 0 })),
+      })),
+    })
   })
 
-  it('GET previews gateway session cleanup through openclaw session source boundary', async () => {
+  it('GET reports unsupported runtime session cleanup without reading storage', async () => {
     const { GET } = await import('@/app/api/cleanup/route')
-    const request = new NextRequest('http://localhost/api/cleanup', { method: 'GET' })
-
-    const response = await GET(request)
+    const response = await GET(new NextRequest('http://localhost/api/cleanup'))
     const body = await response.json()
 
     expect(response.status).toBe(200)
-    expect(countStaleGatewaySessions).toHaveBeenCalledWith(10)
-    expect(body.preview).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          table: 'Gateway Session Store',
-          retention_days: 10,
-          stale_count: 2,
-        }),
-      ]),
-    )
+    expect(body.preview).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'Runtime Sessions',
+        retention_days: 10,
+        stale_count: null,
+        note: 'Selected runtime does not support safe bulk session pruning',
+      }),
+    ]))
+    expect(countSessionsOlderThan).not.toHaveBeenCalled()
   })
 
-  it('POST prunes gateway sessions through openclaw session source boundary', async () => {
+  it('POST fails closed before other cleanup when runtime bulk pruning is unavailable', async () => {
     const { POST } = await import('@/app/api/cleanup/route')
-    const request = new NextRequest('http://localhost/api/cleanup', {
+    const response = await POST(new NextRequest('http://localhost/api/cleanup', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ dry_run: false }),
-    })
-
-    const response = await POST(request)
+    }))
     const body = await response.json()
 
-    expect(response.status).toBe(200)
-    expect(pruneGatewaySessionsOlderThan).toHaveBeenCalledWith(10)
-    expect(body.results).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          table: 'Gateway Session Store',
-          deleted: 4,
-          retention_days: 10,
-        }),
-      ]),
-    )
-    expect(logAuditEvent).toHaveBeenCalled()
+    expect(response.status).toBe(409)
+    expect(body.error).toMatch(/does not support safe bulk session pruning/u)
+    expect(pruneSessionsOlderThan).not.toHaveBeenCalled()
+    expect(logAuditEvent).not.toHaveBeenCalled()
   })
 })

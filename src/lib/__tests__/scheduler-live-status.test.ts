@@ -15,8 +15,8 @@ const spawnRecurringTasks = vi.fn()
 const drainN8nMediaCleanupDebts = vi.fn()
 const drainDirectorEvidenceOutbox = vi.fn()
 const drainDirectorExtractionJobs = vi.fn()
-const pruneGatewaySessionsOlderThan = vi.fn()
-const getAgentLiveStatuses = vi.fn()
+const getRuntimeProvider = vi.fn()
+const listSessions = vi.fn()
 const logger = { info: vi.fn(), warn: vi.fn() }
 const eventBus = { broadcast: vi.fn() }
 const acquireOrRenewSchedulerLeadership = vi.fn(() => ({
@@ -72,7 +72,7 @@ vi.mock('@/lib/config', () => ({
 vi.mock('@/lib/logger', () => ({ logger }))
 vi.mock('@/lib/webhooks', () => ({ processWebhookRetries }))
 vi.mock('@/lib/claude-sessions', () => ({ syncClaudeSessions }))
-vi.mock('@/lib/openclaw-session-source', () => ({ pruneGatewaySessionsOlderThan, getAgentLiveStatuses }))
+vi.mock('@/lib/runtime-provider', () => ({ getRuntimeProvider }))
 vi.mock('@/lib/event-bus', () => ({ eventBus }))
 vi.mock('@/lib/skill-sync', () => ({ syncSkillsFromDisk }))
 vi.mock('@/lib/local-agent-sync', () => ({ syncLocalAgents }))
@@ -118,9 +118,25 @@ describe('scheduler gateway live-status boundary', () => {
       generation: null,
     })
 
-    getAgentLiveStatuses.mockReturnValue(new Map([
-      ['main', { status: 'active', lastActivity: Date.parse('2026-03-27T02:59:00.000Z'), channel: 'cli' }],
-    ]))
+    listSessions.mockResolvedValue([{
+      key: 'agent:main:main',
+      agent: 'main',
+      sessionId: 'session-main',
+      updatedAt: Date.parse('2026-03-27T02:59:00.000Z'),
+      chatType: 'direct',
+      channel: 'cli',
+      model: 'model',
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      contextTokens: 0,
+      active: true,
+    }])
+    getRuntimeProvider.mockReturnValue({
+      sessionCapabilities: { bulkPrune: false },
+      listSessions,
+      pruneSessionsOlderThan: vi.fn(),
+    })
     syncAgentsFromConfig.mockResolvedValue({ created: 0, updated: 0, synced: 1 })
     processWebhookRetries.mockResolvedValue({ ok: true, message: 'no retries' })
     syncClaudeSessions.mockResolvedValue({ ok: true, message: 'no claude changes' })
@@ -139,7 +155,6 @@ describe('scheduler gateway live-status boundary', () => {
       conflict: 0,
     })
     drainDirectorExtractionJobs.mockResolvedValue(emptyExtractionDrainResult())
-    pruneGatewaySessionsOlderThan.mockReturnValue({ deleted: 0, filesTouched: 0 })
 
     getDatabase.mockReturnValue({
       prepare: vi.fn((sql: string) => {
@@ -168,7 +183,7 @@ describe('scheduler gateway live-status boundary', () => {
     const result = await triggerTask('gateway_agent_sync')
 
     expect(syncAgentsFromConfig).toHaveBeenCalledWith('manual')
-    expect(getAgentLiveStatuses).toHaveBeenCalled()
+    expect(listSessions).toHaveBeenCalled()
     expect(eventBus.broadcast).toHaveBeenCalledWith('agent.status_changed', expect.objectContaining({
       id: 1,
       name: 'main',

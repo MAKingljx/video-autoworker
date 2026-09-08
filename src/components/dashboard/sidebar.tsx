@@ -3,6 +3,7 @@
 import Image from 'next/image'
 import { useEffect, useState } from 'react'
 import { useMissionControl } from '@/store'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 import { useNavigateToPanel } from '@/lib/navigation'
 import { createClientLogger } from '@/lib/client-logger'
 import { Button } from '@/components/ui/button'
@@ -64,6 +65,7 @@ const menuItems: MenuItem[] = [
 
 export function Sidebar() {
   const { activeTab, connection, sessions } = useMissionControl()
+  const gatewayConnection = selectGatewayConnection(connection)
   const navigateToPanel = useNavigateToPanel()
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null)
 
@@ -140,12 +142,12 @@ export function Sidebar() {
             <span className="text-sm font-medium text-foreground">网关</span>
             <div className="flex items-center space-x-1">
               <div className={`w-2 h-2 rounded-full ${
-                connection.isConnected 
+                gatewayConnection.operational
                   ? 'bg-green-500 animate-pulse' 
                   : 'bg-red-500'
               }`}></div>
               <span className="text-xs text-muted-foreground">
-                {connection.isConnected ? '已连接' : '已断开'}
+                {gatewayConnection.state === 'online' ? '在线' : gatewayConnection.state === 'checking' ? '检查中' : '离线'}
               </span>
             </div>
           </div>

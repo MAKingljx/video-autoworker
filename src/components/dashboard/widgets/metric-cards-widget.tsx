@@ -9,11 +9,13 @@ import {
   ActivityIconMini,
   type DashboardData,
 } from '../widget-primitives'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 export function MetricCardsWidget({ data }: { data: DashboardData }) {
   const {
     isLocal,
     isSessionsLoading,
+    sessionsUnavailable,
     isSystemLoading,
     systemLoad,
     memPct,
@@ -28,6 +30,11 @@ export function MetricCardsWidget({ data }: { data: DashboardData }) {
     runningTasks,
     errorCount,
   } = data
+  const gateway = selectGatewayConnection(connection)
+  const gatewayValue = gateway.state === 'online' ? '在线' : gateway.state === 'checking' ? '检查中' : '离线'
+  const gatewayTone = gateway.state === 'online' ? 'success' : gateway.state === 'checking' ? 'warning' : 'danger'
+  const sessionValue = sessionsUnavailable ? '暂不可用' : activeSessions
+  const sessionTotal = sessionsUnavailable ? undefined : sessions.length
 
   if (isLocal) {
     const qwenSessions = sessions.filter((session) => {
@@ -40,13 +47,13 @@ export function MetricCardsWidget({ data }: { data: DashboardData }) {
       <section className="grid grid-cols-2 xl:grid-cols-5 gap-3">
         <MetricCard
           label="OpenClaw"
-          value={connection.isConnected ? '在线' : '离线'}
-          subtitle="网关连接"
+          value={gatewayValue}
+          subtitle="网关服务"
           icon={<GatewayIcon />}
-          tone={connection.isConnected ? 'success' : 'danger'}
+          tone={gatewayTone}
         />
-        <MetricCard label="本地千问" value={isSessionsLoading ? '...' : qwenActive} total={isSessionsLoading ? undefined : qwenSessions.length} subtitle="活跃 / 总数" icon={<SessionIcon />} />
-        <MetricCard label="会话" value={activeSessions} total={sessions.length} subtitle="OpenClaw 会话" icon={<SessionIcon />} />
+        <MetricCard label="本地千问" value={sessionsUnavailable ? '暂不可用' : isSessionsLoading ? '...' : qwenActive} total={sessionsUnavailable || isSessionsLoading ? undefined : qwenSessions.length} subtitle="当前运行时内" icon={<SessionIcon />} tone={sessionsUnavailable ? 'warning' : 'neutral'} />
+        <MetricCard label="会话" value={sessionValue} total={sessionTotal} subtitle={sessionsUnavailable ? '会话读取暂不可用' : '默认运行时会话'} icon={<SessionIcon />} tone={sessionsUnavailable ? 'warning' : 'neutral'} />
         <MetricCard
           label="系统负载"
           value={isSystemLoading ? '...' : `${systemLoad}%`}
@@ -61,8 +68,8 @@ export function MetricCardsWidget({ data }: { data: DashboardData }) {
 
   return (
     <section className="grid grid-cols-2 xl:grid-cols-5 gap-3">
-      <MetricCard label="网关" value={connection.isConnected ? '在线' : '离线'} subtitle="传输状态" icon={<GatewayIcon />} tone={connection.isConnected ? 'success' : 'danger'} />
-      <MetricCard label="会话" value={activeSessions} total={sessions.length} subtitle="活跃 / 总数" icon={<SessionIcon />} />
+      <MetricCard label="网关" value={gatewayValue} subtitle="服务状态" icon={<GatewayIcon />} tone={gatewayTone} />
+      <MetricCard label="会话" value={sessionValue} total={sessionTotal} subtitle={sessionsUnavailable ? '会话读取暂不可用' : '默认运行时会话'} icon={<SessionIcon />} tone={sessionsUnavailable ? 'warning' : 'neutral'} />
       <MetricCard label="智能体容量" value={onlineAgents} subtitle={`${dbStats?.agents.total ?? agents.length} 总数`} icon={<AgentIcon />} />
       <MetricCard label="队列" value={backlogCount} subtitle={`${runningTasks} 运行中`} icon={<TaskIcon />} tone={backlogCount > 12 ? 'danger' : 'neutral'} />
       <MetricCard label="系统负载" value={isSystemLoading ? '...' : `${systemLoad}%`} subtitle={`错误 ${errorCount}`} icon={<ActivityIconMini />} tone={systemLoad > 85 || errorCount > 0 ? 'danger' : systemLoad > 70 ? 'warning' : 'neutral'} />

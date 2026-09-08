@@ -140,12 +140,142 @@ describe('OpenClawRuntimeProvider', () => {
   })
 
   it('lists sessions through provider boundary', async () => {
-    const listed = [{ key: 'agent:main:main', agent: 'main', sessionId: 'sess-1', updatedAt: 123, chatType: 'chat', channel: 'cli', model: 'opus', totalTokens: 1, inputTokens: 1, outputTokens: 0, contextTokens: 1000, active: true }]
-    vi.doMock('@/lib/openclaw-session-source', () => ({ getAllGatewaySessions: vi.fn(() => listed) }))
+    vi.spyOn(Date, 'now').mockReturnValue(10_000)
+    callOpenClawGateway
+      .mockResolvedValueOnce({
+        sessions: [{
+          key: 'agent:main:main',
+          agentId: 'main',
+          sessionId: 'sess-1',
+          updatedAt: 9_000,
+          kind: 'direct',
+          channel: 'cli',
+          model: 'opus',
+          totalTokens: 3,
+          inputTokens: 2,
+          outputTokens: 1,
+          contextTokens: 1000,
+          hasActiveRun: true,
+        }],
+        hasMore: true,
+        nextOffset: 1,
+      })
+      .mockResolvedValueOnce({
+        sessions: [{
+          key: 'agent:worker:main',
+          sessionId: 'sess-2',
+          updatedAt: 1_000,
+          chatType: 'chat',
+        }],
+        hasMore: false,
+      })
     const { OpenClawRuntimeProvider } = await import('@/lib/runtime-provider')
 
     const provider = new OpenClawRuntimeProvider()
-    await expect(provider.listSessions()).resolves.toEqual(listed)
+    await expect(provider.listSessions({ activeWithinMs: 5_000 })).resolves.toEqual([
+      expect.objectContaining({
+        key: 'agent:main:main',
+        agent: 'main',
+        chatType: 'direct',
+        active: true,
+        hasActiveRun: true,
+      }),
+      expect.objectContaining({
+        key: 'agent:worker:main',
+        agent: 'worker',
+        active: false,
+        hasActiveRun: false,
+      }),
+    ])
+    expect(callOpenClawGateway).toHaveBeenNthCalledWith(
+      1,
+      'sessions.list',
+      { limit: 200, offset: 0, configuredAgentsOnly: true },
+      15_000,
+    )
+    expect(callOpenClawGateway).toHaveBeenNthCalledWith(
+      2,
+      'sessions.list',
+      { limit: 200, offset: 1, configuredAgentsOnly: true },
+      15_000,
+    )
+    await provider.listSessions()
+    expect(callOpenClawGateway).toHaveBeenCalledTimes(2)
+  })
+
+  it('fails closed when sessions.list pagination skips or stalls', async () => {
+    callOpenClawGateway.mockResolvedValue({
+      sessions: [{ key: 'agent:main:main', sessionId: 'sess-1', updatedAt: 1 }],
+      hasMore: true,
+      nextOffset: 3,
+    })
+    const { OpenClawRuntimeProvider } = await import('@/lib/runtime-provider')
+
+    const provider = new OpenClawRuntimeProvider()
+    await expect(provider.listSessions()).rejects.toThrow('Invalid sessions.list pagination')
+
+    callOpenClawGateway.mockReset()
+    callOpenClawGateway.mockResolvedValue({ sessions: [], hasMore: true, nextOffset: 0 })
+    const stalledProvider = new OpenClawRuntimeProvider()
+    await expect(stalledProvider.listSessions()).rejects.toThrow('Invalid sessions.list pagination')
+  })
+
+  it('normalizes official and legacy tool history inside the OpenClaw adapter', async () => {
+    callOpenClawGateway.mockResolvedValue({
+      messages: [
+        {
+          role: 'assistant',
+          timestamp: 1_000,
+          content: [
+            { type: 'toolCall', id: 'call-1', name: 'status', arguments: { concise: true } },
+            { type: 'tool_use', id: 'call-legacy', name: 'legacy', input: { ok: true } },
+          ],
+        },
+        {
+          role: 'toolResult',
+          timestamp: 2_000,
+          toolCallId: 'call-1',
+          toolName: 'fixture-result',
+          isError: true,
+          content: [{
+            type: 'toolResult',
+            id: 'result-1',
+            name: 'fixture-result',
+            content: '',
+            text: 'ready',
+            toolCallId: 'call-1',
+            toolName: 'fixture-result',
+            toolUseId: 'call-1',
+            tool_use_id: 'call-1',
+          }],
+        },
+      ],
+    })
+    const { OpenClawRuntimeProvider } = await import('@/lib/runtime-provider')
+
+    const provider = new OpenClawRuntimeProvider()
+    await expect(provider.getSessionHistory('agent:main:main', { limit: 25 })).resolves.toEqual({
+      messages: [
+        {
+          role: 'assistant',
+          parts: [
+            { type: 'tool_use', id: 'call-1', name: 'status', input: '{"concise":true}' },
+            { type: 'tool_use', id: 'call-legacy', name: 'legacy', input: '{"ok":true}' },
+          ],
+          timestamp: 1_000,
+        },
+        {
+          role: 'tool',
+          parts: [{ type: 'tool_result', toolUseId: 'call-1', content: 'ready', isError: true }],
+          timestamp: 2_000,
+        },
+      ],
+    })
+    expect(callOpenClawGateway).toHaveBeenCalledWith(
+      'chat.history',
+      { sessionKey: 'agent:main:main', limit: 25 },
+      15_000,
+    )
   })
 
   it('updates session config through gateway session boundary', async () => {
@@ -167,27 +297,58 @@ describe('OpenClawRuntimeProvider', () => {
   })
 
   it('deletes session through gateway session boundary', async () => {
-    callOpenClawGateway.mockResolvedValue({ ok: true })
+    callOpenClawGateway
+      .mockResolvedValueOnce({
+        sessions: [{
+          key: 'agent:worker:task',
+          agentId: 'worker',
+          sessionId: 'sess-z',
+          updatedAt: 1,
+        }],
+        hasMore: false,
+      })
+      .mockResolvedValueOnce({ ok: true })
     const { OpenClawRuntimeProvider } = await import('@/lib/runtime-provider')
 
     const provider = new OpenClawRuntimeProvider()
-    await provider.deleteSession('sess-z')
+    await provider.deleteSession('agent:worker:task')
 
-    expect(callOpenClawGateway).toHaveBeenCalledWith('session_delete', { sessionKey: 'sess-z' }, 10_000)
+    expect(callOpenClawGateway).toHaveBeenNthCalledWith(2, 'sessions.delete', {
+      key: 'agent:worker:task',
+      agentId: 'worker',
+      expectedSessionId: 'sess-z',
+      deleteTranscript: true,
+    }, 15_000)
   })
 
   it('controls session through provider boundary', async () => {
-    callOpenClawGateway.mockResolvedValueOnce({ ok: true }).mockResolvedValueOnce({ ok: true })
+    callOpenClawGateway
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        sessions: [{
+          key: 'agent:worker:task',
+          agentId: 'worker',
+          sessionId: 'sess-a',
+          updatedAt: 1,
+        }],
+        hasMore: false,
+      })
+      .mockResolvedValueOnce({ ok: true })
     const { OpenClawRuntimeProvider } = await import('@/lib/runtime-provider')
 
     const provider = new OpenClawRuntimeProvider()
-    await provider.controlSession('sess-a', 'monitor')
-    await provider.controlSession('sess-a', 'terminate')
+    await provider.controlSession('agent:worker:task', 'monitor')
+    await provider.controlSession('agent:worker:task', 'terminate')
 
     expect(callOpenClawGateway).toHaveBeenNthCalledWith(1, 'sessions_send', {
-      sessionKey: 'sess-a',
+      sessionKey: 'agent:worker:task',
       message: { type: 'control', action: 'monitor' },
     }, 10_000)
-    expect(callOpenClawGateway).toHaveBeenNthCalledWith(2, 'session_delete', { sessionKey: 'sess-a' }, 10_000)
+    expect(callOpenClawGateway).toHaveBeenNthCalledWith(3, 'sessions.delete', {
+      key: 'agent:worker:task',
+      agentId: 'worker',
+      expectedSessionId: 'sess-a',
+      deleteTranscript: true,
+    }, 15_000)
   })
 })

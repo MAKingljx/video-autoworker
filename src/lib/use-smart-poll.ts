@@ -1,12 +1,13 @@
 'use client'
 
 import { useEffect, useRef, useCallback } from 'react'
+import { gatewayAllowsPolling } from '@/lib/gateway-connection-state'
 import { useMissionControl } from '@/store'
 
 interface SmartPollOptions {
   /** Pause polling when WebSocket is connected (data comes via WS anyway) */
   pauseWhenConnected?: boolean
-  /** Pause polling when WebSocket is disconnected (no point polling if server is down) */
+  /** Pause polling when neither the managed gateway nor browser transport is healthy */
   pauseWhenDisconnected?: boolean
   /** Pause polling when SSE is connected (real-time events replace polling) */
   pauseWhenSseConnected?: boolean
@@ -48,6 +49,10 @@ export function useSmartPoll(
   const initialFiredRef = useRef(false)
 
   const { connection } = useMissionControl()
+  const gatewayPollingAllowed = gatewayAllowsPolling(connection, {
+    pauseWhenConnected,
+    pauseWhenDisconnected,
+  })
 
   // Keep callback ref current without re-triggering the effect
   useEffect(() => {
@@ -58,11 +63,12 @@ export function useSmartPoll(
   const shouldPoll = useCallback(() => {
     if (!enabled) return false
     if (!isVisibleRef.current) return false
-    if (pauseWhenConnected && connection.isConnected) return false
-    if (pauseWhenDisconnected && !connection.isConnected) return false
+    // Only a browser WebSocket replaces HTTP polling with pushed data. A
+    // healthy server-managed gateway still needs browser-side HTTP polling.
+    if (!gatewayPollingAllowed) return false
     if (pauseWhenSseConnected && connection.sseConnected) return false
     return true
-  }, [enabled, pauseWhenConnected, pauseWhenDisconnected, pauseWhenSseConnected, connection.isConnected, connection.sseConnected])
+  }, [enabled, gatewayPollingAllowed, pauseWhenSseConnected, connection.sseConnected])
 
   const fire = useCallback(() => {
     if (!shouldPoll()) return
@@ -137,7 +143,7 @@ export function useSmartPoll(
   // Restart interval when connection state changes (WS or SSE)
   useEffect(() => {
     startInterval()
-  }, [connection.isConnected, connection.sseConnected, startInterval])
+  }, [gatewayPollingAllowed, connection.sseConnected, startInterval])
 
   // Return manual trigger
   return fire

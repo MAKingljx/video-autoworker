@@ -1,9 +1,13 @@
 'use client'
 
 import { HealthRow, formatUptime, type DashboardData } from '../widget-primitives'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 export function RuntimeHealthWidget({ data }: { data: DashboardData }) {
   const { localOsStatus, connection, sessions, isSessionsLoading, mcHealth, memPct, systemStats } = data
+  const gateway = selectGatewayConnection(connection)
+  const gatewayValue = gateway.state === 'online' ? '在线' : gateway.state === 'checking' ? '检查中' : '离线'
+  const gatewayStatus = gateway.state === 'online' ? 'good' : gateway.state === 'checking' ? 'warn' : 'bad'
   const qwenSessions = sessions.filter((session) => {
     const text = `${session.model || ''} ${session.key || ''} ${session.agent || ''}`.toLowerCase()
     return text.includes('qwen') || text.includes('千问') || text.includes('default_model')
@@ -20,7 +24,7 @@ export function RuntimeHealthWidget({ data }: { data: DashboardData }) {
     <div className="panel">
       <div className="panel-header"><h3 className="text-sm font-semibold">本地运行健康</h3></div>
       <div className="panel-body space-y-3">
-        <HealthRow label="OpenClaw 网关" value={connection.isConnected ? '在线' : '离线'} status={connection.isConnected ? 'good' : 'bad'} />
+        <HealthRow label="OpenClaw 网关" value={gatewayValue} status={gatewayStatus} />
         <HealthRow label="本地千问" value={qwenStatus.value} status={qwenStatus.status} />
         <HealthRow label="本地系统" value={localOsStatus.value} status={localOsStatus.status} />
         <HealthRow label="控制中心核心" value={mcHealth.value} status={mcHealth.status} />

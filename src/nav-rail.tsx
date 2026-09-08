@@ -4,6 +4,7 @@ import Image from 'next/image'
 import { useState, useEffect } from 'react'
 import { useMissionControl } from '@/store'
 import { Button } from '@/components/ui/button'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 interface NavItem {
   id: string
@@ -67,6 +68,7 @@ const allNavItems = navGroups.flatMap(g => g.items)
 
 export function NavRail() {
   const { activeTab, setActiveTab, connection, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup } = useMissionControl()
+  const gatewayConnection = selectGatewayConnection(connection)
 
   // Keyboard shortcut: [ to toggle sidebar
   useEffect(() => {
@@ -180,13 +182,13 @@ export function NavRail() {
         <div className={`shrink-0 py-3 flex ${sidebarExpanded ? 'px-3 items-center gap-2' : 'flex-col items-center'}`}>
           <div
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-              connection.isConnected ? 'bg-green-500 pulse-dot' : 'bg-red-500'
+              gatewayConnection.operational ? 'bg-green-500 pulse-dot' : 'bg-red-500'
             }`}
-            title={connection.isConnected ? '网关已连接' : '网关已断开'}
+            title={gatewayConnection.operational ? '网关在线' : '网关离线'}
           />
           {sidebarExpanded && (
             <span className="text-xs text-muted-foreground truncate">
-              {connection.isConnected ? '已连接' : '已断开'}
+              {gatewayConnection.state === 'online' ? '在线' : gatewayConnection.state === 'checking' ? '检查中' : '离线'}
             </span>
           )}
         </div>

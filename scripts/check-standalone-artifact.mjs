@@ -143,6 +143,8 @@ const ALLOWED_NEXT_ROOT_FILES = new Set([
 ])
 
 const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
+  'scripts/lib/blue-green-installed-manager.mjs',
+  'scripts/lib/blue-green-execve-contract.mjs',
   'scripts/apply-openclaw-runtime-convergence.sh',
   'scripts/feishu-director-brain.mjs',
   'scripts/install-aiworker-task-flow-skill.sh',
@@ -182,6 +184,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
 ])
 
 const ALLOWED_STANDALONE_OPS_PATHS = new Set([
+  'ops/recovery/install-blue-green-execve-adapter.mjs',
   'ops/feishu-director-brain/schema.json',
   'ops/openclaw/qwen-current-runtime-convergence.manifest.json',
 ])
@@ -973,7 +976,7 @@ export async function assertStandaloneStaticImportClosure(
   rootPath = resolve('.next/standalone'),
 ) {
   const { root, physicalRoot } = await assertStandalonePhysicalRoot(rootPath)
-  const firstPartyRoots = ['scripts', 'openclaw-plugins', 'openclaw-skills']
+  const firstPartyRoots = ['scripts', 'openclaw-plugins', 'openclaw-skills', 'ops/recovery']
   const queue = []
   for (const firstPartyRoot of firstPartyRoots) {
     const pathname = resolve(root, firstPartyRoot)
@@ -1020,7 +1023,16 @@ export async function assertStandaloneStaticImportClosure(
   }
 
   let dynamicDependencies = 0
-  for (const [importer, dependencies] of EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES) {
+  const dynamicRuntimeDependencies = new Map(EXPLICIT_DYNAMIC_RUNTIME_DEPENDENCIES)
+  // Existing rollback artifacts predate the installed-manager adapter. Require
+  // its closure when the deployment entry uses it, without invalidating them.
+  const deploymentSource = await readFile(resolve(root, 'scripts/deploy-blue-green.sh'), 'utf8')
+  if (deploymentSource.includes('scripts/lib/blue-green-installed-manager.mjs')) {
+    dynamicRuntimeDependencies.set('scripts/deploy-blue-green.sh', [
+      'scripts/lib/blue-green-installed-manager.mjs',
+    ])
+  }
+  for (const [importer, dependencies] of dynamicRuntimeDependencies) {
     const importerStat = await lstat(resolve(root, importer)).catch(() => null)
     if (!importerStat?.isFile() || importerStat.isSymbolicLink()) {
       throw new Error(`standalone_dynamic_importer_missing:${importer}`)

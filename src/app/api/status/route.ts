@@ -6,7 +6,12 @@ import path from 'node:path'
 import { runCommand, runOpenClaw, runClawdbot } from '@/lib/command'
 import { config } from '@/lib/config'
 import { getDatabase } from '@/lib/db'
-import { getAllGatewaySessions, getAgentLiveStatuses } from '@/lib/openclaw-session-source'
+import { getRuntimeProvider } from '@/lib/runtime-provider'
+import {
+  deriveAgentLiveStatuses,
+  summarizeRuntimeSessions,
+  unavailableRuntimeSessionOverview,
+} from '@/lib/runtime/sessions'
 import { requireRole } from '@/lib/auth'
 import { MODEL_CATALOG } from '@/lib/models'
 import { logger } from '@/lib/logger'
@@ -253,7 +258,7 @@ async function getSystemStatus(workspaceId: number) {
     uptime: 0,
     memory: { total: 0, used: 0, available: 0 },
     disk: { total: 0, used: 0, available: 0 },
-    sessions: { total: 0, active: 0 },
+    sessions: unavailableRuntimeSessionOverview(),
     processes: []
   }
 
@@ -334,17 +339,13 @@ async function getSystemStatus(workspaceId: number) {
   }
 
   try {
-    // Read sessions directly from agent session stores on disk
-    const gatewaySessions = getAllGatewaySessions()
-    status.sessions = {
-      total: gatewaySessions.length,
-      active: gatewaySessions.filter((s) => s.active).length,
-    }
+    const gatewaySessions = await getRuntimeProvider().listSessions()
+    status.sessions = summarizeRuntimeSessions(gatewaySessions)
 
     // Sync agent statuses in DB from live session data
     try {
       const db = getDatabase()
-      const liveStatuses = getAgentLiveStatuses()
+      const liveStatuses = deriveAgentLiveStatuses(gatewaySessions)
       const now = Math.floor(Date.now() / 1000)
       // Match by: exact name, lowercase, or normalized (spaces→hyphens)
       const updateStmt = db.prepare(
@@ -367,7 +368,7 @@ async function getSystemStatus(workspaceId: number) {
       logger.error({ err: dbErr }, 'Error syncing agent statuses')
     }
   } catch (error) {
-    logger.error({ err: error }, 'Error reading session stores')
+    logger.error({ err: error }, 'Error reading runtime sessions')
   }
 
   return status

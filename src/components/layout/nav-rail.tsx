@@ -8,6 +8,7 @@ import { useNavigateToPanel, usePrefetchPanel } from '@/lib/navigation'
 import { Button } from '@/components/ui/button'
 import { APP_VERSION } from '@/lib/version'
 import { getPluginNavItems } from '@/lib/plugins'
+import { selectGatewayConnection } from '@/lib/gateway-connection-state'
 
 interface NavItem {
   id: string
@@ -132,6 +133,7 @@ const adminOnlyPanels = new Set<string>([])
 
 export function NavRail() {
   const { activeTab, connection, dashboardMode, currentUser, activeTenant, tenants, osUsers, setActiveTenant, fetchTenants, fetchOsUsers, activeProject, projects, setActiveProject, fetchProjects, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup, defaultOrgName } = useMissionControl()
+  const gatewayConnection = selectGatewayConnection(connection)
   const navigateToPanel = useNavigateToPanel()
   const prefetchPanel = usePrefetchPanel()
   const tn = useTranslations('nav')
@@ -454,7 +456,7 @@ export function NavRail() {
           currentUser={currentUser}
           isAdmin={isAdmin}
           isLocal={isLocal}
-          isConnected={connection.isConnected}
+          isConnected={gatewayConnection.operational}
           tenants={tenants}
           osUsers={osUsers}
           activeTenant={activeTenant}

@@ -1,6 +1,7 @@
 'use client'
 
 import { Button } from '@/components/ui/button'
+import type { GatewayConnectionStatus } from '@/lib/gateway-connection-state'
 
 export interface DbStats {
   tasks: { total: number; byStatus: Record<string, number> }
@@ -42,7 +43,7 @@ export interface DashboardData {
   logs: any[]
   agents: any[]
   tasks: any[]
-  connection: { isConnected: boolean; url: string; reconnectAttempts: number; latency?: number; sseConnected?: boolean }
+  connection: GatewayConnectionStatus
   subscription: { type: string; provider?: string; rateLimitTier?: string } | null
   navigateToPanel: (tab: string) => void
   openSession: (session: any) => void
@@ -73,10 +74,11 @@ export interface DashboardData {
   codexHealth: { value: string; status: 'good' | 'warn' | 'bad' }
   hermesHealth: { value: string; status: 'good' | 'warn' | 'bad' }
   mcHealth: { value: string; status: 'good' | 'warn' | 'bad' }
-  gatewayHealthStatus: 'good' | 'bad'
+  gatewayHealthStatus: 'good' | 'warn' | 'bad'
   // Loading states
   isSystemLoading: boolean
   isSessionsLoading: boolean
+  sessionsUnavailable: boolean
   isClaudeLoading: boolean
   isGithubLoading: boolean
   hermesCronJobCount: number

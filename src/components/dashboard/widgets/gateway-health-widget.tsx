@@ -3,13 +3,14 @@
 import { HealthRow, type DashboardData } from '../widget-primitives'
 
 export function GatewayHealthWidget({ data }: { data: DashboardData }) {
-  const { connection, sessions, errorCount, backlogCount, memPct, systemStats, gatewayHealthStatus } = data
+  const { sessions, errorCount, backlogCount, memPct, systemStats, gatewayHealthStatus } = data
+  const gatewayValue = gatewayHealthStatus === 'good' ? '在线' : gatewayHealthStatus === 'warn' ? '检查中' : '离线'
 
   return (
     <div className="panel">
       <div className="panel-header"><h3 className="text-sm font-semibold">网关健康与关键指标</h3></div>
       <div className="panel-body space-y-3">
-        <HealthRow label="网关" value={connection.isConnected ? '已连接' : '已断开'} status={gatewayHealthStatus} />
+        <HealthRow label="网关" value={gatewayValue} status={gatewayHealthStatus} />
         <HealthRow label="流量（会话）" value={`${sessions.length}`} status={sessions.length > 0 ? 'good' : 'warn'} />
         <HealthRow label="错误（24 小时）" value={`${errorCount}`} status={errorCount > 0 ? 'warn' : 'good'} />
         <HealthRow label="饱和度（队列）" value={`${backlogCount}`} status={backlogCount > 16 ? 'bad' : backlogCount > 8 ? 'warn' : 'good'} />

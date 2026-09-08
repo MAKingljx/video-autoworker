@@ -42,6 +42,21 @@ describe('/api/sessions route', () => {
     })
   })
 
+  it('GET reports provider failure as unavailable instead of an empty list', async () => {
+    getRuntimeProvider.mockReturnValue({
+      listSessions: vi.fn().mockRejectedValue(new Error('gateway unavailable')),
+    })
+    const { GET } = await import('@/app/api/sessions/route')
+
+    const response = await GET(new NextRequest('http://localhost/api/sessions'))
+
+    expect(response.status).toBe(503)
+    await expect(response.json()).resolves.toEqual({
+      available: false,
+      error: 'Runtime sessions are unavailable',
+    })
+  })
+
   it('POST delegates set-thinking to runtime provider config boundary', async () => {
     const updateSessionConfig = vi.fn().mockResolvedValue({ ok: true })
     getRuntimeProvider.mockReturnValue({ listSessions: vi.fn().mockResolvedValue([]), updateSessionConfig, deleteSession: vi.fn() })
@@ -156,6 +171,7 @@ describe('/api/sessions route', () => {
     const body = await response.json()
 
     expect(response.status).toBe(200)
+    expect(body.available).toBe(true)
     expect(body.sessions).toHaveLength(1)
     expect(body.sessions[0]).toHaveProperty('source')
     expect(body.sessions.map((s: any) => s.id)).toEqual(['sess-1'])

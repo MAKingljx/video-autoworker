@@ -178,6 +178,7 @@ export async function POST(request: NextRequest) {
     ws_url,
     token_set: detected.configured,
     credential_source: detected.source,
+    connection_mode: 'server-managed',
     server_managed: true,
   })
 }
