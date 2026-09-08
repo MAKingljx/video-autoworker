@@ -27,6 +27,7 @@
     "start": "pnpm run start:standalone",
     "start:standalone": "pnpm run verify:node && bash scripts/start-standalone.sh",
     "deploy:standalone": "pnpm run verify:node && bash scripts/deploy-standalone.sh",
+    "deploy:blue-green": "node scripts/run-blue-green-deployment.mjs",
     "lint": "pnpm run verify:node && eslint .",
     "typecheck": "pnpm run verify:node && tsc --noEmit",
     "test": "pnpm run verify:node && pnpm run test:root && pnpm run test:openclaw-video-command && pnpm run test:openclaw-director-brain && pnpm run test:openclaw-task-flow",

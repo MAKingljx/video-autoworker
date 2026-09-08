@@ -29,6 +29,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   'transfer-encoding',
   'upgrade',
 ])
+const FORWARDED_IDENTITY_HEADERS = new Set([
+  'forwarded',
+  'x-original-host',
+  'x-forwarded-server',
+])
 
 function safeRouterDiagnostic(error) {
   return String(error instanceof Error ? error.message : error || 'unknown')
@@ -168,16 +173,34 @@ export function writeRouterRuntimeAttestationAtomic(pathname, value) {
   }
 }
 
-function proxyHeaders(headers, backend, preserveUpgrade = false, addBackendHost = true) {
+function requestHost(incoming) {
+  const values = []
+  for (let index = 0; index < incoming.rawHeaders.length; index += 2) {
+    if (incoming.rawHeaders[index].toLowerCase() === 'host') values.push(incoming.rawHeaders[index + 1])
+  }
+  if (values.length !== 1 || typeof values[0] !== 'string') fail('request_host_invalid')
+  const value = values[0]
+  if (!value || value !== value.trim() || value.length > 255 || /[\s,/@\\?#]/u.test(value)) {
+    fail('request_host_invalid')
+  }
+  let parsed
+  try { parsed = new URL(`http://${value}/`) } catch { fail('request_host_invalid') }
+  if (!parsed.hostname || parsed.username || parsed.password || parsed.pathname !== '/'
+    || parsed.search || parsed.hash) fail('request_host_invalid')
+  return parsed.host
+}
+
+function proxyHeaders(headers, preserveUpgrade = false, originalHost = null) {
   const output = {}
   for (const [name, value] of Object.entries(headers)) {
     if (value === undefined) continue
     const lower = name.toLowerCase()
     if (!preserveUpgrade && HOP_BY_HOP_HEADERS.has(lower)) continue
-    if (lower === 'host' || lower === 'x-forwarded-host' || lower === 'x-forwarded-port') continue
+    if (lower === 'host' || lower.startsWith('x-forwarded-')
+      || FORWARDED_IDENTITY_HEADERS.has(lower)) continue
     output[name] = value
   }
-  if (addBackendHost) output.host = `${backend.host}:${backend.port}`
+  if (originalHost !== null) output.host = originalHost
   return output
 }
 
@@ -199,6 +222,13 @@ export function createStandaloneRouter(options) {
   }
 
   const server = createServer((incoming, outgoing) => {
+    let originalHost
+    try {
+      originalHost = requestHost(incoming)
+    } catch {
+      jsonResponse(outgoing, 400, { ok: false, error: 'standalone_request_host_invalid' })
+      return
+    }
     let state
     try {
       state = readRouterState(stateFile)
@@ -244,9 +274,9 @@ export function createStandaloneRouter(options) {
       port: backend.port,
       method: incoming.method,
       path: incoming.url,
-      headers: proxyHeaders(incoming.headers, backend),
+      headers: proxyHeaders(incoming.headers, false, originalHost),
     }, backendResponse => {
-      const headers = proxyHeaders(backendResponse.headers, backend, false, false)
+      const headers = proxyHeaders(backendResponse.headers)
       outgoing.writeHead(backendResponse.statusCode || 502, backendResponse.statusMessage, headers)
       backendResponse.pipe(outgoing)
     })
@@ -262,6 +292,13 @@ export function createStandaloneRouter(options) {
   })
 
   server.on('upgrade', (incoming, socket, head) => {
+    let originalHost
+    try {
+      originalHost = requestHost(incoming)
+    } catch {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
+      return
+    }
     let state
     try {
       state = readRouterState(stateFile)
@@ -276,7 +313,7 @@ export function createStandaloneRouter(options) {
     upstream.once('connect', () => {
       connected = true
       counters[slot].upgradedSockets += 1
-      const headers = proxyHeaders(incoming.headers, backend, true)
+      const headers = proxyHeaders(incoming.headers, true, originalHost)
       const lines = [`${incoming.method || 'GET'} ${incoming.url || '/'} HTTP/${incoming.httpVersion}`]
       for (const [name, value] of Object.entries(headers)) {
         if (Array.isArray(value)) {

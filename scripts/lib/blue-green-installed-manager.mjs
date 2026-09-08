@@ -8,7 +8,10 @@ import { pathToFileURL } from 'node:url'
 import { verifyInstalledExecveAdapter } from '../../ops/recovery/install-blue-green-execve-adapter.mjs'
 
 const INSTALLATION_SCHEMA = 'video-autoworker-blue-green-launchd/v2'
-const ADAPTER_SCHEMA = 'video-autoworker-blue-green-execve-adapter/v2'
+const ADAPTER_SCHEMAS = new Set([
+  'video-autoworker-blue-green-execve-adapter/v2',
+  'video-autoworker-blue-green-execve-adapter/v3',
+])
 const MANAGER_RELATIVE_PATH = 'scripts/manage-blue-green-services.sh'
 const SLOT_LAUNCHER_RELATIVE_PATH = 'scripts/start-standalone-slot.sh'
 const SHA256 = /^[a-f0-9]{64}$/u
@@ -125,7 +128,7 @@ export function resolveInstalledBlueGreenManager({
     mode = 'same-project'
   } else {
     const compatibility = installation.recoveryCompatibility
-    if (compatibility?.schema !== ADAPTER_SCHEMA || !COMMIT.test(compatibility.sourceCommit || '')
+    if (!ADAPTER_SCHEMAS.has(compatibility?.schema) || !COMMIT.test(compatibility.sourceCommit || '')
       || !COMMIT.test(compatibility.adapterCommit || '')) {
       fail('cross-project installation lacks an exact execve adapter binding')
     }

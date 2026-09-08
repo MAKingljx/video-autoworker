@@ -236,6 +236,17 @@ function upgrade(port: number): Promise<{ socket: Socket; received: () => string
   })
 }
 
+function rawHttp(port: number, lines: string[]): Promise<string> {
+  return new Promise((resolvePromise, reject) => {
+    const socket = connect(port, '127.0.0.1')
+    let response = ''
+    socket.once('error', reject)
+    socket.once('connect', () => socket.end(`${lines.join('\r\n')}\r\n\r\n`))
+    socket.on('data', data => { response += data.toString() })
+    socket.once('close', () => resolvePromise(response))
+  })
+}
+
 afterEach(() => {
   while (cleanup.length) cleanup.pop()?.()
 })
@@ -575,6 +586,117 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
       previous: 'blue',
       generation: 2,
     })
+  })
+
+  it('preserves the validated browser Host for same-origin CSRF and strips forged forwarding identity', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-router-origin-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const received: Array<Record<string, string | string[] | undefined>> = []
+    const csrfBackend = createServer((request, response) => {
+      received.push(request.headers)
+      const originHost = request.headers.origin ? new URL(request.headers.origin).host : ''
+      if (originHost !== request.headers.host) {
+        response.writeHead(403, { 'content-type': 'application/json' })
+        response.end('{"error":"CSRF origin mismatch"}\n')
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"ok":true}\n')
+    })
+    const blue = await listen(csrfBackend)
+    const green = await listen(backend('green'))
+    const stateFile = join(root, 'router-state.json')
+    writeRouterStateAtomic(stateFile, state(blue.port, green.port))
+    const router = await listen(createStandaloneRouter({ stateFile }))
+    const publicOrigin = `http://127.0.0.1:${router.port}`
+
+    const sameOrigin = await fetch(`${publicOrigin}/api/n8n/intake-control`, {
+      method: 'POST',
+      headers: {
+        origin: publicOrigin,
+        forwarded: 'host=evil.example.test',
+        'x-forwarded-host': 'evil.example.test',
+        'x-forwarded-port': '443',
+        'x-forwarded-proto': 'https',
+        'x-forwarded-for': '192.0.2.1',
+        'x-original-host': 'evil.example.test',
+        'x-forwarded-server': 'evil.example.test',
+      },
+    })
+    expect(sameOrigin.status).toBe(200)
+    await expect(sameOrigin.json()).resolves.toEqual({ ok: true })
+    expect(received[0]?.host).toBe(`127.0.0.1:${router.port}`)
+    for (const name of ['forwarded', 'x-forwarded-host', 'x-forwarded-port',
+      'x-forwarded-proto', 'x-forwarded-for', 'x-original-host', 'x-forwarded-server']) {
+      expect(received[0]?.[name]).toBeUndefined()
+    }
+
+    const crossOrigin = await fetch(`${publicOrigin}/api/n8n/intake-control`, {
+      method: 'POST', headers: { origin: 'https://evil.example.test' },
+    })
+    expect(crossOrigin.status).toBe(403)
+    await expect(crossOrigin.json()).resolves.toEqual({ error: 'CSRF origin mismatch' })
+
+    const invalidHost = await rawHttp(router.port, [
+      'POST /api/n8n/intake-control HTTP/1.1',
+      `Host: 127.0.0.1:${router.port},evil.example.test`,
+      `Origin: ${publicOrigin}`,
+      'Connection: close',
+    ])
+    expect(invalidHost).toContain('HTTP/1.1 400 Bad Request')
+    expect(received).toHaveLength(2)
+  })
+
+  it('rejects duplicate Host before proxying and preserves trusted Host for WebSocket upgrades', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-router-host-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    let upgradedHeaders: Record<string, string | string[] | undefined> = {}
+    const blueServer = backend('blue')
+    blueServer.removeAllListeners('upgrade')
+    blueServer.on('upgrade', (request, socket) => {
+      upgradedHeaders = request.headers
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\nblue\n')
+    })
+    const blue = await listen(blueServer)
+    const green = await listen(backend('green'))
+    const stateFile = join(root, 'router-state.json')
+    writeRouterStateAtomic(stateFile, state(blue.port, green.port))
+    const router = await listen(createStandaloneRouter({ stateFile }))
+
+    const duplicate = await rawHttp(router.port, [
+      'POST /api/test HTTP/1.1',
+      `Host: 127.0.0.1:${router.port}`,
+      'Host: evil.example.test',
+      'Connection: close',
+    ])
+    expect(duplicate).toContain('HTTP/1.1 400 Bad Request')
+
+    const socket = connect(router.port, '127.0.0.1')
+    cleanup.push(() => socket.destroy())
+    let response = ''
+    await new Promise<void>((resolvePromise, reject) => {
+      socket.once('error', reject)
+      socket.once('connect', () => socket.write([
+        'GET /socket HTTP/1.1',
+        `Host: 127.0.0.1:${router.port}`,
+        'Connection: Upgrade',
+        'Upgrade: test',
+        'Forwarded: host=evil.example.test',
+        'X-Forwarded-Host: evil.example.test',
+        'X-Forwarded-For: 192.0.2.1',
+        '',
+        '',
+      ].join('\r\n')))
+      socket.on('data', data => {
+        response += data.toString()
+        if (response.includes('\r\n\r\n')) resolvePromise()
+      })
+    })
+    expect(response).toContain('101 Switching Protocols')
+    expect(upgradedHeaders.host).toBe(`127.0.0.1:${router.port}`)
+    expect(upgradedHeaders.forwarded).toBeUndefined()
+    expect(upgradedHeaders['x-forwarded-host']).toBeUndefined()
+    expect(upgradedHeaders['x-forwarded-for']).toBeUndefined()
   })
 
   it('keeps the router runtime attestation immutable across normal generation updates', () => {
