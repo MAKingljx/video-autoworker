@@ -14,6 +14,7 @@ import test from 'node:test'
 import {
   captureOpenClawRichCanarySessionSnapshot,
   loadOpenClawRichCanarySessionRuntime,
+  openClawCheckpointPostReferenceMatchesSnapshot,
   openClawLinearActiveTranscriptEntryIds,
   openClawSessionReferenceMatchesSnapshot,
   openClawSessionMarkerMatchesSnapshot,
@@ -137,6 +138,74 @@ test('captures a storage-neutral SQLite session snapshot', () => {
   ), true)
   assert.equal(openClawSessionReferenceMatchesSnapshot(
     binding(), 'agent:other:canary', value,
+  ), false)
+})
+
+test('accepts only the official omitted SQLite checkpoint reference for in-place compaction', () => {
+  const sdk = binding()
+  const value = captureOpenClawRichCanarySessionSnapshot(sdk, {
+    agentId: 'second-original',
+    env: { OPENCLAW_STATE_DIR: '/private/tmp/state' },
+    sessionKey: 'agent:second-original:canary',
+  })
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, undefined, value, 'in-place',
+  ), true)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, value.sessionFile, value, 'in-place',
+  ), true)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, value.identity.sessionKey, value, 'in-place',
+  ), true)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, undefined, value, 'generation-rotation',
+  ), false)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, value.sessionFile, value, 'generation-rotation',
+  ), true)
+})
+
+test('rejects omitted non-SQLite and unsafe explicit checkpoint references', () => {
+  const sdk = binding()
+  const markerAwareSdk = binding({
+    parseSqliteSessionFileMarker: input => {
+      const match = /^sqlite:([^:]+):([^:]+):(.+)$/u.exec(input)
+      return match
+        ? { agentId: match[1], sessionId: match[2], storePath: match[3] }
+        : undefined
+    },
+  })
+  const value = captureOpenClawRichCanarySessionSnapshot(sdk, {
+    agentId: 'second-original',
+    env: { OPENCLAW_STATE_DIR: '/private/tmp/state' },
+    sessionKey: 'agent:second-original:canary',
+  })
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, '/private/tmp/foreign.jsonl', value, 'in-place',
+  ), false)
+  for (const marker of [
+    'sqlite:other-agent:session-1:/private/tmp/openclaw-rich-canary-sessions.sqlite',
+    'sqlite:second-original:other-session:/private/tmp/openclaw-rich-canary-sessions.sqlite',
+    'sqlite:second-original:session-1:/private/tmp/other.sqlite',
+  ]) {
+    assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+      markerAwareSdk, marker, value, 'in-place',
+    ), false)
+  }
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, null, value, 'in-place',
+  ), false)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, undefined, { ...value, sessionFile: '/private/tmp/legacy.jsonl' }, 'in-place',
+  ), false)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk,
+    undefined,
+    { ...value, identity: { ...value.identity, sessionId: 'other-session' } },
+    'in-place',
+  ), false)
+  assert.equal(openClawCheckpointPostReferenceMatchesSnapshot(
+    sdk, undefined, value, 'inconsistent',
   ), false)
 })
 

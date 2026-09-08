@@ -196,6 +196,31 @@ export function openClawSessionReferenceMatchesSnapshot(binding, value, snapshot
     || openClawSessionMarkerMatchesSnapshot(binding, value, snapshot)
 }
 
+export function openClawCheckpointPostReferenceMatchesSnapshot(
+  binding,
+  value,
+  snapshot,
+  mode,
+) {
+  if (mode !== 'in-place' && mode !== 'generation-rotation') return false
+  const identity = snapshot?.identity
+  const marker = snapshot?.marker
+  const sqliteBindingValid = Boolean(identity && marker
+    && identity.agentId === marker.agentId
+    && identity.sessionId === marker.sessionId
+    && identity.storePath === marker.storePath
+    && openClawSessionMarkerMatchesSnapshot(binding, snapshot.sessionFile, snapshot))
+  if (!sqliteBindingValid) return false
+  if (value !== undefined) {
+    return openClawSessionReferenceMatchesSnapshot(binding, value, snapshot)
+  }
+  // OpenClaw 9.2 omits postCompaction.sessionFile after recognizing a SQLite
+  // marker. The caller still binds its exact sessionId and active leaf, and
+  // only an in-place checkpoint may use that omitted-reference form.
+  if (mode !== 'in-place') return false
+  return openClawSessionMarkerMatchesSnapshot(binding, snapshot?.sessionFile, snapshot)
+}
+
 export function openClawLinearActiveTranscriptEntryIds(events) {
   if (!Array.isArray(events) || events.length === 0) fail('transcript_events_invalid')
   const byId = new Map()

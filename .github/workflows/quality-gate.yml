@@ -53,6 +53,7 @@ jobs:
       - name: OpenClaw session QA contracts
         run: >-
           node --test
+          scripts/test-openclaw-agent-json-result.test.mjs
           scripts/test-openclaw-rich-canary-session-runtime.test.mjs
           scripts/test-openclaw-owned-synthetic-session.test.mjs
           scripts/test-openclaw-session-resilience-matrix.test.mjs

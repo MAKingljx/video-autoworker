@@ -33,8 +33,8 @@ import {
 import {
   captureOpenClawRichCanarySessionSnapshot,
   loadOpenClawRichCanarySessionRuntime,
+  openClawCheckpointPostReferenceMatchesSnapshot,
   openClawLinearActiveTranscriptEntryIds,
-  openClawSessionReferenceMatchesSnapshot,
 } from './lib/openclaw-rich-canary-session-runtime.mjs'
 import { fingerprintOpenClawToolInventory } from './lib/openclaw-tool-capability-fingerprint.mjs'
 
@@ -1133,20 +1133,22 @@ function checkpointSuccessorEvidence({
   }
   const activeSessionIdChanged = beforeSnapshot.entry.sessionId !== afterSnapshot.entry.sessionId
   const activeSessionFileChanged = beforeSnapshot.sessionFile !== afterSnapshot.sessionFile
+  const generationRotated = activeSessionIdChanged && activeSessionFileChanged
+  const inPlace = !activeSessionIdChanged && !activeSessionFileChanged
+  const mode = generationRotated ? 'generation-rotation' : inPlace ? 'in-place' : 'inconsistent'
   const checkpointPostSessionMatchesActive = createdCheckpoints.every(checkpoint => (
     checkpoint?.postCompaction?.sessionId === afterSnapshot.entry.sessionId
   ))
   const checkpointPostFileMatchesActive = createdCheckpoints.every(checkpoint => (
-    openClawSessionReferenceMatchesSnapshot(
+    openClawCheckpointPostReferenceMatchesSnapshot(
       sessionRuntimeBinding,
       checkpoint?.postCompaction?.sessionFile,
       afterSnapshot,
+      mode,
     )
   ))
   const checkpointPostLeafInActiveBranch = checkpointSuccessorIds(createdCheckpoints)
     .every(id => activeEntryIds.has(id))
-  const generationRotated = activeSessionIdChanged && activeSessionFileChanged
-  const inPlace = !activeSessionIdChanged && !activeSessionFileChanged
   const successorBound = (generationRotated || inPlace)
     && checkpointPostSessionMatchesActive
     && checkpointPostFileMatchesActive
@@ -1158,7 +1160,7 @@ function checkpointSuccessorEvidence({
     checkpointPostSessionMatchesActive,
     checkpointPostFileMatchesActive,
     checkpointPostLeafInActiveBranch,
-    mode: generationRotated ? 'generation-rotation' : inPlace ? 'in-place' : 'inconsistent',
+    mode,
     rotated: generationRotated && successorBound,
     successorBound,
   }

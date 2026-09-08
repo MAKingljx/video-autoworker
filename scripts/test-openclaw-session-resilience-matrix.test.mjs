@@ -494,7 +494,7 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
     'loadOpenClawRichCanarySessionRuntime',
     'captureOpenClawRichCanarySessionSnapshot',
     'openClawLinearActiveTranscriptEntryIds',
-    'openClawSessionReferenceMatchesSnapshot',
+    'openClawCheckpointPostReferenceMatchesSnapshot',
     'sessionSnapshot',
     'stats.sizeBytes',
     "call('chat.inject'",

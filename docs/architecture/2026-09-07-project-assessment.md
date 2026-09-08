@@ -35,3 +35,10 @@ n8n 任务由 `src/app/api/n8n/trigger/route.ts` 接收 task ID 与幂等键，�
 下一步依次迁移 TaskExecution、AgentDirectory、Identity 和 KnowledgeRepository。每次迁移共用既有业务服务、任务标识、持久队列和权限语义；平台协议、配置、凭据与外部 ID 留在适配器。当前会话合同仍保留 `sessionKey`、`raw: any` 等兼容字段，需要逐步规范化响应、错误与能力声明，避免业务层继续解析平台 DTO。
 
 最后选择一个真实第二平台进行端到端验收，覆盖幂等重试、乱序回调、取消、超时、附件、权限拒绝与平台不可用。在没有 OpenClaw 二进制、配置、Gateway 和凭据的环境中完成同一业务任务、读回结果并验证恢复后，才可声明对应业务已脱离 OpenClaw。生产切换时暂停新准入，保留进行中任务原有执行归属，排空后退役旧适配器。
+
+
+## 9月8日生产复核补充
+
+应用d96已通过独立finisher f26a128完成生产恢复收尾，原5c0 controller发布完成记录并恢复任务入口至active revision2。router3017与blue3317健康，历史3db与n8n来源保留；原两库文件身份及519条视频任务状态不变。自动清理仍关闭，视频lane保持停用。此前“未激活”的描述是9月7日快照，最新现场证据见9月8日运维记录。
+
+实际浏览器发现两项早于d96的兼容缺口。服务端托管Gateway的状态没有进入前端连接状态模型，导致离线标记及部分依赖该标记的轮询不准确；HTTP聊天与SSE采用独立路径。会话索引仍读旧JSON，不能正确代表9.2 SQLite当前会话，亦影响在线状态、令牌统计、聚合历史和清理；已有有效key的单会话历史优先走官方chat.history。后续应在RuntimeProvider内使用sessions.list/chat.history及受控sessions.delete，给health/transcript/retention声明能力，并迁走status、scheduler和cleanup对平台文件格式的直接引用。不得通过复制旧索引或伪造在线状态解决。
