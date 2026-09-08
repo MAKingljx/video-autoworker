@@ -1,25 +1,152 @@
 // @vitest-environment node
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
+  closeSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   gitBoundFile,
   reconcileRecoveredIntake,
+  sanitizedEnvironment,
   verifyRecoveredRouter,
 } from '../../ops/recovery/run-legacy-bootstrap-sdk-successor.mjs'
 
 describe('legacy bootstrap SDK successor entry', () => {
+  it('validates historical evidence and workflow identity before mapping the requested successor', () => {
+    const root = mkdtempSync(join(realpathSync(tmpdir()), 'successor-inline-binding-'))
+    try {
+      const deploy = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+      const evidenceCall = deploy.indexOf('evidence_values="$($NODE_BIN')
+      const evidenceProgramStart = deploy.indexOf("const fs = require('node:fs')", evidenceCall)
+      const evidenceProgramEnd = deploy.indexOf('\nNODE\n  )"', evidenceProgramStart)
+      const evidenceProgram = deploy.slice(evidenceProgramStart, evidenceProgramEnd)
+      const evidenceArguments = deploy.slice(evidenceCall, evidenceProgramStart)
+      expect(evidenceArguments).toContain('"$authorization_release_id" "$authorization_release_root"')
+      expect(evidenceArguments).toContain('"$authorization_manifest"')
+
+      const now = 1_800_000_000
+      const historicalTarget = {
+        slot: 'blue', releaseId: 'historical-target', releaseRoot: '/releases/historical-target',
+        manifestSha256: 'a'.repeat(64),
+      }
+      const fileIdentity = (path: string) => ({ path, dev: '1', ino: '2' })
+      const processIdentity = (pid: number, database: string) => ({
+        pid, ppid: 2, uid: process.getuid(), startTime: 'now', argvSha256: 'b'.repeat(64),
+        cwd: fileIdentity('/runtime/cwd'), database: fileIdentity(database),
+        executable: fileIdentity('/runtime/node'),
+      })
+      const evidence = {
+        schema: 'video-autoworker-legacy-freeze-evidence/v3',
+        generatorSha256: 'c'.repeat(64),
+        target: historicalTarget,
+        legacy: { ...processIdentity(1, '/mission.db'), releaseId: 'pre-baseline', routerPort: 3017 },
+        n8n: { ...processIdentity(3, '/n8n.db'), ppid: 4, launchPid: 4, port: 5678 },
+        counts: { mediaNodes: 0, n8nActiveExecutions: 0, queueRunning: 0, queueWaiting: 0 },
+        queueDigestSha256: 'd'.repeat(64),
+        rollback: { ...fileIdentity('/rollback.json'), sha256: 'e'.repeat(64) },
+        supervisor: { disabled: true, loaded: false, lockAbsent: true, workerPids: [] },
+        frozen: {
+          schema: 'video-autoworker-legacy-freeze-guard/v1', mode: 'dual', ready: true,
+          pid: 5, uid: process.getuid(), startedAt: 'now', issuedAt: now - 60, expiresAt: now + 60,
+          argvSha256: 'f'.repeat(64), guardNonceSha256: '1'.repeat(64),
+          legacyBindingSha256: '2'.repeat(64), scriptSha256: '3'.repeat(64),
+          database: fileIdentity('/mission.db'), n8nDatabase: fileIdentity('/n8n.db'),
+          socket: fileIdentity('/guard.sock'),
+        },
+        observedAt: now - 10,
+      }
+      const evidencePath = join(root, 'evidence.json')
+      const evidenceSource = `${JSON.stringify(evidence)}\n`
+      writeFileSync(evidencePath, evidenceSource, { mode: 0o600 })
+      chmodSync(evidencePath, 0o600)
+      const descriptor = openSync(evidencePath, 'r')
+      const runEvidenceValidator = (releaseId: string, releaseRoot: string, manifest: string) =>
+        spawnSync(process.execPath, [
+          '-', '3', evidencePath, '3017', String(now), '300', 'blue', releaseId, releaseRoot,
+          manifest, '/mission.db', '/n8n.db',
+          createHash('sha256').update(evidenceSource).digest('hex'), '/rollback.json', '0',
+        ], { input: evidenceProgram, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe', descriptor] })
+      try {
+        const historical = runEvidenceValidator(
+          historicalTarget.releaseId, historicalTarget.releaseRoot, historicalTarget.manifestSha256,
+        )
+        expect(historical.status, historical.stderr).toBe(0)
+        expect(historical.stdout).toContain('pre-baseline\n1\n/runtime/cwd')
+
+        const requested = runEvidenceValidator('requested', '/releases/requested', '9'.repeat(64))
+        expect(requested.status).not.toBe(0)
+      } finally {
+        closeSync(descriptor)
+      }
+
+      const workflowCall = deploy.indexOf('workflow_digest="$($NODE_BIN -e')
+      const workflowProgramStart = deploy.indexOf("\n    const value = JSON.parse", workflowCall) + 1
+      const workflowProgramEnd = deploy.indexOf("\n  ' \"$workflow_compatibility\"", workflowProgramStart)
+      const workflowProgram = deploy.slice(workflowProgramStart, workflowProgramEnd)
+      const workflowArguments = deploy.slice(workflowProgramEnd, deploy.indexOf('\\\n', workflowProgramEnd))
+      expect(workflowArguments).toContain('"$n8n_source_commit"')
+      const historicalCommit = '3'.repeat(40)
+      const workflow = JSON.stringify({
+        schema: 'video-autoworker-n8n-workflow-compatibility/v2',
+        protocol: 'slot-v1-execution-owner-v1', sourceCommit: historicalCommit,
+        databasePath: '/n8n.db', runtimeIdentitySha256: '4'.repeat(64),
+        combinedSha256: '5'.repeat(64), workflows: [{}, {}],
+      })
+      const accepted = spawnSync(process.execPath, [
+        '-e', workflowProgram, workflow, '/n8n.db', historicalCommit,
+      ], { encoding: 'utf8' })
+      expect(accepted.status, accepted.stderr).toBe(0)
+      expect(accepted.stdout).toBe('5'.repeat(64))
+      const rejected = spawnSync(process.execPath, [
+        '-e', workflowProgram, workflow, '/n8n.db', '9'.repeat(40),
+      ], { encoding: 'utf8' })
+      expect(rejected.status).not.toBe(0)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('pins command lookup to the current Node directory without inheriting caller PATH', () => {
+    const maliciousBin = mkdtempSync(join(realpathSync(tmpdir()), 'successor-malicious-path-'))
+    try {
+      const fakeNode = join(maliciousBin, 'node')
+      writeFileSync(fakeNode, '#!/bin/sh\nexit 99\n', { mode: 0o755 })
+      chmodSync(fakeNode, 0o755)
+      const environment = sanitizedEnvironment({
+        HOME: '/safe-home',
+        PATH: `${maliciousBin}:/untrusted/bin`,
+      })
+      const expectedPath = [dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+        .filter((value, index, values) => values.indexOf(value) === index)
+        .join(':')
+
+      expect(environment).toMatchObject({
+        HOME: '/safe-home',
+        NODE_BIN: process.execPath,
+        PATH: expectedPath,
+      })
+      expect(environment.PATH).not.toContain(maliciousBin)
+      const resolvedNode = execFileSync('/bin/sh', ['-c', 'command -v node'], {
+        encoding: 'utf8', env: environment,
+      }).trim()
+      expect(realpathSync(resolvedNode)).toBe(realpathSync(process.execPath))
+    } finally {
+      rmSync(maliciousBin, { recursive: true, force: true })
+    }
+  })
+
   it('binds the Node-invoked compatibility CLI from a real 100644 Git fixture', () => {
     const repository = mkdtempSync(join(realpathSync(tmpdir()), 'successor-runner-mode-'))
     try {

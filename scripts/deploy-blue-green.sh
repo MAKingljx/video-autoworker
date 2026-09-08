@@ -2207,7 +2207,8 @@ NODE
   now="$(date +%s)"
   evidence_max_age="$BOOTSTRAP_EVIDENCE_MAX_AGE"
   evidence_values="$($NODE_BIN - "$evidence_fd" "$evidence_file" "$ROUTER_PORT" "$now" \
-    "$evidence_max_age" "$slot" "$release_id" "$physical_root" "$manifest" "$live_db" \
+    "$evidence_max_age" "$slot" "$authorization_release_id" "$authorization_release_root" \
+    "$authorization_manifest" "$live_db" \
     "$n8n_db" "$verified_evidence_sha" "$rollback_proof" "$evidence_static_recovery" <<'NODE'
 const fs = require('node:fs')
 const crypto = require('node:crypto')
@@ -2340,7 +2341,7 @@ NODE
       || !/^[a-f0-9]{64}$/u.test(value.combinedSha256)
       || !Array.isArray(value.workflows) || value.workflows.length !== 2) process.exit(2)
     process.stdout.write(value.combinedSha256)
-  ' "$workflow_compatibility" "$n8n_db" "$source_commit")" \
+  ' "$workflow_compatibility" "$n8n_db" "$n8n_source_commit")" \
     || fail "published n8n workflow compatibility result is invalid"
   bootstrap_authorization="$("$NODE_BIN" "$bootstrap_controller" status --attempt-dir "$attempt_dir")" \
     || fail "legacy bootstrap confirmation and workflow transition chain is invalid"

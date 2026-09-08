@@ -156,7 +156,7 @@ function requiredObject(value, keys, label) {
     || keys.some(key => !Object.hasOwn(value, key))) fail(`${label} is incomplete`)
   return value
 }
-function sanitizedEnvironment(source = process.env) {
+export function sanitizedEnvironment(source = process.env) {
   if (source.NODE_ENV === 'test' || Object.keys(source).some(key => (
     key.startsWith('AIWORKER_TEST_')
     || key === 'AIWORKER_OPENCLAW_RUNTIME_TEST_MODE'
@@ -166,7 +166,9 @@ function sanitizedEnvironment(source = process.env) {
   for (const key of ['HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'SHELL']) {
     if (typeof source[key] === 'string' && source[key]) clean[key] = source[key]
   }
-  clean.PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
+  clean.PATH = [dirname(process.execPath), '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join(':')
   clean.NODE_BIN = process.execPath
   for (const key of ['AIWORKER_BG_CONTROL_TOKEN_FILE', 'AIWORKER_PLATFORM_ENV_FILE']) {
     if (typeof source[key] === 'string' && source[key]) clean[key] = source[key]
