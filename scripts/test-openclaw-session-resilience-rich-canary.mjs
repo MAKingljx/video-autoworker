@@ -32,11 +32,11 @@ import {
 } from './lib/openclaw-general-compaction-anchors.mjs'
 import {
   RICH_CANARY_CONTRACT,
-  canonicalTechniqueToolRouteVerified,
   inspectCurrentTurnToolRoute,
   missingCanonicalTechniqueFactAnchors,
   validatesCanonicalTechniqueFacts,
 } from './lib/openclaw-rich-canary-contract.mjs'
+import { observedCanonicalRouteVerified } from './lib/openclaw-canary-tool-observer.mjs'
 import {
   captureOpenClawRichCanarySessionSnapshot,
   loadOpenClawRichCanarySessionRuntime,
@@ -245,6 +245,8 @@ const homeDir = join(root, 'home')
 const workspaceDir = join(root, 'workspace')
 const configPath = join(stateDir, 'openclaw.json')
 const logPath = join(root, 'gateway.log')
+const toolObservationsPath = join(root, 'tool-observations.jsonl')
+writeFileSync(toolObservationsPath, '', { mode: 0o600, flag: 'wx' })
 for (const directory of [stateDir, homeDir, workspaceDir]) {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
 }
@@ -271,6 +273,26 @@ for (const pluginId of ['aiworker-director-brain', 'aiworker-video-command']) {
     cpSync(join(pluginSource, member), join(pluginDestination, member), { recursive: true })
   }
 }
+// Wrap the real tool only inside this disposable fixture. Its parameters,
+// return value and production persistence hooks are unchanged.
+const isolatedDirectorPlugin = join(stateDir, 'extensions', 'aiworker-director-brain')
+cpSync(resolve(process.cwd(), 'scripts/lib/openclaw-canary-tool-observer.mjs'),
+  join(isolatedDirectorPlugin, 'lib/canary-tool-observer.mjs'))
+writeFileSync(join(isolatedDirectorPlugin, 'lib/canary-director-tool.mjs'), [
+  "import { appendFileSync } from 'node:fs'",
+  "import { createDirectorBrainTool as original } from './director-brain-tool.js'",
+  "import { observeCanaryTool } from './canary-tool-observer.mjs'",
+  "export * from './director-brain-tool.js'",
+  'export function createDirectorBrainTool(options) {',
+  '  return observeCanaryTool(original(options), value => {',
+  `    appendFileSync(${JSON.stringify(toolObservationsPath)}, JSON.stringify(value) + '\\n', { mode: 0o600 })`,
+  '  })',
+  '}',
+  '',
+].join('\n'), { mode: 0o600 })
+const isolatedIndex = join(isolatedDirectorPlugin, 'index.js')
+writeFileSync(isolatedIndex, readFileSync(isolatedIndex, 'utf8')
+  .replace("from './lib/director-brain-tool.js'", "from './lib/canary-director-tool.mjs'"))
 const isolatedDirectorRuntimeRoot = join(
   stateDir,
   'extensions',
@@ -1350,6 +1372,8 @@ try {
   const turns = []
   const sentAt = Date.now()
   for (let turnIndex = 0; turnIndex < TURN_COUNT; turnIndex += 1) {
+    const prompt = `第 ${turnIndex + 1} 轮独立提问：${prompts[turnIndex % prompts.length]}`
+    const toolObservationOffset = statSync(toolObservationsPath).size
     const beforeSnapshot = sessionSnapshot()
     const storedTranscriptBytesBefore = beforeSnapshot.stats.sizeBytes
     const compactionCountBefore = Number(beforeSnapshot.entry.compactionCount || 0)
@@ -1360,7 +1384,7 @@ try {
     const turnSentAt = Date.now()
     const sent = unwrap(call('chat.send', {
       sessionKey: SESSION_KEY,
-      message: prompts[turnIndex % prompts.length],
+      message: prompt,
       idempotencyKey: randomUUID(),
       deliver: false,
     }, 15_000))
@@ -1395,11 +1419,14 @@ try {
     const activeRows = transcriptRows(afterSnapshot.events)
     const toolRoute = inspectCurrentTurnToolRoute(
       activeRows,
-      prompts[turnIndex % prompts.length],
+      prompt,
+      { includeCallDigests: true },
     )
+    const toolObservations = readFileSync(toolObservationsPath).subarray(toolObservationOffset)
+      .toString('utf8').split('\n').filter(Boolean).map(line => JSON.parse(line))
     const canonicalToolRouteVerified = COMPACTION_BENCHMARK_MODE
       ? toolRoute.foundPrompt && toolRoute.calls.length === 0
-      : turnIndex >= 2 || canonicalTechniqueToolRouteVerified(toolRoute)
+      : turnIndex >= 2 || observedCanonicalRouteVerified(toolRoute, toolObservations)
     const fallbackToolCalls = toolRoute.calls.filter(callEntry => (
       callEntry.name !== 'aiworker_director_brain'
     ))

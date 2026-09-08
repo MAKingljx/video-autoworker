@@ -780,7 +780,9 @@ test('rich canary exposes the comparison inputs and per-turn evidence without pr
   assert.ok(source.includes("'这是隔离测试的已确认历史，禁止调用工具。'"))
   assert.ok(source.includes('const semanticRoleEvidence = semanticSeedRoleEvidence('))
   assert.ok(source.includes("throw new Error('semantic seeds compacted before the acceptance turns')"))
-  assert.ok(!source.includes('appendFileSync'))
+  // The only append is the isolated execution witness, never a session store.
+  assert.ok(source.includes('appendFileSync(${JSON.stringify(toolObservationsPath)}'))
+  assert.ok(source.includes("join(root, 'tool-observations.jsonl')"))
   assert.ok(!source.includes('sessions.json'))
   assert.ok(!source.includes('list: [{'))
   assert.ok(source.includes('entries: {'))

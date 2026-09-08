@@ -1,3 +1,5 @@
+import { canaryToolCallDigest } from './openclaw-canary-tool-observer.mjs'
+
 export const RICH_CANARY_CONTRACT = Object.freeze({
   recentTurnsPreserve: 4,
   keepRecentTokens: 4_096,
@@ -94,7 +96,7 @@ function parsedToolArguments(part) {
   }
 }
 
-export function inspectCurrentTurnToolRoute(rows, prompt) {
+export function inspectCurrentTurnToolRoute(rows, prompt, { includeCallDigests = false } = {}) {
   if (!Array.isArray(rows)) return { foundPrompt: false, calls: [], results: [], completedPairs: 0 }
   let promptIndex = -1
   for (let index = rows.length - 1; index >= 0; index -= 1) {
@@ -115,6 +117,7 @@ export function inspectCurrentTurnToolRoute(rows, prompt) {
       for (const part of message.content) {
         if (part?.type !== 'toolCall' || typeof part.name !== 'string') continue
         const entry = { name: part.name, arguments: parsedToolArguments(part) }
+        if (includeCallDigests) entry.callIdSha256 = canaryToolCallDigest(part.id)
         calls.push(entry)
         if (typeof part.id === 'string') callIds.set(part.id, entry)
       }
