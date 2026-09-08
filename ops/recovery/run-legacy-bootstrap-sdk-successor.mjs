@@ -130,7 +130,7 @@ function runJson(command, args, label, options = {}) {
   } catch { fail(`${label} failed`) }
   try { return JSON.parse(stdout) } catch { fail(`${label} returned invalid JSON`) }
 }
-function gitBoundFile(repository, commit, relativePath, mode) {
+export function gitBoundFile(repository, commit, relativePath, mode) {
   safeSourceDirectory(repository, 'control repository')
   const pathname = join(repository, relativePath)
   const loaded = stableFile(pathname, relativePath, mode)
@@ -468,7 +468,7 @@ async function main(planPath) {
   const controller = gitBoundFile(plan.control.repository, plan.control.commit,
     'scripts/legacy-bootstrap-sdk-successor-controller.mjs', 0o755)
   const compatibilityCli = gitBoundFile(plan.control.repository, plan.control.commit,
-    'scripts/verify-openclaw-runtime-compatibility.mjs', 0o755)
+    'scripts/verify-openclaw-runtime-compatibility.mjs', 0o644)
   const readinessCli = gitBoundFile(plan.control.repository, plan.control.commit,
     'scripts/verify-director-video-release-readiness.mjs', 0o644)
   const execveAdapter = gitBoundFile(plan.control.repository, plan.control.commit,

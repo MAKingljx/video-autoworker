@@ -91,8 +91,8 @@ function fixture() {
   const execveContractPath = join(control, 'scripts/lib/blue-green-execve-contract.mjs')
   copyFileSync(sourceExecveContract, execveContractPath)
   chmodSync(execveContractPath, 0o644)
-  writeFileSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), '#!/usr/bin/env node\n', { mode: 0o755 })
-  chmodSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), 0o755)
+  writeFileSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), '#!/usr/bin/env node\n', { mode: 0o644 })
+  chmodSync(join(control, 'scripts/verify-openclaw-runtime-compatibility.mjs'), 0o644)
   writeFileSync(join(control, 'scripts/verify-director-video-release-readiness.mjs'), '// fixture\n', { mode: 0o644 })
   chmodSync(join(control, 'scripts/verify-director-video-release-readiness.mjs'), 0o644)
 

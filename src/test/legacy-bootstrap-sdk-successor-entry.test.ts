@@ -1,14 +1,57 @@
 // @vitest-environment node
 
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { execFileSync } from 'node:child_process'
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  gitBoundFile,
   reconcileRecoveredIntake,
   verifyRecoveredRouter,
 } from '../../ops/recovery/run-legacy-bootstrap-sdk-successor.mjs'
 
 describe('legacy bootstrap SDK successor entry', () => {
+  it('binds the Node-invoked compatibility CLI from a real 100644 Git fixture', () => {
+    const repository = mkdtempSync(join(realpathSync(tmpdir()), 'successor-runner-mode-'))
+    try {
+      const relativePath = 'scripts/verify-openclaw-runtime-compatibility.mjs'
+      const pathname = join(repository, relativePath)
+      mkdirSync(join(repository, 'scripts'), { mode: 0o700 })
+      writeFileSync(pathname, '#!/usr/bin/env node\n', { mode: 0o644 })
+      chmodSync(pathname, 0o644)
+      execFileSync('/usr/bin/git', ['init', '-q', repository])
+      execFileSync('/usr/bin/git', ['-C', repository, 'add', relativePath])
+      execFileSync('/usr/bin/git', [
+        '-C', repository,
+        '-c', 'user.name=Fixture',
+        '-c', 'user.email=fixture@example.invalid',
+        'commit', '-qm', 'fixture',
+      ])
+      const commit = execFileSync('/usr/bin/git', [
+        '-C', repository, 'rev-parse', 'HEAD',
+      ], { encoding: 'utf8' }).trim()
+      const staged = execFileSync('/usr/bin/git', [
+        '-C', repository, 'ls-files', '--stage', relativePath,
+      ], { encoding: 'utf8' })
+
+      expect(staged).toMatch(/^100644 /u)
+      expect(gitBoundFile(repository, commit, relativePath, 0o644)).toBe(pathname)
+      expect(() => gitBoundFile(repository, commit, relativePath, 0o755))
+        .toThrow('scripts/verify-openclaw-runtime-compatibility.mjs is unsafe')
+    } finally {
+      rmSync(repository, { recursive: true, force: true })
+    }
+  })
+
   it('verifies the consumed successor before historical recovery logic and preserves historical tools', () => {
     const source = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
     const start = source.indexOf('bootstrap_baseline() {')

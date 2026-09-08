@@ -364,7 +364,7 @@ function validateReceiptBindings(receipt) {
     value.control.sourceCommit,
     'scripts/verify-openclaw-runtime-compatibility.mjs',
     value.control.compatibilityValidator.path,
-    0o755,
+    0o644,
   )
   sameReference(compatibilityValidator, value.control.compatibilityValidator,
     'OpenClaw compatibility validator')
@@ -483,7 +483,7 @@ function authorize(values) {
   )
   const runtimeContractPath = join(controlRepository, 'scripts/lib/openclaw-runtime-contract.mjs')
   const compatibilityValidator = gitFile(controlRepository, controlCommit,
-    'scripts/verify-openclaw-runtime-compatibility.mjs', compatibilityValidatorPath, 0o755)
+    'scripts/verify-openclaw-runtime-compatibility.mjs', compatibilityValidatorPath, 0o644)
   const readinessValidator = gitFile(controlRepository, controlCommit,
     'scripts/verify-director-video-release-readiness.mjs', readinessValidatorPath, 0o644)
   const runtimeContract = gitFile(controlRepository, controlCommit,
