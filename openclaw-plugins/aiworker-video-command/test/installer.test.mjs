@@ -175,9 +175,22 @@ const state = path.join(process.env.HOME, '.openclaw-qwen-current')
 const installed = path.join(state, 'extensions', 'aiworker-video-command')
 const command = args.slice(2)
 if (command[0] === 'plugins' && command[1] === 'install') {
+  if (!command.includes('--accept-capabilities')) {
+    process.stderr.write('fixture requires capability consent\\n')
+    process.exit(80)
+  }
   if (process.env.AIWORKER_TEST_OPENCLAW_INSTALL_FAIL === '1') process.exit(81)
   fs.rmSync(installed, { recursive: true, force: true })
   fs.cpSync(command.at(-1), installed, { recursive: true })
+  const restoring = command.at(-1).includes('/previous-plugin')
+  if (!restoring && process.env.AIWORKER_TEST_OPENCLAW_CURRENT_INSTALL_FAIL === '1') {
+    process.stderr.write('fixture current install rejected after copy\\n')
+    process.exit(83)
+  }
+  if (restoring && process.env.AIWORKER_TEST_OPENCLAW_RESTORE_INSTALL_FAIL === '1') {
+    process.stderr.write('fixture restore install rejected after copy\\n')
+    process.exit(84)
+  }
   console.log('{"installed":true}')
 } else if (command[0] === 'plugins' && command[1] === 'inspect') {
   const version = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version
@@ -292,7 +305,7 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('&& "$MODE" != dry-run && "$MODE" != probe-current-manifest')
     expect(script).toContain('Local HEAD and origin/main must match the preinstall target SHA.')
     expect(script).toContain('HEAD, origin/main, live GitHub main, and target SHA must match.')
-    expect(script).toContain('run_qwen_openclaw plugins install --force "$PLUGIN_DIR"')
+    expect(script).toContain('run_qwen_openclaw plugins install --force --accept-capabilities')
     expect(script).toContain('run_qwen_openclaw gateway restart --wait 60s --json')
     expect(script).toContain('validate-runtime-inspection.mjs')
     expect(script).toContain('validate_runtime_payload_matches')
@@ -335,9 +348,14 @@ describe('current video-command plugin installer', () => {
     expect(script).toContain('validate_config_migration')
     expect(script).toContain('fs.writeFileSync(outputPath')
     expect(script).not.toContain('config unset')
-    expect(script).toContain('> "$WORK_ROOT/restore-install.txt" 2>&1 || return 1')
+    expect(script).toContain('"$candidate/previous-plugin" > "$WORK_ROOT/restore-install.txt" 2>&1')
+    const currentInstall = [
+      'run_qwen_openclaw plugins install --force --accept-capabilities \\\n',
+      '    "$PLUGIN_DIR" > "$WORK_ROOT/install-current.txt" 2>&1',
+    ].join('')
+    expect(script).toContain(currentInstall)
     expect(script.indexOf('install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG"'))
-      .toBeLessThan(script.indexOf('run_qwen_openclaw plugins install --force "$PLUGIN_DIR"'))
+      .toBeLessThan(script.indexOf(currentInstall))
     expect(script).toContain('ROLLBACK FAILED')
     expect(script).toContain('[[ "$(listener_snapshot)" == "$BEFORE_LISTENERS" ]]')
     expect(script).toContain('for candidate in "${backups[@]:0:$remove_count}"')
@@ -479,6 +497,104 @@ describe('current video-command plugin installer', () => {
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
       )).version).toBe('0.5.15')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('retains bounded private evidence when the candidate install fails and rollback succeeds', async () => {
+    const fixture = await createVideoInstallerFixture('entries')
+    try {
+      const beforeConfig = await fileSha256(resolve(fixture.stateDir, 'openclaw.json'))
+      fixture.environment.AIWORKER_TEST_OPENCLAW_CURRENT_INSTALL_FAIL = '1'
+      const failure = await runFixtureInstaller(fixture, '--apply').then(
+        () => null,
+        error => error,
+      )
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure.message).toContain(
+        'Current plugin install failed at plugin-install (exit 83); exact 0.5.14 plugin and config were restored.',
+      )
+      expect(failure.message).not.toContain('fixture current install rejected after copy')
+      expect(await fileSha256(resolve(fixture.stateDir, 'openclaw.json'))).toBe(beforeConfig)
+      expect(JSON.parse(await readFile(
+        resolve(fixture.installedPlugin, 'package.json'), 'utf8',
+      )).version).toBe('0.5.14')
+      expect(await pathExists(resolve(
+        fixture.stateDir, '.aiworker-video-command-install.lock',
+      ))).toBe(false)
+      const evidenceNames = (await readdir(fixture.backupRoot))
+        .filter(name => name.startsWith('failed-attempt-'))
+      expect(evidenceNames).toHaveLength(1)
+      const evidenceRoot = resolve(fixture.backupRoot, evidenceNames[0])
+      expect((await stat(evidenceRoot)).mode & 0o777).toBe(0o700)
+      const evidence = await readJson(resolve(evidenceRoot, 'evidence.json'))
+      expect(evidence).toMatchObject({
+        schema: 'video-autoworker-installer-failure-evidence/v1',
+        component: 'video-command',
+        targetSha,
+        failure: { phase: 'plugin-install', exitCode: 83 },
+        rollbackFailure: null,
+        files: [
+          { name: 'install-current.txt', truncated: false },
+          { name: 'restore-install.txt', truncated: false },
+        ],
+      })
+      expect((await stat(resolve(evidenceRoot, 'evidence.json'))).mode & 0o777).toBe(0o600)
+      expect(await readFile(resolve(evidenceRoot, 'install-current.txt'), 'utf8'))
+        .toContain('fixture current install rejected after copy')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('retains a recoverable journal when candidate and rollback installs both fail', async () => {
+    const fixture = await createVideoInstallerFixture('entries')
+    try {
+      fixture.environment.AIWORKER_TEST_OPENCLAW_CURRENT_INSTALL_FAIL = '1'
+      fixture.environment.AIWORKER_TEST_OPENCLAW_RESTORE_INSTALL_FAIL = '1'
+      const failure = await runFixtureInstaller(fixture, '--apply').then(
+        () => null,
+        error => error,
+      )
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure.message).toContain(
+        'ROLLBACK FAILED after plugin-install (exit 83); recovery stopped at rollback-plugin-install (exit 84).',
+      )
+      expect(failure.message).not.toContain('fixture restore install rejected after copy')
+      const lockRoot = resolve(fixture.stateDir, '.aiworker-video-command-install.lock')
+      expect(await pathExists(resolve(lockRoot, 'journal.json'))).toBe(true)
+      expect(await pathExists(resolve(lockRoot, 'owner.json'))).toBe(true)
+      expect(JSON.parse(await readFile(
+        resolve(fixture.installedPlugin, 'package.json'), 'utf8',
+      )).version).toBe('0.5.14')
+      const evidenceNames = (await readdir(fixture.backupRoot))
+        .filter(name => name.startsWith('failed-attempt-'))
+      expect(evidenceNames).toHaveLength(1)
+      const evidenceRoot = resolve(fixture.backupRoot, evidenceNames[0])
+      expect(await readJson(resolve(evidenceRoot, 'evidence.json'))).toMatchObject({
+        failure: { phase: 'plugin-install', exitCode: 83 },
+        rollbackFailure: { phase: 'rollback-plugin-install', exitCode: 84 },
+      })
+      expect(await readFile(resolve(evidenceRoot, 'restore-install.txt'), 'utf8'))
+        .toContain('fixture restore install rejected after copy')
+
+      delete fixture.environment.AIWORKER_TEST_OPENCLAW_CURRENT_INSTALL_FAIL
+      delete fixture.environment.AIWORKER_TEST_OPENCLAW_RESTORE_INSTALL_FAIL
+      await writeFile(fixture.openclawLog, '', { mode: 0o600 })
+      await runFixtureInstaller(fixture, '--apply')
+      const installCalls = (await openclawCalls(fixture))
+        .filter(args => args.includes('plugins') && args.includes('install'))
+      expect(installCalls).toHaveLength(2)
+      expect(installCalls[0].at(-1)).toContain('/previous-plugin')
+      expect(await realpath(installCalls[1].at(-1))).toBe(await realpath(resolve(
+        fixture.repository, 'openclaw-plugins/aiworker-video-command',
+      )))
+      expect(JSON.parse(await readFile(
+        resolve(fixture.installedPlugin, 'package.json'), 'utf8',
+      )).version).toBe('0.5.15')
+      expect(await pathExists(lockRoot)).toBe(false)
+      expect(await pathExists(evidenceRoot)).toBe(true)
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }

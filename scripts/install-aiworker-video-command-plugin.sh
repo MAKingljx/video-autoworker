@@ -74,6 +74,12 @@ fi
 MUTATION_AUTHORIZATION=""
 SHARED_GATE_MODE=""
 STABLE_QUEUE_SHA256=""
+FAILURE_PHASE=""
+FAILURE_STATUS=0
+ROLLBACK_FAILURE_PHASE=""
+ROLLBACK_FAILURE_STATUS=0
+FAILURE_EVIDENCE_PATH=""
+PRESERVE_LOCAL_JOURNAL=0
 
 [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
   printf 'Shared deployment lock helper is unavailable.\n' >&2
@@ -240,9 +246,14 @@ cleanup() {
     esac
   fi
   if [[ "$LOCAL_LOCK_OWNED" == 1 ]]; then
-    rm -f -- "$LOCAL_LOCK_DIR/journal.json" "$LOCAL_LOCK_DIR/owner.json" 2>/dev/null || status=70
-    rmdir "$LOCAL_LOCK_DIR" 2>/dev/null || status=70
-    LOCAL_LOCK_OWNED=0
+    if [[ "$PRESERVE_LOCAL_JOURNAL" == 1 ]]; then
+      printf 'Retained the private recovery journal after rollback failure: %s\n' \
+        "$LOCAL_LOCK_DIR" >&2
+    else
+      rm -f -- "$LOCAL_LOCK_DIR/journal.json" "$LOCAL_LOCK_DIR/owner.json" 2>/dev/null || status=70
+      rmdir "$LOCAL_LOCK_DIR" 2>/dev/null || status=70
+      LOCAL_LOCK_OWNED=0
+    fi
   fi
   if [[ "$DEPLOYMENT_LOCK_OWNED" == 1 ]]; then
     if ! release_shared_deployment_lock; then status=70; fi
@@ -980,19 +991,30 @@ acquire_video_local_lock() {
 }
 
 restore_backup() {
-  local candidate="$1" defer_gateway_restart="${2:-0}" metadata previous_version
+  local candidate="$1" defer_gateway_restart="${2:-0}" metadata previous_version restore_status=0
+  ROLLBACK_FAILURE_PHASE="rollback-backup-validation"
+  ROLLBACK_FAILURE_STATUS=1
   metadata="$(verify_backup "$candidate" "${ROLLBACK_SOURCE_CLAIM_ROOT:-$BACKUP_ROOT}")" || return 1
   previous_version="$(printf '%s' "$metadata" | awk -F '\t' '{print $1}')"
-  run_qwen_openclaw plugins install --force "$candidate/previous-plugin" \
-    > "$WORK_ROOT/restore-install.txt" 2>&1 || return 1
+  ROLLBACK_FAILURE_PHASE="rollback-plugin-install"
+  run_qwen_openclaw plugins install --force --accept-capabilities \
+    "$candidate/previous-plugin" > "$WORK_ROOT/restore-install.txt" 2>&1 \
+    || restore_status=$?
+  if [[ "$restore_status" -ne 0 ]]; then
+    ROLLBACK_FAILURE_STATUS="$restore_status"
+    return 1
+  fi
   if [[ "$TEST_FAILPOINT" == sigkill-after-first-mutation ]]; then
     wait_for_test_barrier sigkill-ready sigkill-continue 'SIGKILL after first rollback mutation'
   fi
+  ROLLBACK_FAILURE_PHASE="rollback-config-restore"
   install -m 600 "$candidate/openclaw.json" "$PROFILE_CONFIG" || return 1
   if [[ "$defer_gateway_restart" == 0 ]]; then
+    ROLLBACK_FAILURE_PHASE="rollback-gateway-restart"
     run_qwen_openclaw gateway restart --wait 60s --json \
       > "$WORK_ROOT/restore-restart.json" || return 1
   fi
+  ROLLBACK_FAILURE_PHASE="rollback-postcheck"
   validate_installed_version "$previous_version" || return 1
   validate_runtime_payload_matches "$candidate/previous-plugin" || return 1
   if [[ "$defer_gateway_restart" == 0 ]]; then
@@ -1002,6 +1024,86 @@ restore_backup() {
   [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" \
     == "$(printf '%s' "$metadata" | awk -F '\t' '{print $3}')" ]] || return 1
   [[ "$(listener_snapshot)" == "$BEFORE_LISTENERS" ]] || return 1
+  ROLLBACK_FAILURE_PHASE=""
+  ROLLBACK_FAILURE_STATUS=0
+}
+
+retain_failure_evidence() {
+  local evidence
+  [[ ! -L "$BACKUP_ROOT" && -d "$BACKUP_ROOT"
+    && "$(stat -f '%Lp' "$BACKUP_ROOT")" == 700 ]] || return 1
+  evidence="$(mktemp -d "$BACKUP_ROOT/failed-attempt-$(date +%Y%m%d-%H%M%S).XXXXXX")" \
+    || return 1
+  chmod 700 "$evidence" || return 1
+  if ! node - "$evidence" "$WORK_ROOT" "$TARGET_SHA" "$BACKUP_DIR" \
+    "$FAILURE_PHASE" "$FAILURE_STATUS" "$ROLLBACK_FAILURE_PHASE" \
+    "$ROLLBACK_FAILURE_STATUS" <<'NODE'
+const { createHash } = require('node:crypto')
+const fs = require('node:fs')
+const path = require('node:path')
+const [evidenceRoot, workRoot, targetSha, backupPath, failurePhase, failureStatus,
+  rollbackPhase, rollbackStatus] = process.argv.slice(2)
+const limit = 64 * 1024
+const files = []
+for (const name of ['install-current.txt', 'restore-install.txt']) {
+  const source = path.join(workRoot, name)
+  const sourceStat = fs.statSync(source, { throwIfNoEntry: false })
+  if (!sourceStat?.isFile()) continue
+  const sourceHandle = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+  let captured
+  try {
+    captured = Buffer.alloc(Math.min(sourceStat.size, limit))
+    const size = fs.readSync(sourceHandle, captured, 0, captured.length, 0)
+    captured = captured.subarray(0, size)
+  } finally {
+    fs.closeSync(sourceHandle)
+  }
+  const output = path.join(evidenceRoot, name)
+  const outputHandle = fs.openSync(output, fs.constants.O_WRONLY | fs.constants.O_CREAT
+    | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+  try {
+    fs.writeFileSync(outputHandle, captured)
+    fs.fsyncSync(outputHandle)
+  } finally {
+    fs.closeSync(outputHandle)
+  }
+  files.push({
+    name,
+    sourceBytes: sourceStat.size,
+    capturedBytes: captured.length,
+    truncated: sourceStat.size > captured.length,
+    capturedSha256: createHash('sha256').update(captured).digest('hex'),
+  })
+}
+const value = {
+  schema: 'video-autoworker-installer-failure-evidence/v1',
+  component: 'video-command',
+  targetSha,
+  backupPath,
+  failure: { phase: failurePhase, exitCode: Number(failureStatus) },
+  rollbackFailure: rollbackPhase
+    ? { phase: rollbackPhase, exitCode: Number(rollbackStatus) }
+    : null,
+  files,
+  createdAt: Math.floor(Date.now() / 1000),
+}
+const metadata = path.join(evidenceRoot, 'evidence.json')
+const metadataHandle = fs.openSync(metadata, fs.constants.O_WRONLY | fs.constants.O_CREAT
+  | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600)
+try {
+  fs.writeFileSync(metadataHandle, `${JSON.stringify(value)}\n`)
+  fs.fsyncSync(metadataHandle)
+} finally {
+  fs.closeSync(metadataHandle)
+}
+const directoryHandle = fs.openSync(evidenceRoot, fs.constants.O_RDONLY)
+try { fs.fsyncSync(directoryHandle) } finally { fs.closeSync(directoryHandle) }
+NODE
+  then
+    rm -rf -- "$evidence"
+    return 1
+  fi
+  FAILURE_EVIDENCE_PATH="$evidence"
 }
 
 create_safety_backup() {
@@ -1235,6 +1337,8 @@ fi
 safety_manifest_digest="$(shasum -a 256 "$BACKUP_DIR/MANIFEST.sha256" | awk '{print $1}')"
 write_video_journal "$BACKUP_DIR" "$safety_manifest_digest"
 apply_failed=0
+FAILURE_PHASE="apply-postcheck"
+FAILURE_STATUS=1
 install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG" || apply_failed=1
 if [[ "$apply_failed" -eq 0 && "$TEST_FAILPOINT" == sigkill-after-first-mutation ]]; then
   wait_for_test_barrier sigkill-ready sigkill-continue 'SIGKILL after first apply mutation'
@@ -1243,19 +1347,31 @@ if [[ "$apply_failed" -eq 0 ]]; then
   validate_config_migration "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || apply_failed=1
 fi
 if [[ "$apply_failed" -eq 0 ]]; then
-  run_qwen_openclaw plugins install --force "$PLUGIN_DIR" > "$WORK_ROOT/install-current.txt" 2>&1 || apply_failed=1
+  FAILURE_PHASE="plugin-install"
+  step_status=0
+  run_qwen_openclaw plugins install --force --accept-capabilities \
+    "$PLUGIN_DIR" > "$WORK_ROOT/install-current.txt" 2>&1 || step_status=$?
+  if [[ "$step_status" -ne 0 ]]; then
+    FAILURE_STATUS="$step_status"
+    apply_failed=1
+  else
+    FAILURE_PHASE="apply-postcheck"
+    FAILURE_STATUS=1
+  fi
 fi
 if [[ "$apply_failed" -eq 0 ]]; then
   install -m 600 "$MIGRATED_CONFIG" "$PROFILE_CONFIG" || apply_failed=1
 fi
 if [[ "$apply_failed" -eq 0 && "$DEFER_GATEWAY_RESTART" == 0 ]]; then
-  run_qwen_openclaw gateway restart --wait 60s --json > "$WORK_ROOT/gateway-restart.json" || apply_failed=1
+  run_qwen_openclaw gateway restart --wait 60s --json \
+    > "$WORK_ROOT/gateway-restart.json" || apply_failed=1
 fi
 if [[ "$apply_failed" -eq 0 ]]; then
   validate_installed_version "$CURRENT_VERSION" || apply_failed=1
   validate_runtime_payload_matches "$PLUGIN_DIR" || apply_failed=1
   if [[ "$DEFER_GATEWAY_RESTART" == 0 ]]; then
-    validate_runtime "$CURRENT_VERSION" "$WORK_ROOT/runtime-current.json" "$WORK_ROOT/catalog-current.json" || apply_failed=1
+    validate_runtime "$CURRENT_VERSION" "$WORK_ROOT/runtime-current.json" \
+      "$WORK_ROOT/catalog-current.json" || apply_failed=1
   fi
   [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" == "$MIGRATED_CONFIG_SHA" ]] || apply_failed=1
   validate_config_migration "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || apply_failed=1
@@ -1263,19 +1379,39 @@ if [[ "$apply_failed" -eq 0 ]]; then
 fi
 if [[ "$apply_failed" -ne 0 ]]; then
   if ! restore_backup "$BACKUP_DIR" "$DEFER_GATEWAY_RESTART"; then
-    printf 'ROLLBACK FAILED: qwen-current requires manual inspection. Backup: %s\n' "$BACKUP_DIR" >&2
+    PRESERVE_LOCAL_JOURNAL=1
+    retain_failure_evidence || true
+    printf 'ROLLBACK FAILED after %s (exit %s); recovery stopped at %s (exit %s). Backup: %s\n' \
+      "$FAILURE_PHASE" "$FAILURE_STATUS" "$ROLLBACK_FAILURE_PHASE" \
+      "$ROLLBACK_FAILURE_STATUS" "$BACKUP_DIR" >&2
+    [[ -z "$FAILURE_EVIDENCE_PATH" ]] \
+      || printf 'Private bounded failure evidence: %s\n' "$FAILURE_EVIDENCE_PATH" >&2
     exit 70
   fi
-  printf 'Current plugin install failed; exact %s plugin and config were restored.\n' "$installed_version" >&2
+  retain_failure_evidence || true
+  printf 'Current plugin install failed at %s (exit %s); exact %s plugin and config were restored.\n' \
+    "$FAILURE_PHASE" "$FAILURE_STATUS" "$installed_version" >&2
+  [[ -z "$FAILURE_EVIDENCE_PATH" ]] \
+    || printf 'Private bounded failure evidence: %s\n' "$FAILURE_EVIDENCE_PATH" >&2
   exit 1
 fi
 
 if ! enforce_retention; then
+  FAILURE_PHASE="backup-retention"
+  FAILURE_STATUS=1
   if ! restore_backup "$BACKUP_DIR" "$DEFER_GATEWAY_RESTART"; then
-    printf 'ROLLBACK FAILED after backup-retention error. Backup: %s\n' "$BACKUP_DIR" >&2
+    PRESERVE_LOCAL_JOURNAL=1
+    retain_failure_evidence || true
+    printf 'ROLLBACK FAILED after backup-retention error; recovery stopped at %s (exit %s). Backup: %s\n' \
+      "$ROLLBACK_FAILURE_PHASE" "$ROLLBACK_FAILURE_STATUS" "$BACKUP_DIR" >&2
+    [[ -z "$FAILURE_EVIDENCE_PATH" ]] \
+      || printf 'Private bounded failure evidence: %s\n' "$FAILURE_EVIDENCE_PATH" >&2
     exit 70
   fi
+  retain_failure_evidence || true
   printf 'Backup retention failed; exact %s plugin and config were restored.\n' "$installed_version" >&2
+  [[ -z "$FAILURE_EVIDENCE_PATH" ]] \
+    || printf 'Private bounded failure evidence: %s\n' "$FAILURE_EVIDENCE_PATH" >&2
   exit 1
 fi
 verify_backup "$BACKUP_DIR" >/dev/null || {
