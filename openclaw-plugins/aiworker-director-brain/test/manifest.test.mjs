@@ -10,12 +10,12 @@ describe('director brain plugin package', () => {
     const manifest = JSON.parse(await readFile(resolve(ROOT, 'openclaw.plugin.json'), 'utf8'))
 
     expect(packageJson.type).toBe('module')
-    expect(packageJson.version).toBe('0.4.0')
+    expect(packageJson.version).toBe('0.4.1')
     expect(packageJson.peerDependencies).toEqual({ openclaw: '>=2026.9.2' })
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(manifest).toMatchObject({
       id: 'aiworker-director-brain',
-      version: '0.4.0',
+      version: '0.4.1',
       activation: { onStartup: true, onCapabilities: ['hook', 'tool'] },
       contracts: { tools: ['aiworker_director_brain'] },
       toolMetadata: { aiworker_director_brain: { optional: true } },

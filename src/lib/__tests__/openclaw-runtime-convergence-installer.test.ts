@@ -262,7 +262,7 @@ async function createFixture() {
     'aiworker-video-command',
     'aiworker_analyze_video',
     false,
-    '0.5.14',
+    '0.5.15',
     openclawSdkRoot,
   )
   await installPluginManifest(
@@ -270,7 +270,7 @@ async function createFixture() {
     'aiworker-director-brain',
     'aiworker_director_brain',
     true,
-    '0.4.0',
+    '0.4.1',
   )
 
   await writeFile(fakeProgram, `
@@ -436,7 +436,7 @@ if (args[0] === 'plugins' && args[1] === 'inspect') {
           : process.env.FAKE_TYPED_HOOK_PRIORITY === '1' ? { priority: index + 1 } : {}),
       }))
   process.stdout.write(JSON.stringify({
-    plugin: { id: 'aiworker-director-brain', status: 'loaded', version: '0.4.0' },
+    plugin: { id: 'aiworker-director-brain', status: 'loaded', version: '0.4.1' },
     tools: [{ names: ['aiworker_director_brain'] }],
     typedHooks,
     diagnostics: [],
@@ -1153,13 +1153,13 @@ export async function callGatewayFromCli(method, options, params, extra) {
       requiredPlugins: [
         {
           id: 'aiworker-video-command',
-          version: '0.5.14',
+          version: '0.5.15',
           tool: 'aiworker_analyze_video',
           requiredConfig: { releaseReady: true },
         },
         {
           id: 'aiworker-director-brain',
-          version: '0.4.0',
+          version: '0.4.1',
           tool: 'aiworker_director_brain',
           requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
           requiredHookConfig: { allowConversationAccess: true },
@@ -1270,7 +1270,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     15_000,
   )
 
-  it('captures the pre-install baseline before the 0.4.0 plugin is present', async () => {
+  it('captures the 0.4.0 pre-install baseline before the 0.4.1 plugin is present', async () => {
     const entry = await createFixture()
     const pluginManifestPath = join(
       entry.state,
@@ -1282,8 +1282,8 @@ export async function callGatewayFromCli(method, options, params, extra) {
     )
     const pluginManifest = JSON.parse(await readFile(pluginManifestPath, 'utf8'))
     const packageManifest = JSON.parse(await readFile(packageManifestPath, 'utf8'))
-    pluginManifest.version = '0.3.0'
-    packageManifest.version = '0.3.0'
+    pluginManifest.version = '0.4.0'
+    packageManifest.version = '0.4.0'
     await writeFile(pluginManifestPath, `${JSON.stringify(pluginManifest, null, 2)}\n`, {
       mode: 0o600,
     })
@@ -1667,7 +1667,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     entry.env[variable] = value
 
     await expect(run(entry, '--apply')).rejects.toMatchObject({
-      stderr: expect.stringContaining('requires the installed 0.4.0 persistence hooks'),
+      stderr: expect.stringContaining('requires the installed 0.4.1 persistence hooks'),
     })
     expect(await readFile(entry.config, 'utf8')).toBe(before)
     expect(await exists(entry.backupRoot)).toBe(false)

@@ -227,6 +227,7 @@ if(a[0]==='disable'){s.disabled=true;save();process.exit(0)}
 if(a[0]==='bootout'){s.loaded=false;s.workers=[];save();process.exit(0)}
 if(a[0]==='enable'){s.disabled=false;save();process.exit(0)}
 if(a[0]==='bootstrap'){
+ if(process.env.RESUME_BOOTSTRAP_FAIL==='1')process.exit(5)
  if(fs.existsSync(s.lockPath))process.exit(3)
  fs.writeFileSync(s.lockPath,JSON.stringify({pid:s.workerPid,token:'87654321-4321-4321-8321-cba987654321',createdAt:new Date().toISOString()})+'\\n',{mode:0o600})
  s.loaded=true;s.workers=[s.workerPid];save();process.exit(0)
@@ -515,6 +516,30 @@ describe('legacy media orphan post-CAS guardian retire', () => {
       expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(false)
       expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(false)
     }, 30_000)
+
+  it('recovers an interruption after enable and before bootstrap', async () => {
+    const fixture = createFixture()
+    const { holder, prepared } = await fixture.startHeld()
+    const killed = fixture.resume(prepared, {
+      AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_RESUME_LANE_ENABLED: '1',
+    })
+    expect(killed.signal, String(killed.stderr)).toBe('SIGKILL')
+    expect(await waitForExit(holder)).toEqual({ code: 0, signal: null })
+    expect(fixture.readState()).toMatchObject({ loaded: false, disabled: false, workers: [] })
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
+    expect(parseOutput(fixture.resume(prepared)).mode).toBe('resumed')
+  }, 30_000)
+
+  it('recovers after bootstrap rejects an enabled-unloaded handoff once', async () => {
+    const fixture = createFixture()
+    const { holder, prepared } = await fixture.startHeld()
+    const failed = fixture.resume(prepared, { RESUME_BOOTSTRAP_FAIL: '1' })
+    expect(failed.status).not.toBe(0)
+    expect(await waitForExit(holder)).toEqual({ code: 0, signal: null })
+    expect(fixture.readState()).toMatchObject({ loaded: false, disabled: false, workers: [] })
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
+    expect(parseOutput(fixture.resume(prepared)).mode).toBe('resumed')
+  }, 30_000)
 
   it('fails closed when the quarantined tree drifts', async () => {
     const fixture = createFixture()

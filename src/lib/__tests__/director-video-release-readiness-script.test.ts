@@ -266,8 +266,8 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     })
-    expect(result.videoCommand).toMatchObject({ version: '0.5.14' })
-    expect(result.directorBrain).toMatchObject({ version: '0.4.0' })
+    expect(result.videoCommand).toMatchObject({ version: '0.5.15' })
+    expect(result.directorBrain).toMatchObject({ version: '0.4.1' })
     expect(result.taskFlow.files).toBeGreaterThan(3)
     expect(Object.keys(result.closure)).toHaveLength(8)
     expect((result.closure as Record<string, string>)
@@ -301,8 +301,8 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     })
-    expect(result.videoCommand).toMatchObject({ version: '0.5.14' })
-    expect(result.directorBrain).toMatchObject({ version: '0.4.0' })
+    expect(result.videoCommand).toMatchObject({ version: '0.5.15' })
+    expect(result.directorBrain).toMatchObject({ version: '0.4.1' })
 
     const drifted = JSON.parse(readFileSync(videoPackage, 'utf8'))
     drifted.description = 'unexpected package drift'
@@ -337,7 +337,7 @@ describe('director video release readiness verifier', () => {
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    }).videoCommand).toMatchObject({ version: '0.5.14' })
+    }).videoCommand).toMatchObject({ version: '0.5.15' })
   })
 
   it('allows safe auxiliary content changes while binding them into the actual manifest', async () => {

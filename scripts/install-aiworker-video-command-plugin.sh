@@ -6,14 +6,15 @@ PROFILE="qwen-current"
 PLUGIN_ID="aiworker-video-command"
 AGENT_ID="second-original"
 TOOL_ID="aiworker_analyze_video"
-SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13")
-CURRENT_VERSION="0.5.14"
+SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13" "0.5.14")
+CURRENT_VERSION="0.5.15"
 OPENCLAW_VERSION=""
 EXPECTED_USER="heisenbergs-1"
 EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
+OPENCLAW_AGENT_CONFIG_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-agent-config.mjs"
 OPENCLAW_VERSION="$(node "$OPENCLAW_RUNTIME_CONTRACT" runtime-version)" \
   || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
@@ -447,11 +448,15 @@ validate_source() {
   [[ -f "$SHARED_INSTALL_GATE" && ! -L "$SHARED_INSTALL_GATE" ]] || return 1
   [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || return 1
   [[ -f "$RUNTIME_TREE_MANIFEST" && ! -L "$RUNTIME_TREE_MANIFEST" ]] || return 1
+  [[ -f "$OPENCLAW_AGENT_CONFIG_HELPER" && ! -L "$OPENCLAW_AGENT_CONFIG_HELPER" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/package.json")" == "$CURRENT_VERSION" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/openclaw.plugin.json")" == "$CURRENT_VERSION" ]] || return 1
-  node - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'
-const fs = require('node:fs')
-const [configPath, manifestPath, pluginId, agentId, toolId] = process.argv.slice(2)
+  node --input-type=module - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" \
+    "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" "$OPENCLAW_AGENT_CONFIG_HELPER" <<'NODE'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [configPath, manifestPath, pluginId, agentId, toolId, agentConfigHelper] = process.argv.slice(2)
+const { readOpenClawAgentEntries } = await import(pathToFileURL(agentConfigHelper).href)
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
 const entry = config?.plugins?.entries?.[pluginId]
@@ -474,7 +479,7 @@ if (JSON.stringify(manifest?.configSchema) !== JSON.stringify({
 })) {
   throw new Error('plugin config schema must contain only the current release gate')
 }
-const agents = Array.isArray(config?.agents?.list) ? config.agents.list : []
+const agents = readOpenClawAgentEntries(config)
 const targets = agents.filter(agent => agent?.id === agentId)
 if (targets.length !== 1) throw new Error('target agent must exist exactly once')
 const allowGrants = Array.isArray(targets[0]?.tools?.allow)

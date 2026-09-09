@@ -688,7 +688,7 @@ function lockState(batchRoot, expectedPid = null) {
 }
 
 function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null,
-  { allowHeldQueue = false, admitted = false } = {}) {
+  { allowHeldQueue = false, admitted = false, allowEnabledUnloaded = false } = {}) {
   const service = launchState()
   const disabled = disabledState()
   const workers = workerPids()
@@ -711,7 +711,11 @@ function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null,
     if (!admitted && ((!allowHeldQueue && projection.runnable !== 0) || projection.journals !== 0)) fail('video lane still has runnable or journal work')
     return { service, disabled, workers, worker, lock, plist, projection }
   }
-  if (service.loaded || !disabled || workers.length !== 0) fail('video lane is not disabled, unloaded, and worker-free')
+  if (service.loaded || (!disabled && !allowEnabledUnloaded) || workers.length !== 0) {
+    fail(allowEnabledUnloaded
+      ? 'video lane is not unloaded and worker-free'
+      : 'video lane is not disabled, unloaded, and worker-free')
+  }
   if (phase === 'stopped' ? !lock.present : lock.present) {
     fail(phase === 'stopped' ? 'stopped video lane no longer has the captured dead-owner lock' : 'video lane global lock is still present')
   }
@@ -3159,15 +3163,22 @@ function resumeBaseline(values, phase) {
     snapshot: result.snapshot }
 }
 
-function resumeLane(chain, phase, baseline, admitted = false) {
+function resumeLane(chain, phase, baseline, admitted = false, allowEnabledUnloaded = false) {
   if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_SNAPSHOT_COMMAND) {
     const value = JSON.parse(run(testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_SNAPSHOT_COMMAND', ''),
       [phase], 'test guardian resume snapshot'))
+    if (phase !== 'active' && (value.lane?.service?.loaded || value.lane?.workers?.length !== 0
+      || value.lane?.lock?.present || (!value.lane?.disabled && !allowEnabledUnloaded)
+      || value.lane?.projection?.journals !== 0)) {
+      fail('test guardian resume lane is not one permitted held state')
+    }
     return value
   }
   const before = chain.value.runtimeBefore
   return { protectedPids: protectedListeners(), lane: laneSnapshot(before.batchRoot,
-    before.plistPath, phase, { finalReadinessPath: baseline }, { allowHeldQueue: true, admitted }) }
+    before.plistPath, phase, { finalReadinessPath: baseline }, {
+      allowHeldQueue: true, admitted, allowEnabledUnloaded,
+    }) }
 }
 
 function resumeInvariant(snapshot) {
@@ -3257,14 +3268,27 @@ async function resumeGuardian(values) {
       let cleanupOwner
       const service = launchState()
       if (!service.loaded) {
-        const held = resumeLane(chain, 'quiesced', values.baseline)
+        const disabled = disabledState()
+        const held = resumeLane(chain, 'quiesced', values.baseline, false, !disabled)
         assertStable(intent.value.evidence, resumeInvariant(held), 'guardian resume held runtime')
+        if (!held.lane.disabled) {
+          if (optionalEntry(admissionPath)) {
+            fail('guardian resume enabled-unloaded recovery already admitted another successor')
+          }
+          const owner = heldGuardianSample(plan, false).owner
+          if (!owner || pidExists(owner.value.pid, 'guardian resume interrupted owner')) {
+            fail('guardian resume enabled-unloaded recovery requires the dead exact owner')
+          }
+        }
         const guardian = takeoverRetireGuardian(chain, values.attemptDirectory)
         // Handoff preserves the marker; only the bound successor may consume it.
         guardian.verify()
         cleanupOwner = guardian.handoff()
         testKillAfter('RESUME_GUARDIAN_HANDOFF')
-        action(['enable', `gui/${process.getuid()}/${LABEL}`], 'video-lane enable')
+        if (held.lane.disabled) {
+          action(['enable', `gui/${process.getuid()}/${LABEL}`], 'video-lane enable')
+          testKillAfter('RESUME_LANE_ENABLED')
+        }
         action(['bootstrap', `gui/${process.getuid()}`, chain.value.runtimeBefore.plistPath], 'video-lane bootstrap')
       }
       active = await waitResumeLane(chain, values, intent.value.evidence)

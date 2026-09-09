@@ -267,6 +267,25 @@ async function waitForInstallerOutcome(
   }
 }
 
+async function waitForProcessStopped(pid: number, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs
+  let lastState = ''
+  while (Date.now() <= deadline) {
+    try {
+      const { stdout } = await execFileAsync('ps', ['-o', 'state=', '-p', String(pid)], {
+        encoding: 'utf8',
+      })
+      lastState = stdout.trim()
+      if (!lastState || /^Z/u.test(lastState)) return
+    } catch (error) {
+      if ((error as { code?: number }).code === 1) return
+      throw error
+    }
+    await new Promise(resolveWait => setTimeout(resolveWait, 25))
+  }
+  throw new Error(`Process ${pid} remained executable after cleanup (state=${lastState || 'unknown'})`)
+}
+
 async function installerProcessTreePids(attempt: InstallerExecution) {
   const rootPid = attempt.child.pid
   if (!rootPid) return []
@@ -363,6 +382,7 @@ async function initializeCleanInstallerRepository() {
     'scripts/verify-shared-runtime-install-gate.mjs',
     'scripts/lib/feishu-director-brain.mjs',
     'scripts/lib/application-release-manifest-contract.mjs',
+    'scripts/lib/openclaw-agent-config.mjs',
     'scripts/lib/blue-green-installed-manager.mjs',
     'scripts/lib/blue-green-execve-contract.mjs',
     'ops/recovery/install-blue-green-execve-adapter.mjs',
@@ -680,7 +700,7 @@ describe('installer synchronization', () => {
       expect(rootProcessId).toBeTruthy()
       expect(Number.isSafeInteger(descendantProcessId)).toBe(true)
       expect(() => process.kill(rootProcessId!, 0)).toThrow()
-      expect(() => process.kill(descendantProcessId!, 0)).toThrow()
+      await waitForProcessStopped(descendantProcessId!)
     } finally {
       if (rootProcessId) {
         try {
@@ -1324,6 +1344,55 @@ write_backup_tree_manifest "$1" "$3"
       await rm(root, { recursive: true, force: true })
     }
   }, 15_000)
+
+  it('preserves the OpenClaw 9.2 agents.entries layout through install, no-op, and rollback', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-agent-entries-'))
+    try {
+      const fixture = await createFixture(root)
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const config = JSON.parse(await readFile(configPath, 'utf8'))
+      const [dev] = config.agents.list
+      config.agents = {
+        defaults: { model: { primary: 'fixture/default' }, workspace: '/preserved/default' },
+        entries: {
+          dev: { workspace: dev.workspace, custom: { preserved: true } },
+          other: { name: 'Other agent', custom: { preserved: 'other' } },
+        },
+      }
+      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 })
+      const originalConfig = await readFile(configPath, 'utf8')
+
+      await runInstaller(fixture, '--apply')
+      const [backupName] = await readdir(fixture.backupRoot)
+      const appliedSource = await readFile(configPath, 'utf8')
+      const applied = JSON.parse(appliedSource)
+      expect(applied.agents).toEqual({
+        defaults: config.agents.defaults,
+        entries: {
+          dev: {
+            workspace: dev.workspace,
+            custom: { preserved: true },
+            tools: { alsoAllow: ['aiworker_director_brain'] },
+          },
+          other: { name: 'Other agent', custom: { preserved: 'other' } },
+        },
+      })
+      expect(applied.agents.list).toBeUndefined()
+      expect((await stat(configPath)).mode & 0o777).toBe(0o600)
+
+      await runInstaller(fixture, '--apply')
+      expect(await readFile(configPath, 'utf8')).toBe(appliedSource)
+      expect(await readdir(fixture.backupRoot)).toEqual([backupName])
+
+      await runInstaller(fixture, '--rollback', [
+        '--backup', resolve(fixture.backupRoot, backupName),
+      ])
+      expect(await readFile(configPath, 'utf8')).toBe(originalConfig)
+      expect((await stat(configPath)).mode & 0o777).toBe(0o600)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 20_000)
 
   it('writes immutable apply, no-op, and rollback machine evidence without profile secrets', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-result-'))

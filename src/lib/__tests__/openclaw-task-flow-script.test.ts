@@ -179,6 +179,7 @@ globalThis.fetch = async (input, init = {}) => {
         maxAttempts: 1,
         output: { summary: '状态客户端测试摘要' },
         updatedAt: '2026-08-11T12:00:00.000Z',
+        progress: { stage: 'succeeded', updatedAt: '2026-08-11T12:00:00.000Z' },
       })
 
       const briefStatusRun = await new Promise<{ stdout: string; stderr: string }>((resolvePromise, rejectPromise) => {

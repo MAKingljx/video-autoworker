@@ -67,13 +67,13 @@ function validateManifest(pathname) {
     requiredPlugins: [
       {
         id: 'aiworker-video-command',
-        version: '0.5.14',
+        version: '0.5.15',
         tool: 'aiworker_analyze_video',
         requiredConfig: { releaseReady: true },
       },
       {
         id: 'aiworker-director-brain',
-        version: '0.4.0',
+        version: '0.4.1',
         tool: 'aiworker_director_brain',
         requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
         requiredHookConfig: { allowConversationAccess: true },
@@ -392,7 +392,7 @@ function sha256(value) {
 function directorPluginDescriptor(manifest) {
   const matches = manifest.requiredPlugins.filter(descriptor => descriptor.id === 'aiworker-director-brain')
   if (matches.length !== 1 || matches[0].id !== 'aiworker-director-brain'
-    || matches[0].version !== '0.4.0' || !Array.isArray(matches[0].requiredHooks)) {
+    || matches[0].version !== '0.4.1' || !Array.isArray(matches[0].requiredHooks)) {
     fail('director-brain runtime plugin descriptor is invalid')
   }
   return matches[0]
@@ -842,7 +842,7 @@ function verifyRuntimeHooks(
   if (!same(identity, identityBefore) || !same(trees, treesBefore)
     || identity.startTimeMs > Date.now() + 1_000
     || identity.startTimeMs < nextSecondAfterPlugin) {
-    fail('Gateway was not freshly started after the installed 0.4.0 plugin tree')
+    fail('Gateway was not freshly started after the installed 0.4.1 plugin tree')
   }
   process.stdout.write(`${JSON.stringify(stable({
     gateway: {

@@ -8,6 +8,7 @@ DEFAULT_AGENT_ID="second-original"
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
+OPENCLAW_AGENT_CONFIG="$REPOSITORY_ROOT/scripts/lib/openclaw-agent-config.mjs"
 OPENCLAW_SOURCE_PLUGIN_PEER="$(node "$OPENCLAW_RUNTIME_CONTRACT" source-plugin-peer)" \
   || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
@@ -295,7 +296,7 @@ assert_canonical_source_repository() {
   done < <(find \
     "$PLUGIN_SOURCE" "$SKILL_SOURCE" \
     "$SERVICE_SOURCE" "$SENSITIVE_VALUE_SCANNER_SOURCE" "$SERVICE_CLI_SOURCE" \
-    "$TREE_MANIFEST_HELPER" "$SCHEMA_SOURCE" -type f -print)
+    "$TREE_MANIFEST_HELPER" "$OPENCLAW_AGENT_CONFIG" "$SCHEMA_SOURCE" -type f -print)
   printf '%s\n' "$current_commit"
 }
 
@@ -626,15 +627,18 @@ regular_file "$PROFILE_CONFIG" || {
 
 validate_agent_workspace() {
   local pathname="$1"
-  node - "$pathname" "$AGENT_ID" "$WORKSPACE" <<'NODE'
-const fs = require('node:fs')
-const path = require('node:path')
-const [pathname, agentId, expectedWorkspace] = process.argv.slice(2)
+  node --input-type=module - "$OPENCLAW_AGENT_CONFIG" \
+    "$pathname" "$AGENT_ID" "$WORKSPACE" <<'NODE'
+import fs from 'node:fs'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+const [agentConfigPath, pathname, agentId, expectedWorkspace] = process.argv.slice(2)
+const { readOpenClawAgentEntries } = await import(pathToFileURL(agentConfigPath).href)
 const config = JSON.parse(fs.readFileSync(pathname, 'utf8'))
 if (!config || typeof config !== 'object' || Array.isArray(config)) {
   throw new Error('profile_config_invalid')
 }
-const agents = Array.isArray(config.agents?.list) ? config.agents.list : []
+const agents = readOpenClawAgentEntries(config)
 const targets = agents.filter(agent => agent?.id === agentId)
 if (targets.length === 0) throw new Error('target_agent_missing')
 if (targets.length > 1) throw new Error('target_agent_ambiguous')
@@ -685,6 +689,10 @@ regular_file "$TREE_MANIFEST_HELPER" || {
   printf 'Runtime tree manifest helper is unavailable: %s\n' "$TREE_MANIFEST_HELPER" >&2
   exit 1
 }
+regular_file "$OPENCLAW_AGENT_CONFIG" || {
+  printf 'OpenClaw agent config helper is unavailable: %s\n' "$OPENCLAW_AGENT_CONFIG" >&2
+  exit 1
+}
 
 if [[ "$MODE" != "rollback" ]]; then
   validate_agent_workspace "$PROFILE_CONFIG"
@@ -701,6 +709,7 @@ if [[ "$MODE" != "rollback" ]]; then
     "$SERVICE_SOURCE" \
     "$SENSITIVE_VALUE_SCANNER_SOURCE" \
     "$TREE_MANIFEST_HELPER" \
+    "$OPENCLAW_AGENT_CONFIG" \
     "$SERVICE_CLI_SOURCE" \
     "$SCHEMA_SOURCE"; do
     regular_file "$source_file" || {
@@ -724,6 +733,7 @@ if [[ "$MODE" != "rollback" ]]; then
   node --check "$SERVICE_SOURCE"
   node --check "$SENSITIVE_VALUE_SCANNER_SOURCE"
   node --check "$TREE_MANIFEST_HELPER"
+  node --check "$OPENCLAW_AGENT_CONFIG"
   node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" "$OPENCLAW_SOURCE_PLUGIN_PEER" <<'NODE'
 const fs = require('node:fs')
 const [manifestPath, packagePath, expectedPeer] = process.argv.slice(2)
@@ -731,12 +741,12 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
 const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 if (manifest?.id !== 'aiworker-director-brain'
-  || manifest?.version !== '0.4.0'
+  || manifest?.version !== '0.4.1'
   || manifest?.activation?.onStartup !== true
   || !same(manifest?.activation?.onCapabilities, ['hook', 'tool'])
   || !same(manifest?.contracts?.tools, ['aiworker_director_brain'])
   || manifest?.toolMetadata?.aiworker_director_brain?.optional !== true
-  || packageManifest?.version !== '0.4.0'
+  || packageManifest?.version !== '0.4.1'
   || packageManifest?.peerDependencies?.openclaw !== expectedPeer) {
   throw new Error('director_brain_plugin_contract_mismatch')
 }
@@ -927,13 +937,18 @@ build_source_payload() {
 
 render_config() {
   local input="$1" output="$2"
-  node - "$input" "$output" "$PLUGIN_ID" "$TOOL_ID" "$AGENT_ID" <<'NODE'
-const fs = require('node:fs')
-const [input, output, pluginId, toolId, agentId] = process.argv.slice(2)
+  node --input-type=module - "$OPENCLAW_AGENT_CONFIG" \
+    "$input" "$output" "$PLUGIN_ID" "$TOOL_ID" "$AGENT_ID" <<'NODE'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [agentConfigPath, input, output, pluginId, toolId, agentId] = process.argv.slice(2)
+const { readOpenClawAgentEntries, writeOpenClawAgentEntries } = await import(
+  pathToFileURL(agentConfigPath).href
+)
 const config = JSON.parse(fs.readFileSync(input, 'utf8'))
 if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('profile_config_invalid')
 if (config.plugins?.enabled === false) throw new Error('profile_plugins_disabled')
-const agents = Array.isArray(config.agents?.list) ? config.agents.list : []
+const agents = readOpenClawAgentEntries(config)
 const targets = agents.filter(agent => agent?.id === agentId)
 if (targets.length !== 1) throw new Error('target_agent_must_exist_exactly_once')
 for (const agent of agents) {
@@ -1003,15 +1018,19 @@ if (Array.isArray(target.tools.alsoAllow)) {
 }
 target.tools.alsoAllow ??= []
 target.tools.alsoAllow.push(toolId)
+writeOpenClawAgentEntries(config, agents)
 fs.writeFileSync(output, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
 NODE
 }
 
 validate_config() {
   local pathname="$1"
-  node - "$pathname" "$PLUGIN_ID" "$TOOL_ID" "$AGENT_ID" <<'NODE'
-const fs = require('node:fs')
-const [pathname, pluginId, toolId, agentId] = process.argv.slice(2)
+  node --input-type=module - "$OPENCLAW_AGENT_CONFIG" \
+    "$pathname" "$PLUGIN_ID" "$TOOL_ID" "$AGENT_ID" <<'NODE'
+import fs from 'node:fs'
+import { pathToFileURL } from 'node:url'
+const [agentConfigPath, pathname, pluginId, toolId, agentId] = process.argv.slice(2)
+const { readOpenClawAgentEntries } = await import(pathToFileURL(agentConfigPath).href)
 const config = JSON.parse(fs.readFileSync(pathname, 'utf8'))
 const entry = config?.plugins?.entries?.[pluginId]
 if (entry?.enabled !== true
@@ -1025,7 +1044,7 @@ if (config?.plugins?.allow !== undefined
   && (!Array.isArray(config.plugins.allow) || !config.plugins.allow.includes(pluginId))) {
   throw new Error('director_brain_plugin_allowlist_missing')
 }
-const agents = Array.isArray(config?.agents?.list) ? config.agents.list : []
+const agents = readOpenClawAgentEntries(config)
 const target = agents.filter(agent => agent?.id === agentId)
 if (target.length !== 1) throw new Error('target_agent_must_exist_exactly_once')
 const allowGrants = Array.isArray(target[0]?.tools?.allow)

@@ -44,8 +44,8 @@ execution chain.
   reverse component order and, only when a forward restart occurred, performs one recovery restart
   after the on-disk state has been restored.
 
-The current candidate versions are director-brain `0.4.0` and video-command `0.5.14`. The remote
-OpenClaw read/query entry was previously accepted on director-brain `0.3.0`; the `0.4.0` projection
+The current candidate versions are director-brain `0.4.1` and video-command `0.5.15`. The production
+predecessors remain director-brain `0.4.0` and video-command `0.5.14`; the `0.4.1` projection
 chain must not be described as production until its immutable release is installed, switched, and
 verified against a real video. DaVinci integration, editing-software timelines, rendering, export,
 and every other editing side effect are intentionally outside the current scope.

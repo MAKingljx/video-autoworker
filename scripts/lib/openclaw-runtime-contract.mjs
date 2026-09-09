@@ -70,11 +70,11 @@ export function canonicalOpenClawRuntimeCompatibilityCore(value) {
     || !exactKeys(value.plugins, ['video', 'director'])
     || !exactKeys(value.plugins.video, ['id', 'version', 'peerPolicy'])
     || value.plugins.video.id !== 'aiworker-video-command'
-    || value.plugins.video.version !== '0.5.14'
+    || value.plugins.video.version !== '0.5.15'
     || !acceptedInstalledOpenClawPeer(value.plugins.video.id, value.plugins.video.peerPolicy)
     || !exactKeys(value.plugins.director, ['id', 'version', 'peerPolicy'])
     || value.plugins.director.id !== 'aiworker-director-brain'
-    || value.plugins.director.version !== '0.4.0'
+    || value.plugins.director.version !== '0.4.1'
     || !acceptedInstalledOpenClawPeer(value.plugins.director.id, value.plugins.director.peerPolicy)
     || !exactKeys(value.secretRef, [
       'wrapperSourceCommit', 'wrapperSha256', 'commandRelativePath', 'passEnv', 'argumentCount',

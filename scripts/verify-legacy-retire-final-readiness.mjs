@@ -374,7 +374,7 @@ function validateDirectorInspection(value) {
   const toolNames = tools.flatMap(item => Array.isArray(item?.names) ? item.names : []).sort()
   const diagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : []
   const typedHookNames = normalizeOpenClawTypedHookNames(value?.typedHooks)
-  if (plugin?.id !== 'aiworker-director-brain' || plugin.status !== 'loaded' || plugin.version !== '0.4.0'
+  if (plugin?.id !== 'aiworker-director-brain' || plugin.status !== 'loaded' || plugin.version !== '0.4.1'
     || canonicalJson(toolNames) !== canonicalJson(['aiworker_director_brain'])
     || canonicalJson(typedHookNames) !== canonicalJson(requiredHooks)
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {

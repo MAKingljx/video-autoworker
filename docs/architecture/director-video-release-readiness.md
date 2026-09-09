@@ -10,9 +10,9 @@
 | 组件 | 发布身份 |
 | --- | --- |
 | Video AutoWorker standalone | Git release ID + `2.0.1` + `release-manifest.json` |
-| `aiworker-video-command` | `0.5.14` |
+| `aiworker-video-command` | `0.5.15` |
 | `aiworker-task-flow` | 与同一 Git 提交生成的精确安装清单 |
-| `aiworker-director-brain` | `0.4.0`，包含插件和 Skill |
+| `aiworker-director-brain` | `0.4.1`，包含插件和 Skill |
 
 ## 验证范围
 
@@ -117,13 +117,13 @@ legacy controller 的 `prepare -> current-confirm -> apply`；最后才 bootstra
 
 ### 插件安装与数据库迁移边界
 
-`aiworker-director-brain 0.4.0` 的安装器只替换目标 OpenClaw profile 下的插件、Skill、私有无密钥
+`aiworker-director-brain 0.4.1` 的安装器只替换目标 OpenClaw profile 下的插件、Skill、私有无密钥
 运行载荷和该 Agent 的窄授权；它不打开 Mission Control SQLite、不调用 `runMigrations`，也不创建、
 更新或回填导演提炼记录，也不会迁移飞书导演脑 catalog。当前真实测试 catalog 是 v2，随安装包
-携带的 schema v3 只是待迁移候选；在另行完成 v3 迁移和真实 API 回读前，加载 0.4.0 的运行时会
+携带的 schema v3 只是待迁移候选；在另行完成 v3 迁移和真实 API 回读前，加载 0.4.1 的运行时会
 对版本不匹配失败关闭。发布顺序应先用 `migrate --dry-run` 固定无破坏性计划，再由显式外部写入任务
 生成权限受控的全表备份、执行 v2 → v3 追加迁移并真实回读，最后才由统一 preinstall orchestrator
-安装 0.4.0 并 fresh restart 目标 Gateway 一次；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现 058/059，也不能作为飞书
+安装 0.4.1 并 fresh restart 目标 Gateway 一次；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现 058/059，也不能作为飞书
 v3 已就绪的证据。
 
 生产数据库对象只由新的 3017 application release 首次打开权威 Mission Control SQLite 时按既有
@@ -141,7 +141,7 @@ v3 已就绪的证据。
 058 只有在启用自动五阶段提炼时才是功能必需；只读问答、作品解析、检索和候选提交并不依赖它。
 059 对“远端写入成功后可证明、可恢复而不盲目重写”是必需的；因为 057 已冻结，不能通过回改 057
 增加回执列。当前完整非剪辑导演脑发布同时包含自动提炼和可验证投影，因此 readiness 将两项都列为
-必需迁移，不能把“0.4.0 插件已安装”误报成“数据库提炼链已上线”。
+必需迁移，不能把“0.4.1 插件已安装”误报成“数据库提炼链已上线”。
 
 首次 blue/green bootstrap 会在提交 baseline、释放维护保护之前自动执行该检查。常规 forward
 `switch` 会在 router 原子切换前执行，并把 HEAD 绑定的静态 verifier 摘要与 target runtime

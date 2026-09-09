@@ -24,7 +24,7 @@
   "requiredPlugins": [
     {
       "id": "aiworker-video-command",
-      "version": "0.5.14",
+      "version": "0.5.15",
       "tool": "aiworker_analyze_video",
       "requiredConfig": {
         "releaseReady": true
@@ -32,7 +32,7 @@
     },
     {
       "id": "aiworker-director-brain",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "tool": "aiworker_director_brain",
       "requiredHooks": [
         "before_agent_reply",
