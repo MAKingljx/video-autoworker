@@ -38,6 +38,11 @@ const SEARCH_BATCH_STATUSES = new Set([
   ...BATCH_STATUSES,
   ...SEARCH_ITEM_STATUSES,
 ])
+const EXECUTION_AVAILABILITY = Object.freeze({
+  available: new Set(['worker_active', 'worker_starting']),
+  blocked: new Set(['maintenance_guardian', 'worker_unavailable']),
+  unknown: new Set(['guardian_unconfirmed', 'launch_control_unconfirmed', 'worker_unconfirmed']),
+})
 const MAX_SEARCH_QUERY_LENGTH = 512
 const MAX_SEARCH_MATCHES = 32
 const MAX_RESULT_OFFSET = 16 * 1024 * 1024
@@ -690,11 +695,48 @@ function normalizeDispatchResult(value, expectedId, kind) {
   if (!value.duplicate && value.status !== 'queued') {
     throw new Error('invalid_fresh_dispatch_status')
   }
+  const executionAvailability = normalizeExecutionAvailability(value.executionAvailability)
+  const progress = normalizeProgress(value.progress)
   return {
     kind,
     id: expectedId,
     status: value.status,
     duplicate: value.duplicate,
+    ...(executionAvailability ? { executionAvailability } : {}),
+    ...(progress ? { progress } : {}),
+  }
+}
+
+function normalizeExecutionAvailability(value) {
+  if (value === undefined) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'reason,status') {
+    throw new Error('invalid_execution_availability')
+  }
+  const reasons = EXECUTION_AVAILABILITY[value.status]
+  if (!reasons || !reasons.has(value.reason)) throw new Error('invalid_execution_availability')
+  return { status: value.status, reason: value.reason }
+}
+
+function normalizeProgress(value) {
+  if (value === undefined) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('invalid_task_progress')
+  }
+  const keys = Object.keys(value).sort().join(',')
+  if (!['stage', 'stage,updatedAt', 'updatedAt'].includes(keys)) {
+    throw new Error('invalid_task_progress')
+  }
+  const stage = value.stage === undefined ? null : value.stage
+  const updatedAt = value.updatedAt === undefined ? null : value.updatedAt
+  if ((stage !== null && (typeof stage !== 'string' || !/^[a-z_]{1,64}$/u.test(stage)))
+    || (updatedAt !== null && (typeof updatedAt !== 'string' || updatedAt.length > 64
+      || !Number.isFinite(Date.parse(updatedAt))))) {
+    throw new Error('invalid_task_progress')
+  }
+  return {
+    ...(stage ? { stage } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   }
 }
 
@@ -717,11 +759,15 @@ function normalizeTaskStatus(value, expectedTaskId) {
   ) {
     throw new Error('invalid_task_status_result')
   }
+  const executionAvailability = normalizeExecutionAvailability(value.executionAvailability)
+  const progress = normalizeProgress(value.progress)
   return {
     kind: 'task',
     id: expectedTaskId,
     status: value.status,
     summary: value.status === 'succeeded' ? safeSummary(value.output) : null,
+    ...(executionAvailability ? { executionAvailability } : {}),
+    ...(progress ? { progress } : {}),
   }
 }
 
@@ -788,6 +834,8 @@ function normalizeBatchStatus(value, expectedBatchId) {
   if (new Set(items.map(item => item.index)).size !== items.length) {
     throw new Error('invalid_batch_status_result')
   }
+  const executionAvailability = normalizeExecutionAvailability(value.executionAvailability)
+  const progress = normalizeProgress(value.progress)
   return {
     kind: 'batch',
     id: expectedBatchId,
@@ -795,6 +843,8 @@ function normalizeBatchStatus(value, expectedBatchId) {
     total: value.total,
     counts,
     items,
+    ...(executionAvailability ? { executionAvailability } : {}),
+    ...(progress ? { progress } : {}),
   }
 }
 
@@ -1113,6 +1163,9 @@ export function createSchedulerRunner({
         batchStatus: batch.status,
         total: batch.total,
         counts: batch.counts,
+        ...(batch.executionAvailability
+          ? { executionAvailability: batch.executionAvailability }
+          : {}),
       }
     },
 

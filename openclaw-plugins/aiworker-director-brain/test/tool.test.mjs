@@ -46,7 +46,7 @@ describe('director brain tool contract', () => {
     ])
     expect(TOOL_PARAMETERS.properties.action.enum).toEqual([
       'health', 'explain', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
-      'extraction_status',
+      'extraction_status', 'review_guidance',
     ])
     expect(TOOL_PARAMETERS.properties).not.toHaveProperty('sourceQuery')
     expect(TOOL_PARAMETERS.properties.references.properties.techniqueIds).toEqual({

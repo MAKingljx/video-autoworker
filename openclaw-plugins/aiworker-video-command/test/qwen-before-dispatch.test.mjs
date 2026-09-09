@@ -49,6 +49,30 @@ function handler({ classifier, runner, releaseReady = true, duplicateConfirmatio
 }
 
 describe('hook-owned Qwen video scheduler', () => {
+  it('states maintenance blocking and real progress without promising automatic start', () => {
+    const text = statusReceipt({
+      kind: 'task',
+      status: 'queued',
+      summary: null,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+      progress: { stage: 'queued', updatedAt: '2026-09-09T03:30:00.000Z' },
+    })
+    expect(text).toBe('任务已排队。处理服务正在维护，尚未开始。当前阶段：排队；状态更新时间：09月09日11:30。')
+    expect(text).not.toContain('自动开始')
+    expect(text).not.toContain('%')
+    const running = statusReceipt({ kind: 'task', status: 'running', summary: null,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' } })
+    expect(running).toContain('进度以当前记录为准')
+    expect(running).not.toContain('尚未开始')
+
+    expect(statusReceipt({
+      kind: 'task',
+      status: 'queued',
+      summary: null,
+      executionAvailability: { status: 'unknown', reason: 'launch_control_unconfirmed' },
+    })).toBe('任务已排队。处理服务启动状态尚未确认。')
+  })
+
   it('passes ordinary chat without calling the classifier', async () => {
     const classifier = vi.fn()
     expect(handler({ classifier })(event({ content: '你好' }), context)).toBeUndefined()

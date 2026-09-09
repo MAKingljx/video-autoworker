@@ -13,6 +13,10 @@ import {
   scanOfflineDurableBatchStates,
 } from './lib/runtime-safe-offline-queue.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
+import {
+  assertInstallationSnapshot,
+  resolveInstalledBlueGreenManager,
+} from './lib/blue-green-installed-manager.mjs'
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -52,6 +56,7 @@ function parseArguments(argv) {
   let rawResultOutput = ''
   let targetStateSha256 = ''
   let expectedFinalizeSha256 = ''
+  let expectedMaintenanceQueueSha256 = ''
   let phase = 'component'
   let operationSeen = false
   let componentSeen = false
@@ -125,6 +130,12 @@ function parseArguments(argv) {
       index += 1
       continue
     }
+    if (argv[index] === '--expected-maintenance-queue-sha256'
+      && index + 1 < argv.length && !expectedMaintenanceQueueSha256) {
+      expectedMaintenanceQueueSha256 = argv[index + 1]
+      index += 1
+      continue
+    }
     if (argv[index] === '--phase' && index + 1 < argv.length && phase === 'component') {
       phase = argv[index + 1]
       index += 1
@@ -137,7 +148,8 @@ function parseArguments(argv) {
   if (!['component', 'final'].includes(phase) || !['install', 'rollback'].includes(operation)
     || (componentSeen && !COMPONENTS.includes(component))
     || (targetStateSha256 && !SHA256.test(targetStateSha256))
-    || (expectedFinalizeSha256 && (!SHA256.test(expectedFinalizeSha256) || phase !== 'final'))) {
+    || (expectedFinalizeSha256 && (!SHA256.test(expectedFinalizeSha256) || phase !== 'final'))
+    || (expectedMaintenanceQueueSha256 && !SHA256.test(expectedMaintenanceQueueSha256))) {
     fail('operation_or_component_invalid')
   }
   return {
@@ -153,6 +165,7 @@ function parseArguments(argv) {
     rawResultOutput,
     targetStateSha256,
     expectedFinalizeSha256,
+    expectedMaintenanceQueueSha256,
     phase,
   }
 }
@@ -423,12 +436,36 @@ export function verifyRollingRuntimeBinding({
     fail('rolling_router_listener_mismatch')
   }
   const repositoryIdentity = pathIdentity(sourceRepositoryRoot)
-  if (!processAlive(routerRuntime.pid) || !repositoryIdentity
-    || !identitySetContains(openFiles(routerRuntime.pid, 'cwd'), repositoryIdentity)) {
+  const routerWorkingDirectories = openFiles(routerRuntime.pid, 'cwd')
+  let installedManager = null
+  if (!processAlive(routerRuntime.pid) || !repositoryIdentity) {
     fail('rolling_router_repository_mismatch')
+  }
+  if (!identitySetContains(routerWorkingDirectories, repositoryIdentity)) {
+    const resolveManager = dependencies.resolveInstalledBlueGreenManager
+      ?? resolveInstalledBlueGreenManager
+    installedManager = resolveManager({
+      deploymentProjectRoot: sourceRepositoryRoot,
+      runDir: deploymentRunDir,
+      releasesDir: trustedLayout.releasesDirectory,
+      launchAgentsDir: join(canonicalHome, 'Library', 'LaunchAgents'),
+    })
+    const installationPath = join(deploymentRunDir, 'supervisor', 'installation.json')
+    const supervisorIdentity = pathIdentity(dirname(installationPath))
+    if (installedManager?.schema !== 'video-autoworker-blue-green-installed-manager/v1'
+      || !['same-project', 'adapted-historical'].includes(installedManager.mode)
+      || installedManager.installation?.path !== installationPath
+      || !SHA256.test(installedManager.installation?.sha256 || '')
+      || !validAbsolutePath(installedManager.manager?.path)
+      || !COMMIT.test(installedManager.manager?.sourceCommit || '')
+      || !supervisorIdentity
+      || !identitySetContains(routerWorkingDirectories, supervisorIdentity)) {
+      fail('rolling_router_repository_mismatch')
+    }
   }
 
   const runtimePids = {}
+  const applicationReleases = {}
   for (const [slot, port] of [['blue', 3317], ['green', 3417]]) {
     const listeners = listenerPids(port)
     const shouldRun = slot === state.active
@@ -465,6 +502,12 @@ export function verifyRollingRuntimeBinding({
     const releaseIdentity = pathIdentity(binding.releaseRoot)
     if (!releaseIdentity) fail(`rolling_${slot}_release_missing`)
     verifyRelease(sourceRepositoryRoot, binding)
+    applicationReleases[slot] = {
+      slot,
+      releaseId: binding.releaseId,
+      releaseRoot: binding.releaseRoot,
+      manifestSha256: binding.manifestSha256,
+    }
     if (listeners.length === 0) {
       if (processAlive(recordedPid)) fail(`rolling_${slot}_process_still_alive`)
       if (slot !== state.previous) fail(`rolling_${slot}_unexpected_stopped_runtime`)
@@ -486,6 +529,10 @@ export function verifyRollingRuntimeBinding({
     || !identitySetContains(openFiles(n8nListeners[0]), n8nIdentity)) {
     fail('rolling_n8n_runtime_binding_mismatch')
   }
+  if (installedManager) {
+    const assertSnapshot = dependencies.assertInstallationSnapshot ?? assertInstallationSnapshot
+    assertSnapshot(installedManager.installation.path, installedManager.installation.sha256)
+  }
   return {
     schema: 'video-autoworker-rolling-runtime-binding/v1',
     runDirectory: deploymentRunDir,
@@ -493,12 +540,14 @@ export function verifyRollingRuntimeBinding({
     activeSlot: state.active,
     previousSlot: state.previous,
     generation: state.generation,
+    activeApplication: applicationReleases[state.active],
     routerPid: routerRuntime.pid,
     slotPids: runtimePids,
     n8nPid: n8nListeners[0],
     mission: missionIdentity,
     n8n: n8nIdentity,
     videoBatchRoot,
+    ...(installedManager ? { installedManager } : {}),
   }
 }
 
@@ -839,7 +888,7 @@ function formalQueueProjection(database, batchRoot) {
   }
   let durable
   try {
-    durable = scanOfflineDurableBatchStates(batchRoot)
+    durable = scanOfflineDurableBatchStates(batchRoot, { includeEvidence: true })
   } catch {
     fail('video_batch_root_unsafe')
   }
@@ -851,11 +900,56 @@ function formalQueueProjection(database, batchRoot) {
     )
     ORDER BY created_at, id
   `).all()
-  const projection = projectOfflineQueue(rows, durable, Math.floor(Date.now() / 1_000))
+  const projection = projectOfflineQueue(rows, durable.items, Math.floor(Date.now() / 1_000))
   return {
     ...projection,
+    durableSnapshot: durable.snapshot,
     attentionStale: projection.values.filter(item => item.origin === 'attention-stale').length,
   }
+}
+
+function captureVerifiedMaintenanceGuardian(batchRoot) {
+  const markerPath = join(batchRoot, '.worker-launch.lock')
+  const ownerPath = `${markerPath}.owner`
+  if (!existsSync(markerPath) || !existsSync(ownerPath)) return null
+  if (existsSync(join(batchRoot, '.global-video-worker.lock'))) {
+    fail('maintenance_queue_worker_present')
+  }
+  const marker = readOwnedText(markerPath, 'maintenance_guardian_marker', 16 * 1024)
+  const owner = readOwnedText(ownerPath, 'maintenance_guardian_owner', 16 * 1024)
+  const markerIdentity = pathIdentity(markerPath)
+  const ownerIdentity = pathIdentity(ownerPath)
+  let ownerPid
+  try { ownerPid = JSON.parse(owner).pid } catch { fail('maintenance_guardian_owner_invalid') }
+  if (!markerIdentity || !ownerIdentity || !Number.isSafeInteger(ownerPid) || ownerPid <= 0) {
+    fail('maintenance_guardian_identity_invalid')
+  }
+  return {
+    marker: { ...markerIdentity, sourceSha256: sha256(marker) },
+    owner: { ...ownerIdentity, sourceSha256: sha256(owner), pid: ownerPid },
+  }
+}
+
+function maintenanceQueueBaseline(queue, guardian, activity) {
+  const active = queue.values.filter(item => item.origin !== 'attention-stale')
+  if (queue.running !== 0 || queue.waiting < 1 || active.length !== queue.waiting
+    || queue.durableSnapshot?.activeJournals !== 0
+    || active.some(item => item.status !== 'queued'
+      || !['durable', 'durable+n8n'].includes(item.origin))
+    || !guardian) return null
+  const value = {
+    queue: {
+      values: queue.values,
+      digest: queue.digest,
+      waiting: queue.waiting,
+      running: queue.running,
+      attentionStale: queue.attentionStale,
+      durableSnapshot: queue.durableSnapshot,
+    },
+    guardian,
+    activity,
+  }
+  return { value, snapshotSha256: sha256(canonicalJson(value)) }
 }
 
 function readLegacyIdleSnapshot(Database, missionIdentity, n8nIdentity, videoBatchRoot) {
@@ -939,6 +1033,7 @@ export function verifySharedRuntimeInstallGate(
     rawResultOutput = '',
     targetStateSha256 = '',
     expectedFinalizeSha256 = '',
+    expectedMaintenanceQueueSha256 = '',
     phase = 'component',
   },
   dependencies = {},
@@ -951,7 +1046,8 @@ export function verifySharedRuntimeInstallGate(
   if (!['component', 'final'].includes(phase)
     || !['install', 'rollback'].includes(operation) || (component && !COMPONENTS.includes(component))
     || (targetStateSha256 && !SHA256.test(targetStateSha256))
-    || (expectedFinalizeSha256 && (!SHA256.test(expectedFinalizeSha256) || phase !== 'final'))) {
+    || (expectedFinalizeSha256 && (!SHA256.test(expectedFinalizeSha256) || phase !== 'final'))
+    || (expectedMaintenanceQueueSha256 && !SHA256.test(expectedMaintenanceQueueSha256))) {
     fail('operation_or_component_invalid')
   }
   const verifyLegacyPreinstall = dependencies.verifyLegacyPreinstall ?? legacyPreinstallGate
@@ -1001,9 +1097,10 @@ export function verifySharedRuntimeInstallGate(
     `).get()?.count)
     if (!Number.isSafeInteger(mediaActive) || mediaActive !== 0) fail('active_media_nodes_present')
     if (!Number.isSafeInteger(n8nActive) || n8nActive !== 0) fail('active_n8n_executions_present')
-    if (queue.waiting !== 0 || queue.running !== 0) fail('active_tasks_present')
     if (!hasIntake || !hasOutbox) {
       if (hasIntake !== hasOutbox) fail('rolling_schema_partial')
+      if (expectedMaintenanceQueueSha256) fail('maintenance_queue_snapshot_changed')
+      if (queue.waiting !== 0 || queue.running !== 0) fail('active_tasks_present')
       if (!legacyPreinstallAttemptDir) fail('legacy_preinstall_attempt_required')
       if (!isAbsolute(legacyPreinstallAttemptDir)
         || resolve(legacyPreinstallAttemptDir) !== legacyPreinstallAttemptDir) {
@@ -1128,9 +1225,24 @@ export function verifySharedRuntimeInstallGate(
     if (intake?.accepting !== 0 || !Number.isSafeInteger(revision) || revision < 1) {
       fail('intake_not_paused')
     }
-    if (!Number.isSafeInteger(activeTasks) || activeTasks !== 0) fail('active_tasks_present')
     if (!Number.isSafeInteger(pendingOutbox) || pendingOutbox !== 0) {
       fail('director_outbox_pending')
+    }
+    const guardian = activeTasks > 0
+      ? captureVerifiedMaintenanceGuardian(videoBatchRoot)
+      : null
+    const maintenanceBaseline = maintenanceQueueBaseline(queue, guardian, {
+      intakeRevision: revision,
+      mediaActive,
+      n8nActive,
+      pendingOutbox,
+    })
+    if (!Number.isSafeInteger(activeTasks) || (activeTasks !== 0 && !maintenanceBaseline)) {
+      fail('active_tasks_present')
+    }
+    if (expectedMaintenanceQueueSha256
+      && maintenanceBaseline?.snapshotSha256 !== expectedMaintenanceQueueSha256) {
+      fail('maintenance_queue_snapshot_changed')
     }
     const runtimeBinding = deploymentRunDir
       ? (dependencies.verifyRollingRuntimeBinding ?? verifyRollingRuntimeBinding)({
@@ -1140,6 +1252,48 @@ export function verifySharedRuntimeInstallGate(
           videoBatchRoot,
         })
       : null
+    if (maintenanceBaseline) {
+      mission.exec('BEGIN')
+      n8n.exec('BEGIN')
+      const currentQueue = formalQueueProjection(mission, videoBatchRoot)
+      const currentMediaActive = Number(mission.prepare(`
+        SELECT COUNT(*) AS count
+        FROM n8n_task_runs
+        WHERE source = 'n8n-media-node'
+          AND status IN ('queued', 'accepted', 'running')
+      `).get()?.count)
+      const currentN8nActive = Number(n8n.prepare(`
+        SELECT COUNT(*) AS count
+        FROM execution_entity
+        WHERE status IN ('new', 'running', 'waiting') AND "stoppedAt" IS NULL
+      `).get()?.count)
+      const currentIntake = mission.prepare(`
+        SELECT accepting, revision
+        FROM n8n_intake_controls
+        WHERE control_id = 1
+      `).get()
+      const currentOutbox = Number(mission.prepare(`
+        SELECT COUNT(*) AS count
+        FROM n8n_director_evidence_outbox
+        WHERE status = 'pending'
+      `).get()?.count)
+      n8n.exec('COMMIT')
+      mission.exec('COMMIT')
+      const currentRevision = Number(currentIntake?.revision)
+      const currentGuardian = captureVerifiedMaintenanceGuardian(videoBatchRoot)
+      const currentBaseline = maintenanceQueueBaseline(currentQueue, currentGuardian, {
+        intakeRevision: currentRevision,
+        mediaActive: currentMediaActive,
+        n8nActive: currentN8nActive,
+        pendingOutbox: currentOutbox,
+      })
+      if (currentIntake?.accepting !== 0 || currentRevision !== revision
+        || currentMediaActive !== 0 || currentN8nActive !== 0 || currentOutbox !== 0
+        || !currentBaseline
+        || currentBaseline.snapshotSha256 !== maintenanceBaseline.snapshotSha256) {
+        fail('maintenance_queue_snapshot_changed')
+      }
+    }
     return {
       schema: 'video-autoworker-shared-runtime-install-gate/v1',
       mode: 'rolling',
@@ -1154,6 +1308,15 @@ export function verifySharedRuntimeInstallGate(
       attentionStale: queue.attentionStale,
       pendingOutbox,
       ...(runtimeBinding ? { runtimeBinding } : {}),
+      ...(maintenanceBaseline ? { stableQueueSha256: maintenanceBaseline.snapshotSha256 } : {}),
+      ...(maintenanceBaseline ? {
+        maintenanceQueue: {
+          reason: 'maintenance_guardian',
+          queued: queue.waiting,
+          snapshotSha256: maintenanceBaseline.snapshotSha256,
+          baseline: maintenanceBaseline.value,
+        },
+      } : {}),
     }
   } catch (error) {
     try { n8n?.exec('ROLLBACK') } catch { /* no active read transaction */ }

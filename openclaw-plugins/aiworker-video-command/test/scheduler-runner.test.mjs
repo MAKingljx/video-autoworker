@@ -97,6 +97,51 @@ describe('0.5 scheduler runner', () => {
     expect(execute.mock.calls[0][2]).toEqual({ timeout: 25_000 })
   })
 
+  it('validates and preserves execution availability with evidence-backed progress', async () => {
+    const { runner } = fixture({
+      taskId,
+      status: 'queued',
+      duplicate: false,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+      progress: { stage: 'queued', updatedAt: '2026-09-09T03:30:00.000Z' },
+    })
+    await expect(runner.dispatchVideo({ videoPath: '/data/test.mp4', taskId })).resolves.toEqual({
+      kind: 'task',
+      id: taskId,
+      status: 'queued',
+      duplicate: false,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+      progress: { stage: 'queued', updatedAt: '2026-09-09T03:30:00.000Z' },
+    })
+
+    const malformed = fixture({
+      taskId,
+      status: 'queued',
+      duplicate: false,
+      executionAvailability: { status: 'blocked', reason: 'worker_active' },
+    }).runner
+    await expect(malformed.dispatchVideo({ videoPath: '/data/test.mp4', taskId }))
+      .rejects.toThrow('invalid_execution_availability')
+  })
+
+  it('preserves bounded execution availability and real progress from dispatch', async () => {
+    const { runner } = fixture({
+      taskId,
+      status: 'queued',
+      duplicate: false,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+      progress: { stage: 'queued', updatedAt: '2026-09-08T15:50:04.940Z' },
+    })
+    await expect(runner.dispatchVideo({ videoPath: '/data/test.mp4', taskId })).resolves.toEqual({
+      kind: 'task',
+      id: taskId,
+      status: 'queued',
+      duplicate: false,
+      executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+      progress: { stage: 'queued', updatedAt: '2026-09-08T15:50:04.940Z' },
+    })
+  })
+
   it('passes a validated director work name as one CLI argument', async () => {
     const { execute, runner } = fixture({ taskId, status: 'queued', duplicate: false })
     await runner.dispatchVideo({ videoPath: '/data/test.mp4', taskId, directorWork: '地球之极 第三季' })
@@ -606,6 +651,60 @@ describe('0.5 scheduler runner', () => {
     expect(taskFixture.execute.mock.calls[0][1]).toEqual([
       '/installed/submit-task.mjs', '--status-brief', taskId,
     ])
+  })
+
+  it('preserves task status availability and does not invent progress', async () => {
+    const withEvidence = fixture({
+      taskId,
+      status: 'queued',
+      output: null,
+      executionAvailability: { status: 'unknown', reason: 'launch_control_unconfirmed' },
+      progress: { stage: 'staging', updatedAt: '2026-09-09T03:30:00.000Z' },
+    }).runner
+    await expect(withEvidence.taskStatus({ taskId })).resolves.toEqual({
+      kind: 'task',
+      id: taskId,
+      status: 'queued',
+      summary: null,
+      executionAvailability: { status: 'unknown', reason: 'launch_control_unconfirmed' },
+      progress: { stage: 'staging', updatedAt: '2026-09-09T03:30:00.000Z' },
+    })
+
+    const withoutEvidence = fixture({ taskId, status: 'running', output: null }).runner
+    const result = await withoutEvidence.taskStatus({ taskId })
+    expect(result).not.toHaveProperty('executionAvailability')
+    expect(result).not.toHaveProperty('progress')
+  })
+
+  it('keeps maintenance, unknown launch and worker-active states distinct on status', async () => {
+    const fixtures = [
+      { status: 'blocked', reason: 'maintenance_guardian' },
+      { status: 'unknown', reason: 'launch_control_unconfirmed' },
+      { status: 'available', reason: 'worker_active' },
+    ]
+    for (const executionAvailability of fixtures) {
+      const runner = fixture({
+        taskId,
+        status: 'queued',
+        output: null,
+        executionAvailability,
+        progress: { stage: 'queued', updatedAt: '2026-09-08T15:50:04.940Z' },
+      }).runner
+      await expect(runner.taskStatus({ taskId })).resolves.toMatchObject({
+        executionAvailability,
+        progress: { stage: 'queued', updatedAt: '2026-09-08T15:50:04.940Z' },
+      })
+    }
+  })
+
+  it('rejects mismatched execution availability instead of calling it maintenance', async () => {
+    const runner = fixture({
+      taskId,
+      status: 'queued',
+      output: null,
+      executionAvailability: { status: 'blocked', reason: 'launch_control_unconfirmed' },
+    }).runner
+    await expect(runner.taskStatus({ taskId })).rejects.toThrow('invalid_execution_availability')
   })
 
   it('reads the uniquely matched item from its batch state without submitting work', async () => {

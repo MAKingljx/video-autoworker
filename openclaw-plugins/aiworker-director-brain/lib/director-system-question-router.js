@@ -1,6 +1,8 @@
 import {
   DIRECTOR_BRAIN_UNAVAILABLE_MESSAGE,
+  DIRECTOR_BRAIN_REVIEW_GUIDANCE,
   readDirectorBrainSystemAnswer,
+  reportDirectorBrainFailure,
 } from './director-brain-tool.js'
 
 export const DIRECTOR_BRAIN_MAINTENANCE_MESSAGE = '导演脑正在维护，请稍后再试。'
@@ -72,6 +74,14 @@ export function classifyDirectorBrainSystemQuestion(value) {
   return topics.length === 1 ? topics[0] : null
 }
 
+export function isDirectorBrainReviewRequest(value) {
+  const text = normalizeQuestion(value)
+  if (!text || !/导演(?:大)?脑/u.test(text)) return false
+  if (META_OR_CONDITIONAL_SHAPE.test(text) || QUOTED_OR_CODE_SHAPE.test(text)
+    || MULTI_INTENT_SHAPE.test(text) || /不要|不用|无需|别|不批准|不审核|不驳回/u.test(text)) return false
+  return /^(?:请|帮我|请帮我)?\s*(?:批准|审核通过|驳回|拒绝审核)\s*.+$/u.test(text)
+}
+
 function ownsTargetAgent(context, targetAgentId) {
   try {
     return SAFE_AGENT_ID.test(targetAgentId) && context?.agentId === targetAgentId
@@ -98,10 +108,18 @@ export function createDirectorBrainSystemQuestionHandler({
   targetAgentId,
   service,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  onDiagnostic,
 } = {}) {
   return async (event, context) => {
     if (!ownsTargetAgent(context, targetAgentId)) return undefined
     if (context?.trigger !== undefined && context.trigger !== 'user') return undefined
+    if (isDirectorBrainReviewRequest(event?.cleanedBody)) {
+      return {
+        handled: true,
+        reply: { text: releaseReady ? DIRECTOR_BRAIN_REVIEW_GUIDANCE : DIRECTOR_BRAIN_MAINTENANCE_MESSAGE },
+        reason: 'director_brain_manual_review_required',
+      }
+    }
     const topic = classifyDirectorBrainSystemQuestion(event?.cleanedBody)
     if (!topic) return undefined
     if (!releaseReady) {
@@ -121,7 +139,8 @@ export function createDirectorBrainSystemQuestionHandler({
         reply: { text },
         reason: 'director_brain_system_question',
       }
-    } catch {
+    } catch (error) {
+      reportDirectorBrainFailure(error, 'explain', onDiagnostic)
       return {
         handled: true,
         reply: { text: DIRECTOR_BRAIN_UNAVAILABLE_MESSAGE },

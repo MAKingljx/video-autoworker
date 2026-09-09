@@ -362,7 +362,7 @@ export function projectOfflineQueue(rows, durableItems, now) {
   }
 }
 
-export function scanOfflineDurableBatchStates(batchRoot) {
+export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = false } = {}) {
   const root = resolve(batchRoot)
   assertNoSymlink(root, 'bootstrap resume video batch root')
   const rootEntry = safeEntry(root, 'bootstrap resume video batch root', 'directory')
@@ -475,6 +475,7 @@ export function scanOfflineDurableBatchStates(batchRoot) {
 
     const durable = new Map()
     const fileProjections = []
+    let activeJournals = 0
     let visited = 0
     let totalBytes = 0
     const readState = (pathname, terminalHistoryPrimary = false) => {
@@ -516,6 +517,7 @@ export function scanOfflineDurableBatchStates(batchRoot) {
           && !terminalStatuses.has(status)) status = 'paused'
         else if (state.status === 'recovering' && status === 'queued') status = 'recovering'
         if (!activeStatuses.has(status)) continue
+        if (item.stagingRecovery) activeJournals += 1
         activeItems += 1
         active.push({ taskId, status, origin: 'durable' })
       }
@@ -568,6 +570,7 @@ export function scanOfflineDurableBatchStates(batchRoot) {
         entries: rootEntries.sort((left, right) => left.name.localeCompare(right.name)),
         histories: historyProjections,
         files: fileProjections.sort((left, right) => left.pathname.localeCompare(right.pathname)),
+        activeJournals,
         guardian: guardian ? {
           marker: {
             identity: entryProjection(guardian.marker.entry, false),
@@ -588,5 +591,7 @@ export function scanOfflineDurableBatchStates(batchRoot) {
     fail('bootstrap resume video batch directory or file projection changed between samples')
   }
   finalGuardianProjection(root, second.guardian)
-  return second.durable
+  return includeEvidence
+    ? { items: second.durable, snapshot: second.projection }
+    : second.durable
 }

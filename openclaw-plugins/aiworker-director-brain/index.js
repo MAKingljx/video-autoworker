@@ -20,10 +20,12 @@ export default definePluginEntry({
   register(api) {
     const releaseReady = api.pluginConfig?.releaseReady === true
     const targetAgentId = api.pluginConfig?.targetAgentId?.trim() || DEFAULT_TARGET_AGENT_ID
+    const onDiagnostic = diagnostic => api.logger?.warn?.(JSON.stringify(diagnostic))
     api.registerTool(context => createDirectorBrainTool({
       context,
       releaseReady,
       targetAgentId,
+      onDiagnostic,
     }), {
       names: [DIRECTOR_BRAIN_TOOL_NAME],
       optional: true,
@@ -31,6 +33,7 @@ export default definePluginEntry({
     api.on('before_agent_reply', createDirectorBrainSystemQuestionHandler({
       releaseReady,
       targetAgentId,
+      onDiagnostic,
     }), {
       priority: 200,
       eligibleTriggers: ['user'],

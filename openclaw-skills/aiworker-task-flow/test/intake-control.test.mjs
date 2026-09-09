@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { access, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -113,6 +114,123 @@ test('new single-video and directory requests stop before durable state creation
     })
     assert.equal(requests, 2)
     await assert.rejects(access(batchRoot), { code: 'ENOENT' })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a live maintenance guardian keeps a queued task durable and blocks automatic worker launch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-intake-guardian-'))
+  const batchRoot = join(root, 'batches')
+  const inboxRoot = join(root, 'inbox')
+  const video = join(root, 'video.mp4')
+  const taskId = `video-command-${'d'.repeat(64)}`
+  await writeFile(video, 'maintenance-queued-video')
+  try {
+    await withPlatform((request, response) => {
+      if (request.url === '/api/n8n/intake-control') {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ control: { accepting: true } }))
+        return
+      }
+      if (request.url === '/api/n8n/workflows') {
+        response.writeHead(200, { 'Content-Type': 'application/json' })
+        response.end(JSON.stringify({ bindings: [{ id: 1, enabled: true, taskType: 'video-analysis' }] }))
+        return
+      }
+      response.writeHead(404).end()
+    }, async baseUrl => {
+      const created = await createSingleVideoState({
+        taskId,
+        idempotencyKey: taskId,
+        baseUrl,
+        bindingId: 1,
+        prompt: '分析视频中的语音内容和画面信息，分别给出结果后合并。',
+        videoFile: video,
+        inboxRoot,
+        batchRoot,
+      })
+      const markerPath = join(batchRoot, '.worker-launch.lock')
+      const markerValue = {
+        schema: 'video-autoworker-worker-launch-guardian/v2',
+        pid: process.pid,
+        token: randomBytes(32).toString('hex'),
+        createdAt: '2026-09-09T00:00:00.000Z',
+      }
+      const markerSource = `${JSON.stringify(markerValue)}\n`
+      await writeFile(markerPath, markerSource, { mode: 0o600 })
+      const marker = await lstat(markerPath, { bigint: true })
+      await writeFile(`${markerPath}.owner`, `${JSON.stringify({
+        schema: 'video-autoworker-worker-launch-guardian-owner/v1',
+        pid: process.pid,
+        createdAt: '2026-09-09T00:00:01.000Z',
+        marker: {
+          path: markerPath,
+          dev: marker.dev.toString(),
+          ino: marker.ino.toString(),
+          tokenSha256: createHash('sha256').update(markerValue.token).digest('hex'),
+          createdAt: markerValue.createdAt,
+          sourceSha256: createHash('sha256').update(markerSource).digest('hex'),
+        },
+      })}\n`, { mode: 0o600 })
+
+      const result = await execute(process.execPath, [
+        submitScript.pathname,
+        '--video-file', video,
+        '--task-id', taskId,
+        '--idempotency-key', taskId,
+        '--base-url', baseUrl,
+        '--delivery', 'none',
+        '--wait-seconds', '0',
+        '--no-trigger-recovery',
+      ], {
+        env: {
+          ...process.env,
+          AIWORKER_VIDEO_BATCH_DIR: batchRoot,
+          AIWORKER_MEDIA_INGEST_DIR: inboxRoot,
+        },
+      })
+      const output = JSON.parse(result.stdout)
+      assert.equal(output.taskId, taskId)
+      assert.equal(output.status, 'queued')
+      assert.equal(output.duplicate, true)
+      assert.deepEqual(output.executionAvailability, {
+        status: 'blocked',
+        reason: 'maintenance_guardian',
+      })
+      assert.equal(await readFile(markerPath, 'utf8'), markerSource)
+      await assert.rejects(access(join(batchRoot, '.global-video-worker.lock')), { code: 'ENOENT' })
+      assert.deepEqual(await readBatchState(created.statePath), created.state)
+
+      await rm(`${markerPath}.owner`)
+      const ordinarySource = `${JSON.stringify({
+        pid: process.pid,
+        createdAt: '2026-09-01T00:00:00.000Z',
+      })}\n`
+      await writeFile(markerPath, ordinarySource, { mode: 0o600 })
+      const ordinaryResult = await execute(process.execPath, [
+        submitScript.pathname,
+        '--video-file', video,
+        '--task-id', taskId,
+        '--idempotency-key', taskId,
+        '--base-url', baseUrl,
+        '--delivery', 'none',
+        '--wait-seconds', '0',
+        '--no-trigger-recovery',
+      ], {
+        env: {
+          ...process.env,
+          AIWORKER_VIDEO_BATCH_DIR: batchRoot,
+          AIWORKER_MEDIA_INGEST_DIR: inboxRoot,
+        },
+      })
+      assert.deepEqual(JSON.parse(ordinaryResult.stdout).executionAvailability, {
+        status: 'unknown',
+        reason: 'launch_control_unconfirmed',
+      })
+      assert.equal(await readFile(markerPath, 'utf8'), ordinarySource)
+      await assert.rejects(access(join(batchRoot, '.global-video-worker.lock')), { code: 'ENOENT' })
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }

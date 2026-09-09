@@ -190,7 +190,11 @@ describe('director work natural-language dispatch integration', () => {
     }, context)
     const taskId = result.text.match(/video-natural-[a-f0-9]{64}/u)?.[0]
     expect(taskId).toBeTruthy()
-    expect(result.text).toBe(`已提交，任务编号：${taskId}。结果请稍后查询。`)
+    expect(result.text).toMatch(new RegExp(
+      `^已提交，任务编号：${taskId}。处理服务正在启动。当前阶段：排队；状态更新时间：\\d{2}月\\d{2}日\\d{2}:\\d{2}。$`,
+      'u',
+    ))
+    expect(result.text).not.toContain('自动开始')
 
     const durable = await readSingleVideoTaskState(taskId, batchRoot)
     expect(durable.state.directorWork).toBe('导演脑验收片')

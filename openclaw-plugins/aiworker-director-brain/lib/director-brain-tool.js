@@ -102,8 +102,9 @@ const TOOL_PARAMETERS = Object.freeze({
         'workflow',
         'propose',
         'extraction_status',
+        'review_guidance',
       ],
-      description: 'health 检查连接；explain 直接读取已生效系统蓝图并回答架构、技法学习逻辑、最终目标、集成边界、数据边界或当前范围；resolve_work 用作品名或别名解析唯一作品；get/search 读取作品知识；assemble 组装已审核上下文；workflow 返回六层就绪度、案例与技法成熟度；propose 写入候选；extraction_status 只读查询导演知识提炼进度。OpenClaw 对话不得启动、回填或重提提炼任务。',
+      description: 'health 检查连接；explain 读取系统蓝图；resolve_work 解析作品；get/search 读取知识；assemble 组装已审核上下文；workflow 返回就绪度；propose 写入候选；extraction_status 只读查询提炼进度；review_guidance 说明人工审核方式，用户要求批准或驳回导演脑候选时使用，只传 action，不读取或修改记录。OpenClaw 对话不得启动、回填或重提提炼任务。',
     },
     topic: {
       type: 'string',
@@ -313,8 +314,8 @@ function normalizeAssemblyReferences(value) {
 
 export function normalizeDirectorBrainToolRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  if (value.action === 'health') {
-    return hasExactKeys(value, ['action']) ? { action: 'health' } : null
+  if (value.action === 'health' || value.action === 'review_guidance') {
+    return hasExactKeys(value, ['action']) ? { action: value.action } : null
   }
   if (value.action === 'explain') {
     if (!hasExactKeys(value, ['action', 'topic'])) return null
@@ -531,8 +532,49 @@ function textResult(text) {
   return { content: [{ type: 'text', text }] }
 }
 
+export const DIRECTOR_BRAIN_REVIEW_GUIDANCE = '当前聊天暂不支持批准或驳回。候选需通过人工审核流程确认，本次没有更改审核状态。'
+
+const DIAGNOSTIC_ERROR_CODES = new Set([
+  'director_brain_keychain_unavailable',
+  'director_brain_keychain_secret_missing',
+  'director_brain_runtime_service_invalid',
+  'director_brain_runtime_contract_invalid',
+  'director_brain_runtime_result_invalid',
+  'director_brain_runtime_result_too_large',
+  'director_brain_blueprint_result_invalid',
+  'director_brain_system_read_timeout',
+  'director_brain_system_answer_invalid',
+  'director_brain_extraction_response_invalid',
+  'director_brain_extraction_service_invalid',
+  'work_resolution_ambiguous',
+  'work_not_found',
+])
+
+// Keep diagnostic codes independently of transcript projection. Never forward
+// request fields, error prose, stacks, identities or remote response bodies.
+export function reportDirectorBrainFailure(error, action, onDiagnostic) {
+  if (typeof onDiagnostic !== 'function') return
+  const message = error instanceof Error ? error.message : ''
+  const transportCode = /^(feishu_http_error|feishu_api_error):([0-9]{1,10}):/u.exec(message)
+  const code = DIAGNOSTIC_ERROR_CODES.has(message) ? message
+    : transportCode ? `${transportCode[1]}:${transportCode[2]}`
+      : error?.name === 'TimeoutError' ? 'director_brain_request_timeout'
+        : 'unexpected_error'
+  const safeAction = TOOL_PARAMETERS.properties.action.enum.includes(action) ? action : 'unknown'
+  try {
+    onDiagnostic({ schema: 'aiworker-director-diagnostic/v1', action: safeAction, code })
+  } catch {
+    // Logging must not change the result of a business operation.
+  }
+}
+
 function mapDirectorBrainError(error, action) {
   const code = error instanceof Error ? error.message : ''
+  if (/^director_brain_keychain_(?:unavailable|secret_missing)$/u.test(code)) {
+    return action === 'propose'
+      ? '导演脑暂时无法保存候选，本次未写入。'
+      : '导演脑暂时无法读取，请稍后再试。'
+  }
   if (/director_extraction_source_not_found/iu.test(code)) {
     return '没有找到已完成的视频分析。请告诉我更准确的视频标题或季集。'
   }
@@ -1000,18 +1042,24 @@ export function createDirectorBrainTool({
   targetAgentId = DEFAULT_TARGET_AGENT_ID,
   service,
   extractionService,
+  onDiagnostic,
 } = {}) {
   if (context?.agentId !== targetAgentId) return null
   return {
     name: DIRECTOR_BRAIN_TOOL_NAME,
     label: 'AI-worker 导演脑',
-    description: '完整导演脑的唯一 OpenClaw 工具。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；查询导演知识提炼进度时只调用 extraction_status，同样只传作品名 query。OpenClaw 对话不得启动、回填、重提提炼任务或触发素材投影。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow 和 extraction_status 返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得批准、删除、创建任务或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
+    description: '完整导演脑的唯一 OpenClaw 工具。用户要求批准或驳回导演脑候选（包括刚提交候选后只回复批准）时只调用 review_guidance，逐字返回并结束，不得改成 search 或回退通用工具；提交候选后告知需人工审核，不得承诺回复批准即可。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；查询导演知识提炼进度时只调用 extraction_status，同样只传作品名 query。OpenClaw 对话不得启动、回填、重提提炼任务或触发素材投影。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow 和 extraction_status 返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得批准、删除、创建任务或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {
       if (!releaseReady) return textResult('导演脑正在维护，请稍后再试。')
       const request = normalizeDirectorBrainToolRequest(params)
       if (!request) return textResult('导演脑请求参数无效。')
+      if (request.action === 'review_guidance') {
+        return textResult(serializeServiceResult(handledAnswer(
+          request.action, 'manual_review_required', DIRECTOR_BRAIN_REVIEW_GUIDANCE,
+        )))
+      }
       try {
         const executeOperation = service || await loadInstalledDirectorBrainService()
         const getExtractionService = EXTRACTION_ACTIONS.has(request.action)
@@ -1021,6 +1069,7 @@ export function createDirectorBrainTool({
           await executeResolvedRequest(executeOperation, getExtractionService, request),
         ))
       } catch (error) {
+        reportDirectorBrainFailure(error, request.action, onDiagnostic)
         const code = error instanceof Error ? error.message : ''
         if (/work_resolution_ambiguous/iu.test(code)) {
           return textResult(serializeServiceResult(resolutionBlocked(request.action, 'ambiguous')))

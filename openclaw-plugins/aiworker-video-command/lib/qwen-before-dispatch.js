@@ -309,10 +309,76 @@ export function dispatchReceipt(result) {
     }
     return `这个视频已经分析过：${names[0]}。如需重新分析，请回复“${DUPLICATE_CONFIRMATION_TEXT}”。`
   }
+  const execution = executionReceipt(result) || (result.kind === 'batch'
+    ? '进度请稍后按批次编号查询。'
+    : '结果请稍后查询。')
+  const progress = progressReceipt(result)
   if (result.kind === 'batch') {
-    return `${result.duplicate ? '批次已存在' : '已加入学习队列'}，批次编号：${result.id}。进度请稍后按批次编号查询。`
+    return `${result.duplicate ? '批次已存在' : '已加入学习队列'}，批次编号：${result.id}。${execution}${progress}`
   }
-  return `${result.duplicate ? '任务已存在' : '已提交'}，任务编号：${result.id}。结果请稍后查询。`
+  return `${result.duplicate ? '任务已存在' : '已提交'}，任务编号：${result.id}。${execution}${progress}`
+}
+
+function progressLabel(stage) {
+  return {
+    queued: '排队',
+    staging: '准备素材',
+    prepared: '素材已准备',
+    anchor_observed: '核验素材',
+    source_finalized: '素材已就绪',
+    staged: '等待提交',
+    triggering: '正在提交',
+    submitted: '已提交',
+    accepted: '已受理',
+    running: '处理中',
+    waiting: '等待处理结果',
+    recovering: '等待恢复',
+    discarding: '清理暂存素材',
+    discarding_prepared: '清理准备素材',
+    paused: '已暂停',
+  }[stage] || null
+}
+
+function progressReceipt(result) {
+  if (!result.progress) return ''
+  const details = []
+  const stage = progressLabel(result.progress.stage)
+  if (stage) details.push(`当前阶段：${stage}`)
+  const updatedAt = readableProgressTimestamp(result.progress.updatedAt)
+  if (updatedAt) details.push(`状态更新时间：${updatedAt}`)
+  return details.length ? `${details.join('；')}。` : ''
+}
+
+function readableProgressTimestamp(value) {
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return null
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(value)).map(part => [part.type, part.value]))
+  return `${parts.month}月${parts.day}日${parts.hour}:${parts.minute}`
+}
+
+function executionReceipt(result) {
+  const execution = result.executionAvailability
+  if (!execution) return ''
+  if (execution.reason === 'maintenance_guardian') {
+    return result.status === 'queued' ? '处理服务正在维护，尚未开始。'
+      : '处理服务正在维护，进度以当前记录为准。'
+  }
+  if (execution.reason === 'worker_unavailable') {
+    return result.status === 'queued' ? '当前未检测到可用处理服务，尚未开始。'
+      : '当前未检测到可用处理服务，进度以当前记录为准。'
+  }
+  if (execution.reason === 'worker_starting') return '处理服务正在启动。'
+  if (execution.reason === 'worker_active') return '处理服务已运行，任务状态以当前登记为准。'
+  if (execution.reason === 'guardian_unconfirmed') {
+    return '处理服务的维护状态尚未确认。'
+  }
+  return '处理服务启动状态尚未确认。'
 }
 
 export function statusReceipt(result) {
@@ -338,7 +404,7 @@ export function statusReceipt(result) {
       succeeded: '已完成',
       completed_with_errors: '已完成（含失败项）',
     }
-    return `${searchName(result.name)}：${itemLabels[result.status] ?? '状态未知'}；所在批次${batchLabels[result.batchStatus] ?? '状态未知'}，已结束 ${completed}/${result.total}。`
+    return `${searchName(result.name)}：${itemLabels[result.status] ?? '状态未知'}；所在批次${batchLabels[result.batchStatus] ?? '状态未知'}，已结束 ${completed}/${result.total}。${executionReceipt(result)}${progressReceipt(result)}`
   }
   if (result.kind === 'batch') {
     const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
@@ -357,7 +423,7 @@ export function statusReceipt(result) {
     if (result.status === 'unavailable') {
       return '该批次状态文件不可用，当前无法验证进度；未执行恢复或提交。'
     }
-    return `批次${labels[result.status] ?? '状态未知'}；已结束 ${completed}/${result.total}。`
+    return `批次${labels[result.status] ?? '状态未知'}；已结束 ${completed}/${result.total}。${executionReceipt(result)}${progressReceipt(result)}`
   }
   if (result.status === 'succeeded' && result.summary) return `任务已完成。摘要：${result.summary}`
   const replies = {
@@ -368,7 +434,8 @@ export function statusReceipt(result) {
     failed: '任务处理失败。',
     cancelled: '任务已取消。',
   }
-  return replies[result.status] ?? '暂时无法查询任务状态。'
+  const state = replies[result.status] ?? '暂时无法查询任务状态。'
+  return `${state}${executionReceipt(result)}${progressReceipt(result)}`
 }
 
 function searchStatusLabel(status) {

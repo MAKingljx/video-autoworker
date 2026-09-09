@@ -72,6 +72,7 @@ elif [[ -n "${AIWORKER_VIDEO_BATCH_DIR:-}" \
 fi
 MUTATION_AUTHORIZATION=""
 SHARED_GATE_MODE=""
+STABLE_QUEUE_SHA256=""
 
 [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
   printf 'Shared deployment lock helper is unavailable.\n' >&2
@@ -287,11 +288,26 @@ verify_shared_install_gate() {
     gate_arguments+=(--legacy-preinstall-attempt-dir "$LEGACY_PREINSTALL_ATTEMPT_DIR")
     gate_arguments+=(--raw-result-output "$RESULT_OUTPUT")
   fi
+  if [[ -n "$STABLE_QUEUE_SHA256" ]]; then
+    gate_arguments+=(--expected-maintenance-queue-sha256 "$STABLE_QUEUE_SHA256")
+  fi
   gate_output="$(node "$SHARED_INSTALL_GATE" "${gate_arguments[@]}")" || {
     printf 'Shared video-command replacement requires paused intake, zero active tasks, and zero pending director outbox rows.\n' >&2
     return 1
   }
   if [[ "$MUTATION_AUTHORIZATION" == production ]]; then
+    # Bind the same held queue across preflight, locked installation and readback.
+    STABLE_QUEUE_SHA256="$(printf '%s' "$gate_output" | node -e '
+      const value = JSON.parse(require("node:fs").readFileSync(0, "utf8"))
+      const digest = value.stableQueueSha256
+      const expected = process.argv[1]
+      if ((digest !== undefined && (value.mode !== "rolling" || !/^[a-f0-9]{64}$/.test(digest)))
+        || (expected && digest !== expected)) process.exit(1)
+      process.stdout.write(digest || "")
+    ' "$STABLE_QUEUE_SHA256")" || {
+      printf 'Held maintenance queue changed during video-command installation.\n' >&2
+      return 1
+    }
     gate_mode="$(printf '%s' "$gate_output" | node -e '
       const fs = require("node:fs")
       const value = JSON.parse(fs.readFileSync(0, "utf8"))
@@ -665,6 +681,7 @@ fi
 write_install_result() {
   local operation="$1" status="$2" before_digest="$3" after_digest="$4"
   local backup_path="$5" backup_manifest_digest="$6" requires_fresh_restart="$7"
+  if [[ -n "$STABLE_QUEUE_SHA256" ]]; then verify_shared_install_gate || return 1; fi
   [[ -n "$RESULT_OUTPUT" ]] || return 0
   node - "$RESULT_OUTPUT" "$operation" "$status" "$EXPECTED_SOURCE_COMMIT" \
     "$EXPECTED_RELEASE_ID" "$before_digest" "$after_digest" "$backup_path" \

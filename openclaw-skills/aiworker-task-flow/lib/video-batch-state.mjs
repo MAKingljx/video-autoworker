@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { constants } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs'
 import { chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, join, resolve } from 'node:path'
@@ -20,6 +20,9 @@ const MAX_STATUS_SEARCH_MATCHES = 32
 const MAX_DUPLICATE_MATCHES = 32
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
 const MATERIAL_HANDOFF_JOURNAL_SCHEMA_VERSION = 1
+const WORKER_LAUNCH_GUARDIAN_SCHEMA = 'video-autoworker-worker-launch-guardian/v2'
+const WORKER_LAUNCH_GUARDIAN_OWNER_SCHEMA = 'video-autoworker-worker-launch-guardian-owner/v1'
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 
 const SEARCH_STOPWORDS = new Set([
   '请', '帮我', '帮', '查', '查询', '看', '一下', '下', '视频', '影片', '录像',
@@ -1810,6 +1813,300 @@ async function readLockSample(lockPath) {
       source, pid, token,
     }
   } finally { await descriptor.close() }
+}
+
+function parseExactControlJson(sample, keys) {
+  let value
+  try { value = JSON.parse(sample.source) } catch { return null }
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== [...keys].sort().join(',')) return null
+  return value
+}
+
+function stableControlReference(sample) {
+  return {
+    dev: sample.dev.toString(),
+    ino: sample.ino.toString(),
+    sourceSha256: createHash('sha256').update(sample.source).digest('hex'),
+  }
+}
+
+function controlEvidence(pathname, sample) {
+  return {
+    identity: {
+      path: resolve(pathname),
+      dev: sample.dev.toString(),
+      ino: sample.ino.toString(),
+      uid: Number(sample.uid),
+      mode: Number(sample.mode & 0o7777n),
+      nlink: Number(sample.nlink),
+      size: Number(sample.size),
+    },
+    sourceSha256: createHash('sha256').update(sample.source).digest('hex'),
+    mtimeNs: sample.mtimeNs.toString(),
+    ctimeNs: sample.ctimeNs.toString(),
+  }
+}
+
+async function readOptionalControlSample(pathname) {
+  try {
+    return { present: true, sample: await readLockSample(pathname) }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { present: false, sample: null }
+    return { present: true, sample: null }
+  }
+}
+
+function readControlSampleSync(pathname) {
+  const entry = lstatSync(pathname, { bigint: true })
+  if (!isPrivateLockFile(entry) || entry.size <= 0n || entry.size > 4_096n) {
+    throw new Error('视频队列控制文件身份无效')
+  }
+  const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (opened.dev !== entry.dev || opened.ino !== entry.ino || opened.size !== entry.size
+      || opened.nlink !== entry.nlink || opened.mode !== entry.mode) {
+      throw new Error('视频队列控制文件在读取前已变化')
+    }
+    const source = readFileSync(descriptor, 'utf8')
+    const after = fstatSync(descriptor, { bigint: true })
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.nlink !== opened.nlink || after.mtimeNs !== opened.mtimeNs
+      || after.ctimeNs !== opened.ctimeNs || Buffer.byteLength(source) !== Number(opened.size)) {
+      throw new Error('视频队列控制文件在读取时已变化')
+    }
+    let pid = null
+    let token = null
+    try {
+      const value = JSON.parse(source)
+      pid = Number.isInteger(value?.pid) ? value.pid : null
+      token = typeof value?.token === 'string' ? value.token : null
+    } catch { /* validation happens in the exact schema reader */ }
+    return {
+      dev: after.dev, ino: after.ino, uid: after.uid, mode: after.mode,
+      nlink: after.nlink, size: after.size, mtimeNs: after.mtimeNs, ctimeNs: after.ctimeNs,
+      source, pid, token,
+    }
+  } finally {
+    closeSync(descriptor)
+  }
+}
+
+function readStableControlSampleSync(pathname) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const first = readControlSampleSync(pathname)
+    const second = readControlSampleSync(pathname)
+    if (sameLockSample(first, second)) return second
+  }
+  throw new Error('视频队列控制文件在连续读取间变化')
+}
+
+function readOptionalStableControlSampleSync(pathname) {
+  try {
+    return readStableControlSampleSync(pathname)
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  }
+}
+
+function pidIsAliveSync(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function compactControlEvidence(pathname, sample, extra = {}) {
+  return {
+    path: resolve(pathname),
+    dev: sample.dev.toString(),
+    ino: sample.ino.toString(),
+    sourceSha256: createHash('sha256').update(sample.source).digest('hex'),
+    ...extra,
+  }
+}
+
+function ordinaryLaunchMarker(sample) {
+  const value = parseExactControlJson(sample, ['createdAt', 'pid'])
+  return value
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+    ? value
+    : null
+}
+
+function guardianLaunchMarker(sample) {
+  const value = parseExactControlJson(sample, ['createdAt', 'pid', 'schema', 'token'])
+  return value
+    && value.schema === WORKER_LAUNCH_GUARDIAN_SCHEMA
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.token === 'string' && SHA256_PATTERN.test(value.token)
+    ? value
+    : null
+}
+
+function guardianOwner(sample, markerPath, markerSample, markerValue) {
+  const value = parseExactControlJson(sample, ['createdAt', 'marker', 'pid', 'schema'])
+  if (!value || value.schema !== WORKER_LAUNCH_GUARDIAN_OWNER_SCHEMA
+    || !Number.isSafeInteger(value.pid) || value.pid <= 0
+    || typeof value.createdAt !== 'string' || !Number.isFinite(Date.parse(value.createdAt))) return null
+  const reference = value.marker
+  if (!reference || typeof reference !== 'object' || Array.isArray(reference)
+    || Object.keys(reference).sort().join(',')
+      !== ['createdAt', 'dev', 'ino', 'path', 'sourceSha256', 'tokenSha256'].sort().join(',')) return null
+  const markerReference = stableControlReference(markerSample)
+  if (reference.path !== markerPath
+    || reference.dev !== markerReference.dev
+    || reference.ino !== markerReference.ino
+    || reference.createdAt !== markerValue.createdAt
+    || reference.sourceSha256 !== markerReference.sourceSha256
+    || reference.tokenSha256 !== createHash('sha256').update(markerValue.token).digest('hex')) return null
+  return value
+}
+
+function globalWorkerLock(sample) {
+  const value = parseExactControlJson(sample, ['createdAt', 'pid', 'token'])
+  return value
+    && Number.isSafeInteger(value.pid) && value.pid > 0
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt))
+    && typeof value.token === 'string' && UUID_PATTERN.test(value.token)
+    ? value
+    : null
+}
+
+/**
+ * Read-only execution availability for the one process-wide video lane.
+ * This deliberately does not remove, refresh, adopt, or create any control file.
+ */
+export function inspectVideoExecutionControlSnapshotSync(root = defaultBatchRoot()) {
+  const batchRoot = resolve(root)
+  const markerPath = join(batchRoot, '.worker-launch.lock')
+  const ownerPath = `${markerPath}.owner`
+  const globalPath = join(batchRoot, '.global-video-worker.lock')
+  const markerSample = readOptionalStableControlSampleSync(markerPath)
+  const globalSample = readOptionalStableControlSampleSync(globalPath)
+  const workerValue = globalSample ? globalWorkerLock(globalSample) : null
+  const workerAlive = workerValue ? pidIsAliveSync(workerValue.pid) : false
+  const worker = globalSample ? {
+    present: true,
+    ...compactControlEvidence(globalPath, globalSample, {
+      pid: workerValue?.pid || null,
+      alive: workerAlive,
+    }),
+  } : { present: false }
+
+  if (markerSample) {
+    const markerValue = guardianLaunchMarker(markerSample)
+    if (!markerValue) {
+      return {
+        status: 'unknown',
+        reason: 'launch_control_unconfirmed',
+        guardian: null,
+        worker,
+      }
+    }
+    const ownerSample = readOptionalStableControlSampleSync(ownerPath)
+    const ownerValue = ownerSample
+      ? guardianOwner(ownerSample, markerPath, markerSample, markerValue)
+      : null
+    const ownerAlive = ownerValue ? pidIsAliveSync(ownerValue.pid) : false
+    const guardian = {
+      marker: compactControlEvidence(markerPath, markerSample),
+      owner: ownerSample ? compactControlEvidence(ownerPath, ownerSample, {
+        pid: ownerValue?.pid || null,
+        alive: ownerAlive,
+      }) : null,
+    }
+    return ownerValue && ownerAlive
+      ? { status: 'blocked', reason: 'maintenance_guardian', guardian, worker }
+      : { status: 'unknown', reason: 'guardian_unconfirmed', guardian, worker }
+  }
+
+  if (!globalSample) {
+    return { status: 'blocked', reason: 'worker_unavailable', guardian: null, worker }
+  }
+  return workerValue && workerAlive
+    ? { status: 'available', reason: 'worker_active', guardian: null, worker }
+    : { status: 'unknown', reason: 'worker_unconfirmed', guardian: null, worker }
+}
+
+export async function inspectVideoExecutionAvailability(
+  root = defaultBatchRoot(),
+  { includeEvidence = false } = {},
+) {
+  const batchRoot = resolve(root)
+  const markerPath = join(batchRoot, '.worker-launch.lock')
+  const result = (status, reason, evidence = undefined) => ({
+    status,
+    reason,
+    ...(includeEvidence ? {
+      evidence: evidence || { marker: null, owner: null, globalLock: null },
+    } : {}),
+  })
+  const ownerPath = `${markerPath}.owner`
+  const marker = await readOptionalControlSample(markerPath)
+
+  if (marker.present) {
+    if (!marker.sample) return result('unknown', 'launch_control_unconfirmed')
+    const markerEvidence = controlEvidence(markerPath, marker.sample)
+    const guardian = guardianLaunchMarker(marker.sample)
+    if (guardian) {
+      const owner = await readOptionalControlSample(ownerPath)
+      const boundOwner = owner.sample
+        ? guardianOwner(owner.sample, markerPath, marker.sample, guardian)
+        : null
+      const ownerAlive = boundOwner ? await pidIsAlive(boundOwner.pid) : false
+      const evidence = {
+        marker: { ...markerEvidence, schema: guardian.schema, creatorPid: guardian.pid },
+        owner: owner.sample ? {
+          ...controlEvidence(ownerPath, owner.sample),
+          pid: boundOwner?.pid || null,
+          alive: ownerAlive,
+        } : null,
+        globalLock: null,
+      }
+      if (boundOwner && ownerAlive) {
+        return result('blocked', 'maintenance_guardian', evidence)
+      }
+      return result('unknown', 'guardian_unconfirmed', evidence)
+    }
+    if (ordinaryLaunchMarker(marker.sample)) {
+      return result('unknown', 'launch_control_unconfirmed', {
+        marker: markerEvidence,
+        owner: null,
+        globalLock: null,
+      })
+    }
+    return result('unknown', 'launch_control_unconfirmed', {
+      marker: markerEvidence,
+      owner: null,
+      globalLock: null,
+    })
+  }
+
+  const globalPath = join(batchRoot, '.global-video-worker.lock')
+  const global = await readOptionalControlSample(globalPath)
+  if (!global.present) return result('blocked', 'worker_unavailable')
+  if (!global.sample) return result('unknown', 'worker_unconfirmed')
+  const worker = globalWorkerLock(global.sample)
+  const workerAlive = worker ? await pidIsAlive(worker.pid) : false
+  const evidence = {
+    marker: null,
+    owner: null,
+    globalLock: {
+      ...controlEvidence(globalPath, global.sample),
+      pid: worker?.pid || null,
+      alive: workerAlive,
+    },
+  }
+  if (!worker || !workerAlive) return result('unknown', 'worker_unconfirmed', evidence)
+  return result('available', 'worker_active', evidence)
 }
 
 async function quarantineStaleLock(lockPath, expected) {

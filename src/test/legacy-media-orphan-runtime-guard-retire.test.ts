@@ -322,6 +322,33 @@ if(child.status!==0){process.stderr.write(child.stderr||'consume failed\\n');pro
     prepared.finalReadiness = finalReadiness
     return { holder, prepared, stderr: () => stderr }
   }
+  const resumeVerifier = join(tools, 'resume-verifier.mjs')
+  executable(resumeVerifier, `
+import fs from 'node:fs'; import crypto from 'node:crypto';
+const args=process.argv.slice(2), phase=args[0], reportPath=args[args.indexOf('--report')+1];
+if(!['verify-live','verify-successor','verify-artifact'].includes(phase))process.exit(2);
+if(phase==='verify-successor'&&process.env.RESUME_REJECT_SUCCESSOR==='1')process.exit(3);
+const source=fs.readFileSync(reportPath), report=JSON.parse(source), s=fs.lstatSync(reportPath,{bigint:true});
+if(phase!=='verify-artifact'&&crypto.createHash('sha256').update(fs.readFileSync(report.taskPath)).digest('hex')!==report.taskSha256)process.exit(4);
+process.stdout.write(JSON.stringify({schema:'video-autoworker-guardian-resume-baseline-verification/v1',ok:true,
+report:{path:reportPath,dev:String(s.dev),ino:String(s.ino),sha256:crypto.createHash('sha256').update(source).digest('hex')},
+snapshot:{runtimeBinding:{runDirectory:process.env.AIWORKER_BG_RUN_DIR}}}));
+`)
+  const resume = (prepared: Record<string, string>, extra: Partial<NodeJS.ProcessEnv> = {}) => {
+    const attempt = join(root, 'resume-attempt')
+    const baseline = join(attempt, 'baseline.json')
+    if (!existsSync(attempt)) {
+      mkdirSync(attempt, { mode: 0o700 })
+      const taskPath = join(batchRoot, `${'c'.repeat(64)}.json`)
+      const source = JSON.stringify({ schemaVersion: 2, batchId: 'original-learning', status: 'queued',
+        items: [{ taskId: 'original-learning', status: 'queued', idempotencyKey: 'original-only' }] })
+      writeFileSync(taskPath, source, { mode: 0o600 })
+      writeFileSync(baseline, JSON.stringify({ taskPath, taskSha256: sha256(source) }), { mode: 0o400 })
+    }
+    return run(['resume-guardian', '--receipt', prepared.receipt, '--baseline', baseline,
+      '--attempt-dir', attempt], { AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_VERIFIER: resumeVerifier,
+      AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_SNAPSHOT_COMMAND: retireSnapshot, ...extra })
+  }
   return {
     root,
     runRoot,
@@ -332,6 +359,7 @@ if(child.status!==0){process.stderr.write(child.stderr||'consume failed\\n');pro
     writeState,
     readState,
     run,
+    resume,
     retire: (prepared: Record<string, string>, extra: Partial<NodeJS.ProcessEnv> = {}) => run([
       'retire', '--receipt', prepared.receipt,
       '--final-readiness', prepared.finalReadiness,
@@ -448,6 +476,45 @@ describe('legacy media orphan post-CAS guardian retire', () => {
     expect(existsSync(join(fixture.deploymentRun, '.deployment.lock'))).toBe(false)
     expect(holder.exitCode).toBeNull()
   }, 30_000)
+
+  it('resumes the original held queue across current component versions without restoring quarantine', async () => {
+    const fixture = createFixture()
+    const { holder, prepared } = await fixture.startHeld()
+    // Current protected PIDs deliberately differ from the historical receipt.
+    fixture.writeState({ protected18091: 14404, protected18789: 15505, protected18989: 17707, queueWaiting: 1 })
+    const receiptBefore = readFileSync(prepared.receipt)
+    const result = parseOutput(fixture.resume(prepared))
+    expect(result.mode).toBe('resumed')
+    expect(await waitForExit(holder)).toEqual({ code: 0, signal: null })
+    expect(readFileSync(prepared.receipt)).toEqual(receiptBefore)
+    expect(fixture.readState()).toMatchObject({ loaded: true, disabled: false, workers: [3000], queueWaiting: 1 })
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(false)
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(false)
+    expect(parseOutput(fixture.resume(prepared))).toEqual(result)
+    const task = JSON.parse(readFileSync(join(fixture.batchRoot, `${'c'.repeat(64)}.json`), 'utf8'))
+    expect(task.items).toEqual([{ taskId: 'original-learning', status: 'queued', idempotencyKey: 'original-only' }])
+  }, 30_000)
+
+  it('preserves the live guardian when the current successor baseline rejects', async () => {
+    const fixture = createFixture()
+    const { holder, prepared } = await fixture.startHeld()
+    const result = fixture.resume(prepared, { RESUME_REJECT_SUCCESSOR: '1' })
+    expect(result.status).not.toBe(0)
+    expect(holder.exitCode).toBeNull()
+    expect(fixture.readState()).toMatchObject({ loaded: false, disabled: true, workers: [] })
+    expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(true)
+  }, 30_000)
+
+  it.each(['RESUME_INTENT', 'RESUME_GUARDIAN_HANDOFF', 'RESUME_AUTHORIZATION', 'RESUME_MARKER_CONSUMED'])(
+    'recovers a guardian resume interrupted at %s with the same original task', async point => {
+      const fixture = createFixture()
+      const { prepared } = await fixture.startHeld()
+      const killed = fixture.resume(prepared, { [`AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_KILL_AFTER_${point}`]: '1' })
+      expect(killed.signal, String(killed.stderr)).toBe('SIGKILL')
+      expect(parseOutput(fixture.resume(prepared)).mode).toBe('resumed')
+      expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock'))).toBe(false)
+      expect(existsSync(join(fixture.batchRoot, '.worker-launch.lock.owner'))).toBe(false)
+    }, 30_000)
 
   it('fails closed when the quarantined tree drifts', async () => {
     const fixture = createFixture()

@@ -28,6 +28,7 @@ import {
   createBatchState,
   createSingleVideoState,
   defaultBatchRoot,
+  inspectVideoExecutionAvailability,
   markBatchQueued,
   prepareMaterialHandoffJournalContext,
   readBatchState,
@@ -274,6 +275,46 @@ function resultTimestamp(value) {
   return timestamp
 }
 
+function progressTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return new Date(value).toISOString()
+  }
+  return resultTimestamp(value)
+}
+
+function taskProgress(record, local = null) {
+  const localStage = local?.item?.stagingRecovery?.phase || local?.item?.status
+  const fallbackStage = typeof record?.status === 'string' ? record.status : null
+  const stage = typeof localStage === 'string' && /^[a-z_]{1,64}$/u.test(localStage)
+    ? localStage
+    : fallbackStage && /^[a-z_]{1,64}$/u.test(fallbackStage)
+      ? fallbackStage
+      : null
+  const updatedAt = progressTimestamp(local?.state?.updatedAt ?? record?.updatedAt)
+  return {
+    ...(stage ? { stage } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+  }
+}
+
+function isTerminalPublicStatus(status) {
+  return ['succeeded', 'failed', 'cancelled', 'completed_with_errors'].includes(status)
+}
+
+async function executionFields(status, {
+  batchRoot = defaultBatchRoot(),
+  videoTask = true,
+} = {}) {
+  return !videoTask || isTerminalPublicStatus(status)
+    ? {}
+    : { executionAvailability: await inspectVideoExecutionAvailability(batchRoot) }
+}
+
+function batchProgress(state) {
+  const item = state.items.find(candidate => !isTerminalPublicStatus(candidate.status)) || null
+  return taskProgress(state, item ? { state, item } : null)
+}
+
 function publicDuplicateConfirmation(historical) {
   const matches = Array.isArray(historical?.matches) ? historical.matches : []
   const names = [...new Set(matches
@@ -387,15 +428,17 @@ async function spawnBatchWorker({ batchRoot = defaultBatchRoot() } = {}) {
   const worker = fileURLToPath(new URL('./run-video-batch.mjs', import.meta.url))
   await mkdir(batchRoot, { recursive: true, mode: 0o700 })
   const launchLockPath = resolve(batchRoot, '.worker-launch.lock')
+  const before = await inspectVideoExecutionAvailability(batchRoot)
+  if (before.reason !== 'worker_unavailable') return before
   let launchLock
   try {
     launchLock = await open(launchLockPath, 'wx', 0o600)
   } catch (error) {
     if (error?.code === 'EEXIST') {
-      const lockStat = await stat(launchLockPath).catch(() => null)
-      if (lockStat && Date.now() - lockStat.mtimeMs < 30_000) return false
-      await rm(launchLockPath, { force: true })
-      launchLock = await open(launchLockPath, 'wx', 0o600)
+      const raced = await inspectVideoExecutionAvailability(batchRoot)
+      return raced.reason === 'worker_unavailable'
+        ? { status: 'unknown', reason: 'launch_control_unconfirmed' }
+        : raced
     } else {
       throw error
     }
@@ -437,7 +480,7 @@ async function spawnBatchWorker({ batchRoot = defaultBatchRoot() } = {}) {
       })
     })
     child.unref()
-    return true
+    return { status: 'available', reason: 'worker_starting' }
   } catch (error) {
     // A launcher lock is only a short handoff semaphore. If the child could
     // not be spawned, remove it immediately so the next submission is not
@@ -467,7 +510,11 @@ async function handleBatchStatus(batchId) {
   const safeBatchId = validateBatchId(batchId)
   try {
     const state = await readBatchState(batchStatePath(safeBatchId))
-    output(summarizeBatchState(state))
+    output({
+      ...summarizeBatchState(state),
+      progress: batchProgress(state),
+      ...await executionFields(state.status),
+    })
   } catch (error) {
     if (error?.code === 'ENOENT') {
       output({
@@ -548,13 +595,16 @@ async function handleBatchCreate(client, videoDir) {
     })
     return
   }
+  let executionAvailability
   if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
-    await spawnBatchWorker()
+    executionAvailability = await spawnBatchWorker()
   }
   output({
     ...summarizeBatchState(created.state),
     duplicate: created.duplicate,
     bindingId: binding.id,
+    progress: batchProgress(created.state),
+    ...(executionAvailability ? { executionAvailability } : {}),
   })
 }
 
@@ -591,6 +641,7 @@ async function main() {
   const statusTaskId = option('--status') || option('--status-brief')
   const briefStatus = Boolean(option('--status-brief'))
   if (statusTaskId) {
+    let localTask = null
     const selected = await resolveAuthoritativeTaskRecord({
       loadPlatformRecord: () => client.getRun(statusTaskId),
       loadDurableRecord: async () => {
@@ -598,6 +649,7 @@ async function main() {
           if (error?.code === 'ENOENT') return null
           throw error
         })
+        localTask = local
         return local
           ? {
             taskId: statusTaskId,
@@ -611,8 +663,17 @@ async function main() {
       isPlatformUnavailable: isRetryablePlatformError,
     })
     if (!selected) throw new Error(`未找到任务：${statusTaskId}`)
+    if (selected.source === 'platform' && localTask === null) {
+      localTask = await readSingleVideoTaskState(statusTaskId).catch(() => null)
+    }
+    const progress = selected.source === 'platform'
+      ? taskProgress(selected.record)
+      : taskProgress(selected.record, localTask)
+    const availability = await executionFields(selected.record.status, {
+      videoTask: localTask !== null,
+    })
     if (selected.source !== 'platform') {
-      output(selected.record)
+      output({ ...selected.record, progress, ...availability })
       return
     }
     const run = selected.record
@@ -624,6 +685,8 @@ async function main() {
       output: briefStatus ? compactStatusOutput(run.output) : run.output,
       error: run.error,
       updatedAt: run.updatedAt,
+      progress,
+      ...availability,
     })
     return
   }
@@ -756,15 +819,21 @@ async function main() {
       })
       return
     }
-    if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
-      await spawnBatchWorker()
-    }
     const item = created.state.items[0]
+    let executionAvailability
+    if (!['succeeded', 'completed_with_errors'].includes(created.state.status)) {
+      executionAvailability = await spawnBatchWorker()
+    }
     output({
       taskId,
       status: item.status,
       duplicate: created.duplicate,
       bindingId: binding.id,
+      progress: taskProgress({ status: item.status, updatedAt: created.state.updatedAt }, {
+        state: created.state,
+        item,
+      }),
+      ...(executionAvailability ? { executionAvailability } : {}),
       ...(created.materialHandoffPersisted === true ? { materialHandoffPersisted: true } : {}),
     })
     return

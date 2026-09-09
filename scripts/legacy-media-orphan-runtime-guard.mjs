@@ -106,10 +106,10 @@ function sha256(value) {
 
 function parseArguments(argv) {
   const command = argv[0]
-  if (!['prepare', 'status', 'restore', 'recover', 'retire'].includes(command)) fail('unknown command')
+  if (!['prepare', 'status', 'restore', 'recover', 'retire', 'resume-guardian'].includes(command)) fail('unknown command')
   const allowed = command === 'prepare'
     ? new Set(['--run-root', '--quarantine-root', '--minimum-age-seconds', '--hold-guardian'])
-    : new Set(command === 'retire'
+    : new Set(command === 'resume-guardian' ? ['--receipt', '--baseline', '--attempt-dir'] : command === 'retire'
       ? ['--receipt', '--final-readiness']
       : [command === 'recover' ? '--intent' : '--receipt'])
   const values = {}
@@ -136,6 +136,12 @@ function parseArguments(argv) {
       minimumAgeSeconds,
       holdGuardian: values['--hold-guardian'] === 'yes',
     }
+  }
+  if (command === 'resume-guardian') {
+    if (Object.keys(values).length !== 3) fail('required arguments are missing')
+    return { command, pathname: normalizedAbsolute(values['--receipt'], 'receipt'),
+      baseline: normalizedAbsolute(values['--baseline'], 'baseline'),
+      attemptDirectory: normalizedAbsolute(values['--attempt-dir'], 'resume attempt') }
   }
   if (command === 'retire') {
     if (Object.keys(values).length !== 2) fail('required arguments are missing')
@@ -681,7 +687,8 @@ function lockState(batchRoot, expectedPid = null) {
   }
 }
 
-function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null) {
+function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null,
+  { allowHeldQueue = false, admitted = false } = {}) {
   const service = launchState()
   const disabled = disabledState()
   const workers = workerPids()
@@ -697,11 +704,11 @@ function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null) 
     if (realpathSync(argumentsValue[0]) !== executable.path && realpathSync(argumentsValue[0]) !== realpathSync(executable.path)) fail('video worker executable differs from the installed LaunchAgent plist')
     const workingDirectory = run(command('PLUTIL', '/usr/bin/plutil'), ['-extract', 'WorkingDirectory', 'raw', '-o', '-', plistPath], 'video-lane WorkingDirectory query').trim()
     if (realpathSync(workingDirectory) !== worker.cwd.path) fail('video worker cwd differs from the installed LaunchAgent plist')
-    const projection = batchProjection(batchRoot, lock.path, authorizationContext ? {
+    const projection = admitted ? null : batchProjection(batchRoot, lock.path, authorizationContext ? {
       ...authorizationContext,
       workerPid: workers[0],
     } : null)
-    if (projection.runnable !== 0 || projection.journals !== 0) fail('video lane still has runnable or journal work')
+    if (!admitted && ((!allowHeldQueue && projection.runnable !== 0) || projection.journals !== 0)) fail('video lane still has runnable or journal work')
     return { service, disabled, workers, worker, lock, plist, projection }
   }
   if (service.loaded || !disabled || workers.length !== 0) fail('video lane is not disabled, unloaded, and worker-free')
@@ -709,7 +716,7 @@ function laneSnapshot(batchRoot, plistPath, phase, authorizationContext = null) 
     fail(phase === 'stopped' ? 'stopped video lane no longer has the captured dead-owner lock' : 'video lane global lock is still present')
   }
   const projection = batchProjection(batchRoot, lock.path)
-  if (projection.runnable !== 0 || projection.journals !== 0) fail('video lane acquired new runnable or journal work')
+  if ((!allowHeldQueue && projection.runnable !== 0) || projection.journals !== 0) fail('video lane acquired new runnable or journal work')
   return { service, disabled, workers, worker: null, lock, plist, projection }
 }
 
@@ -3135,12 +3142,182 @@ async function recover(values) {
   }
 }
 
+function resumeBaseline(values, phase) {
+  const verifier = testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_VERIFIER',
+    join(REPOSITORY_ROOT, 'scripts/verify-guardian-resume-baseline.mjs'))
+  safeEntry(verifier, 'guardian resume verifier', 'file')
+  const source = run(process.execPath, [verifier, phase, '--report', values.baseline,
+    '--prepared-receipt', values.pathname], 'guardian resume baseline verification')
+  let result
+  try { result = JSON.parse(source) } catch { fail('guardian resume verifier result is invalid JSON') }
+  const report = readImmutableJson(values.baseline, 'guardian resume baseline')
+  if (result?.schema !== 'video-autoworker-guardian-resume-baseline-verification/v1'
+    || result.ok !== true || result.report?.path !== values.baseline
+    || result.report.sha256 !== report.sha256 || result.report.dev !== report.identity.dev
+    || result.report.ino !== report.identity.ino) fail('guardian resume verifier binding is invalid')
+  return { report: { path: values.baseline, sha256: report.sha256, ...report.identity },
+    snapshot: result.snapshot }
+}
+
+function resumeLane(chain, phase, baseline, admitted = false) {
+  if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_SNAPSHOT_COMMAND) {
+    const value = JSON.parse(run(testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_RESUME_SNAPSHOT_COMMAND', ''),
+      [phase], 'test guardian resume snapshot'))
+    return value
+  }
+  const before = chain.value.runtimeBefore
+  return { protectedPids: protectedListeners(), lane: laneSnapshot(before.batchRoot,
+    before.plistPath, phase, { finalReadinessPath: baseline }, { allowHeldQueue: true, admitted }) }
+}
+
+function resumeInvariant(snapshot) {
+  return { protectedPids: snapshot.protectedPids, plist: snapshot.lane.plist,
+    plistSha256: sha256(readFileSync(snapshot.lane.plist.path)) }
+}
+
+async function waitResumeLane(chain, values, expected, admitted = false) {
+  let lastError
+  for (let attempt = 0; attempt < WAIT_ATTEMPTS; attempt += 1) {
+    try {
+      const current = resumeLane(chain, 'active', values.baseline, admitted)
+      assertStable(expected, resumeInvariant(current), 'guardian resume protected runtime')
+      if (!current.lane.service.loaded || current.lane.disabled || current.lane.workers.length !== 1
+        || current.lane.service.pid !== current.lane.workers[0]
+        || current.lane.lock.ownerPid !== current.lane.workers[0]) fail('guardian resume successor is not unique')
+      return current
+    } catch (error) { lastError = error }
+    await new Promise(resolvePromise => setTimeout(resolvePromise, WAIT_MILLISECONDS))
+  }
+  throw lastError
+}
+
+async function resumeGuardian(values) {
+  // This is a separate maintenance transaction: the historical isolation
+  // receipt and quarantine are read-only, and intake is never reopened here.
+  const initial = validateReceipt(values.pathname, true, true, true)
+  if (!initial.value.holdGuardian || hasRestoreArtifact(values.pathname)
+    || optionalEntry(retireIntentPath(values.pathname))) fail('guardian resume conflicts with historical recovery')
+  const parent = join(dirname(initial.value.runtimeBefore.batchRoot), 'guardian-resume')
+  if (!TEST_MODE && dirname(values.attemptDirectory) !== parent) fail('guardian resume attempt is outside its canonical root')
+  safeEntry(values.attemptDirectory, 'guardian resume attempt', 'directory', 0o700)
+  const lock = acquireSharedDeploymentLock()
+  try {
+    const chain = validateReceipt(values.pathname, true, true, true)
+    assertStable(initial.loaded, chain.loaded, 'guardian resume prepared receipt')
+    const intentPath = join(values.attemptDirectory, 'intent.json')
+    const admissionPath = join(values.attemptDirectory, 'admission.json')
+    const receiptPath = join(values.attemptDirectory, 'receipt.json')
+    const anchorPath = join(values.attemptDirectory, 'receipt.anchor.json')
+    const markerPath = chain.intent.value.launchGuardian.path
+    const plan = chain.intent.value.launchGuardian
+    const batchRoot = chain.value.runtimeBefore.batchRoot
+    let intent
+    if (optionalEntry(intentPath)) {
+      intent = readImmutableJson(intentPath, 'guardian resume intent')
+      if (intent.value.schema !== 'video-autoworker-guardian-resume-intent/v1'
+        || intent.value.toolSha256 !== toolSha256()
+        || intent.value.preparedReceiptPath !== values.pathname
+        || intent.value.preparedReceiptSha256 !== chain.loaded.sha256
+        || intent.value.baseline.path !== values.baseline) fail('guardian resume intent binding changed')
+      assertStable(intent.value.baseline, resumeBaseline(values, 'verify-artifact').report, 'guardian resume baseline')
+    } else {
+      if ([admissionPath, receiptPath, anchorPath].some(pathname => optionalEntry(pathname))) fail('guardian resume artifacts have no intent')
+      const verified = resumeBaseline(values, 'verify-live')
+      if (verified.snapshot.runtimeBinding?.runDirectory !==
+        (process.env.AIWORKER_BG_RUN_DIR || join(REPOSITORY_ROOT, '.run/blue-green'))) {
+        fail('guardian resume shared lock does not bind the live runtime')
+      }
+      const snapshot = resumeLane(chain, 'quiesced', values.baseline)
+      if (snapshot.lane.service.loaded || !snapshot.lane.disabled || snapshot.lane.workers.length
+        || snapshot.lane.lock.present || snapshot.lane.projection.journals !== 0) fail('guardian resume lane is not held')
+      validateHeldGuardian(plan)
+      intent = immutableJson(intentPath, {
+        schema: 'video-autoworker-guardian-resume-intent/v1', toolSha256: toolSha256(),
+        createdAt: Math.floor(Date.now() / 1000), preparedReceiptPath: values.pathname,
+        preparedReceiptSha256: chain.loaded.sha256, baseline: verified.report,
+        quarantine: validateRetireQuarantine(chain, null), evidence: resumeInvariant(snapshot),
+      })
+      testKillAfter('RESUME_INTENT')
+    }
+    assertStable(intent.value.quarantine, validateRetireQuarantine(chain, null), 'guardian resume quarantine')
+    if (optionalEntry(receiptPath)) {
+      const receipt = readImmutableJson(receiptPath, 'guardian resume receipt')
+      if (receipt.value.schema !== 'video-autoworker-guardian-resume-receipt/v1'
+        || receipt.value.intentSha256 !== intent.sha256 || receipt.value.toolSha256 !== toolSha256()
+        || optionalEntry(markerPath) || optionalEntry(launchGuardianOwnerPath(batchRoot))) fail('guardian resume receipt is incomplete')
+      await waitResumeLane(chain, values, intent.value.evidence, true)
+      if (optionalEntry(anchorPath)) validateAnchor(anchorPath, 'guardian-resume', receipt, intent.sha256)
+      else writeAnchor(anchorPath, 'guardian-resume', receipt, intent.sha256)
+      process.stdout.write(`${JSON.stringify({ mode: 'resumed', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+      return
+    }
+    let active
+    if (optionalEntry(markerPath)) {
+      resumeBaseline(values, 'verify-successor')
+      let cleanupOwner
+      const service = launchState()
+      if (!service.loaded) {
+        const held = resumeLane(chain, 'quiesced', values.baseline)
+        assertStable(intent.value.evidence, resumeInvariant(held), 'guardian resume held runtime')
+        const guardian = takeoverRetireGuardian(chain, values.attemptDirectory)
+        // Handoff preserves the marker; only the bound successor may consume it.
+        guardian.verify()
+        cleanupOwner = guardian.handoff()
+        testKillAfter('RESUME_GUARDIAN_HANDOFF')
+        action(['enable', `gui/${process.getuid()}/${LABEL}`], 'video-lane enable')
+        action(['bootstrap', `gui/${process.getuid()}`, chain.value.runtimeBefore.plistPath], 'video-lane bootstrap')
+      }
+      active = await waitResumeLane(chain, values, intent.value.evidence)
+      resumeBaseline(values, 'verify-successor')
+      assertStable(intent.value.quarantine, validateRetireQuarantine(chain, null), 'guardian resume quarantine')
+      if (!optionalEntry(admissionPath)) immutableJson(admissionPath, {
+        schema: 'video-autoworker-guardian-resume-admission/v1', intentSha256: intent.sha256,
+        workerPid: active.lane.workers[0], lock: active.lane.lock,
+      })
+      const admission = readImmutableJson(admissionPath, 'guardian resume admission')
+      if (admission.value.intentSha256 !== intent.sha256 || admission.value.workerPid !== active.lane.workers[0]
+        || admission.value.lock.contentSha256 !== active.lane.lock.contentSha256
+        || admission.value.lock.ino !== active.lane.lock.ino || admission.value.lock.dev !== active.lane.lock.dev) {
+        fail('guardian resume admission successor changed')
+      }
+      const controls = reconcileWorkerLaunchControl(chain.value.runtimeBefore, active, values.baseline, true)
+      if (!controls.authorization && !controls.claim) issueWorkerLaunchAuthorizationSync({
+        batchRoot, workerPid: active.lane.workers[0], finalReadinessPath: values.baseline,
+      })
+      testKillAfter('RESUME_AUTHORIZATION')
+      if (TEST_MODE && process.env.AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_CONSUME_AUTHORIZATION_COMMAND) {
+        run(testPath('AIWORKER_TEST_ORPHAN_RUNTIME_GUARD_CONSUME_AUTHORIZATION_COMMAND', ''),
+          [batchRoot, String(active.lane.workers[0])], 'test authorization consumption')
+      }
+      waitForConsumedGuardian(markerPath, workerLaunchAuthorizationPath(batchRoot), workerLaunchAuthorizationClaimPath(batchRoot))
+      testKillAfter('RESUME_MARKER_CONSUMED')
+      if (cleanupOwner) cleanupOwner()
+    }
+    if (!optionalEntry(admissionPath)) fail('guardian disappeared without one recorded successor admission')
+    const admission = readImmutableJson(admissionPath, 'guardian resume admission')
+    active = await waitResumeLane(chain, values, intent.value.evidence, true)
+    if (admission.value.intentSha256 !== intent.sha256 || admission.value.workerPid !== active.lane.workers[0]
+      || admission.value.lock.contentSha256 !== active.lane.lock.contentSha256) fail('guardian resume admitted worker changed')
+    if (optionalEntry(launchGuardianOwnerPath(batchRoot))) removeDetachedGuardianOwner(batchRoot, plan)
+    const controls = inspectWorkerLaunchAuthorizationStateSync({ batchRoot })
+    if (controls.pending || controls.authorization || controls.claim) fail('guardian resume launch controls remain')
+    assertStable(intent.value.quarantine, validateRetireQuarantine(chain, null), 'guardian resume quarantine')
+    resumeBaseline(values, 'verify-artifact')
+    const receipt = immutableJson(receiptPath, { schema: 'video-autoworker-guardian-resume-receipt/v1',
+      toolSha256: toolSha256(), intentSha256: intent.sha256, completedAt: Math.floor(Date.now() / 1000),
+      baseline: intent.value.baseline, workerPid: active.lane.workers[0], runtime: resumeInvariant(active) })
+    writeAnchor(anchorPath, 'guardian-resume', receipt, intent.sha256)
+    process.stdout.write(`${JSON.stringify({ mode: 'resumed', receipt: receiptPath, receiptSha256: receipt.sha256 })}\n`)
+  } finally { lock.release() }
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const values = parseArguments(argv)
   if (values.command === 'prepare') return prepare(values)
   if (values.command === 'status') return status(values)
   if (values.command === 'restore') return restore(values)
   if (values.command === 'recover') return recover(values)
+  if (values.command === 'resume-guardian') return resumeGuardian(values)
   return retire(values)
 }
 

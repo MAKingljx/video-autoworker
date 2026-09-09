@@ -86,6 +86,11 @@ test('status CLI asks the platform before a non-terminal durable record', async 
     assert.equal(requests, 1)
     assert.equal(result.status, 'failed')
     assert.equal(result.error, 'vision: fetch failed')
+    assert.deepEqual(result.progress, {
+      stage: 'failed',
+      updatedAt: '1970-01-01T00:00:00.200Z',
+    })
+    assert.equal(Object.hasOwn(result, 'executionAvailability'), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -103,6 +108,41 @@ test('status CLI falls back to the durable record on temporary platform failure'
 
     assert.equal(result.status, 'running')
     assert.equal(result.updatedAt, '2026-08-21T12:00:00.000Z')
+    assert.deepEqual(result.progress, {
+      stage: 'waiting',
+      updatedAt: '2026-08-21T12:00:00.000Z',
+    })
+    assert.deepEqual(result.executionAvailability, {
+      status: 'blocked',
+      reason: 'worker_unavailable',
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('platform-only tasks never inherit video-lane execution availability', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-status-platform-only-'))
+  const taskId = 'ordinary-platform-task'
+  try {
+    const result = await withPlatform((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ runs: [{
+        taskId,
+        status: 'running',
+        attemptCount: 1,
+        maxAttempts: 1,
+        output: null,
+        error: null,
+        updatedAt: '2026-09-09T03:30:00.000Z',
+      }] }))
+    }, baseUrl => queryStatus(root, taskId, baseUrl))
+
+    assert.deepEqual(result.progress, {
+      stage: 'running',
+      updatedAt: '2026-09-09T03:30:00.000Z',
+    })
+    assert.equal(Object.hasOwn(result, 'executionAvailability'), false)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

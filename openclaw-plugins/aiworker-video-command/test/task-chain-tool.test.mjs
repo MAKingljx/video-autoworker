@@ -33,6 +33,7 @@ describe('AI-worker direct task-chain tool', () => {
     expect(value.description).toContain('禁止添加解释、问句、建议或“如需全文”类引导')
     expect(value.description).toContain('必须立即停止本轮')
     expect(value.description).toContain('禁止模型在同一轮自行确认')
+    expect(value.description).toContain('不得声称任务会自动开始或推算百分比')
     expect(value.parameters.properties.query.description).toContain('如 S03E03')
     expect(value.parameters.properties.query.description).toContain('禁止追加旧上下文')
     expect(value.parameters.properties).not.toHaveProperty('materialId')
@@ -70,6 +71,26 @@ describe('AI-worker direct task-chain tool', () => {
       }],
     })
     expect(runner.dispatchDirectory).toHaveBeenCalledOnce()
+  })
+
+  it('reports a queued task blocked by maintenance with its real update time', async () => {
+    const taskId = `video-command-${'f'.repeat(64)}`
+    const runner = {
+      taskStatus: vi.fn(async () => ({
+        kind: 'task',
+        id: taskId,
+        status: 'queued',
+        summary: null,
+        executionAvailability: { status: 'blocked', reason: 'maintenance_guardian' },
+        progress: { stage: 'queued', updatedAt: '2026-09-09T03:30:00.000Z' },
+      })),
+    }
+    const result = await tool({ runner }).execute('status-maintenance', {
+      action: 'status', query: taskId,
+    })
+    expect(result.content[0].text).toBe(
+      '任务已排队。处理服务正在维护，尚未开始。当前阶段：排队；状态更新时间：09月09日11:30。',
+    )
   })
 
   it('passes an optional work name and binds it into the stable task identity', async () => {

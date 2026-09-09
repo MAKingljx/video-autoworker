@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import {
   chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile,
 } from 'node:fs/promises'
@@ -16,6 +17,11 @@ const offlineQueueHelperPath = resolve(
 )
 const applicationReleaseManifestContractPath = resolve(
   repositoryRoot, 'scripts/lib/application-release-manifest-contract.mjs',
+)
+const installedManagerPath = resolve(repositoryRoot, 'scripts/lib/blue-green-installed-manager.mjs')
+const execveContractPath = resolve(repositoryRoot, 'scripts/lib/blue-green-execve-contract.mjs')
+const execveAdapterPath = resolve(
+  repositoryRoot, 'ops/recovery/install-blue-green-execve-adapter.mjs',
 )
 const expectedSourceCommit = 'a'.repeat(40)
 const expectedReleaseId = `${expectedSourceCommit}-runtime`
@@ -70,6 +76,41 @@ async function writeRuntimeBatchArtifacts(batchRoot: string, status = 'succeeded
   })}\n`
   await writeFile(resolve(history, stateName), stateSource, { mode: 0o600 })
   await writeFile(resolve(history, `${stateName}.bak`), stateSource, { mode: 0o600 })
+}
+
+async function writeHeldQueuedArtifacts(batchRoot: string) {
+  const markerPath = resolve(batchRoot, '.worker-launch.lock')
+  const createdAt = new Date().toISOString()
+  const token = 'e'.repeat(64)
+  const markerSource = `${JSON.stringify({
+    schema: 'video-autoworker-worker-launch-guardian/v2',
+    pid: process.pid,
+    createdAt,
+    token,
+  })}\n`
+  await writeFile(markerPath, markerSource, { mode: 0o600 })
+  const marker = await stat(markerPath, { bigint: true })
+  await writeFile(resolve(batchRoot, '.worker-launch.lock.owner'), `${JSON.stringify({
+    schema: 'video-autoworker-worker-launch-guardian-owner/v1',
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    marker: {
+      path: markerPath,
+      dev: marker.dev.toString(),
+      ino: marker.ino.toString(),
+      tokenSha256: sha256(token),
+      createdAt,
+      sourceSha256: sha256(markerSource),
+    },
+  })}\n`, { mode: 0o600 })
+  const statePath = resolve(batchRoot, `${'f'.repeat(64)}.json`)
+  await writeFile(statePath, `${JSON.stringify({
+    schemaVersion: 2,
+    batchId: 'held-learning-task',
+    status: 'queued',
+    items: [{ taskId: 'held-learning-task', status: 'queued' }],
+  })}\n`, { mode: 0o600 })
+  return statePath
 }
 
 async function createDatabase(root: string) {
@@ -206,6 +247,7 @@ async function verifier() {
       component?: 'task-flow' | 'video-command' | 'director-brain' | ''
       rawResultOutput?: string
       targetStateSha256?: string
+      expectedMaintenanceQueueSha256?: string
       phase?: 'component' | 'final'
     }, dependencies?: {
       verifyLegacyPreinstall?: (
@@ -229,6 +271,8 @@ async function verifier() {
       running: number
       attentionStale: number
       pendingOutbox: number
+      stableQueueSha256?: string
+      maintenanceQueue?: Record<string, unknown>
       reservation?: Record<string, unknown>
       runtimeBinding?: Record<string, unknown>
     }
@@ -244,6 +288,8 @@ async function verifier() {
       listenerPids: (port: number) => number[]
       openPaths: (pid: number, descriptor?: string) => string[]
       processAlive: (pid: number) => boolean
+      resolveInstalledBlueGreenManager?: (input: Record<string, unknown>) => Record<string, unknown>
+      assertInstallationSnapshot?: (pathname: string, digest: string) => void
     }) => Record<string, unknown>
   }
 }
@@ -626,10 +672,19 @@ describe('shared runtime installation gate', () => {
       const copiedManifestContract = resolve(
         standaloneLib, 'application-release-manifest-contract.mjs',
       )
+      const copiedManager = resolve(standaloneLib, 'blue-green-installed-manager.mjs')
+      const copiedExecveContract = resolve(standaloneLib, 'blue-green-execve-contract.mjs')
+      const copiedAdapter = resolve(
+        root, 'standalone/ops/recovery/install-blue-green-execve-adapter.mjs',
+      )
+      await mkdir(resolve(root, 'standalone/ops/recovery'), { recursive: true })
       await Promise.all([
         copyFile(verifierPath, copiedGate),
         copyFile(offlineQueueHelperPath, copiedHelper),
         copyFile(applicationReleaseManifestContractPath, copiedManifestContract),
+        copyFile(installedManagerPath, copiedManager),
+        copyFile(execveContractPath, copiedExecveContract),
+        copyFile(execveAdapterPath, copiedAdapter),
       ])
 
       const gateSource = await readFile(copiedGate, 'utf8')
@@ -703,6 +758,80 @@ describe('shared runtime installation gate', () => {
       })}\n`
       await writeFile(resolve(history, stateName), activeSource)
       expect(() => verifySharedRuntimeInstallGate(fixture)).toThrow(/video_batch_root_unsafe/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves a durable queued task held by the exact live maintenance guardian', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-gate-held-queue-'))
+    try {
+      const fixture = await createDatabase(root)
+      await writeHeldQueuedArtifacts(fixture.videoBatchRoot)
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      const first = verifySharedRuntimeInstallGate(fixture)
+      expect(first).toMatchObject({
+        mode: 'rolling',
+        activeTasks: 1,
+        waiting: 1,
+        running: 0,
+        stableQueueSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        maintenanceQueue: {
+          reason: 'maintenance_guardian',
+          queued: 1,
+          snapshotSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        },
+      })
+      expect(verifySharedRuntimeInstallGate({
+        ...fixture,
+        expectedMaintenanceQueueSha256: first.stableQueueSha256,
+      })).toMatchObject({ stableQueueSha256: first.stableQueueSha256 })
+      expect(() => verifySharedRuntimeInstallGate({
+        ...fixture,
+        expectedMaintenanceQueueSha256: '0'.repeat(64),
+      })).toThrow(/maintenance_queue_snapshot_changed/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a queued task that is not durable even when a guardian is live', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-gate-nondurable-queue-'))
+    try {
+      const fixture = await createDatabase(root)
+      await writeRuntimeBatchArtifacts(fixture.videoBatchRoot)
+      const database = new Database(fixture.missionControlDbPath)
+      database.exec(`
+        INSERT INTO n8n_task_runs VALUES (
+          1, 'database-only', 'openclaw', 'queued', strftime('%s','now'), strftime('%s','now')
+        )
+      `)
+      database.close()
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      expect(() => verifySharedRuntimeInstallGate(fixture)).toThrow(/active_tasks_present/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects a held queue that changes while the runtime binding is checked', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-gate-held-race-'))
+    try {
+      const fixture = await createDatabase(root)
+      const statePath = await writeHeldQueuedArtifacts(fixture.videoBatchRoot)
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      expect(() => verifySharedRuntimeInstallGate({
+        ...fixture,
+        deploymentRunDir: resolve(root, '.run/blue-green'),
+      }, {
+        verifyRollingRuntimeBinding: () => {
+          const state = JSON.parse(readFileSync(statePath, 'utf8'))
+          state.status = 'accepted'
+          state.items[0].status = 'accepted'
+          writeFileSync(statePath, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+          return { schema: 'video-autoworker-rolling-runtime-binding/v1' }
+        },
+      })).toThrow(/maintenance_queue_snapshot_changed/u)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -1178,6 +1307,64 @@ describe('shared runtime installation gate', () => {
       expect(() => verifyRollingRuntimeBinding(
         fixture.input, fixture.dependencies,
       )).toThrow(/rolling_blue_runtime_binding_mismatch/u)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts a v3 supervisor router cwd only through the installed-manager proof', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-rolling-installed-manager-'))
+    try {
+      const fixture = await createRollingRuntimeFixture(root, 'production')
+      const supervisor = resolve(fixture.deploymentRunDir, 'supervisor')
+      const installationPath = resolve(supervisor, 'installation.json')
+      await mkdir(supervisor, { mode: 0o700 })
+      await writeFile(installationPath, '{"fixture":true}\n', { mode: 0o600 })
+      fixture.processPaths.set('101:cwd', [supervisor])
+      const managerProof = {
+        schema: 'video-autoworker-blue-green-installed-manager/v1',
+        mode: 'adapted-historical',
+        manager: {
+          path: resolve(fixture.input.sourceRepositoryRoot, 'scripts/manage-blue-green-services.sh'),
+          sourceCommit: '3'.repeat(40),
+        },
+        installation: { path: installationPath, sha256: '4'.repeat(64) },
+      }
+      let resolved = 0
+      let asserted = 0
+      const { verifyRollingRuntimeBinding } = await verifier()
+      expect(verifyRollingRuntimeBinding(fixture.input, {
+        ...fixture.dependencies,
+        resolveInstalledBlueGreenManager: (input: Record<string, unknown>) => {
+          resolved += 1
+          expect(input).toEqual({
+            deploymentProjectRoot: fixture.input.sourceRepositoryRoot,
+            runDir: fixture.deploymentRunDir,
+            releasesDir: fixture.releasesDirectory,
+            launchAgentsDir: resolve(fixture.dependencies.canonicalHome, 'Library/LaunchAgents'),
+          })
+          return managerProof
+        },
+        assertInstallationSnapshot: (path: string, digest: string) => {
+          asserted += 1
+          expect([path, digest]).toEqual([installationPath, '4'.repeat(64)])
+        },
+      })).toMatchObject({
+        installedManager: managerProof,
+        activeApplication: {
+          slot: 'blue', releaseId: 'active-release', manifestSha256: fixture.manifestSha256,
+        },
+      })
+      expect([resolved, asserted]).toEqual([1, 1])
+
+      const arbitrary = resolve(fixture.dependencies.canonicalHome, 'arbitrary-router-cwd')
+      await mkdir(arbitrary, { mode: 0o700 })
+      fixture.processPaths.set('101:cwd', [arbitrary])
+      expect(() => verifyRollingRuntimeBinding(fixture.input, {
+        ...fixture.dependencies,
+        resolveInstalledBlueGreenManager: () => managerProof,
+        assertInstallationSnapshot: () => true,
+      })).toThrow(/rolling_router_repository_mismatch/u)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

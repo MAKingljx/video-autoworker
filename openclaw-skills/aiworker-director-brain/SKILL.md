@@ -81,6 +81,8 @@ OpenClaw 对话面不提供 `start_extraction` 或 `backfill_extraction`。用�
 
 ## 禁止事项
 
+用户要求批准或驳回导演脑候选（包括上一轮刚提交候选后只回复“批准”）时，只调用 `review_guidance`，不需要作品名或内部 ID，逐字返回审核方式说明并结束；不得把批准语义改成 search、exec 或其他操作。提交候选后须说明需要人工审核，不得承诺“回复批准即可”。
+
 - 不得批准、拒绝、合并、删除或覆盖导演脑记录。
 - 不得向 `system_blueprint` 或 `material_evidence` 提交候选。
 - 除 `skills_techniques` 按已确认案例聚合全局技法外，不得跨作品读取、引用、组装或写入；不得绕过 `resolve_work` 猜测自然语言作品名。
