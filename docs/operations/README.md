@@ -2,6 +2,11 @@
 
 本目录保存 AI-worker 可在 GitHub 共享和审计的脱敏项目记录。它与源码、n8n 工作流和部署脚本一起进入版本控制，用于回答“为什么改、改了什么、在哪个环境验证、是否部署、还剩什么风险”。
 
+## 常用入口
+
+- [日常部署与蓝绿维护](blue-green-maintenance.md)
+- [本地目录、历史文件与工作树维护](local-workspace-maintenance.md)
+
 ## 记录范围
 
 每个非简单项目任务都应在 `YYYY/YYYY-MM-DD.md` 中记录：
