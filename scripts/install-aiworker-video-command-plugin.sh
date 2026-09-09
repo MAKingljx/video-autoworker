@@ -80,6 +80,13 @@ ROLLBACK_FAILURE_PHASE=""
 ROLLBACK_FAILURE_STATUS=0
 FAILURE_EVIDENCE_PATH=""
 PRESERVE_LOCAL_JOURNAL=0
+RUNTIME_FAILURE_PHASE=""
+RUNTIME_FAILURE_STATUS=0
+RUNTIME_READY_ATTEMPTS=8
+RUNTIME_READY_DELAY_SECONDS=2
+if [[ "${NODE_ENV:-}" == test && -n "$ISOLATED_TEST_ROOT" ]]; then
+  RUNTIME_READY_DELAY_SECONDS=0
+fi
 
 [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || {
   printf 'Shared deployment lock helper is unavailable.\n' >&2
@@ -162,7 +169,7 @@ fi
 EXPECTED_SOURCE_COMMIT="$TARGET_SHA"
 EXPECTED_RELEASE_ID="$TARGET_SHA-runtime"
 
-for command_name in awk chmod cmp cp date env find git hostname id install lsof mkdir mktemp node openclaw readlink rm shasum sort stat tr; do
+for command_name in awk chmod cmp cp date env find git hostname id install lsof mkdir mktemp node openclaw readlink rm shasum sleep sort stat tr; do
   command -v "$command_name" >/dev/null 2>&1 || {
     printf 'Required command is unavailable: %s\n' "$command_name" >&2
     exit 1
@@ -603,16 +610,37 @@ NODE
 }
 
 validate_runtime() {
-  local expected="$1" report="$2" catalog="$3"
-  run_qwen_openclaw gateway status --deep --require-rpc --json > "$WORK_ROOT/gateway-status.json" \
-    || return 1
-  run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json > "$report" \
-    || return 1
-  node "$RUNTIME_VALIDATOR" "$report" "$PLUGIN_ID" "$expected" || return 1
+  local expected="$1" report="$2" catalog="$3" capture_label="${4:-preflight}"
+  local gateway_report="$WORK_ROOT/gateway-status-$capture_label.json"
+  local gateway_stderr="$WORK_ROOT/gateway-status-$capture_label.stderr"
+  local runtime_stderr="$WORK_ROOT/runtime-$capture_label.stderr"
+  local catalog_stderr="$WORK_ROOT/catalog-$capture_label.stderr"
+  local contract_stderr="$WORK_ROOT/catalog-contract-$capture_label.stderr"
+  local status=0
+  RUNTIME_FAILURE_PHASE="gateway-status"
+  run_qwen_openclaw gateway status --deep --require-rpc --json \
+    > "$gateway_report" 2> "$gateway_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
+  RUNTIME_FAILURE_PHASE="runtime-inspect"
+  status=0
+  run_qwen_openclaw plugins inspect "$PLUGIN_ID" --runtime --json \
+    > "$report" 2> "$runtime_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
+  RUNTIME_FAILURE_PHASE="runtime-validator"
+  status=0
+  node "$RUNTIME_VALIDATOR" "$report" "$PLUGIN_ID" "$expected" \
+    2>> "$runtime_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
+  RUNTIME_FAILURE_PHASE="tools-catalog"
+  status=0
   run_qwen_openclaw_gateway_call tools.catalog \
     --params "{\"agentId\":\"$AGENT_ID\",\"includePlugins\":true}" \
-    --timeout 20000 --json > "$catalog" || return 1
-  node - "$catalog" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" <<'NODE'
+    --timeout 20000 --json > "$catalog" 2> "$catalog_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
+  RUNTIME_FAILURE_PHASE="catalog-contract"
+  status=0
+  node - "$catalog" "$PLUGIN_ID" "$AGENT_ID" "$TOOL_ID" 2> "$contract_stderr" <<'NODE' \
+    || status=$?
 const fs = require('node:fs')
 const [reportPath, pluginId, agentId, toolId] = process.argv.slice(2)
 const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'))
@@ -626,6 +654,42 @@ if (group?.pluginId !== pluginId || group?.source !== 'plugin'
   process.exit(1)
 }
 NODE
+  if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
+  RUNTIME_FAILURE_PHASE=""
+  RUNTIME_FAILURE_STATUS=0
+}
+
+validate_runtime_after_restart() {
+  local expected="$1" label="$2" attempt=1
+  while [[ "$attempt" -le "$RUNTIME_READY_ATTEMPTS" ]]; do
+    if validate_runtime "$expected" \
+      "$WORK_ROOT/runtime-$label-attempt-$attempt.json" \
+      "$WORK_ROOT/catalog-$label-attempt-$attempt.json" \
+      "$label-attempt-$attempt"; then
+      if [[ "$attempt" -gt 1 ]]; then
+        printf 'Runtime readiness %s passed on attempt %s/%s.\n' \
+          "$label" "$attempt" "$RUNTIME_READY_ATTEMPTS" >&2
+      fi
+      return 0
+    fi
+    node - "$WORK_ROOT/runtime-readiness.ndjson" "$label" "$attempt" \
+      "$RUNTIME_FAILURE_PHASE" "$RUNTIME_FAILURE_STATUS" <<'NODE'
+const fs = require('node:fs')
+const [output, label, attempt, phase, status] = process.argv.slice(2)
+fs.appendFileSync(output, `${JSON.stringify({
+  label, attempt: Number(attempt), phase, exitCode: Number(status),
+  observedAt: Math.floor(Date.now() / 1000),
+})}\n`, { mode: 0o600 })
+NODE
+    printf 'Runtime readiness %s attempt %s/%s failed at %s (exit %s).\n' \
+      "$label" "$attempt" "$RUNTIME_READY_ATTEMPTS" \
+      "$RUNTIME_FAILURE_PHASE" "$RUNTIME_FAILURE_STATUS" >&2
+    if [[ "$attempt" -lt "$RUNTIME_READY_ATTEMPTS" ]]; then
+      sleep "$RUNTIME_READY_DELAY_SECONDS"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 write_tree_manifest() {
@@ -1018,8 +1082,11 @@ restore_backup() {
   validate_installed_version "$previous_version" || return 1
   validate_runtime_payload_matches "$candidate/previous-plugin" || return 1
   if [[ "$defer_gateway_restart" == 0 ]]; then
-    validate_runtime "$previous_version" "$WORK_ROOT/runtime-restored.json" \
-      "$WORK_ROOT/catalog-restored.json" || return 1
+    if ! validate_runtime_after_restart "$previous_version" restored; then
+      ROLLBACK_FAILURE_PHASE="rollback-$RUNTIME_FAILURE_PHASE"
+      ROLLBACK_FAILURE_STATUS="$RUNTIME_FAILURE_STATUS"
+      return 1
+    fi
   fi
   [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" \
     == "$(printf '%s' "$metadata" | awk -F '\t' '{print $3}')" ]] || return 1
@@ -1045,7 +1112,11 @@ const [evidenceRoot, workRoot, targetSha, backupPath, failurePhase, failureStatu
   rollbackPhase, rollbackStatus] = process.argv.slice(2)
 const limit = 64 * 1024
 const files = []
-for (const name of ['install-current.txt', 'restore-install.txt']) {
+const names = fs.readdirSync(workRoot).filter(name => (
+  ['install-current.txt', 'restore-install.txt', 'runtime-readiness.ndjson'].includes(name)
+  || /^(?:gateway-status|runtime|catalog|catalog-contract)-(?:current|restored)-attempt-[1-8]\.(?:json|stderr)$/u.test(name)
+)).sort()
+for (const name of names) {
   const source = path.join(workRoot, name)
   const sourceStat = fs.statSync(source, { throwIfNoEntry: false })
   if (!sourceStat?.isFile()) continue
@@ -1145,7 +1216,12 @@ validate_source
 installed_version="$(read_version "$INSTALLED_PLUGIN_DIR/package.json")"
 BEFORE_CONFIG_SHA="$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')"
 BEFORE_LISTENERS="$(listener_snapshot)"
-validate_runtime "$installed_version" "$WORK_ROOT/runtime-before.json" "$WORK_ROOT/catalog-before.json"
+validate_runtime "$installed_version" "$WORK_ROOT/runtime-before.json" "$WORK_ROOT/catalog-before.json" \
+  || {
+    printf 'Pre-install runtime validation failed at %s (exit %s).\n' \
+      "$RUNTIME_FAILURE_PHASE" "$RUNTIME_FAILURE_STATUS" >&2
+    exit 1
+  }
 BEFORE_MANIFEST_SHA256="$(target_manifest_sha256)" || {
   printf 'Could not capture the pre-install target manifest.\n' >&2
   exit 1
@@ -1370,8 +1446,11 @@ if [[ "$apply_failed" -eq 0 ]]; then
   validate_installed_version "$CURRENT_VERSION" || apply_failed=1
   validate_runtime_payload_matches "$PLUGIN_DIR" || apply_failed=1
   if [[ "$DEFER_GATEWAY_RESTART" == 0 ]]; then
-    validate_runtime "$CURRENT_VERSION" "$WORK_ROOT/runtime-current.json" \
-      "$WORK_ROOT/catalog-current.json" || apply_failed=1
+    if ! validate_runtime_after_restart "$CURRENT_VERSION" current; then
+      FAILURE_PHASE="runtime-$RUNTIME_FAILURE_PHASE"
+      FAILURE_STATUS="$RUNTIME_FAILURE_STATUS"
+      apply_failed=1
+    fi
   fi
   [[ "$(shasum -a 256 "$PROFILE_CONFIG" | awk '{print $1}')" == "$MIGRATED_CONFIG_SHA" ]] || apply_failed=1
   validate_config_migration "$BACKUP_DIR/openclaw.json" "$PROFILE_CONFIG" || apply_failed=1

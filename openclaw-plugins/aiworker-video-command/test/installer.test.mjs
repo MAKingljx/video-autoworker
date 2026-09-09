@@ -208,7 +208,19 @@ if (command[0] === 'plugins' && command[1] === 'install') {
       source: 'plugin', optional: true,
     }] }],
   }))
-} else if (command[0] === 'gateway' && ['status', 'restart'].includes(command[1])) {
+} else if (command[0] === 'gateway' && command[1] === 'status') {
+  const version = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version
+  if (version === process.env.AIWORKER_TEST_RUNTIME_FAIL_VERSION) {
+    const counterPath = process.env.AIWORKER_TEST_OPENCLAW_LOG + '.runtime-count'
+    const count = Number(fs.readFileSync(counterPath, { encoding: 'utf8', flag: 'a+' }) || 0) + 1
+    fs.writeFileSync(counterPath, String(count))
+    if (count <= Number(process.env.AIWORKER_TEST_RUNTIME_FAIL_COUNT || 0)) {
+      process.stderr.write('fixture runtime is not ready\\n')
+      process.exit(85)
+    }
+  }
+  console.log('{"ok":true}')
+} else if (command[0] === 'gateway' && command[1] === 'restart') {
   console.log('{"ok":true}')
 } else process.exit(82)
 `)
@@ -502,6 +514,68 @@ describe('current video-command plugin installer', () => {
     }
   }, 30_000)
 
+  it('waits through a bounded transient Gateway restart window', async () => {
+    const fixture = await createVideoInstallerFixture('entries')
+    try {
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.15'
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_COUNT = '2'
+      const result = await runFixtureInstaller(fixture, '--apply')
+      expect(result.stderr).toContain('Runtime readiness current attempt 1/8 failed at gateway-status (exit 85).')
+      expect(result.stderr).toContain('Runtime readiness current passed on attempt 3/8.')
+      expect(JSON.parse(await readFile(
+        resolve(fixture.installedPlugin, 'package.json'), 'utf8',
+      )).version).toBe('0.5.15')
+      const statusCalls = (await openclawCalls(fixture))
+        .filter(args => args.includes('gateway') && args.includes('status'))
+      expect(statusCalls).toHaveLength(4)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('retains exact runtime failure evidence after the restart window expires', async () => {
+    const fixture = await createVideoInstallerFixture('entries')
+    try {
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.15'
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_COUNT = '99'
+      const failure = await runFixtureInstaller(fixture, '--apply').then(
+        () => null,
+        error => error,
+      )
+      expect(failure).toBeInstanceOf(Error)
+      expect(failure.message).toContain(
+        'Current plugin install failed at runtime-gateway-status (exit 85); exact 0.5.14 plugin and config were restored.',
+      )
+      expect(failure.message).toContain(
+        'Runtime readiness current attempt 8/8 failed at gateway-status (exit 85).',
+      )
+      expect(failure.message).not.toContain('fixture runtime is not ready')
+      expect(JSON.parse(await readFile(
+        resolve(fixture.installedPlugin, 'package.json'), 'utf8',
+      )).version).toBe('0.5.14')
+      const evidenceNames = (await readdir(fixture.backupRoot))
+        .filter(name => name.startsWith('failed-attempt-'))
+      expect(evidenceNames).toHaveLength(1)
+      const evidenceRoot = resolve(fixture.backupRoot, evidenceNames[0])
+      const readiness = (await readFile(
+        resolve(evidenceRoot, 'runtime-readiness.ndjson'), 'utf8',
+      )).trim().split('\n').map(line => JSON.parse(line))
+      expect(readiness).toHaveLength(8)
+      expect(readiness.every(item => item.label === 'current'
+        && item.phase === 'gateway-status' && item.exitCode === 85)).toBe(true)
+      const evidence = await readJson(resolve(evidenceRoot, 'evidence.json'))
+      expect(evidence.failure).toEqual({ phase: 'runtime-gateway-status', exitCode: 85 })
+      expect(evidence.files.map(item => item.name)).toContain(
+        'gateway-status-current-attempt-8.stderr',
+      )
+      expect(await readFile(
+        resolve(evidenceRoot, 'gateway-status-current-attempt-8.stderr'), 'utf8',
+      )).toContain('fixture runtime is not ready')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
   it('retains bounded private evidence when the candidate install fails and rollback succeeds', async () => {
     const fixture = await createVideoInstallerFixture('entries')
     try {
@@ -535,11 +609,10 @@ describe('current video-command plugin installer', () => {
         targetSha,
         failure: { phase: 'plugin-install', exitCode: 83 },
         rollbackFailure: null,
-        files: [
-          { name: 'install-current.txt', truncated: false },
-          { name: 'restore-install.txt', truncated: false },
-        ],
       })
+      const evidenceFiles = new Map(evidence.files.map(item => [item.name, item]))
+      expect(evidenceFiles.get('install-current.txt')).toMatchObject({ truncated: false })
+      expect(evidenceFiles.get('restore-install.txt')).toMatchObject({ truncated: false })
       expect((await stat(resolve(evidenceRoot, 'evidence.json'))).mode & 0o777).toBe(0o600)
       expect(await readFile(resolve(evidenceRoot, 'install-current.txt'), 'utf8'))
         .toContain('fixture current install rejected after copy')
