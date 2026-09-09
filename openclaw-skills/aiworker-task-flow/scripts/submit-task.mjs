@@ -277,7 +277,9 @@ function resultTimestamp(value) {
 
 function progressTimestamp(value) {
   if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-    return new Date(value).toISOString()
+    const milliseconds = value < 1_000_000_000_000 ? value * 1_000 : value
+    const timestamp = new Date(milliseconds)
+    return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : null
   }
   return resultTimestamp(value)
 }

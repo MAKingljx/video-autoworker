@@ -79,7 +79,7 @@ test('status CLI asks the platform before a non-terminal durable record', async 
         maxAttempts: 2,
         output: null,
         error: 'vision: fetch failed',
-        updatedAt: 200,
+        updatedAt: 1788936272,
       }] }))
     }, baseUrl => queryStatus(root, taskId, baseUrl))
 
@@ -88,9 +88,35 @@ test('status CLI asks the platform before a non-terminal durable record', async 
     assert.equal(result.error, 'vision: fetch failed')
     assert.deepEqual(result.progress, {
       stage: 'failed',
-      updatedAt: '1970-01-01T00:00:00.200Z',
+      updatedAt: '2026-09-09T06:44:32.000Z',
     })
     assert.equal(Object.hasOwn(result, 'executionAvailability'), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('status CLI preserves numeric Unix millisecond timestamps', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aiworker-status-platform-milliseconds-'))
+  const taskId = 'ordinary-platform-task-milliseconds'
+  try {
+    const result = await withPlatform((_request, response) => {
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      response.end(JSON.stringify({ runs: [{
+        taskId,
+        status: 'running',
+        attemptCount: 1,
+        maxAttempts: 1,
+        output: null,
+        error: null,
+        updatedAt: 1788936272000,
+      }] }))
+    }, baseUrl => queryStatus(root, taskId, baseUrl))
+
+    assert.deepEqual(result.progress, {
+      stage: 'running',
+      updatedAt: '2026-09-09T06:44:32.000Z',
+    })
   } finally {
     await rm(root, { recursive: true, force: true })
   }
