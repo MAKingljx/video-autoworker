@@ -1170,7 +1170,7 @@ write_backup_tree_manifest "$1" "$3"
     },
     {
       name: 'ambiguous target agent',
-      expected: /target_agent_ambiguous/u,
+      expected: /agent entry ids must be unique/u,
       mutate: (config: InstallerProfile, workspace: string) => {
         config.agents.list.push({ id: 'dev', workspace })
       },
