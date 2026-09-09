@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -61,6 +61,21 @@ describe('current-component guardian resume baseline', () => {
     writeFileSync(join(f.inputs.videoBatchRoot, '.global-video-worker.lock'), 'successor control', { mode: 0o600 })
     expect(api.verifyGuardianResumeSuccessor(f.request, f.dependencies).ok).toBe(true)
     expect(() => api.createGuardianResumeBaseline(f.inputs, f.dependencies)).toThrow()
+  })
+  it('accepts a physical SQLite database above the JSON evidence limit and retains file safety checks', async () => {
+    const f = fixture(), api = await load()
+    const mission = new Database(f.inputs.missionControlDbPath)
+    mission.exec('CREATE TABLE size_fixture(value BLOB); INSERT INTO size_fixture VALUES(zeroblob(17825792));')
+    mission.close()
+    expect(statSync(f.inputs.missionControlDbPath).size).toBeGreaterThan(16 * 1024 * 1024)
+    api.createGuardianResumeBaseline(f.inputs, f.dependencies)
+    expect(api.verifyGuardianResumeSuccessor(f.request, f.dependencies).ok).toBe(true)
+
+    chmodSync(f.inputs.missionControlDbPath, 0o666)
+    expect(() => api.verifyGuardianResumeSuccessor(f.request, f.dependencies)).toThrow(/mode is unsafe/u)
+    chmodSync(f.inputs.missionControlDbPath, 0o600)
+    linkSync(f.inputs.missionControlDbPath, join(f.root, 'mission-hardlink.db'))
+    expect(() => api.verifyGuardianResumeSuccessor(f.request, f.dependencies)).toThrow(/not one regular file/u)
   })
   it.each(['sourcePath', 'idempotencyKey'])('rejects %s drift even when task identity and queued status are unchanged', async field => {
     const f = fixture(), api = await load()

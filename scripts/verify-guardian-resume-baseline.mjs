@@ -26,6 +26,7 @@ const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const RELEASE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u
 const MAX_JSON_BYTES = 16 * 1024 * 1024
+const MAX_DATABASE_BYTES = 64 * 1024 * 1024 * 1024
 
 function fail(message) { throw new Error(`guardian resume baseline failed: ${message}`) }
 function canonicalize(value) {
@@ -348,7 +349,7 @@ export function verifyGuardianResumeArtifact({ report, preparedReceipt }, depend
 }
 
 function physicalDatabase(pathname, label) {
-  const entry = safeEntry(pathname, label, 'file')
+  const entry = safeEntry(pathname, label, 'file', null, MAX_DATABASE_BYTES)
   if (realpathSync.native(pathname) !== pathname || entry.nlink !== 1n) fail(`${label} is not physical`)
   return { path: pathname, dev: entry.dev.toString(), ino: entry.ino.toString() }
 }
