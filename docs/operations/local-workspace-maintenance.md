@@ -17,6 +17,10 @@ AI-worker 根目录是同一 `PROJ-VIDEO-AUTOWORKER` 的飞书管理根；Video 
 
 目录叫 `tmp` 不代表内容可删除。中央 Git 目录可能被多个工作树共享，必须先核对 `git worktree list --porcelain`。完整项目还包含配置、测试和部署脚本，不能把整个仓库误命名为 src。移动主 Git 存储时，按 Git 官方 worktree repair 流程修复链接；读取工作脑时使用迁移后的准确项目根，保留源 `.PhoenixBrain`。
 
+共享Git可以使用工作区 `repositories/video-autoworker.git/` 这一bare存储，仅挂接当前产品和两份回滚，不保留中央旧源码工作副本。移动原common Git之前保全差异、数据、refs和可恢复历史；使用官方worktree repair，逐树核对gitdir、common-dir、HEAD、status及bare属性。全部通过后才能删除原旧源码，失败时移动原Git库回原位并repair恢复。不得通过重新clone后覆盖现有Git链接来迁移。
+
+独有旧方案保存差异和原base，离线数据独立保全；不为保存几个修改保留整棵长期源码。历史Git对象和独立上游实验Git可以保留为受控历史资产，不作为运行入口。清理普通截图/日志时明确它们属于可重建测试输出，不在验收记录中声称仍保留原图。
+
 ## 清理顺序
 
 1. 明确本机范围，核对当前源码、Git 状态、工作树关系、进程 cwd、打开文件、命令参数和启动配置引用。
