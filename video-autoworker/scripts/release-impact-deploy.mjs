@@ -21,6 +21,7 @@ import {
 } from './lib/git-source-layout.mjs'
 import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-manager.mjs'
 import { readRouterState } from './standalone-router.mjs'
+import { verifyInstalledReleasePayloads } from './verify-director-video-release-readiness.mjs'
 
 const modulePath = fileURLToPath(import.meta.url)
 const coordinatorRoot = resolve(dirname(modulePath), '..')
@@ -560,8 +561,23 @@ async function actualInstalledComponents(components, sourceCommit) {
   const workspace = process.env.AIWORKER_QWEN_WORKSPACE
     || join(homedir(), 'AI-worker-second-original-workspace')
   const result = structuredClone(components)
+  // Exact local payload validation is sufficient to reuse unchanged video and
+  // task-flow components; their installation preflight need not access GitHub.
+  let reusablePayloads = false
+  if (components.taskFlow.changed || components.videoCommand.changed) {
+    try {
+      verifyInstalledReleasePayloads({ repositoryRoot: productRoot,
+        profileStateRoot: stateRoot, workspaceRoot: workspace })
+      reusablePayloads = true
+    } catch { /* A changed or unknown payload still uses its own installer preflight. */ }
+  }
+  if (reusablePayloads) {
+    for (const name of ['taskFlow', 'videoCommand']) {
+      result[name] = { ...result[name], before: result[name].after, changed: false }
+    }
+  }
   const inspections = []
-  if (components.taskFlow.changed) {
+  if (components.taskFlow.changed && !reusablePayloads) {
     const output = await managed('/bin/bash', [join(coordinatorRoot,
       'scripts/install-aiworker-task-flow-skill.sh'), '--dry-run'])
     inspections.push(['taskFlow',
@@ -574,7 +590,7 @@ async function actualInstalledComponents(components, sourceCommit) {
     inspections.push(['directorBrain',
       !/Would change: plugin=0 skill=0 config=0\./u.test(output), output])
   }
-  if (components.videoCommand.changed) {
+  if (components.videoCommand.changed && !reusablePayloads) {
     const output = await managed('/bin/bash', [join(coordinatorRoot,
       'scripts/install-aiworker-video-command-plugin.sh'), '--dry-run', '--target-sha', resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')])
     inspections.push(['videoCommand',
