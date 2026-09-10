@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+PORT="${1:-18080}"
+curl -sS --max-time 360 "http://127.0.0.1:$PORT/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"default_model","messages":[{"role":"user","content":"1+1等于几？请只给最终答案。"}],"max_tokens":16,"temperature":0,"chat_template_kwargs":{"thinking":false}}'

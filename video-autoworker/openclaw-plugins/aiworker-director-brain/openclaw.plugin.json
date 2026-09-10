@@ -1,0 +1,37 @@
+{
+  "id": "aiworker-director-brain",
+  "name": "AI-worker Director Brain",
+  "version": "0.4.3",
+  "description": "Exposes one tool for reviewed work context, global techniques, extraction status, workflow guidance, and candidate proposals.",
+  "activation": {
+    "onStartup": true,
+    "onCapabilities": [
+      "hook",
+      "tool"
+    ]
+  },
+  "contracts": {
+    "tools": [
+      "aiworker_director_brain"
+    ]
+  },
+  "toolMetadata": {
+    "aiworker_director_brain": {
+      "optional": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "releaseReady": {
+        "type": "boolean"
+      },
+      "targetAgentId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    }
+  }
+}

@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Production
+build/
+dist/
+
+# Misc
+.DS_Store
+*.pem
+.env*.local
+
+# npm (root project uses pnpm; ops/n8n intentionally tracks its npm lockfile)
+/package-lock.json
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+.env
+.data/
+aegis/
+/need/
+
+# Playwright
+test-results/
+playwright-report/
+.tmp/
+.playwright-mcp/
+.playwright-cli/
+
+# Local runtime/export artifacts
+output/
+/report/
+src-tauri/target/
+*.log
+.runtime/
+.run/
+.PhoenixBrain
+*.pid
+*.bak-*
+
+# n8n runtime state is external and must never enter Git. Deployment assets,
+# workflow JSON, the lockfile, and the env template under ops/n8n stay tracked.
+ops/n8n/node_modules/
+ops/n8n/.env
+ops/n8n/.n8n/
+ops/n8n/data/
+ops/n8n/logs/
+ops/n8n/run/
+ops/n8n/credentials/
+ops/n8n/backups/
+
+# Local QA screenshots
+/e2e-debug-*.png
+/e2e-channels-*.png
+
+# Local OpenClaw canary evidence (private runtime reports; never publish)
+/.canary-results/
+
+# Claude Code context files (root CLAUDE.md is committed for AI agent discovery)
+**/CLAUDE.md
+!/CLAUDE.md

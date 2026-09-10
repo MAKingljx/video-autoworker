@@ -1,0 +1,5080 @@
+{
+  "rows": [
+    {
+      "系列": "Qwen3.6",
+      "模型名称": "Qwen3.6-27B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "51.75",
+      "权重文件数": "15",
+      "总参数": "27B",
+      "激活参数": "27B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.6-27B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.6-27B",
+      "最后更新": "2026-04-24T02:39:16.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.6",
+      "模型名称": "Qwen3.6-27B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "28.75",
+      "权重文件数": "66",
+      "总参数": "27B",
+      "激活参数": "27B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.6-27B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.6-27B-FP8",
+      "最后更新": "2026-04-24T02:39:18.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.6",
+      "模型名称": "Qwen3.6-35B-A3B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "66.97",
+      "权重文件数": "26",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B",
+      "最后更新": "2026-04-24T02:53:42.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3.6",
+      "模型名称": "Qwen3.6-35B-A3B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "34.89",
+      "权重文件数": "42",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.6-35B-A3B-FP8",
+      "最后更新": "2026-04-24T02:39:23.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-0.8B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.63",
+      "权重文件数": "1",
+      "总参数": "0.8B",
+      "激活参数": "0.8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-0.8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-0.8B",
+      "最后更新": "2026-03-02T11:26:58.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-0.8B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "1.63",
+      "权重文件数": "1",
+      "总参数": "0.8B",
+      "激活参数": "0.8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-0.8B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-0.8B-Base",
+      "最后更新": "2026-04-23T11:14:09.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-122B-A10B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "232.99",
+      "权重文件数": "39",
+      "总参数": "122B",
+      "激活参数": "10B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-122B-A10B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-122B-A10B",
+      "最后更新": "2026-04-24T03:55:23.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-122B-A10B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "118.43",
+      "权重文件数": "39",
+      "总参数": "122B",
+      "激活参数": "10B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-122B-A10B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-122B-A10B-FP8",
+      "最后更新": "2026-04-24T05:56:01.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-122B-A10B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "73.45",
+      "权重文件数": "39",
+      "总参数": "122B",
+      "激活参数": "10B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-122B-A10B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-122B-A10B-GPTQ-Int4",
+      "最后更新": "2026-04-24T05:56:30.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；量化推理版"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-27B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "51.75",
+      "权重文件数": "11",
+      "总参数": "27B",
+      "激活参数": "27B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-27B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-27B",
+      "最后更新": "2026-04-24T02:54:49.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-27B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "28.75",
+      "权重文件数": "11",
+      "总参数": "27B",
+      "激活参数": "27B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-27B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-27B-FP8",
+      "最后更新": "2026-04-24T02:38:46.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-27B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "28.16",
+      "权重文件数": "11",
+      "总参数": "27B",
+      "激活参数": "27B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-27B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-27B-GPTQ-Int4",
+      "最后更新": "2026-04-24T02:38:57.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-2B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "4.24",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-2B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-2B",
+      "最后更新": "2026-03-02T11:26:29.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-2B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "4.24",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-2B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-2B-Base",
+      "最后更新": "2026-04-23T11:13:46.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-35B-A3B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "66.97",
+      "权重文件数": "14",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-35B-A3B",
+      "最后更新": "2026-04-24T02:38:38.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-35B-A3B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "66.97",
+      "权重文件数": "14",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-35B-A3B-Base",
+      "最后更新": "2026-04-23T11:21:45.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-35B-A3B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "34.89",
+      "权重文件数": "14",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-35B-A3B-FP8",
+      "最后更新": "2026-04-24T02:38:49.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-35B-A3B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "22.74",
+      "权重文件数": "14",
+      "总参数": "35B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
+      "最后更新": "2026-04-24T02:38:59.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；量化推理版"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-397B-A17B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "751.39",
+      "权重文件数": "94",
+      "总参数": "397B",
+      "激活参数": "17B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "边缘/不建议生产",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-397B-A17B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-397B-A17B",
+      "最后更新": "2026-04-24T05:51:23.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；超大权重，优先集群/多卡"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-397B-A17B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "378.26",
+      "权重文件数": "94",
+      "总参数": "397B",
+      "激活参数": "17B",
+      "Mac Studio 512GB 可行性": "边缘/不建议生产",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-397B-A17B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-397B-A17B-FP8",
+      "最后更新": "2026-04-24T05:50:39.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-397B-A17B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "219.52",
+      "权重文件数": "94",
+      "总参数": "397B",
+      "激活参数": "17B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-397B-A17B-GPTQ-Int4",
+      "最后更新": "2026-04-24T05:52:53.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；量化推理版"
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-4B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "8.68",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-4B",
+      "最后更新": "2026-03-02T00:52:52.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-4B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "8.68",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-4B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-4B-Base",
+      "最后更新": "2026-04-23T11:13:30.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-9B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "17.98",
+      "权重文件数": "4",
+      "总参数": "9B",
+      "激活参数": "9B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-9B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-9B",
+      "最后更新": "2026-03-02T00:51:43.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3.5",
+      "模型名称": "Qwen3.5-9B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "17.98",
+      "权重文件数": "4",
+      "总参数": "9B",
+      "激活参数": "9B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3.5-9B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3.5-9B-Base",
+      "最后更新": "2026-04-23T12:04:39.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.40",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B",
+      "最后更新": "2025-07-26T03:46:27.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "1.11",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-Base",
+      "最后更新": "2025-07-26T03:45:42.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "0.99",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-FP8",
+      "最后更新": "2025-07-26T03:45:47.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "0.60",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-GGUF",
+      "最后更新": "2025-05-09T07:15:43.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-GPTQ-Int8",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int8",
+      "下载大小(GiB)": "0.71",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-GPTQ-Int8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-GPTQ-Int8",
+      "最后更新": "2025-05-21T06:07:42.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "0.30",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-MLX-4bit",
+      "最后更新": "2025-07-29T12:21:40.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "0.43",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-MLX-6bit",
+      "最后更新": "2025-07-07T08:58:08.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "0.57",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-MLX-8bit",
+      "最后更新": "2025-07-07T08:57:27.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-0.6B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "1.11",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-0.6B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-0.6B-MLX-bf16",
+      "最后更新": "2025-07-07T08:57:02.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "3.78",
+      "权重文件数": "2",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B",
+      "最后更新": "2025-07-26T03:46:32.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "3.20",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-Base",
+      "最后更新": "2025-07-26T03:50:48.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "2.47",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-FP8",
+      "最后更新": "2025-07-26T03:45:56.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "1.71",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-GGUF",
+      "最后更新": "2025-05-09T07:16:01.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-GPTQ-Int8",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int8",
+      "下载大小(GiB)": "1.93",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-GPTQ-Int8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-GPTQ-Int8",
+      "最后更新": "2025-05-21T06:07:04.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "0.85",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-MLX-4bit",
+      "最后更新": "2025-07-07T08:56:11.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "1.25",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-MLX-6bit",
+      "最后更新": "2025-07-07T08:55:49.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "1.65",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-MLX-8bit",
+      "最后更新": "2025-07-07T08:55:23.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-1.7B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "3.20",
+      "权重文件数": "1",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-1.7B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-1.7B-MLX-bf16",
+      "最后更新": "2025-07-07T08:54:54.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "27.51",
+      "权重文件数": "8",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B",
+      "最后更新": "2025-07-26T03:49:23.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-AWQ",
+      "类型": "文本/对话",
+      "权重格式": "AWQ",
+      "下载大小(GiB)": "9.29",
+      "权重文件数": "2",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-AWQ",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-AWQ",
+      "最后更新": "2025-05-21T06:21:57.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "27.51",
+      "权重文件数": "8",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-Base",
+      "最后更新": "2025-07-26T03:45:33.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "15.21",
+      "权重文件数": "4",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-FP8",
+      "最后更新": "2025-07-26T03:46:09.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "53.64",
+      "权重文件数": "5",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-GGUF",
+      "最后更新": "2025-05-09T07:16:19.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "7.31",
+      "权重文件数": "2",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-MLX-4bit",
+      "最后更新": "2025-07-07T08:50:10.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "10.75",
+      "权重文件数": "3",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-MLX-6bit",
+      "最后更新": "2025-07-07T08:51:00.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "14.18",
+      "权重文件数": "3",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-MLX-8bit",
+      "最后更新": "2025-07-07T08:50:35.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-14B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "27.51",
+      "权重文件数": "6",
+      "总参数": "14B",
+      "激活参数": "14B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-14B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-14B-MLX-bf16",
+      "最后更新": "2025-07-07T09:02:52.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "437.90",
+      "权重文件数": "118",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B",
+      "最后更新": "2025-07-26T03:45:13.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "222.63",
+      "权重文件数": "48",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-FP8",
+      "最后更新": "2025-07-26T03:46:22.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "851.05",
+      "权重文件数": "33",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-GGUF",
+      "最后更新": "2025-05-21T06:27:12.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化；超大权重，优先集群/多卡"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "116.00",
+      "权重文件数": "32",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-GPTQ-Int4",
+      "最后更新": "2025-05-21T06:09:15.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-Instruct-2507",
+      "类型": "文本/对话",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "437.90",
+      "权重文件数": "118",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "最后更新": "2025-09-17T06:52:55.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-Instruct-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "220.19",
+      "权重文件数": "24",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+      "最后更新": "2025-09-17T06:53:28.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "116.32",
+      "权重文件数": "24",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-MLX-4bit",
+      "最后更新": "2025-07-07T08:17:58.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "171.05",
+      "权重文件数": "36",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-MLX-6bit",
+      "最后更新": "2025-07-07T08:18:52.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "225.79",
+      "权重文件数": "48",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-MLX-8bit",
+      "最后更新": "2025-07-07T08:17:24.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "437.90",
+      "权重文件数": "95",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "边缘可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-MLX-bf16",
+      "最后更新": "2025-07-07T08:21:01.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-Thinking-2507",
+      "类型": "文本/对话",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "437.90",
+      "权重文件数": "118",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Thinking-2507",
+      "最后更新": "2025-08-17T08:20:17.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-235B-A22B-Thinking-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "220.19",
+      "权重文件数": "24",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-235B-A22B-Thinking-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-235B-A22B-Thinking-2507-FP8",
+      "最后更新": "2025-07-30T15:48:19.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B",
+      "最后更新": "2025-07-26T03:45:17.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Base",
+      "最后更新": "2025-07-26T03:45:29.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "30.22",
+      "权重文件数": "7",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-FP8",
+      "最后更新": "2025-07-26T03:46:17.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "110.77",
+      "权重文件数": "5",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-GGUF",
+      "最后更新": "2025-05-21T06:25:14.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-GPTQ-Int4",
+      "类型": "文本/对话",
+      "权重格式": "GPTQ-Int4",
+      "下载大小(GiB)": "15.77",
+      "权重文件数": "1",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-GPTQ-Int4",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-GPTQ-Int4",
+      "最后更新": "2025-05-21T06:08:09.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-Instruct-2507",
+      "类型": "文本/对话",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "最后更新": "2025-09-17T06:56:43.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-Instruct-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "29.03",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Instruct-2507-FP8",
+      "最后更新": "2025-09-17T06:56:32.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "15.11",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-MLX-4bit",
+      "最后更新": "2025-07-07T08:22:14.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "22.22",
+      "权重文件数": "5",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-MLX-6bit",
+      "最后更新": "2025-07-07T08:23:00.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "29.32",
+      "权重文件数": "6",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-MLX-8bit",
+      "最后更新": "2025-07-07T08:38:00.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "13",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-MLX-bf16",
+      "最后更新": "2025-07-07T08:39:37.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-Thinking-2507",
+      "类型": "文本/对话",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Thinking-2507",
+      "最后更新": "2025-08-17T08:20:51.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-30B-A3B-Thinking-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "29.03",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-30B-A3B-Thinking-2507-FP8",
+      "最后更新": "2025-07-30T16:02:13.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "61.02",
+      "权重文件数": "17",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B",
+      "最后更新": "2025-07-26T03:45:22.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-AWQ",
+      "类型": "文本/对话",
+      "权重格式": "AWQ",
+      "下载大小(GiB)": "18.00",
+      "权重文件数": "4",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-AWQ",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-AWQ",
+      "最后更新": "2025-05-21T06:17:51.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "31.97",
+      "权重文件数": "7",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-FP8",
+      "最后更新": "2025-07-26T03:46:13.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "118.57",
+      "权重文件数": "5",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-GGUF",
+      "最后更新": "2025-05-09T07:16:46.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "16.21",
+      "权重文件数": "4",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-MLX-4bit",
+      "最后更新": "2025-07-07T08:46:53.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "23.84",
+      "权重文件数": "5",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-MLX-6bit",
+      "最后更新": "2025-07-07T08:48:43.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "31.47",
+      "权重文件数": "7",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-MLX-8bit",
+      "最后更新": "2025-07-07T08:49:16.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-32B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "61.02",
+      "权重文件数": "13",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-32B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-32B-MLX-bf16",
+      "最后更新": "2025-07-07T08:49:38.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B",
+      "最后更新": "2025-07-26T03:46:39.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-AWQ",
+      "类型": "文本/对话",
+      "权重格式": "AWQ",
+      "下载大小(GiB)": "2.48",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-AWQ",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-AWQ",
+      "最后更新": "2025-05-21T06:13:28.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-Base",
+      "最后更新": "2025-07-26T03:45:37.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "4.83",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-FP8",
+      "最后更新": "2025-07-26T03:46:01.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "14.71",
+      "权重文件数": "5",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-GGUF",
+      "最后更新": "2025-05-21T06:32:23.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-Instruct-2507",
+      "类型": "文本/对话",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-Instruct-2507",
+      "最后更新": "2025-09-17T06:56:53.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-Instruct-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "4.83",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-Instruct-2507-FP8",
+      "最后更新": "2025-09-17T06:57:02.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "1.99",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-MLX-4bit",
+      "最后更新": "2025-08-29T08:19:39.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "2.93",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-MLX-6bit",
+      "最后更新": "2025-07-07T09:00:20.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "3.86",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-MLX-8bit",
+      "最后更新": "2025-07-07T08:59:45.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-MLX-bf16",
+      "最后更新": "2025-07-07T08:59:17.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-SafeRL",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-SafeRL",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-SafeRL",
+      "最后更新": "2025-10-17T02:33:25.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-Thinking-2507",
+      "类型": "文本/对话",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-Thinking-2507",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-Thinking-2507",
+      "最后更新": "2025-08-06T11:08:25.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-4B-Thinking-2507-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "4.83",
+      "权重文件数": "1",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-4B-Thinking-2507-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-4B-Thinking-2507-FP8",
+      "最后更新": "2025-08-06T11:07:01.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "15.26",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B",
+      "最后更新": "2025-07-26T03:49:13.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-AWQ",
+      "类型": "文本/对话",
+      "权重格式": "AWQ",
+      "下载大小(GiB)": "5.68",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-AWQ",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-AWQ",
+      "最后更新": "2025-05-21T06:09:42.000Z",
+      "备注": "量化推理版"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-Base",
+      "类型": "文本/对话",
+      "权重格式": "Base",
+      "下载大小(GiB)": "15.26",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-Base",
+      "最后更新": "2025-05-21T05:59:01.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "8.79",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-FP8",
+      "最后更新": "2025-07-26T03:46:05.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "29.83",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-GGUF",
+      "最后更新": "2025-05-21T06:31:50.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-MLX-4bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-4bit",
+      "下载大小(GiB)": "4.05",
+      "权重文件数": "1",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-MLX-4bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-MLX-4bit",
+      "最后更新": "2025-07-07T08:54:28.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-MLX-6bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-6bit",
+      "下载大小(GiB)": "5.96",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-MLX-6bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-MLX-6bit",
+      "最后更新": "2025-07-07T08:53:57.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-MLX-8bit",
+      "类型": "文本/对话",
+      "权重格式": "MLX-8bit",
+      "下载大小(GiB)": "7.87",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-MLX-8bit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-MLX-8bit",
+      "最后更新": "2025-07-07T08:53:15.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3-8B-MLX-bf16",
+      "类型": "文本/对话",
+      "权重格式": "MLX-bf16",
+      "下载大小(GiB)": "15.26",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "推荐/可行",
+      "Mac Studio 1TB 可行性": "推荐/可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-8B-MLX-bf16",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-8B-MLX-bf16",
+      "最后更新": "2025-07-07T08:52:52.000Z",
+      "备注": "更适合 Apple Silicon / MLX"
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Gen-0.6B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.40",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Gen-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Gen-0.6B",
+      "最后更新": "2025-11-07T08:10:53.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Gen-4B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "8.22",
+      "权重文件数": "3",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Gen-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Gen-4B",
+      "最后更新": "2025-11-07T08:10:44.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Gen-8B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "15.26",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Gen-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Gen-8B",
+      "最后更新": "2025-11-07T08:11:03.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Stream-0.6B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.11",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Stream-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Stream-0.6B",
+      "最后更新": "2025-11-07T07:36:26.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Stream-4B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "7.50",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Stream-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Stream-4B",
+      "最后更新": "2025-11-07T07:34:37.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3",
+      "模型名称": "Qwen3Guard-Stream-8B",
+      "类型": "文本/对话",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "14.11",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3Guard-Stream-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3Guard-Stream-8B",
+      "最后更新": "2025-11-07T07:35:13.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Instruct",
+      "类型": "文本/对话",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "151.49",
+      "权重文件数": "41",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct",
+      "最后更新": "2025-09-17T06:57:40.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Instruct-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "76.42",
+      "权重文件数": "8",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+      "最后更新": "2025-09-22T05:38:44.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Instruct-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "437.64",
+      "权重文件数": "9",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct-GGUF",
+      "最后更新": "2025-12-03T08:26:07.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Thinking",
+      "类型": "文本/对话",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "151.49",
+      "权重文件数": "41",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Thinking",
+      "最后更新": "2025-09-15T09:12:48.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Thinking-FP8",
+      "类型": "文本/对话",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "76.42",
+      "权重文件数": "8",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Thinking-FP8",
+      "最后更新": "2025-09-22T05:39:57.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-Next",
+      "模型名称": "Qwen3-Next-80B-A3B-Thinking-GGUF",
+      "类型": "文本/对话",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "437.64",
+      "权重文件数": "9",
+      "总参数": "80B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Thinking-GGUF",
+      "最后更新": "2025-12-03T08:24:52.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-30B-A3B-Instruct",
+      "类型": "代码",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "56.87",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "最后更新": "2025-12-03T08:05:17.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-30B-A3B-Instruct-FP8",
+      "类型": "代码",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "29.03",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8",
+      "最后更新": "2025-12-03T08:20:23.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-480B-A35B-Instruct",
+      "类型": "代码",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "894.36",
+      "权重文件数": "241",
+      "总参数": "480B",
+      "激活参数": "35B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "不建议",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "最后更新": "2025-08-21T10:18:07.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；超大权重，优先集群/多卡"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "类型": "代码",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "449.04",
+      "权重文件数": "49",
+      "总参数": "480B",
+      "激活参数": "35B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+      "最后更新": "2025-08-21T10:40:35.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-Next",
+      "类型": "代码",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "148.41",
+      "权重文件数": "40",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-Next",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-Next",
+      "最后更新": "2026-02-03T16:16:38.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-Next-Base",
+      "类型": "代码",
+      "权重格式": "Base",
+      "下载大小(GiB)": "148.41",
+      "权重文件数": "40",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-Next-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-Next-Base",
+      "最后更新": "2026-02-03T14:14:04.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-Next-FP8",
+      "类型": "代码",
+      "权重格式": "FP8",
+      "下载大小(GiB)": "74.86",
+      "权重文件数": "40",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-Next-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-Next-FP8",
+      "最后更新": "2026-02-03T14:13:28.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-Coder",
+      "模型名称": "Qwen3-Coder-Next-GGUF",
+      "类型": "代码",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "437.64",
+      "权重文件数": "24",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Coder-Next-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Coder-Next-GGUF",
+      "最后更新": "2026-02-04T04:26:16.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "438.97",
+      "权重文件数": "96",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "最后更新": "2025-11-26T13:18:18.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "221.28",
+      "权重文件数": "24",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+      "最后更新": "2025-11-26T13:18:20.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "804.94",
+      "权重文件数": "21",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct-GGUF",
+      "最后更新": "2025-11-01T03:17:04.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化；超大权重，优先集群/多卡"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "438.97",
+      "权重文件数": "96",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "不建议",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Thinking",
+      "最后更新": "2025-11-26T13:18:17.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "221.28",
+      "权重文件数": "24",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:19.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-235B-A22B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "804.94",
+      "权重文件数": "21",
+      "总参数": "235B",
+      "激活参数": "22B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:18:19.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化；超大权重，优先集群/多卡"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "3.96",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct",
+      "最后更新": "2025-10-23T11:30:44.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "3.23",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct-FP8",
+      "最后更新": "2025-10-20T19:26:45.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "7.13",
+      "权重文件数": "5",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Instruct-GGUF",
+      "最后更新": "2025-11-01T03:21:20.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "3.96",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Thinking",
+      "最后更新": "2025-10-20T19:15:08.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "3.23",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:22.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-2B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "7.13",
+      "权重文件数": "5",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-2B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-2B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:22:14.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "57.87",
+      "权重文件数": "13",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct",
+      "最后更新": "2025-11-26T13:18:04.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "30.04",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+      "最后更新": "2025-11-26T13:18:10.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "106.11",
+      "权重文件数": "6",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF",
+      "最后更新": "2025-11-01T03:19:27.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "57.87",
+      "权重文件数": "13",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Thinking",
+      "最后更新": "2025-11-26T13:18:00.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "30.04",
+      "权重文件数": "4",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:07.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-30B-A3B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "106.11",
+      "权重文件数": "6",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-30B-A3B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:19:00.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小；仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "62.13",
+      "权重文件数": "14",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct",
+      "最后更新": "2025-10-21T18:26:34.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "33.08",
+      "权重文件数": "7",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct-FP8",
+      "最后更新": "2025-10-22T03:06:29.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "113.70",
+      "权重文件数": "6",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct-GGUF",
+      "最后更新": "2025-11-01T03:20:18.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "62.13",
+      "权重文件数": "14",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Thinking",
+      "最后更新": "2025-10-21T18:23:29.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "33.08",
+      "权重文件数": "7",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:23.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-32B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "113.70",
+      "权重文件数": "6",
+      "总参数": "32B",
+      "激活参数": "32B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-32B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-32B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:24:46.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "8.27",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct",
+      "最后更新": "2025-10-15T16:15:55.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "5.61",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-FP8",
+      "最后更新": "2025-10-15T16:08:37.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "15.01",
+      "权重文件数": "5",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Instruct-GGUF",
+      "最后更新": "2025-11-01T02:28:10.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "8.27",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Thinking",
+      "最后更新": "2025-10-15T16:14:47.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "5.61",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:21.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-4B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "15.01",
+      "权重文件数": "5",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-4B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-4B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:23:09.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Instruct",
+      "类型": "视觉语言",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "16.33",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct",
+      "最后更新": "2025-10-15T16:16:59.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Instruct-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Instruct",
+      "下载大小(GiB)": "9.86",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct-FP8",
+      "最后更新": "2025-11-26T13:18:16.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Instruct-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Instruct",
+      "下载大小(GiB)": "29.84",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct-GGUF",
+      "最后更新": "2025-11-01T03:21:00.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Thinking",
+      "类型": "视觉语言",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "16.33",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Thinking",
+      "最后更新": "2025-11-26T13:18:14.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Thinking-FP8",
+      "类型": "视觉语言",
+      "权重格式": "FP8 / Thinking",
+      "下载大小(GiB)": "9.86",
+      "权重文件数": "2",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking-FP8",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Thinking-FP8",
+      "最后更新": "2025-11-26T13:18:15.000Z",
+      "备注": "低显存/高吞吐部署优先"
+    },
+    {
+      "系列": "Qwen3-VL",
+      "模型名称": "Qwen3-VL-8B-Thinking-GGUF",
+      "类型": "视觉语言",
+      "权重格式": "GGUF / Thinking",
+      "下载大小(GiB)": "29.84",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-8B-Thinking-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Thinking-GGUF",
+      "最后更新": "2025-11-01T03:23:55.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Omni",
+      "模型名称": "Qwen3-Omni-30B-A3B-Captioner",
+      "类型": "全模态",
+      "权重格式": "Captioner",
+      "下载大小(GiB)": "59.08",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Captioner",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Captioner",
+      "最后更新": "2025-09-22T13:46:56.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Omni",
+      "模型名称": "Qwen3-Omni-30B-A3B-Instruct",
+      "类型": "全模态",
+      "权重格式": "Instruct",
+      "下载大小(GiB)": "65.68",
+      "权重文件数": "15",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Instruct",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Instruct",
+      "最后更新": "2025-09-22T14:17:52.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Omni",
+      "模型名称": "Qwen3-Omni-30B-A3B-Thinking",
+      "类型": "全模态",
+      "权重格式": "Thinking",
+      "下载大小(GiB)": "59.08",
+      "权重文件数": "16",
+      "总参数": "30B",
+      "激活参数": "3B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Omni-30B-A3B-Thinking",
+      "最后更新": "2025-09-22T14:17:44.000Z",
+      "备注": "MoE，总参数大但每 token 激活较小"
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-0.6B",
+      "类型": "向量/检索",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.11",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B",
+      "最后更新": "2026-04-20T02:45:58.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-0.6B-GGUF",
+      "类型": "向量/检索",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "1.71",
+      "权重文件数": "2",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF",
+      "最后更新": "2025-07-14T23:19:36.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-4B",
+      "类型": "向量/检索",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-4B",
+      "最后更新": "2025-06-20T09:30:56.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-4B-GGUF",
+      "类型": "向量/检索",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "22.21",
+      "权重文件数": "6",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-4B-GGUF",
+      "最后更新": "2025-08-03T14:37:22.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-8B",
+      "类型": "向量/检索",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "14.10",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-8B",
+      "最后更新": "2025-07-07T09:02:21.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Embedding-8B-GGUF",
+      "类型": "向量/检索",
+      "权重格式": "GGUF",
+      "下载大小(GiB)": "41.72",
+      "权重文件数": "6",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "按所选GGUF量化文件评估",
+      "Mac Studio 1TB 可行性": "按所选GGUF量化文件评估",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Embedding-8B-GGUF",
+      "最后更新": "2025-07-15T02:30:41.000Z",
+      "备注": "仓库常含多个量化文件，实际只需下载目标量化"
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Reranker-0.6B",
+      "类型": "重排",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.11",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B",
+      "最后更新": "2026-04-16T08:55:59.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Reranker-4B",
+      "类型": "重排",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "7.49",
+      "权重文件数": "2",
+      "总参数": "4B",
+      "激活参数": "4B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Reranker-4B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Reranker-4B",
+      "最后更新": "2026-04-16T08:56:07.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-Reranker-8B",
+      "类型": "重排",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "15.25",
+      "权重文件数": "5",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-Reranker-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-Reranker-8B",
+      "最后更新": "2026-04-16T08:56:16.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-VL-Embedding-2B",
+      "类型": "向量/检索",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "3.96",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-Embedding-2B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B",
+      "最后更新": "2026-04-16T08:54:25.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-VL-Embedding-8B",
+      "类型": "向量/检索",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "15.17",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-Embedding-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B",
+      "最后更新": "2026-04-16T08:55:18.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-VL-Reranker-2B",
+      "类型": "重排",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "3.96",
+      "权重文件数": "1",
+      "总参数": "2B",
+      "激活参数": "2B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-Reranker-2B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B",
+      "最后更新": "2026-04-16T08:55:33.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-Embedding/Reranker",
+      "模型名称": "Qwen3-VL-Reranker-8B",
+      "类型": "重排",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "16.33",
+      "权重文件数": "4",
+      "总参数": "8B",
+      "激活参数": "8B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-VL-Reranker-8B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B",
+      "最后更新": "2026-04-16T08:55:43.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-ASR-0.6B",
+      "类型": "语音识别/对齐",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.75",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-ASR-0.6B",
+      "最后更新": "2026-01-30T03:00:21.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-ASR-1.7B",
+      "类型": "语音识别/对齐",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "4.38",
+      "权重文件数": "2",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-ASR-1.7B",
+      "最后更新": "2026-01-30T03:00:12.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-ForcedAligner-0.6B",
+      "类型": "语音识别/对齐",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "1.71",
+      "权重文件数": "1",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-ForcedAligner-0.6B",
+      "最后更新": "2026-01-30T03:00:55.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-12Hz-0.6B-Base",
+      "类型": "语音合成",
+      "权重格式": "Base",
+      "下载大小(GiB)": "2.34",
+      "权重文件数": "2",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      "最后更新": "2026-01-29T08:01:19.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "类型": "语音合成",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "2.32",
+      "权重文件数": "2",
+      "总参数": "0.6B",
+      "激活参数": "0.6B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "最后更新": "2026-01-29T08:01:51.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-12Hz-1.7B-Base",
+      "类型": "语音合成",
+      "权重格式": "Base",
+      "下载大小(GiB)": "4.23",
+      "权重文件数": "2",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "最后更新": "2026-01-23T05:25:33.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "类型": "语音合成",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "4.21",
+      "权重文件数": "2",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      "最后更新": "2026-01-29T08:00:54.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "类型": "语音合成",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "4.21",
+      "权重文件数": "2",
+      "总参数": "1.7B",
+      "激活参数": "1.7B",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+      "最后更新": "2026-01-29T08:04:19.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen3-ASR/TTS",
+      "模型名称": "Qwen3-TTS-Tokenizer-12Hz",
+      "类型": "语音合成",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "0.64",
+      "权重文件数": "1",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen3-TTS-Tokenizer-12Hz",
+      "最后更新": "2026-01-29T08:01:28.000Z",
+      "备注": ""
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "14",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image",
+      "最后更新": "2025-08-18T02:42:19.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image-2512",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "14",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image-2512",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image-2512",
+      "最后更新": "2025-12-31T09:47:56.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image-Edit",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "14",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image-Edit",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image-Edit",
+      "最后更新": "2025-08-25T04:41:11.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image-Edit-2509",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "10",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image-Edit-2509",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image-Edit-2509",
+      "最后更新": "2025-09-22T13:37:12.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image-Edit-2511",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "10",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image-Edit-2511",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image-Edit-2511",
+      "最后更新": "2025-12-23T13:13:52.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    },
+    {
+      "系列": "Qwen-Image",
+      "模型名称": "Qwen-Image-Layered",
+      "类型": "图像生成/编辑",
+      "权重格式": "官方默认权重",
+      "下载大小(GiB)": "53.74",
+      "权重文件数": "10",
+      "总参数": "未标注",
+      "激活参数": "未标注",
+      "Mac Studio 512GB 可行性": "可行",
+      "Mac Studio 1TB 可行性": "可行",
+      "HF下载地址": "https://huggingface.co/Qwen/Qwen-Image-Layered",
+      "ModelScope下载地址": "https://modelscope.cn/models/Qwen/Qwen-Image-Layered",
+      "最后更新": "2025-12-19T09:11:18.000Z",
+      "备注": "非文本 token 服务主力，按图像任务评估"
+    }
+  ],
+  "raw_details": {
+    "Qwen3.6-27B": {
+      "sha": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+      "lastModified": "2026-04-24T02:39:16.000Z",
+      "usedStorage": 55575814382,
+      "safetensors": {
+        "parameters": {
+          "BF16": 27781427952
+        },
+        "total": 27781427952
+      }
+    },
+    "Qwen3.6-27B-FP8": {
+      "sha": "e89b16ebf1988b3d6befa7de50abc2d76f26eb09",
+      "lastModified": "2026-04-24T02:39:18.000Z",
+      "usedStorage": 30879674910,
+      "safetensors": {
+        "parameters": {
+          "BF16": 3083727792,
+          "F8_E4M3": 24699207680
+        },
+        "total": 27782935472
+      }
+    },
+    "Qwen3.6-35B-A3B": {
+      "sha": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+      "lastModified": "2026-04-24T02:53:42.000Z",
+      "usedStorage": 71921347477,
+      "safetensors": {
+        "parameters": {
+          "BF16": 35951822704
+        },
+        "total": 35951822704
+      }
+    },
+    "Qwen3.6-35B-A3B-FP8": {
+      "sha": "95a723d08a9490559dae23d0cff1d9466213d989",
+      "lastModified": "2026-04-24T02:39:23.000Z",
+      "usedStorage": 37476648812,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1500863920,
+          "F8_E4M3": 34453061632
+        },
+        "total": 35953925552
+      }
+    },
+    "Qwen3.5-0.8B": {
+      "sha": "2fc06364715b967f1860aea9cf38778875588b17",
+      "lastModified": "2026-03-02T11:26:58.000Z",
+      "usedStorage": 1759750582,
+      "safetensors": {
+        "parameters": {
+          "F32": 2592,
+          "BF16": 873436192
+        },
+        "total": 873438784
+      }
+    },
+    "Qwen3.5-0.8B-Base": {
+      "sha": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+      "lastModified": "2026-04-23T11:14:09.000Z",
+      "usedStorage": 1759749796,
+      "safetensors": {
+        "parameters": {
+          "F32": 2592,
+          "BF16": 873436192
+        },
+        "total": 873438784
+      }
+    },
+    "Qwen3.5-122B-A10B": {
+      "sha": "dc4d348443bc740c68e2d77492492c11606384d5",
+      "lastModified": "2026-04-24T03:55:23.000Z",
+      "usedStorage": 250186058846,
+      "safetensors": {
+        "parameters": {
+          "BF16": 125086490096,
+          "F32": 6912
+        },
+        "total": 125086497008
+      }
+    },
+    "Qwen3.5-122B-A10B-FP8": {
+      "sha": "a099dee70ccfcd8d5dda56aaa0b60cb8ecadabc9",
+      "lastModified": "2026-04-24T05:56:01.000Z",
+      "usedStorage": 127175819814,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2058286064,
+          "F8_E4M3": 123035713536,
+          "F32": 6912
+        },
+        "total": 125094006512
+      }
+    },
+    "Qwen3.5-122B-A10B-GPTQ-Int4": {
+      "sha": "30cd92cba9707a9aba09d1e490ed4b66b78e9606",
+      "lastModified": "2026-04-24T05:56:30.000Z",
+      "usedStorage": 78895278969,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9122373104,
+          "F32": 6912,
+          "I32": 115964116992
+        },
+        "total": 125086497008
+      }
+    },
+    "Qwen3.5-27B": {
+      "sha": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+      "lastModified": "2026-04-24T02:54:49.000Z",
+      "usedStorage": 55575830414,
+      "safetensors": {
+        "parameters": {
+          "BF16": 27781419504,
+          "F32": 8448
+        },
+        "total": 27781427952
+      }
+    },
+    "Qwen3.5-27B-FP8": {
+      "sha": "97f5941bf617e31c5e237364a8602ce3f03a551a",
+      "lastModified": "2026-04-24T02:38:46.000Z",
+      "usedStorage": 30879690294,
+      "safetensors": {
+        "parameters": {
+          "BF16": 3083719344,
+          "F8_E4M3": 24699207680,
+          "F32": 8448
+        },
+        "total": 27782935472
+      }
+    },
+    "Qwen3.5-27B-GPTQ-Int4": {
+      "sha": "8f0c09f227ae570e79617c6d9172b59df9c16081",
+      "lastModified": "2026-04-24T02:38:57.000Z",
+      "usedStorage": 30248072398,
+      "safetensors": {
+        "parameters": {
+          "I32": 17112760320,
+          "BF16": 10668659184,
+          "F32": 8448
+        },
+        "total": 27781427952
+      }
+    },
+    "Qwen3.5-2B": {
+      "sha": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+      "lastModified": "2026-03-02T11:26:29.000Z",
+      "usedStorage": 4561029470,
+      "safetensors": {
+        "parameters": {
+          "F32": 2592,
+          "BF16": 2274067232
+        },
+        "total": 2274069824
+      }
+    },
+    "Qwen3.5-2B-Base": {
+      "sha": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
+      "lastModified": "2026-04-23T11:13:46.000Z",
+      "usedStorage": 4561028684,
+      "safetensors": {
+        "parameters": {
+          "F32": 2592,
+          "BF16": 2274067232
+        },
+        "total": 2274069824
+      }
+    },
+    "Qwen3.5-35B-A3B": {
+      "sha": "59d61f3ce65a6d9863b86d2e96597125219dc754",
+      "lastModified": "2026-04-24T02:38:38.000Z",
+      "usedStorage": 71928163942,
+      "safetensors": {
+        "parameters": {
+          "BF16": 35951817904,
+          "F32": 4800
+        },
+        "total": 35951822704
+      }
+    },
+    "Qwen3.5-35B-A3B-Base": {
+      "sha": "0f0813072d2358973511097385626f21fcb6d422",
+      "lastModified": "2026-04-23T11:21:45.000Z",
+      "usedStorage": 71916685156,
+      "safetensors": {
+        "parameters": {
+          "BF16": 35951817904,
+          "F32": 4800
+        },
+        "total": 35951822704
+      }
+    },
+    "Qwen3.5-35B-A3B-FP8": {
+      "sha": "9d1823d2dee688a6b25e77009dc727688c44936e",
+      "lastModified": "2026-04-24T02:38:49.000Z",
+      "usedStorage": 42691977654,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1500859120,
+          "F8_E4M3": 34453061632,
+          "F32": 4800
+        },
+        "total": 35953925552
+      }
+    },
+    "Qwen3.5-35B-A3B-GPTQ-Int4": {
+      "sha": "3af5ca2972faf6de1fd6f4efc4d8d319ca751e8b",
+      "lastModified": "2026-04-24T02:38:59.000Z",
+      "usedStorage": 24447882201,
+      "safetensors": {
+        "parameters": {
+          "I32": 32212254720,
+          "BF16": 3739563184,
+          "F32": 4800
+        },
+        "total": 35951822704
+      }
+    },
+    "Qwen3.5-397B-A17B": {
+      "sha": "8472618112abcbd45acbcdc58436aff4233c23f7",
+      "lastModified": "2026-04-24T05:51:23.000Z",
+      "usedStorage": 806809049334,
+      "safetensors": {
+        "parameters": {
+          "BF16": 403397920304,
+          "F32": 8640
+        },
+        "total": 403397928944
+      }
+    },
+    "Qwen3.5-397B-A17B-FP8": {
+      "sha": "ea5b4f81096f3901c91dea97f81324302495781d",
+      "lastModified": "2026-04-24T05:50:39.000Z",
+      "usedStorage": 406188403831,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2702768432,
+          "F8_E4M3": 400719609856,
+          "F32": 8640
+        },
+        "total": 403422386928
+      }
+    },
+    "Qwen3.5-397B-A17B-GPTQ-Int4": {
+      "sha": "df333de344e06b492063d1ca04e2d4ee878f7595",
+      "lastModified": "2026-04-24T05:52:53.000Z",
+      "usedStorage": 235766149842,
+      "safetensors": null
+    },
+    "Qwen3.5-4B": {
+      "sha": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "lastModified": "2026-03-02T00:52:52.000Z",
+      "usedStorage": 9332636078,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4659861248,
+          "F32": 3840
+        },
+        "total": 4659865088
+      }
+    },
+    "Qwen3.5-4B-Base": {
+      "sha": "1001bb4d826a52d1f399e183466143f4da7b741b",
+      "lastModified": "2026-04-23T11:13:30.000Z",
+      "usedStorage": 9332635252,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4659861248,
+          "F32": 3840
+        },
+        "total": 4659865088
+      }
+    },
+    "Qwen3.5-9B": {
+      "sha": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+      "lastModified": "2026-03-02T00:51:43.000Z",
+      "usedStorage": 19319118862,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9653100528,
+          "F32": 3840
+        },
+        "total": 9653104368
+      }
+    },
+    "Qwen3.5-9B-Base": {
+      "sha": "68c46c4b3498877f3ef123c856ecfde50c39f404",
+      "lastModified": "2026-04-23T12:04:39.000Z",
+      "usedStorage": 19319118068,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9653100528,
+          "F32": 3840
+        },
+        "total": 9653104368
+      }
+    },
+    "Qwen3-0.6B": {
+      "sha": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "lastModified": "2025-07-26T03:46:27.000Z",
+      "usedStorage": 4522815806,
+      "safetensors": {
+        "parameters": {
+          "BF16": 751632384
+        },
+        "total": 751632384
+      }
+    },
+    "Qwen3-0.6B-Base": {
+      "sha": "da87bfb608c14b7cf20ba1ce41287e8de496c0cd",
+      "lastModified": "2025-07-26T03:45:42.000Z",
+      "usedStorage": 1192135096,
+      "safetensors": null
+    },
+    "Qwen3-0.6B-FP8": {
+      "sha": "e5be08033360965ceca7b0ffd72d521a51331ce0",
+      "lastModified": "2025-07-26T03:45:47.000Z",
+      "usedStorage": 1074398398,
+      "safetensors": {
+        "parameters": {
+          "BF16": 311257344,
+          "F8_E4M3": 440401920
+        },
+        "total": 751659264
+      }
+    },
+    "Qwen3-0.6B-GGUF": {
+      "sha": "23749fefcc72300e3a2ad315e1317431b06b590a",
+      "lastModified": "2025-05-09T07:15:43.000Z",
+      "usedStorage": 3451630624,
+      "safetensors": null
+    },
+    "Qwen3-0.6B-GPTQ-Int8": {
+      "sha": "d3f20e7e71825fe57ad32705b396e9e156279107",
+      "lastModified": "2025-05-21T06:07:42.000Z",
+      "usedStorage": 774687950,
+      "safetensors": {
+        "parameters": {
+          "I32": 440401920,
+          "F16": 155648000
+        },
+        "total": 596049920
+      }
+    },
+    "Qwen3-0.6B-MLX-4bit": {
+      "sha": "173234aa840d113125e9f2271100ddbaf16c9620",
+      "lastModified": "2025-07-29T12:21:40.000Z",
+      "usedStorage": 328248396,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9377792,
+          "U32": 74498048
+        },
+        "total": 83875840
+      }
+    },
+    "Qwen3-0.6B-MLX-6bit": {
+      "sha": "3818e758c8ed9ec596a5e0c4c426fb81f7c0be18",
+      "lastModified": "2025-07-07T08:58:08.000Z",
+      "usedStorage": 477244684,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9377792,
+          "U32": 111747072
+        },
+        "total": 121124864
+      }
+    },
+    "Qwen3-0.6B-MLX-8bit": {
+      "sha": "e53d3ae02ebc79eac17f1fa9e23a2b65ce227893",
+      "lastModified": "2025-07-07T08:57:27.000Z",
+      "usedStorage": 626240850,
+      "safetensors": {
+        "parameters": {
+          "BF16": 9377792,
+          "U32": 148996096
+        },
+        "total": 158373888
+      }
+    },
+    "Qwen3-0.6B-MLX-bf16": {
+      "sha": "bc82a1060abf25e90be9782b12c00fa55d9bf542",
+      "lastModified": "2025-07-07T08:57:02.000Z",
+      "usedStorage": 1203557637,
+      "safetensors": {
+        "parameters": {
+          "BF16": 596049920
+        },
+        "total": 596049920
+      }
+    },
+    "Qwen3-1.7B": {
+      "sha": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+      "lastModified": "2025-07-26T03:46:32.000Z",
+      "usedStorage": 4074938246,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2031739904
+        },
+        "total": 2031739904
+      }
+    },
+    "Qwen3-1.7B-Base": {
+      "sha": "ea980cb0a6c2ae4b936e82123acc929f1cec04c1",
+      "lastModified": "2025-07-26T03:50:48.000Z",
+      "usedStorage": 3441185608,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1720574976
+        },
+        "total": 1720574976
+      }
+    },
+    "Qwen3-1.7B-FP8": {
+      "sha": "1641e6c1b620b7ed7e8711b443990429a23b1b99",
+      "lastModified": "2025-07-26T03:45:56.000Z",
+      "usedStorage": 2665848638,
+      "safetensors": {
+        "parameters": {
+          "BF16": 622539776,
+          "F8_E4M3": 1409286144
+        },
+        "total": 2031825920
+      }
+    },
+    "Qwen3-1.7B-GGUF": {
+      "sha": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+      "lastModified": "2025-05-09T07:16:01.000Z",
+      "usedStorage": 9482268704,
+      "safetensors": null
+    },
+    "Qwen3-1.7B-GPTQ-Int8": {
+      "sha": "382fed3fa21d1a7e837b42a500564a0c4be4f060",
+      "lastModified": "2025-05-21T06:07:04.000Z",
+      "usedStorage": 2078481110,
+      "safetensors": {
+        "parameters": {
+          "I32": 1409286144,
+          "F16": 311288832
+        },
+        "total": 1720574976
+      }
+    },
+    "Qwen3-1.7B-MLX-4bit": {
+      "sha": "21457c6f51ed54a7c16e988c0844db973815c137",
+      "lastModified": "2025-07-07T08:56:11.000Z",
+      "usedStorage": 925738754,
+      "safetensors": {
+        "parameters": {
+          "BF16": 27005952,
+          "U32": 215056384
+        },
+        "total": 242062336
+      }
+    },
+    "Qwen3-1.7B-MLX-6bit": {
+      "sha": "51d30dc1eaca0a2638a1165dba94fbf79be82809",
+      "lastModified": "2025-07-07T08:55:49.000Z",
+      "usedStorage": 1355852073,
+      "safetensors": {
+        "parameters": {
+          "BF16": 27005952,
+          "U32": 322584576
+        },
+        "total": 349590528
+      }
+    },
+    "Qwen3-1.7B-MLX-8bit": {
+      "sha": "95400cbada1bef81d2c4fb6f9d2b10aa27f1f1a0",
+      "lastModified": "2025-07-07T08:55:23.000Z",
+      "usedStorage": 1785965095,
+      "safetensors": {
+        "parameters": {
+          "BF16": 27005952,
+          "U32": 430112768
+        },
+        "total": 457118720
+      }
+    },
+    "Qwen3-1.7B-MLX-bf16": {
+      "sha": "720c04346ea2b095c801ebbd545c109230964cd4",
+      "lastModified": "2025-07-07T08:54:54.000Z",
+      "usedStorage": 3452608091,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1720574976
+        },
+        "total": 1720574976
+      }
+    },
+    "Qwen3-14B": {
+      "sha": "40c069824f4251a91eefaf281ebe4c544efd3e18",
+      "lastModified": "2025-07-26T03:49:23.000Z",
+      "usedStorage": 29548088294,
+      "safetensors": null
+    },
+    "Qwen3-14B-AWQ": {
+      "sha": "31c69efc29464b6bb0aee1398b5a7b50a99340c3",
+      "lastModified": "2025-05-21T06:21:57.000Z",
+      "usedStorage": 9988112894,
+      "safetensors": {
+        "parameters": {
+          "I32": 13212057600,
+          "BF16": 1556249600
+        },
+        "total": 14768307200
+      }
+    },
+    "Qwen3-14B-Base": {
+      "sha": "0b0bd3732e2c374d483664439ea334928b65f304",
+      "lastModified": "2025-07-26T03:45:33.000Z",
+      "usedStorage": 29536665640,
+      "safetensors": {
+        "parameters": {
+          "BF16": 14768307200
+        },
+        "total": 14768307200
+      }
+    },
+    "Qwen3-14B-FP8": {
+      "sha": "9a283b4a5efbc09ce247e0ae5b02b744739e525a",
+      "lastModified": "2025-07-26T03:46:09.000Z",
+      "usedStorage": 16337675950,
+      "safetensors": null
+    },
+    "Qwen3-14B-GGUF": {
+      "sha": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+      "lastModified": "2025-05-09T07:16:19.000Z",
+      "usedStorage": 115201368768,
+      "safetensors": null
+    },
+    "Qwen3-14B-MLX-4bit": {
+      "sha": "ba63a5141812f9870287df53341123a71ba41433",
+      "lastModified": "2025-07-07T08:50:10.000Z",
+      "usedStorage": 7857824790,
+      "safetensors": {
+        "parameters": {
+          "BF16": 231173120,
+          "U32": 1845985280
+        },
+        "total": 2077158400
+      }
+    },
+    "Qwen3-14B-MLX-6bit": {
+      "sha": "02c5e9b6ecab3c60eccc9d15b3a9fa2dbf021a35",
+      "lastModified": "2025-07-07T08:51:00.000Z",
+      "usedStorage": 11549795257,
+      "safetensors": {
+        "parameters": {
+          "BF16": 231173120,
+          "U32": 2768977920
+        },
+        "total": 3000151040
+      }
+    },
+    "Qwen3-14B-MLX-8bit": {
+      "sha": "7f11bdbf4e522b155526983c77d33771330d5b8f",
+      "lastModified": "2025-07-07T08:50:35.000Z",
+      "usedStorage": 15241766218,
+      "safetensors": {
+        "parameters": {
+          "BF16": 231173120,
+          "U32": 3691970560
+        },
+        "total": 3923143680
+      }
+    },
+    "Qwen3-14B-MLX-bf16": {
+      "sha": "edbe64998ef16142f85b440e34e3504dd2325052",
+      "lastModified": "2025-07-07T09:02:52.000Z",
+      "usedStorage": 29548088270,
+      "safetensors": {
+        "parameters": {
+          "BF16": 14768307200
+        },
+        "total": 14768307200
+      }
+    },
+    "Qwen3-235B-A22B": {
+      "sha": "8efa61729e24bd65b1d152b5ab5409052aa80e65",
+      "lastModified": "2025-07-26T03:45:13.000Z",
+      "usedStorage": 470203304443,
+      "safetensors": {
+        "parameters": {
+          "BF16": 235093634560
+        },
+        "total": 235093634560
+      }
+    },
+    "Qwen3-235B-A22B-FP8": {
+      "sha": "39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35",
+      "lastModified": "2025-07-26T03:46:22.000Z",
+      "usedStorage": 239055571958,
+      "safetensors": {
+        "parameters": {
+          "F32": 1309010944,
+          "F8_E4M3": 233798893568
+        },
+        "total": 235107904512
+      }
+    },
+    "Qwen3-235B-A22B-GGUF": {
+      "sha": "211e807ecd6d37446a747409108783e39a04e80f",
+      "lastModified": "2025-05-21T06:27:12.000Z",
+      "usedStorage": 913805257984,
+      "safetensors": null
+    },
+    "Qwen3-235B-A22B-GPTQ-Int4": {
+      "sha": "dff138951f3898772fc0d795a4b5b30f417577f4",
+      "lastModified": "2025-05-21T06:09:15.000Z",
+      "usedStorage": 249135955732,
+      "safetensors": {
+        "parameters": {
+          "F16": 1294740992,
+          "I32": 233798893568
+        },
+        "total": 235093634560
+      }
+    },
+    "Qwen3-235B-A22B-Instruct-2507": {
+      "sha": "ac9c66cc9b46af7306746a9250f23d47083d689e",
+      "lastModified": "2025-09-17T06:52:55.000Z",
+      "usedStorage": 470203297694,
+      "safetensors": null
+    },
+    "Qwen3-235B-A22B-Instruct-2507-FP8": {
+      "sha": "e156cb4efae43fbee1a1ab073f946a1377e6b969",
+      "lastModified": "2025-09-17T06:53:28.000Z",
+      "usedStorage": 236437616534,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1309010944,
+          "F8_E4M3": 233798893568
+        },
+        "total": 235107904512
+      }
+    },
+    "Qwen3-235B-A22B-MLX-4bit": {
+      "sha": "b503f28279e60cbcbbb4281da8fa97a12c791869",
+      "lastModified": "2025-07-07T08:17:58.000Z",
+      "usedStorage": 124906397607,
+      "safetensors": {
+        "parameters": {
+          "F16": 3674123776,
+          "U32": 29386604544
+        },
+        "total": 33060728320
+      }
+    },
+    "Qwen3-235B-A22B-MLX-6bit": {
+      "sha": "a9b4800972d7b032a3af9fd81bbeb4a6bee6b63f",
+      "lastModified": "2025-07-07T08:18:52.000Z",
+      "usedStorage": 183679606265,
+      "safetensors": {
+        "parameters": {
+          "F16": 3674123776,
+          "U32": 44079906816
+        },
+        "total": 47754030592
+      }
+    },
+    "Qwen3-235B-A22B-MLX-8bit": {
+      "sha": "06d7d9cb6602b95aa88f46a9f623fd8731768381",
+      "lastModified": "2025-07-07T08:17:24.000Z",
+      "usedStorage": 242452816427,
+      "safetensors": {
+        "parameters": {
+          "F16": 3674123776,
+          "U32": 58773209088
+        },
+        "total": 62447332864
+      }
+    },
+    "Qwen3-235B-A22B-MLX-bf16": {
+      "sha": "284ea931f422d64380bd650b5fe4a755b14b3e2b",
+      "lastModified": "2025-07-07T08:21:01.000Z",
+      "usedStorage": 470198827417,
+      "safetensors": {
+        "parameters": {
+          "F16": 235093634560
+        },
+        "total": 235093634560
+      }
+    },
+    "Qwen3-235B-A22B-Thinking-2507": {
+      "sha": "6cbffae6d8e28b986a6b17bd36f42f9fa0f1f0a5",
+      "lastModified": "2025-08-17T08:20:17.000Z",
+      "usedStorage": 470191875040,
+      "safetensors": null
+    },
+    "Qwen3-235B-A22B-Thinking-2507-FP8": {
+      "sha": "f07f63f2bbd7540917118ebdf3812696ef303b03",
+      "lastModified": "2025-07-30T15:48:19.000Z",
+      "usedStorage": 236437616534,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1309010944,
+          "F8_E4M3": 233798893568
+        },
+        "total": 235107904512
+      }
+    },
+    "Qwen3-30B-A3B": {
+      "sha": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
+      "lastModified": "2025-07-26T03:45:17.000Z",
+      "usedStorage": 61077998302,
+      "safetensors": null
+    },
+    "Qwen3-30B-A3B-Base": {
+      "sha": "1b75feb79f60b8dc6c5bc769a898c206a1c6a4f9",
+      "lastModified": "2025-07-26T03:45:29.000Z",
+      "usedStorage": 61066575648,
+      "safetensors": {
+        "parameters": {
+          "BF16": 30532122624
+        },
+        "total": 30532122624
+      }
+    },
+    "Qwen3-30B-A3B-FP8": {
+      "sha": "d206ba732169f29bb77fbf80fc2c4b81d4d30782",
+      "lastModified": "2025-07-26T03:46:17.000Z",
+      "usedStorage": 32460910422,
+      "safetensors": null
+    },
+    "Qwen3-30B-A3B-GGUF": {
+      "sha": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
+      "lastModified": "2025-05-21T06:25:14.000Z",
+      "usedStorage": 118939239936,
+      "safetensors": null
+    },
+    "Qwen3-30B-A3B-GPTQ-Int4": {
+      "sha": "9b534e4318b7ebc3c961a839f13eb18b1833f441",
+      "lastModified": "2025-05-21T06:08:09.000Z",
+      "usedStorage": 16944679046,
+      "safetensors": {
+        "parameters": {
+          "I32": 29896998912,
+          "F16": 635123712
+        },
+        "total": 30532122624
+      }
+    },
+    "Qwen3-30B-A3B-Instruct-2507": {
+      "sha": "0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe",
+      "lastModified": "2025-09-17T06:56:43.000Z",
+      "usedStorage": 61079824827,
+      "safetensors": null
+    },
+    "Qwen3-30B-A3B-Instruct-2507-FP8": {
+      "sha": "5a5a776300a41aaa681dd7ff0106608ef2bc90db",
+      "lastModified": "2025-09-17T06:56:32.000Z",
+      "usedStorage": 31187041238,
+      "safetensors": {
+        "parameters": {
+          "BF16": 636948480,
+          "F8_E4M3": 29896998912
+        },
+        "total": 30533947392
+      }
+    },
+    "Qwen3-30B-A3B-MLX-4bit": {
+      "sha": "4e2776a4cc73a8a251d0b797010a5b07fd541a3e",
+      "lastModified": "2025-07-07T08:22:14.000Z",
+      "usedStorage": 16232080166,
+      "safetensors": {
+        "parameters": {
+          "F16": 477272064,
+          "U32": 3816488960
+        },
+        "total": 4293761024
+      }
+    },
+    "Qwen3-30B-A3B-MLX-6bit": {
+      "sha": "b92024737fc38f0bce249aaefb7611dd22c38b58",
+      "lastModified": "2025-07-07T08:23:00.000Z",
+      "usedStorage": 23865058926,
+      "safetensors": {
+        "parameters": {
+          "BF16": 477272064,
+          "U32": 5724733440
+        },
+        "total": 6202005504
+      }
+    },
+    "Qwen3-30B-A3B-MLX-8bit": {
+      "sha": "ef6823f1ecb032a5661f97806d920d270803a1b9",
+      "lastModified": "2025-07-07T08:38:00.000Z",
+      "usedStorage": 31498036966,
+      "safetensors": {
+        "parameters": {
+          "BF16": 477272064,
+          "U32": 7632977920
+        },
+        "total": 8110249984
+      }
+    },
+    "Qwen3-30B-A3B-MLX-bf16": {
+      "sha": "c8e239e419e3b086961216a88e541228106db3cd",
+      "lastModified": "2025-07-07T08:39:37.000Z",
+      "usedStorage": 61075736446,
+      "safetensors": {
+        "parameters": {
+          "BF16": 30532122624
+        },
+        "total": 30532122624
+      }
+    },
+    "Qwen3-30B-A3B-Thinking-2507": {
+      "sha": "144afc2f379b542fdd4e85a1fcd5e1f79112d95d",
+      "lastModified": "2025-08-17T08:20:51.000Z",
+      "usedStorage": 61077998310,
+      "safetensors": {
+        "parameters": {
+          "BF16": 30532122624
+        },
+        "total": 30532122624
+      }
+    },
+    "Qwen3-30B-A3B-Thinking-2507-FP8": {
+      "sha": "60d80c83c53c3b611c642dbb8c942b3f90c5948a",
+      "lastModified": "2025-07-30T16:02:13.000Z",
+      "usedStorage": 31187041238,
+      "safetensors": null
+    },
+    "Qwen3-32B": {
+      "sha": "9216db5781bf21249d130ec9da846c4624c16137",
+      "lastModified": "2025-07-26T03:45:22.000Z",
+      "usedStorage": 65535751214,
+      "safetensors": null
+    },
+    "Qwen3-32B-AWQ": {
+      "sha": "0499c3ac83fdef8810b907a23894ba91e95eddd8",
+      "lastModified": "2025-05-21T06:17:51.000Z",
+      "usedStorage": 19336904398,
+      "safetensors": {
+        "parameters": {
+          "I32": 31205621760,
+          "BF16": 1556501504
+        },
+        "total": 32762123264
+      }
+    },
+    "Qwen3-32B-FP8": {
+      "sha": "aa55da1ecc13d006e8b8e4f54579b1ea8c3db2df",
+      "lastModified": "2025-07-26T03:46:13.000Z",
+      "usedStorage": 34333990294,
+      "safetensors": null
+    },
+    "Qwen3-32B-GGUF": {
+      "sha": "938a7432affaec9157f883a87164e2646ae17555",
+      "lastModified": "2025-05-09T07:16:46.000Z",
+      "usedStorage": 254626997248,
+      "safetensors": null
+    },
+    "Qwen3-32B-MLX-4bit": {
+      "sha": "ceb4c4aad0164033af0c8dd37a0641693d0d6321",
+      "lastModified": "2025-07-07T08:46:53.000Z",
+      "usedStorage": 17417478092,
+      "safetensors": {
+        "parameters": {
+          "BF16": 512574464,
+          "U32": 4095180800
+        },
+        "total": 4607755264
+      }
+    },
+    "Qwen3-32B-MLX-6bit": {
+      "sha": "864389199428709a0af1119f9647823926864b58",
+      "lastModified": "2025-07-07T08:48:43.000Z",
+      "usedStorage": 25607839822,
+      "safetensors": {
+        "parameters": {
+          "BF16": 512574464,
+          "U32": 6142771200
+        },
+        "total": 6655345664
+      }
+    },
+    "Qwen3-32B-MLX-8bit": {
+      "sha": "5fd4a0905f0e34cc45682cf9e52769681727e38c",
+      "lastModified": "2025-07-07T08:49:16.000Z",
+      "usedStorage": 33798201778,
+      "safetensors": {
+        "parameters": {
+          "BF16": 512574464,
+          "U32": 8190361600
+        },
+        "total": 8702936064
+      }
+    },
+    "Qwen3-32B-MLX-bf16": {
+      "sha": "cf84a682b91f6fe200f1000764405a6dded44f4f",
+      "lastModified": "2025-07-07T08:49:38.000Z",
+      "usedStorage": 65535750878,
+      "safetensors": {
+        "parameters": {
+          "BF16": 32762123264
+        },
+        "total": 32762123264
+      }
+    },
+    "Qwen3-4B": {
+      "sha": "1cfa9a7208912126459214e8b04321603b3df60c",
+      "lastModified": "2025-07-26T03:46:39.000Z",
+      "usedStorage": 8056404654,
+      "safetensors": null
+    },
+    "Qwen3-4B-AWQ": {
+      "sha": "74d4bd2bd4bff9cafc9345221320bffb08b406a3",
+      "lastModified": "2025-05-21T06:13:28.000Z",
+      "usedStorage": 2677450326,
+      "safetensors": {
+        "parameters": {
+          "I32": 3633315840,
+          "BF16": 389152256
+        },
+        "total": 4022468096
+      }
+    },
+    "Qwen3-4B-Base": {
+      "sha": "906bfd4b4dc7f14ee4320094d8b41684abff8539",
+      "lastModified": "2025-07-26T03:45:37.000Z",
+      "usedStorage": 8044982000,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4022468096
+        },
+        "total": 4022468096
+      }
+    },
+    "Qwen3-4B-FP8": {
+      "sha": "96b30dc13593a244a5e59e84687309f53c375cfa",
+      "lastModified": "2025-07-26T03:46:01.000Z",
+      "usedStorage": 5201475526,
+      "safetensors": {
+        "parameters": {
+          "BF16": 778330176,
+          "F8_E4M3": 3633315840
+        },
+        "total": 4411646016
+      }
+    },
+    "Qwen3-4B-GGUF": {
+      "sha": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      "lastModified": "2025-05-21T06:32:23.000Z",
+      "usedStorage": 15797169824,
+      "safetensors": null
+    },
+    "Qwen3-4B-Instruct-2507": {
+      "sha": "cdbee75f17c01a7cc42f958dc650907174af0554",
+      "lastModified": "2025-09-17T06:56:53.000Z",
+      "usedStorage": 64383326441,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4022468096
+        },
+        "total": 4022468096
+      }
+    },
+    "Qwen3-4B-Instruct-2507-FP8": {
+      "sha": "8591804019c8b22094c3b5b4454e0edc05dffc98",
+      "lastModified": "2025-09-17T06:57:02.000Z",
+      "usedStorage": 5201475918,
+      "safetensors": {
+        "parameters": {
+          "F16": 778330176,
+          "F8_E4M3": 3633315840
+        },
+        "total": 4411646016
+      }
+    },
+    "Qwen3-4B-MLX-4bit": {
+      "sha": "52a5ab34fa604bc8af6d3ce0cac0cab10b7eb495",
+      "lastModified": "2025-08-29T08:19:39.000Z",
+      "usedStorage": 2148749021,
+      "safetensors": {
+        "parameters": {
+          "BF16": 63044096,
+          "U32": 502784000
+        },
+        "total": 565828096
+      }
+    },
+    "Qwen3-4B-MLX-6bit": {
+      "sha": "d73d5dba88e4b0356f224d778fdd88d973ec217f",
+      "lastModified": "2025-07-07T09:00:20.000Z",
+      "usedStorage": 3154317365,
+      "safetensors": {
+        "parameters": {
+          "BF16": 63044096,
+          "U32": 754176000
+        },
+        "total": 817220096
+      }
+    },
+    "Qwen3-4B-MLX-8bit": {
+      "sha": "315fb4813e1d13d630f4ee43ea06eb03c6150afb",
+      "lastModified": "2025-07-07T08:59:45.000Z",
+      "usedStorage": 4159885555,
+      "safetensors": {
+        "parameters": {
+          "BF16": 63044096,
+          "U32": 1005568000
+        },
+        "total": 1068612096
+      }
+    },
+    "Qwen3-4B-MLX-bf16": {
+      "sha": "94e68620a4b9db944b2f5b3c3633fbdf621d871b",
+      "lastModified": "2025-07-07T08:59:17.000Z",
+      "usedStorage": 8056404529,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4022468096
+        },
+        "total": 4022468096
+      }
+    },
+    "Qwen3-4B-SafeRL": {
+      "sha": "1b95ccb88cabaf284ffb6968719c40ae6cd4085b",
+      "lastModified": "2025-10-17T02:33:25.000Z",
+      "usedStorage": 8056404654,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4022468096
+        },
+        "total": 4411424256
+      }
+    },
+    "Qwen3-4B-Thinking-2507": {
+      "sha": "768f209d9ea81521153ed38c47d515654e938aea",
+      "lastModified": "2025-08-06T11:08:25.000Z",
+      "usedStorage": 8056404654,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4022468096
+        },
+        "total": 4022468096
+      }
+    },
+    "Qwen3-4B-Thinking-2507-FP8": {
+      "sha": "953532f942706930ec4bb870569932ef63038fdf",
+      "lastModified": "2025-08-06T11:07:01.000Z",
+      "usedStorage": 5201475918,
+      "safetensors": null
+    },
+    "Qwen3-8B": {
+      "sha": "b968826d9c46dd6066d109eabc6255188de91218",
+      "lastModified": "2025-07-26T03:49:13.000Z",
+      "usedStorage": 45450222438,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8190735360
+        },
+        "total": 8190735360
+      }
+    },
+    "Qwen3-8B-AWQ": {
+      "sha": "4da05a8edb55c6046cce958586c33b61da07bb79",
+      "lastModified": "2025-05-21T06:09:42.000Z",
+      "usedStorage": 6110004518,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1244967936,
+          "I32": 6945767424
+        },
+        "total": 8190735360
+      }
+    },
+    "Qwen3-8B-Base": {
+      "sha": "49e3418fbbbca6ecbdf9608b4d22e5a407081db4",
+      "lastModified": "2025-05-21T05:59:01.000Z",
+      "usedStorage": 16381516776,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8190735360
+        },
+        "total": 8190735360
+      }
+    },
+    "Qwen3-8B-FP8": {
+      "sha": "220b46e3b2180893580a4454f21f22d3ebb187d3",
+      "lastModified": "2025-07-26T03:46:05.000Z",
+      "usedStorage": 9448051438,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1245391872,
+          "F8_E4M3": 6945767424
+        },
+        "total": 8191159296
+      }
+    },
+    "Qwen3-8B-GGUF": {
+      "sha": "7c41481f57cb95916b40956ab2f0b139b296d974",
+      "lastModified": "2025-05-21T06:31:50.000Z",
+      "usedStorage": 32035074016,
+      "safetensors": null
+    },
+    "Qwen3-8B-MLX-4bit": {
+      "sha": "383413e909f3bc5303ce195ebbdf0339c5a1a2a3",
+      "lastModified": "2025-07-07T08:54:28.000Z",
+      "usedStorage": 4363306870,
+      "safetensors": {
+        "parameters": {
+          "BF16": 128283648,
+          "U32": 1023803392
+        },
+        "total": 1152087040
+      }
+    },
+    "Qwen3-8B-MLX-6bit": {
+      "sha": "dccec1206305048d1beee830b25c2098530ecfd8",
+      "lastModified": "2025-07-07T08:53:57.000Z",
+      "usedStorage": 6410913462,
+      "safetensors": {
+        "parameters": {
+          "BF16": 128283648,
+          "U32": 1535705088
+        },
+        "total": 1663988736
+      }
+    },
+    "Qwen3-8B-MLX-8bit": {
+      "sha": "6a20f8c9329f958e0f2e8e7d92aa002022a9a70d",
+      "lastModified": "2025-07-07T08:53:15.000Z",
+      "usedStorage": 8458520678,
+      "safetensors": {
+        "parameters": {
+          "BF16": 128283648,
+          "U32": 2047606784
+        },
+        "total": 2175890432
+      }
+    },
+    "Qwen3-8B-MLX-bf16": {
+      "sha": "6766fd4b8101fa4201cc55c5a2e464f3d301f792",
+      "lastModified": "2025-07-07T08:52:52.000Z",
+      "usedStorage": 16392939356,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8190735360
+        },
+        "total": 8190735360
+      }
+    },
+    "Qwen3Guard-Gen-0.6B": {
+      "sha": "fada3b2f655b89601929198343c94cd2f64d93cc",
+      "lastModified": "2025-11-07T08:10:53.000Z",
+      "usedStorage": 1514722982,
+      "safetensors": {
+        "parameters": {
+          "BF16": 751632384
+        },
+        "total": 751632384
+      }
+    },
+    "Qwen3Guard-Gen-4B": {
+      "sha": "6ec42827da0c1ff11e7a49dc269d2e810d27e108",
+      "lastModified": "2025-11-07T08:10:44.000Z",
+      "usedStorage": 8834317086,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4411424256
+        },
+        "total": 4411424256
+      }
+    },
+    "Qwen3Guard-Gen-8B": {
+      "sha": "4505cb1a6f1864f21f8b27f7daf1b9a1aab6edbb",
+      "lastModified": "2025-11-07T08:11:03.000Z",
+      "usedStorage": 16392939430,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8190735360
+        },
+        "total": 8190735360
+      }
+    },
+    "Qwen3Guard-Stream-0.6B": {
+      "sha": "419364a715de9840d47b1457982f64ff37f90ed4",
+      "lastModified": "2025-11-07T07:36:26.000Z",
+      "usedStorage": 1205681334,
+      "safetensors": null
+    },
+    "Qwen3Guard-Stream-4B": {
+      "sha": "27a8f4e52e66dc01a03d20f41e362bb9c9bda7bf",
+      "lastModified": "2025-11-07T07:34:37.000Z",
+      "usedStorage": 8061673958,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4025102336
+        },
+        "total": 4025102336
+      }
+    },
+    "Qwen3Guard-Stream-8B": {
+      "sha": "f14fba01154127167c77c0e9f80536cec56e7b69",
+      "lastModified": "2025-11-07T07:35:13.000Z",
+      "usedStorage": 15156694670,
+      "safetensors": {
+        "parameters": {
+          "BF16": 7572612608
+        },
+        "total": 7572612608
+      }
+    },
+    "Qwen3-Next-80B-A3B-Instruct": {
+      "sha": "9c7f2fbe84465e40164a94cc16cd30b6999b0cc7",
+      "lastModified": "2025-09-17T06:57:40.000Z",
+      "usedStorage": 162670584182,
+      "safetensors": {
+        "parameters": {
+          "BF16": 81324862720
+        },
+        "total": 81324862720
+      }
+    },
+    "Qwen3-Next-80B-A3B-Instruct-FP8": {
+      "sha": "c5f5f263bdd5cc134092897864e8905d8fe7b928",
+      "lastModified": "2025-09-22T05:38:44.000Z",
+      "usedStorage": 82077791006,
+      "safetensors": {
+        "parameters": {
+          "F32": 4921664,
+          "BF16": 688319744,
+          "F8_E4M3": 80636542976
+        },
+        "total": 81329784384
+      }
+    },
+    "Qwen3-Next-80B-A3B-Instruct-GGUF": {
+      "sha": "4c8630cf7af926a9c5095cb4bbbbc65d36e20f77",
+      "lastModified": "2025-12-03T08:26:07.000Z",
+      "usedStorage": 469914998656,
+      "safetensors": null
+    },
+    "Qwen3-Next-80B-A3B-Thinking": {
+      "sha": "e502dd4100cc68c0de57643fd4317ec93a128670",
+      "lastModified": "2025-09-15T09:12:48.000Z",
+      "usedStorage": 162670584182,
+      "safetensors": null
+    },
+    "Qwen3-Next-80B-A3B-Thinking-FP8": {
+      "sha": "1a28d48a94e799860201879be67616b9e21c4bd2",
+      "lastModified": "2025-09-22T05:39:57.000Z",
+      "usedStorage": 82077791006,
+      "safetensors": null
+    },
+    "Qwen3-Next-80B-A3B-Thinking-GGUF": {
+      "sha": "de5795cd9a4f5538d1dd5c9823fdd73eacfae3fe",
+      "lastModified": "2025-12-03T08:24:52.000Z",
+      "usedStorage": 469915007264,
+      "safetensors": null
+    },
+    "Qwen3-Coder-30B-A3B-Instruct": {
+      "sha": "b2cff646eb4bb1d68355c01b18ae02e7cf42d120",
+      "lastModified": "2025-12-03T08:05:17.000Z",
+      "usedStorage": 61066575656,
+      "safetensors": {
+        "parameters": {
+          "BF16": 30532122624
+        },
+        "total": 30532122624
+      }
+    },
+    "Qwen3-Coder-30B-A3B-Instruct-FP8": {
+      "sha": "dcaee4d4dfc5ee71ad501f01f530e5652438fde0",
+      "lastModified": "2025-12-03T08:20:23.000Z",
+      "usedStorage": 31187041238,
+      "safetensors": {
+        "parameters": {
+          "BF16": 636948480,
+          "F8_E4M3": 29896998912
+        },
+        "total": 30533947392
+      }
+    },
+    "Qwen3-Coder-480B-A35B-Instruct": {
+      "sha": "9d90cf8fca1bf7b7acca42d3fc9ae694a2194069",
+      "lastModified": "2025-08-21T10:18:07.000Z",
+      "usedStorage": 960313541352,
+      "safetensors": {
+        "parameters": {
+          "BF16": 480154875392
+        },
+        "total": 480154875392
+      }
+    },
+    "Qwen3-Coder-480B-A35B-Instruct-FP8": {
+      "sha": "003f183a92fbe5b9a8325aaa8b2ae797c91dd90f",
+      "lastModified": "2025-08-21T10:40:35.000Z",
+      "usedStorage": 482160995462,
+      "safetensors": null
+    },
+    "Qwen3-Coder-Next": {
+      "sha": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+      "lastModified": "2026-02-03T16:16:38.000Z",
+      "usedStorage": 159362601248,
+      "safetensors": {
+        "parameters": {
+          "BF16": 79674391296
+        },
+        "total": 79674391296
+      }
+    },
+    "Qwen3-Coder-Next-Base": {
+      "sha": "1b6df59d5f75ab51edb9ad8cb3ea69c5d0aedd57",
+      "lastModified": "2026-02-03T14:14:04.000Z",
+      "usedStorage": 159358031480,
+      "safetensors": {
+        "parameters": {
+          "BF16": 79674391296
+        },
+        "total": 79674391296
+      }
+    },
+    "Qwen3-Coder-Next-FP8": {
+      "sha": "da6e2ed27304dd39abadd9c82ef50e8de67bdd4c",
+      "lastModified": "2026-02-03T14:13:28.000Z",
+      "usedStorage": 80396214083,
+      "safetensors": {
+        "parameters": {
+          "BF16": 683691264,
+          "F8_E4M3": 78995521536
+        },
+        "total": 79679212800
+      }
+    },
+    "Qwen3-Coder-Next-GGUF": {
+      "sha": "b82fb7382639d97b38fa7672e526c760c2fb358e",
+      "lastModified": "2026-02-04T04:26:16.000Z",
+      "usedStorage": 469915020128,
+      "safetensors": null
+    },
+    "Qwen3-VL-235B-A22B-Instruct": {
+      "sha": "710c13861be6c466e66de3f484069440b8f31389",
+      "lastModified": "2025-11-26T13:18:18.000Z",
+      "usedStorage": 471340223736,
+      "safetensors": {
+        "parameters": {
+          "BF16": 235670022896
+        },
+        "total": 235670022896
+      }
+    },
+    "Qwen3-VL-235B-A22B-Instruct-FP8": {
+      "sha": "7fbcd8c9e2ad011808ed8a57d64c462605c3e381",
+      "lastModified": "2025-11-26T13:18:20.000Z",
+      "usedStorage": 237598481568,
+      "safetensors": {
+        "parameters": {
+          "F32": 14269952,
+          "BF16": 1871129328,
+          "F8_E4M3": 233798893568
+        },
+        "total": 235684292848
+      }
+    },
+    "Qwen3-VL-235B-A22B-Instruct-GGUF": {
+      "sha": "cbf7709dad5de4632836beb8969d51f1eff0f48b",
+      "lastModified": "2025-11-01T03:17:04.000Z",
+      "usedStorage": 864298939968,
+      "safetensors": null
+    },
+    "Qwen3-VL-235B-A22B-Thinking": {
+      "sha": "6664affde68449468deb7527186455c7450c13c0",
+      "lastModified": "2025-11-26T13:18:17.000Z",
+      "usedStorage": 471340223736,
+      "safetensors": {
+        "parameters": {
+          "BF16": 235670022896
+        },
+        "total": 235670022896
+      }
+    },
+    "Qwen3-VL-235B-A22B-Thinking-FP8": {
+      "sha": "4208801232c8ef5e6faea2ea1e4066193958776d",
+      "lastModified": "2025-11-26T13:18:19.000Z",
+      "usedStorage": 237598481568,
+      "safetensors": {
+        "parameters": {
+          "F32": 14269952,
+          "BF16": 1871129328,
+          "F8_E4M3": 233798893568
+        },
+        "total": 235684292848
+      }
+    },
+    "Qwen3-VL-235B-A22B-Thinking-GGUF": {
+      "sha": "e3423a389728d101f209c908b79b68367fdfa062",
+      "lastModified": "2025-11-01T03:18:19.000Z",
+      "usedStorage": 864298939680,
+      "safetensors": null
+    },
+    "Qwen3-VL-2B-Instruct": {
+      "sha": "89644892e4d85e24eaac8bacfd4f463576704203",
+      "lastModified": "2025-10-23T11:30:44.000Z",
+      "usedStorage": 4255140312,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2127532032
+        },
+        "total": 2127532032
+      }
+    },
+    "Qwen3-VL-2B-Instruct-FP8": {
+      "sha": "46485250d8854c0a9be4f1adbc67ca47e5bb6fa5",
+      "lastModified": "2025-10-20T19:26:45.000Z",
+      "usedStorage": 3468553776,
+      "safetensors": {
+        "parameters": {
+          "F32": 86016,
+          "BF16": 1029410816,
+          "F8_E4M3": 1409286144
+        },
+        "total": 2438782976
+      }
+    },
+    "Qwen3-VL-2B-Instruct-GGUF": {
+      "sha": "52d6c8ffea26cc873ac5ad116f8631268d7eb503",
+      "lastModified": "2025-11-01T03:21:20.000Z",
+      "usedStorage": 7653635744,
+      "safetensors": null
+    },
+    "Qwen3-VL-2B-Thinking": {
+      "sha": "33e0ad94c327808ebc7d3bbc97e78e600f1eeecd",
+      "lastModified": "2025-10-20T19:15:08.000Z",
+      "usedStorage": 4255140312,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2127532032
+        },
+        "total": 2127532032
+      }
+    },
+    "Qwen3-VL-2B-Thinking-FP8": {
+      "sha": "bc71e10812c1bba5532bd2eca46a4166f3b7fffd",
+      "lastModified": "2025-11-26T13:18:22.000Z",
+      "usedStorage": 3468553776,
+      "safetensors": {
+        "parameters": {
+          "F32": 86016,
+          "BF16": 1029410816,
+          "F8_E4M3": 1409286144
+        },
+        "total": 2438782976
+      }
+    },
+    "Qwen3-VL-2B-Thinking-GGUF": {
+      "sha": "76646427920e08bd278e46af11c5db8532e6a657",
+      "lastModified": "2025-11-01T03:22:14.000Z",
+      "usedStorage": 7653635552,
+      "safetensors": null
+    },
+    "Qwen3-VL-30B-A3B-Instruct": {
+      "sha": "9c4b90e1e4ba969fd3b5378b57d966d725f1b86c",
+      "lastModified": "2025-11-26T13:18:04.000Z",
+      "usedStorage": 62141618016,
+      "safetensors": null
+    },
+    "Qwen3-VL-30B-A3B-Instruct-FP8": {
+      "sha": "d9748a51ae66354c4dad665aab2c71f26cf2c8cd",
+      "lastModified": "2025-11-26T13:18:10.000Z",
+      "usedStorage": 32251954920,
+      "safetensors": null
+    },
+    "Qwen3-VL-30B-A3B-Instruct-GGUF": {
+      "sha": "f54435e6cc31258f04b0969105c3f6badb197931",
+      "lastModified": "2025-11-01T03:19:27.000Z",
+      "usedStorage": 113932072608,
+      "safetensors": null
+    },
+    "Qwen3-VL-30B-A3B-Thinking": {
+      "sha": "d0ed0380729be07a546fdefafbb4fe411f341e92",
+      "lastModified": "2025-11-26T13:18:00.000Z",
+      "usedStorage": 62141618016,
+      "safetensors": {
+        "parameters": {
+          "BF16": 31070754032
+        },
+        "total": 31070754032
+      }
+    },
+    "Qwen3-VL-30B-A3B-Thinking-FP8": {
+      "sha": "cf3058e421b60f13f81b16c0e3665f8554c03d6a",
+      "lastModified": "2025-11-26T13:18:07.000Z",
+      "usedStorage": 32251954920,
+      "safetensors": {
+        "parameters": {
+          "F32": 1824768,
+          "BF16": 1173755120,
+          "F8_E4M3": 29896998912
+        },
+        "total": 31072578800
+      }
+    },
+    "Qwen3-VL-30B-A3B-Thinking-GGUF": {
+      "sha": "681477a4711f4bcefa0233abeb16a02abc74c14a",
+      "lastModified": "2025-11-01T03:19:00.000Z",
+      "usedStorage": 113932072864,
+      "safetensors": null
+    },
+    "Qwen3-VL-32B-Instruct": {
+      "sha": "0cfaf48183f594c314753d30a4c4974bc75f3ccb",
+      "lastModified": "2025-10-21T18:26:34.000Z",
+      "usedStorage": 66714912872,
+      "safetensors": {
+        "parameters": {
+          "BF16": 33357390064
+        },
+        "total": 33357390064
+      }
+    },
+    "Qwen3-VL-32B-Instruct-FP8": {
+      "sha": "4bf2c2f39c37c0fede78bede4056e1f18cdf8109",
+      "lastModified": "2025-10-22T03:06:29.000Z",
+      "usedStorage": 71033932368,
+      "safetensors": null
+    },
+    "Qwen3-VL-32B-Instruct-GGUF": {
+      "sha": "e3e1fe0c76de7ee58ea65db420c643adfe2e457c",
+      "lastModified": "2025-11-01T03:20:18.000Z",
+      "usedStorage": 122080602592,
+      "safetensors": null
+    },
+    "Qwen3-VL-32B-Thinking": {
+      "sha": "7edd10ffd1196091948fb245ff63e406ccb2d4d1",
+      "lastModified": "2025-10-21T18:23:29.000Z",
+      "usedStorage": 66714912872,
+      "safetensors": {
+        "parameters": {
+          "BF16": 33357390064
+        },
+        "total": 33357390064
+      }
+    },
+    "Qwen3-VL-32B-Thinking-FP8": {
+      "sha": "3eee143c9b355ba456390568e5970e2e60f5582b",
+      "lastModified": "2025-11-26T13:18:23.000Z",
+      "usedStorage": 35516966184,
+      "safetensors": {
+        "parameters": {
+          "F32": 1904640,
+          "BF16": 2151768304,
+          "F8_E4M3": 31205621760
+        },
+        "total": 33359294704
+      }
+    },
+    "Qwen3-VL-32B-Thinking-GGUF": {
+      "sha": "a612b3102374e69a892162730ad904b69961f806",
+      "lastModified": "2025-11-01T03:24:46.000Z",
+      "usedStorage": 122080602304,
+      "safetensors": null
+    },
+    "Qwen3-VL-4B-Instruct": {
+      "sha": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+      "lastModified": "2025-10-15T16:15:55.000Z",
+      "usedStorage": 8875719344,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4437815808
+        },
+        "total": 4437815808
+      }
+    },
+    "Qwen3-VL-4B-Instruct-FP8": {
+      "sha": "fefbb44cbcce8d1bb7e20b920b94f77432b3446d",
+      "lastModified": "2025-10-15T16:08:37.000Z",
+      "usedStorage": 6021235456,
+      "safetensors": {
+        "parameters": {
+          "F32": 221760,
+          "BF16": 1193456128,
+          "F8_E4M3": 3633315840
+        },
+        "total": 4826993728
+      }
+    },
+    "Qwen3-VL-4B-Instruct-GGUF": {
+      "sha": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+      "lastModified": "2025-11-01T02:28:10.000Z",
+      "usedStorage": 18616410208,
+      "safetensors": null
+    },
+    "Qwen3-VL-4B-Thinking": {
+      "sha": "1de27d8c51f12e819435303b9e84c4e25ba8401e",
+      "lastModified": "2025-10-15T16:14:47.000Z",
+      "usedStorage": 8875719344,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4437815808
+        },
+        "total": 4437815808
+      }
+    },
+    "Qwen3-VL-4B-Thinking-FP8": {
+      "sha": "219b8e195ea30e383c55c954278767990974bba9",
+      "lastModified": "2025-11-26T13:18:21.000Z",
+      "usedStorage": 6021235456,
+      "safetensors": {
+        "parameters": {
+          "F32": 221760,
+          "BF16": 1193456128,
+          "F8_E4M3": 3633315840
+        },
+        "total": 4826993728
+      }
+    },
+    "Qwen3-VL-4B-Thinking-GGUF": {
+      "sha": "a55c03cbb1dad5a0c678efa066a8dbccf5a8d30e",
+      "lastModified": "2025-11-01T03:23:09.000Z",
+      "usedStorage": 16119127680,
+      "safetensors": null
+    },
+    "Qwen3-VL-8B-Instruct": {
+      "sha": "0c351dd01ed87e9c1b53cbc748cba10e6187ff3b",
+      "lastModified": "2025-10-15T16:16:59.000Z",
+      "usedStorage": 17534339512,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8767123696
+        },
+        "total": 8767123696
+      }
+    },
+    "Qwen3-VL-8B-Instruct-FP8": {
+      "sha": "9cdc6310a8cb770ce18efaf4e9935334512aee45",
+      "lastModified": "2025-11-26T13:18:16.000Z",
+      "usedStorage": 10590299512,
+      "safetensors": {
+        "parameters": {
+          "F32": 423936,
+          "BF16": 1821356272,
+          "F8_E4M3": 6945767424
+        },
+        "total": 8767547632
+      }
+    },
+    "Qwen3-VL-8B-Instruct-GGUF": {
+      "sha": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+      "lastModified": "2025-11-01T03:21:00.000Z",
+      "usedStorage": 32036668704,
+      "safetensors": null
+    },
+    "Qwen3-VL-8B-Thinking": {
+      "sha": "92f3c4b4feadd3a016ef468d103bb5f58b2a2c6b",
+      "lastModified": "2025-11-26T13:18:14.000Z",
+      "usedStorage": 17534339512,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8767123696
+        },
+        "total": 8767123696
+      }
+    },
+    "Qwen3-VL-8B-Thinking-FP8": {
+      "sha": "a6638e84662f85a17bb8688224541e153d4f6c71",
+      "lastModified": "2025-11-26T13:18:15.000Z",
+      "usedStorage": 10590299512,
+      "safetensors": {
+        "parameters": {
+          "F32": 423936,
+          "BF16": 1821356272,
+          "F8_E4M3": 6945767424
+        },
+        "total": 8767547632
+      }
+    },
+    "Qwen3-VL-8B-Thinking-GGUF": {
+      "sha": "bca5838231f8cc1303cf8810afffcfbdc41bc75a",
+      "lastModified": "2025-11-01T03:23:55.000Z",
+      "usedStorage": 32036668416,
+      "safetensors": null
+    },
+    "Qwen3-Omni-30B-A3B-Captioner": {
+      "sha": "a2bd106cbf527db5676e79662674da22b0545ec0",
+      "lastModified": "2025-09-22T13:46:56.000Z",
+      "usedStorage": 63440997784,
+      "safetensors": {
+        "parameters": {
+          "BF16": 31719205488
+        },
+        "total": 31719205488
+      }
+    },
+    "Qwen3-Omni-30B-A3B-Instruct": {
+      "sha": "26291f793822fb6be9555850f06dfe95f2d7e695",
+      "lastModified": "2025-09-22T14:17:52.000Z",
+      "usedStorage": 70523299202,
+      "safetensors": {
+        "parameters": {
+          "BF16": 35259818545
+        },
+        "total": 35259818545
+      }
+    },
+    "Qwen3-Omni-30B-A3B-Thinking": {
+      "sha": "2f443cfc4c54b14a815c0e2bb9a9d6cbcd9a748b",
+      "lastModified": "2025-09-22T14:17:44.000Z",
+      "usedStorage": 63440997640,
+      "safetensors": {
+        "parameters": {
+          "BF16": 31719205488
+        },
+        "total": 31719205488
+      }
+    },
+    "Qwen3-Embedding-0.6B": {
+      "sha": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+      "lastModified": "2026-04-20T02:45:58.000Z",
+      "usedStorage": 10170768124,
+      "safetensors": {
+        "parameters": {
+          "BF16": 595776512
+        },
+        "total": 595776512
+      }
+    },
+    "Qwen3-Embedding-0.6B-GGUF": {
+      "sha": "370f27d7550e0def9b39c1f16d3fbaa13aa67728",
+      "lastModified": "2025-07-14T23:19:36.000Z",
+      "usedStorage": 3673559296,
+      "safetensors": null
+    },
+    "Qwen3-Embedding-4B": {
+      "sha": "5cf2132abc99cad020ac570b19d031efec650f2b",
+      "lastModified": "2025-06-20T09:30:56.000Z",
+      "usedStorage": 36248505432,
+      "safetensors": null
+    },
+    "Qwen3-Embedding-4B-GGUF": {
+      "sha": "f4602530db1d980e16da9d7d3a70294cf5c190be",
+      "lastModified": "2025-08-03T14:37:22.000Z",
+      "usedStorage": 49192988160,
+      "safetensors": null
+    },
+    "Qwen3-Embedding-8B": {
+      "sha": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+      "lastModified": "2025-07-07T09:02:21.000Z",
+      "usedStorage": 60585337250,
+      "safetensors": {
+        "parameters": {
+          "BF16": 7567295488
+        },
+        "total": 7567295488
+      }
+    },
+    "Qwen3-Embedding-8B-GGUF": {
+      "sha": "69d0e58a13e463cd99a9b83e3f5fee7c10265fab",
+      "lastModified": "2025-07-15T02:30:41.000Z",
+      "usedStorage": 89587750656,
+      "safetensors": null
+    },
+    "Qwen3-Reranker-0.6B": {
+      "sha": "e61197ed45024b0ed8a2d74b80b4d909f1255473",
+      "lastModified": "2026-04-16T08:55:59.000Z",
+      "usedStorage": 1203010934,
+      "safetensors": {
+        "parameters": {
+          "BF16": 595776512
+        },
+        "total": 595776512
+      }
+    },
+    "Qwen3-Reranker-4B": {
+      "sha": "22e683669bc0f0bd69640a1354a6d0aebcfeede5",
+      "lastModified": "2026-04-16T08:56:07.000Z",
+      "usedStorage": 8055037614,
+      "safetensors": {
+        "parameters": {
+          "BF16": 4021784576
+        },
+        "total": 4021784576
+      }
+    },
+    "Qwen3-Reranker-8B": {
+      "sha": "77d193c791ed757ca307ee72715aa132723da912",
+      "lastModified": "2026-04-16T08:56:16.000Z",
+      "usedStorage": 16388564926,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8188548096
+        },
+        "total": 8188548096
+      }
+    },
+    "Qwen3-VL-Embedding-2B": {
+      "sha": "9f2f7e710d6d81056aa5c0a4f04764fec6bb7bda",
+      "lastModified": "2026-04-16T08:54:25.000Z",
+      "usedStorage": 4266564017,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2127532032
+        },
+        "total": 2127532032
+      }
+    },
+    "Qwen3-VL-Embedding-8B": {
+      "sha": "2c4565515e0f265c6511776e7193b22c0968ddc7",
+      "lastModified": "2026-04-16T08:55:18.000Z",
+      "usedStorage": 16301103329,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8144793840
+        },
+        "total": 8144793840
+      }
+    },
+    "Qwen3-VL-Reranker-2B": {
+      "sha": "4bd860ac4f15ad1897a214615cccc700f8f71818",
+      "lastModified": "2026-04-16T08:55:33.000Z",
+      "usedStorage": 4266562966,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2127532032
+        },
+        "total": 2127532032
+      }
+    },
+    "Qwen3-VL-Reranker-8B": {
+      "sha": "b212dc8c91a8164aef1ea2de9c1a867611e75c04",
+      "lastModified": "2026-04-16T08:55:43.000Z",
+      "usedStorage": 17545762142,
+      "safetensors": {
+        "parameters": {
+          "BF16": 8767123696
+        },
+        "total": 8767123696
+      }
+    },
+    "Qwen3-ASR-0.6B": {
+      "sha": "5eb144179a02acc5e5ba31e748d22b0cf3e303b0",
+      "lastModified": "2026-01-30T03:00:21.000Z",
+      "usedStorage": 1876091704,
+      "safetensors": {
+        "parameters": {
+          "BF16": 938008576
+        },
+        "total": 938008576
+      }
+    },
+    "Qwen3-ASR-1.7B": {
+      "sha": "7278e1e70fe206f11671096ffdd38061171dd6e5",
+      "lastModified": "2026-01-30T03:00:12.000Z",
+      "usedStorage": 4699896190,
+      "safetensors": {
+        "parameters": {
+          "BF16": 2349217408
+        },
+        "total": 2349217408
+      }
+    },
+    "Qwen3-ForcedAligner-0.6B": {
+      "sha": "c7cbfc2048c462b0d63a45797104fc9db3ad62b7",
+      "lastModified": "2026-01-30T03:00:55.000Z",
+      "usedStorage": 1835544544,
+      "safetensors": {
+        "parameters": {
+          "BF16": 917728896
+        },
+        "total": 917728896
+      }
+    },
+    "Qwen3-TTS-12Hz-0.6B-Base": {
+      "sha": "5d83992436eae1d760afd27aff78a71d676296fc",
+      "lastModified": "2026-01-29T08:01:19.000Z",
+      "usedStorage": 2511637364,
+      "safetensors": null
+    },
+    "Qwen3-TTS-12Hz-0.6B-CustomVoice": {
+      "sha": "85e237c12c027371202489a0ec509ded67b5e4b5",
+      "lastModified": "2026-01-29T08:01:51.000Z",
+      "usedStorage": 2493919668,
+      "safetensors": {
+        "parameters": {
+          "BF16": 905788672
+        },
+        "total": 905788672
+      }
+    },
+    "Qwen3-TTS-12Hz-1.7B-Base": {
+      "sha": "fd4b254389122332181a7c3db7f27e918eec64e3",
+      "lastModified": "2026-01-23T05:25:33.000Z",
+      "usedStorage": 4539706836,
+      "safetensors": null
+    },
+    "Qwen3-TTS-12Hz-1.7B-CustomVoice": {
+      "sha": "0c0e3051f131929182e2c023b9537f8b1c68adfe",
+      "lastModified": "2026-01-29T08:00:54.000Z",
+      "usedStorage": 4521505557,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1916676352
+        },
+        "total": 1916676352
+      }
+    },
+    "Qwen3-TTS-12Hz-1.7B-VoiceDesign": {
+      "sha": "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+      "lastModified": "2026-01-29T08:04:19.000Z",
+      "usedStorage": 4515695644,
+      "safetensors": {
+        "parameters": {
+          "BF16": 1916676352
+        },
+        "total": 1916676352
+      }
+    },
+    "Qwen3-TTS-Tokenizer-12Hz": {
+      "sha": "7dd38ad4e9bad454aae9cd937d0cd577604fe229",
+      "lastModified": "2026-01-29T08:01:28.000Z",
+      "usedStorage": 682293092,
+      "safetensors": null
+    },
+    "Qwen-Image": {
+      "sha": "75e0b4be04f60ec59a75f475837eced720f823b6",
+      "lastModified": "2025-08-18T02:42:19.000Z",
+      "usedStorage": 57954375058,
+      "safetensors": null
+    },
+    "Qwen-Image-2512": {
+      "sha": "25468b98e3276ca6700de15c6628e51b7de54a26",
+      "lastModified": "2025-12-31T09:47:56.000Z",
+      "usedStorage": 57699806247,
+      "safetensors": null
+    },
+    "Qwen-Image-Edit": {
+      "sha": "ac7f9318f633fc4b5778c59367c8128225f1e3de",
+      "lastModified": "2025-08-25T04:41:11.000Z",
+      "usedStorage": 57710671286,
+      "safetensors": null
+    },
+    "Qwen-Image-Edit-2509": {
+      "sha": "d3968ef930e841f4c73640fb8afa3b306a78167e",
+      "lastModified": "2025-09-22T13:37:12.000Z",
+      "usedStorage": 57711227846,
+      "safetensors": null
+    },
+    "Qwen-Image-Edit-2511": {
+      "sha": "6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9",
+      "lastModified": "2025-12-23T13:13:52.000Z",
+      "usedStorage": 57710671694,
+      "safetensors": null
+    },
+    "Qwen-Image-Layered": {
+      "sha": "8f0ca708dfff6ba1dd5f2d85d78f8c108a040bcf",
+      "lastModified": "2025-12-19T09:11:18.000Z",
+      "usedStorage": 57732278528,
+      "safetensors": null
+    }
+  }
+}

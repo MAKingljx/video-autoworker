@@ -1,0 +1,35 @@
+#!/bin/sh
+set +e
+
+LABEL="ai.aiworker.qwen36-server"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+NAME="${QWEN36_NAME:-qwen36-35b-a3b-q8}"
+PORT="${QWEN36_PORT:-18091}"
+PID_FILE="$HOME/ai-worker/run/$NAME.pid"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+
+launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 2
+    fi
+  fi
+  rm -f "$PID_FILE"
+fi
+
+pids="$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)"
+if [ -n "$pids" ]; then
+  echo "$pids" | xargs kill 2>/dev/null || true
+fi
+
+echo "stopped qwen36 port=$PORT supervisor=$LABEL"
+if [ -f "$PLIST" ]; then
+  echo "restart with: launchctl bootstrap $DOMAIN $PLIST && launchctl kickstart -k $DOMAIN/$LABEL"
+fi

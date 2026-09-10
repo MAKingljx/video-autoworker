@@ -1,0 +1,21 @@
+#!/bin/sh
+set +e
+
+PID_FILE="$HOME/ai-worker/run/deepseek-v4-flash-bf16.pid"
+LOG_FILE="$HOME/ai-worker/logs/deepseek-v4-flash-bf16-mlx.log"
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    echo "stopped DeepSeek server: pid=$pid"
+  else
+    echo "DeepSeek pid not running: stale pid=$pid"
+  fi
+  rm -f "$PID_FILE"
+else
+  echo "DeepSeek pid file not found"
+fi
+
+pkill -f 'mlx_lm.*DeepSeek-V4-Flash-bf16' 2>/dev/null
+echo "cleanup sent; log=$LOG_FILE"

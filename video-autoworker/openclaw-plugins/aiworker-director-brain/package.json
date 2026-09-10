@@ -1,0 +1,23 @@
+{
+  "name": "@aiworker/openclaw-aiworker-director-brain",
+  "version": "0.4.3",
+  "private": true,
+  "description": "OpenClaw bridge for work-scoped director context, global techniques, and shared extraction workflows",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.9.2"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    }
+  }
+}

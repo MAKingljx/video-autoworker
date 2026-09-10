@@ -1,0 +1,78 @@
+#!/bin/sh
+set -eu
+
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+NAME="${QWEN3_NAME:-qwen3-235b-q6k}"
+PORT="${QWEN3_PORT:-18090}"
+CTX_SIZE="${QWEN3_CTX_SIZE:-32768}"
+LOG_FILE="$LOG_DIR/$NAME.log"
+PID_FILE="$RUN_DIR/$NAME.pid"
+LLAMA_SERVER="${QWEN3_LLAMA_SERVER:-$HOME/ai-worker/src/llama.cpp/build-aiworker-metal/bin/llama-server}"
+MODEL_FILE="${QWEN3_MODEL_FILE:-$HOME/models/Qwen3-235B-A22B-Instruct-2507-GGUF-Q6_K/Qwen_Qwen3-235B-A22B-Instruct-2507-Q6_K/Qwen_Qwen3-235B-A22B-Instruct-2507-Q6_K-00001-of-00005.gguf}"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+if [ ! -x "$LLAMA_SERVER" ]; then
+  echo "llama-server not found or not executable: $LLAMA_SERVER" >&2
+  exit 1
+fi
+
+if [ ! -f "$MODEL_FILE" ]; then
+  echo "model file not found: $MODEL_FILE" >&2
+  exit 1
+fi
+
+model_dir="$(dirname "$MODEL_FILE")"
+gguf_count="$(find "$model_dir" -maxdepth 1 -name '*.gguf' -type f | wc -l | tr -d ' ')"
+if [ "$gguf_count" -lt 5 ]; then
+  echo "Qwen GGUF shards incomplete: found=$gguf_count expected=5 dir=$model_dir" >&2
+  exit 1
+fi
+
+if [ -s "$PID_FILE" ]; then
+  old_pid="$(cat "$PID_FILE")"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    echo "already running: pid=$old_pid port=$PORT log=$LOG_FILE"
+    exit 0
+  fi
+fi
+
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already listening; not starting another Qwen server" >&2
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
+  exit 1
+fi
+
+nohup "$LLAMA_SERVER" \
+  --model "$MODEL_FILE" \
+  --alias "$NAME" \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --ctx-size "$CTX_SIZE" \
+  --parallel "${QWEN3_PARALLEL:-1}" \
+  --batch-size "${QWEN3_BATCH_SIZE:-512}" \
+  --ubatch-size "${QWEN3_UBATCH_SIZE:-128}" \
+  --gpu-layers "${QWEN3_GPU_LAYERS:-all}" \
+  --split-mode "${QWEN3_SPLIT_MODE:-none}" \
+  --main-gpu "${QWEN3_MAIN_GPU:-0}" \
+  --flash-attn "${QWEN3_FLASH_ATTN:-on}" \
+  --cache-type-k "${QWEN3_CACHE_TYPE_K:-q8_0}" \
+  --cache-type-v "${QWEN3_CACHE_TYPE_V:-q8_0}" \
+  --jinja \
+  --timeout "${QWEN3_TIMEOUT:-900}" \
+  --threads "${QWEN3_THREADS:-16}" \
+  --threads-batch "${QWEN3_THREADS_BATCH:-16}" \
+  >"$LOG_FILE" 2>&1 &
+
+pid="$!"
+echo "$pid" > "$PID_FILE"
+sleep 5
+
+if kill -0 "$pid" 2>/dev/null; then
+  echo "started: pid=$pid port=$PORT model=$MODEL_FILE log=$LOG_FILE"
+else
+  echo "start failed; see log: $LOG_FILE" >&2
+  tail -n 120 "$LOG_FILE" >&2 || true
+  exit 1
+fi

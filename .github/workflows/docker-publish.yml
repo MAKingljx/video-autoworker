@@ -40,8 +40,8 @@ jobs:
       - name: Build diagnostic image without export
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: ./Dockerfile
+          context: ./video-autoworker
+          file: ./video-autoworker/Dockerfile
           push: false
           load: false
           platforms: linux/amd64,linux/arm64

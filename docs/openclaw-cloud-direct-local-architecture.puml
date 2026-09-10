@@ -1,0 +1,90 @@
+@startuml
+left to right direction
+skinparam shadowing false
+skinparam packageStyle rectangle
+skinparam componentStyle rectangle
+skinparam defaultFontName "PingFang SC"
+skinparam ArrowColor #4C6FFF
+skinparam ArrowThickness 1.5
+skinparam PackageBorderColor #8B97A8
+skinparam PackageBackgroundColor #F8FAFD
+skinparam ComponentBorderColor #607086
+skinparam ComponentBackgroundColor #FFFFFF
+skinparam NoteBackgroundColor #FFF8DC
+skinparam NoteBorderColor #D6B656
+skinparam linetype ortho
+
+actor "用户" as User
+
+package "接入层" as P1 {
+  [OpenClaw Gateway] as Gateway
+}
+
+package "控制层" as P2 {
+  [任务路由] as Router
+  [权限控制] as Auth
+  [日志审计] as Audit
+}
+
+package "云端决策层" as P3 {
+  [云端主模型] as CloudModel
+  [任务规划器] as Planner
+  [结果复核器] as Reviewer
+}
+
+package "本地执行层" as P4 {
+  [本地模型节点 A] as LocalA
+  [本地模型节点 B] as LocalB
+  [Embedding / Rerank 节点] as LocalEmb
+}
+
+package "输出层" as P5 {
+  [结果汇总] as Output
+  [返回响应] as Response
+}
+
+' 固定各层顺序，避免自动布局混乱
+User -[hidden]-> Gateway
+Gateway -[hidden]-> Router
+Router -[hidden]-> CloudModel
+CloudModel -[hidden]-> LocalA
+LocalA -[hidden]-> Output
+
+' 每层内部关系
+Gateway --> Router : 任务进入
+Router --> Auth : 鉴权
+Router --> Audit : 记录
+Router --> CloudModel : 转交任务
+
+CloudModel --> Planner : 理解与拆解任务
+Planner --> LocalA : 下发日常任务
+Planner --> LocalB : 下发推理任务
+Planner --> LocalEmb : 下发检索 / 重排任务
+
+LocalA --> Reviewer : 返回执行结果
+LocalB --> Reviewer : 返回执行结果
+LocalEmb --> Reviewer : 返回辅助结果
+
+Reviewer --> Output : 汇总与整合
+Output --> Response : 生成最终答复
+
+' 端到端主路径
+User --> Gateway : 发起任务
+Response --> User : 返回结果
+
+note top of CloudModel
+云端模型负责：
+- 理解任务
+- 拆解任务
+- 指挥本地模型
+- 复核最终结果
+end note
+
+note bottom of LocalA
+本地模型负责：
+- 日常任务
+- 内部知识问答
+- 高并发执行
+end note
+
+@enduml

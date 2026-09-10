@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+SERVER="${AIWORKER_SMB_SERVER:-heisenbergs-1demac-studio.local}"
+SMB_USER="${AIWORKER_SMB_USER:-heisenbergs-1}"
+BASE="${AIWORKER_MOUNT_BASE:-$HOME/AIWorkerSecondStorage}"
+STORAGE_SHARE="${AIWORKER_STORAGE_SHARE:-AIWorkerStorage}"
+MODELS_SHARE="${AIWORKER_MODELS_SHARE:-AIWorkerModelsRO}"
+
+mount_if_needed() {
+  share_name="$1"
+  mount_path="$2"
+  volume_path="/Volumes/$share_name"
+
+  /bin/mkdir -p "$mount_path"
+
+  if [ -L "$mount_path" ]; then
+    target="$(/usr/bin/readlink "$mount_path")"
+    if [ -n "$target" ] && /sbin/mount | /usr/bin/grep -F " on $target " >/dev/null 2>&1; then
+      echo "Already available: $mount_path -> $target"
+      return 0
+    fi
+  fi
+
+  if /sbin/mount | /usr/bin/grep -F " on $mount_path " >/dev/null 2>&1; then
+    echo "Already mounted: $mount_path"
+    return 0
+  fi
+
+  if /sbin/mount | /usr/bin/grep -F " on $volume_path " >/dev/null 2>&1; then
+    /bin/rmdir "$mount_path" 2>/dev/null || true
+    /bin/ln -sfn "$volume_path" "$mount_path"
+    echo "Linked existing Finder mount: $mount_path -> $volume_path"
+    return 0
+  fi
+
+  if /sbin/mount_smbfs -N "//$SMB_USER@$SERVER/$share_name" "$mount_path"; then
+    return 0
+  fi
+
+  echo "Could not mount //$SMB_USER@$SERVER/$share_name." >&2
+  echo "If this is the first login after reboot, open smb://$SMB_USER@$SERVER/$share_name once and save the password to Keychain." >&2
+  return 1
+}
+
+/bin/mkdir -p "$BASE"
+/bin/chmod 700 "$BASE"
+
+mount_if_needed "$STORAGE_SHARE" "$BASE/storage"
+mount_if_needed "$MODELS_SHARE" "$BASE/models"
+
+/bin/df -h "$BASE/storage" "$BASE/models"

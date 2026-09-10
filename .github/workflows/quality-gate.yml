@@ -4,69 +4,188 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: quality-gate-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  quality-gate:
-    # Deployment and installer tests exercise launchd, plutil and BSD stat,
-    # matching the Mac Studio production target.
-    runs-on: macos-15
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: video-autoworker
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      base: ${{ steps.plan.outputs.base }}
+      partitions: ${{ steps.plan.outputs.partitions }}
+      integration: ${{ steps.plan.outputs.integration }}
+      plugins: ${{ steps.plan.outputs.plugins }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          # Historical runtime compatibility tests read immutable source commits.
           fetch-depth: 0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version-file: '.nvmrc'
-          cache: 'pnpm'
+          node-version-file: video-autoworker/.nvmrc
+      - name: Select checks from the change scope
+        id: plan
+        env:
+          CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          args=()
+          if [[ -n "$CHANGE_BASE" ]]; then args+=(--base "$CHANGE_BASE"); fi
+          if [[ "$FORCE_FULL" == true ]]; then args+=(--force-full); fi
+          node scripts/ci-impact-plan.mjs "${args[@]}" > "$RUNNER_TEMP/ci-impact.json"
+          node --input-type=module <<'JS'
+          import { readFileSync, appendFileSync, lstatSync } from 'node:fs'
+          import { execFileSync } from 'node:child_process'
+          import { resolve } from 'node:path'
+          import { resolveGitSourceLayout, gitSourceEnvironment } from './scripts/lib/git-source-layout.mjs'
+          import { scanReleaseFile } from './scripts/check-sensitive-content.mjs'
+          const plan = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/ci-impact.json`))
+          const { gitRoot } = resolveGitSourceLayout(process.cwd())
+          const git = args => execFileSync('git', ['-C', gitRoot, ...args], { encoding: 'utf8', env: gitSourceEnvironment() })
+          const paths = git(['ls-files', '-z']).split('\0').filter(Boolean)
+          const forbidden = paths.filter(p => /(^|\/)(?:\.PhoenixBrain|node_modules|\.venv|__pycache__)(\/|$)/u.test(p)
+            || /^(?:private|repositories|rollback|memory|output|tmp)\//u.test(p)
+            || /^(?:TOOLS|MEMORY|USER|IDENTITY|SOUL|HEARTBEAT)\.md$/u.test(p)
+            || /\.(?:db|sqlite|sqlite3|safetensors|gguf|pem|key)$/iu.test(p))
+          if (forbidden.length) throw new Error(`Private runtime members are tracked: ${JSON.stringify(forbidden)}`)
+          if (plan.mode === 'docs') {
+            git(['diff', '--check', plan.base, plan.head])
+            const changed = git(['diff', '--name-only', '-z', '--diff-filter=ACMR', plan.base, plan.head]).split('\0').filter(Boolean)
+            const findings = []
+            for (const member of changed) {
+              const file = resolve(gitRoot, member)
+              const stat = lstatSync(file)
+              if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe documentation member')
+              findings.push(...scanReleaseFile(member, readFileSync(file), { useTypescript: false }))
+            }
+            if (findings.length) throw new Error(`Sensitive content detected: ${JSON.stringify(findings)}`)
+          } else {
+            git(['show', '--format=', '--check', plan.head])
+          }
+          const values = {
+            mode: plan.mode, base: plan.base || '',
+            partitions: JSON.stringify(plan.rootPartitions.length ? plan.rootPartitions : ['regular']),
+            integration: String(plan.runIntegration), plugins: String(plan.runPluginTests),
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''))
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `检查范围：${plan.mode}\n\n原因：${plan.reasons.join(', ')}\n\n变更文件：${plan.changedCount}；根测试分组：${plan.rootPartitions.length}。\n`)
+          JS
 
-      - name: Configure git identity
+  root-tests:
+    needs: plan
+    if: needs.plan.outputs.mode != 'docs'
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        partition: ${{ fromJSON(needs.plan.outputs.partitions) }}
+    defaults:
+      run:
+        working-directory: video-autoworker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: video-autoworker/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: video-autoworker/.nvmrc
+          cache: pnpm
+          cache-dependency-path: video-autoworker/pnpm-lock.yaml
+      - name: Configure isolated test identity
         run: |
           git config --global user.email "ci@mission-control.dev"
           git config --global user.name "CI"
+      - run: pnpm install --frozen-lockfile
+      - name: Run the selected test partition
+        env:
+          CI_PARTITION: ${{ matrix.partition }}
+          CI_MODE: ${{ needs.plan.outputs.mode }}
+          CI_BASE: ${{ needs.plan.outputs.base }}
+        run: |
+          args=(--partition "$CI_PARTITION")
+          if [[ "$CI_MODE" == targeted && "$CI_PARTITION" == regular ]]; then args+=(--changed "$CI_BASE"); fi
+          node scripts/run-root-vitest.mjs "${args[@]}"
 
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Scan versioned source for sensitive content
-        run: pnpm scan:sensitive:source
-
-      - name: API contract parity
-        run: pnpm api:parity
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Unit tests
-        run: pnpm test
-
-      - name: OpenClaw session QA contracts
-        run: pnpm qa:contracts
-
+  integration:
+    needs: plan
+    if: needs.plan.outputs.mode != 'docs'
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: video-autoworker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: video-autoworker/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: video-autoworker/.nvmrc
+          cache: pnpm
+          cache-dependency-path: video-autoworker/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Source privacy and static checks
+        run: |
+          pnpm scan:sensitive:source
+          pnpm api:parity
+          pnpm lint
+          pnpm typecheck
+      - name: OpenClaw runtime and session contracts
+        if: needs.plan.outputs.plugins == 'true'
+        run: |
+          pnpm test:openclaw-video-command
+          pnpm test:openclaw-director-brain
+          pnpm test:openclaw-task-flow
+          pnpm qa:contracts
       - name: Prepare E2E environment
+        if: needs.plan.outputs.integration == 'true'
         run: cp .env.test .env
-
-      - name: Build
-        run: pnpm build
-
-      - name: Audit standalone release artifact
-        run: pnpm audit:standalone
-
+      - name: Build and audit standalone artifact
+        if: needs.plan.outputs.integration == 'true'
+        run: |
+          pnpm build
+          pnpm audit:standalone
       - name: Install Playwright browsers
+        if: needs.plan.outputs.integration == 'true'
         run: pnpm exec playwright install --with-deps
-
       - name: E2E tests
+        if: needs.plan.outputs.integration == 'true'
         run: pnpm test:e2e
+
+  quality-gate:
+    name: quality-gate
+    needs: [plan, root-tests, integration]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every selected check to succeed
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          TEST_RESULT: ${{ needs.root-tests.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          if [[ "$MODE" == docs ]]; then
+            test "$TEST_RESULT" = skipped
+            test "$INTEGRATION_RESULT" = skipped
+          else
+            test "$TEST_RESULT" = success
+            test "$INTEGRATION_RESULT" = success
+          fi

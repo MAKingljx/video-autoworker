@@ -1,0 +1,59 @@
+#!/bin/sh
+set -eu
+
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+NAME="${QWEN36_NAME:-qwen36-35b-a3b-q8}"
+PORT="${QWEN36_PORT:-18091}"
+CTX_SIZE="${QWEN36_CTX_SIZE:-131072}"
+PID_FILE="$RUN_DIR/$NAME.pid"
+LLAMA_SERVER="${QWEN36_LLAMA_SERVER:-$HOME/ai-worker/src/llama.cpp/build-aiworker-metal/bin/llama-server}"
+MODEL_FILE="${QWEN36_MODEL_FILE:-$HOME/models/Qwen3.6-35B-A3B-FP8-GGUF/qwen36-35b-a3b-fp8-q8_0.gguf}"
+MMPROJ_FILE="${QWEN36_MMPROJ_FILE:-$HOME/models/Qwen3.6-35B-A3B-FP8-GGUF/mmproj-qwen36-35b-a3b-fp8-f16.gguf}"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+if [ ! -x "$LLAMA_SERVER" ]; then
+  echo "llama-server not found or not executable: $LLAMA_SERVER" >&2
+  exit 1
+fi
+
+if [ ! -f "$MODEL_FILE" ]; then
+  echo "model file not found: $MODEL_FILE" >&2
+  exit 1
+fi
+
+rm -f "$PID_FILE"
+echo "$$" > "$PID_FILE"
+mmproj_args=""
+if [ -f "$MMPROJ_FILE" ]; then
+  mmproj_args="--mmproj $MMPROJ_FILE --mmproj-offload"
+fi
+
+# Run in the foreground so launchd owns the real llama-server lifecycle.
+# Do not background/nohup this process; llama.cpp server cleanup is sensitive to orphaned children.
+# shellcheck disable=SC2086
+exec "$LLAMA_SERVER" \
+  --model "$MODEL_FILE" \
+  $mmproj_args \
+  --alias "$NAME" \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --ctx-size "$CTX_SIZE" \
+  --parallel "${QWEN36_PARALLEL:-1}" \
+  --batch-size "${QWEN36_BATCH_SIZE:-512}" \
+  --ubatch-size "${QWEN36_UBATCH_SIZE:-128}" \
+  --gpu-layers "${QWEN36_GPU_LAYERS:-all}" \
+  --split-mode "${QWEN36_SPLIT_MODE:-none}" \
+  --main-gpu "${QWEN36_MAIN_GPU:-0}" \
+  --flash-attn "${QWEN36_FLASH_ATTN:-on}" \
+  --cache-type-k "${QWEN36_CACHE_TYPE_K:-q8_0}" \
+  --cache-type-v "${QWEN36_CACHE_TYPE_V:-q8_0}" \
+  --ctx-checkpoints "${QWEN36_CTX_CHECKPOINTS:-0}" \
+  --checkpoint-every-n-tokens "${QWEN36_CHECKPOINT_EVERY_N_TOKENS:--1}" \
+  --cache-ram "${QWEN36_CACHE_RAM:-4096}" \
+  --jinja \
+  --reasoning "${QWEN36_REASONING:-off}" \
+  --timeout "${QWEN36_TIMEOUT:-900}" \
+  --threads "${QWEN36_THREADS:-16}" \
+  --threads-batch "${QWEN36_THREADS_BATCH:-16}"

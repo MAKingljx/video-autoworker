@@ -1,74 +1,52 @@
-# Dependencies
-node_modules/
+# 仅跟踪产品源码与经审查的公共项目资料。
+/*
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/AGENTS.md
+!/README.md
+!/video-autoworker/
+!/docs/
+!/scripts/
+!/launch-agents/
 
-# Next.js
-.next/
-out/
-
-# Production
-build/
-dist/
-
-# Misc
-.DS_Store
-*.pem
-.env*.local
-
-# npm (root project uses pnpm; ops/n8n intentionally tracks its npm lockfile)
-/package-lock.json
-
-# Debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Vercel
-.vercel
-
-# TypeScript
-*.tsbuildinfo
-next-env.d.ts
-.env
-.data/
-aegis/
-/need/
-
-# Playwright
-test-results/
-playwright-report/
-.tmp/
-.playwright-mcp/
-.playwright-cli/
-
-# Local runtime/export artifacts
-output/
-/report/
-src-tauri/target/
-*.log
-.runtime/
-.run/
+# 任意层级均不得包含本机身份、依赖、缓存、运行数据或密钥。
 .PhoenixBrain
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.next/
+.pnpm-store/
+.corepack-cache/
+.playwright-cli/
+.playwright-mcp/
+.DS_Store
+*.tsbuildinfo
+*.log
 *.pid
-*.bak-*
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.pem
+*.key
+.env*
+!.env.example
+!.env.sample
+!.env.template
+!.env.test
+need/
 
-# n8n runtime state is external and must never enter Git. Deployment assets,
-# workflow JSON, the lockfile, and the env template under ops/n8n stay tracked.
-ops/n8n/node_modules/
-ops/n8n/.env
-ops/n8n/.n8n/
-ops/n8n/data/
-ops/n8n/logs/
-ops/n8n/run/
-ops/n8n/credentials/
-ops/n8n/backups/
+# 原始运维记录与规划原件仅保留本机，公共结论进入正式运维记录。
+/docs/remaining-tasks.md
+/docs/codex-cli-temporary-openclaw-auth-2026-07-30.md
+/docs/china-open-model-token-business-plan-2026.*
 
-# Local QA screenshots
-/e2e-debug-*.png
-/e2e-channels-*.png
-
-# Local OpenClaw canary evidence (private runtime reports; never publish)
-/.canary-results/
-
-# Claude Code context files (root CLAUDE.md is committed for AI agent discovery)
-**/CLAUDE.md
-!/CLAUDE.md
+/docs/*.docx
+/docs/*.pptx
+/docs/*.xlsx

@@ -1,0 +1,36 @@
+#!/bin/sh
+set +e
+
+NAME="${QWEN3_NAME:-qwen3-235b-q6k}"
+PORT="${QWEN3_PORT:-18090}"
+PID_FILE="$HOME/ai-worker/run/$NAME.pid"
+LOG_FILE="$HOME/ai-worker/logs/$NAME.log"
+MODEL_DIR="${QWEN3_MODEL_DIR:-$HOME/models/Qwen3-235B-A22B-Instruct-2507-GGUF-Q6_K/Qwen_Qwen3-235B-A22B-Instruct-2507-Q6_K}"
+
+printf "node=%s user=%s\n" "$(hostname 2>/dev/null)" "$(whoami 2>/dev/null)"
+printf "server_port=%s\n" "$PORT"
+printf "model_dir=%s\n" "$MODEL_DIR"
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    printf "server=running pid=%s\n" "$pid"
+    ps -o pid,etime,stat,%cpu,%mem,rss,command -p "$pid" || true
+  else
+    printf "server=stale pid=%s\n" "$pid"
+  fi
+else
+  printf "server=not-running\n"
+fi
+
+printf "listen=%s\n" "$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
+printf "gguf_shards=%s\n" "$(find "$MODEL_DIR" -maxdepth 1 -name '*.gguf' -type f 2>/dev/null | wc -l | tr -d ' ')"
+du -sh "$(dirname "$MODEL_DIR")" 2>/dev/null || true
+
+echo "processes:"
+pgrep -af 'llama-server.*qwen3-235b-q6k|llama-server.*Qwen3-235B' || true
+
+if [ -f "$LOG_FILE" ]; then
+  printf "log=%s\n" "$LOG_FILE"
+  tail -n 80 "$LOG_FILE"
+fi

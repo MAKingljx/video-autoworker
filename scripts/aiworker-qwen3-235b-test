@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+PORT="${QWEN3_PORT:-18090}"
+MODEL="${QWEN3_NAME:-qwen3-235b-q6k}"
+
+curl -sS "http://127.0.0.1:$PORT/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"model\":\"$MODEL\",
+    \"messages\":[{\"role\":\"user\",\"content\":\"只输出一个字：好\"}],
+    \"temperature\":0,
+    \"max_tokens\":16,
+    \"chat_template_kwargs\":{\"thinking\":false}
+  }"
+echo

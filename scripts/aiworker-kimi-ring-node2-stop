@@ -1,0 +1,24 @@
+#!/bin/sh
+set +e
+
+PID_FILE="$HOME/ai-worker/run/kimi-mlx-ring.pid"
+LOG_FILE="$HOME/ai-worker/logs/kimi-mlx-ring.log"
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    echo "stopped launcher: pid=$pid"
+  else
+    echo "launcher not running: stale pid=$pid"
+  fi
+  rm -f "$PID_FILE"
+else
+  echo "launcher pid file not found"
+fi
+
+pkill -f 'mlx_lm.server --model .*Kimi-K2.6-MLX-4bit' 2>/dev/null
+pkill -f 'mlx.launch .*mlx-ring-hostfile.json' 2>/dev/null
+ssh aiworker-node1-tb "pkill -f 'mlx_lm.server --model .*Kimi-K2.6-MLX-4bit' 2>/dev/null; pkill -f 'mlx.launch .*mlx-ring-hostfile.json' 2>/dev/null" 2>/dev/null
+
+echo "cleanup sent; log=$LOG_FILE"

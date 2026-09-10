@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+LOG_FILE="$LOG_DIR/deepseek-v4-flash-bf16-mlx.log"
+PID_FILE="$RUN_DIR/deepseek-v4-flash-bf16.pid"
+MODEL_DIR="${DEEPSEEK_MODEL_DIR:-$HOME/models/DeepSeek-V4-Flash-bf16}"
+PORT="${DEEPSEEK_PORT:-18082}"
+PYTHON_BIN="${DEEPSEEK_PYTHON:-$HOME/ai-worker/src/exo/.venv/bin/python}"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+if [ ! -f "$MODEL_DIR/config.json" ]; then
+  echo "model config not found: $MODEL_DIR/config.json" >&2
+  exit 1
+fi
+
+shard_count="$(find "$MODEL_DIR" -maxdepth 1 -name 'model-*.safetensors' -type f | wc -l | tr -d ' ')"
+if [ "$shard_count" -lt 33 ]; then
+  echo "model shards incomplete: found=$shard_count expected=33 dir=$MODEL_DIR" >&2
+  exit 1
+fi
+
+if [ -s "$PID_FILE" ]; then
+  old_pid="$(cat "$PID_FILE")"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    echo "already running: pid=$old_pid port=$PORT log=$LOG_FILE"
+    exit 0
+  fi
+fi
+
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already listening; not starting another DeepSeek server" >&2
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
+  exit 1
+fi
+
+nohup "$PYTHON_BIN" -m mlx_lm server \
+  --model "$MODEL_DIR" \
+  --trust-remote-code \
+  --host 127.0.0.1 \
+  --port "$PORT" \
+  --max-tokens "${DEEPSEEK_MAX_TOKENS:-1024}" \
+  --chat-template-args '{"thinking_mode":"chat"}' \
+  --temp "${DEEPSEEK_TEMP:-0.2}" \
+  --prompt-concurrency "${DEEPSEEK_PROMPT_CONCURRENCY:-1}" \
+  --decode-concurrency "${DEEPSEEK_DECODE_CONCURRENCY:-1}" \
+  --prefill-step-size "${DEEPSEEK_PREFILL_STEP_SIZE:-512}" \
+  --prompt-cache-size "${DEEPSEEK_PROMPT_CACHE_SIZE:-2}" \
+  --log-level INFO \
+  >"$LOG_FILE" 2>&1 &
+
+pid="$!"
+echo "$pid" > "$PID_FILE"
+sleep 5
+
+if kill -0 "$pid" 2>/dev/null; then
+  echo "started: pid=$pid port=$PORT model=$MODEL_DIR log=$LOG_FILE"
+else
+  echo "start failed; see log: $LOG_FILE" >&2
+  tail -n 120 "$LOG_FILE" >&2 || true
+  exit 1
+fi

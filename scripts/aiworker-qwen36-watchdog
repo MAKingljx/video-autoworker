@@ -1,0 +1,74 @@
+#!/bin/sh
+set +e
+
+LABEL="ai.aiworker.qwen36-server"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+NAME="${QWEN36_NAME:-qwen36-35b-a3b-q8}"
+PORT="${QWEN36_PORT:-18091}"
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+LOG_FILE="$LOG_DIR/qwen36-watchdog.log"
+LOCK_DIR="$RUN_DIR/qwen36-watchdog.lock"
+COOLDOWN_FILE="$RUN_DIR/qwen36-watchdog.last-kickstart"
+UID_NUM="$(id -u)"
+DOMAIN="gui/$UID_NUM"
+COOLDOWN_SECONDS="${QWEN36_WATCHDOG_COOLDOWN_SECONDS:-120}"
+
+mkdir -p "$LOG_DIR" "$RUN_DIR"
+
+ts() { date +%Y-%m-%d %H:%M:%S %Z; }
+log() { echo "$(ts) $*" >> "$LOG_FILE"; }
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  log "watchdog already running; skip"
+  exit 0
+fi
+cleanup() { rmdir "$LOCK_DIR" 2>/dev/null; }
+trap cleanup EXIT INT TERM
+
+now="$(date +%s)"
+last="0"
+[ -s "$COOLDOWN_FILE" ] && last="$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)"
+can_restart=1
+if [ $((now - last)) -lt "$COOLDOWN_SECONDS" ]; then
+  can_restart=0
+fi
+
+ensure_loaded() {
+  if [ ! -f "$PLIST" ]; then
+    log "$NAME server plist missing: $PLIST"
+    return 1
+  fi
+  if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    log "$NAME supervisor not loaded; bootstrapping $LABEL"
+    launchctl bootstrap "$DOMAIN" "$PLIST" >> "$LOG_FILE" 2>&1 || true
+  fi
+  return 0
+}
+
+kickstart_server() {
+  reason="$1"
+  if [ "$can_restart" -ne 1 ]; then
+    log "$NAME unhealthy ($reason) but cooldown active; skip kickstart"
+    return 0
+  fi
+  echo "$now" > "$COOLDOWN_FILE"
+  log "$NAME unhealthy ($reason); kickstarting $LABEL"
+  launchctl kickstart -k "$DOMAIN/$LABEL" >> "$LOG_FILE" 2>&1 || true
+}
+
+ensure_loaded || exit 0
+
+if ! lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  kickstart_server "port $PORT not listening"
+  exit 0
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  if ! curl -fsS --max-time 5 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+    kickstart_server "models endpoint failed"
+    exit 0
+  fi
+fi
+
+exit 0

@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+
+exec /usr/bin/python3 - "$@" <<'PY'
+import argparse
+import contextlib
+import os
+import sys
+
+import whisper
+
+parser = argparse.ArgumentParser(description="Fast local Whisper transcription for OpenClaw audio media.")
+parser.add_argument("--model", default=os.environ.get("AIWORKER_WHISPER_MODEL", "large-v3-turbo"))
+parser.add_argument("--language", default=os.environ.get("AIWORKER_WHISPER_LANGUAGE", "zh"))
+parser.add_argument("--max-chars", type=int, default=int(os.environ.get("AIWORKER_WHISPER_MAX_CHARS", "6000")))
+parser.add_argument("media_path")
+args = parser.parse_args()
+
+if not os.path.exists(args.media_path):
+    print(f"media not found: {args.media_path}", file=sys.stderr)
+    raise SystemExit(2)
+
+# OpenAI Whisper shells out to ffmpeg. The remote AI-worker install provides it here.
+os.environ["PATH"] = os.path.expanduser("~/ai-worker/bin") + os.pathsep + os.environ.get("PATH", "")
+
+model = whisper.load_model(args.model)
+with contextlib.redirect_stdout(sys.stderr):
+    result = model.transcribe(args.media_path, language=args.language or None, fp16=False, verbose=False)
+
+text = " ".join((result.get("text") or "").split())
+if args.max_chars and len(text) > args.max_chars:
+    text = text[: args.max_chars].rstrip() + "..."
+print(text)
+PY

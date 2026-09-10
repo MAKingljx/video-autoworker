@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Tiny terminal client for the local Kimi MLX-LM OpenAI-compatible endpoint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+
+DEFAULT_BASE_URL = "http://127.0.0.1:18080/v1"
+DEFAULT_MODEL = "default_model"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="kimi",
+        description="Ask the local Kimi ring server from the terminal.",
+    )
+    parser.add_argument("prompt", nargs="*", help="Prompt text. If omitted, stdin is used.")
+    parser.add_argument("--url", default=os.getenv("KIMI_BASE_URL", DEFAULT_BASE_URL), help="Base URL, default: %(default)s")
+    parser.add_argument("--model", default=os.getenv("KIMI_MODEL", DEFAULT_MODEL), help="Model id, default: %(default)s")
+    parser.add_argument("--system", default=os.getenv("KIMI_SYSTEM", ""), help="Optional system prompt")
+    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("KIMI_MAX_TOKENS", "1024")), help="Output token budget")
+    parser.add_argument("--temperature", type=float, default=float(os.getenv("KIMI_TEMPERATURE", "0.3")), help="Sampling temperature")
+    parser.add_argument("--think", action="store_true", help="Enable Kimi thinking/reasoning mode")
+    parser.add_argument("--show-reasoning", action="store_true", help="Print reasoning deltas to stderr when thinking is enabled")
+    parser.add_argument("--timeout", type=float, default=float(os.getenv("KIMI_TIMEOUT", "600")), help="HTTP timeout in seconds")
+    return parser.parse_args()
+
+
+def read_prompt(parts: list[str]) -> str:
+    if parts:
+        return " ".join(parts).strip()
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    try:
+        return input("kimi> ").strip()
+    except EOFError:
+        return ""
+
+
+def build_payload(args: argparse.Namespace, prompt: str) -> dict:
+    messages = []
+    if args.system.strip():
+        messages.append({"role": "system", "content": args.system.strip()})
+    messages.append({"role": "user", "content": prompt})
+    return {
+        "model": args.model,
+        "messages": messages,
+        "temperature": args.temperature,
+        "max_tokens": args.max_tokens,
+        "stream": True,
+        "chat_template_kwargs": {"thinking": bool(args.think)},
+    }
+
+
+def stream_response(args: argparse.Namespace, payload: dict) -> None:
+    endpoint = args.url.rstrip("/") + "/chat/completions"
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    wrote_content = False
+    with urllib.request.urlopen(request, timeout=args.timeout) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", "replace").strip()
+            if not line.startswith("data: "):
+                continue
+            data = line[6:]
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            content = delta.get("content") or ""
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content") or ""
+            if args.show_reasoning and reasoning:
+                print(reasoning, end="", file=sys.stderr, flush=True)
+            if content:
+                wrote_content = True
+                print(content, end="", flush=True)
+    if wrote_content:
+        print()
+
+
+def main() -> int:
+    args = parse_args()
+    prompt = read_prompt(args.prompt)
+    if not prompt:
+        print("kimi: empty prompt", file=sys.stderr)
+        return 2
+    try:
+        stream_response(args, build_payload(args, prompt))
+        return 0
+    except urllib.error.URLError as exc:
+        print(f"kimi: request failed: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

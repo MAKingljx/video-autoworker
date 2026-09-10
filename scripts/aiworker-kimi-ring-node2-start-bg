@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+LOG_DIR="$HOME/ai-worker/logs"
+RUN_DIR="$HOME/ai-worker/run"
+TMP_DIR="$HOME/ai-worker/tmp"
+LOG_FILE="$LOG_DIR/kimi-mlx-ring.log"
+PID_FILE="$RUN_DIR/kimi-mlx-ring.pid"
+HOSTFILE="$TMP_DIR/mlx-ring-hostfile.json"
+PORT=18080
+STARTING_PORT=32400
+MODEL_NAME=Kimi-K2.6-MLX-4bit
+
+mkdir -p "$LOG_DIR" "$RUN_DIR" "$TMP_DIR"
+
+cat >"$HOSTFILE" <<'JSON'
+{
+  "backend": "ring",
+  "envs": [
+    "AIWORKER_MLX_BACKEND=ring"
+  ],
+  "hosts": [
+    {
+      "ssh": "aiworker-self",
+      "ips": [
+        "169.254.246.247"
+      ],
+      "rdma": []
+    },
+    {
+      "ssh": "aiworker-node1-tb",
+      "ips": [
+        "169.254.98.138"
+      ],
+      "rdma": []
+    }
+  ]
+}
+JSON
+
+if [ -s "$PID_FILE" ]; then
+  old_pid="$(cat "$PID_FILE")"
+  if kill -0 "$old_pid" 2>/dev/null; then
+    echo "already running: pid=$old_pid port=$PORT log=$LOG_FILE"
+    exit 0
+  fi
+fi
+
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already listening; not starting another Kimi server" >&2
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >&2 || true
+  exit 1
+fi
+
+cd /tmp/aiworker-exo
+nohup .venv/bin/mlx.launch \
+  --verbose \
+  --hostfile "$HOSTFILE" \
+  --cwd /tmp/aiworker-exo \
+  --starting-port "$STARTING_PORT" \
+  --no-verify-script \
+  bash -lc 'exec .venv/bin/mlx_lm.server --model "$HOME/models/Kimi-K2.6-MLX-4bit" --trust-remote-code --host 0.0.0.0 --port 18080 --max-tokens 64 --log-level INFO' \
+  >"$LOG_FILE" 2>&1 &
+
+pid="$!"
+echo "$pid" > "$PID_FILE"
+sleep 3
+
+if kill -0 "$pid" 2>/dev/null; then
+  echo "started: pid=$pid port=$PORT model=$MODEL_NAME log=$LOG_FILE"
+else
+  echo "start failed; see log: $LOG_FILE" >&2
+  tail -n 100 "$LOG_FILE" >&2 || true
+  exit 1
+fi

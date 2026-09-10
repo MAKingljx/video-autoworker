@@ -1,0 +1,22 @@
+#!/bin/sh
+set +e
+
+NAME="${QWEN3_NAME:-qwen3-235b-q6k}"
+PID_FILE="$HOME/ai-worker/run/$NAME.pid"
+LOG_FILE="$HOME/ai-worker/logs/$NAME.log"
+
+if [ -s "$PID_FILE" ]; then
+  pid="$(cat "$PID_FILE")"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid"
+    echo "stopped Qwen server: pid=$pid"
+  else
+    echo "Qwen pid not running: stale pid=$pid"
+  fi
+  rm -f "$PID_FILE"
+else
+  echo "Qwen pid file not found"
+fi
+
+pkill -f 'llama-server.*qwen3-235b-q6k' 2>/dev/null
+echo "cleanup sent; log=$LOG_FILE"

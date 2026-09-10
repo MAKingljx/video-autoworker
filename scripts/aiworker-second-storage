@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+KEY="${AIWORKER_SELF_SSH_KEY:-$HOME/.ssh/id_ed25519_aiworker_bridge}"
+HOST="${AIWORKER_SELF_SSH_HOST:-heisenberg@localhost}"
+MODELS="/Volumes/AIWorkerModelsRO"
+STORAGE="/Volumes/AIWorkerStorage"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  aiworker-second-storage status
+  aiworker-second-storage models-list [limit]
+  aiworker-second-storage storage-list [relative_path]
+  aiworker-second-storage write-test
+
+This helper lets OpenClaw access the second Mac Studio SMB storage through the
+first Mac host login shell. It avoids direct SMB access from the OpenShell
+sandbox, which can hang on /Volumes mounts.
+EOF
+}
+
+remote() {
+  /usr/bin/ssh \
+    -i "$KEY" \
+    -o BatchMode=yes \
+    -o ConnectTimeout=8 \
+    -o StrictHostKeyChecking=accept-new \
+    "$HOST" "$@"
+}
+
+safe_rel() {
+  rel="${1:-}"
+  case "$rel" in
+    ""|.|./) printf "." ;;
+    /*|*"/../"*|../*|*".."*) echo "Unsafe relative path: $rel" >&2; exit 2 ;;
+    *) printf "%s" "$rel" ;;
+  esac
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  status)
+    remote "test -d '$MODELS' && test -d '$STORAGE' && df -h '$MODELS' '$STORAGE'"
+    ;;
+  models-list)
+    limit="${2:-20}"
+    case "$limit" in *[!0-9]*|"") limit=20 ;; esac
+    remote "/usr/bin/find '$MODELS' -mindepth 1 -maxdepth 1 -print | /usr/bin/sort | /usr/bin/head -n $limit"
+    ;;
+  storage-list)
+    rel="$(safe_rel "${2:-.}")"
+    remote "/bin/ls -la '$STORAGE/$rel'"
+    ;;
+  write-test)
+    remote "p='$STORAGE/.openclaw_storage_test_\$\$'; /bin/date > \"\$p\" && /bin/cat \"\$p\" && /bin/rm \"\$p\" && echo WRITE_OK"
+    ;;
+  ""|-h|--help|help)
+    usage
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

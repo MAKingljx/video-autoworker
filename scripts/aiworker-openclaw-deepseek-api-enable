@@ -1,0 +1,178 @@
+#!/bin/sh
+set -eu
+
+STATE_DIR="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}"
+CONFIG_FILE="${OPENCLAW_CONFIG_PATH:-$STATE_DIR/openclaw.json}"
+SECRET_DIR="$STATE_DIR/secrets"
+SECRET_FILE="$SECRET_DIR/deepseek-api-key"
+
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "openclaw command not found" >&2
+  exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "node command not found" >&2
+  exit 1
+fi
+
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "OpenClaw config not found: $CONFIG_FILE" >&2
+  exit 1
+fi
+
+if [ "${DEEPSEEK_API_KEY:-}" ]; then
+  api_key="$DEEPSEEK_API_KEY"
+elif [ "$#" -gt 0 ]; then
+  api_key="$1"
+else
+  printf "DeepSeek API Key: " >&2
+  old_tty="$(stty -g 2>/dev/null || true)"
+  stty -echo 2>/dev/null || true
+  IFS= read -r api_key
+  if [ "$old_tty" ]; then stty "$old_tty" 2>/dev/null || true; fi
+  printf "\n" >&2
+fi
+
+api_key="$(printf '%s' "$api_key" | tr -d '\r\n')"
+if [ -z "$api_key" ]; then
+  echo "DeepSeek API Key is empty" >&2
+  exit 1
+fi
+
+umask 077
+mkdir -p "$SECRET_DIR"
+printf '%s' "$api_key" > "$SECRET_FILE"
+chmod 600 "$SECRET_FILE"
+
+backup="$CONFIG_FILE.backup-$(date +%Y%m%d-%H%M%S)"
+cp "$CONFIG_FILE" "$backup"
+
+node - "$CONFIG_FILE" "$SECRET_FILE" <<'NODE'
+const fs = require("fs");
+const [configFile, secretFile] = process.argv.slice(2);
+const cfg = JSON.parse(fs.readFileSync(configFile, "utf8"));
+
+cfg.plugins = cfg.plugins || {};
+cfg.plugins.entries = cfg.plugins.entries || {};
+cfg.plugins.entries.deepseek = { ...(cfg.plugins.entries.deepseek || {}), enabled: true };
+cfg.plugins.entries.browser = { ...(cfg.plugins.entries.browser || {}), enabled: true };
+cfg.plugins.allow = [...new Set([...(cfg.plugins.allow || []), "deepseek", "browser"])];
+
+cfg.secrets = cfg.secrets || {};
+cfg.secrets.providers = cfg.secrets.providers || {};
+cfg.secrets.providers.deepseek = {
+  source: "file",
+  path: secretFile,
+  mode: "singleValue"
+};
+
+cfg.models = cfg.models || {};
+cfg.models.mode = cfg.models.mode || "merge";
+cfg.models.providers = cfg.models.providers || {};
+cfg.models.providers.deepseek = {
+  baseUrl: "https://api.deepseek.com",
+  api: "openai-completions",
+  apiKey: { source: "file", provider: "deepseek", id: "value" },
+  models: [
+    {
+      id: "deepseek-v4-flash",
+      name: "DeepSeek V4 Flash",
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 1000000,
+      maxTokens: 384000,
+      cost: { input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
+      compat: {
+        supportsUsageInStreaming: true,
+        supportsReasoningEffort: true,
+        maxTokensField: "max_tokens"
+      }
+    },
+    {
+      id: "deepseek-v4-pro",
+      name: "DeepSeek V4 Pro",
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 1000000,
+      maxTokens: 384000,
+      cost: { input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 },
+      compat: {
+        supportsUsageInStreaming: true,
+        supportsReasoningEffort: true,
+        maxTokensField: "max_tokens"
+      }
+    },
+    {
+      id: "deepseek-chat",
+      name: "DeepSeek Chat",
+      input: ["text"],
+      contextWindow: 131072,
+      maxTokens: 8192,
+      cost: { input: 0.28, output: 0.42, cacheRead: 0.028, cacheWrite: 0 },
+      compat: {
+        supportsUsageInStreaming: true,
+        maxTokensField: "max_tokens"
+      }
+    },
+    {
+      id: "deepseek-reasoner",
+      name: "DeepSeek Reasoner",
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 131072,
+      maxTokens: 65536,
+      cost: { input: 0.28, output: 0.42, cacheRead: 0.028, cacheWrite: 0 },
+      compat: {
+        supportsUsageInStreaming: true,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens"
+      }
+    }
+  ]
+};
+
+cfg.agents = cfg.agents || {};
+cfg.agents.defaults = cfg.agents.defaults || {};
+cfg.agents.defaults.models = cfg.agents.defaults.models || {};
+cfg.agents.defaults.models["deepseek/deepseek-v4-flash"] = {
+  ...(cfg.agents.defaults.models["deepseek/deepseek-v4-flash"] || {}),
+  alias: "DeepSeek API"
+};
+
+const oldPrimary = cfg.agents.defaults.model && cfg.agents.defaults.model.primary;
+const previousFallbacks = Array.isArray(cfg.agents.defaults.model && cfg.agents.defaults.model.fallbacks)
+  ? cfg.agents.defaults.model.fallbacks
+  : [];
+const fallbacks = [];
+for (const model of [oldPrimary, ...previousFallbacks, "deepseek-local/default_model", "kimi-local/default_model"]) {
+  if (model && model !== "deepseek/deepseek-v4-flash" && !fallbacks.includes(model)) {
+    fallbacks.push(model);
+  }
+}
+cfg.agents.defaults.model = {
+  primary: "deepseek/deepseek-v4-flash",
+  fallbacks
+};
+
+fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2) + "\n");
+NODE
+
+openclaw config validate
+openclaw secrets reload >/dev/null 2>&1 || true
+openclaw gateway restart >/dev/null
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if openclaw health >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+echo "Gateway restarted. Testing official DeepSeek provider..."
+openclaw infer model run --gateway --model deepseek/deepseek-v4-flash --prompt "只输出一个字：好"
+
+echo "Testing full agent path..."
+openclaw agent --agent main --message "只输出一个字：好" --thinking off --timeout 180 --json
+
+echo "Done. Backup: $backup"
