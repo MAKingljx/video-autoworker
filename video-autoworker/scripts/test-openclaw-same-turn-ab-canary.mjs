@@ -168,17 +168,6 @@ function installStressPlugin(stateDir) {
   )
 }
 
-function installDirectorRuntimeFixture(stateDir) {
-  const root = join(stateDir, 'extensions', 'aiworker-director-brain', 'runtime', 'scripts', 'lib')
-  mkdirSync(root, { recursive: true, mode: 0o700 })
-  writeFileSync(join(root, 'feishu-director-brain.mjs'), [
-    'export async function executeDirectorBrainOperation() {',
-    "  return { ok: false, error: 'canary_fixture_has_no_business_data' }",
-    '}',
-    '',
-  ].join('\n'), { mode: 0o600 })
-}
-
 function makeProvider(baseUrl, modelId, modelName) {
   return {
     baseUrl: `${baseUrl}/v1`,
@@ -330,7 +319,6 @@ async function runCell(options, descriptor, index) {
   writeFileSync(join(workspaceDir, 'AGENTS.md'), 'This isolated canary must follow the exact user request and use tools sequentially.\n', { mode: 0o600 })
   const directorDestination = copyPlugin(options.projectRoot, stateDir, 'aiworker-director-brain')
   copyPlugin(options.projectRoot, stateDir, 'aiworker-video-command')
-  installDirectorRuntimeFixture(stateDir)
   installStressPlugin(stateDir)
   if (!descriptor.projection) {
     writeFileSync(join(directorDestination, 'index.js'), buildProjectionDisabledDirectorEntry(), { mode: 0o600 })

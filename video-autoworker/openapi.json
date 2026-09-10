@@ -11795,6 +11795,29 @@
         }
       }
     },
+    "/api/n8n/director-brain": {
+      "post": {
+        "tags": ["n8n"],
+        "summary": "Run the app-managed director-brain service for the loopback OpenClaw client",
+        "operationId": "operateDirectorBrain",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["command", "input"],
+          "properties": {
+            "command": { "type": "string", "enum": ["operate", "review"] },
+            "input": { "type": "object" }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "Director-brain operation completed by the application runtime" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "description": "Mutation rate limit exceeded" },
+          "503": { "description": "Director-brain application service is temporarily unavailable" }
+        }
+      }
+    },
     "/api/n8n/director-extraction": {
       "post": {
         "tags": ["n8n"],

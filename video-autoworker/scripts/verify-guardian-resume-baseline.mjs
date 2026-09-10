@@ -238,17 +238,28 @@ function captureInstalledComponents(inputs, dependencies = {}) {
       pairs.push({ source: expected, installed: current })
     }
   }
-  for (const name of ['aiworker-video-command', 'aiworker-director-brain']) {
+  const directorInstalledRoot = join(
+    home, '.openclaw-qwen-current/extensions/aiworker-director-brain',
+  )
+  const directorPackage = JSON.parse(readFileSync(join(directorInstalledRoot, 'package.json'), 'utf8'))
+  const directorManifest = JSON.parse(readFileSync(
+    join(directorInstalledRoot, 'openclaw.plugin.json'), 'utf8',
+  ))
+  const directorVersion = directorPackage?.version
+  if (!['0.4.1', '0.4.2', '0.4.3'].includes(directorVersion)
+    || directorManifest?.id !== 'aiworker-director-brain'
+    || directorManifest?.version !== directorVersion
+    || !directorManifest?.contracts?.tools?.includes('aiworker_director_brain')) {
+    fail('installed director-brain compatibility identity is invalid')
+  }
+  for (const name of ['aiworker-video-command',
+    ...(directorVersion === '0.4.3' ? ['aiworker-director-brain'] : [])]) {
     const source = join(REPOSITORY_ROOT, 'openclaw-plugins', name)
     const installed = join(home, '.openclaw-qwen-current/extensions', name)
     for (const part of ['index.js', 'package.json', 'openclaw.plugin.json', 'lib', ...(name === 'aiworker-video-command' ? ['scripts'] : [])]) add(join(source, part), join(installed, part))
   }
   for (const name of ['SKILL.md', 'scripts', 'lib']) add(join(REPOSITORY_ROOT, 'openclaw-skills/aiworker-task-flow', name), join(workspace, 'skills/aiworker-task-flow', name))
   add(join(REPOSITORY_ROOT, 'openclaw-skills/aiworker-director-brain/SKILL.md'), join(workspace, 'skills/aiworker-director-brain/SKILL.md'))
-  for (const part of ['scripts/lib/feishu-director-brain.mjs', 'scripts/lib/sensitive-value-scanner.mjs',
-    'scripts/feishu-director-brain.mjs', 'ops/feishu-director-brain/schema.json']) {
-    add(join(REPOSITORY_ROOT, part), join(home, '.openclaw-qwen-current/extensions/aiworker-director-brain/runtime', part))
-  }
   return { sourceCommit: inputs.expectedSourceCommit, files: pairs }
 }
 

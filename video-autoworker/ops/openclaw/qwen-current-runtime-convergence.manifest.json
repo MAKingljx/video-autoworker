@@ -32,7 +32,11 @@
     },
     {
       "id": "aiworker-director-brain",
-      "version": "0.4.3",
+      "compatibleVersions": [
+        "0.4.1",
+        "0.4.2",
+        "0.4.3"
+      ],
       "tool": "aiworker_director_brain",
       "requiredHooks": [
         "before_agent_reply",

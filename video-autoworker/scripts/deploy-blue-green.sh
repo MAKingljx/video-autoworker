@@ -492,7 +492,7 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || value?.extraction?.schema !== 'video-autoworker-director-extraction-readiness/v1'
   || value?.extraction?.expectedProjectionVersion !== 'feishu-candidate-projection-v2'
   || value?.extraction?.activePhases !== 0
-  || value?.extraction?.sourcesWithoutPhase !== 0
+  || value?.extraction?.invalidSourcesWithoutPhase !== 0
   || value?.extraction?.invalidPhaseBindings !== 0
   || value?.extraction?.invalidCheckpoints !== 0
   || value?.extraction?.invalidProjectionReceipts !== 0
@@ -528,7 +528,8 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || typeof value?.runtimeConvergence?.sessionKeySha256 !== 'string'
   || !/^[a-f0-9]{64}$/u.test(value.runtimeConvergence.sessionKeySha256)) process.exit(3)
 if (transitionFromProjectionContract) {
-  if (transition?.schema !== 'video-autoworker-director-projection-compatibility/v1'
+  if (!['video-autoworker-director-projection-compatibility/v1',
+    'video-autoworker-director-projection-compatibility/v2'].includes(transition?.schema)
     || typeof transition.transitionId !== 'string'
     || !/^[a-z0-9][a-z0-9-]{0,79}$/u.test(transition.transitionId)
     || transition.direction !== 'forward-only'

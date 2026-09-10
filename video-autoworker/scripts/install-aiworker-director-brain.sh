@@ -13,11 +13,7 @@ OPENCLAW_SOURCE_PLUGIN_PEER="$(node "$OPENCLAW_RUNTIME_CONTRACT" source-plugin-p
   || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
 SKILL_SOURCE="$REPOSITORY_ROOT/openclaw-skills/$PLUGIN_ID"
-SERVICE_SOURCE="$REPOSITORY_ROOT/scripts/lib/feishu-director-brain.mjs"
-SENSITIVE_VALUE_SCANNER_SOURCE="$REPOSITORY_ROOT/scripts/lib/sensitive-value-scanner.mjs"
 TREE_MANIFEST_HELPER="$REPOSITORY_ROOT/scripts/lib/runtime-tree-manifest.mjs"
-SERVICE_CLI_SOURCE="$REPOSITORY_ROOT/scripts/feishu-director-brain.mjs"
-SCHEMA_SOURCE="$REPOSITORY_ROOT/ops/feishu-director-brain/schema.json"
 SHARED_INSTALL_GATE="$REPOSITORY_ROOT/scripts/verify-shared-runtime-install-gate.mjs"
 SHARED_DEPLOYMENT_LOCK_HELPER="$REPOSITORY_ROOT/scripts/lib/shared-deployment-lock.sh"
 GIT_SOURCE_LAYOUT="$REPOSITORY_ROOT/scripts/lib/git-source-layout.mjs"
@@ -287,9 +283,9 @@ assert_canonical_source_repository() {
         return 1
       }
   done < <(find \
-    "$PLUGIN_SOURCE" "$SKILL_SOURCE" \
-    "$SERVICE_SOURCE" "$SENSITIVE_VALUE_SCANNER_SOURCE" "$SERVICE_CLI_SOURCE" \
-    "$TREE_MANIFEST_HELPER" "$OPENCLAW_AGENT_CONFIG" "$SCHEMA_SOURCE" -type f -print)
+    "$PLUGIN_SOURCE/index.js" "$PLUGIN_SOURCE/openclaw.plugin.json" \
+    "$PLUGIN_SOURCE/package.json" "$PLUGIN_SOURCE/lib" "$SKILL_SOURCE" \
+    "$TREE_MANIFEST_HELPER" "$OPENCLAW_AGENT_CONFIG" -type f -print)
   printf '%s\n' "$current_commit"
 }
 
@@ -700,12 +696,8 @@ if [[ "$MODE" != "rollback" ]]; then
     "$PLUGIN_SOURCE/lib/sensitive-narrative-text.js" \
     "$PLUGIN_SOURCE/lib/transcript-tool-result-projection.js" \
     "$SKILL_SOURCE/SKILL.md" \
-    "$SERVICE_SOURCE" \
-    "$SENSITIVE_VALUE_SCANNER_SOURCE" \
     "$TREE_MANIFEST_HELPER" \
-    "$OPENCLAW_AGENT_CONFIG" \
-    "$SERVICE_CLI_SOURCE" \
-    "$SCHEMA_SOURCE"; do
+    "$OPENCLAW_AGENT_CONFIG"; do
     regular_file "$source_file" || {
       printf 'Director-brain source is incomplete: %s\n' "$source_file" >&2
       exit 1
@@ -724,9 +716,6 @@ if [[ "$MODE" != "rollback" ]]; then
   node --check "$PLUGIN_SOURCE/lib/director-system-question-router.js"
   node --check "$PLUGIN_SOURCE/lib/sensitive-narrative-text.js"
   node --check "$PLUGIN_SOURCE/lib/transcript-tool-result-projection.js"
-  node --check "$SERVICE_CLI_SOURCE"
-  node --check "$SERVICE_SOURCE"
-  node --check "$SENSITIVE_VALUE_SCANNER_SOURCE"
   node --check "$TREE_MANIFEST_HELPER"
   node --check "$OPENCLAW_AGENT_CONFIG"
   node - "$PLUGIN_SOURCE/openclaw.plugin.json" "$PLUGIN_SOURCE/package.json" "$OPENCLAW_SOURCE_PLUGIN_PEER" <<'NODE'
@@ -922,11 +911,6 @@ build_source_payload() {
   install -m 600 "$PLUGIN_SOURCE/openclaw.plugin.json" "$plugin_destination/openclaw.plugin.json"
   install -m 600 "$PLUGIN_SOURCE/package.json" "$plugin_destination/package.json"
   copy_tree_exact "$PLUGIN_SOURCE/lib" "$plugin_destination/lib"
-  mkdir -m 700 -p "$plugin_destination/runtime/scripts/lib" "$plugin_destination/runtime/ops/feishu-director-brain"
-  install -m 600 "$SERVICE_CLI_SOURCE" "$plugin_destination/runtime/scripts/feishu-director-brain.mjs"
-  install -m 600 "$SERVICE_SOURCE" "$plugin_destination/runtime/scripts/lib/feishu-director-brain.mjs"
-  install -m 600 "$SENSITIVE_VALUE_SCANNER_SOURCE" "$plugin_destination/runtime/scripts/lib/sensitive-value-scanner.mjs"
-  install -m 600 "$SCHEMA_SOURCE" "$plugin_destination/runtime/ops/feishu-director-brain/schema.json"
   copy_tree_exact "$SKILL_SOURCE" "$skill_destination"
 }
 
@@ -2613,7 +2597,7 @@ printf 'SECURITY: the retired config artifact also contains the full prior profi
 if [[ "$MODE" == "rollback" ]]; then
   printf 'Rolled back director-brain installation for explicit profile %s. Gateway was not restarted.\n' "$PROFILE"
 else
-  printf 'Installed director-brain plugin, private shared runtime, and Skill for explicit profile %s (agent %s).\n' "$PROFILE" "$AGENT_ID"
+  printf 'Installed director-brain thin client plugin and Skill for explicit profile %s (agent %s).\n' "$PROFILE" "$AGENT_ID"
   printf 'Gateway was not restarted. Activate only through a separately controlled restart and runtime catalog check.\n'
 fi
 printf 'No credential was added to the installed plugin payload; profile credentials remain present in the private rollback artifacts described above. No queue, n8n, media, database, scheduler, remote host, or editing capability was changed.\n'

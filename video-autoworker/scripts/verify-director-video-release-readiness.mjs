@@ -31,7 +31,11 @@ import {
   STANDALONE_PROVENANCE_SCHEMA,
 } from './lib/director-extraction-release-provenance.mjs'
 import {
+  DIRECTOR_PROJECTION_PROTOCOL,
+  DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+  directorProjectionImplementationDigest,
   directorProjectionCompatibilitySha256,
+  getDirectorProjectionReadCompatibleDigests,
   loadDirectorProjectionContractCompatibility,
   validateDirectorProjectionContractCompatibility,
 } from './lib/director-projection-contract-compatibility.mjs'
@@ -44,7 +48,7 @@ const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
 const EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
 const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.15'
-const EXPECTED_DIRECTOR_BRAIN_VERSION = '0.4.3'
+const COMPATIBLE_DIRECTOR_BRAIN_VERSIONS = new Set(['0.4.1', '0.4.2', '0.4.3'])
 const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
 const OUTBOX_CLOSURE_CONSTANTS = Object.freeze({
   DIRECTOR_BRAIN_CLI_SHA256: 'scripts/feishu-director-brain.mjs',
@@ -236,30 +240,28 @@ function taskFlowMembers(repositoryRoot) {
   return members
 }
 
-function directorBrainPluginMembers(repositoryRoot) {
-  const base = 'openclaw-plugins/aiworker-director-brain'
-  return [
-    { source: `${base}/index.js`, target: 'index.js' },
-    { source: `${base}/openclaw.plugin.json`, target: 'openclaw.plugin.json' },
-    { source: `${base}/package.json`, target: 'package.json' },
-    ...recursiveSourceMembers(repositoryRoot, `${base}/lib`, 'lib'),
-    {
-      source: 'scripts/feishu-director-brain.mjs',
-      target: 'runtime/scripts/feishu-director-brain.mjs',
-    },
-    {
-      source: 'scripts/lib/feishu-director-brain.mjs',
-      target: 'runtime/scripts/lib/feishu-director-brain.mjs',
-    },
-    {
-      source: 'scripts/lib/sensitive-value-scanner.mjs',
-      target: 'runtime/scripts/lib/sensitive-value-scanner.mjs',
-    },
-    {
-      source: 'ops/feishu-director-brain/schema.json',
-      target: 'runtime/ops/feishu-director-brain/schema.json',
-    },
+function inspectCompatibleDirectorBrainPlugin(root) {
+  const physicalRoot = assertPhysicalDirectory(root, 'director_brain')
+  const actual = walkTree(physicalRoot)
+  const requiredFiles = [
+    'index.js', 'openclaw.plugin.json', 'package.json',
+    'lib/director-brain-tool.js', 'lib/director-context-summary.js',
+    'lib/director-system-question-router.js', 'lib/sensitive-narrative-text.js',
+    'lib/transcript-tool-result-projection.js',
   ]
+  const files = new Set(actual.files.map(item => item.path))
+  if (requiredFiles.some(path => !files.has(path))) {
+    fail('director_brain_manifest_mismatch')
+  }
+  const version = assertVersionPair(physicalRoot, null, 'director_brain')
+  if (!COMPATIBLE_DIRECTOR_BRAIN_VERSIONS.has(version)) fail('director_brain_version_mismatch')
+  assertDirectorBrainPluginContract(physicalRoot)
+  return {
+    root: physicalRoot,
+    manifestSha256: manifestDigest(actual),
+    files: actual.files.length,
+    version,
+  }
 }
 
 function assertManifestMatches(repositoryRoot, installedRoot, members, label, pluginPackage = null) {
@@ -401,7 +403,8 @@ function assertDirectorBrainPluginContract(root) {
 function assertVersionPair(root, expected, label) {
   const packageVersion = readVersion(join(root, 'package.json'), `${label}_package`)
   const manifestVersion = readVersion(join(root, 'openclaw.plugin.json'), `${label}_manifest`)
-  if (packageVersion !== expected || manifestVersion !== expected) fail(`${label}_version_mismatch`)
+  if (packageVersion !== manifestVersion
+    || (expected !== null && packageVersion !== expected)) fail(`${label}_version_mismatch`)
   return packageVersion
 }
 
@@ -431,9 +434,7 @@ function parseProjectionContract(repositoryRoot, closure) {
     || !Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
     fail('projection_contract_source_invalid')
   }
-  const contract = {
-    authority,
-    schemaVersion,
+  const implementationClosure = {
     directorBrainCliSha256: closure.DIRECTOR_BRAIN_CLI_SHA256,
     directorBrainServiceSha256: closure.DIRECTOR_BRAIN_SERVICE_SHA256,
     directorBrainSensitiveValueScannerSha256:
@@ -448,7 +449,10 @@ function parseProjectionContract(repositoryRoot, closure) {
   return {
     authority,
     schemaVersion,
-    currentDigest: sha256(canonicalJson(contract)),
+    currentDigest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+    protocol: DIRECTOR_PROJECTION_PROTOCOL,
+    implementationClosure,
+    implementationDigest: directorProjectionImplementationDigest(implementationClosure),
   }
 }
 
@@ -465,6 +469,38 @@ function projectionClosureDescriptor(closure) {
       closure.DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256,
     deliveryCoreSha256: closure.DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256,
   }
+}
+
+function projectionCompatibilityValidationOptions(
+  compatibility,
+  projectionContract,
+  closure,
+  sourceDigest,
+) {
+  const implementationClosure = projectionClosureDescriptor(closure)
+  return compatibility?.schema === 'video-autoworker-director-projection-compatibility/v1'
+    ? {
+      currentClosure: implementationClosure,
+      currentDigest: projectionContract.implementationDigest,
+      ...(sourceDigest ? { sourceDigest } : {}),
+    }
+    : {
+      currentImplementation: {
+        closure: implementationClosure,
+        digest: projectionContract.implementationDigest,
+      },
+      protocolDigest: projectionContract.currentDigest,
+      ...(sourceDigest ? { sourceDigest } : {}),
+    }
+}
+
+function projectionReadCompatibleDigests(compatibility, projectionContract, closure) {
+  return getDirectorProjectionReadCompatibleDigests(
+    compatibility,
+    compatibility?.schema === 'video-autoworker-director-projection-compatibility/v1'
+      ? { closure: projectionClosureDescriptor(closure), digest: projectionContract.implementationDigest }
+      : { digest: projectionContract.currentDigest },
+  )
 }
 
 function physicalDatabaseFile(pathname) {
@@ -506,12 +542,18 @@ export function inspectDirectorExtractionIntegrity({
   repositoryRoot,
   liveDbPath,
   scope,
+  compatibleProjectionDigests = [],
 }) {
   const repository = assertPhysicalDirectory(repositoryRoot, 'repository')
   const databasePath = physicalDatabaseFile(liveDbPath)
   if (!scope || !Number.isSafeInteger(scope.tenantId) || scope.tenantId < 1
     || !Number.isSafeInteger(scope.workspaceId) || scope.workspaceId < 1) {
     fail('director_scope_invalid')
+  }
+  if (!Array.isArray(compatibleProjectionDigests)
+    || compatibleProjectionDigests.some(value => typeof value !== 'string' || !SHA256.test(value))
+    || new Set(compatibleProjectionDigests).size !== compatibleProjectionDigests.length) {
+    fail('projection_compatible_digests_invalid')
   }
   const expectedProjectionVersion = extractionProjectionVersion(repository)
   let Database
@@ -584,6 +626,9 @@ export function inspectDirectorExtractionIntegrity({
               AND json_extract(phase.input, '$.parentTaskId') = source.task_id
           )
       `).pluck().get(scope.tenantId, scope.workspaceId) || 0),
+      unstartedSourcesWithoutPhase: 0,
+      recoverableSourcesWithoutPhase: 0,
+      invalidSourcesWithoutPhase: 0,
       activePhases: 0,
       invalidPhaseBindings: 0,
       invalidCheckpoints: 0,
@@ -591,6 +636,71 @@ export function inspectDirectorExtractionIntegrity({
       invalidReviewReceipts: 0,
       missingPredecessorReviews: 0,
       incompatibleProjectionBoundary: 0,
+    }
+    const acceptedProjectionDigests = new Set(compatibleProjectionDigests)
+    const unphasedSources = database.prepare(`
+      SELECT source.task_id AS source_task_id, source.binding_id AS source_binding_id,
+        source.tenant_id AS source_tenant_id, source.workspace_id AS source_workspace_id,
+        source.input AS source_input, source.output AS source_output,
+        outbox.*,
+        receipt.task_id AS receipt_task_id,
+        receipt.source_identity_sha256,
+        receipt.projection_contract_digest AS receipt_projection_contract_digest,
+        receipt.receipt_json, receipt.receipt_sha256,
+        receipt.origin AS receipt_origin, receipt.created_at AS receipt_created_at
+      FROM n8n_task_runs source
+      JOIN n8n_workflow_bindings binding ON binding.id = source.binding_id
+        AND binding.tenant_id = source.tenant_id
+        AND binding.workspace_id = source.workspace_id
+      LEFT JOIN n8n_director_evidence_outbox outbox ON outbox.task_id = source.task_id
+      LEFT JOIN n8n_director_evidence_projection_receipts receipt
+        ON receipt.task_id = outbox.task_id
+      WHERE source.tenant_id = ? AND source.workspace_id = ?
+        AND source.status = 'succeeded' AND binding.task_type = 'video-analysis'
+        AND json_valid(source.input) = 1
+        AND json_extract(source.input, '$.directorEvidence.workId') IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM n8n_task_runs phase
+          WHERE phase.tenant_id = source.tenant_id
+            AND phase.workspace_id = source.workspace_id
+            AND phase.source = 'n8n-node'
+            AND json_valid(phase.input) = 1
+            AND json_extract(phase.input, '$.childKind') = 'director-extraction'
+            AND json_extract(phase.input, '$.parentTaskId') = source.task_id
+        )
+    `).all(scope.tenantId, scope.workspaceId)
+    for (const row of unphasedSources) {
+      if (!row.task_id) {
+        report.unstartedSourcesWithoutPhase++
+        continue
+      }
+      const input = parsedJsonObject(row.source_input)
+      const output = parsedJsonObject(row.source_output)
+      const binding = input?.directorEvidence
+      const immutableIdentityValid = input && output
+        && row.task_id === row.source_task_id
+        && row.binding_id === row.source_binding_id
+        && row.tenant_id === row.source_tenant_id
+        && row.workspace_id === row.source_workspace_id
+        && row.work_id === binding?.workId
+        && row.query_digest === binding?.queryDigest
+        && acceptedProjectionDigests.has(row.projection_contract_digest)
+        && row.result_sha256 === sha256(canonicalJson(output))
+        && row.idempotency_key === sha256(canonicalJson({
+          authority: 'video-autoworker-final-result-v1',
+          schemaVersion: 2,
+          taskId: row.task_id,
+          workId: row.work_id,
+          queryDigest: row.query_digest,
+          resultSha256: row.result_sha256,
+          projectionContractDigest: row.projection_contract_digest,
+        }))
+      const recoverableStatus = row.status === 'pending'
+        || (row.status === 'conflict'
+          && row.last_error_code === 'director_evidence_projection_receipt_invalid')
+        || (row.status === 'delivered' && validDirectorEvidenceReceipt(row, row))
+      if (immutableIdentityValid && recoverableStatus) report.recoverableSourcesWithoutPhase++
+      else report.invalidSourcesWithoutPhase++
     }
     const bySource = new Map()
     for (const row of phases) {
@@ -696,7 +806,7 @@ export function inspectDirectorExtractionIntegrity({
 export function assertDirectorExtractionReleaseReady(extraction) {
   for (const field of [
     'activePhases',
-    'sourcesWithoutPhase',
+    'invalidSourcesWithoutPhase',
     'invalidPhaseBindings',
     'invalidCheckpoints',
     'invalidProjectionReceipts',
@@ -782,12 +892,18 @@ export function inspectDirectorEvidenceOutboxCompatibility({
   repositoryRoot,
   liveDbPath,
   currentDigest,
+  compatibleDigests = [],
   scope,
 }) {
   const repository = assertPhysicalDirectory(repositoryRoot, 'repository')
   const databasePath = physicalDatabaseFile(liveDbPath)
   if (typeof currentDigest !== 'string' || !SHA256.test(currentDigest)) {
     fail('projection_contract_digest_invalid')
+  }
+  if (!Array.isArray(compatibleDigests)
+    || compatibleDigests.some(item => typeof item !== 'string' || !SHA256.test(item))
+    || new Set([currentDigest, ...compatibleDigests]).size !== compatibleDigests.length + 1) {
+    fail('projection_compatible_digests_invalid')
   }
   if (!scope || !Number.isSafeInteger(scope.tenantId) || scope.tenantId < 1
     || !Number.isSafeInteger(scope.workspaceId) || scope.workspaceId < 1) {
@@ -811,13 +927,15 @@ export function inspectDirectorEvidenceOutboxCompatibility({
       || !table.sql.includes('projection_contract_digest')) {
       fail('projection_outbox_schema_invalid')
     }
+    const acceptedDigests = [currentDigest, ...compatibleDigests]
+    const placeholders = acceptedDigests.map(() => '?').join(', ')
     const row = database.prepare(`
       SELECT COUNT(*) AS pending,
-        COALESCE(SUM(CASE WHEN projection_contract_digest <> ? THEN 1 ELSE 0 END), 0)
+        COALESCE(SUM(CASE WHEN projection_contract_digest NOT IN (${placeholders}) THEN 1 ELSE 0 END), 0)
           AS incompatible_pending
       FROM n8n_director_evidence_outbox
       WHERE status = 'pending'
-    `).get(currentDigest)
+    `).get(...acceptedDigests)
     const pending = Number(row?.pending)
     const incompatiblePending = Number(row?.incompatible_pending)
     if (!Number.isSafeInteger(pending) || pending < 0
@@ -932,20 +1050,7 @@ export function verifyInstalledReleasePayloads({
   const taskFlow = assertManifestMatches(
     repository, taskFlowRoot, taskFlowMembers(repository), 'task_flow',
   )
-  const directorBrain = assertManifestMatches(
-    repository,
-    directorPluginRoot,
-    directorBrainPluginMembers(repository),
-    'director_brain',
-    {
-      sourceRelative: 'openclaw-plugins/aiworker-director-brain/package.json',
-      id: 'aiworker-director-brain',
-    },
-  )
-  directorBrain.version = assertVersionPair(
-    directorPluginRoot, EXPECTED_DIRECTOR_BRAIN_VERSION, 'director_brain',
-  )
-  assertDirectorBrainPluginContract(directorPluginRoot)
+  const directorBrain = inspectCompatibleDirectorBrainPlugin(directorPluginRoot)
   const directorSkillMembers = recursiveSourceMembers(
     repository, 'openclaw-skills/aiworker-director-brain', '',
   )
@@ -1048,6 +1153,21 @@ export function verifyDirectorExtractionReleaseProvenance({
     !== sha256(canonicalJson(expectedClosure))) {
     fail('app_release_build_source_anchor_mismatch')
   }
+  const expectedProjectionProtocol = {
+    descriptor: DIRECTOR_PROJECTION_PROTOCOL,
+    digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+  }
+  const expectedProjectionImplementation = {
+    algorithm: 'sha256',
+    schema: 'video-autoworker-director-projection-implementation/v1',
+    sourceClosureSha256: sha256(canonicalJson(expectedClosure)),
+  }
+  if (canonicalJson(provenance.projectionProtocol)
+      !== canonicalJson(expectedProjectionProtocol)
+    || canonicalJson(provenance.projectionImplementation)
+      !== canonicalJson(expectedProjectionImplementation)) {
+    fail('app_release_projection_protocol_binding_invalid')
+  }
   const releaseManifestPath = join(releaseRoot, 'release-manifest.json')
   safeApplicationReleaseManifest(releaseManifestPath, 'app_release_manifest')
   const releaseManifest = parsedJsonObject(readFileSync(releaseManifestPath, 'utf8'))
@@ -1056,7 +1176,11 @@ export function verifyDirectorExtractionReleaseProvenance({
     || canonicalJson(releaseManifest.artifactContent)
       !== canonicalJson(provenance.artifactContent)
     || (artifactContent && canonicalJson(artifactContent)
-      !== canonicalJson(provenance.artifactContent))) {
+      !== canonicalJson(provenance.artifactContent))
+    || canonicalJson(releaseManifest.projectionProtocol)
+      !== canonicalJson(expectedProjectionProtocol)
+    || canonicalJson(releaseManifest.projectionImplementation)
+      !== canonicalJson(expectedProjectionImplementation)) {
     fail('app_release_artifact_content_binding_invalid')
   }
   const expectedCompatibility = loadDirectorProjectionContractCompatibility(repositoryRoot, {
@@ -1088,6 +1212,8 @@ export function verifyDirectorExtractionReleaseProvenance({
     sourceFiles: expectedClosure.files.length,
     sha256: fileSha256(provenancePath),
     artifactContent: provenance.artifactContent,
+    projectionProtocol: provenance.projectionProtocol,
+    projectionImplementation: provenance.projectionImplementation,
     projectionContractCompatibility: expectedCompatibility,
     projectionContractCompatibilitySha256: expectedCompatibility
       ? directorProjectionCompatibilitySha256(expectedCompatibility)
@@ -1131,10 +1257,11 @@ export async function verifyDirectorVideoReleasePreflight({
     try {
       validateDirectorProjectionContractCompatibility(
         provenance.projectionContractCompatibility,
-        {
-          currentClosure: projectionClosureDescriptor(payloads.closure),
-          currentDigest: payloads.projectionContract.currentDigest,
-        },
+        projectionCompatibilityValidationOptions(
+          provenance.projectionContractCompatibility,
+          payloads.projectionContract,
+          payloads.closure,
+        ),
       )
     } catch {
       fail('projection_compatibility_declaration_invalid')
@@ -1180,10 +1307,16 @@ export async function verifyDirectorVideoReleasePreflight({
 
 export async function verifyDirectorVideoReleaseReadiness(options) {
   const preflight = await verifyDirectorVideoReleasePreflight(options)
+  const compatibleDigests = projectionReadCompatibleDigests(
+    preflight.provenance.projectionContractCompatibility,
+    preflight.payloads.projectionContract,
+    preflight.payloads.closure,
+  )
   const projectionOutbox = inspectDirectorEvidenceOutboxCompatibility({
     repositoryRoot: options.repositoryRoot,
     liveDbPath: options.liveDbPath,
     currentDigest: preflight.payloads.projectionContract.currentDigest,
+    compatibleDigests,
     scope: options.scope,
   })
   assertDirectorEvidenceOutboxReleaseReady(projectionOutbox)
@@ -1191,6 +1324,10 @@ export async function verifyDirectorVideoReleaseReadiness(options) {
     repositoryRoot: options.repositoryRoot,
     liveDbPath: options.liveDbPath,
     scope: options.scope,
+    compatibleProjectionDigests: [
+      preflight.payloads.projectionContract.currentDigest,
+      ...compatibleDigests,
+    ],
   })
   assertDirectorExtractionReleaseReady(extraction)
   let projectionTransition = null
@@ -1198,18 +1335,19 @@ export async function verifyDirectorVideoReleaseReadiness(options) {
     try {
       const compatibility = validateDirectorProjectionContractCompatibility(
         preflight.provenance.projectionContractCompatibility,
-        {
-          currentClosure: projectionClosureDescriptor(preflight.payloads.closure),
-          currentDigest: preflight.payloads.projectionContract.currentDigest,
-          sourceDigest: options.transitionFromProjectionContract,
-        },
+        projectionCompatibilityValidationOptions(
+          preflight.provenance.projectionContractCompatibility,
+          preflight.payloads.projectionContract,
+          preflight.payloads.closure,
+          options.transitionFromProjectionContract,
+        ),
       )
       projectionTransition = {
         schema: compatibility.schema,
         transitionId: compatibility.transitionId,
         direction: compatibility.rollback.direction,
         fromContractDigest: options.transitionFromProjectionContract,
-        toContractDigest: compatibility.toContract.digest,
+        toContractDigest: compatibility.protocol?.digest ?? compatibility.toContract.digest,
         declarationSha256:
           preflight.provenance.projectionContractCompatibilitySha256,
       }

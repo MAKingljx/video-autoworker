@@ -1270,7 +1270,7 @@ write_backup_tree_manifest "$1" "$3"
     }
   }, 15_000)
 
-  it('installs plugin, shared runtime, Skill, and a narrow agent grant, then becomes a no-op', async () => {
+  it('installs the thin plugin, Skill, and a narrow agent grant without app runtime files', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-apply-'))
     try {
       const fixture = await createFixture(root)
@@ -1278,26 +1278,14 @@ write_backup_tree_manifest "$1" "$3"
       const first = await runInstaller(fixture, '--apply')
       const backups = await readdir(fixture.backupRoot)
 
-      expect(first.stdout).toContain('Installed director-brain plugin, private shared runtime, and Skill')
+      expect(first.stdout).toContain('Installed director-brain thin client plugin and Skill')
       expect(first.stdout).toContain('Gateway was not restarted')
       expectOfficialStagingValidation(await readFakeOpenClawCalls(), 2)
       expect(backups).toHaveLength(1)
       expect(await exists(resolve(
         fixture.stateDir,
-        'extensions/aiworker-director-brain/runtime/scripts/feishu-director-brain.mjs',
-      ))).toBe(true)
-      expect(await exists(resolve(
-        fixture.stateDir,
-        'extensions/aiworker-director-brain/runtime/scripts/lib/feishu-director-brain.mjs',
-      ))).toBe(true)
-      expect(await exists(resolve(
-        fixture.stateDir,
-        'extensions/aiworker-director-brain/runtime/scripts/lib/sensitive-value-scanner.mjs',
-      ))).toBe(true)
-      expect(await exists(resolve(
-        fixture.stateDir,
-        'extensions/aiworker-director-brain/runtime/ops/feishu-director-brain/schema.json',
-      ))).toBe(true)
+        'extensions/aiworker-director-brain/runtime',
+      ))).toBe(false)
       expect(await readFile(resolve(
         fixture.stateDir,
         'extensions/aiworker-director-brain/lib/director-chat-review.js',
@@ -1352,7 +1340,7 @@ write_backup_tree_manifest "$1" "$3"
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  }, 15_000)
+  }, 30_000)
 
   it('preserves the OpenClaw 9.2 agents.entries layout through install, no-op, and rollback', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-agent-entries-'))

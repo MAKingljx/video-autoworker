@@ -1,20 +1,34 @@
 {
-  "schema": "video-autoworker-director-projection-compatibility/v1",
-  "transitionId": "receipt-text-normalization-20260910",
-  "fromContract": {
-    "digest": "e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1",
-    "closure": {
-      "directorBrainCliSha256": "8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e",
-      "directorBrainServiceSha256": "c10d17caa790206f33562e03f5bea5330ad65bad8e637b562fa905e910c8519b",
-      "directorBrainSensitiveValueScannerSha256": "65d3a771f631b4cbf34c31e31b821d63a357008af3a09d2ea4e21a44b9852b5c",
-      "directorBrainSchemaSha256": "72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f",
-      "evidenceTransformerSha256": "b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1",
-      "evidenceLibrarySha256": "dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc",
-      "appProjectionSemanticsSha256": "1e5153a633225b6454ab722b689de9ee7a5dcfccff697c19d2ea2d0a708e2cda",
-      "deliveryCoreSha256": "ceefa7f9b1f37c359637ec13947aade3d093fa53f7c2de591901446207f10040"
-    }
+  "schema": "video-autoworker-director-projection-compatibility/v2",
+  "transitionId": "projection-protocol-v1-history",
+  "protocol": {
+    "descriptor": {
+      "authority": "director-evidence-projection-contract-v1",
+      "projectionSchemaVersion": 1,
+      "receiptAuthority": "video-autoworker-director-evidence-delivery-v1",
+      "receiptSchemaVersion": 1,
+      "schema": "video-autoworker-director-evidence-projection-protocol/v1",
+      "sourceAuthority": "video-autoworker-final-result-v1",
+      "stableEvidenceIdentity": "material-evidence-canonical-fields-v1",
+      "storedTextNormalization": "unicode-nfkc-crlf-trim-v1",
+      "wireProtocol": "director-command-jsonl-v1"
+    },
+    "digest": "11472003a209a0689952715aa4147b9bb7490d16799d3db68181e3341d49caab"
   },
-  "additionalSourceContracts": [
+  "legacyImplementations": [
+    {
+      "digest": "e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1",
+      "closure": {
+        "directorBrainCliSha256": "8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e",
+        "directorBrainServiceSha256": "c10d17caa790206f33562e03f5bea5330ad65bad8e637b562fa905e910c8519b",
+        "directorBrainSensitiveValueScannerSha256": "65d3a771f631b4cbf34c31e31b821d63a357008af3a09d2ea4e21a44b9852b5c",
+        "directorBrainSchemaSha256": "72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f",
+        "evidenceTransformerSha256": "b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1",
+        "evidenceLibrarySha256": "dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc",
+        "appProjectionSemanticsSha256": "1e5153a633225b6454ab722b689de9ee7a5dcfccff697c19d2ea2d0a708e2cda",
+        "deliveryCoreSha256": "ceefa7f9b1f37c359637ec13947aade3d093fa53f7c2de591901446207f10040"
+      }
+    },
     {
       "digest": "1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932",
       "closure": {
@@ -26,34 +40,28 @@
         "evidenceLibrarySha256": "dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc",
         "appProjectionSemanticsSha256": "260b7fe725e4a92a6815cddb52117c458d78e927fbf5595f05f8a7d32784ad8c",
         "deliveryCoreSha256": "83cbbddca0037c9b848e12abfb160e1af6ce416f9a95099131cc2e968894f740"
-      },
-      "changedClosureMembers": [
-        "directorBrainServiceSha256"
-      ]
+      }
+    },
+    {
+      "digest": "eec806b96c0b1389a25c4ffc1426b0e499d1b51a541691c46a660a20f5d157db",
+      "closure": {
+        "directorBrainCliSha256": "8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e",
+        "directorBrainServiceSha256": "ce91dd84f55a115f7aba1b56b763631dfc68bbcb0d440f6c1a383b1de332e01e",
+        "directorBrainSensitiveValueScannerSha256": "65d3a771f631b4cbf34c31e31b821d63a357008af3a09d2ea4e21a44b9852b5c",
+        "directorBrainSchemaSha256": "72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f",
+        "evidenceTransformerSha256": "b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1",
+        "evidenceLibrarySha256": "dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc",
+        "appProjectionSemanticsSha256": "260b7fe725e4a92a6815cddb52117c458d78e927fbf5595f05f8a7d32784ad8c",
+        "deliveryCoreSha256": "83cbbddca0037c9b848e12abfb160e1af6ce416f9a95099131cc2e968894f740"
+      }
     }
   ],
-  "toContract": {
-    "digest": "eec806b96c0b1389a25c4ffc1426b0e499d1b51a541691c46a660a20f5d157db"
-  },
-  "changedClosureMembers": [
-    "appProjectionSemanticsSha256",
-    "deliveryCoreSha256",
-    "directorBrainServiceSha256"
-  ],
-  "unchanged": {
-    "projectionAuthority": "director-evidence-projection-contract-v1",
-    "projectionSchemaVersion": 1,
-    "receiptSchemaVersion": 1,
-    "stableEvidenceIdentity": true,
-    "wireProtocol": true,
-    "sourceIdentity": true,
-    "outboxIdentity": true
-  },
   "recovery": {
     "mode": "verified-read-only",
     "compatibleSourceDigests": [
       "e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1",
-      "1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932"
+      "1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932",
+      "eec806b96c0b1389a25c4ffc1426b0e499d1b51a541691c46a660a20f5d157db"
     ],
     "preserveOutboxIdentity": true,
     "remoteWrites": false,
@@ -63,31 +71,5 @@
     "direction": "forward-only",
     "automaticCompensationBeforeReturn": true,
     "explicitReverse": false
-  },
-  "regressionEvidence": [
-    {
-      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
-      "sha256": "c783cf1cb8d88a14edca55c3a2d4fa8a3f7aed1826b48e0eb73a98842a6b3f06"
-    },
-    {
-      "path": "src/lib/__tests__/director-evidence-outbox.test.ts",
-      "sha256": "a15b23738d88511ce9900643f3a74c01f14c5e9bff915193c3134988a51af8e5"
-    },
-    {
-      "path": "src/lib/__tests__/director-projection-contract-compatibility.test.ts",
-      "sha256": "f3c0cec21a8f822e8ee1496a199b74e9b9e2d40a2e0ac16e2f1ddb5339ef7348"
-    },
-    {
-      "path": "src/lib/__tests__/director-video-release-readiness-script.test.ts",
-      "sha256": "303b67d232762f59f96f393049da542c148d2acde9766f530b50378bc27da40b"
-    },
-    {
-      "path": "src/test/standalone-blue-green.test.ts",
-      "sha256": "51ccdcc780f80dbc978f357ac2f5b0ab6d21c441ada59138482b8c4fb24788b7"
-    },
-    {
-      "path": "openclaw-plugins/aiworker-director-brain/test/director-chat-review.test.mjs",
-      "sha256": "3c523ab5a6e991b14a553b43a640baf48e5a49980172a702c8275e7a3446e726"
-    }
-  ]
+  }
 }

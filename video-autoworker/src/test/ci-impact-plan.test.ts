@@ -77,7 +77,8 @@ describe('CI impact plan', () => {
     expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json)
       .toMatchObject({
         mode: 'docs', base: entry.base, head, reasons: ['documentation_only'],
-        changedCount: 2, rootPartitions: [], runIntegration: false, runPluginTests: false,
+        changedCount: 2, rootPartitions: [], relatedFiles: [], testFiles: [], pluginSuites: [],
+        runIntegration: false, runBrowserTests: false, runPluginTests: false,
       })
   })
 
@@ -89,7 +90,8 @@ describe('CI impact plan', () => {
     expect(run(entry.productRoot, ['--base', entry.base]).json)
       .toMatchObject({
         mode: 'targeted', head, rootPartitions: ['regular'],
-        runIntegration: true, runPluginTests: false,
+        relatedFiles: ['src/app/page.tsx'], testFiles: [], pluginSuites: [],
+        runIntegration: true, runBrowserTests: true, runPluginTests: false,
       })
   })
 
@@ -103,7 +105,9 @@ describe('CI impact plan', () => {
     expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json)
       .toMatchObject({
         mode: 'targeted', rootPartitions: ['regular'],
-        runIntegration: true, runPluginTests: false,
+        relatedFiles: ['src/app/page.tsx', 'src/components/card.tsx'],
+        testFiles: [customHeavy], pluginSuites: [],
+        runIntegration: true, runBrowserTests: true, runPluginTests: false,
       })
   })
 
@@ -128,8 +132,9 @@ describe('CI impact plan', () => {
 
     expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json)
       .toMatchObject({
-        mode: 'targeted', rootPartitions: [customHeavy],
-        runIntegration: false, runPluginTests: false,
+        mode: 'targeted', rootPartitions: ['regular'], relatedFiles: [],
+        testFiles: [customHeavy], pluginSuites: [],
+        runIntegration: false, runBrowserTests: false, runPluginTests: false,
       })
     const source = readFileSync(script, 'utf8')
     expect(source).toContain("'--print-plan'")
@@ -137,16 +142,18 @@ describe('CI impact plan', () => {
   })
 
   it.each([
-    ['root CI', '.github/workflows/ci.yml', 'name: CI\n'],
-    ['runtime skill', 'openclaw-skills/example/SKILL.md', '# Runtime skill\n'],
-    ['skill inside docs', 'docs/examples/SKILL.md', '# Runtime skill\n'],
-    ['executable inside docs', 'docs/examples/check.ts', 'export {}\n'],
-    ['build config', 'package.json', '{"name":"video-autoworker","version":"2.0.0"}\n'],
-    ['unknown product path', 'config/unknown.txt', 'unknown\n'],
-    ['security source', 'src/lib/auth/session.ts', 'export {}\n'],
-    ['authorization source', 'src/app/api/authorization/route.ts', 'export {}\n'],
-    ['state outbox source', 'src/lib/outbox/director-evidence.ts', 'export {}\n'],
-  ])('selects full mode for %s changes', (_label, relativePath, contents) => {
+    ['root CI', '.github/workflows/ci.yml', 'name: CI\n', [], true, false, []],
+    ['runtime skill', 'openclaw-skills/example/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow']],
+    ['skill inside docs', 'docs/examples/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow']],
+    ['executable inside docs', 'docs/examples/check.ts', 'export {}\n', ['docs/examples/check.ts'], true, false, []],
+    ['build config', 'package.json', '{"name":"video-autoworker","version":"2.0.0"}\n', [], true, false, []],
+    ['unknown product path', 'config/unknown.txt', 'unknown\n', [], true, false, []],
+    ['security source', 'src/lib/auth/session.ts', 'export {}\n', ['src/lib/auth/session.ts'], true, false, []],
+    ['authorization source', 'src/app/api/authorization/route.ts', 'export {}\n', ['src/app/api/authorization/route.ts'], true, false, []],
+    ['state outbox source', 'src/lib/outbox/director-evidence.ts', 'export {}\n', ['src/lib/outbox/director-evidence.ts'], true, false, []],
+  ])('keeps automatic %s changes targeted with explicit effects', (
+    _label, relativePath, contents, relatedFiles, runIntegration, runBrowserTests, pluginSuites,
+  ) => {
     const entry = fixture(true)
     const target = relativePath.startsWith('.github/')
       ? join(entry.gitRoot, relativePath)
@@ -156,8 +163,23 @@ describe('CI impact plan', () => {
 
     expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json)
       .toMatchObject({
-        mode: 'full', rootPartitions: partitions,
-        runIntegration: true, runPluginTests: true,
+        mode: 'targeted', rootPartitions: ['regular'], relatedFiles,
+        testFiles: [], pluginSuites,
+        runIntegration, runBrowserTests, runPluginTests: pluginSuites.length > 0,
+      })
+  })
+
+  it('selects each existing plugin suite from markdown, package, and installer-only changes', () => {
+    const entry = fixture(true)
+    write(join(entry.productRoot, 'openclaw-plugins/aiworker-video-command/package.json'), '{}\n')
+    write(join(entry.productRoot, 'openclaw-skills/aiworker-director-brain/SKILL.md'), '# Director\n')
+    write(join(entry.productRoot, 'scripts/install-aiworker-task-flow-skill.sh'), '#!/bin/bash\n')
+    const head = commit(entry.gitRoot, 'plugin inputs')
+
+    expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json)
+      .toMatchObject({
+        mode: 'targeted', pluginSuites: ['video-command', 'director-brain', 'task-flow'],
+        runPluginTests: true,
       })
   })
 
@@ -167,16 +189,19 @@ describe('CI impact plan', () => {
     const head = commit(entry.gitRoot, 'docs')
 
     expect(run(entry.productRoot, ['--head', head]).json).toMatchObject({
-      mode: 'full', reasons: ['base_missing'], rootPartitions: partitions,
+      mode: 'targeted', reasons: ['base_missing_requires_build_static'],
+      rootPartitions: ['regular'], testFiles: [], pluginSuites: [],
+      runIntegration: true, runBrowserTests: false,
     })
     expect(run(entry.productRoot, [
       '--base', entry.base, '--head', head, '--force-full',
     ]).json).toMatchObject({
       mode: 'full', reasons: ['force_full'], rootPartitions: partitions,
+      testFiles: [], pluginSuites: ['video-command', 'director-brain', 'task-flow'],
     })
   })
 
-  it('selects full when history changes from the flat product tree to the prefix', () => {
+  it('compares logical blobs so a pure flat-to-prefixed move stays targeted', () => {
     const entry = fixture()
     mkdirSync(join(entry.gitRoot, 'video-autoworker'), { mode: 0o700 })
     for (const member of ['package.json', 'pnpm-lock.yaml', 'next.config.js', 'scripts', 'src']) {
@@ -186,7 +211,9 @@ describe('CI impact plan', () => {
     const productRoot = join(entry.gitRoot, 'video-autoworker')
 
     expect(run(productRoot, ['--base', entry.base, '--head', head]).json).toMatchObject({
-      mode: 'full', reasons: ['git_source_layout_changed'], rootPartitions: partitions,
+      mode: 'targeted', reasons: ['git_source_layout_changed_without_content_drift'],
+      changedCount: 0, rootPartitions: ['regular'], relatedFiles: [],
+      testFiles: [], pluginSuites: [], runIntegration: true, runBrowserTests: false,
     })
   })
 })

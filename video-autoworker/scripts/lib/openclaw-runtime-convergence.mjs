@@ -73,7 +73,7 @@ function validateManifest(pathname) {
       },
       {
         id: 'aiworker-director-brain',
-        version: '0.4.3',
+        compatibleVersions: ['0.4.1', '0.4.2', '0.4.3'],
         tool: 'aiworker_director_brain',
         requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
         requiredHookConfig: { allowConversationAccess: true },
@@ -143,20 +143,22 @@ function validatePlugin(config, stateDir, descriptor) {
   const manifestPath = path.join(stateDir, 'extensions', descriptor.id, 'openclaw.plugin.json')
   assertPhysicalFileInside(stateDir, manifestPath, `${descriptor.id} plugin manifest`)
   const pluginManifest = readJson(manifestPath, `${descriptor.id} plugin manifest`)
+  const compatibleVersions = descriptor.compatibleVersions
+  const versionAccepted = descriptor.version !== undefined
+    ? pluginManifest.version === descriptor.version
+    : Array.isArray(compatibleVersions) && compatibleVersions.includes(pluginManifest.version)
   if (pluginManifest.id !== descriptor.id
-    || (descriptor.version !== undefined && pluginManifest.version !== descriptor.version)
+    || !versionAccepted
     || !Array.isArray(pluginManifest?.contracts?.tools)
     || !pluginManifest.contracts.tools.includes(descriptor.tool)
     || pluginManifest?.toolMetadata?.[descriptor.tool]?.optional !== true) {
     fail(`required optional plugin contract is not ready: ${descriptor.id}`)
   }
-  if (descriptor.version !== undefined) {
-    const packagePath = path.join(stateDir, 'extensions', descriptor.id, 'package.json')
-    assertPhysicalFileInside(stateDir, packagePath, `${descriptor.id} package manifest`)
-    const packageManifest = readJson(packagePath, `${descriptor.id} package manifest`)
-    if (packageManifest.version !== descriptor.version) {
-      fail(`required plugin version is not ready: ${descriptor.id}`)
-    }
+  const packagePath = path.join(stateDir, 'extensions', descriptor.id, 'package.json')
+  assertPhysicalFileInside(stateDir, packagePath, `${descriptor.id} package manifest`)
+  const packageManifest = readJson(packagePath, `${descriptor.id} package manifest`)
+  if (packageManifest.version !== pluginManifest.version) {
+    fail(`required plugin version is not ready: ${descriptor.id}`)
   }
   if (descriptor.requiredHooks) {
     const entryPath = path.join(stateDir, 'extensions', descriptor.id, 'index.js')
@@ -392,7 +394,8 @@ function sha256(value) {
 function directorPluginDescriptor(manifest) {
   const matches = manifest.requiredPlugins.filter(descriptor => descriptor.id === 'aiworker-director-brain')
   if (matches.length !== 1 || matches[0].id !== 'aiworker-director-brain'
-    || matches[0].version !== '0.4.3' || !Array.isArray(matches[0].requiredHooks)) {
+    || !same(matches[0].compatibleVersions, ['0.4.1', '0.4.2', '0.4.3'])
+    || !Array.isArray(matches[0].requiredHooks)) {
     fail('director-brain runtime plugin descriptor is invalid')
   }
   return matches[0]
@@ -579,11 +582,29 @@ function pluginTreeEvidence(stateDir, descriptor, openclawVersion) {
 }
 
 function requiredPluginTreeEvidence(stateDir, manifest) {
-  return manifest.requiredPlugins.map(descriptor => ({
-    id: descriptor.id,
-    version: descriptor.version,
-    ...pluginTreeEvidence(stateDir, descriptor, manifest.openclawVersion),
-  })).toSorted((left, right) => left.id.localeCompare(right.id))
+  return manifest.requiredPlugins.map(descriptor => {
+    const root = path.join(stateDir, 'extensions', descriptor.id)
+    const packageVersion = readJson(
+      path.join(root, 'package.json'),
+      `${descriptor.id} package manifest`,
+    ).version
+    const manifestVersion = readJson(
+      path.join(root, 'openclaw.plugin.json'),
+      `${descriptor.id} plugin manifest`,
+    ).version
+    const accepted = descriptor.version !== undefined
+      ? packageVersion === descriptor.version
+      : Array.isArray(descriptor.compatibleVersions)
+        && descriptor.compatibleVersions.includes(packageVersion)
+    if (!accepted || packageVersion !== manifestVersion) {
+      fail(`required plugin version is not ready: ${descriptor.id}`)
+    }
+    return {
+      id: descriptor.id,
+      version: packageVersion,
+      ...pluginTreeEvidence(stateDir, descriptor, manifest.openclawVersion),
+    }
+  }).toSorted((left, right) => left.id.localeCompare(right.id))
 }
 
 function requiredPluginTreeSnapshot(stateDir, manifestPath) {
@@ -618,8 +639,7 @@ function pluginCollectionAnchor(trees) {
 
 function validateRuntimePluginCollectionAnchor(runtime, manifest, currentPlugins) {
   const anchor = runtime?.pluginCollectionAnchor
-  const expectedPlugins = manifest.requiredPlugins.map(({ id, version }) => ({ id, version }))
-    .toSorted((left, right) => left.id.localeCompare(right.id))
+  const descriptors = new Map(manifest.requiredPlugins.map(descriptor => [descriptor.id, descriptor]))
   if (!anchor || typeof anchor !== 'object' || Array.isArray(anchor)
     || !same(Object.keys(anchor).toSorted(), ['plugins', 'schema'])
     || anchor.schema !== 'video-autoworker-openclaw-plugin-collection-anchor/v1'
@@ -627,7 +647,13 @@ function validateRuntimePluginCollectionAnchor(runtime, manifest, currentPlugins
     || anchor.plugins.some(plugin => !plugin || typeof plugin !== 'object' || Array.isArray(plugin)
       || !same(Object.keys(plugin).toSorted(), ['id', 'treeSha256', 'version'])
       || !/^[a-f0-9]{64}$/u.test(plugin.treeSha256))
-    || !same(anchor.plugins.map(({ id, version }) => ({ id, version })), expectedPlugins)
+    || anchor.plugins.length !== descriptors.size
+    || anchor.plugins.some(({ id, version }) => {
+      const descriptor = descriptors.get(id)
+      return !descriptor || (descriptor.version !== undefined
+        ? version !== descriptor.version
+        : !descriptor.compatibleVersions?.includes(version))
+    })
     || !same(anchor.plugins, runtime?.plugins)) {
     fail('runtime plugin collection anchor is invalid')
   }
@@ -692,8 +718,11 @@ function validateRuntimeInspection(value, descriptor) {
   const toolNames = tools.flatMap(item => Array.isArray(item?.names) ? item.names : []).sort()
   const diagnostics = Array.isArray(value.diagnostics) ? value.diagnostics : []
   const typedHookNames = normalizeOpenClawTypedHookNames(value.typedHooks)
+  const versionAccepted = descriptor.version !== undefined
+    ? value?.plugin?.version === descriptor.version
+    : descriptor.compatibleVersions?.includes(value?.plugin?.version)
   if (value?.plugin?.id !== descriptor.id || value.plugin.status !== 'loaded'
-    || value.plugin.version !== descriptor.version || !same(toolNames, [descriptor.tool])
+    || !versionAccepted || !same(toolNames, [descriptor.tool])
     || typedHookNames === null
     || !same(typedHookNames, (descriptor.requiredHooks || []).toSorted())
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {
@@ -842,7 +871,7 @@ function verifyRuntimeHooks(
   if (!same(identity, identityBefore) || !same(trees, treesBefore)
     || identity.startTimeMs > Date.now() + 1_000
     || identity.startTimeMs < nextSecondAfterPlugin) {
-    fail('Gateway was not freshly started after the installed 0.4.3 plugin tree')
+    fail('Gateway was not freshly started after the installed compatible plugin tree')
   }
   process.stdout.write(`${JSON.stringify(stable({
     gateway: {
@@ -854,7 +883,7 @@ function verifyRuntimeHooks(
     },
     plugin: {
       id: descriptor.id,
-      version: descriptor.version,
+      version: trees.find(tree => tree.id === descriptor.id)?.version,
       treeSha256: trees.find(tree => tree.id === descriptor.id)?.treeSha256,
       hooks: descriptor.requiredHooks.toSorted(),
     },

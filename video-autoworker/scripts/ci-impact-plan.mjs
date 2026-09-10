@@ -12,6 +12,7 @@ import {
 } from './lib/git-source-layout.mjs'
 
 const COMMIT = /^[a-f0-9]{40}$/u
+const PLUGIN_SUITES = Object.freeze(['video-command', 'director-brain', 'task-flow'])
 
 function parseArguments(argv) {
   const values = { head: 'HEAD', forceFull: false }
@@ -80,14 +81,30 @@ function loadRootPlan(productRoot) {
   return plan.partitions
 }
 
-function changedPaths(gitRoot, base, head) {
-  const raw = git(gitRoot, ['diff', '--name-only', '-z', base, head], { encoding: 'buffer' })
-  return raw.toString('utf8').split('\0').filter(Boolean)
+function commitTrees(gitRoot, commit, productPrefix) {
+  const raw = git(gitRoot, ['ls-tree', '-r', '-z', commit], { encoding: 'buffer' })
+  const product = new Map()
+  const repository = new Map()
+  for (const record of raw.toString('utf8').split('\0').filter(Boolean)) {
+    const match = /^(\d+)\s+(\w+)\s+([a-f0-9]{40,64})\t(.+)$/u.exec(record)
+    if (!match) throw new Error('ci_impact_source_tree_invalid')
+    const [, mode, type, objectId, treePath] = match
+    const identity = `${mode}:${type}:${objectId}`
+    if (!productPrefix || treePath.startsWith(productPrefix)) {
+      const logicalPath = productPrefix ? treePath.slice(productPrefix.length) : treePath
+      if (!logicalPath || product.has(logicalPath)) throw new Error('ci_impact_product_tree_invalid')
+      product.set(logicalPath, identity)
+    } else {
+      repository.set(treePath, identity)
+    }
+  }
+  return { product, repository }
 }
 
-function productRelativePath(pathname, productPrefix) {
-  if (!productPrefix) return pathname
-  return pathname.startsWith(productPrefix) ? pathname.slice(productPrefix.length) : null
+function changedLogicalPaths(left, right) {
+  return [...new Set([...left.keys(), ...right.keys()])]
+    .filter(pathname => left.get(pathname) !== right.get(pathname))
+    .sort()
 }
 
 function isDocumentation(pathname) {
@@ -101,39 +118,57 @@ function isRuntimeSkill(pathname) {
     || /(?:^|\/)SKILL\.md$/u.test(pathname)
 }
 
-function fullReason(pathname) {
-  if (pathname === '.gitignore' || pathname.startsWith('.github/')) return 'git_or_ci_changed'
-  if (isRuntimeSkill(pathname) || pathname.startsWith('openclaw-plugins/')) {
-    return 'runtime_plugin_or_skill_changed'
-  }
-  if (pathname.startsWith('scripts/') || pathname.startsWith('ops/')
-    || pathname.startsWith('runtime/') || pathname.startsWith('migrations/')) {
-    return 'release_or_runtime_safety_changed'
-  }
-  if (/^(?:package\.json|pnpm-lock\.yaml|next\.config\.[cm]?[jt]s|tsconfig(?:\.[^.]+)?\.json|eslint\.config\.[cm]?[jt]s|vitest\.config\.[cm]?[jt]s|playwright[^/]*\.config\.[cm]?[jt]s|openapi\.json)$/u.test(pathname)) {
-    return 'dependency_or_build_config_changed'
-  }
-  if (/(?:^|\/)(?:auth(?:entication|orization)?|security|permissions?|credentials?|secrets?|tokens?|sessions?|rbac|acl|crypto|signatures?|webhooks?|database|db|migrations?|state|storage|persistence|queues?|scheduler|leases?|outbox|recovery|runtime|deploy(?:ment)?|releases?|provenance|integrity|fencing|locks?)(?:\/|\.|-|_)/iu.test(pathname)
-    || /(?:^|\/)(?:schema\.sql|middleware\.[cm]?[jt]s)$/u.test(pathname)) {
-    return 'state_or_security_changed'
-  }
-  return null
+function isTestOrFixture(pathname) {
+  return /(?:^|\/)(?:__tests__|test|tests|fixtures)(?:\/|$)/u.test(pathname)
+    || /\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(pathname)
+    || /^scripts\/test-/u.test(pathname)
 }
 
-function isOrdinaryProductPath(pathname, heavyPartitions) {
-  return heavyPartitions.has(pathname)
-    || pathname.startsWith('src/')
-    || pathname.startsWith('tests/')
-    || pathname.startsWith('public/')
-    || pathname.startsWith('messages/')
+function isTestFile(pathname) {
+  return /\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(pathname)
+    || /^scripts\/test-[^/]+\.test\.mjs$/u.test(pathname)
 }
 
-function needsIntegration(paths) {
+function pluginSuitesFor(paths) {
+  const suites = new Set()
+  for (const pathname of paths) {
+    if (pathname.startsWith('openclaw-plugins/aiworker-video-command/')
+      || pathname === 'scripts/install-aiworker-video-command-plugin.sh') {
+      suites.add('video-command')
+    }
+    if (pathname.startsWith('openclaw-plugins/aiworker-director-brain/')
+      || pathname.startsWith('openclaw-skills/aiworker-director-brain/')
+      || pathname === 'scripts/install-aiworker-director-brain.sh') {
+      suites.add('director-brain')
+    }
+    if (pathname.startsWith('openclaw-skills/aiworker-task-flow/')
+      || pathname === 'scripts/install-aiworker-task-flow-skill.sh') {
+      suites.add('task-flow')
+    }
+    if (isRuntimeSkill(pathname)
+      && !pathname.startsWith('openclaw-plugins/aiworker-video-command/')
+      && !pathname.startsWith('openclaw-plugins/aiworker-director-brain/')
+      && !pathname.startsWith('openclaw-skills/aiworker-director-brain/')
+      && !pathname.startsWith('openclaw-skills/aiworker-task-flow/')) {
+      for (const suite of PLUGIN_SUITES) suites.add(suite)
+    }
+  }
+  return PLUGIN_SUITES.filter(suite => suites.has(suite))
+}
+
+function isProductionSource(pathname) {
+  return !isTestOrFixture(pathname)
+    && /\.(?:cjs|js|jsx|mjs|cts|ts|tsx|mts|sh)$/u.test(pathname)
+}
+
+function needsBrowser(paths) {
   return paths.some(pathname => (
     pathname.startsWith('public/')
     || pathname.startsWith('messages/')
-    || (pathname.startsWith('src/')
-      && !/(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|\.test\.[cm]?[jt]sx?$/u.test(pathname))
+    || pathname.startsWith('src/components/')
+    || pathname.startsWith('src/styles/')
+    || (pathname.startsWith('src/app/') && !pathname.startsWith('src/app/api/'))
+    || /\.(?:css|scss|sass|less)$/u.test(pathname)
   ))
 }
 
@@ -145,8 +180,21 @@ function fullPlan({ base, head, reasons, changedCount, partitions }) {
   return {
     mode: 'full', base, head, reasons: unique(reasons), changedCount,
     rootPartitions: partitions,
+    relatedFiles: [],
+    testFiles: [],
+    pluginSuites: [...PLUGIN_SUITES],
     runIntegration: true,
+    runBrowserTests: true,
     runPluginTests: true,
+  }
+}
+
+function unknownTargetedPlan({ base, head, reason }) {
+  return {
+    mode: 'targeted', base, head, reasons: [reason], changedCount: 0,
+    rootPartitions: ['regular'], relatedFiles: [],
+    testFiles: [], pluginSuites: [],
+    runIntegration: true, runBrowserTests: false, runPluginTests: false,
   }
 }
 
@@ -158,23 +206,31 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     layout = resolveGitSourceLayout(productRoot)
     head = resolveCommit(layout.gitRoot, options.head || 'HEAD')
   } catch {
-    return fullPlan({
+    return options.forceFull ? fullPlan({
       base: options.base || null,
       head: options.head || 'HEAD',
       reasons: ['head_or_layout_unavailable'],
       changedCount: 0,
       partitions,
+    }) : unknownTargetedPlan({
+      base: options.base || null,
+      head: options.head || 'HEAD',
+      reason: 'head_or_layout_unknown_requires_build_static',
     })
   }
   let base
   if (!options.base) {
-    return fullPlan({ base: null, head, reasons: ['base_missing'], changedCount: 0, partitions })
+    return options.forceFull
+      ? fullPlan({ base: null, head, reasons: ['force_full', 'base_missing'], changedCount: 0, partitions })
+      : unknownTargetedPlan({ base: null, head, reason: 'base_missing_requires_build_static' })
   }
   try {
     base = resolveCommit(layout.gitRoot, options.base)
   } catch {
-    return fullPlan({
+    return options.forceFull ? fullPlan({
       base: options.base, head, reasons: ['base_unavailable'], changedCount: 0, partitions,
+    }) : unknownTargetedPlan({
+      base: options.base, head, reason: 'base_unknown_requires_build_static',
     })
   }
   let basePrefix
@@ -183,70 +239,75 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     basePrefix = resolveGitCommitProductPrefix(layout.gitRoot, base)
     headPrefix = resolveGitCommitProductPrefix(layout.gitRoot, head)
   } catch {
-    return fullPlan({
+    return options.forceFull ? fullPlan({
       base, head, reasons: ['commit_layout_unavailable'], changedCount: 0, partitions,
+    }) : unknownTargetedPlan({
+      base, head, reason: 'commit_layout_unknown_requires_build_static',
     })
   }
-  const changed = changedPaths(layout.gitRoot, base, head)
+  const baseTrees = commitTrees(layout.gitRoot, base, basePrefix)
+  const headTrees = commitTrees(layout.gitRoot, head, headPrefix)
+  const productPaths = changedLogicalPaths(baseTrees.product, headTrees.product)
+  const repositoryPaths = changedLogicalPaths(baseTrees.repository, headTrees.repository)
+  const changedCount = productPaths.length + repositoryPaths.length
   if (options.forceFull) {
     return fullPlan({
-      base, head, reasons: ['force_full'], changedCount: changed.length, partitions,
+      base, head, reasons: ['force_full'], changedCount, partitions,
     })
   }
-  if (basePrefix !== headPrefix) {
-    return fullPlan({
-      base, head, reasons: ['git_source_layout_changed'], changedCount: changed.length, partitions,
-    })
-  }
-  if (changed.length === 0) {
+  const layoutChanged = basePrefix !== headPrefix
+  if (changedCount === 0 && !layoutChanged) {
     return {
       mode: 'docs', base, head, reasons: ['no_changes'], changedCount: 0,
-      rootPartitions: [], runIntegration: false, runPluginTests: false,
+      rootPartitions: [], relatedFiles: [],
+      testFiles: [], pluginSuites: [],
+      runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
-
-  const heavyPartitions = new Set(partitions.slice(1))
-  const productPaths = []
-  const reasons = []
-  let docsOnly = true
-  for (const pathname of changed) {
-    const productPath = productRelativePath(pathname, headPrefix)
-    const policyPath = productPath === null ? pathname : productPath
-    if (isRuntimeSkill(policyPath)) {
-      docsOnly = false
-      reasons.push('runtime_plugin_or_skill_changed')
-      continue
-    }
-    if (isDocumentation(policyPath)) continue
-    if (productPath === null) {
-      docsOnly = false
-      reasons.push('repository_root_runtime_changed')
-      continue
-    }
-    productPaths.push(productPath)
-    docsOnly = false
-    const reason = fullReason(productPath)
-    if (reason) reasons.push(reason)
-    else if (!isOrdinaryProductPath(productPath, heavyPartitions)) reasons.push('unknown_path_changed')
-  }
-  if (reasons.length > 0) {
-    return fullPlan({ base, head, reasons, changedCount: changed.length, partitions })
-  }
-  if (docsOnly && productPaths.every(isDocumentation)) {
+  const docsOnly = !layoutChanged
+    && [...productPaths, ...repositoryPaths].every(pathname => (
+      !isRuntimeSkill(pathname) && isDocumentation(pathname)
+    ))
+  if (docsOnly) {
     return {
-      mode: 'docs', base, head, reasons: ['documentation_only'], changedCount: changed.length,
-      rootPartitions: [], runIntegration: false, runPluginTests: false,
+      mode: 'docs', base, head, reasons: ['documentation_only'], changedCount,
+      rootPartitions: [], relatedFiles: [],
+      testFiles: [], pluginSuites: [],
+      runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
-
-  const directlyChangedHeavy = partitions.slice(1).filter(pathname => productPaths.includes(pathname))
-  const hasNonHeavyChange = productPaths.some(pathname => !heavyPartitions.has(pathname))
+  const relatedFiles = productPaths.filter(isProductionSource)
+  const testFiles = productPaths.filter(isTestFile)
+  const pluginSuites = pluginSuitesFor(productPaths)
+  const nonDocumentation = [...productPaths, ...repositoryPaths].filter(pathname => (
+    isRuntimeSkill(pathname) || !isDocumentation(pathname)
+  ))
+  const onlyTestsOrFixtures = nonDocumentation.length > 0
+    && nonDocumentation.every(pathname => isTestOrFixture(pathname))
+  const knownProductInputs = productPaths.every(pathname => (
+    isDocumentation(pathname) || isRuntimeSkill(pathname) || isTestOrFixture(pathname)
+      || isProductionSource(pathname) || pathname.startsWith('public/')
+      || pathname.startsWith('messages/')
+  ))
+  const reasons = [
+    ...(layoutChanged ? ['git_source_layout_changed_without_content_drift'] : []),
+    ...(relatedFiles.length ? ['production_source_changed'] : []),
+    ...(onlyTestsOrFixtures ? ['test_or_fixture_only'] : []),
+    ...(!knownProductInputs || repositoryPaths.some(pathname => !isDocumentation(pathname))
+      ? ['unknown_requires_build_static'] : []),
+  ]
   return {
-    mode: 'targeted', base, head, reasons: ['ordinary_product_change'],
-    changedCount: changed.length,
-    rootPartitions: hasNonHeavyChange ? ['regular'] : directlyChangedHeavy,
-    runIntegration: needsIntegration(productPaths),
-    runPluginTests: false,
+    mode: 'targeted', base, head,
+    reasons: unique(reasons.length ? reasons : ['targeted_change']),
+    changedCount,
+    rootPartitions: ['regular'],
+    relatedFiles,
+    testFiles,
+    pluginSuites,
+    runIntegration: layoutChanged || relatedFiles.length > 0
+      || reasons.includes('unknown_requires_build_static'),
+    runBrowserTests: needsBrowser(productPaths),
+    runPluginTests: pluginSuites.length > 0,
   }
 }
 

@@ -99,3 +99,9 @@ e8 交付暴露了执行参数漂移：实际使用 `-a` 而非已验证的 `-rl
 
 
 后续公开源码核对显示 9.2 仍使用客户端协议 v4、v3 Ed25519 设备签名、control-ui 标识、operator.admin scope 和 device token；agent CLI 仍声明所需 session-key、message-file 和 model 参数。3db 的 expect-final 位于正确的 gateway call 命令，结果解析也已覆盖嵌套 result.payloads。这些静态证据支持先保留制品、再做针对性真实验证的顺序，尚不等于完成生产握手或业务验收。
+
+## 2026-09-10 日常增量发布入口
+
+`node scripts/release-impact-deploy.mjs plan --source-commit <SHA> --artifact <目录> --output <计划文件>` 生成计划，`node scripts/release-impact-deploy.mjs apply --plan <计划文件>` 执行选中的变更，产品工作目录保持根目录下的 `video-autoworker/`。计划比较生产来源与目标来源的组件内容，并核对已安装控制工具；应用业务改动只构建、暂存和切换应用。仅实际变化的插件调用对应安装器，控制工具变化执行独立的一次维护。
+
+飞书业务统一经应用接口处理，OpenClaw插件不携带业务服务副本。稳定投影协议与实现源码摘要分别负责兼容和完整性，因此常规实现更新不再强制插件升级。38条历史证据的回执恢复是指定对象的幂等维护动作，不是所有新版本的前置步骤。验证范围遵循 `VAW-FOCUSED-VALIDATION-001`，只验本次功能和直接影响，完整套件须显式选择。

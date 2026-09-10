@@ -1,7 +1,3 @@
-import { spawn } from 'node:child_process'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
-
 import {
   prepareDirectorBrainReview,
   rememberProposedDirectorBrainRecord,
@@ -56,6 +52,8 @@ const MAX_WORKFLOW_SUGGESTION_CHARS = 96
 const EXTRACTION_HTTP_TIMEOUT_MS = 15_000
 export const DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL =
   'http://127.0.0.1:3017/api/n8n/director-extraction'
+export const DIRECTOR_BRAIN_APPLICATION_SERVICE_URL =
+  'http://127.0.0.1:3017/api/n8n/director-brain'
 const EXTRACTION_ACTIONS = new Set([
   'extraction_status',
 ])
@@ -82,23 +80,6 @@ const EXTRACTION_STATES = new Set([
   'failed',
   'conflict',
 ])
-const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-export const DEFAULT_RUNTIME_SERVICE_PATH = resolve(
-  MODULE_ROOT,
-  'runtime',
-  'scripts',
-  'lib',
-  'feishu-director-brain.mjs',
-)
-export const DEFAULT_RUNTIME_REVIEW_CLI_PATH = resolve(
-  MODULE_ROOT,
-  'runtime',
-  'scripts',
-  'feishu-director-brain.mjs',
-)
-const REVIEW_CLI_TIMEOUT_MS = 150_000
-const REVIEW_CLI_KILL_GRACE_MS = 2_000
-
 const TOOL_PARAMETERS = Object.freeze({
   type: 'object',
   additionalProperties: false,
@@ -504,106 +485,45 @@ export function normalizeDirectorBrainToolRequest(value) {
   return null
 }
 
-export async function loadInstalledDirectorBrainService(
-  servicePath = DEFAULT_RUNTIME_SERVICE_PATH,
-) {
-  const runtimeModule = await import(pathToFileURL(servicePath).href)
-  if (typeof runtimeModule.executeDirectorBrainOperation !== 'function') {
-    throw new Error('director_brain_runtime_service_invalid')
-  }
-  return operation => runtimeModule.executeDirectorBrainOperation(operation)
-}
-
-export async function loadInstalledDirectorBrainReviewServices(
-  servicePath = DEFAULT_RUNTIME_SERVICE_PATH,
-) {
-  const runtimeModule = await import(pathToFileURL(servicePath).href)
-  if (typeof runtimeModule.executeDirectorBrainOperation !== 'function'
-    || typeof runtimeModule.reviewDirectorBrainRecord !== 'function') {
-    throw new Error('director_brain_runtime_service_invalid')
-  }
-  return {
-    executeOperation: operation => runtimeModule.executeDirectorBrainOperation(operation),
-    reviewRecord: createDirectorBrainReviewCliService({
-      cliPath: resolve(dirname(servicePath), '..', 'feishu-director-brain.mjs'),
-    }),
-  }
-}
-
-export function createDirectorBrainReviewCliService({
-  spawnImpl = spawn,
-  nodePath = process.execPath,
-  cliPath = DEFAULT_RUNTIME_REVIEW_CLI_PATH,
-  timeoutMs = REVIEW_CLI_TIMEOUT_MS,
-  killGraceMs = REVIEW_CLI_KILL_GRACE_MS,
-} = {}) {
-  return request => new Promise((resolvePromise, rejectPromise) => {
-    const input = JSON.stringify(request)
-    let child
+export function createDirectorBrainApplicationService({ fetchImpl = globalThis.fetch } = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('director_brain_application_service_invalid')
+  return async (command, input) => {
+    if (!['operate', 'review'].includes(command)
+      || !input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('director_brain_application_operation_invalid')
+    }
+    const response = await fetchImpl(DIRECTOR_BRAIN_APPLICATION_SERVICE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command, input }),
+      cache: 'no-store',
+      redirect: 'error',
+    })
+    const responseText = await readBoundedResponseText(response)
+    let result
     try {
-      child = spawnImpl(nodePath, [cliPath, 'review'], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
+      result = JSON.parse(responseText)
     } catch {
-      rejectPromise(new Error('director_brain_review_process_failed'))
-      return
+      throw new Error('director_brain_application_response_invalid')
     }
-    const stdout = []
-    let stdoutBytes = 0
-    let timedOut = false
-    let outputTooLarge = false
-    let spawnFailed = false
-    let killTimer
-    const terminate = () => {
-      child.kill('SIGTERM')
-      if (!killTimer) killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs)
+    if (!response.ok || result?.ok !== true || typeof result.action !== 'string') {
+      throw new Error('director_brain_application_service_unavailable')
     }
-    const timeout = setTimeout(() => {
-      timedOut = true
-      terminate()
-    }, timeoutMs)
-    child.stdout.on('data', chunk => {
-      const buffer = Buffer.from(chunk)
-      stdoutBytes += buffer.length
-      if (stdoutBytes > MAX_TOOL_RESULT_BYTES) {
-        outputTooLarge = true
-        terminate()
-        return
-      }
-      stdout.push(buffer)
-    })
-    // Drain stderr so the bounded child cannot block. Never include it in a
-    // user-visible result or diagnostic because it may contain remote details.
-    child.stderr.resume()
-    child.on('error', () => { spawnFailed = true })
-    child.on('close', code => {
-      clearTimeout(timeout)
-      clearTimeout(killTimer)
-      if (timedOut) {
-        rejectPromise(new Error('director_brain_review_timeout'))
-        return
-      }
-      if (outputTooLarge) {
-        rejectPromise(new Error('director_brain_runtime_result_too_large'))
-        return
-      }
-      if (spawnFailed || code !== 0) {
-        rejectPromise(new Error('director_brain_review_process_failed'))
-        return
-      }
-      let result
-      try {
-        result = JSON.parse(Buffer.concat(stdout, stdoutBytes).toString('utf8'))
-      } catch {
-        rejectPromise(new Error('director_brain_review_process_result_invalid'))
-        return
-      }
-      resolvePromise(result)
-    })
-    child.stdin.on('error', () => undefined)
-    child.stdin.end(input)
-  })
+    return result
+  }
+}
+
+export async function loadInstalledDirectorBrainService() {
+  const service = createDirectorBrainApplicationService()
+  return operation => service('operate', operation)
+}
+
+export async function loadInstalledDirectorBrainReviewServices() {
+  const service = createDirectorBrainApplicationService()
+  return {
+    executeOperation: operation => service('operate', operation),
+    reviewRecord: request => service('review', request),
+  }
 }
 
 async function readBoundedResponseText(response) {

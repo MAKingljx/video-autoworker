@@ -5,6 +5,16 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      full_suite:
+        description: 显式运行完整测试套件
+        type: boolean
+        required: false
+        default: false
+      base_sha:
+        description: 定向检查的基准提交（留空则执行静态与构建检查）
+        type: string
+        required: false
 
 concurrency:
   group: quality-gate-${{ github.ref }}
@@ -25,6 +35,8 @@ jobs:
       partitions: ${{ steps.plan.outputs.partitions }}
       integration: ${{ steps.plan.outputs.integration }}
       plugins: ${{ steps.plan.outputs.plugins }}
+      browser: ${{ steps.plan.outputs.browser }}
+      impact: ${{ steps.plan.outputs.impact }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,8 +47,8 @@ jobs:
       - name: Select checks from the change scope
         id: plan
         env:
-          CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' }}
+          CHANGE_BASE: ${{ inputs.base_sha || github.event.pull_request.base.sha || github.event.before }}
+          FORCE_FULL: ${{ github.event_name == 'workflow_dispatch' && inputs.full_suite }}
         run: |
           args=()
           if [[ -n "$CHANGE_BASE" ]]; then args+=(--base "$CHANGE_BASE"); fi
@@ -75,6 +87,7 @@ jobs:
             mode: plan.mode, base: plan.base || '',
             partitions: JSON.stringify(plan.rootPartitions.length ? plan.rootPartitions : ['regular']),
             integration: String(plan.runIntegration), plugins: String(plan.runPluginTests),
+            browser: String(plan.runBrowserTests), impact: JSON.stringify(plan),
           }
           appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''))
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
@@ -114,10 +127,13 @@ jobs:
         env:
           CI_PARTITION: ${{ matrix.partition }}
           CI_MODE: ${{ needs.plan.outputs.mode }}
-          CI_BASE: ${{ needs.plan.outputs.base }}
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
         run: |
           args=(--partition "$CI_PARTITION")
-          if [[ "$CI_MODE" == targeted && "$CI_PARTITION" == regular ]]; then args+=(--changed "$CI_BASE"); fi
+          if [[ "$CI_MODE" == targeted && "$CI_PARTITION" == regular ]]; then
+            node -e 'require("node:fs").writeFileSync(process.env.RUNNER_TEMP+"/ci-impact.json", process.env.CI_IMPACT_PLAN)'
+            args+=(--impact-plan "$RUNNER_TEMP/ci-impact.json")
+          fi
           node scripts/run-root-vitest.mjs "${args[@]}"
 
   integration:
@@ -146,13 +162,25 @@ jobs:
           pnpm api:parity
           pnpm lint
           pnpm typecheck
-      - name: OpenClaw runtime and session contracts
+      - name: Changed OpenClaw plugin checks
         if: needs.plan.outputs.plugins == 'true'
+        env:
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
         run: |
-          pnpm test:openclaw-video-command
-          pnpm test:openclaw-director-brain
-          pnpm test:openclaw-task-flow
-          pnpm qa:contracts
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process'
+          const plan = JSON.parse(process.env.CI_IMPACT_PLAN)
+          const scripts = new Map([
+            ['director-brain', 'test:openclaw-director-brain'],
+            ['video-command', 'test:openclaw-video-command'],
+            ['task-flow', 'test:openclaw-task-flow'],
+          ])
+          for (const suite of plan.pluginSuites || []) {
+            if (!scripts.has(suite)) throw new Error('Unknown plugin test suite')
+            execFileSync('pnpm', [scripts.get(suite)], { stdio: 'inherit' })
+          }
+          if (plan.mode === 'full') execFileSync('pnpm', ['qa:contracts'], { stdio: 'inherit' })
+          JS
       - name: Prepare E2E environment
         if: needs.plan.outputs.integration == 'true'
         run: cp .env.test .env
@@ -162,10 +190,10 @@ jobs:
           pnpm build
           pnpm audit:standalone
       - name: Install Playwright browsers
-        if: needs.plan.outputs.integration == 'true'
+        if: needs.plan.outputs.browser == 'true'
         run: pnpm exec playwright install --with-deps
       - name: E2E tests
-        if: needs.plan.outputs.integration == 'true'
+        if: needs.plan.outputs.browser == 'true'
         run: pnpm test:e2e
 
   quality-gate:

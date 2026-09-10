@@ -10,11 +10,25 @@ import {
 export const DIRECTOR_PROJECTION_COMPATIBILITY_PATH =
   'src/lib/director-projection-contract-compatibility.json'
 export const DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA =
+  'video-autoworker-director-projection-compatibility/v2'
+export const LEGACY_DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA =
   'video-autoworker-director-projection-compatibility/v1'
+
+export const DIRECTOR_PROJECTION_PROTOCOL = Object.freeze({
+  authority: 'director-evidence-projection-contract-v1',
+  projectionSchemaVersion: 1,
+  receiptAuthority: 'video-autoworker-director-evidence-delivery-v1',
+  receiptSchemaVersion: 1,
+  schema: 'video-autoworker-director-evidence-projection-protocol/v1',
+  sourceAuthority: 'video-autoworker-final-result-v1',
+  stableEvidenceIdentity: 'material-evidence-canonical-fields-v1',
+  storedTextNormalization: 'unicode-nfkc-crlf-trim-v1',
+  wireProtocol: 'director-command-jsonl-v1',
+})
 
 const SHA256 = /^[a-f0-9]{64}$/u
 const TRANSITION_ID = /^[a-z0-9][a-z0-9-]{0,79}$/u
-const ALLOWED_CHANGED_MEMBERS = new Set([
+const LEGACY_ALLOWED_CHANGED_MEMBERS = new Set([
   'appProjectionSemanticsSha256',
   'deliveryCoreSha256',
   'directorBrainServiceSha256',
@@ -41,14 +55,24 @@ function canonicalJson(value) {
   return encoded === undefined ? 'null' : encoded
 }
 
-export function directorProjectionContractDigest(closure) {
+function digest(value) {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+}
+
+export const DIRECTOR_PROJECTION_PROTOCOL_DIGEST = digest(DIRECTOR_PROJECTION_PROTOCOL)
+
+export function directorProjectionImplementationDigest(closure) {
   const contract = {
     authority: 'director-evidence-projection-contract-v1',
     schemaVersion: 1,
     ...Object.fromEntries(CONTRACT_MEMBER_KEYS.map(key => [key, closure?.[key]])),
   }
-  return createHash('sha256').update(canonicalJson(contract)).digest('hex')
+  return digest(contract)
 }
+
+// Historical manifests and outbox rows used an implementation-closure digest
+// as their contract identity. Keep the calculation available for verification.
+export const directorProjectionContractDigest = directorProjectionImplementationDigest
 
 function parsedObject(source, label) {
   let value
@@ -73,15 +97,14 @@ function validClosure(value) {
     && CONTRACT_MEMBER_KEYS.every(key => SHA256.test(value[key]))
 }
 
-function validChangedMembers(value) {
-  return Array.isArray(value)
-    && value.length >= 1
-    && value.length <= ALLOWED_CHANGED_MEMBERS.size
-    && new Set(value).size === value.length
-    && value.every(key => ALLOWED_CHANGED_MEMBERS.has(key))
+function validImplementation(value) {
+  return exactKeys(value, ['closure', 'digest'])
+    && validClosure(value.closure)
+    && SHA256.test(value.digest)
+    && directorProjectionImplementationDigest(value.closure) === value.digest
 }
 
-function sourceContracts(value) {
+function sourceContractsV1(value) {
   return [
     { ...value.fromContract, changedClosureMembers: value.changedClosureMembers },
     ...(value.additionalSourceContracts || []),
@@ -105,31 +128,28 @@ function validateRegressionEvidence(value) {
   return true
 }
 
-export function validateDirectorProjectionContractCompatibility(value, options = {}) {
+function validateLegacyV1(value, options) {
   const rootKeys = [
     'changedClosureMembers', 'fromContract', 'recovery', 'regressionEvidence', 'rollback',
     'schema', 'toContract', 'transitionId', 'unchanged',
     ...(Object.hasOwn(value || {}, 'additionalSourceContracts')
       ? ['additionalSourceContracts'] : []),
   ]
+  const validChangedMembers = changed => Array.isArray(changed)
+    && changed.length >= 1 && changed.length <= LEGACY_ALLOWED_CHANGED_MEMBERS.size
+    && new Set(changed).size === changed.length
+    && changed.every(key => LEGACY_ALLOWED_CHANGED_MEMBERS.has(key))
   if (!exactKeys(value, rootKeys)
-    || value.schema !== DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA
     || typeof value.transitionId !== 'string' || !TRANSITION_ID.test(value.transitionId)
-    || !exactKeys(value.fromContract, ['closure', 'digest'])
-    || !validClosure(value.fromContract.closure)
-    || !SHA256.test(value.fromContract.digest)
-    || directorProjectionContractDigest(value.fromContract.closure) !== value.fromContract.digest
+    || !validImplementation(value.fromContract)
     || !exactKeys(value.toContract, ['digest']) || !SHA256.test(value.toContract.digest)
     || !validChangedMembers(value.changedClosureMembers)
     || (value.additionalSourceContracts !== undefined
       && (!Array.isArray(value.additionalSourceContracts)
-        || value.additionalSourceContracts.length < 1
-        || value.additionalSourceContracts.length > 4
+        || value.additionalSourceContracts.length < 1 || value.additionalSourceContracts.length > 4
         || value.additionalSourceContracts.some(contract => (
           !exactKeys(contract, ['changedClosureMembers', 'closure', 'digest'])
-          || !validClosure(contract.closure)
-          || !SHA256.test(contract.digest)
-          || directorProjectionContractDigest(contract.closure) !== contract.digest
+          || !validImplementation({ closure: contract.closure, digest: contract.digest })
           || !validChangedMembers(contract.changedClosureMembers)
         ))))
     || !exactKeys(value.unchanged, [
@@ -137,25 +157,18 @@ export function validateDirectorProjectionContractCompatibility(value, options =
       'sourceIdentity', 'stableEvidenceIdentity', 'wireProtocol',
     ])
     || value.unchanged.projectionAuthority !== 'director-evidence-projection-contract-v1'
-    || value.unchanged.projectionSchemaVersion !== 1
-    || value.unchanged.receiptSchemaVersion !== 1
-    || value.unchanged.outboxIdentity !== true
-    || value.unchanged.sourceIdentity !== true
-    || value.unchanged.stableEvidenceIdentity !== true
-    || value.unchanged.wireProtocol !== true
+    || value.unchanged.projectionSchemaVersion !== 1 || value.unchanged.receiptSchemaVersion !== 1
+    || value.unchanged.outboxIdentity !== true || value.unchanged.sourceIdentity !== true
+    || value.unchanged.stableEvidenceIdentity !== true || value.unchanged.wireProtocol !== true
     || !exactKeys(value.recovery, [
       'compatibleSourceDigests', 'mode', 'preserveOutboxIdentity',
       'remoteWrites', 'requiredConflictCode',
     ])
     || value.recovery.mode !== 'verified-read-only'
-    || value.recovery.preserveOutboxIdentity !== true
-    || value.recovery.remoteWrites !== false
+    || value.recovery.preserveOutboxIdentity !== true || value.recovery.remoteWrites !== false
     || value.recovery.requiredConflictCode !== 'director_evidence_projection_receipt_invalid'
-    || !Array.isArray(value.recovery.compatibleSourceDigests)
     || JSON.stringify(value.recovery.compatibleSourceDigests)
-      !== JSON.stringify(sourceContracts(value).map(contract => contract.digest))
-    || new Set(sourceContracts(value).map(contract => contract.digest)).size
-      !== sourceContracts(value).length
+      !== JSON.stringify(sourceContractsV1(value).map(contract => contract.digest))
     || !exactKeys(value.rollback, [
       'automaticCompensationBeforeReturn', 'direction', 'explicitReverse',
     ])
@@ -165,18 +178,17 @@ export function validateDirectorProjectionContractCompatibility(value, options =
     || !validateRegressionEvidence(value.regressionEvidence)) {
     throw new Error('director_projection_contract_compatibility_invalid')
   }
-
   const currentClosure = options.currentClosure
   if (currentClosure !== undefined) {
     if (!validClosure(currentClosure)) {
       throw new Error('director_projection_contract_current_closure_invalid')
     }
-    const currentDigest = directorProjectionContractDigest(currentClosure)
+    const currentDigest = directorProjectionImplementationDigest(currentClosure)
     if (currentDigest !== value.toContract.digest
       || (options.currentDigest !== undefined && options.currentDigest !== currentDigest)) {
       throw new Error('director_projection_contract_target_mismatch')
     }
-    for (const source of sourceContracts(value)) {
+    for (const source of sourceContractsV1(value)) {
       const changed = CONTRACT_MEMBER_KEYS.filter(
         key => source.closure[key] !== currentClosure[key],
       ).sort()
@@ -187,25 +199,86 @@ export function validateDirectorProjectionContractCompatibility(value, options =
     }
   }
   if (options.sourceDigest !== undefined
-    && !sourceContracts(value).some(contract => contract.digest === options.sourceDigest)) {
+    && !sourceContractsV1(value).some(contract => contract.digest === options.sourceDigest)) {
     throw new Error('director_projection_contract_source_mismatch')
   }
   return value
 }
 
-export function getDirectorProjectionReadCompatibleDigests(
-  declaration,
-  currentContract,
-) {
-  if (!exactKeys(currentContract, ['closure', 'digest'])
-    || !SHA256.test(currentContract.digest)) {
-    throw new Error('director_projection_contract_current_invalid')
+function validateV2(value, options) {
+  if (!exactKeys(value, [
+    'legacyImplementations', 'protocol', 'recovery', 'rollback', 'schema', 'transitionId',
+  ])
+    || typeof value.transitionId !== 'string' || !TRANSITION_ID.test(value.transitionId)
+    || !exactKeys(value.protocol, ['descriptor', 'digest'])
+    || canonicalJson(value.protocol.descriptor) !== canonicalJson(DIRECTOR_PROJECTION_PROTOCOL)
+    || value.protocol.digest !== DIRECTOR_PROJECTION_PROTOCOL_DIGEST
+    || !Array.isArray(value.legacyImplementations)
+    || value.legacyImplementations.length < 1 || value.legacyImplementations.length > 8
+    || value.legacyImplementations.some(item => !validImplementation(item))
+    || new Set(value.legacyImplementations.map(item => item.digest)).size
+      !== value.legacyImplementations.length
+    || value.legacyImplementations.some(item => item.digest === DIRECTOR_PROJECTION_PROTOCOL_DIGEST)
+    || !exactKeys(value.recovery, [
+      'compatibleSourceDigests', 'mode', 'preserveOutboxIdentity',
+      'remoteWrites', 'requiredConflictCode',
+    ])
+    || value.recovery.mode !== 'verified-read-only'
+    || value.recovery.preserveOutboxIdentity !== true || value.recovery.remoteWrites !== false
+    || value.recovery.requiredConflictCode !== 'director_evidence_projection_receipt_invalid'
+    || JSON.stringify(value.recovery.compatibleSourceDigests)
+      !== JSON.stringify(value.legacyImplementations.map(item => item.digest))
+    || !exactKeys(value.rollback, [
+      'automaticCompensationBeforeReturn', 'direction', 'explicitReverse',
+    ])
+    || value.rollback.direction !== 'forward-only'
+    || value.rollback.automaticCompensationBeforeReturn !== true
+    || value.rollback.explicitReverse !== false) {
+    throw new Error('director_projection_contract_compatibility_invalid')
   }
-  const validated = validateDirectorProjectionContractCompatibility(declaration, {
-    currentClosure: currentContract.closure,
-    currentDigest: currentContract.digest,
-  })
-  return Object.freeze([...validated.recovery.compatibleSourceDigests])
+  if (options.protocolDigest !== undefined
+    && options.protocolDigest !== DIRECTOR_PROJECTION_PROTOCOL_DIGEST) {
+    throw new Error('director_projection_protocol_mismatch')
+  }
+  if (options.currentImplementation !== undefined
+    && !validImplementation(options.currentImplementation)) {
+    throw new Error('director_projection_implementation_invalid')
+  }
+  if (options.sourceDigest !== undefined
+    && options.sourceDigest !== DIRECTOR_PROJECTION_PROTOCOL_DIGEST
+    && !value.legacyImplementations.some(item => item.digest === options.sourceDigest)) {
+    throw new Error('director_projection_contract_source_mismatch')
+  }
+  return value
+}
+
+export function validateDirectorProjectionContractCompatibility(value, options = {}) {
+  if (value?.schema === LEGACY_DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA) {
+    return validateLegacyV1(value, options)
+  }
+  if (value?.schema === DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA) {
+    return validateV2(value, options)
+  }
+  throw new Error('director_projection_contract_compatibility_invalid')
+}
+
+export function getDirectorProjectionReadCompatibleDigests(declaration, currentContract) {
+  if (declaration?.schema === LEGACY_DIRECTOR_PROJECTION_COMPATIBILITY_SCHEMA) {
+    if (!exactKeys(currentContract, ['closure', 'digest']) || !SHA256.test(currentContract.digest)) {
+      throw new Error('director_projection_contract_current_invalid')
+    }
+    return Object.freeze([...validateLegacyV1(declaration, {
+      currentClosure: currentContract.closure,
+      currentDigest: currentContract.digest,
+    }).recovery.compatibleSourceDigests])
+  }
+  validateV2(declaration, { protocolDigest: currentContract?.digest ?? currentContract })
+  return Object.freeze([...declaration.recovery.compatibleSourceDigests])
+}
+
+export function isCompatibleProjectionImplementationDigest(declaration, sourceDigest) {
+  validateDirectorProjectionContractCompatibility(declaration, { sourceDigest })
+  return true
 }
 
 export function loadDirectorProjectionContractCompatibility(repositoryRoot, options = {}) {
@@ -228,7 +301,9 @@ export function loadDirectorProjectionContractCompatibility(repositoryRoot, opti
     parsedObject(source, 'director_projection_contract_compatibility'),
     options,
   )
-  for (const evidence of compatibility.regressionEvidence) {
+  // v1 declarations bind their regression files directly. v2 binds the whole
+  // implementation through release provenance and stays stable across fixes.
+  for (const evidence of compatibility.regressionEvidence || []) {
     let contents
     try {
       contents = layout
@@ -246,5 +321,5 @@ export function loadDirectorProjectionContractCompatibility(repositoryRoot, opti
 
 export function directorProjectionCompatibilitySha256(value) {
   validateDirectorProjectionContractCompatibility(value)
-  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+  return digest(value)
 }

@@ -26,6 +26,7 @@ const MEBIBYTE = 1024 * 1024
 // output accounts for governed fields copied into multiple evidence columns.
 export const DIRECTOR_COMMAND_LIMITS = Object.freeze({
   operate: Object.freeze({ maxInputBytes: 32 * 1024, maxOutputBytes: 256 * 1024 }),
+  review: Object.freeze({ maxInputBytes: 32 * 1024, maxOutputBytes: 256 * 1024 }),
   'propose-batch': Object.freeze({ maxInputBytes: 256 * 1024, maxOutputBytes: 512 * 1024 }),
   transform: Object.freeze({ maxInputBytes: (2 * MEBIBYTE) + 1, maxOutputBytes: 8 * MEBIBYTE }),
   'project-evidence': Object.freeze({
@@ -467,8 +468,14 @@ export function getDirectorEvidenceOutboxCountsCore(
   db: Database.Database,
   currentProjectionContractDigest: string,
   scope: N8nTaskScope,
+  compatibleProjectionContractDigests: readonly string[] = [],
 ): DirectorEvidenceOutboxCounts {
   assertProjectionContractDigest(currentProjectionContractDigest)
+  const acceptedProjectionContractDigests = new Set([
+    currentProjectionContractDigest,
+    ...compatibleProjectionContractDigests,
+  ])
+  for (const digest of acceptedProjectionContractDigests) assertProjectionContractDigest(digest)
   if (!Number.isSafeInteger(scope.tenantId) || scope.tenantId < 1
     || !Number.isSafeInteger(scope.workspaceId) || scope.workspaceId < 1) {
     throw new Error('director_brain_scope_invalid')
@@ -488,11 +495,13 @@ export function getDirectorEvidenceOutboxCountsCore(
     outOfScopeExtraction: 0,
   }
   for (const row of rows) counts[row.status] = Number(row.count)
-  counts.incompatiblePending = Number((db.prepare(`
-    SELECT COUNT(*) AS count
+  counts.incompatiblePending = (db.prepare(`
+    SELECT projection_contract_digest AS digest
     FROM n8n_director_evidence_outbox
-    WHERE status = 'pending' AND projection_contract_digest <> ?
-  `).get(currentProjectionContractDigest) as { count: number }).count)
+    WHERE status = 'pending'
+  `).all() as Array<{ digest: string }>).filter(
+    row => !acceptedProjectionContractDigests.has(row.digest),
+  ).length
   const deliveredRows = db.prepare(`
     SELECT outbox.* FROM n8n_director_evidence_outbox outbox
     WHERE outbox.status = 'delivered'
@@ -663,11 +672,13 @@ async function deliverOutbox(
   item: DirectorEvidenceOutbox,
   options: {
     currentProjectionContractDigest: string
+    compatibleProjectionContractDigests: ReadonlySet<string>
     nowSeconds: () => number
     runner: DirectorCommandRunner
   },
 ): Promise<'delivered' | 'pending' | 'conflict'> {
-  if (item.projectionContractDigest !== options.currentProjectionContractDigest) {
+  if (item.projectionContractDigest !== options.currentProjectionContractDigest
+    && !options.compatibleProjectionContractDigests.has(item.projectionContractDigest)) {
     const attemptCount = item.attemptCount + 1
     const settledAt = options.nowSeconds()
     const transition = db.prepare(`
@@ -777,6 +788,7 @@ export async function drainDirectorEvidenceOutboxCore(
   db: Database.Database,
   options: {
     currentProjectionContractDigest: string
+    compatibleProjectionContractDigests?: readonly string[]
     nowSeconds?: number
     now?: () => number
     limit?: number
@@ -785,6 +797,12 @@ export async function drainDirectorEvidenceOutboxCore(
   },
 ): Promise<{ scanned: number; delivered: number; pending: number; conflict: number }> {
   assertProjectionContractDigest(options.currentProjectionContractDigest)
+  const compatibleProjectionContractDigests = new Set(
+    options.compatibleProjectionContractDigests || [],
+  )
+  for (const digest of compatibleProjectionContractDigests) {
+    assertProjectionContractDigest(digest)
+  }
   const fixedNow = Number.isSafeInteger(options.nowSeconds)
     ? Math.max(0, Number(options.nowSeconds)) : null
   const nowSeconds = () => fixedNow ?? Math.max(0, Math.floor(
@@ -803,6 +821,7 @@ export async function drainDirectorEvidenceOutboxCore(
   for (const row of rows) {
     const outcome = await deliverOutbox(db, rowToOutbox(row), {
       currentProjectionContractDigest: options.currentProjectionContractDigest,
+      compatibleProjectionContractDigests,
       nowSeconds,
       runner: options.runner,
     })

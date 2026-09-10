@@ -63,6 +63,8 @@ async function writeProvenanceOnlyManifest(artifactRoot: string) {
     schemaVersion: 2,
     algorithm: 'sha256',
     artifactContent,
+    projectionProtocol: provenance.projectionProtocol,
+    projectionImplementation: provenance.projectionImplementation,
     ...(provenance.projectionContractCompatibility ? {
       projectionContractCompatibility: provenance.projectionContractCompatibility,
       projectionContractCompatibilitySha256:
@@ -311,13 +313,13 @@ describe('director video release readiness verifier', () => {
     ), 'utf8'))
     const current = directorEvidenceProjectionContract()
     expect(() => validateDirectorProjectionContractCompatibility(compatibility, {
-      currentClosure: current.closure,
-      currentDigest: current.digest,
+      currentImplementation: current,
+      protocolDigest: result.projectionContract.currentDigest,
       sourceDigest: '1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932',
     })).not.toThrow()
     expect(() => validateDirectorProjectionContractCompatibility(compatibility, {
-      currentClosure: current.closure,
-      currentDigest: current.digest,
+      currentImplementation: current,
+      protocolDigest: result.projectionContract.currentDigest,
       sourceDigest: 'f'.repeat(64),
     })).toThrow('director_projection_contract_source_mismatch')
     expect(readFileSync(join(repositoryRoot, 'src/lib/director-evidence-delivery-core.ts'), 'utf8'))
@@ -352,6 +354,32 @@ describe('director video release readiness verifier', () => {
     })).toThrow('video_command_package_mismatch')
   })
 
+  it('allows a known legacy director plugin during app rollout and rejects an unknown version', async () => {
+    const installedRoot = join(profileRoot, 'extensions', 'aiworker-director-brain')
+    for (const name of ['package.json', 'openclaw.plugin.json']) {
+      const pathname = join(installedRoot, name)
+      const value = JSON.parse(readFileSync(pathname, 'utf8'))
+      value.version = '0.4.1'
+      await writeFile(pathname, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+    }
+    expect(verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    }).directorBrain.version).toBe('0.4.1')
+    for (const name of ['package.json', 'openclaw.plugin.json']) {
+      const pathname = join(installedRoot, name)
+      const value = JSON.parse(readFileSync(pathname, 'utf8'))
+      value.version = '9.9.9'
+      await writeFile(pathname, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+    }
+    expect(() => verifyInstalledReleasePayloads({
+      repositoryRoot,
+      profileStateRoot: profileRoot,
+      workspaceRoot,
+    })).toThrow('director_brain_version_mismatch')
+  })
+
   it.each([
     ['video_command', 'aiworker-video-command'],
     ['director_brain', 'aiworker-director-brain'],
@@ -363,7 +391,9 @@ describe('director video release readiness verifier', () => {
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    })).toThrow(`${label}_installed_package_peer_invalid`)
+    })).toThrow(label === 'director_brain'
+      ? 'director_brain_plugin_contract_mismatch'
+      : `${label}_installed_package_peer_invalid`)
   })
 
   it('accepts omission of non-runtime video-command auxiliaries', async () => {
@@ -737,7 +767,7 @@ describe('director video release readiness verifier', () => {
 
   it.each([
     'activePhases',
-    'sourcesWithoutPhase',
+    'invalidSourcesWithoutPhase',
     'invalidPhaseBindings',
     'invalidCheckpoints',
     'invalidProjectionReceipts',
@@ -748,6 +778,7 @@ describe('director video release readiness verifier', () => {
     const clean = {
       activePhases: 0,
       sourcesWithoutPhase: 0,
+      invalidSourcesWithoutPhase: 0,
       invalidPhaseBindings: 0,
       invalidCheckpoints: 0,
       invalidProjectionReceipts: 0,
@@ -757,6 +788,22 @@ describe('director video release readiness verifier', () => {
     }
     expect(() => assertDirectorExtractionReleaseReady({ ...clean, [field]: 1 }))
       .toThrow(`extraction_${field}:1`)
+  })
+
+  it('does not block app rollout for a valid source whose extraction has not started', () => {
+    expect(() => assertDirectorExtractionReleaseReady({
+      activePhases: 0,
+      sourcesWithoutPhase: 1,
+      unstartedSourcesWithoutPhase: 1,
+      recoverableSourcesWithoutPhase: 0,
+      invalidSourcesWithoutPhase: 0,
+      invalidPhaseBindings: 0,
+      invalidCheckpoints: 0,
+      invalidProjectionReceipts: 0,
+      invalidReviewReceipts: 0,
+      missingPredecessorReviews: 0,
+      incompatibleProjectionBoundary: 0,
+    })).not.toThrow()
   })
 
   it('fails closed when submit-task directorWork support drifts', async () => {
@@ -771,14 +818,14 @@ describe('director video release readiness verifier', () => {
     })).toThrow('task_flow_manifest_mismatch')
   })
 
-  it('fails closed when the installed director CLI is missing', async () => {
+  it('does not couple app readiness to the legacy installed director CLI payload', async () => {
     await rm(join(profileRoot, 'extensions', 'aiworker-director-brain',
       'runtime', 'scripts', 'feishu-director-brain.mjs'))
     expect(() => verifyInstalledReleasePayloads({
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    })).toThrow('director_brain_manifest_mismatch')
+    })).not.toThrow()
   })
 
   it('fails closed when the installed transcript projection hook is missing', async () => {
@@ -801,7 +848,7 @@ describe('director video release readiness verifier', () => {
     })).toThrow('director_brain_manifest_mismatch')
   })
 
-  it('fails closed when the installed sensitive narrative filter digest drifts', async () => {
+  it('leaves installed plugin byte identity to the bound runtime proof', async () => {
     await writeFile(
       join(profileRoot, 'extensions', 'aiworker-director-brain',
         'lib', 'sensitive-narrative-text.js'),
@@ -811,10 +858,10 @@ describe('director video release readiness verifier', () => {
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    })).toThrow('director_brain_manifest_mismatch')
+    })).not.toThrow()
   })
 
-  it('fails closed when the installed director sensitive-value scanner drifts', async () => {
+  it('does not couple app readiness to the legacy installed scanner payload', async () => {
     await writeFile(
       join(profileRoot, 'extensions', 'aiworker-director-brain',
         'runtime', 'scripts', 'lib', 'sensitive-value-scanner.mjs'),
@@ -824,7 +871,7 @@ describe('director video release readiness verifier', () => {
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    })).toThrow('director_brain_manifest_mismatch')
+    })).not.toThrow()
   })
 
   it('fails closed when the installed transformer becomes group-writable', async () => {
@@ -911,6 +958,7 @@ describe('director video release readiness verifier', () => {
         expectedProjectionVersion: 'feishu-candidate-projection-v2',
         activePhases: 0,
         sourcesWithoutPhase: 0,
+        invalidSourcesWithoutPhase: 0,
         invalidPhaseBindings: 0,
         invalidCheckpoints: 0,
         invalidProjectionReceipts: 0,
@@ -1129,7 +1177,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     const declaration = JSON.parse(readFileSync(join(repositoryRoot, declarationPath), 'utf8'))
     await mkdir(dirname(join(gitRoot, declarationPath)), { recursive: true })
     await cp(join(repositoryRoot, declarationPath), join(gitRoot, declarationPath))
-    for (const evidence of declaration.regressionEvidence) {
+    for (const evidence of declaration.regressionEvidence || []) {
       await mkdir(dirname(join(gitRoot, evidence.path)), { recursive: true })
       await cp(join(repositoryRoot, evidence.path), join(gitRoot, evidence.path))
     }
@@ -1157,7 +1205,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
 
     const manifestPath = join(artifactRoot, 'release-manifest.json')
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    manifest.projectionContractCompatibility.toContract.digest = 'f'.repeat(64)
+    manifest.projectionContractCompatibility.protocol.digest = 'f'.repeat(64)
     await writeFile(manifestPath, JSON.stringify(manifest))
     expect(() => verifyDirectorExtractionReleaseProvenance({
       repositoryRoot: gitRoot,
@@ -1188,7 +1236,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     const compatibility = JSON.parse(readFileSync(join(
       repositoryRoot, 'src/lib/director-projection-contract-compatibility.json',
     ), 'utf8'))
-    for (const evidence of compatibility.regressionEvidence) {
+    for (const evidence of compatibility.regressionEvidence || []) {
       await mkdir(dirname(join(gitRoot, evidence.path)), { recursive: true })
       await cp(join(repositoryRoot, evidence.path), join(gitRoot, evidence.path))
     }

@@ -6,7 +6,11 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type Database from 'better-sqlite3'
 import projectionCompatibility from '@/lib/director-projection-contract-compatibility.json'
-import { getDirectorProjectionReadCompatibleDigests } from '../../scripts/lib/director-projection-contract-compatibility.mjs'
+import {
+  DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+  getDirectorProjectionReadCompatibleDigests,
+  isCompatibleProjectionImplementationDigest,
+} from '../../scripts/lib/director-projection-contract-compatibility.mjs'
 import type { N8nTaskRun } from '@/lib/n8n-task-runs'
 import {
   DIRECTOR_COMMAND_LIMITS,
@@ -57,7 +61,7 @@ const DIRECTOR_BRAIN_SCHEMA_SHA256 = '72ef48a91f943fbd15786ecba648fccb2f9c91722c
 const DIRECTOR_EVIDENCE_TRANSFORMER_SHA256 = 'b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1'
 const DIRECTOR_EVIDENCE_LIBRARY_SHA256 = 'dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc'
 const DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256 = '260b7fe725e4a92a6815cddb52117c458d78e927fbf5595f05f8a7d32784ad8c'
-const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = '83cbbddca0037c9b848e12abfb160e1af6ce416f9a95099131cc2e968894f740'
+const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = 'fe7de7c319e8c63e0b664aba3a773ad9b294f3513ad2249bfd6495e3e4271327'
 const DIRECTOR_COMMAND_ENV_KEYS = [
   'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'NODE_ENV',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
@@ -66,6 +70,7 @@ const DIRECTOR_COMMAND_ENV_KEYS = [
 ] as const
 const COMMAND_TIMEOUT_MS = {
   operate: 30_000,
+  review: 150_000,
   'propose-batch': 180_000,
   transform: 30_000,
   'project-evidence': 10 * 60_000,
@@ -94,10 +99,16 @@ function commandPaths(command: DirectorCommand): { script: string; args: string[
         'scripts', 'project-director-evidence.mjs')
     return { script, args: [] }
   }
-  const script = process.env.AIWORKER_DIRECTOR_BRAIN_CLI_PATH
-    || join(homedir(), '.openclaw-qwen-current', 'extensions', 'aiworker-director-brain',
-      'runtime', 'scripts', 'feishu-director-brain.mjs')
+  const script = directorBrainRuntimeCliPath()
   return { script, args: [command] }
+}
+
+export function directorBrainRuntimeCliPath(
+  source: Readonly<Record<string, string | undefined>> = process.env,
+  productRoot = process.cwd(),
+): string {
+  return source.AIWORKER_DIRECTOR_BRAIN_CLI_PATH
+    || join(productRoot, 'scripts', 'feishu-director-brain.mjs')
 }
 
 function configuredDigest(
@@ -155,15 +166,23 @@ export function directorEvidenceProjectionContract(
 }
 
 export function directorEvidenceProjectionContractDigest(
-  source: Readonly<Record<string, string | undefined>> = process.env,
+  _source: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
-  return directorEvidenceProjectionContract(source).digest
+  return DIRECTOR_PROJECTION_PROTOCOL_DIGEST
 }
 
 export function directorEvidenceReadCompatibleContractDigests(): readonly string[] {
   return getDirectorProjectionReadCompatibleDigests(
-    projectionCompatibility, directorEvidenceProjectionContract(),
+    projectionCompatibility, { digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST },
   )
+}
+
+function storedProjectionContractDigestIsCompatible(digest: string): boolean {
+  try {
+    return isCompatibleProjectionImplementationDigest(projectionCompatibility, digest)
+  } catch {
+    return false
+  }
 }
 
 export async function recoverConflictedDirectorEvidenceProjection(
@@ -389,6 +408,7 @@ export function getDirectorEvidenceOutboxCounts(
     db,
     directorEvidenceProjectionContractDigest(),
     getDirectorBrainScope(),
+    directorEvidenceReadCompatibleContractDigests(),
   )
 }
 
@@ -397,10 +417,15 @@ export function enqueueDirectorEvidenceOutbox(
   parent: N8nTaskRun,
   nowSeconds = Math.floor(Date.now() / 1_000),
 ): 'skipped' | 'created' | 'existing' | 'conflict' {
+  const existing = getDirectorEvidenceOutboxCore(db, parent.taskId)
+  const projectionContractDigest = existing
+    && storedProjectionContractDigestIsCompatible(existing.projectionContractDigest)
+    ? existing.projectionContractDigest
+    : directorEvidenceProjectionContractDigest()
   return enqueueDirectorEvidenceOutboxCore(
     db,
     parent,
-    directorEvidenceProjectionContractDigest(),
+    projectionContractDigest,
     nowSeconds,
   )
 }
@@ -418,6 +443,7 @@ export async function drainDirectorEvidenceOutbox(
   return await drainDirectorEvidenceOutboxCore(db, {
     scope,
     currentProjectionContractDigest: directorEvidenceProjectionContractDigest(),
+    compatibleProjectionContractDigests: directorEvidenceReadCompatibleContractDigests(),
     nowSeconds: options.nowSeconds,
     now: options.now,
     limit: options.limit,

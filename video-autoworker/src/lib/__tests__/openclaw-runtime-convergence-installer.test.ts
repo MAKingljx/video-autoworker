@@ -1159,7 +1159,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
         },
         {
           id: 'aiworker-director-brain',
-          version: '0.4.3',
+          compatibleVersions: ['0.4.1', '0.4.2', '0.4.3'],
           tool: 'aiworker_director_brain',
           requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
           requiredHookConfig: { allowConversationAccess: true },

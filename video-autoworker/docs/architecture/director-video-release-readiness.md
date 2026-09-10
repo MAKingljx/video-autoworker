@@ -12,7 +12,7 @@
 | Video AutoWorker standalone | Git release ID + `2.0.1` + `release-manifest.json` |
 | `aiworker-video-command` | `0.5.15` |
 | `aiworker-task-flow` | 与同一 Git 提交生成的精确安装清单 |
-| `aiworker-director-brain` | `0.4.1`，包含插件和 Skill |
+| `aiworker-director-brain` | 已验证接口兼容的 `0.4.1`、`0.4.2` 或薄客户端 `0.4.3`；安装树由独立 runtime proof 绑定 |
 
 ## 验证范围
 
@@ -29,9 +29,10 @@ Git HEAD。standalone 必须位于声明的不可变 releases 根下，并通过
 中的 provenance 文件摘要失败。发布门还把 provenance 绑定到干净 Git commit 与抽取源码闭包。
 本机制用于发现发布后的漂移，不宣称在没有独立签名基础设施时可以抵抗同时重建两份证明的发布者。
 
-三份 OpenClaw 安装载荷按现有安装器的真实 payload 边界重建期望清单，再与安装目录的目录集合、
-文件集合和每个文件 SHA-256 精确比较。任何软链接、额外文件、文件缺失、set-id 文件或组/其他用户
-可写对象都会失败。插件的 `package.json` 与 `openclaw.plugin.json` 版本必须同时匹配。
+Video command 与 Skill 继续按安装器 payload 精确比较。director-brain 在 app 发布门只核对已知版本、
+工具/钩子接口、manifest/package 版本一致性和安全文件类型；插件树字节身份由同一会话的 runtime proof
+绑定。`0.4.1`/`0.4.2` 的历史厚插件可先服务新 app，`0.4.3` 薄客户端再独立安装和重启 Gateway，
+避免 app 与插件互相要求对方先上线。
 
 集成契约另行确认：
 
@@ -40,9 +41,9 @@ Git HEAD。standalone 必须位于声明的不可变 releases 根下，并通过
   transformer wrapper、inner library、应用侧封套/分批/回执语义模块，以及
   `director-evidence-delivery-core.ts` 的 SHA-256 与 `director-evidence-outbox.ts` 固定闭包一致；
   delivery core 自身不保存自己的摘要，避免自引用；
-- 上述八项闭包与投影 schema 版本共同计算
-  `projection_contract_digest`；当前 SQLite 中所有
-  `pending` outbox 必须使用同一摘要，存在旧摘要 pending 时 forward switch 失败关闭；
+- 八项实现闭包继续逐文件校验并写入 provenance 的 implementation 指纹，但不再决定互通协议。
+  `projection_contract_digest` 对新任务使用稳定 protocol 摘要；历史 `e4bc…`、`1b23…`、`eec8…`
+  仅凭 v2 声明中的完整旧闭包精确映射，未知摘要仍失败关闭；
 - standalone 的服务端 bundle 实际包含同一组固定闭包摘要，而不是只检查源码副本。
 
 outbox 在创建时把投影契约摘要纳入幂等身份。部分批次已经写入后如果转换器或飞书写入契约
@@ -63,11 +64,14 @@ runner、投影契约构建与薄入口。transform 的 JSON 合同仍为 2 MiB�
 头尾并写入完整 checkpoint 的摘要指纹；完整模型候选仍留在不可变 checkpoint，飞书仅保存供人工
 复核的有界投影。即使缩写后仍不能投影，也以
 `director_extraction_projection_input_too_large` 确定性终止，不能按网络故障无限重试。
-`propose_batch` 的子进程超时只按其有界条数从 30 秒受控增加，普通查询仍保持 30 秒。
+`propose_batch` 的子进程超时只按其有界条数从 30 秒受控增加。批量 `get_many` 保留并发上限，
+不设置整个批次的固定 wall timer；其他普通命令仍使用各自有界超时。
 
 同一 release gate 还只读核对 extraction root/phase 的作用域绑定、成功 phase 的 checkpoint 与
 projection receipt 摘要、review receipt 摘要、后继 phase 的前置审核和 checkpoint 的投影版本。
-等待人工审核本身不是活跃执行；queued/running phase、断链、缺失回执或旧投影边界均阻断切换。
+等待人工审核和合法但尚未发起提炼的成功来源都不是活跃执行。已识别的 pending、有效 delivered
+回执或 `receipt_invalid` 历史冲突可在新 app 上线后由独立幂等入口处理；未知协议、身份损坏、
+queued/running phase、断链、缺失回执或旧投影边界仍阻断切换。
 
 工具基线采用v4，同时固定catalog/effective可见工具描述面和策略提示。唯一已验证可接受的提示是
 effective中的 `browser-filtered-by-profile / info`，它表示现有profile有意过滤browser；必须保留其
@@ -104,12 +108,10 @@ transition claim、runtime convergence proof 和 readiness 摘要的 handoff，b
 
 ## 发布顺序
 
-完整发布顺序为：从最终干净提交构建并审计 immutable standalone；在隔离端口验收页面、CSS、只读 API、
-两库 `quick_check` 与回滚点；执行飞书 v2 -> v3 的 dry-run、私有全表快照、独立 verify、仅新增 14 字段的
-apply、真实 API 回读和 rollback-dry-run；完成 n8n transition/attestation；捕获真实
-`second-original` 会话工具基线；运行统一 preinstall orchestrator；收到 terminal handoff 后再执行
-legacy controller 的 `prepare -> current-confirm -> apply`；最后才 bootstrap 并精确切换 3017。该检查
-不能代替隔离启动、飞书迁移、OpenClaw 自然对话、跨压缩恢复或真实视频闭环验收。
+常规发布从最终干净提交构建并审计 immutable standalone，复用未变化组件的有效安装证明，只对影响面
+执行 focused 隔离验收；随后 stage inactive slot、核对数据库 `quick_check` 与回滚点、绑定并探测候选，
+在同一 intake revision 下原子切换 3017。插件、控制层或飞书 schema 未变化时，不重复安装、Gateway
+重启、全页面/CSS 验收或历史数据修复。首次 bootstrap、飞书迁移和旧 38 条恢复继续使用各自专用流程。
 
 进入生产数据阶段前，还须在真实 canonical checkout 核对统一 orchestrator 直接调用的四个 shell
 入口均具备 Git 跟踪的可执行位，并以正式入口验证解释器和参数可用。模拟 fixture 的权限不能作为
@@ -117,8 +119,9 @@ legacy controller 的 `prepare -> current-confirm -> apply`；最后才 bootstra
 
 ### 插件安装与数据库迁移边界
 
-`aiworker-director-brain 0.4.1` 的安装器只替换目标 OpenClaw profile 下的插件、Skill、私有无密钥
-运行载荷和该 Agent 的窄授权；它不打开 Mission Control SQLite、不调用 `runMigrations`，也不创建、
+`aiworker-director-brain 0.4.3` 安装器只替换目标 OpenClaw profile 下的薄插件和该 Agent 的窄授权；
+Feishu CLI、service、scanner 与 schema 随 app release 交付。安装器不打开 Mission Control SQLite、
+不调用 `runMigrations`，也不创建、
 更新或回填导演提炼记录，也不会迁移飞书导演脑 catalog。当前真实测试 catalog 是 v2，随安装包
 携带的 schema v3 只是待迁移候选；在另行完成 v3 迁移和真实 API 回读前，加载 0.4.1 的运行时会
 对版本不匹配失败关闭。发布顺序应先用 `migrate --dry-run` 固定无破坏性计划，再由显式外部写入任务
@@ -157,20 +160,20 @@ legacy 首迁仍只能走带冻结证据和回滚证明的专用 bootstrap。
 backup，并绑定源库 device/inode、队列摘要、freeze guard 和目标 release。新 release 启动后 058/059
 只执行 `CREATE ... IF NOT EXISTS`，不改写既有业务行。bootstrap 成功提交 baseline 后，旧
 `57f6e6c-runtime` 被永久 fence，不再允许作为普通 blue/green slot 或普通 rollback 目标；后续常规
-回滚只能在相同 `projection_contract_digest` 的新架构 release 之间进行。前向兼容声明只允许原
+回滚只能在相同稳定 projection protocol 的新架构 release 之间进行。历史 implementation 摘要映射只允许原
 `switch` 在本次调用内使用；路由提交后的既有复验失败可按已捕获 source 证据自动补偿，成功返回后
 不授权显式反向切换。除此之外的跨契约或需恢复旧 legacy
 数据库时必须保持入口冻结，走显式 restore/disaster-recovery 手册和完整双库回滚点，不能让部署器
 猜测性降级。
 
-每个 slot 的 `release-readiness` 同时公开该 release 编译时的投影契约摘要和权威 outbox 计数。
-source/target 摘要相同，已有任务可继续按 release affinity 排空并热切换；摘要不同时必须通过上述
-目标 release 前向声明，否则转换失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
+每个 slot 的 `release-readiness` 同时公开稳定投影 protocol、实现指纹和权威 outbox 计数。
+source/target protocol 相同即可按 release affinity 排空并热切换；仅历史 implementation 摘要需要通过
+目标 release 的精确映射，否则转换失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
 attestation 哈希、readiness revision/schema epoch/契约摘要与原路由元组，并以进程内只读、带
 SHA-256 封套的证据复验。这样 source=A、仓库 HEAD=B 时，自动回滚不会拿只接受 HEAD 的 target
 verifier 错验历史 source；显式 rollback 也使用同一证据路径。目标验证失败仍返回非零，任一
 source 回滚证据失败则保持 intake 暂停。旧槽 callback 冻结并达到静默后、停止旧槽前还会再查
-不兼容 pending；普通页面和不改变投影闭包的功能发布仍保留热切换能力。
+未知协议 pending；普通 app 实现变化不再因文件 SHA 改变而失去热切换能力。
 
 延迟退役可能发生在发布后的 docs-only 审计提交之后。退役门允许 active release 是当前干净
 `main` HEAD 的 Git 祖先，但仍执行完整 payload、闭包、bundle 与 outbox 校验；非祖先 release、

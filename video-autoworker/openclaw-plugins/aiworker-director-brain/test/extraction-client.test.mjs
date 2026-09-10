@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  createDirectorBrainApplicationService,
   createDirectorBrainExtractionService,
   createDirectorBrainTool,
+  DIRECTOR_BRAIN_APPLICATION_SERVICE_URL,
   DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL,
 } from '../lib/director-brain-tool.js'
 
@@ -44,6 +46,24 @@ function expectHandledShortAnswer(result, expected) {
 }
 
 describe('director brain extraction loopback client', () => {
+  it.each(['operate', 'review'])('routes %s through the credential-free app service', async command => {
+    const action = command === 'operate' ? 'health' : 'review'
+    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, action }))
+    const service = createDirectorBrainApplicationService({ fetchImpl })
+    const input = { action }
+
+    await expect(service(command, input)).resolves.toEqual({ ok: true, action })
+    const [url, init] = fetchImpl.mock.calls[0]
+    expect(url).toBe(DIRECTOR_BRAIN_APPLICATION_SERVICE_URL)
+    expect(init).toMatchObject({
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store', redirect: 'error',
+    })
+    expect(init).not.toHaveProperty('signal')
+    expect(init.headers).not.toHaveProperty('Authorization')
+    expect(JSON.parse(init.body)).toEqual({ command, input })
+  })
+
   it('queries status through the fixed credential-free loopback', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, {
       ok: true,

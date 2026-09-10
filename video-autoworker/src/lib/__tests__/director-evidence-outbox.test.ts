@@ -6,16 +6,21 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
 import {
+  directorBrainRuntimeCliPath,
   directorEvidenceProjectionContractDigest,
   directorCommandTimeoutMs,
   drainDirectorEvidenceOutbox,
   enqueueDirectorEvidenceOutbox,
   getDirectorEvidenceOutbox,
+  getDirectorEvidenceOutboxCounts,
+  directorEvidenceReadCompatibleContractDigests,
   runDirectorCommand,
 } from '@/lib/director-evidence-outbox'
 import {
   directorEvidenceBindingForResolvedWork,
   directorEvidenceDigest,
+  drainDirectorEvidenceOutboxCore,
+  enqueueDirectorEvidenceOutboxCore,
   getDirectorEvidenceProjectionReceiptCore,
   recoverConflictedDirectorEvidenceProjectionCore,
   type DirectorCommandRunner,
@@ -201,6 +206,7 @@ describe('director evidence root outbox', () => {
     expect(directorCommandTimeoutMs('operate', {
       action: 'search', table: 'material_evidence', query: '证据',
     })).toBe(30_000)
+    expect(directorCommandTimeoutMs('review', {})).toBe(150_000)
     expect(directorCommandTimeoutMs('propose-batch', {
       action: 'propose_batch',
       items: Array.from({ length: 8 }, () => ({})),
@@ -209,6 +215,14 @@ describe('director evidence root outbox', () => {
       action: 'propose_batch',
       items: Array.from({ length: 50 }, () => ({})),
     })).toBe(180_000)
+  })
+
+  it('resolves ordinary director commands from the application runtime by default', () => {
+    expect(directorBrainRuntimeCliPath({}, '/managed/video-autoworker'))
+      .toBe('/managed/video-autoworker/scripts/feishu-director-brain.mjs')
+    expect(directorBrainRuntimeCliPath({
+      AIWORKER_DIRECTOR_BRAIN_CLI_PATH: '/explicit/feishu-director-brain.mjs',
+    }, '/managed/video-autoworker')).toBe('/explicit/feishu-director-brain.mjs')
   })
 
   it('does not arm the old wall timer and waits for one get_many child to exit', async () => {
@@ -310,6 +324,50 @@ describe('director evidence root outbox', () => {
     expect(delivered.status).toBe('delivered')
     expect(getDirectorEvidenceProjectionReceiptCore(db, delivered)?.receipt.workId)
       .toBe(binding.workId)
+  })
+
+  it('delivers a known legacy outbox with its stored immutable contract identity', async () => {
+    const { root } = seedRoot(db)
+    const legacyDigest = directorEvidenceReadCompatibleContractDigests().at(-1)!
+    expect(enqueueDirectorEvidenceOutboxCore(db, root, legacyDigest, 100)).toBe('created')
+    expect(enqueueDirectorEvidenceOutbox(db, root, 101)).toBe('existing')
+    expect(getDirectorEvidenceOutboxCounts(db).incompatiblePending).toBe(0)
+    const calls: Array<{ command: string; input: Record<string, unknown> }> = []
+
+    await expect(drainDirectorEvidenceOutbox(db, {
+      nowSeconds: 101,
+      runner: runner(calls),
+    })).resolves.toEqual({ scanned: 1, delivered: 1, pending: 0, conflict: 0 })
+
+    expect(getDirectorEvidenceOutbox(db, root.taskId)).toMatchObject({
+      status: 'delivered',
+      projectionContractDigest: legacyDigest,
+    })
+    expect(getDirectorEvidenceProjectionReceiptCore(
+      db, getDirectorEvidenceOutbox(db, root.taskId)!,
+    )).toMatchObject({ projectionContractDigest: legacyDigest })
+  })
+
+  it('does not execute an outbox whose stored contract identity is unknown', async () => {
+    const { root } = seedRoot(db)
+    const unknownDigest = 'c'.repeat(64)
+    expect(enqueueDirectorEvidenceOutboxCore(db, root, unknownDigest, 100)).toBe('created')
+    const calls: Array<{ command: string; input: Record<string, unknown> }> = []
+
+    await expect(drainDirectorEvidenceOutboxCore(db, {
+      scope,
+      currentProjectionContractDigest: 'b'.repeat(64),
+      compatibleProjectionContractDigests: [],
+      nowSeconds: 101,
+      runner: runner(calls),
+    })).resolves.toEqual({ scanned: 1, delivered: 0, pending: 1, conflict: 0 })
+
+    expect(calls).toHaveLength(0)
+    expect(getDirectorEvidenceOutbox(db, root.taskId)).toMatchObject({
+      status: 'pending',
+      projectionContractDigest: unknownDigest,
+      lastErrorCode: 'director_evidence_projection_contract_incompatible',
+    })
   })
 
   it('fails closed without external writes when the source output drifts', async () => {

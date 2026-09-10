@@ -68,6 +68,20 @@ describe('n8n rolling and callback OpenAPI contract', () => {
     expect(Object.keys(status.properties).sort()).toEqual(['action', 'workId'])
   })
 
+  it('documents the app-managed director service behind the existing loopback boundary', () => {
+    const operation = document.paths['/api/n8n/director-brain'].post
+    const request = operation.requestBody.content['application/json'].schema
+    expect(operation.operationId).toBe('operateDirectorBrain')
+    expect(request).toMatchObject({
+      type: 'object',
+      additionalProperties: false,
+      required: ['command', 'input'],
+    })
+    expect(request.properties.command.enum).toEqual(['operate', 'review'])
+    expect(request.properties.input.type).toBe('object')
+    expect(operation.responses).toHaveProperty('503')
+  })
+
   const document = JSON.parse(
     readFileSync(resolve(process.cwd(), 'openapi.json'), 'utf8'),
   ) as Record<string, any>

@@ -2,7 +2,8 @@
 
 import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
 
 const repositoryRoot = process.cwd()
 const vitestCli = resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs')
@@ -41,14 +42,10 @@ if (partitionFlag >= 0 && (
 )) {
   throw new Error('Root Vitest partition must be regular or one declared heavy test file')
 }
-const changedFlag = process.argv.indexOf('--changed')
-const changedBase = changedFlag < 0 ? null : process.argv[changedFlag + 1]
-if (changedFlag >= 0 && (
-  process.argv.lastIndexOf('--changed') !== changedFlag
-  || selectedPartition !== 'regular'
-  || !/^[a-f0-9]{40}$/u.test(changedBase || '')
-)) {
-  throw new Error('Changed-test selection requires the regular partition and one immutable base commit')
+const impactFlag = process.argv.indexOf('--impact-plan')
+const impactPath = impactFlag < 0 ? null : process.argv[impactFlag + 1]
+if (impactFlag >= 0 && (selectedPartition !== 'regular' || !impactPath || process.argv.lastIndexOf('--impact-plan') !== impactFlag)) {
+  throw new Error('Impact-plan selection requires the regular partition and one plan')
 }
 
 if (process.argv.includes('--print-plan')) {
@@ -128,8 +125,8 @@ async function verifyPartition() {
   }
 }
 
-const partition = await verifyPartition()
 if (process.argv.includes('--verify-partition')) {
+  const partition = await verifyPartition()
   process.stdout.write(`${JSON.stringify(partition)}\n`)
   process.exit(0)
 }
@@ -157,24 +154,44 @@ async function runVitest(args) {
 }
 
 if (selectedPartition === 'regular') {
-  let invocation = regularInvocation
-  if (changedBase) {
-    const related = await collectTestFiles([
-      'list', '--filesOnly', '--changed', changedBase,
-    ])
-    process.stdout.write(`${JSON.stringify({
-      changedBase, relatedTestFiles: related.length,
-      selection: related.length ? 'related' : 'regular_fallback_no_related_tests',
-    })}\n`)
-    // Dynamic imports may have no discoverable static test relationship. Keep
-    // a quick regression fallback instead of treating an empty selection as QA.
-    // The dependency graph can also select a heavy test. Keep it included and
-    // run this related subset sequentially in its own CI environment.
-    if (related.length) invocation = [
-      'run', '--changed', changedBase, '--maxWorkers=1', '--no-file-parallelism',
-    ]
+  if (impactPath) {
+    const plan = JSON.parse(readFileSync(impactPath, 'utf8'))
+    if (plan.mode !== 'targeted' || !Array.isArray(plan.relatedFiles) || !Array.isArray(plan.testFiles)) {
+      throw new Error('Invalid targeted impact plan')
+    }
+    const resolveMember = member => {
+      if (typeof member !== 'string' || isAbsolute(member) || member.includes('\\')) {
+        throw new Error('Invalid related source path')
+      }
+      const absolute = resolve(repositoryRoot, member)
+      if (relative(repositoryRoot, absolute).startsWith('..')) throw new Error('Related source is outside product')
+      return absolute
+    }
+    const related = plan.relatedFiles.map(resolveMember)
+    const direct = plan.testFiles.map(resolveMember)
+    if (!related.length && !direct.length) {
+      process.stdout.write('No changed production module needs an import-graph test run; retain scoped static/build and functional acceptance.\n')
+      process.exit(0)
+    }
+    const { createVitest } = await import('vitest/node')
+    const selected = new Set()
+    if (related.length) {
+      const context = await createVitest('test', { root: repositoryRoot, related, watch: false })
+      try { for (const spec of await context.listFiles([])) selected.add(spec[1]) }
+      finally { await context.close() }
+    }
+    if (direct.length) {
+      const context = await createVitest('test', { root: repositoryRoot, watch: false })
+      try { for (const spec of await context.listFiles(direct)) selected.add(spec[1]) }
+      finally { await context.close() }
+    }
+    const files = [...selected]
+    process.stdout.write(`${JSON.stringify({ selection: 'changed_production_dependencies', sourceFiles: related.length, testFiles: files.length })}\n`)
+    if (files.length) await runVitest(['run', '--maxWorkers=1', '--no-file-parallelism', ...files])
+    else process.stdout.write('No associated automated test was found; functional acceptance remains required.\n')
+    process.exit(0)
   }
-  await runVitest(invocation)
+  await runVitest(regularInvocation)
 } else if (selectedPartition) {
   await runVitest(heavyInvocations[heavyRootTests.indexOf(selectedPartition)])
 } else {

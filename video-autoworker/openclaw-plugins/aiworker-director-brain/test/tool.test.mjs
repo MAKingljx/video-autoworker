@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   createDirectorBrainTool,
-  DEFAULT_RUNTIME_SERVICE_PATH,
+  DIRECTOR_BRAIN_APPLICATION_SERVICE_URL,
   DIRECTOR_BRAIN_PROPOSAL_TABLES,
   DIRECTOR_BRAIN_TABLES,
   normalizeDirectorBrainToolRequest,
@@ -16,10 +16,9 @@ function resultText(result) {
 }
 
 describe('director brain tool contract', () => {
-  it('uses the installed runtime service without accepting runtime paths from tool input', () => {
-    expect(DEFAULT_RUNTIME_SERVICE_PATH).toMatch(
-      /aiworker-director-brain\/runtime\/scripts\/lib\/feishu-director-brain\.mjs$/u,
-    )
+  it('uses the app loopback service without accepting runtime paths from tool input', () => {
+    expect(DIRECTOR_BRAIN_APPLICATION_SERVICE_URL)
+      .toBe('http://127.0.0.1:3017/api/n8n/director-brain')
     expect(DIRECTOR_BRAIN_TABLES).toEqual([
       'system_blueprint',
       'works',

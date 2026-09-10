@@ -24,7 +24,11 @@ import {
   STANDALONE_PROVENANCE_SCHEMA,
   writeDirectorExtractionProvenance,
 } from './lib/director-extraction-release-provenance.mjs'
-import { directorProjectionCompatibilitySha256 } from './lib/director-projection-contract-compatibility.mjs'
+import {
+  DIRECTOR_PROJECTION_PROTOCOL,
+  DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+  directorProjectionCompatibilitySha256,
+} from './lib/director-projection-contract-compatibility.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { scanStandaloneSensitiveContent } from './check-sensitive-content.mjs'
 
@@ -1149,6 +1153,15 @@ async function assertStandaloneProvenanceArtifactBinding(rootPath, artifactConte
   if (!provenance || provenance.schema !== STANDALONE_PROVENANCE_SCHEMA
     || !isStandaloneArtifactContentBinding(provenance.artifactContent)
     || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)
+    || JSON.stringify(provenance.projectionProtocol) !== JSON.stringify({
+      descriptor: DIRECTOR_PROJECTION_PROTOCOL,
+      digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+    })
+    || provenance.projectionImplementation?.schema
+      !== 'video-autoworker-director-projection-implementation/v1'
+    || provenance.projectionImplementation?.algorithm !== 'sha256'
+    || provenance.projectionImplementation?.sourceClosureSha256
+      !== createHash('sha256').update(JSON.stringify(provenance.sourceClosure)).digest('hex')
     || (provenance.projectionContractCompatibility
       ? provenance.projectionContractCompatibilitySha256
         !== directorProjectionCompatibilitySha256(provenance.projectionContractCompatibility)
@@ -1163,6 +1176,8 @@ async function collectStandaloneManifestMembers(rootPath, artifactContent, prove
     schemaVersion: RELEASE_MANIFEST_SCHEMA_VERSION,
     algorithm: 'sha256',
     artifactContent,
+    projectionProtocol: provenance.projectionProtocol,
+    projectionImplementation: provenance.projectionImplementation,
     ...(provenance?.projectionContractCompatibility ? {
       projectionContractCompatibility: provenance.projectionContractCompatibility,
       projectionContractCompatibilitySha256:

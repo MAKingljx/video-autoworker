@@ -1,7 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 
 import {
   createDirectorBrainChatReviewHandler,
@@ -11,7 +8,6 @@ import {
 } from '../lib/director-chat-review.js'
 import {
   createDirectorBrainTool,
-  createDirectorBrainReviewCliService,
   normalizeDirectorBrainToolRequest,
 } from '../lib/director-brain-tool.js'
 
@@ -69,26 +65,6 @@ function exactSearch(request, matches) {
 }
 
 describe('director brain chat review', () => {
-  it('hard-stops and reaps a timed-out formal review CLI before rejecting', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'director-chat-review-cli-'))
-    const cliPath = join(directory, 'review.mjs')
-    try {
-      await writeFile(cliPath, [
-        "process.on('SIGTERM', () => undefined)",
-        'process.stdin.resume()',
-        'setInterval(() => undefined, 1000)',
-        '',
-      ].join('\n'))
-      const reviewRecord = createDirectorBrainReviewCliService({
-        cliPath, timeoutMs: 30, killGraceMs: 30,
-      })
-      await expect(reviewRecord({ table: 'story_nodes' }))
-        .rejects.toThrow('director_brain_review_timeout')
-    } finally {
-      await rm(directory, { recursive: true, force: true })
-    }
-  })
-
   it('exposes preview only and rejects model-supplied confirmation flags', async () => {
     expect(normalizeDirectorBrainToolRequest({
       action: 'review_preview', decision: 'approve', table: 'story_nodes',

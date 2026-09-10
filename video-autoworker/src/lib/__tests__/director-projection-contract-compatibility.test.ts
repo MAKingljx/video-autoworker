@@ -7,13 +7,16 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
+  DIRECTOR_PROJECTION_PROTOCOL,
+  DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
   directorProjectionContractDigest,
+  directorProjectionImplementationDigest,
   directorProjectionCompatibilitySha256,
   getDirectorProjectionReadCompatibleDigests,
+  isCompatibleProjectionImplementationDigest,
   loadDirectorProjectionContractCompatibility,
   validateDirectorProjectionContractCompatibility,
 } from '../../../scripts/lib/director-projection-contract-compatibility.mjs'
-import { directorEvidenceProjectionContract } from '@/lib/director-evidence-outbox'
 
 const sha = (value: string) => value.repeat(64)
 
@@ -79,27 +82,70 @@ function declaration() {
 
 describe('director projection contract compatibility declaration', () => {
   it('accepts both production source contracts and rejects an unknown digest', () => {
-    const current = directorEvidenceProjectionContract()
     const production = JSON.parse(readFileSync(
       join(process.cwd(), 'src/lib/director-projection-contract-compatibility.json'),
       'utf8',
     ))
-    expect(current.digest)
-      .toBe('eec806b96c0b1389a25c4ffc1426b0e499d1b51a541691c46a660a20f5d157db')
-    expect(getDirectorProjectionReadCompatibleDigests(production, current)).toEqual([
+    expect(DIRECTOR_PROJECTION_PROTOCOL).toMatchObject({
+      projectionSchemaVersion: 1,
+      receiptSchemaVersion: 1,
+      storedTextNormalization: 'unicode-nfkc-crlf-trim-v1',
+    })
+    expect(DIRECTOR_PROJECTION_PROTOCOL_DIGEST)
+      .toBe('11472003a209a0689952715aa4147b9bb7490d16799d3db68181e3341d49caab')
+    expect(getDirectorProjectionReadCompatibleDigests(production, {
+      digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+    })).toEqual([
       'e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1',
       '1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932',
+      'eec806b96c0b1389a25c4ffc1426b0e499d1b51a541691c46a660a20f5d157db',
     ])
+    expect(isCompatibleProjectionImplementationDigest(
+      production,
+      '1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932',
+    )).toBe(true)
     expect(() => validateDirectorProjectionContractCompatibility(production, {
-      currentClosure: current.closure,
-      currentDigest: current.digest,
+      protocolDigest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
       sourceDigest: '1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932',
     })).not.toThrow()
     expect(() => validateDirectorProjectionContractCompatibility(production, {
-      currentClosure: current.closure,
-      currentDigest: current.digest,
       sourceDigest: sha('f'),
     })).toThrow('director_projection_contract_source_mismatch')
+  })
+
+  it('keeps the protocol stable when an implementation member changes', () => {
+    const production = JSON.parse(readFileSync(
+      join(process.cwd(), 'src/lib/director-projection-contract-compatibility.json'),
+      'utf8',
+    ))
+    const legacy = production.legacyImplementations[2]
+    const changed = {
+      ...legacy.closure,
+      directorBrainServiceSha256: sha('f'),
+      deliveryCoreSha256: sha('e'),
+    }
+    expect(directorProjectionImplementationDigest(changed)).not.toBe(legacy.digest)
+    expect(() => validateDirectorProjectionContractCompatibility(production, {
+      currentImplementation: {
+        closure: changed,
+        digest: directorProjectionImplementationDigest(changed),
+      },
+      protocolDigest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+    })).not.toThrow()
+    expect(production.protocol.digest).toBe(DIRECTOR_PROJECTION_PROTOCOL_DIGEST)
+  })
+
+  it('rejects an unknown protocol and a widened protocol declaration', () => {
+    const production = JSON.parse(readFileSync(
+      join(process.cwd(), 'src/lib/director-projection-contract-compatibility.json'),
+      'utf8',
+    ))
+    expect(() => validateDirectorProjectionContractCompatibility(production, {
+      protocolDigest: sha('f'),
+    })).toThrow('director_projection_protocol_mismatch')
+    production.protocol.descriptor.wireProtocol = 'director-command-jsonl-v2'
+    expect(() => validateDirectorProjectionContractCompatibility(production))
+      .toThrow('director_projection_contract_compatibility_invalid')
   })
 
   it('returns only the exact verified-read source digest for the current target contract', () => {

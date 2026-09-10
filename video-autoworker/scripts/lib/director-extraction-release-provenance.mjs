@@ -5,6 +5,8 @@ import { createRequire } from 'node:module'
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import {
+  DIRECTOR_PROJECTION_PROTOCOL,
+  DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
   directorProjectionCompatibilitySha256,
   loadDirectorProjectionContractCompatibility,
 } from './director-projection-contract-compatibility.mjs'
@@ -490,6 +492,15 @@ export function buildDirectorExtractionProvenance(
       buildNonce: verifiedAnchor.buildNonce,
     } : null,
     sourceClosure: closure,
+    projectionProtocol: {
+      descriptor: DIRECTOR_PROJECTION_PROTOCOL,
+      digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
+    },
+    projectionImplementation: {
+      algorithm: 'sha256',
+      schema: 'video-autoworker-director-projection-implementation/v1',
+      sourceClosureSha256: sourceClosureDigest(closure),
+    },
     artifactContent,
     ...(projectionContractCompatibility ? {
       projectionContractCompatibility,
