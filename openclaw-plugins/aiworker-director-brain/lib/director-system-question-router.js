@@ -1,6 +1,5 @@
 import {
   DIRECTOR_BRAIN_UNAVAILABLE_MESSAGE,
-  DIRECTOR_BRAIN_REVIEW_GUIDANCE,
   readDirectorBrainSystemAnswer,
   reportDirectorBrainFailure,
 } from './director-brain-tool.js'
@@ -113,13 +112,6 @@ export function createDirectorBrainSystemQuestionHandler({
   return async (event, context) => {
     if (!ownsTargetAgent(context, targetAgentId)) return undefined
     if (context?.trigger !== undefined && context.trigger !== 'user') return undefined
-    if (isDirectorBrainReviewRequest(event?.cleanedBody)) {
-      return {
-        handled: true,
-        reply: { text: releaseReady ? DIRECTOR_BRAIN_REVIEW_GUIDANCE : DIRECTOR_BRAIN_MAINTENANCE_MESSAGE },
-        reason: 'director_brain_manual_review_required',
-      }
-    }
     const topic = classifyDirectorBrainSystemQuestion(event?.cleanedBody)
     if (!topic) return undefined
     if (!releaseReady) {

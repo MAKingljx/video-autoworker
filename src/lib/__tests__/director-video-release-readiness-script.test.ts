@@ -48,10 +48,16 @@ async function writeProvenanceOnlyManifest(artifactRoot: string) {
   })
   const path = 'release-provenance.json'
   const contents = readFileSync(join(artifactRoot, path))
+  const provenance = JSON.parse(contents.toString('utf8'))
   await writeFile(join(artifactRoot, 'release-manifest.json'), JSON.stringify({
     schemaVersion: 2,
     algorithm: 'sha256',
     artifactContent,
+    ...(provenance.projectionContractCompatibility ? {
+      projectionContractCompatibility: provenance.projectionContractCompatibility,
+      projectionContractCompatibilitySha256:
+        provenance.projectionContractCompatibilitySha256,
+    } : {}),
     directories: [],
     files: [{
       path,
@@ -237,9 +243,12 @@ describe('director video release readiness verifier', () => {
       ...common, '--verification-phase', 'pre-bootstrap',
     ], { NODE_ENV: 'test' })).toMatchObject({ verificationPhase: 'pre-bootstrap', scope: null })
     expect(parseDirectorVideoReleaseReadinessArguments([
-      ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
+      ...common, '--live-db-path', '/private/mission.db',
+      '--transition-from-projection-contract', 'a'.repeat(64),
+      '--verification-phase', 'full',
     ], { NODE_ENV: 'test', MC_AUTH_MODE: 'openclaw-loopback' })).toMatchObject({
       verificationPhase: 'full', scope: { tenantId: 1, workspaceId: 1 },
+      transitionFromProjectionContract: 'a'.repeat(64),
     })
     expect(parseDirectorVideoReleaseReadinessArguments([
       ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
@@ -252,6 +261,10 @@ describe('director video release readiness verifier', () => {
     expect(() => parseDirectorVideoReleaseReadinessArguments([
       ...common, '--live-db-path', '/private/mission.db', '--verification-phase', 'full',
     ], { NODE_ENV: 'test' })).toThrow('director_scope_invalid')
+    expect(() => parseDirectorVideoReleaseReadinessArguments([
+      ...common, '--transition-from-projection-contract', 'a'.repeat(64),
+      '--verification-phase', 'pre-bootstrap',
+    ], { NODE_ENV: 'test' })).toThrow('arguments_invalid')
   })
 
   afterEach(async () => {
@@ -267,7 +280,7 @@ describe('director video release readiness verifier', () => {
       workspaceRoot,
     })
     expect(result.videoCommand).toMatchObject({ version: '0.5.15' })
-    expect(result.directorBrain).toMatchObject({ version: '0.4.1' })
+    expect(result.directorBrain).toMatchObject({ version: '0.4.2' })
     expect(result.taskFlow.files).toBeGreaterThan(3)
     expect(Object.keys(result.closure)).toHaveLength(8)
     expect((result.closure as Record<string, string>)
@@ -302,7 +315,7 @@ describe('director video release readiness verifier', () => {
       workspaceRoot,
     })
     expect(result.videoCommand).toMatchObject({ version: '0.5.15' })
-    expect(result.directorBrain).toMatchObject({ version: '0.4.1' })
+    expect(result.directorBrain).toMatchObject({ version: '0.4.2' })
 
     const drifted = JSON.parse(readFileSync(videoPackage, 'utf8'))
     drifted.description = 'unexpected package drift'
@@ -837,7 +850,7 @@ describe('director video release readiness verifier', () => {
     const harnessPath = join(root, 'release-verifier-report-harness.sh')
     const deploy = readFileSync(join(repositoryRoot, 'scripts', 'deploy-blue-green.sh'), 'utf8')
     const functionPrelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
-    const report = {
+    const report: any = {
       schema: 'video-autoworker-director-video-readiness/v1',
       ok: true,
       commit: 'b'.repeat(40),
@@ -911,6 +924,46 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     expect(accepted.status, accepted.stderr).toBe(0)
     expect(accepted.stdout).toBe(digest)
 
+    const sourceDigest = '9'.repeat(64)
+    const declarationSha256 = '8'.repeat(64)
+    report.provenance.projectionContractCompatibilitySha256 = declarationSha256
+    report.projectionTransition = {
+      schema: 'video-autoworker-director-projection-compatibility/v1',
+      transitionId: 'receipt-text-normalization-20260910',
+      direction: 'forward-only',
+      fromContractDigest: sourceDigest,
+      toContractDigest: digest,
+      declarationSha256,
+    }
+    await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
+    await writeFile(harnessPath, `${functionPrelude}
+DIRECTOR_VIDEO_READINESS="$1"
+verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone head ${sourceDigest}
+`)
+    const transitionAccepted = spawnSync('bash', [harnessPath, verifierPath], {
+      env: environment,
+      encoding: 'utf8',
+    })
+    expect(transitionAccepted.status, transitionAccepted.stderr).toBe(0)
+    expect(transitionAccepted.stdout).toBe(digest)
+
+    report.projectionTransition.fromContractDigest = '7'.repeat(64)
+    await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
+    const transitionRejected = spawnSync('bash', [harnessPath, verifierPath], {
+      env: environment,
+      encoding: 'utf8',
+    })
+    expect(transitionRejected.status).not.toBe(0)
+    expect(transitionRejected.stderr).toContain(
+      'release-readiness verifier returned an invalid report',
+    )
+
+    report.projectionTransition = null
+    delete report.provenance.projectionContractCompatibilitySha256
+    await writeFile(harnessPath, `${functionPrelude}
+DIRECTOR_VIDEO_READINESS="$1"
+verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone
+`)
     report.projectionOutbox.currentDigest = 'c'.repeat(64)
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
     const rejected = spawnSync('bash', [harnessPath, verifierPath], {
@@ -989,6 +1042,56 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     })).toThrow('app_release_provenance_invalid')
   })
 
+  it('binds the committed compatibility declaration and regression evidence into provenance and manifest', async () => {
+    const gitRoot = join(root, 'compatibility-provenance-source')
+    const artifactRoot = join(root, 'compatibility-provenance-artifact')
+    await mkdir(gitRoot, { recursive: true, mode: 0o700 })
+    await mkdir(artifactRoot, { recursive: true, mode: 0o700 })
+    for (const member of DIRECTOR_EXTRACTION_SOURCE_ROOTS) {
+      await mkdir(dirname(join(gitRoot, member)), { recursive: true })
+      await writeFile(join(gitRoot, member), `fixture:${member}\n`)
+    }
+    const declarationPath = 'src/lib/director-projection-contract-compatibility.json'
+    const declaration = JSON.parse(readFileSync(join(repositoryRoot, declarationPath), 'utf8'))
+    await mkdir(dirname(join(gitRoot, declarationPath)), { recursive: true })
+    await cp(join(repositoryRoot, declarationPath), join(gitRoot, declarationPath))
+    for (const evidence of declaration.regressionEvidence) {
+      await mkdir(dirname(join(gitRoot, evidence.path)), { recursive: true })
+      await cp(join(repositoryRoot, evidence.path), join(gitRoot, evidence.path))
+    }
+    const git = (...args: string[]) => execFileSync('git', ['-C', gitRoot, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Compatibility Provenance Test')
+    git('config', 'user.email', 'compatibility-provenance@example.invalid')
+    git('config', 'commit.gpgSign', 'false')
+    git('add', '.')
+    git('commit', '-m', 'compatibility provenance')
+    const commit = git('rev-parse', 'HEAD')
+
+    writeProvenanceOnly(artifactRoot, gitRoot)
+    await writeProvenanceOnlyManifest(artifactRoot)
+    const verified = verifyDirectorExtractionReleaseProvenance({
+      repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot,
+      commit,
+    })
+    expect(verified.projectionContractCompatibility).toEqual(declaration)
+    expect(verified.projectionContractCompatibilitySha256).toMatch(/^[a-f0-9]{64}$/u)
+
+    const manifestPath = join(artifactRoot, 'release-manifest.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    manifest.projectionContractCompatibility.toContract.digest = 'f'.repeat(64)
+    await writeFile(manifestPath, JSON.stringify(manifest))
+    expect(() => verifyDirectorExtractionReleaseProvenance({
+      repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot,
+      commit,
+    })).toThrow('app_release_projection_compatibility_binding_invalid')
+  })
+
   it('derives the deterministic recursive closure and fails if a real transitive file is removed', async () => {
     const actual = sourceClosure(repositoryRoot)
     const paths = actual.files.map((item: { path: string }) => item.path)
@@ -1006,6 +1109,13 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     for (const member of paths) {
       await mkdir(dirname(join(gitRoot, member)), { recursive: true })
       await cp(join(repositoryRoot, member), join(gitRoot, member))
+    }
+    const compatibility = JSON.parse(readFileSync(join(
+      repositoryRoot, 'src/lib/director-projection-contract-compatibility.json',
+    ), 'utf8'))
+    for (const evidence of compatibility.regressionEvidence) {
+      await mkdir(dirname(join(gitRoot, evidence.path)), { recursive: true })
+      await cp(join(repositoryRoot, evidence.path), join(gitRoot, evidence.path))
     }
     const git = (...args: string[]) => execFileSync('git', ['-C', gitRoot, ...args], {
       encoding: 'utf8',

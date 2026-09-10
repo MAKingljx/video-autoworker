@@ -30,6 +30,11 @@ import {
   STANDALONE_BUILD_SOURCE_ANCHOR_SCHEMA,
   STANDALONE_PROVENANCE_SCHEMA,
 } from './lib/director-extraction-release-provenance.mjs'
+import {
+  directorProjectionCompatibilitySha256,
+  loadDirectorProjectionContractCompatibility,
+  validateDirectorProjectionContractCompatibility,
+} from './lib/director-projection-contract-compatibility.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SHA256 = /^[a-f0-9]{64}$/u
@@ -38,7 +43,7 @@ const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
 const EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
 const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.15'
-const EXPECTED_DIRECTOR_BRAIN_VERSION = '0.4.1'
+const EXPECTED_DIRECTOR_BRAIN_VERSION = '0.4.2'
 const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
 const OUTBOX_CLOSURE_CONSTANTS = Object.freeze({
   DIRECTOR_BRAIN_CLI_SHA256: 'scripts/feishu-director-brain.mjs',
@@ -443,6 +448,21 @@ function parseProjectionContract(repositoryRoot, closure) {
     authority,
     schemaVersion,
     currentDigest: sha256(canonicalJson(contract)),
+  }
+}
+
+function projectionClosureDescriptor(closure) {
+  return {
+    directorBrainCliSha256: closure.DIRECTOR_BRAIN_CLI_SHA256,
+    directorBrainServiceSha256: closure.DIRECTOR_BRAIN_SERVICE_SHA256,
+    directorBrainSensitiveValueScannerSha256:
+      closure.DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256,
+    directorBrainSchemaSha256: closure.DIRECTOR_BRAIN_SCHEMA_SHA256,
+    evidenceTransformerSha256: closure.DIRECTOR_EVIDENCE_TRANSFORMER_SHA256,
+    evidenceLibrarySha256: closure.DIRECTOR_EVIDENCE_LIBRARY_SHA256,
+    appProjectionSemanticsSha256:
+      closure.DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256,
+    deliveryCoreSha256: closure.DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256,
   }
 }
 
@@ -1030,6 +1050,23 @@ export function verifyDirectorExtractionReleaseProvenance({
       !== canonicalJson(provenance.artifactContent))) {
     fail('app_release_artifact_content_binding_invalid')
   }
+  const expectedCompatibility = loadDirectorProjectionContractCompatibility(repositoryRoot, {
+    gitCommit: commit,
+    optional: true,
+  })
+  if (canonicalJson(provenance.projectionContractCompatibility ?? null)
+      !== canonicalJson(expectedCompatibility)
+    || canonicalJson(releaseManifest.projectionContractCompatibility ?? null)
+      !== canonicalJson(expectedCompatibility)
+    || (expectedCompatibility
+      ? provenance.projectionContractCompatibilitySha256
+        !== directorProjectionCompatibilitySha256(expectedCompatibility)
+        || releaseManifest.projectionContractCompatibilitySha256
+          !== provenance.projectionContractCompatibilitySha256
+      : provenance.projectionContractCompatibilitySha256 !== undefined
+        || releaseManifest.projectionContractCompatibilitySha256 !== undefined)) {
+    fail('app_release_projection_compatibility_binding_invalid')
+  }
   const member = Array.isArray(releaseManifest?.files)
     ? releaseManifest.files.find(item => item?.path === DIRECTOR_EXTRACTION_PROVENANCE_NAME)
     : null
@@ -1042,6 +1079,10 @@ export function verifyDirectorExtractionReleaseProvenance({
     sourceFiles: expectedClosure.files.length,
     sha256: fileSha256(provenancePath),
     artifactContent: provenance.artifactContent,
+    projectionContractCompatibility: expectedCompatibility,
+    projectionContractCompatibilitySha256: expectedCompatibility
+      ? directorProjectionCompatibilitySha256(expectedCompatibility)
+      : null,
   }
 }
 
@@ -1077,6 +1118,19 @@ export async function verifyDirectorVideoReleasePreflight({
     profileStateRoot,
     workspaceRoot,
   })
+  if (provenance.projectionContractCompatibility) {
+    try {
+      validateDirectorProjectionContractCompatibility(
+        provenance.projectionContractCompatibility,
+        {
+          currentClosure: projectionClosureDescriptor(payloads.closure),
+          currentDigest: payloads.projectionContract.currentDigest,
+        },
+      )
+    } catch {
+      fail('projection_compatibility_declaration_invalid')
+    }
+  }
   let runtimeConvergence
   try {
     runtimeConvergence = assertConvergenceProof(
@@ -1130,6 +1184,30 @@ export async function verifyDirectorVideoReleaseReadiness(options) {
     scope: options.scope,
   })
   assertDirectorExtractionReleaseReady(extraction)
+  let projectionTransition = null
+  if (options.transitionFromProjectionContract) {
+    try {
+      const compatibility = validateDirectorProjectionContractCompatibility(
+        preflight.provenance.projectionContractCompatibility,
+        {
+          currentClosure: projectionClosureDescriptor(preflight.payloads.closure),
+          currentDigest: preflight.payloads.projectionContract.currentDigest,
+          sourceDigest: options.transitionFromProjectionContract,
+        },
+      )
+      projectionTransition = {
+        schema: compatibility.schema,
+        transitionId: compatibility.transitionId,
+        direction: compatibility.rollback.direction,
+        fromContractDigest: compatibility.fromContract.digest,
+        toContractDigest: compatibility.toContract.digest,
+        declarationSha256:
+          preflight.provenance.projectionContractCompatibilitySha256,
+      }
+    } catch {
+      fail('projection_transition_not_declared')
+    }
+  }
   return {
     schema: 'video-autoworker-director-video-readiness/v1',
     ok: true,
@@ -1139,6 +1217,7 @@ export async function verifyDirectorVideoReleaseReadiness(options) {
     provenance: preflight.provenance,
     runtimeConvergence: preflight.runtimeConvergence,
     projectionOutbox,
+    projectionTransition,
     extraction,
     contracts: {
       directorWork: true,
@@ -1157,7 +1236,8 @@ export function parseDirectorVideoReleaseReadinessArguments(argv, source = proce
   const allowed = new Set([
     '--repository-root', '--releases-root', '--release-root', '--release-id',
     '--profile-state-root', '--workspace-root', '--live-db-path', '--repository-release-mode',
-    '--runtime-convergence-proof', '--verification-phase',
+    '--runtime-convergence-proof', '--transition-from-projection-contract',
+    '--verification-phase',
   ])
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index]
@@ -1178,9 +1258,13 @@ export function parseDirectorVideoReleaseReadinessArguments(argv, source = proce
   const runtimeConvergenceProofPath = values.get('--runtime-convergence-proof')
     || process.env.AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF
   const verificationPhase = values.get('--verification-phase') || 'full'
+  const transitionFromProjectionContract =
+    values.get('--transition-from-projection-contract') || null
   if (!['pre-bootstrap', 'full'].includes(verificationPhase)
     || !releaseId || !releaseRoot || !runtimeConvergenceProofPath
-    || (verificationPhase === 'full' && !liveDbPath)) {
+    || (verificationPhase === 'full' && !liveDbPath)
+    || (transitionFromProjectionContract
+      && (verificationPhase !== 'full' || !SHA256.test(transitionFromProjectionContract)))) {
     fail('arguments_invalid')
   }
   return {
@@ -1188,7 +1272,7 @@ export function parseDirectorVideoReleaseReadinessArguments(argv, source = proce
     liveDbPath,
     scope: verificationPhase === 'full' ? directorBrainScope(source) : null,
     runtimeConvergenceProofPath,
-    repositoryReleaseMode, verificationPhase,
+    repositoryReleaseMode, transitionFromProjectionContract, verificationPhase,
   }
 }
 

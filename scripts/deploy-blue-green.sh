@@ -155,9 +155,12 @@ that has carried production traffic requires that proof and a stopped old PID.
 `switch` and `rollback` require AIWORKER_BG_LIVE_DB_PATH, an `active` runtime
 attestation for the same canonical SQLite database, and a paused intake gate.
 They verify the selected release through port 3017 and automatically roll back
-if the routed read-only checks fail. Ordinary switch and explicit rollback are
-contract-preserving only; a different director projection contract is rejected
-even at zero work. They do not stop either backend or mutate application data.
+if the routed read-only checks fail. Explicit rollback remains contract-preserving.
+A forward switch may cross one director projection contract only when the target
+clean release, provenance, manifest, and readiness verifier carry the exact
+same-wire declaration for the live source and target digests. The declaration
+does not authorize a later reverse switch. They do not stop either backend or
+mutate application data.
 For an OpenClaw loopback deployment, set MC_AUTH_MODE=openclaw-loopback,
 matching the slot environment. Requests then use the existing loopback release
 boundary and never read or forward a control token. Other authentication modes
@@ -288,6 +291,7 @@ verify_deployment_source_gate() {
     scripts/lib/sensitive-value-scanner.mjs
     scripts/verify-director-video-release-readiness.mjs
     scripts/lib/director-extraction-release-provenance.mjs
+    scripts/lib/director-projection-contract-compatibility.mjs
     scripts/lib/openclaw-private-gateway-rpc.mjs
     scripts/lib/openclaw-runtime-convergence.mjs
     scripts/lib/render-managed-markdown-section.mjs
@@ -417,9 +421,15 @@ verify_director_video_release_chain() {
   local release_id="$1"
   local release_root="$2"
   local repository_release_mode="${3:-head}"
+  local transition_from_projection_contract="${4:-}"
   local report scope tenant workspace
   [[ "$repository_release_mode" == head || "$repository_release_mode" == ancestor ]] \
     || { printf 'error: invalid director/video repository release mode\n' >&2; return 1; }
+  if [[ -n "$transition_from_projection_contract" ]]; then
+    [[ "$repository_release_mode" == head \
+      && "$transition_from_projection_contract" =~ ^[a-f0-9]{64}$ ]] \
+      || { printf 'error: invalid director projection transition source\n' >&2; return 1; }
+  fi
   [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
     || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
   scope="$(openclaw_scope_values)" || return 1
@@ -434,15 +444,17 @@ verify_director_video_release_chain() {
     --release-root "$release_root" \
     --live-db-path "$LIVE_DB_PATH" \
     --repository-release-mode "$repository_release_mode" \
+    --transition-from-projection-contract "$transition_from_projection_contract" \
     --verification-phase full)" \
     || { printf 'error: 3017, video-command, task-flow, director-brain, or projection outbox is incompatible\n' >&2; return 1; }
-  "$NODE_BIN" - "$report" "$release_id" <<'NODE' \
+  "$NODE_BIN" - "$report" "$release_id" "$transition_from_projection_contract" <<'NODE' \
     || { printf 'error: director/video release-readiness verifier returned an invalid report\n' >&2; return 1; }
-const [raw, releaseId] = process.argv.slice(2)
+const [raw, releaseId, transitionFromProjectionContract] = process.argv.slice(2)
 let value
 try { value = JSON.parse(raw) } catch { process.exit(2) }
 const digest = value?.payloads?.projectionContract?.currentDigest
 const commitPrefix = releaseId.replace(/-runtime$/u, '')
+const transition = value?.projectionTransition
 if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || value?.ok !== true || value?.app?.releaseId !== releaseId
   || typeof value?.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.commit)
@@ -491,6 +503,18 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || value.provenance.artifactContent.symlinks < 0
   || typeof value?.runtimeConvergence?.sessionKeySha256 !== 'string'
   || !/^[a-f0-9]{64}$/u.test(value.runtimeConvergence.sessionKeySha256)) process.exit(3)
+if (transitionFromProjectionContract) {
+  if (transition?.schema !== 'video-autoworker-director-projection-compatibility/v1'
+    || typeof transition.transitionId !== 'string'
+    || !/^[a-z0-9][a-z0-9-]{0,79}$/u.test(transition.transitionId)
+    || transition.direction !== 'forward-only'
+    || transition.fromContractDigest !== transitionFromProjectionContract
+    || transition.toContractDigest !== digest
+    || typeof transition.declarationSha256 !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(transition.declarationSha256)
+    || value?.provenance?.projectionContractCompatibilitySha256
+      !== transition.declarationSha256) process.exit(4)
+} else if (transition !== null && transition !== undefined) process.exit(5)
 process.stdout.write(digest)
 NODE
 }
@@ -3817,6 +3841,7 @@ transition_with_verification() {
   local source source_release target_release generation switched_generation rollback_generation
   local source_readiness target_readiness intake_revision source_epoch target_revision target_epoch
   local source_projection_contract target_projection_contract
+  local transition_from_projection_contract=""
   local source_evidence target_evidence target_verified_contract post_target_verified_contract
   local target_release_root
   source="$(read_state_field active)"
@@ -3843,14 +3868,18 @@ transition_with_verification() {
   target_projection_contract="$(printf '%s\n' "$target_readiness" | sed -n '3p')"
   [[ "$target_revision" == "$intake_revision" && "$target_epoch" == "$source_epoch" ]] \
     || fail "source and target readiness snapshots are not from the same gate revision/database epoch"
-  [[ "$source_projection_contract" == "$target_projection_contract" ]] \
-    || fail "ordinary switch and rollback cannot cross director projection contracts; use the dedicated bootstrap migration path"
+  if [[ "$source_projection_contract" != "$target_projection_contract" ]]; then
+    [[ "$mode" == switch ]] \
+      || fail "ordinary switch and rollback cannot cross director projection contracts without a forward-only release declaration"
+    transition_from_projection_contract="$source_projection_contract"
+  fi
   if [[ "$mode" == switch ]]; then
     target_release_root="$(binding_values "$target" | sed -n '2p')" \
       || fail "$target binding has no release root"
     [[ "$target_release_root" == /* ]] || fail "$target binding release root is invalid"
     target_verified_contract="$(verify_director_video_release_chain \
-      "$target_release" "$target_release_root")" \
+      "$target_release" "$target_release_root" head \
+      "$transition_from_projection_contract")" \
       || fail "target director/video release chain is incompatible immediately before router commit"
     [[ "$target_verified_contract" == "$target_projection_contract" ]] \
       || fail "target runtime projection contract does not match the HEAD-bound release verifier"
@@ -3872,7 +3901,8 @@ transition_with_verification() {
       return
     fi
     if post_target_verified_contract="$(verify_director_video_release_chain \
-      "$target_release" "$target_release_root")" \
+      "$target_release" "$target_release_root" head \
+      "$transition_from_projection_contract")" \
       && [[ "$post_target_verified_contract" == "$target_projection_contract" ]]; then
       printf 'Switched router atomically: active=%s generation=%s\n' \
         "$target" "$switched_generation"

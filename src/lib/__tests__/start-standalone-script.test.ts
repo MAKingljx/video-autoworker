@@ -27,6 +27,10 @@ const artifactProvenancePath = resolve(
   process.cwd(),
   'scripts/lib/director-extraction-release-provenance.mjs',
 )
+const projectionCompatibilityPath = resolve(
+  process.cwd(),
+  'scripts/lib/director-projection-contract-compatibility.mjs',
+)
 
 type LauncherFixture = {
   projectRoot: string
@@ -60,6 +64,10 @@ function createLauncherFixture(): LauncherFixture {
     join(projectRoot, 'scripts', 'lib', 'director-extraction-release-provenance.mjs'),
   )
   copyFileSync(
+    projectionCompatibilityPath,
+    join(projectRoot, 'scripts', 'lib', 'director-projection-contract-compatibility.mjs'),
+  )
+  copyFileSync(
     resolve(process.cwd(), 'scripts/lib/application-release-manifest-contract.mjs'),
     join(projectRoot, 'scripts/lib/application-release-manifest-contract.mjs'),
   )
@@ -89,6 +97,7 @@ function createLauncherFixture(): LauncherFixture {
     'openapi.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/index.js': 'export default {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-context-summary.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-system-question-router.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js': 'export {}\n',
@@ -162,6 +171,7 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
     'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
     'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
+    'scripts/lib/director-projection-contract-compatibility.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
@@ -240,6 +250,55 @@ describe('standalone runtime launcher', () => {
     } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
   })
 
+  it('allows legacy artifacts to omit new unreferenced modules but rejects missing imports', async () => {
+    const fixture = createLauncherFixture()
+    try {
+      const checker = await import(pathToFileURL(artifactCheckerPath).href)
+      const chatReview = join(
+        fixture.standaloneRoot,
+        'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js',
+      )
+      const projectionCompatibility = join(
+        fixture.standaloneRoot,
+        'scripts/lib/director-projection-contract-compatibility.mjs',
+      )
+      rmSync(chatReview)
+      rmSync(projectionCompatibility)
+
+      await expect(checker.assertRequiredStandaloneMembers(fixture.standaloneRoot))
+        .resolves.toBe(true)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .resolves.toBeDefined()
+
+      const directorEntry = join(
+        fixture.standaloneRoot,
+        'openclaw-plugins/aiworker-director-brain/index.js',
+      )
+      writeFileSync(directorEntry, "import './lib/director-chat-review.js'\n")
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow(
+          'standalone_import_missing:openclaw-plugins/aiworker-director-brain/index.js:./lib/director-chat-review.js',
+        )
+
+      writeFileSync(chatReview, 'export {}\n')
+      writeFileSync(directorEntry, 'export default {}\n')
+      const artifactAuditor = join(
+        fixture.standaloneRoot,
+        'scripts/check-standalone-artifact.mjs',
+      )
+      writeFileSync(
+        artifactAuditor,
+        "import './lib/director-projection-contract-compatibility.mjs'\n",
+      )
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow(
+          'standalone_import_missing:scripts/check-standalone-artifact.mjs:./lib/director-projection-contract-compatibility.mjs',
+        )
+    } finally {
+      rmSync(fixture.projectRoot, { recursive: true, force: true })
+    }
+  })
+
   it('requires every runtime file consumed by the three OpenClaw installers', async () => {
     const repositoryRoot = process.cwd()
     const walk = (relativeRoot: string): string[] => {
@@ -279,10 +338,20 @@ describe('standalone runtime launcher', () => {
     const checker = await import(
       `${pathToFileURL(artifactCheckerPath).href}?payload=${Date.now()}`
     ) as { REQUIRED_STANDALONE_FILES: string[] }
+    const importClosureOnly = new Set([
+      'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js',
+      'scripts/lib/director-projection-contract-compatibility.mjs',
+    ])
 
     for (const member of expectedPayload) {
-      expect(checker.REQUIRED_STANDALONE_FILES, member).toContain(member)
+      if (importClosureOnly.has(member)) {
+        expect(checker.REQUIRED_STANDALONE_FILES, member).not.toContain(member)
+      } else {
+        expect(checker.REQUIRED_STANDALONE_FILES, member).toContain(member)
+      }
     }
+    expect(checker.REQUIRED_STANDALONE_FILES)
+      .not.toContain('scripts/lib/director-projection-contract-compatibility.mjs')
   })
 
   it('makes every supported production package entrypoint use the fail-closed launcher', () => {

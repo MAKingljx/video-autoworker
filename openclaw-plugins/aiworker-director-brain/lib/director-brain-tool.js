@@ -1,5 +1,11 @@
+import { spawn } from 'node:child_process'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+
+import {
+  prepareDirectorBrainReview,
+  rememberProposedDirectorBrainRecord,
+} from './director-chat-review.js'
 
 export const DIRECTOR_BRAIN_TOOL_NAME = 'aiworker_director_brain'
 export const DEFAULT_TARGET_AGENT_ID = 'second-original'
@@ -84,6 +90,14 @@ export const DEFAULT_RUNTIME_SERVICE_PATH = resolve(
   'lib',
   'feishu-director-brain.mjs',
 )
+export const DEFAULT_RUNTIME_REVIEW_CLI_PATH = resolve(
+  MODULE_ROOT,
+  'runtime',
+  'scripts',
+  'feishu-director-brain.mjs',
+)
+const REVIEW_CLI_TIMEOUT_MS = 150_000
+const REVIEW_CLI_KILL_GRACE_MS = 2_000
 
 const TOOL_PARAMETERS = Object.freeze({
   type: 'object',
@@ -101,10 +115,11 @@ const TOOL_PARAMETERS = Object.freeze({
         'assemble',
         'workflow',
         'propose',
+        'review_preview',
         'extraction_status',
         'review_guidance',
       ],
-      description: 'health 检查连接；explain 读取系统蓝图；resolve_work 解析作品；get/search 读取知识；assemble 组装已审核上下文；workflow 返回就绪度；propose 写入候选；extraction_status 只读查询提炼进度；review_guidance 说明人工审核方式，用户要求批准或驳回导演脑候选时使用，只传 action，不读取或修改记录。OpenClaw 对话不得启动、回填或重提提炼任务。',
+      description: 'health 检查连接；explain 读取系统蓝图；resolve_work 解析作品；get/search 读取知识；assemble 组装已审核上下文；workflow 返回就绪度；propose 写入候选；review_preview 只读定位待审核对象并生成聊天确认预览；extraction_status 只读查询提炼进度。OpenClaw 对话不得启动、回填或重提提炼任务。',
     },
     topic: {
       type: 'string',
@@ -151,6 +166,21 @@ const TOOL_PARAMETERS = Object.freeze({
       minLength: 1,
       maxLength: 500,
       description: 'workflow 可选的当前导演目标，用于生成六层就绪度、质量门槛和下一步建议。',
+    },
+    decision: {
+      type: 'string',
+      enum: ['approve', 'reject'],
+      description: 'review_preview 专用。只表示要预览批准或驳回，不会直接更改记录。',
+    },
+    workQuery: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 256,
+      description: 'review_preview 的作品完整名称或明确别名。作品业务候选必填；作品目录和全局导演技法可省略。',
+    },
+    batch: {
+      type: 'boolean',
+      description: 'review_preview 专用。只有用户明确说全部、这批或给出数量时才为 true；单次最多预览 50 条。明确审核该表全部候选时可省略 query，由适配层按作品、表和候选状态精确枚举。',
     },
     fields: {
       type: 'object',
@@ -412,6 +442,27 @@ export function normalizeDirectorBrainToolRequest(value) {
     const query = safeString(value.query, 256)
     return query ? { action: 'extraction_status', query } : null
   }
+  if (value.action === 'review_preview') {
+    if (!hasExactKeys(value, ['action', 'decision', 'table'], ['query', 'workQuery', 'batch'])) return null
+    const decision = safeString(value.decision, 16)
+    const table = safeString(value.table, 64)
+    const query = value.query === undefined ? undefined : safeString(value.query, 256)
+    const workQuery = value.workQuery === undefined ? undefined : safeString(value.workQuery, 256)
+    return ['approve', 'reject'].includes(decision)
+      && table && table !== 'all' && table !== 'system_blueprint'
+      && DIRECTOR_BRAIN_TABLES.includes(table)
+      && (query || value.batch === true)
+      && (value.query === undefined || query)
+      && (value.workQuery === undefined || workQuery)
+      && (value.batch === undefined || typeof value.batch === 'boolean')
+      ? {
+          action: 'review_preview', decision, table,
+          ...(query === undefined ? {} : { query }),
+          ...(workQuery === undefined ? {} : { workQuery }),
+          ...(value.batch === undefined ? {} : { batch: value.batch }),
+        }
+      : null
+  }
   if (value.action === 'propose') {
     if (!hasExactKeys(value, ['action', 'table', 'fields'], ['workId', 'references'])) return null
     const table = safeString(value.table, 64)
@@ -461,6 +512,98 @@ export async function loadInstalledDirectorBrainService(
     throw new Error('director_brain_runtime_service_invalid')
   }
   return operation => runtimeModule.executeDirectorBrainOperation(operation)
+}
+
+export async function loadInstalledDirectorBrainReviewServices(
+  servicePath = DEFAULT_RUNTIME_SERVICE_PATH,
+) {
+  const runtimeModule = await import(pathToFileURL(servicePath).href)
+  if (typeof runtimeModule.executeDirectorBrainOperation !== 'function'
+    || typeof runtimeModule.reviewDirectorBrainRecord !== 'function') {
+    throw new Error('director_brain_runtime_service_invalid')
+  }
+  return {
+    executeOperation: operation => runtimeModule.executeDirectorBrainOperation(operation),
+    reviewRecord: createDirectorBrainReviewCliService({
+      cliPath: resolve(dirname(servicePath), '..', 'feishu-director-brain.mjs'),
+    }),
+  }
+}
+
+export function createDirectorBrainReviewCliService({
+  spawnImpl = spawn,
+  nodePath = process.execPath,
+  cliPath = DEFAULT_RUNTIME_REVIEW_CLI_PATH,
+  timeoutMs = REVIEW_CLI_TIMEOUT_MS,
+  killGraceMs = REVIEW_CLI_KILL_GRACE_MS,
+} = {}) {
+  return request => new Promise((resolvePromise, rejectPromise) => {
+    const input = JSON.stringify(request)
+    let child
+    try {
+      child = spawnImpl(nodePath, [cliPath, 'review'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      })
+    } catch {
+      rejectPromise(new Error('director_brain_review_process_failed'))
+      return
+    }
+    const stdout = []
+    let stdoutBytes = 0
+    let timedOut = false
+    let outputTooLarge = false
+    let spawnFailed = false
+    let killTimer
+    const terminate = () => {
+      child.kill('SIGTERM')
+      if (!killTimer) killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs)
+    }
+    const timeout = setTimeout(() => {
+      timedOut = true
+      terminate()
+    }, timeoutMs)
+    child.stdout.on('data', chunk => {
+      const buffer = Buffer.from(chunk)
+      stdoutBytes += buffer.length
+      if (stdoutBytes > MAX_TOOL_RESULT_BYTES) {
+        outputTooLarge = true
+        terminate()
+        return
+      }
+      stdout.push(buffer)
+    })
+    // Drain stderr so the bounded child cannot block. Never include it in a
+    // user-visible result or diagnostic because it may contain remote details.
+    child.stderr.resume()
+    child.on('error', () => { spawnFailed = true })
+    child.on('close', code => {
+      clearTimeout(timeout)
+      clearTimeout(killTimer)
+      if (timedOut) {
+        rejectPromise(new Error('director_brain_review_timeout'))
+        return
+      }
+      if (outputTooLarge) {
+        rejectPromise(new Error('director_brain_runtime_result_too_large'))
+        return
+      }
+      if (spawnFailed || code !== 0) {
+        rejectPromise(new Error('director_brain_review_process_failed'))
+        return
+      }
+      let result
+      try {
+        result = JSON.parse(Buffer.concat(stdout, stdoutBytes).toString('utf8'))
+      } catch {
+        rejectPromise(new Error('director_brain_review_process_result_invalid'))
+        return
+      }
+      resolvePromise(result)
+    })
+    child.stdin.on('error', () => undefined)
+    child.stdin.end(input)
+  })
 }
 
 async function readBoundedResponseText(response) {
@@ -532,7 +675,7 @@ function textResult(text) {
   return { content: [{ type: 'text', text }] }
 }
 
-export const DIRECTOR_BRAIN_REVIEW_GUIDANCE = '当前聊天暂不支持批准或驳回。候选需通过人工审核流程确认，本次没有更改审核状态。'
+export const DIRECTOR_BRAIN_REVIEW_GUIDANCE = '当前聊天支持先预览、再明确确认的审核。请说明作品名、记录类型和候选名称；口述新增仍只保存为候选。'
 
 const DIAGNOSTIC_ERROR_CODES = new Set([
   'director_brain_keychain_unavailable',
@@ -644,12 +787,16 @@ const USER_VISIBLE_SENSITIVE_PATTERNS = Object.freeze([
   /\b[a-z0-9_]*(?:token|secret|key|pass(?:word)?)[a-z0-9_]*\s*[:=]\s*\S+/iu,
 ])
 
-function safeUserVisibleText(value, maximum = MAX_USER_VISIBLE_ANSWER_CHARS) {
+function safeUserVisibleText(
+  value,
+  maximum = MAX_USER_VISIBLE_ANSWER_CHARS,
+  { maxSentences = 3 } = {},
+) {
   if (typeof value !== 'string') return null
   const normalized = value.trim()
   if (!normalized || normalized.length > maximum) return null
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(normalized)) return null
-  if (normalized.split(/[。！？!?]+/u).filter(Boolean).length > 3) return null
+  if (normalized.split(/[。！？!?]+/u).filter(Boolean).length > maxSentences) return null
   return USER_VISIBLE_SENSITIVE_PATTERNS.some(pattern => pattern.test(normalized))
     ? null
     : normalized
@@ -680,8 +827,12 @@ function singleSentenceText(value, maximum) {
     .trim()
 }
 
-function exactResponseContract(userVisibleAnswer, { noFallback = false } = {}) {
-  const safeAnswer = safeUserVisibleText(userVisibleAnswer)
+function exactResponseContract(userVisibleAnswer, {
+  noFallback = false,
+  maximum = MAX_USER_VISIBLE_ANSWER_CHARS,
+  maxSentences = 3,
+} = {}) {
+  const safeAnswer = safeUserVisibleText(userVisibleAnswer, maximum, { maxSentences })
   return {
     mustQuoteUserVisibleAnswerExactly: true,
     doNotAddFacts: true,
@@ -697,13 +848,16 @@ function exactResponseContract(userVisibleAnswer, { noFallback = false } = {}) {
   }
 }
 
-function handledAnswer(action, outcome, userVisibleAnswer) {
+function handledAnswer(action, outcome, userVisibleAnswer, responseOptions = {}) {
   return {
     ok: true,
     action,
     handled: true,
     outcome,
-    responseContract: exactResponseContract(userVisibleAnswer, { noFallback: true }),
+    responseContract: exactResponseContract(userVisibleAnswer, {
+      noFallback: true,
+      ...responseOptions,
+    }),
     [TRUSTED_HANDLED_ANSWER]: true,
   }
 }
@@ -842,6 +996,17 @@ function extractionUserVisibleAnswer(value) {
   const workName = safeWorkName(context.workName)
   const state = extractionState(value)
   if (value.found === false) return `《${workName}》还没有开始整理导演知识。`
+  if (state === 'conflict' && value.attentionReason === 'evidence_sync') {
+    return `《${workName}》的视频分析已完成，素材证据写入确认异常，需核对后继续。`
+  }
+  if (state === 'awaiting_evidence_projection'
+    && value.attentionReason === 'evidence_sync_pending') {
+    return `《${workName}》的视频分析已完成，素材证据正在写入确认。`
+  }
+  if (state === 'awaiting_evidence_review'
+    && value.attentionReason === 'evidence_delivered_pending_extraction') {
+    return `《${workName}》的视频分析已完成，素材证据写入已确认，导演知识待提炼。`
+  }
   const aggregate = extractionAggregateSummary(value, workName)
   if (aggregate) return aggregate
   if (/awaiting_registration/iu.test(state)) {
@@ -1042,13 +1207,14 @@ export function createDirectorBrainTool({
   targetAgentId = DEFAULT_TARGET_AGENT_ID,
   service,
   extractionService,
+  reviewSessionStore,
   onDiagnostic,
 } = {}) {
   if (context?.agentId !== targetAgentId) return null
   return {
     name: DIRECTOR_BRAIN_TOOL_NAME,
     label: 'AI-worker 导演脑',
-    description: '完整导演脑的唯一 OpenClaw 工具。用户要求批准或驳回导演脑候选（包括刚提交候选后只回复批准）时只调用 review_guidance，逐字返回并结束，不得改成 search 或回退通用工具；提交候选后告知需人工审核，不得承诺回复批准即可。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；查询导演知识提炼进度时只调用 extraction_status，同样只传作品名 query。OpenClaw 对话不得启动、回填、重提提炼任务或触发素材投影。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow 和 extraction_status 返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得批准、删除、创建任务或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
+    description: '完整导演脑的唯一 OpenClaw 工具。用户要求批准或驳回导演脑候选时调用 review_preview，只做候选定位与确认预览；必须逐字返回 responseContract.userVisibleAnswer，真正审核只接受随后当前聊天中的精确确认语句，绝不能用工具参数代替用户确认。口述新增仍调用 propose 且只保存为候选，新增本身不等于批准；刚提交候选后用户只说批准或驳回时，系统也会先展示预览。询问导演脑架构、技法学习底层逻辑、最终目标、集成边界、数据边界或当前范围时，直接调用 explain 并选择 topic；这是系统问题，不得把“导演脑”当作品名，不得先 resolve_work，也不得回退通用工具。作品上下文必须严格隔离；skills_techniques 是由已确认案例支撑的跨作品全局技法库，可直接读取或按来源作品过滤。用户只说作品名或别名并查询六层状态时直接调用 workflow，把原片名放入 query，工具会在内部唯一解析，不要猜测或索取 ID；查询导演知识提炼进度时只调用 extraction_status，同样只传作品名 query。OpenClaw 对话不得启动、回填、重提提炼任务或触发素材投影。解析出的内部 ID 只用于工具调用，绝不向用户展示。作品未找到或名称不唯一时，responseContract 已经给出本轮完整短答；必须逐字回复并立刻结束，不得回退到 read、exec、memory、聊天记录、SQLite、n8n、媒体目录或旧素材库。explain、workflow、review_preview 和 extraction_status 返回 responseContract 时，最终答复必须逐字使用其中 userVisibleAnswer，不增加任何文字或事实。其他回答也只能忠实复述当前工具实际返回的字段：readiness=true 只表示该层就绪，layerCoverage 只表示六层全局覆盖率，禁止改写成每层百分比；不得捏造准确率、测试次数、人物动机、故事变体或其他未返回事实。需要具体故事内容时继续 search 并用 assemble 校验最小已审核上下文，无法合法组装就明确依据不足。候选不是事实；素材证据与系统蓝图只读。不得删除、创建任务或控制剪辑、DaVinci、剪辑时间线、渲染与导出。',
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {
@@ -1062,12 +1228,23 @@ export function createDirectorBrainTool({
       }
       try {
         const executeOperation = service || await loadInstalledDirectorBrainService()
+        if (request.action === 'review_preview') {
+          const preview = await prepareDirectorBrainReview({
+            request, executeOperation, store: reviewSessionStore, context,
+          })
+          return textResult(serializeServiceResult(handledAnswer(
+            request.action, preview.outcome, preview.answer,
+            { maximum: 8 * 1024, maxSentences: 60 },
+          )))
+        }
         const getExtractionService = EXTRACTION_ACTIONS.has(request.action)
           ? async () => extractionService || await loadInstalledDirectorBrainExtractionService()
           : null
-        return textResult(serializeServiceResult(
-          await executeResolvedRequest(executeOperation, getExtractionService, request),
-        ))
+        const result = await executeResolvedRequest(executeOperation, getExtractionService, request)
+        if (request.action === 'propose') {
+          rememberProposedDirectorBrainRecord({ result, store: reviewSessionStore, context })
+        }
+        return textResult(serializeServiceResult(result))
       } catch (error) {
         reportDirectorBrainFailure(error, request.action, onDiagnostic)
         const code = error instanceof Error ? error.message : ''

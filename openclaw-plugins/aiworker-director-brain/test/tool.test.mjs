@@ -46,7 +46,7 @@ describe('director brain tool contract', () => {
     ])
     expect(TOOL_PARAMETERS.properties.action.enum).toEqual([
       'health', 'explain', 'resolve_work', 'get', 'search', 'assemble', 'workflow', 'propose',
-      'extraction_status', 'review_guidance',
+      'review_preview', 'extraction_status', 'review_guidance',
     ])
     expect(TOOL_PARAMETERS.properties).not.toHaveProperty('sourceQuery')
     expect(TOOL_PARAMETERS.properties.references.properties.techniqueIds).toEqual({
@@ -268,6 +268,59 @@ describe('director brain tool contract', () => {
 
     expect(result.responseContract.userVisibleAnswer).toContain(expected)
     expect(JSON.stringify(result)).not.toMatch(/WORK-HIDDEN|RUN-HIDDEN/iu)
+  })
+
+  it('reports evidence write confirmation attention without claiming the video is unfinished', async () => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'resolve_work',
+        found: true,
+        work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
+      }),
+      extractionService: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'extraction_status',
+        status: 'conflict',
+        attentionReason: 'evidence_sync',
+        message: 'director_evidence_projection_receipt_invalid',
+      }),
+    })
+    const result = JSON.parse(resultText(await tool.execute('call-evidence-attention', {
+      action: 'extraction_status', query: '冰原纪事',
+    })))
+
+    expect(result.responseContract.userVisibleAnswer).toBe(
+      '《冰原纪事》的视频分析已完成，素材证据写入确认异常，需核对后继续。',
+    )
+    expect(JSON.stringify(result)).not.toMatch(/WORK-HIDDEN|projection_receipt|director_evidence/iu)
+  })
+
+  it('keeps delivered evidence conservative until extraction has a phase job', async () => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'resolve_work',
+        found: true,
+        work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
+      }),
+      extractionService: vi.fn().mockResolvedValue({
+        ok: true,
+        action: 'extraction_status',
+        status: 'awaiting_evidence_review',
+        attentionReason: 'evidence_delivered_pending_extraction',
+      }),
+    })
+    const result = JSON.parse(resultText(await tool.execute('call-evidence-delivered', {
+      action: 'extraction_status', query: '冰原纪事',
+    })))
+
+    expect(result.responseContract.userVisibleAnswer).toBe(
+      '《冰原纪事》的视频分析已完成，素材证据写入已确认，导演知识待提炼。',
+    )
+    expect(JSON.stringify(result)).not.toContain('WORK-HIDDEN')
   })
 
   it('normalizes the nine allowed actions and rejects extra or privileged operations', () => {

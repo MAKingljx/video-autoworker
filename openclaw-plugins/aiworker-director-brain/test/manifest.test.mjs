@@ -10,12 +10,12 @@ describe('director brain plugin package', () => {
     const manifest = JSON.parse(await readFile(resolve(ROOT, 'openclaw.plugin.json'), 'utf8'))
 
     expect(packageJson.type).toBe('module')
-    expect(packageJson.version).toBe('0.4.1')
+    expect(packageJson.version).toBe('0.4.2')
     expect(packageJson.peerDependencies).toEqual({ openclaw: '>=2026.9.2' })
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(manifest).toMatchObject({
       id: 'aiworker-director-brain',
-      version: '0.4.1',
+      version: '0.4.2',
       activation: { onStartup: true, onCapabilities: ['hook', 'tool'] },
       contracts: { tools: ['aiworker_director_brain'] },
       toolMetadata: { aiworker_director_brain: { optional: true } },
@@ -40,10 +40,11 @@ describe('director brain plugin package', () => {
     expect(entry).toContain("api.on('before_message_write'")
     expect(entry).toContain("api.on('before_agent_reply'")
     expect(entry).toContain('priority: 200')
+    expect(entry).toContain('CHAT_REVIEW_HOOK_TIMEOUT_MS = 10 * 60 * 1000')
     expect(entry).toContain("eligibleTriggers: ['user']")
     expect(entry).toContain('TRANSCRIPT_LAST_DEFENSE_PRIORITY = -1_000')
     expect(entry.match(/priority: TRANSCRIPT_LAST_DEFENSE_PRIORITY/gu)).toHaveLength(2)
-    expect(entry).toContain('timeoutMs: 35_000')
+    expect(entry).toContain('timeoutMs: CHAT_REVIEW_HOOK_TIMEOUT_MS')
     expect(entry).toContain('createDirectorBrainSystemQuestionHandler')
     expect(entry).toContain('projectAiworkerToolResultForTargetAgent(event, context, targetAgentId)')
     expect(entry).toContain('projectAiworkerMessageForTargetAgent(event, context, targetAgentId)')

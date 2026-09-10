@@ -1916,7 +1916,7 @@ fi
     )
   })
 
-  it('rejects an ordinary cross-contract switch even when both sides have no active work', async () => {
+  it('rejects an undeclared cross-contract switch even when both sides have no active work', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-projection-contract-switch-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
     const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
@@ -1941,7 +1941,7 @@ check_json_endpoint() {
     printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${'b'.repeat(64)}'
   fi
 }
-verify_director_video_release_chain() { :; }
+verify_director_video_release_chain() { return 1; }
 update_state() { : > ${JSON.stringify(updateMarker)}; }
 transition_with_verification green switch
 `)
@@ -1949,10 +1949,58 @@ transition_with_verification green switch
     const failure = await execFileAsync('bash', [harness], {
       env: { ...process.env, NODE_BIN: process.execPath },
     }).then(() => null, error => error as Error & { stderr?: string })
-    expect(failure?.stderr).toContain(
-      'ordinary switch and rollback cannot cross director projection contracts',
-    )
+    expect(failure?.stderr).toContain('target director/video release chain is incompatible')
     expect(existsSync(updateMarker)).toBe(false)
+  })
+
+  it('allows only a declared forward cross-contract switch through the existing compensation path', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-projection-contract-declared-switch-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'projection-declared-switch-harness.sh')
+    const eventsFile = join(root, 'events')
+    const sourceDigest = 'a'.repeat(64)
+    const targetDigest = 'b'.repeat(64)
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+read_state_field() {
+  case "$1" in active) printf 'blue\\n' ;; generation) printf '7\\n' ;; esac
+}
+read_state_slot_release() { printf 'release-%s\\n' "$1"; }
+binding_values() {
+  printf 'release-%s\\n' "$1"
+  printf '/private/test/releases/release-%s/standalone\\n' "$1"
+}
+preflight_transition() { :; }
+check_json_endpoint() {
+  [[ "$1" == readiness ]] || return 1
+  if [[ "$2" == *':3017/'* ]]; then
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${sourceDigest}'
+  else
+    printf '3\\n1\\n%s\\n0\\n0\\n0\\n' '${targetDigest}'
+  fi
+}
+verify_director_video_release_chain() {
+  printf 'verify:%s:%s\\n' "$1" "$4" >> "$EVENTS_FILE"
+  [[ "$4" == '${sourceDigest}' ]] || return 1
+  printf '%s' '${targetDigest}'
+}
+capture_transition_release_evidence() { printf 'evidence-%s' "$1"; }
+verify_captured_transition_release_evidence() { :; }
+update_state() { printf 'update:%s:%s\\n' "$1" "$2" >> "$EVENTS_FILE"; }
+transition_with_verification green switch
+`)
+
+    const result = await execFileAsync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+    })
+    expect(result.stdout).toContain('Switched router atomically')
+    expect(readFileSync(eventsFile, 'utf8').trim().split('\n')).toEqual([
+      `verify:release-green:${sourceDigest}`,
+      'update:green:switch',
+      `verify:release-green:${sourceDigest}`,
+    ])
   })
 
   it('rejects an explicit cross-contract rollback even when both sides have no active work', async () => {
@@ -2304,8 +2352,10 @@ check_legacy_databases_quiescent "$1" "$2"
       '[[ "$target_verified_contract" == "$target_projection_contract" ]]',
     )
     expect(transitionBody).toContain(
-      '[[ "$source_projection_contract" == "$target_projection_contract" ]]',
+      '[[ "$source_projection_contract" != "$target_projection_contract" ]]',
     )
+    expect(transitionBody).toContain('[[ "$mode" == switch ]]')
+    expect(transitionBody).toContain('"$transition_from_projection_contract"')
     expect(deployScript).not.toMatch(/\b(?:launchctl|n8n-stop|n8n-start)\b/u)
     expect(deployScript).toContain('source "$SHARED_DEPLOYMENT_LOCK_SHELL"')
     expect(deployScript).toContain('acquire_shared_deployment_lock')

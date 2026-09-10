@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const ROOT = resolve(process.cwd(), 'openclaw-plugins/aiworker-director-brain')
 
 describe('director brain static boundaries', () => {
-  it('has no process, shell, scheduler, database, or task-chain adapter', async () => {
+  it('uses only the bounded formal review child and has no shell, scheduler, database, or task-chain adapter', async () => {
     const runtime = [
       await readFile(resolve(ROOT, 'index.js'), 'utf8'),
       await readFile(resolve(ROOT, 'lib/director-brain-tool.js'), 'utf8'),
@@ -16,7 +16,9 @@ describe('director brain static boundaries', () => {
       'utf8',
     )
 
-    expect(runtime).not.toMatch(/node:child_process|execFile|spawn\(|launchctl/iu)
+    expect(runtime.match(/node:child_process/gu)).toHaveLength(1)
+    expect(runtime).not.toMatch(/execFile|shell\s*:|launchctl/iu)
+    expect(runtime).toContain("spawnImpl(nodePath, [cliPath, 'review']")
     expect(runtime).not.toMatch(/better-sqlite3|sqlite3|\.db\b/iu)
     expect(runtime).not.toMatch(/dispatchVideo|dispatchDirectory|submit-task|run-video-batch/iu)
     expect(runtime).not.toMatch(/registerHook/u)
@@ -64,7 +66,7 @@ describe('director brain static boundaries', () => {
     expect(skill.match(/^- `material_judgments`：/gmu)).toHaveLength(1)
     expect(skill).toContain('`system_blueprint` 与 `material_evidence` 始终只读')
     expect(skill).toContain('这里的“时间线”是故事发生顺序，不是剪辑软件时间线')
-    expect(skill).toContain('不得批准、拒绝、合并、删除')
+    expect(skill).toContain('不得绕过 `review_preview → 当前聊天精确确认 → CAS 回读`')
     expect(skill).toContain('除 `skills_techniques` 按已确认案例聚合全局技法外，不得跨作品')
     expect(skill).toContain('必须在 `references.caseIds` 引用至少一个已确认导演案例')
     expect(skill).toContain('任一项缺失时不得确认，也不得用于技法学习')

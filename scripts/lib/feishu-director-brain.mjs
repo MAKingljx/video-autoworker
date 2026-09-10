@@ -273,7 +273,10 @@ const LEARNING_CONTEXT_PHASE_PLAN = Object.freeze({
   },
 })
 const MAX_SEARCH_QUERY_LENGTH = 240
-const MAX_SEARCH_LIMIT = 20
+// The public OpenClaw search tool remains capped at 20. The shared service
+// accepts up to 50 so one explicit chat-review preview can bind a complete,
+// human-visible batch without creating a second review data path.
+const MAX_SEARCH_LIMIT = 50
 const MAX_OPERATION_BATCH_ITEMS = 20
 const MAX_SEARCH_PAGES_PER_TABLE = 5
 const SEARCH_PAGE_SIZE = 100

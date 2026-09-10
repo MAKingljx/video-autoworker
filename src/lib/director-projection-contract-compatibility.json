@@ -1,0 +1,74 @@
+{
+  "schema": "video-autoworker-director-projection-compatibility/v1",
+  "transitionId": "receipt-text-normalization-20260910",
+  "fromContract": {
+    "digest": "e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1",
+    "closure": {
+      "directorBrainCliSha256": "8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e",
+      "directorBrainServiceSha256": "c10d17caa790206f33562e03f5bea5330ad65bad8e637b562fa905e910c8519b",
+      "directorBrainSensitiveValueScannerSha256": "65d3a771f631b4cbf34c31e31b821d63a357008af3a09d2ea4e21a44b9852b5c",
+      "directorBrainSchemaSha256": "72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f",
+      "evidenceTransformerSha256": "b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1",
+      "evidenceLibrarySha256": "dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc",
+      "appProjectionSemanticsSha256": "1e5153a633225b6454ab722b689de9ee7a5dcfccff697c19d2ea2d0a708e2cda",
+      "deliveryCoreSha256": "ceefa7f9b1f37c359637ec13947aade3d093fa53f7c2de591901446207f10040"
+    }
+  },
+  "toContract": {
+    "digest": "1b23cf809e71d8aa13b2e3db37afcc9a66b4e151b834a368619b77be4c8ed932"
+  },
+  "changedClosureMembers": [
+    "appProjectionSemanticsSha256",
+    "deliveryCoreSha256",
+    "directorBrainServiceSha256"
+  ],
+  "unchanged": {
+    "projectionAuthority": "director-evidence-projection-contract-v1",
+    "projectionSchemaVersion": 1,
+    "receiptSchemaVersion": 1,
+    "stableEvidenceIdentity": true,
+    "wireProtocol": true,
+    "sourceIdentity": true,
+    "outboxIdentity": true
+  },
+  "recovery": {
+    "mode": "verified-read-only",
+    "compatibleSourceDigests": [
+      "e4bcabbcea89d809d8a81f15df27c8923d5a6b0727e0dbd0eaec517054c743b1"
+    ],
+    "preserveOutboxIdentity": true,
+    "remoteWrites": false,
+    "requiredConflictCode": "director_evidence_projection_receipt_invalid"
+  },
+  "rollback": {
+    "direction": "forward-only",
+    "automaticCompensationBeforeReturn": true,
+    "explicitReverse": false
+  },
+  "regressionEvidence": [
+    {
+      "path": "src/lib/__tests__/feishu-director-brain.test.ts",
+      "sha256": "f11f30017d2af1d29f3aeee853ce5d9ed7dda2947a92430657fef0ec2135ea28"
+    },
+    {
+      "path": "src/lib/__tests__/director-evidence-outbox.test.ts",
+      "sha256": "cebc0737e26bebf823c4a43fdd70110caf9843577d1d85df2a6a74b9b1e0a3b7"
+    },
+    {
+      "path": "src/lib/__tests__/director-projection-contract-compatibility.test.ts",
+      "sha256": "018bf8fdaa04a061b710f7d3fc757a50765492930d2e62567aaf3595f35028dd"
+    },
+    {
+      "path": "src/lib/__tests__/director-video-release-readiness-script.test.ts",
+      "sha256": "d4e27ca899bb56cc638775e86e1cb8c5049066bd414246e8e38bdb2744278026"
+    },
+    {
+      "path": "src/test/standalone-blue-green.test.ts",
+      "sha256": "7c24debde3fc93815aa5967a412c79b6f2d1a229970b4d8acb7d46f8e61c95c1"
+    },
+    {
+      "path": "openclaw-plugins/aiworker-director-brain/test/director-chat-review.test.mjs",
+      "sha256": "3c523ab5a6e991b14a553b43a640baf48e5a49980172a702c8275e7a3446e726"
+    }
+  ]
+}

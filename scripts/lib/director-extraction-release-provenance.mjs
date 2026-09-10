@@ -4,6 +4,11 @@ import { lstatSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { extname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
+import {
+  directorProjectionCompatibilitySha256,
+  loadDirectorProjectionContractCompatibility,
+} from './director-projection-contract-compatibility.mjs'
+
 export const DIRECTOR_EXTRACTION_PROVENANCE_NAME = 'release-provenance.json'
 export const STANDALONE_ARTIFACT_CONTENT_SCHEMA =
   'video-autoworker-standalone-artifact-content/v1'
@@ -429,6 +434,12 @@ export function buildDirectorExtractionProvenance(
   }
   const verifiedAnchor = verifiedBuildSourceAnchor(repositoryRoot, buildSourceAnchor)
   const gitCommit = verifiedAnchor?.gitCommit || null
+  const projectionContractCompatibility = gitCommit
+    ? loadDirectorProjectionContractCompatibility(repositoryRoot, {
+      gitCommit,
+      optional: true,
+    })
+    : loadDirectorProjectionContractCompatibility(repositoryRoot, { optional: true })
   let closure
   try {
     closure = verifiedAnchor
@@ -452,6 +463,11 @@ export function buildDirectorExtractionProvenance(
     } : null,
     sourceClosure: closure,
     artifactContent,
+    ...(projectionContractCompatibility ? {
+      projectionContractCompatibility,
+      projectionContractCompatibilitySha256:
+        directorProjectionCompatibilitySha256(projectionContractCompatibility),
+    } : {}),
   }
 }
 

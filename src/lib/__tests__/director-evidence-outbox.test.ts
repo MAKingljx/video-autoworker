@@ -15,6 +15,7 @@ import {
   directorEvidenceBindingForResolvedWork,
   directorEvidenceDigest,
   getDirectorEvidenceProjectionReceiptCore,
+  recoverConflictedDirectorEvidenceProjectionCore,
   type DirectorCommandRunner,
 } from '@/lib/director-evidence-delivery-core'
 import {
@@ -108,6 +109,77 @@ describe('director evidence root outbox', () => {
     if (originalScope.workspaceId === undefined) delete process.env.MC_OPENCLAW_WORKSPACE_ID
     else process.env.MC_OPENCLAW_WORKSPACE_ID = originalScope.workspaceId
   })
+
+  it('recovers a fully verified remote candidate without projection writes or changing the parent', async () => {
+    const { root } = seedRoot(db)
+    enqueueDirectorEvidenceOutbox(db, root, 100)
+    db.prepare(`UPDATE n8n_director_evidence_outbox SET status='conflict', attempt_count=2,
+      last_error_code='director_evidence_projection_receipt_invalid' WHERE task_id=?`).run(root.taskId)
+    const before = getDirectorEvidenceOutbox(db, root.taskId)!
+    const sourceBefore = db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?').get(root.taskId)
+    const item = directorEvidenceFixtureItem(1, { '证据摘要': '人物：停下，观察环境。' })
+    const records = (directorEvidenceFixtureProjectionResult({ workId: before.workId, items: [item] })
+      .results as Array<{ record: Record<string, unknown> }>).map(entry => entry.record)
+    ;(records[0].fields as Record<string, unknown>)['证据摘要'] = '人物:停下,观察环境。'
+    const calls: string[] = []
+    const readRunner: DirectorCommandRunner = async (command, input) => {
+      calls.push(command)
+      if (command === 'transform') return { workId: before.workId, items: [item] }
+      expect(command).toBe('operate')
+      expect(input.action).toBe('get_many')
+      return { ok: true, action: 'get_many', table: 'material_evidence', workId: before.workId,
+        count: 1, missing: [], records }
+    }
+    const options = { currentProjectionContractDigest: directorEvidenceProjectionContractDigest(),
+      compatibleProjectionContractDigests: [], runner: readRunner, nowSeconds: 101 }
+    const result = await recoverConflictedDirectorEvidenceProjectionCore(db, root, options)
+    expect(result).toMatchObject({ origin: 'verified_read_recovery', receipt: { entries: [{
+      stableId: records[0].stableId,
+    }] } })
+    expect(getDirectorEvidenceOutbox(db, root.taskId)).toEqual({ ...before,
+      status: 'delivered', lastErrorCode: null, deliveredAt: 101, updatedAt: 101 })
+    expect(db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?').get(root.taskId)).toEqual(sourceBefore)
+    expect(calls).toEqual(['transform', 'operate', 'operate'])
+    expect(records[0]).toMatchObject({ state: '候选', reviewed: false })
+    expect(await recoverConflictedDirectorEvidenceProjectionCore(db, root, options)).toBeNull()
+    expect(calls).toHaveLength(3)
+  })
+
+  it.each(['missing_record', 'changed_content', 'state_changed', 'reviewed_changed', 'remote_version_race', 'source_race', 'attempt_race', 'incompatible_contract'])(
+    'leaves failed evidence confirmation untouched on %s', async failure => {
+      const { root } = seedRoot(db)
+      enqueueDirectorEvidenceOutbox(db, root, 100)
+      db.prepare(`UPDATE n8n_director_evidence_outbox SET status='conflict', attempt_count=2,
+        last_error_code='director_evidence_projection_receipt_invalid' WHERE task_id=?`).run(root.taskId)
+      const before = getDirectorEvidenceOutbox(db, root.taskId)!
+      const item = directorEvidenceFixtureItem()
+      const records = (directorEvidenceFixtureProjectionResult({ workId: before.workId, items: [item] })
+        .results as Array<{ record: Record<string, unknown> }>).map(entry => entry.record)
+      let remoteReads = 0
+      const readRunner: DirectorCommandRunner = async (command, input) => {
+        if (command === 'transform') return { workId: before.workId, items: [item] }
+        expect(command).toBe('operate')
+        expect(input.action).toBe('get_many')
+        remoteReads++
+        if (failure === 'state_changed') records[0].state = '失效'
+        if (failure === 'reviewed_changed') records[0].reviewed = true
+        if (failure === 'remote_version_race' && remoteReads === 2) (records[0].fields as Record<string, unknown>)['版本'] = 'v0.2.99'
+        if (failure === 'changed_content') (records[0].fields as Record<string, unknown>)['证据摘要'] = '替换内容'
+        if (failure === 'source_race') db.prepare("UPDATE n8n_task_runs SET output='{}' WHERE task_id=?").run(root.taskId)
+        if (failure === 'attempt_race') db.prepare('UPDATE n8n_director_evidence_outbox SET attempt_count=3 WHERE task_id=?').run(root.taskId)
+        return { ok: true, action: 'get_many', table: 'material_evidence', workId: before.workId,
+          count: 1, missing: failure === 'missing_record' ? ['missing'] : [], records }
+      }
+      await expect(recoverConflictedDirectorEvidenceProjectionCore(db, root, {
+        currentProjectionContractDigest: failure === 'incompatible_contract'
+          ? 'f'.repeat(64) : directorEvidenceProjectionContractDigest(),
+        compatibleProjectionContractDigests: [], runner: readRunner, nowSeconds: 101,
+      })).rejects.toThrow()
+      expect(getDirectorEvidenceOutbox(db, root.taskId)).toEqual({ ...before,
+        attemptCount: failure === 'attempt_race' ? 3 : before.attemptCount })
+      expect(getDirectorEvidenceProjectionReceiptCore(db, before)).toBeNull()
+    },
+  )
 
   it('scales only bounded propose batches beyond the default operate timeout', () => {
     expect(directorCommandTimeoutMs('operate', { action: 'get', table: 'works' }))

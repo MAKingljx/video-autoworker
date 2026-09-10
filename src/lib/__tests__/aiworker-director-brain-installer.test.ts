@@ -1296,6 +1296,10 @@ write_backup_tree_manifest "$1" "$3"
       ))).toBe(true)
       expect(await readFile(resolve(
         fixture.stateDir,
+        'extensions/aiworker-director-brain/lib/director-chat-review.js',
+      ), 'utf8')).toContain('createDirectorBrainChatReviewHandler')
+      expect(await readFile(resolve(
+        fixture.stateDir,
         'extensions/aiworker-director-brain/lib/director-context-summary.js',
       ), 'utf8')).toContain('buildDirectorContextSummary')
       expect(await readFile(resolve(
@@ -1311,6 +1315,7 @@ write_backup_tree_manifest "$1" "$3"
         'extensions/aiworker-director-brain/lib',
       ))).toSorted()).toEqual([
         'director-brain-tool.js',
+        'director-chat-review.js',
         'director-context-summary.js',
         'director-system-question-router.js',
         'sensitive-narrative-text.js',

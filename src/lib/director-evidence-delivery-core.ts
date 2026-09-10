@@ -5,9 +5,11 @@ import {
   DIRECTOR_EVIDENCE_SOURCE_AUTHORITY,
   MAX_EVIDENCE_PROJECTION_INPUT_BYTES,
   directorEvidenceDeliveryReceipt,
+  directorEvidenceExpectedReceiptEntries,
   directorEvidenceProjectionBatches,
   directorEvidenceProjectionResultCount,
   directorEvidenceTransformEnvelope,
+  directorEvidenceVerifiedReadReceipt,
   parseDirectorEvidenceDeliveryReceipt,
   type DirectorEvidenceDeliveryReceipt,
 } from '@/lib/director-evidence-projection-semantics'
@@ -373,6 +375,94 @@ export function persistRecoveredDirectorEvidenceProjectionReceiptCore(
   }).immediate()
 }
 
+/** Confirm an existing remote projection without creating or reviewing records. */
+export async function recoverConflictedDirectorEvidenceProjectionCore(
+  db: Database.Database,
+  parent: N8nTaskRun,
+  options: {
+    currentProjectionContractDigest: string
+    compatibleProjectionContractDigests: readonly string[]
+    runner: DirectorCommandRunner
+    nowSeconds: number
+  },
+): Promise<DirectorEvidenceProjectionReceiptRecord | null> {
+  const item = getDirectorEvidenceOutboxCore(db, parent.taskId)
+  if (!item || item.status !== 'conflict'
+    || item.lastErrorCode !== 'director_evidence_projection_receipt_invalid') return null
+  if (item.projectionContractDigest !== options.currentProjectionContractDigest
+    && !options.compatibleProjectionContractDigests.includes(item.projectionContractDigest)) {
+    throw new Error('director_evidence_projection_contract_incompatible')
+  }
+  const binding = directorEvidenceBindingFromInput(parent.input)
+  if (!binding || parent.status !== 'succeeded' || !parent.output
+    || !sameImmutableIdentity(item, buildOutboxIdentity(parent, binding, item.projectionContractDigest))) {
+    throw new Error('director_evidence_authority_conflict')
+  }
+  readCurrentEvidenceSource(db, item)
+  const transformInput = directorEvidenceTransformEnvelope(item, parent.output)
+  serializeDirectorCommandInput('transform', transformInput)
+  const projection = await options.runner('transform', transformInput)
+  const batches = directorEvidenceProjectionBatches(projection, item.workId)
+  const ids = directorEvidenceExpectedReceiptEntries(batches).map(entry => entry.stableId)
+  const readRemoteSnapshot = async () => {
+    const records: Record<string, unknown>[] = []
+    for (let offset = 0; offset < ids.length; offset += 20) {
+      const stableIds = ids.slice(offset, offset + 20)
+      const request = { action: 'get_many', table: 'material_evidence', workId: item.workId, stableIds }
+      serializeDirectorCommandInput('operate', request)
+      const result = await options.runner('operate', request)
+      if (result.ok !== true || result.action !== 'get_many'
+        || result.table !== 'material_evidence' || result.workId !== item.workId
+        || result.count !== stableIds.length
+        || !Array.isArray(result.missing) || result.missing.length !== 0
+        || !Array.isArray(result.records) || result.records.length !== stableIds.length) {
+        throw new Error('director_evidence_projection_recovery_conflict')
+      }
+      records.push(...result.records as Record<string, unknown>[])
+    }
+    if (records.some(record => record.state !== '候选' || record.reviewed !== false)) {
+      throw new Error('director_evidence_projection_recovery_review_changed')
+    }
+    return {
+      receipt: directorEvidenceVerifiedReadReceipt(
+        batches, records, directorEvidenceSourceIdentityDigest(item),
+      ),
+      snapshotDigest: directorEvidenceDigest([...records].sort((left, right) => (
+        String(left.stableId).localeCompare(String(right.stableId))
+      ))),
+    }
+  }
+  const first = await readRemoteSnapshot()
+  const second = await readRemoteSnapshot()
+  if (first.snapshotDigest !== second.snapshotDigest) {
+    throw new Error('director_evidence_projection_recovery_remote_changed')
+  }
+  const receipt = second.receipt
+  // Recheck the source and the exact failed attempt after network reads. A
+  // concurrent result, retry or operator change must leave this repair inert.
+  return db.transaction(() => {
+    readCurrentEvidenceSource(db, item)
+    const current = getDirectorEvidenceOutboxCore(db, item.taskId)
+    if (!current || !sameImmutableIdentity(current, item)
+      || current.status !== item.status || current.lastErrorCode !== item.lastErrorCode
+      || current.attemptCount !== item.attemptCount || current.updatedAt !== item.updatedAt) {
+      throw new Error('director_evidence_outbox_state_changed')
+    }
+    insertProjectionReceipt(db, current, receipt, 'verified_read_recovery', options.nowSeconds)
+    const changed = db.prepare(`
+      UPDATE n8n_director_evidence_outbox
+      SET status = 'delivered', last_error_code = NULL, delivered_at = ?, updated_at = ?
+      WHERE task_id = ? AND binding_id = ? AND tenant_id = ? AND workspace_id = ?
+        AND work_id = ? AND query_digest = ? AND projection_contract_digest = ?
+        AND idempotency_key = ? AND result_sha256 = ? AND status = 'conflict'
+        AND last_error_code = ? AND attempt_count = ? AND updated_at = ?
+    `).run(options.nowSeconds, options.nowSeconds, ...immutableIdentityValues(item),
+      item.lastErrorCode, item.attemptCount, item.updatedAt)
+    if (changed.changes !== 1) throw new Error('director_evidence_outbox_state_changed')
+    return getDirectorEvidenceProjectionReceiptCore(db, current)!
+  }).immediate()
+}
+
 export function getDirectorEvidenceOutboxCountsCore(
   db: Database.Database,
   currentProjectionContractDigest: string,
@@ -543,6 +633,31 @@ function parseAuthorityObject(value: string | null): Record<string, unknown> | n
   }
 }
 
+function readCurrentEvidenceSource(
+  db: Database.Database, item: DirectorEvidenceOutbox,
+): Record<string, unknown> {
+  const row = db.prepare(`
+    SELECT run.status, run.output, run.input, binding.task_type
+    FROM n8n_task_runs run
+    JOIN n8n_workflow_bindings binding
+      ON binding.id = run.binding_id
+     AND binding.tenant_id = run.tenant_id
+     AND binding.workspace_id = run.workspace_id
+    WHERE run.task_id = ? AND run.binding_id = ?
+      AND run.tenant_id = ? AND run.workspace_id = ?
+  `).get(item.taskId, item.bindingId, item.tenantId, item.workspaceId) as {
+    status: string; output: string | null; input: string | null; task_type: string
+  } | undefined
+  const output = parseAuthorityObject(row?.output ?? null)
+  const binding = directorEvidenceBindingFromInput(parseAuthorityObject(row?.input ?? null))
+  if (!row || row.status !== 'succeeded' || row.task_type !== 'video-analysis'
+    || !output || directorEvidenceDigest(output) !== item.resultSha256
+    || binding?.workId !== item.workId || binding?.queryDigest !== item.queryDigest) {
+    throw new Error('director_evidence_authority_conflict')
+  }
+  return output
+}
+
 async function deliverOutbox(
   db: Database.Database,
   item: DirectorEvidenceOutbox,
@@ -570,27 +685,11 @@ async function deliverOutbox(
     return 'pending'
   }
 
-  const row = db.prepare(`
-    SELECT run.status, run.output, run.input, binding.task_type
-    FROM n8n_task_runs run
-    JOIN n8n_workflow_bindings binding
-      ON binding.id = run.binding_id
-     AND binding.tenant_id = run.tenant_id
-     AND binding.workspace_id = run.workspace_id
-    WHERE run.task_id = ? AND run.binding_id = ?
-      AND run.tenant_id = ? AND run.workspace_id = ?
-  `).get(item.taskId, item.bindingId, item.tenantId, item.workspaceId) as {
-    status: string
-    output: string | null
-    input: string | null
-    task_type: string
-  } | undefined
-  const output = parseAuthorityObject(row?.output ?? null)
-  const input = parseAuthorityObject(row?.input ?? null)
-  const binding = directorEvidenceBindingFromInput(input)
-  if (!row || row.status !== 'succeeded' || row.task_type !== 'video-analysis'
-    || !output || directorEvidenceDigest(output) !== item.resultSha256
-    || binding?.workId !== item.workId || binding?.queryDigest !== item.queryDigest) {
+  let output: Record<string, unknown>
+  try {
+    output = readCurrentEvidenceSource(db, item)
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'director_evidence_authority_conflict') throw error
     const settledAt = options.nowSeconds()
     const transition = db.prepare(`
       UPDATE n8n_director_evidence_outbox

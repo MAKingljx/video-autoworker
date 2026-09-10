@@ -2,14 +2,16 @@ import type Database from 'better-sqlite3'
 import {
   directorEvidenceBindingFromInput,
 } from '@/lib/director-evidence-delivery-core'
-import { runDirectorCommand } from '@/lib/director-evidence-outbox'
+import { recoverConflictedDirectorEvidenceProjection, runDirectorCommand } from '@/lib/director-evidence-outbox'
 import {
+  getDirectorExtractionJob,
   listDirectorExtractionJobsForWork,
   projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
   retryExhaustedDirectorExtractionJob,
   type DirectorExtractionJob,
 } from '@/lib/director-extraction-runs'
+import { prepareDirectorExtractionFromStoredEvidence } from '@/lib/director-extraction-service'
 import {
   getScopedN8nTaskRunByTaskId,
   searchN8nVideoResults,
@@ -116,6 +118,22 @@ export async function startDirectorExtractionForWork(
   if (verifiedBinding.workId !== input.workId) {
     throw new Error('director_extraction_work_binding_conflict')
   }
+  const existing = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (existing) {
+    // Preserve registration's objective and source-binding checks on retries.
+    registerDirectorExtractionJob(db, sourceTaskId, scope, {
+      binding: sourceBinding, objective: input.objective,
+    })
+    return retryExhaustedDirectorExtractionJob(db, existing.sourceTaskId, scope)
+  }
+  // An explicit start may repair only a fully verified, already-written projection.
+  // It never rewrites remote evidence or approves any candidate.
+  await recoverConflictedDirectorEvidenceProjection(db, source)
+  const prepared = prepareDirectorExtractionFromStoredEvidence(db, sourceTaskId, scope, {
+    binding: sourceBinding,
+    objective: input.objective,
+  })
+  if (prepared) return prepared
   const job = registerDirectorExtractionJob(db, sourceTaskId, scope, {
     binding: sourceBinding,
     objective: input.objective,
@@ -130,8 +148,63 @@ export function getDirectorExtractionStatusForWork(
 ): Record<string, unknown> | null {
   assertDirectorBrainScope(scope)
   const jobs = listDirectorExtractionJobsForWork(db, workId, scope)
-  if (!jobs.length) return null
-  return projectDirectorExtractionWorkStatus(db, jobs)
+  if (jobs.length) return projectDirectorExtractionWorkStatus(db, jobs)
+
+  const evidenceSources = db.prepare(`
+    SELECT outbox.status
+    FROM n8n_director_evidence_outbox outbox
+    JOIN n8n_task_runs run
+      ON run.task_id = outbox.task_id
+     AND run.binding_id = outbox.binding_id
+     AND run.tenant_id = outbox.tenant_id
+     AND run.workspace_id = outbox.workspace_id
+    JOIN n8n_workflow_bindings binding
+      ON binding.id = run.binding_id
+     AND binding.tenant_id = run.tenant_id
+     AND binding.workspace_id = run.workspace_id
+    WHERE outbox.tenant_id = ? AND outbox.workspace_id = ?
+      AND outbox.work_id = ?
+      AND run.status = 'succeeded'
+      AND run.source IN ('video-autoworker', 'openclaw')
+      AND binding.task_type = 'video-analysis'
+      AND json_valid(run.input) = 1
+      AND json_extract(run.input, '$.directorEvidence.workId') = outbox.work_id
+    ORDER BY outbox.updated_at DESC, outbox.task_id DESC
+  `).all(scope.tenantId, scope.workspaceId, workId) as Array<{
+    status: 'pending' | 'delivered' | 'conflict'
+  }>
+  if (!evidenceSources.length) return null
+
+  const base = {
+    phase: 'perception',
+    progress: 0,
+    completedPhases: [],
+    candidateCount: null,
+    candidateCountKnown: false,
+    sourceCount: evidenceSources.length,
+  }
+  if (evidenceSources.some(source => source.status === 'conflict')) {
+    return {
+      ...base,
+      status: 'conflict',
+      attentionReason: 'evidence_sync',
+      message: '视频分析已完成，素材证据写入确认异常，需核对后继续',
+    }
+  }
+  if (evidenceSources.some(source => source.status === 'pending')) {
+    return {
+      ...base,
+      status: 'awaiting_evidence_projection',
+      attentionReason: 'evidence_sync_pending',
+      message: '视频分析已完成，素材证据正在写入确认',
+    }
+  }
+  return {
+    ...base,
+    status: 'awaiting_evidence_review',
+    attentionReason: 'evidence_delivered_pending_extraction',
+    message: '视频分析已完成，素材证据写入已确认，导演知识待提炼',
+  }
 }
 
 function isWaitingForReview(job: DirectorExtractionJob): boolean {

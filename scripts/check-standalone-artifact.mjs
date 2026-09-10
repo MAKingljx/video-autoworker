@@ -24,6 +24,7 @@ import {
   STANDALONE_PROVENANCE_SCHEMA,
   writeDirectorExtractionProvenance,
 } from './lib/director-extraction-release-provenance.mjs'
+import { directorProjectionCompatibilitySha256 } from './lib/director-projection-contract-compatibility.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { scanStandaloneSensitiveContent } from './check-sensitive-content.mjs'
 
@@ -178,6 +179,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/lib/render-managed-markdown-section.mjs',
   'scripts/lib/runtime-tree-manifest.mjs',
   'scripts/lib/director-extraction-release-provenance.mjs',
+  'scripts/lib/director-projection-contract-compatibility.mjs',
   'scripts/lib/sensitive-value-scanner.mjs',
   'scripts/lib/shared-deployment-lock.mjs',
   'scripts/lib/shared-deployment-lock.sh',
@@ -1129,17 +1131,26 @@ async function assertStandaloneProvenanceArtifactBinding(rootPath, artifactConte
   }
   if (!provenance || provenance.schema !== STANDALONE_PROVENANCE_SCHEMA
     || !isStandaloneArtifactContentBinding(provenance.artifactContent)
-    || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)) {
+    || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)
+    || (provenance.projectionContractCompatibility
+      ? provenance.projectionContractCompatibilitySha256
+        !== directorProjectionCompatibilitySha256(provenance.projectionContractCompatibility)
+      : provenance.projectionContractCompatibilitySha256 !== undefined)) {
     throw new Error('standalone_release_provenance_artifact_mismatch')
   }
   return provenance
 }
 
-async function collectStandaloneManifestMembers(rootPath, artifactContent) {
+async function collectStandaloneManifestMembers(rootPath, artifactContent, provenance) {
   return {
     schemaVersion: RELEASE_MANIFEST_SCHEMA_VERSION,
     algorithm: 'sha256',
     artifactContent,
+    ...(provenance?.projectionContractCompatibility ? {
+      projectionContractCompatibility: provenance.projectionContractCompatibility,
+      projectionContractCompatibilitySha256:
+        provenance.projectionContractCompatibilitySha256,
+    } : {}),
     ...await collectStandaloneTreeMembers(rootPath, new Set([RELEASE_MANIFEST_NAME])),
   }
 }
@@ -1154,8 +1165,8 @@ export async function writeStandaloneReleaseManifest(rootPath = resolve('.next/s
   }
   await assertSafeMutationPath(root, manifestPath, 'standalone_release_manifest')
   const artifactContent = await computeStandaloneArtifactContentBinding(root)
-  await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
-  const manifest = await collectStandaloneManifestMembers(root, artifactContent)
+  const provenance = await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
+  const manifest = await collectStandaloneManifestMembers(root, artifactContent, provenance)
   const manifestSource = `${JSON.stringify(manifest, null, 2)}\n`
   if (Buffer.byteLength(manifestSource) > MAX_APPLICATION_RELEASE_MANIFEST_BYTES) {
     throw new Error('standalone_release_manifest_too_large')
@@ -1187,8 +1198,8 @@ export async function verifyStandaloneReleaseManifest(rootPath = resolve('.next/
     throw new Error('standalone_release_manifest_invalid')
   }
   const artifactContent = await computeStandaloneArtifactContentBinding(root)
-  await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
-  const actual = await collectStandaloneManifestMembers(root, artifactContent)
+  const provenance = await assertStandaloneProvenanceArtifactBinding(root, artifactContent)
+  const actual = await collectStandaloneManifestMembers(root, artifactContent, provenance)
   if (JSON.stringify(declared) !== JSON.stringify(actual)) {
     throw new Error('standalone_release_manifest_mismatch')
   }

@@ -128,7 +128,14 @@ function parseClock(value: unknown): number | null {
 }
 
 function normalizedProjectionField(key: string, value: unknown): unknown {
-  if (key !== '观察日期') return value
+  if (key !== '观察日期') {
+    // The Feishu service normalizes text before writing it. Delivery and
+    // read-only recovery must compare that same representation, while still
+    // rejecting type changes or different evidence content.
+    return typeof value === 'string'
+      ? value.normalize('NFKC').replace(/\r\n?/gu, '\n').trim()
+      : value
+  }
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string') {
     const parsed = Date.parse(value)

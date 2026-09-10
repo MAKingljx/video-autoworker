@@ -145,21 +145,27 @@ v3 已就绪的证据。
 
 首次 blue/green bootstrap 会在提交 baseline、释放维护保护之前自动执行该检查。常规 forward
 `switch` 会在 router 原子切换前执行，并把 HEAD 绑定的静态 verifier 摘要与 target runtime
-readiness 摘要直接对账；失败时 intake 继续暂停，router 不切换。普通 `switch` 和显式
-`rollback` 都只允许同一投影契约，任务归零也不能跨契约。legacy 首迁仍只能走带冻结证据和
-回滚证明的专用 bootstrap，不能把普通切换当作契约迁移通道。
+readiness 摘要直接对账；失败时 intake 继续暂停，router 不切换。显式 `rollback` 只允许同一投影
+契约。普通 `switch` 默认同样如此；同一 schema 的缺陷修复只有在目标 release 带有精确前向兼容
+声明时才可跨摘要。声明固定旧契约完整闭包、旧摘要、新摘要、允许变化的闭包成员、same-wire、
+稳定 ID、source/outbox/receipt 身份不变保证及回归文件 SHA。clean commit 构建时声明同时写入
+`release-provenance.json` 和 `release-manifest.json`；发布门从同一 Git commit 重读并重算，再与
+source/target runtime readiness 的实时摘要对账。缺失、漂移、额外闭包变化或反向使用均失败关闭。
+legacy 首迁仍只能走带冻结证据和回滚证明的专用 bootstrap。
 
 首次 bootstrap 前的回滚证明必须同时包含 `quick_check=ok` 的 Mission Control 与 n8n SQLite online
 backup，并绑定源库 device/inode、队列摘要、freeze guard 和目标 release。新 release 启动后 058/059
 只执行 `CREATE ... IF NOT EXISTS`，不改写既有业务行。bootstrap 成功提交 baseline 后，旧
 `57f6e6c-runtime` 被永久 fence，不再允许作为普通 blue/green slot 或普通 rollback 目标；后续常规
-回滚只能在相同 `projection_contract_digest` 的新架构 release 之间进行。跨契约或需恢复旧 legacy
+回滚只能在相同 `projection_contract_digest` 的新架构 release 之间进行。前向兼容声明只允许原
+`switch` 在本次调用内使用；路由提交后的既有复验失败可按已捕获 source 证据自动补偿，成功返回后
+不授权显式反向切换。除此之外的跨契约或需恢复旧 legacy
 数据库时必须保持入口冻结，走显式 restore/disaster-recovery 手册和完整双库回滚点，不能让部署器
 猜测性降级。
 
 每个 slot 的 `release-readiness` 同时公开该 release 编译时的投影契约摘要和权威 outbox 计数。
-source/target 摘要相同，已有任务可继续按 release affinity 排空并热切换；摘要不同则普通转换
-直接失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
+source/target 摘要相同，已有任务可继续按 release affinity 排空并热切换；摘要不同时必须通过上述
+目标 release 前向声明，否则转换失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
 attestation 哈希、readiness revision/schema epoch/契约摘要与原路由元组，并以进程内只读、带
 SHA-256 封套的证据复验。这样 source=A、仓库 HEAD=B 时，自动回滚不会拿只接受 HEAD 的 target
 verifier 错验历史 source；显式 rollback 也使用同一证据路径。目标验证失败仍返回非零，任一

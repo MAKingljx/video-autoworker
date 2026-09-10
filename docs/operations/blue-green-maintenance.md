@@ -8,7 +8,9 @@ macOS 远端维护应从已验证的固定 Node 运行环境启动该入口，�
 
 应用更新按已存在的 stage、bind、switch、rollback、retire 合同执行。绑定或切换前先读取实际路由、槽位和安装状态；已暂存但从未激活的候选不能当作生产退役槽位覆盖，须在精确证明其进程退出后保留原绑定证据，再重新准备候选。应用成功切换后，核验实际 HTTP、浏览器、数据库身份和业务数据，再按当前 revision 恢复入口。
 
-安装器或路由器升级属于独立维护步骤。保留旧安装文件和原历史源码，以 CAS 方式更新；所有被停止的服务须核实精确 label、PID 和监听缺席，再处理旧运行证明。维护 HTTP 复查使用短连接，避免跨进程重启复用连接；读取允许在明确期限内重试，写入不盲重试，响应不确定时先 GET 对账实际 revision。
+普通 `switch` 默认要求 source/target 的导演证据投影摘要一致。同一 schema 的缺陷修复若改变受保护闭包摘要，目标 release 必须携带 `src/lib/director-projection-contract-compatibility.json`，精确固定旧闭包与摘要、新摘要、允许变化的闭包成员、same-wire/稳定 ID/身份不变保证和回归文件 SHA，并由 clean Git、provenance、manifest 与实时 readiness 共同复验。声明只允许前向 `switch`；显式 `rollback` 继续拒绝跨摘要，只有该次 switch 返回前的既有自动补偿可以恢复原路由。
+
+安装器或路由器升级属于独立维护步骤。目标 release 新增 auditor 依赖时，旧 slot launcher 会继续调用其安装绑定的旧 auditor，因此须先用官方 execve-adapter installer 以 CAS 更新 slot runtime 闭包；不能绕过 auditor，也不重做 legacy bootstrap。保留旧安装文件和原历史源码；所有被停止的服务须核实精确 label、PID 和监听缺席，再处理旧运行证明。维护 HTTP 复查使用短连接，避免跨进程重启复用连接；读取允许在明确期限内重试，写入不盲重试，响应不确定时先 GET 对账实际 revision。
 
 本入口不重放历史 bootstrap、恢复收据或其他一次性授权，不开启视频 lane、自动清理或新的外部投递。
 

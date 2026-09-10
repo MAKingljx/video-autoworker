@@ -22,15 +22,18 @@ describe('director review guidance and private diagnostics', () => {
     expect(normalizeDirectorBrainToolRequest({ action: 'approve' })).toBeNull()
   })
 
-  it('handles explicit director review commands while leaving unrelated and quoted requests alone', async () => {
+  it('leaves explicit review requests to review_preview while keeping unrelated and quoted requests out', async () => {
     const service = vi.fn()
     const handler = createDirectorBrainSystemQuestionHandler({ targetAgentId: 'second-original', service })
-    expect(await handler({ cleanedBody: '请批准导演脑的作品候选' }, { agentId: 'second-original' }))
-      .toMatchObject({ handled: true, reply: { text: DIRECTOR_BRAIN_REVIEW_GUIDANCE } })
+    expect(isDirectorBrainReviewRequest('请批准导演脑的作品候选')).toBe(true)
+    expect(await handler(
+      { cleanedBody: '请批准导演脑的作品候选' },
+      { agentId: 'second-original', trigger: 'user' },
+    )).toBeUndefined()
     for (const text of ['批准', '批准这个视频任务', '不要批准导演脑候选', '如果我说批准导演脑候选', '“批准导演脑候选”是什么意思', '批准导演脑候选然后启动视频任务']) {
       expect(isDirectorBrainReviewRequest(text), text).toBe(false)
     }
-    expect(await handler({ cleanedBody: '批准导演脑候选' }, { agentId: 'another-agent' })).toBeUndefined()
+    expect(await handler({ cleanedBody: '批准导演脑候选' }, { agentId: 'another-agent', trigger: 'user' })).toBeUndefined()
     expect(service).not.toHaveBeenCalled()
   })
 

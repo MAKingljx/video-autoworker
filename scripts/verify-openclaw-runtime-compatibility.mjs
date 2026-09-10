@@ -65,7 +65,7 @@ export async function verifyOpenClawRuntimeCompatibility(values) {
   const plugins = {}
   for (const [key, id, expectedVersion, root] of [
     ['video', 'aiworker-video-command', '0.5.15', values['--video-plugin-root']],
-    ['director', 'aiworker-director-brain', '0.4.1', values['--director-plugin-root']],
+    ['director', 'aiworker-director-brain', '0.4.2', values['--director-plugin-root']],
   ]) {
     const packageManifest = json(join(root, 'package.json'), `${key} package`)
     const pluginManifest = json(join(root, 'openclaw.plugin.json'), `${key} manifest`)

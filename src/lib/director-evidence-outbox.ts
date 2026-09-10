@@ -5,6 +5,8 @@ import { access, readFile, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type Database from 'better-sqlite3'
+import projectionCompatibility from '@/lib/director-projection-contract-compatibility.json'
+import { getDirectorProjectionReadCompatibleDigests } from '../../scripts/lib/director-projection-contract-compatibility.mjs'
 import type { N8nTaskRun } from '@/lib/n8n-task-runs'
 import {
   DIRECTOR_COMMAND_LIMITS,
@@ -15,6 +17,7 @@ import {
   getDirectorEvidenceOutboxCore,
   getDirectorEvidenceOutboxCountsCore,
   normalizedDirectorWorkQuery,
+  recoverConflictedDirectorEvidenceProjectionCore,
   serializeDirectorCommandInput,
 } from '@/lib/director-evidence-delivery-core'
 import type {
@@ -48,13 +51,13 @@ export const DIRECTOR_EVIDENCE_PROJECTION_SCHEMA_VERSION = 1
 
 const SHA256 = /^[a-f0-9]{64}$/u
 const DIRECTOR_BRAIN_CLI_SHA256 = '8fbdfdfb8b7ff45601a8b29004d85fec7346de67caa78b3ee11da3db317e7f6e'
-const DIRECTOR_BRAIN_SERVICE_SHA256 = 'c10d17caa790206f33562e03f5bea5330ad65bad8e637b562fa905e910c8519b'
+const DIRECTOR_BRAIN_SERVICE_SHA256 = 'f5ad3718dafd3905c9d581a52877cf6264b0f55524be6c6784e92d74d112859e'
 const DIRECTOR_BRAIN_SENSITIVE_VALUE_SCANNER_SHA256 = '65d3a771f631b4cbf34c31e31b821d63a357008af3a09d2ea4e21a44b9852b5c'
 const DIRECTOR_BRAIN_SCHEMA_SHA256 = '72ef48a91f943fbd15786ecba648fccb2f9c91722c607df96c05578d953e074f'
 const DIRECTOR_EVIDENCE_TRANSFORMER_SHA256 = 'b3dd0dcd11fb7c1b9bbfd21c840fe4e2c48e091a5f8cfcdddb50d1616bd9e6d1'
 const DIRECTOR_EVIDENCE_LIBRARY_SHA256 = 'dc472b4386d4d21a61520cbb0f5abc2829a819063975aafc54312483347fe8cc'
-const DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256 = '1e5153a633225b6454ab722b689de9ee7a5dcfccff697c19d2ea2d0a708e2cda'
-const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = 'ceefa7f9b1f37c359637ec13947aade3d093fa53f7c2de591901446207f10040'
+const DIRECTOR_EVIDENCE_APP_PROJECTION_SEMANTICS_SHA256 = '260b7fe725e4a92a6815cddb52117c458d78e927fbf5595f05f8a7d32784ad8c'
+const DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256 = '83cbbddca0037c9b848e12abfb160e1af6ce416f9a95099131cc2e968894f740'
 const DIRECTOR_COMMAND_ENV_KEYS = [
   'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ', 'NODE_ENV',
   'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
@@ -104,12 +107,10 @@ function configuredDigest(
   return expected
 }
 
-export function directorEvidenceProjectionContractDigest(
+export function directorEvidenceProjectionContract(
   source: Readonly<Record<string, string | undefined>> = process.env,
-): string {
-  return directorEvidenceDigest({
-    authority: DIRECTOR_EVIDENCE_PROJECTION_CONTRACT_AUTHORITY,
-    schemaVersion: DIRECTOR_EVIDENCE_PROJECTION_SCHEMA_VERSION,
+): { digest: string; closure: Record<string, string> } {
+  const closure = {
     directorBrainCliSha256: configuredDigest(
       'AIWORKER_DIRECTOR_BRAIN_CLI_SHA256', DIRECTOR_BRAIN_CLI_SHA256, source,
     ),
@@ -142,6 +143,37 @@ export function directorEvidenceProjectionContractDigest(
       DIRECTOR_EVIDENCE_DELIVERY_CORE_SHA256,
       source,
     ),
+  }
+  return { closure, digest: directorEvidenceDigest({
+    authority: DIRECTOR_EVIDENCE_PROJECTION_CONTRACT_AUTHORITY,
+    schemaVersion: DIRECTOR_EVIDENCE_PROJECTION_SCHEMA_VERSION,
+    ...closure,
+  }) }
+}
+
+export function directorEvidenceProjectionContractDigest(
+  source: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  return directorEvidenceProjectionContract(source).digest
+}
+
+export function directorEvidenceReadCompatibleContractDigests(): readonly string[] {
+  return getDirectorProjectionReadCompatibleDigests(
+    projectionCompatibility, directorEvidenceProjectionContract(),
+  )
+}
+
+export async function recoverConflictedDirectorEvidenceProjection(
+  db: Database.Database, parent: N8nTaskRun,
+) {
+  const item = getDirectorEvidenceOutboxCore(db, parent.taskId)
+  if (!item || item.status !== 'conflict'
+    || item.lastErrorCode !== 'director_evidence_projection_receipt_invalid') return null
+  return recoverConflictedDirectorEvidenceProjectionCore(db, parent, {
+    currentProjectionContractDigest: directorEvidenceProjectionContractDigest(),
+    compatibleProjectionContractDigests: directorEvidenceReadCompatibleContractDigests(),
+    runner: runDirectorCommand,
+    nowSeconds: Math.floor(Date.now() / 1_000),
   })
 }
 

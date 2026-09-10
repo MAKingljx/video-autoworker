@@ -866,7 +866,7 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
   const directorPlugin = manifest.requiredPlugins.find(entry => (
     entry.id === 'aiworker-director-brain'
   ))
-  assert.equal(directorPlugin.version, '0.4.1')
+  assert.equal(directorPlugin.version, '0.4.2')
   const videoPlugin = manifest.requiredPlugins.find(entry => (
     entry.id === 'aiworker-video-command'
   ))

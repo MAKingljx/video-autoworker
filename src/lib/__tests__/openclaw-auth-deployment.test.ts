@@ -151,6 +151,7 @@ describe('OpenClaw-only production launch contract', () => {
       'scripts/build-standalone.mjs',
       'scripts/check-standalone-artifact.mjs',
       'scripts/lib/director-extraction-release-provenance.mjs',
+      'scripts/lib/director-projection-contract-compatibility.mjs',
       'ops/feishu-director-brain/schema.json',
       'ops/openclaw/qwen-current-runtime-convergence.manifest.json',
       'openclaw-skills/aiworker-director-brain/SKILL.md',

@@ -45,6 +45,13 @@ export const DIRECTOR_EXTRACTION_WAITING_SCAN_MULTIPLIER = 20
 export const DIRECTOR_EXTRACTION_WAITING_MAX_SCAN = 2_000
 export const DIRECTOR_EXTRACTION_CLAIM_SCAN_LIMIT = 200
 
+type DirectorExtractionClaimOptions = {
+  nowSeconds?: number
+  ownerInstanceId?: string
+  leaseToken?: string
+  requirePerceptionEvidenceReady?: boolean
+}
+
 type CheckpointRow = {
   phase_task_id: string
   phase: DirectorExtractionPhase
@@ -553,6 +560,61 @@ export function registerDirectorExtractionJob(
   }).immediate()
 }
 
+/**
+ * Turn an already verified evidence receipt into the normal perception review
+ * wait without exposing an intermediate queued child to another scheduler.
+ * This path performs no model call and creates no review decision.
+ */
+export function prepareDirectorExtractionPerceptionReview(
+  db: Database.Database,
+  sourceTaskId: string,
+  scope: N8nTaskScope,
+  receiptValue: DirectorExtractionProjectionReceipt,
+  options: {
+    binding?: DirectorEvidenceBinding
+    objective?: string
+    maxAttempts?: number
+    nowSeconds?: number
+  } = {},
+): DirectorExtractionJob {
+  assertDirectorBrainScope(scope)
+  const receipt = directorExtractionProjectionReceiptSchema.parse(receiptValue)
+  if (receipt.phase !== 'perception') {
+    throw new Error('director_extraction_projection_phase_mismatch')
+  }
+  const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1_000)
+  return db.transaction(() => {
+    const registered = registerDirectorExtractionJob(db, sourceTaskId, scope, options).job
+    const checkpoint = getDirectorExtractionCheckpoint(db, sourceTaskId, 'perception')
+    if (registered.status === 'awaiting_evidence_review') {
+      if (!checkpoint?.projectionReceipt
+        || directorExtractionDigest(checkpoint.projectionReceipt)
+          !== directorExtractionDigest(receipt)) {
+        throw new Error('director_extraction_projection_conflict')
+      }
+      return registered
+    }
+    if (registered.status !== 'pending' || registered.currentPhase !== 'perception') {
+      throw new Error('director_extraction_perception_prepare_conflict')
+    }
+    const claimed = claimDirectorExtractionJobBySource(db, sourceTaskId, scope, {
+      nowSeconds,
+      requirePerceptionEvidenceReady: true,
+    })
+    if (!claimed || claimed.sourceTaskId !== sourceTaskId
+      || claimed.currentPhase !== 'perception') {
+      throw new Error('director_extraction_perception_claim_failed')
+    }
+    const prepared = completeDirectorExtractionProjection(
+      db, claimed, receipt, { nowSeconds },
+    )
+    if (prepared.status !== 'awaiting_evidence_review') {
+      throw new Error('director_extraction_perception_prepare_failed')
+    }
+    return prepared
+  }).immediate()
+}
+
 export function getDirectorExtractionCheckpoint(
   db: Database.Database,
   sourceTaskId: string,
@@ -734,22 +796,14 @@ function childClaimInput(source: N8nTaskRun, run: N8nTaskRun, ownerInstanceId: s
   }
 }
 
-export function claimNextDirectorExtractionJob(
+function claimDirectorExtractionCandidate(
   db: Database.Database,
-  options: {
-    nowSeconds?: number
-    ownerInstanceId?: string
-    leaseToken?: string
-    requirePerceptionEvidenceReady?: boolean
-  } = {},
+  candidate: DirectorExtractionJob,
+  scope: N8nTaskScope,
+  options: DirectorExtractionClaimOptions,
+  firstRunnableSourceByWork: Map<string, string | null>,
 ): DirectorExtractionJob | null {
-  const scope = getDirectorBrainScope()
   const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1_000)
-  const candidates = listDirectorExtractionJobsByStatuses(
-    db, ['pending', 'failed', 'running'], DIRECTOR_EXTRACTION_CLAIM_SCAN_LIMIT,
-    { nowSeconds, scanMultiplier: 1 },
-  )
-  const firstRunnableSourceByWork = new Map<string, string | null>()
   const claimCandidate = db.transaction((candidate: DirectorExtractionJob) => {
     if (candidate.currentPhase === 'complete' || !candidate.phaseTaskId) return null
     // This work-level exclusion and the child claim must share one IMMEDIATE
@@ -794,10 +848,42 @@ export function claimNextDirectorExtractionJob(
       ? getDirectorExtractionJob(db, candidate.sourceTaskId, scope)
       : null
   })
+  return claimCandidate.immediate(candidate)
+}
+
+export function claimDirectorExtractionJobBySource(
+  db: Database.Database,
+  sourceTaskId: string,
+  scope: N8nTaskScope = getDirectorBrainScope(),
+  options: DirectorExtractionClaimOptions = {},
+): DirectorExtractionJob | null {
+  assertDirectorBrainScope(scope)
+  const candidate = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (!candidate || !['pending', 'failed', 'running'].includes(candidate.status)
+    || (candidate.status === 'failed' && candidate.attemptCount >= candidate.maxAttempts)
+    || candidate.currentPhase === 'complete' || !candidate.phaseTaskId) return null
+  return claimDirectorExtractionCandidate(
+    db, candidate, scope, options, new Map<string, string | null>(),
+  )
+}
+
+export function claimNextDirectorExtractionJob(
+  db: Database.Database,
+  options: DirectorExtractionClaimOptions = {},
+): DirectorExtractionJob | null {
+  const scope = getDirectorBrainScope()
+  const nowSeconds = options.nowSeconds ?? Math.floor(Date.now() / 1_000)
+  const candidates = listDirectorExtractionJobsByStatuses(
+    db, ['pending', 'failed', 'running'], DIRECTOR_EXTRACTION_CLAIM_SCAN_LIMIT,
+    { nowSeconds, scanMultiplier: 1 },
+  )
+  const firstRunnableSourceByWork = new Map<string, string | null>()
   for (const candidate of candidates) {
     if (candidate.status === 'failed' && candidate.attemptCount >= candidate.maxAttempts) continue
     if (candidate.currentPhase === 'complete' || !candidate.phaseTaskId) continue
-    const claimed = claimCandidate.immediate(candidate)
+    const claimed = claimDirectorExtractionCandidate(
+      db, candidate, scope, options, firstRunnableSourceByWork,
+    )
     if (claimed) return claimed
   }
   return null
@@ -1178,12 +1264,17 @@ export function projectDirectorExtractionStatus(
   job: DirectorExtractionJob,
 ): Record<string, unknown> {
   const checkpoints = listDirectorExtractionCheckpoints(db, job.sourceTaskId)
+  const candidateCount = checkpoints.reduce((sum, item) => (
+    sum + (item.phase === 'perception'
+      ? (item.projectionReceipt?.entries.length || 0)
+      : item.candidateOutput.candidates.length)
+  ), 0)
   return {
     status: job.status,
     phase: job.currentPhase,
     progress: directorExtractionProgress(job.currentPhase),
     completedPhases: checkpoints.filter(item => item.projectionState === 'delivered').map(item => item.phase),
-    candidateCount: checkpoints.reduce((sum, item) => sum + item.candidateOutput.candidates.length, 0),
+    candidateCount,
     message: job.status === 'awaiting_evidence_projection' ? '素材证据正在写入导演脑，完成后会自动继续'
       : job.status === 'awaiting_intent_review' ? '需要先确认唯一生效的导演意图，确认后会自动继续'
         : job.status === 'completed' ? '导演知识链已完成复核'

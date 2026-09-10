@@ -11,6 +11,11 @@ import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
 import { describe, expect, it, vi } from 'vitest'
+import {
+  directorEvidenceDeliveryReceipt,
+  directorEvidenceProjectionBatches,
+  directorEvidenceVerifiedReadReceipt,
+} from '@/lib/director-evidence-projection-semantics'
 
 const execFileAsync = promisify(execFile)
 
@@ -173,6 +178,7 @@ async function prepareRequiredStandaloneFixture(
     'openapi.json': '{}\n',
     'openclaw-plugins/aiworker-director-brain/index.js': 'export default {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-brain-tool.js': 'export {}\n',
+    'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-context-summary.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/director-system-question-router.js': 'export {}\n',
     'openclaw-plugins/aiworker-director-brain/lib/sensitive-narrative-text.js': 'export {}\n',
@@ -249,6 +255,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
     'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
     'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
+    'scripts/lib/director-projection-contract-compatibility.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.sh': '#!/bin/sh\n',
@@ -3498,9 +3505,10 @@ describe('Feishu director brain OpenClaw operation service', () => {
       matches: [{ table: 'story_nodes', stableId: 'story-1', reviewed: false }],
     })
     const reviewedOnly = await directorBrain.executeDirectorBrainOperation({
-      action: 'search', table: 'all', workId: 'WORK-ICE-001', query: '暴风雪', limit: 20,
+      action: 'search', table: 'all', workId: 'WORK-ICE-001', query: '暴风雪', limit: 50,
     }, harness.options)
     expect(reviewedOnly).toMatchObject({
+      limit: 50,
       count: 1,
       matches: [{ table: 'story_nodes', stableId: 'story-2', state: '已确认', reviewed: true }],
     })
@@ -3511,7 +3519,7 @@ describe('Feishu director brain OpenClaw operation service', () => {
       record: { state: '已确认', reviewed: true },
     })
     await expect(directorBrain.executeDirectorBrainOperation({
-      action: 'search', table: 'all', workId: 'WORK-ICE-001', query: '暴风雪', limit: 21,
+      action: 'search', table: 'all', workId: 'WORK-ICE-001', query: '暴风雪', limit: 51,
     }, harness.options)).rejects.toThrow('search_limit_invalid')
   })
 
@@ -5176,6 +5184,29 @@ describe('Feishu director brain administrator review lifecycle', () => {
 })
 
 describe('Feishu director brain trusted evidence projection', () => {
+  it('verifies delivery and read recovery against the real service text normalization', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const harness = operationHarness(schema)
+    const request = evidenceProjectionRequest([projectedEvidence({
+      '证据摘要': '  人物：张三，进入矿区。\r\n镜头Ａ与声音相互补充。  ',
+      '画面信息': 'Ａ镜头：人物停下，观察环境。',
+    })])
+    const batches = directorEvidenceProjectionBatches(request, String(request.workId))
+    const result = await directorBrain.projectDirectorBrainEvidence(request, harness.options)
+    const entries = result.results as Array<{ record: Record<string, unknown> }>
+    const records = entries.map(entry => entry.record)
+    expect((records[0].fields as Record<string, unknown>)['证据摘要'])
+      .toBe('人物:张三,进入矿区。\n镜头A与声音相互补充。')
+    const receipt = directorEvidenceDeliveryReceipt(batches, [result], 'a'.repeat(64))
+    expect(directorEvidenceVerifiedReadReceipt(batches, records, 'a'.repeat(64)))
+      .toEqual(receipt)
+    const drifted = structuredClone(records)
+    ;(drifted[0].fields as Record<string, unknown>)['证据摘要'] = '实际内容被替换。'
+    expect(() => directorEvidenceVerifiedReadReceipt(batches, drifted, 'a'.repeat(64)))
+      .toThrow('director_evidence_projection_recovery_conflict')
+  })
+
   it('creates a candidate with a server-owned stable ID and is idempotent on replay', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()

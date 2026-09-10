@@ -13,6 +13,7 @@ import {
 } from '@/lib/director-extraction-learning'
 import {
   directorEvidenceProjectionContractDigest,
+  directorEvidenceReadCompatibleContractDigests,
   enqueueDirectorEvidenceOutbox,
   getDirectorEvidenceOutbox,
   runDirectorCommand,
@@ -23,6 +24,7 @@ import {
   getDirectorEvidenceProjectionReceiptCore,
   persistRecoveredDirectorEvidenceProjectionReceiptCore,
   type DirectorCommandRunner,
+  type DirectorEvidenceBinding,
   type DirectorEvidenceOutbox,
 } from '@/lib/director-evidence-delivery-core'
 import {
@@ -43,6 +45,7 @@ import {
   listDirectorExtractionJobsByStatuses,
   listDirectorExtractionCheckpoints,
   pauseDirectorExtractionForEvidence,
+  prepareDirectorExtractionPerceptionReview,
   renewDirectorExtractionLease,
   resumeDirectorExtractionAfterReview,
   resumeDirectorExtractionAfterIntent,
@@ -86,6 +89,7 @@ import { executeN8nModelRoute } from '@/lib/n8n-model-execution'
 import { loadN8nModelRegistry, publicN8nModelRoute } from '@/lib/n8n-model-routing'
 import {
   getScopedN8nTaskRunByTaskId,
+  type N8nTaskScope,
 } from '@/lib/n8n-task-runs'
 
 export type DirectorExtractionPhaseRunner = (
@@ -955,6 +959,30 @@ function extractionReceiptFromEvidenceReceipt(
   })
 }
 
+export function prepareDirectorExtractionFromStoredEvidence(
+  db: Database.Database,
+  sourceTaskId: string,
+  scope: N8nTaskScope,
+  options: {
+    binding?: DirectorEvidenceBinding
+    objective?: string
+    maxAttempts?: number
+    nowSeconds?: number
+  } = {},
+): DirectorExtractionJob | null {
+  const outbox = getDirectorEvidenceOutbox(db, sourceTaskId)
+  if (!outbox || outbox.status !== 'delivered') return null
+  const stored = getDirectorEvidenceProjectionReceiptCore(db, outbox)
+  if (!stored) throw new Error('director_extraction_evidence_projection_receipt_missing')
+  return prepareDirectorExtractionPerceptionReview(
+    db,
+    sourceTaskId,
+    scope,
+    extractionReceiptFromEvidenceReceipt(stored.receipt),
+    options,
+  )
+}
+
 async function recoverLegacyEvidenceReceipt(
   db: Database.Database,
   job: DirectorExtractionJob,
@@ -1044,7 +1072,8 @@ function assertEvidenceOutboxAuthority(
     || outbox.resultSha256 !== job.sourceResultSha256
     || (outbox.projectionContractDigest !== directorEvidenceProjectionContractDigest()
       && !LEGACY_EVIDENCE_RECEIPT_RECOVERY_CONTRACT_DIGESTS
-        .has(outbox.projectionContractDigest))) {
+        .has(outbox.projectionContractDigest)
+      && !directorEvidenceReadCompatibleContractDigests().includes(outbox.projectionContractDigest))) {
     throw new Error('director_extraction_evidence_authority_conflict')
   }
 }

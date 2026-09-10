@@ -14,6 +14,7 @@ import {
   getDirectorExtractionJob,
   listDirectorExtractionJobsByStatuses,
   listDirectorExtractionJobsForWork,
+  projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
   retryExhaustedDirectorExtractionJob,
   renewDirectorExtractionLease,
@@ -25,14 +26,24 @@ import {
   directorEvidenceBindingForResolvedWork,
   directorEvidenceDigest,
 } from '@/lib/director-evidence-delivery-core'
-import { directorEvidenceProjectionContractDigest } from '@/lib/director-evidence-outbox'
+import {
+  directorEvidenceProjectionContractDigest,
+  enqueueDirectorEvidenceOutbox,
+  getDirectorEvidenceOutbox,
+} from '@/lib/director-evidence-outbox'
 import {
   backfillDirectorExtractionForWork,
   getDirectorExtractionStatusForWork,
   resolveDirectorExtractionSourceTaskId,
   startDirectorExtractionForWork,
 } from '@/lib/director-extraction-application'
+import { prepareDirectorExtractionFromStoredEvidence } from '@/lib/director-extraction-service'
 import { createDeterministicDirectorExtractionFixtureRunner } from '@/lib/__tests__/fixtures/director-extraction'
+import {
+  directorEvidenceFixtureItem,
+  persistDirectorEvidenceFixtureReceipt,
+} from '@/lib/__tests__/fixtures/director-evidence'
+import { getScopedN8nTaskRunByTaskId } from '@/lib/n8n-task-runs'
 import type { DirectorExtractionProjectionReceipt } from '@/lib/director-extraction-state'
 
 const scope = { tenantId: 73, workspaceId: 37 }
@@ -73,6 +84,27 @@ function seedSource(
     JSON.stringify(videoOutput(`MAT-${taskId}`)), scope.workspaceId, scope.tenantId,
   )
   return taskId
+}
+
+function seedDeliveredEvidence(db: Database.Database, sourceTaskId: string) {
+  const source = getScopedN8nTaskRunByTaskId(db, sourceTaskId, scope)!
+  expect(enqueueDirectorEvidenceOutbox(db, source, 100)).toBe('created')
+  db.prepare(`
+    UPDATE n8n_director_evidence_outbox
+    SET status = 'delivered', delivered_at = 101, updated_at = 101
+    WHERE task_id = ?
+  `).run(sourceTaskId)
+  const outbox = getDirectorEvidenceOutbox(db, sourceTaskId)!
+  persistDirectorEvidenceFixtureReceipt(
+    db,
+    outbox,
+    [directorEvidenceFixtureItem(1, {
+      '任务 ID': sourceTaskId,
+      '素材 ID': `MAT-${sourceTaskId}`,
+    })],
+    101,
+  )
+  return outbox
 }
 
 function receipt(
@@ -264,6 +296,71 @@ describe('director extraction source-child task chain', () => {
     })
   })
 
+  it('reports evidence delivery attention after a successful video when extraction has no phase job', () => {
+    const sourceTaskId = seedSource(db, 'evidence-attention-source')
+    db.prepare(`
+      INSERT INTO n8n_director_evidence_outbox (
+        task_id, binding_id, tenant_id, workspace_id, work_id, query_digest,
+        projection_contract_digest, idempotency_key, result_sha256, status,
+        attempt_count, last_error_code, updated_at
+      ) VALUES (?, 73, ?, ?, ?, ?, ?, ?, ?, 'conflict', 2,
+        'director_evidence_projection_receipt_invalid', 100)
+    `).run(
+      sourceTaskId,
+      scope.tenantId,
+      scope.workspaceId,
+      binding.workId,
+      binding.queryDigest,
+      directorEvidenceProjectionContractDigest(),
+      directorEvidenceDigest({ taskId: sourceTaskId, projection: 'attention-test' }),
+      directorEvidenceDigest(videoOutput(`MAT-${sourceTaskId}`)),
+    )
+
+    expect(getDirectorExtractionStatusForWork(db, scope, binding.workId)).toEqual({
+      status: 'conflict',
+      phase: 'perception',
+      progress: 0,
+      completedPhases: [],
+      candidateCount: null,
+      candidateCountKnown: false,
+      sourceCount: 1,
+      attentionReason: 'evidence_sync',
+      message: '视频分析已完成，素材证据写入确认异常，需核对后继续',
+    })
+    expect(listDirectorExtractionJobsForWork(db, binding.workId, scope)).toHaveLength(0)
+  })
+
+  it('keeps delivered evidence conservative when extraction has no phase job', () => {
+    const sourceTaskId = seedSource(db, 'evidence-delivered-source')
+    db.prepare(`
+      INSERT INTO n8n_director_evidence_outbox (
+        task_id, binding_id, tenant_id, workspace_id, work_id, query_digest,
+        projection_contract_digest, idempotency_key, result_sha256, status,
+        delivered_at, updated_at
+      ) VALUES (?, 73, ?, ?, ?, ?, ?, ?, ?, 'delivered', 100, 100)
+    `).run(
+      sourceTaskId,
+      scope.tenantId,
+      scope.workspaceId,
+      binding.workId,
+      binding.queryDigest,
+      directorEvidenceProjectionContractDigest(),
+      directorEvidenceDigest({ taskId: sourceTaskId, projection: 'delivered-test' }),
+      directorEvidenceDigest(videoOutput(`MAT-${sourceTaskId}`)),
+    )
+
+    expect(getDirectorExtractionStatusForWork(db, scope, binding.workId)).toMatchObject({
+      status: 'awaiting_evidence_review',
+      phase: 'perception',
+      progress: 0,
+      candidateCount: null,
+      candidateCountKnown: false,
+      attentionReason: 'evidence_delivered_pending_extraction',
+      message: '视频分析已完成，素材证据写入已确认，导演知识待提炼',
+    })
+    expect(listDirectorExtractionJobsForWork(db, binding.workId, scope)).toHaveLength(0)
+  })
+
   it('resolves the same source query only inside the requested work', () => {
     const neighboringBinding = directorEvidenceBindingForResolvedWork(
       'WORK-SINGLE-CHAIN-NEIGHBOR',
@@ -352,6 +449,123 @@ describe('director extraction source-child task chain', () => {
       },
     })).rejects.toThrow('director_extraction_work_not_registered')
     expect(verifierCalls).toBe(0)
+  })
+
+  it('atomically prepares delivered perception evidence for human review without a model or review write', async () => {
+    const sourceTaskId = seedSource(db, 'start-delivered-perception')
+    seedDeliveredEvidence(db, sourceTaskId)
+
+    const started = await startDirectorExtractionForWork(
+      db,
+      scope,
+      { workId: binding.workId, objective: '提炼人物变化' },
+      { workVerifier: async workId => ({ workId }) },
+    )
+    expect(started).toMatchObject({
+      sourceTaskId,
+      status: 'awaiting_evidence_review',
+      currentPhase: 'perception',
+      attemptCount: 1,
+    })
+    expect(db.prepare(`
+      SELECT status FROM n8n_task_runs
+      WHERE source = 'n8n-node' AND json_extract(input, '$.parentTaskId') = ?
+    `).get(sourceTaskId)).toEqual({ status: 'succeeded' })
+    expect(getDirectorExtractionCheckpoint(db, sourceTaskId, 'perception'))
+      .toMatchObject({
+        candidateOutput: { phase: 'perception', candidates: [] },
+        projectionReceipt: { phase: 'perception', entries: [{ stableId: expect.any(String) }] },
+      })
+    expect(db.prepare('SELECT COUNT(*) FROM n8n_child_execution_leases').pluck().get()).toBe(0)
+    expect(db.prepare('SELECT COUNT(*) FROM director_extraction_review_receipts').pluck().get()).toBe(0)
+  })
+
+  it('rolls back registration if exact perception completion fails and replays idempotently', () => {
+    db.close()
+    const directory = mkdtempSync(join(tmpdir(), 'director-perception-prepare-'))
+    const pathname = join(directory, 'runs.sqlite')
+    const first = new Database(pathname)
+    const second = new Database(pathname)
+    try {
+      for (const connection of [first, second]) {
+        connection.pragma('foreign_keys = ON')
+        connection.pragma('journal_mode = WAL')
+        connection.pragma('busy_timeout = 5000')
+      }
+      runMigrations(first)
+      const sourceTaskId = seedSource(first, 'atomic-perception-prepare')
+      seedDeliveredEvidence(first, sourceTaskId)
+      first.exec(`
+        CREATE TRIGGER fail_perception_projection
+        BEFORE INSERT ON director_extraction_projection_receipts
+        BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END
+      `)
+
+      expect(() => prepareDirectorExtractionFromStoredEvidence(
+        first, sourceTaskId, scope, { binding, nowSeconds: 200 },
+      )).toThrow('injected projection failure')
+      expect(second.prepare(`
+        SELECT COUNT(*) FROM n8n_task_runs
+        WHERE source = 'n8n-node' AND json_extract(input, '$.parentTaskId') = ?
+      `).pluck().get(sourceTaskId)).toBe(0)
+      expect(second.prepare(`
+        SELECT COUNT(*) FROM director_extraction_checkpoints
+      `).pluck().get()).toBe(0)
+      expect(second.prepare('SELECT COUNT(*) FROM n8n_child_execution_leases').pluck().get()).toBe(0)
+
+      first.exec('DROP TRIGGER fail_perception_projection')
+      const prepared = prepareDirectorExtractionFromStoredEvidence(
+        first, sourceTaskId, scope, { binding, nowSeconds: 201 },
+      )!
+      expect(prepared.status).toBe('awaiting_evidence_review')
+      expect(second.prepare(`
+        SELECT status FROM n8n_task_runs
+        WHERE source = 'n8n-node' AND json_extract(input, '$.parentTaskId') = ?
+      `).get(sourceTaskId)).toEqual({ status: 'succeeded' })
+      expect(prepareDirectorExtractionFromStoredEvidence(
+        first, sourceTaskId, scope, { binding, nowSeconds: 202 },
+      )).toMatchObject({ status: 'awaiting_evidence_review', attemptCount: 1 })
+      expect(second.prepare(`
+        SELECT COUNT(*) FROM director_extraction_projection_receipts
+      `).pluck().get()).toBe(1)
+      expect(second.prepare(`
+        SELECT COUNT(*) FROM director_extraction_review_receipts
+      `).pluck().get()).toBe(0)
+    } finally {
+      first.close()
+      second.close()
+      rmSync(directory, { recursive: true, force: true })
+      db = new Database(':memory:')
+    }
+  })
+
+  it('preserves ordinary pending starts and existing review waits', async () => {
+    const pendingSource = seedSource(db, 'ordinary-pending-start')
+    const pending = await startDirectorExtractionForWork(
+      db, scope, { workId: binding.workId },
+      { workVerifier: async workId => ({ workId }) },
+    )
+    expect(pending).toMatchObject({ sourceTaskId: pendingSource, status: 'pending' })
+
+    db.prepare('DELETE FROM n8n_task_runs WHERE task_id = ?').run(pending.phaseTaskId)
+    db.prepare('DELETE FROM director_extraction_checkpoints WHERE phase_task_id = ?')
+      .run(pending.phaseTaskId)
+    db.prepare('DELETE FROM n8n_task_runs WHERE task_id = ?').run(pendingSource)
+
+    const reviewedSource = seedSource(db, 'existing-review-wait')
+    seedDeliveredEvidence(db, reviewedSource)
+    const reviewed = prepareDirectorExtractionFromStoredEvidence(
+      db, reviewedSource, scope, { binding, nowSeconds: 300 },
+    )!
+    expect(reviewed.status).toBe('awaiting_evidence_review')
+    await expect(startDirectorExtractionForWork(
+      db, scope, { workId: binding.workId },
+      { workVerifier: async workId => ({ workId }) },
+    )).resolves.toMatchObject({
+      sourceTaskId: reviewedSource,
+      status: 'awaiting_evidence_review',
+      attemptCount: 1,
+    })
   })
 
   it('uses the common child lease and fences an expired owner across connections', () => {
@@ -523,6 +737,26 @@ describe('director extraction source-child task chain', () => {
       SELECT COUNT(*) FROM director_extraction_review_receipts
       WHERE receipt_type IN ('candidate_review', 'intent_review')
     `).pluck().get()).toBe(3)
+  })
+
+  it('counts projected perception evidence once alongside later model candidates', async () => {
+    const sourceTaskId = seedSource(db, 'candidate-count-source')
+    registerDirectorExtractionJob(db, sourceTaskId, scope)
+
+    const perception = await completeCurrent(db, 100)
+    expect(projectDirectorExtractionStatus(db, perception)).toMatchObject({
+      candidateCount: 1,
+      completedPhases: ['perception'],
+    })
+    resumeDirectorExtractionAfterReview(db, sourceTaskId, scope, {
+      material_evidence: ['EVIDENCE-001'],
+    }, { nowSeconds: 102 })
+    const understanding = await completeCurrent(db, 200)
+    expect(projectDirectorExtractionStatus(db, understanding)).toMatchObject({
+      candidateCount: 4,
+      completedPhases: ['perception', 'understanding'],
+    })
+    expect(projectDirectorExtractionStatus(db, understanding).candidateCount).toBe(4)
   })
 
   it('records rejection append-only without rewriting the succeeded child', async () => {

@@ -74,7 +74,7 @@ export function canonicalOpenClawRuntimeCompatibilityCore(value) {
     || !acceptedInstalledOpenClawPeer(value.plugins.video.id, value.plugins.video.peerPolicy)
     || !exactKeys(value.plugins.director, ['id', 'version', 'peerPolicy'])
     || value.plugins.director.id !== 'aiworker-director-brain'
-    || value.plugins.director.version !== '0.4.1'
+    || value.plugins.director.version !== '0.4.2'
     || !acceptedInstalledOpenClawPeer(value.plugins.director.id, value.plugins.director.peerPolicy)
     || !exactKeys(value.secretRef, [
       'wrapperSourceCommit', 'wrapperSha256', 'commandRelativePath', 'passEnv', 'argumentCount',

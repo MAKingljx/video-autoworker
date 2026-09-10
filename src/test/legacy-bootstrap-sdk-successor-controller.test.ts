@@ -97,6 +97,7 @@ function fixture(options: { historicalControllerMode?: number } = {}) {
     ['scripts/check-sensitive-content.mjs', 0o644],
     ['scripts/lib/sensitive-value-scanner.mjs', 0o644],
     ['scripts/lib/director-extraction-release-provenance.mjs', 0o644],
+    ['scripts/lib/director-projection-contract-compatibility.mjs', 0o644],
     ['scripts/lib/application-release-manifest-contract.mjs', 0o644],
   ] as const) {
     const destination = join(control, relativePath)
@@ -161,6 +162,7 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
       ['sensitiveContent', 'scripts/check-sensitive-content.mjs'],
       ['sensitiveValueScanner', 'scripts/lib/sensitive-value-scanner.mjs'],
       ['directorExtractionProvenance', 'scripts/lib/director-extraction-release-provenance.mjs'],
+      ['directorProjectionContractCompatibility', 'scripts/lib/director-projection-contract-compatibility.mjs'],
       ['applicationReleaseManifestContract', 'scripts/lib/application-release-manifest-contract.mjs'],
     ].map(([name, relativePath]) => [name, reference(join(control, relativePath))])),
   }
@@ -342,6 +344,7 @@ describe('legacy bootstrap SDK successor controller', () => {
       [entry.control, entry.controlCommit, 'scripts/check-sensitive-content.mjs', '100644'],
       [entry.control, entry.controlCommit, 'scripts/lib/sensitive-value-scanner.mjs', '100644'],
       [entry.control, entry.controlCommit, 'scripts/lib/director-extraction-release-provenance.mjs', '100644'],
+      [entry.control, entry.controlCommit, 'scripts/lib/director-projection-contract-compatibility.mjs', '100644'],
       [entry.control, entry.controlCommit, 'scripts/lib/application-release-manifest-contract.mjs', '100644'],
     ] as const
 
