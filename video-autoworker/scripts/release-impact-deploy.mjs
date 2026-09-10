@@ -23,7 +23,10 @@ import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-man
 import { readRouterState } from './standalone-router.mjs'
 
 const modulePath = fileURLToPath(import.meta.url)
-const productRoot = resolve(dirname(modulePath), '..')
+const coordinatorRoot = resolve(dirname(modulePath), '..')
+const requestedProductRoot = process.env.AIWORKER_RELEASE_PRODUCT_ROOT
+if (requestedProductRoot && !isAbsolute(requestedProductRoot)) throw new Error('release product root must be absolute')
+const productRoot = requestedProductRoot ? realpathSync.native(requestedProductRoot) : coordinatorRoot
 const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const PLAN_SCHEMA = 'video-autoworker-release-impact-plan/v1'
@@ -562,7 +565,7 @@ async function actualInstalledComponents(components, sourceCommit) {
     const installed = resolveInstalledBlueGreenManager({
       deploymentProjectRoot: productRoot, runDir, releasesDir, launchAgentsDir,
     })
-    await managed(installed.manager, ['preflight', 'all'], 120_000, {
+    await managed(installed.manager.path, ['preflight', 'all'], 120_000, {
       AIWORKER_BG_RUN_DIR: runDir,
       AIWORKER_BG_RELEASES_DIR: releasesDir,
       AIWORKER_BG_SUPERVISOR_DIR: join(runDir, 'supervisor'),
@@ -743,6 +746,26 @@ async function applyPlan(values) {
 }
 
 async function main() {
+  // A stable coordinator may publish an independently verified application
+  // checkout from the same repository. This avoids rebuilding an unchanged app.
+  const coordinator = assertCleanGitSource(coordinatorRoot)
+  if (productRoot !== coordinatorRoot) {
+    const application = assertCleanGitSource(productRoot)
+    const canonicalRemote = 'https://github.com/MAKingljx/video-autoworker.git'
+    for (const root of [coordinator.gitRoot, application.gitRoot]) {
+      if (git(root, ['remote', 'get-url', 'origin']).trim() !== canonicalRemote) fail('coordinator and application repository mismatch')
+    }
+    const controlCommit = resolveCommit(coordinator.gitRoot, 'HEAD')
+    const applicationCommit = resolveCommit(application.gitRoot, 'HEAD')
+    let related = false
+    for (const root of [coordinator.gitRoot, application.gitRoot]) {
+      try {
+        related = COMMIT.test(git(root, ['merge-base', controlCommit, applicationCommit]).trim())
+        if (related) break
+      } catch { /* The other immutable checkout may contain the newer commit. */ }
+    }
+    if (!related) fail('coordinator and application history mismatch')
+  }
   const { command, values } = parseArgs(process.argv.slice(2))
   assertAllowedArguments(command, values)
   if (command === 'plan') return createPlan(values)

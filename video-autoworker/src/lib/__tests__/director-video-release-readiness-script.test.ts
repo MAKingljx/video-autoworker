@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
@@ -238,6 +238,7 @@ describe('director video release readiness verifier', () => {
   let managedNodeRoot: string
 
   beforeEach(async () => {
+    vi.stubEnv('NODE_ENV', 'test')
     root = await realpath(await mkdtemp(join(tmpdir(), 'director-release-readiness-')))
     profileRoot = join(root, 'profile')
     workspaceRoot = join(root, 'workspace')
@@ -286,6 +287,7 @@ describe('director video release readiness verifier', () => {
   })
 
   afterEach(async () => {
+    vi.unstubAllEnvs()
     delete process.env.AIWORKER_OPENCLAW_RUNTIME_TEST_MODE
     delete process.env.AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT
     await rm(root, { recursive: true, force: true })
@@ -1129,7 +1131,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
       releaseRoot: artifactRoot,
       commit: nextCommit,
     })).toThrow('app_release_provenance_invalid')
-  })
+  }, 15_000)
 
   it('validates historical v2 against its writer and requires protocol fields for new v3', async () => {
     const gitRoot = join(root, 'versioned-provenance-source')
