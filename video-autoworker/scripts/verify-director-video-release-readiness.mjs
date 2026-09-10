@@ -1343,8 +1343,11 @@ export async function verifyDirectorVideoReleasePreflight({
 
 export async function verifyDirectorVideoReleaseReadiness(options) {
   const preflight = await verifyDirectorVideoReleasePreflight(options)
+  // The current reader governs which historical rows it understands. An old
+  // release may legitimately predate compatibility declarations altogether.
+  const readerCompatibility = loadDirectorProjectionContractCompatibility(options.repositoryRoot)
   const compatibleDigests = projectionReadCompatibleDigests(
-    preflight.provenance.projectionContractCompatibility,
+    readerCompatibility,
     preflight.payloads.projectionContract,
     preflight.payloads.closure,
   )
