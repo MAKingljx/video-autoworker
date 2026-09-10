@@ -22,7 +22,7 @@ export const DIRECTOR_EXTRACTION_PROVENANCE_NAME = 'release-provenance.json'
 export const STANDALONE_ARTIFACT_CONTENT_SCHEMA =
   'video-autoworker-standalone-artifact-content/v1'
 export const STANDALONE_PROVENANCE_SCHEMA =
-  'video-autoworker-standalone-provenance/v2'
+  'video-autoworker-standalone-provenance/v3'
 export const STANDALONE_BUILD_SOURCE_ANCHOR_SCHEMA =
   'video-autoworker-standalone-build-source-anchor/v1'
 
@@ -328,6 +328,26 @@ function gitCommitReader(repositoryRoot, commit) {
       })
     },
   }
+}
+
+// Read the format from the release's writer, never from the current checkout.
+// Historical v2 releases predate the explicit projection protocol fields.
+export function standaloneProvenanceSchemaFromWriter(source) {
+  const matches = [...String(source).matchAll(
+    /^export\s+const\s+STANDALONE_PROVENANCE_SCHEMA\s*=\s*(['"])(video-autoworker-standalone-provenance\/v[0-9]+)\1/gmu,
+  )]
+  if (matches.length !== 1 || ![
+    'video-autoworker-standalone-provenance/v2',
+    'video-autoworker-standalone-provenance/v3',
+  ].includes(matches[0][2])) {
+    throw new Error('standalone_provenance_writer_schema_invalid')
+  }
+  return matches[0][2]
+}
+
+export function standaloneProvenanceSchemaForGitCommit(repositoryRoot, commit) {
+  return standaloneProvenanceSchemaFromWriter(gitCommitReader(repositoryRoot, commit)
+    .read('scripts/lib/director-extraction-release-provenance.mjs').toString('utf8'))
 }
 
 export function sourceClosure(repositoryRoot, roots = DIRECTOR_EXTRACTION_SOURCE_ROOTS) {

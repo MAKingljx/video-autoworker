@@ -12,7 +12,7 @@
 
 # 任意层级均不得包含本机身份、依赖、缓存、运行数据或密钥。
 .PhoenixBrain
-node_modules/
+node_modules
 __pycache__/
 *.py[cod]
 .venv/

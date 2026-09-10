@@ -22,6 +22,7 @@ import {
   isStandaloneArtifactContentBinding,
   STANDALONE_ARTIFACT_CONTENT_SCHEMA,
   STANDALONE_PROVENANCE_SCHEMA,
+  standaloneProvenanceSchemaFromWriter,
   writeDirectorExtractionProvenance,
 } from './lib/director-extraction-release-provenance.mjs'
 import {
@@ -1150,18 +1151,23 @@ async function assertStandaloneProvenanceArtifactBinding(rootPath, artifactConte
   } catch {
     throw new Error('standalone_release_provenance_invalid')
   }
-  if (!provenance || provenance.schema !== STANDALONE_PROVENANCE_SCHEMA
-    || !isStandaloneArtifactContentBinding(provenance.artifactContent)
-    || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)
-    || JSON.stringify(provenance.projectionProtocol) !== JSON.stringify({
+  const writerSchema = standaloneProvenanceSchemaFromWriter(await readFile(
+    resolve(root, 'scripts/lib/director-extraction-release-provenance.mjs'), 'utf8',
+  ))
+  const bindingValid = writerSchema === STANDALONE_PROVENANCE_SCHEMA
+    ? JSON.stringify(provenance?.projectionProtocol) === JSON.stringify({
       descriptor: DIRECTOR_PROJECTION_PROTOCOL,
       digest: DIRECTOR_PROJECTION_PROTOCOL_DIGEST,
-    })
-    || provenance.projectionImplementation?.schema
-      !== 'video-autoworker-director-projection-implementation/v1'
-    || provenance.projectionImplementation?.algorithm !== 'sha256'
-    || provenance.projectionImplementation?.sourceClosureSha256
-      !== createHash('sha256').update(JSON.stringify(provenance.sourceClosure)).digest('hex')
+    }) && provenance?.projectionImplementation?.schema
+      === 'video-autoworker-director-projection-implementation/v1'
+      && provenance.projectionImplementation.algorithm === 'sha256'
+      && provenance.projectionImplementation.sourceClosureSha256
+        === createHash('sha256').update(JSON.stringify(provenance.sourceClosure)).digest('hex')
+    : provenance && !Object.hasOwn(provenance, 'projectionProtocol')
+      && !Object.hasOwn(provenance, 'projectionImplementation')
+  if (!provenance || provenance.schema !== writerSchema || !bindingValid
+    || !isStandaloneArtifactContentBinding(provenance.artifactContent)
+    || JSON.stringify(provenance.artifactContent) !== JSON.stringify(artifactContent)
     || (provenance.projectionContractCompatibility
       ? provenance.projectionContractCompatibilitySha256
         !== directorProjectionCompatibilitySha256(provenance.projectionContractCompatibility)

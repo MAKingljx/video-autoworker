@@ -219,3 +219,7 @@ durable batch 根允许保留 runtime guard 自身的 `.worker-launch.lock` 与
 为物理 `0700`，且只包含成对的 `<64hex>.json` 与 `.json.bak` 普通文件，主状态及其 item 全部终态。
 缺任一 guardian 成员、绑定漂移、陈旧 guardian、活跃主状态、孤立备份、未知成员、软链接或更深目录
 都会让共享安装门失败关闭。
+
+## 制品来源格式兼容
+
+新增协议字段使用 `video-autoworker-standalone-provenance/v3`。验证器从目标release对应Git提交中的writer声明读取格式，制品审核器也绑定制品内writer声明；不拿当前源码的格式要求直接覆盖历史格式。已部署v2继续校验原clean提交、源码闭包、构建锚点、清单和完整内容摘要，同时要求新增协议字段不存在。v3必须同时具有完整protocol与implementation绑定；冒充旧格式、未知声明或缺字段均拒绝。

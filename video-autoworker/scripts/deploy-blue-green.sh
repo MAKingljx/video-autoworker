@@ -508,7 +508,7 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || value?.contracts?.sessionScopedRuntimeConvergence !== true
   || value?.runtimeConvergence?.schema
     !== 'video-autoworker-openclaw-runtime-convergence-proof/v1'
-  || value?.provenance?.schema !== 'video-autoworker-standalone-provenance/v2'
+  || !['video-autoworker-standalone-provenance/v2', 'video-autoworker-standalone-provenance/v3'].includes(value?.provenance?.schema)
   || value?.provenance?.gitCommit !== value.commit
   || !Number.isSafeInteger(value?.provenance?.sourceFiles)
   || value.provenance.sourceFiles < 1
@@ -571,7 +571,7 @@ if (value?.schema !== 'video-autoworker-director-video-preflight/v1'
   || typeof value?.commit !== 'string' || !/^[a-f0-9]{40}$/u.test(value.commit)
   || !value.commit.startsWith(commitPrefix)
   || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)
-  || value?.provenance?.schema !== 'video-autoworker-standalone-provenance/v2'
+  || !['video-autoworker-standalone-provenance/v2', 'video-autoworker-standalone-provenance/v3'].includes(value?.provenance?.schema)
   || value?.provenance?.gitCommit !== value.commit
   || value?.provenance?.artifactContent?.schema
     !== 'video-autoworker-standalone-artifact-content/v1'

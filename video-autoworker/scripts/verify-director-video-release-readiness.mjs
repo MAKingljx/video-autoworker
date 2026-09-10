@@ -29,6 +29,7 @@ import {
   sourceClosureForGitCommit,
   STANDALONE_BUILD_SOURCE_ANCHOR_SCHEMA,
   STANDALONE_PROVENANCE_SCHEMA,
+  standaloneProvenanceSchemaForGitCommit,
 } from './lib/director-extraction-release-provenance.mjs'
 import {
   DIRECTOR_PROJECTION_PROTOCOL,
@@ -1126,8 +1127,12 @@ export function verifyDirectorExtractionReleaseProvenance({
   const provenancePath = join(releaseRoot, DIRECTOR_EXTRACTION_PROVENANCE_NAME)
   safeFile(provenancePath, 'app_release_provenance')
   const provenance = parsedJsonObject(readFileSync(provenancePath, 'utf8'))
+  let writerSchema
+  try { writerSchema = standaloneProvenanceSchemaForGitCommit(repositoryRoot, commit) }
+  catch { fail('app_release_provenance_invalid') }
+  const hasProjectionBinding = writerSchema === STANDALONE_PROVENANCE_SCHEMA
   if (!provenance
-    || provenance.schema !== STANDALONE_PROVENANCE_SCHEMA
+    || provenance.schema !== writerSchema
     || provenance.gitCommit !== commit
     || provenance.gitDirty !== false
     || provenance.buildSourceAnchor?.schema !== STANDALONE_BUILD_SOURCE_ANCHOR_SCHEMA
@@ -1162,10 +1167,10 @@ export function verifyDirectorExtractionReleaseProvenance({
     schema: 'video-autoworker-director-projection-implementation/v1',
     sourceClosureSha256: sha256(canonicalJson(expectedClosure)),
   }
-  if (canonicalJson(provenance.projectionProtocol)
-      !== canonicalJson(expectedProjectionProtocol)
-    || canonicalJson(provenance.projectionImplementation)
-      !== canonicalJson(expectedProjectionImplementation)) {
+  if (hasProjectionBinding
+    ? canonicalJson(provenance.projectionProtocol) !== canonicalJson(expectedProjectionProtocol)
+      || canonicalJson(provenance.projectionImplementation) !== canonicalJson(expectedProjectionImplementation)
+    : Object.hasOwn(provenance, 'projectionProtocol') || Object.hasOwn(provenance, 'projectionImplementation')) {
     fail('app_release_projection_protocol_binding_invalid')
   }
   const releaseManifestPath = join(releaseRoot, 'release-manifest.json')
@@ -1177,10 +1182,10 @@ export function verifyDirectorExtractionReleaseProvenance({
       !== canonicalJson(provenance.artifactContent)
     || (artifactContent && canonicalJson(artifactContent)
       !== canonicalJson(provenance.artifactContent))
-    || canonicalJson(releaseManifest.projectionProtocol)
-      !== canonicalJson(expectedProjectionProtocol)
-    || canonicalJson(releaseManifest.projectionImplementation)
-      !== canonicalJson(expectedProjectionImplementation)) {
+    || (hasProjectionBinding
+      ? canonicalJson(releaseManifest.projectionProtocol) !== canonicalJson(expectedProjectionProtocol)
+        || canonicalJson(releaseManifest.projectionImplementation) !== canonicalJson(expectedProjectionImplementation)
+      : Object.hasOwn(releaseManifest, 'projectionProtocol') || Object.hasOwn(releaseManifest, 'projectionImplementation'))) {
     fail('app_release_artifact_content_binding_invalid')
   }
   const expectedCompatibility = loadDirectorProjectionContractCompatibility(repositoryRoot, {

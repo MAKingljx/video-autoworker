@@ -254,7 +254,7 @@ async function prepareRequiredStandaloneFixture(
     'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
     'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
-    'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
+    'scripts/lib/director-extraction-release-provenance.mjs': "export const STANDALONE_PROVENANCE_SCHEMA = 'video-autoworker-standalone-provenance/v3'\n",
     'scripts/lib/director-projection-contract-compatibility.mjs': 'export {}\n',
     'scripts/lib/sensitive-value-scanner.mjs': 'export {}\n',
     'scripts/lib/shared-deployment-lock.mjs': 'export {}\n',

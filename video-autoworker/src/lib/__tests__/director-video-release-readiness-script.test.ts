@@ -6,7 +6,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import {
   directorEvidenceProjectionContract,
@@ -36,6 +36,8 @@ import {
   sourceClosure,
   sourceClosureForGitCommit,
   STANDALONE_ARTIFACT_CONTENT_SCHEMA,
+  STANDALONE_PROVENANCE_SCHEMA,
+  standaloneProvenanceSchemaForGitCommit,
   writeDirectorExtractionProvenance,
 } from '../../../scripts/lib/director-extraction-release-provenance.mjs'
 import { validateDirectorProjectionContractCompatibility } from '../../../scripts/lib/director-projection-contract-compatibility.mjs'
@@ -46,6 +48,10 @@ async function writeProductMarkers(productRoot: string) {
   await writeFile(join(productRoot, 'package.json'), '{"name":"video-autoworker"}\n')
   await writeFile(join(productRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
   await writeFile(join(productRoot, 'next.config.js'), 'export default {}\n')
+  const writer = join(productRoot, 'scripts/lib/director-extraction-release-provenance.mjs')
+  if (existsSync(writer) && readFileSync(writer, 'utf8').startsWith('fixture:')) {
+    await writeFile(writer, `export const STANDALONE_PROVENANCE_SCHEMA = '${STANDALONE_PROVENANCE_SCHEMA}'\n`)
+  }
 }
 
 async function writeProvenanceOnlyManifest(artifactRoot: string) {
@@ -929,7 +935,7 @@ describe('director video release readiness verifier', () => {
       app: { releaseId: 'bbbbbbb-runtime' },
       payloads: { projectionContract: { currentDigest: digest } },
       provenance: {
-        schema: 'video-autoworker-standalone-provenance/v2',
+        schema: STANDALONE_PROVENANCE_SCHEMA,
         gitCommit: 'b'.repeat(40),
         sourceFiles: 23,
         sha256: 'e'.repeat(64),
@@ -1116,6 +1122,63 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     })).toThrow('app_release_provenance_invalid')
   })
 
+  it('validates historical v2 against its writer and requires protocol fields for new v3', async () => {
+    const gitRoot = join(root, 'versioned-provenance-source')
+    const artifactRoot = join(root, 'versioned-provenance-artifact')
+    await mkdir(gitRoot, { recursive: true, mode: 0o700 })
+    await mkdir(artifactRoot, { recursive: true, mode: 0o700 })
+    for (const member of DIRECTOR_EXTRACTION_SOURCE_ROOTS) {
+      await mkdir(dirname(join(gitRoot, member)), { recursive: true })
+      await writeFile(join(gitRoot, member), `fixture:${member}\n`)
+    }
+    await writeProductMarkers(gitRoot)
+    const writer = join(gitRoot, 'scripts/lib/director-extraction-release-provenance.mjs')
+    await writeFile(writer, "export const STANDALONE_PROVENANCE_SCHEMA = 'video-autoworker-standalone-provenance/v2'\n")
+    const git = (...args: string[]) => execFileSync('git', ['-C', gitRoot, ...args], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    git('init', '-b', 'main')
+    git('config', 'user.name', 'Versioned Provenance Test')
+    git('config', 'user.email', 'versioned-provenance@example.invalid')
+    git('config', 'commit.gpgSign', 'false')
+    git('add', '.')
+    git('commit', '-m', 'legacy writer')
+    const legacyCommit = git('rev-parse', 'HEAD')
+    writeProvenanceOnly(artifactRoot, gitRoot)
+    const provenancePath = join(artifactRoot, 'release-provenance.json')
+    const legacy = JSON.parse(readFileSync(provenancePath, 'utf8'))
+    legacy.schema = 'video-autoworker-standalone-provenance/v2'
+    delete legacy.projectionProtocol
+    delete legacy.projectionImplementation
+    await writeFile(provenancePath, JSON.stringify(legacy))
+    await writeProvenanceOnlyManifest(artifactRoot)
+    expect(verifyDirectorExtractionReleaseProvenance({ repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot, commit: legacyCommit })).toMatchObject({ schema: legacy.schema })
+    legacy.projectionProtocol = { digest: 'f'.repeat(64) }
+    await writeFile(provenancePath, JSON.stringify(legacy))
+    await writeProvenanceOnlyManifest(artifactRoot)
+    expect(() => verifyDirectorExtractionReleaseProvenance({ repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot, commit: legacyCommit })).toThrow('app_release_projection_protocol_binding_invalid')
+    await writeFile(writer, `export const STANDALONE_PROVENANCE_SCHEMA = '${STANDALONE_PROVENANCE_SCHEMA}'\n`)
+    git('add', '.')
+    git('commit', '-m', 'versioned protocol writer')
+    const currentCommit = git('rev-parse', 'HEAD')
+    expect(standaloneProvenanceSchemaForGitCommit(gitRoot, legacyCommit)).toBe(legacy.schema)
+    writeProvenanceOnly(artifactRoot, gitRoot)
+    const current = JSON.parse(readFileSync(provenancePath, 'utf8'))
+    delete current.projectionProtocol
+    await writeFile(provenancePath, JSON.stringify(current))
+    await writeProvenanceOnlyManifest(artifactRoot)
+    expect(() => verifyDirectorExtractionReleaseProvenance({ repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot, commit: currentCommit })).toThrow('app_release_projection_protocol_binding_invalid')
+    current.schema = legacy.schema
+    delete current.projectionImplementation
+    await writeFile(provenancePath, JSON.stringify(current))
+    await writeProvenanceOnlyManifest(artifactRoot)
+    expect(() => verifyDirectorExtractionReleaseProvenance({ repositoryRoot: gitRoot,
+      releaseRoot: artifactRoot, commit: currentCommit })).toThrow('app_release_provenance_invalid')
+  })
+
   it('binds the same source closure when the product is prefixed in the repository tree', async () => {
     const gitRoot = join(root, 'prefixed-provenance-source')
     const productRoot = join(gitRoot, 'video-autoworker')
@@ -1156,6 +1219,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     ['475', '475840d57a8baaf0aa8cc17fb5dcef7b7e0eaef8'],
     ['938', '938d17e7f5b022120e93acb5f5d6a1840f318330'],
   ])('keeps the historical flat %s source closure readable', (_release, commit) => {
+    expect(standaloneProvenanceSchemaForGitCommit(repositoryRoot, commit)).toBe('video-autoworker-standalone-provenance/v2')
     const closure = sourceClosureForGitCommit(repositoryRoot, commit)
     expect(closure.files.length).toBeGreaterThan(0)
     expect(closure.files.every((entry: { path: string }) => (
