@@ -457,7 +457,9 @@ export function releaseCommandEnvironment(source = process.env, extra = {}) {
 
 async function managed(command, args, timeoutMs = 900_000, extraEnvironment = {}) {
   return runManagedChild(command, args, {
-    cwd: productRoot, timeoutMs, env: releaseCommandEnvironment(process.env, extraEnvironment),
+    cwd: args.some(arg => typeof arg === 'string' && arg.startsWith(`${coordinatorRoot}/scripts/`))
+      ? coordinatorRoot : productRoot,
+    timeoutMs, env: releaseCommandEnvironment(process.env, extraEnvironment),
     maxBytes: 8 * 1024 * 1024,
     onFailure: failure => process.stderr.write(`${JSON.stringify({
       step: basename(args[0] || command),
@@ -539,21 +541,21 @@ async function actualInstalledComponents(components, sourceCommit) {
   const result = structuredClone(components)
   const inspections = []
   if (components.taskFlow.changed) {
-    const output = await managed('/bin/bash', [join(productRoot,
+    const output = await managed('/bin/bash', [join(coordinatorRoot,
       'scripts/install-aiworker-task-flow-skill.sh'), '--dry-run'])
     inspections.push(['taskFlow',
       !/skill_matches=1 agents_matches=1 memory_matches=1/u.test(output), output])
   }
   if (components.directorBrain.changed) {
-    const output = await managed('/bin/bash', [join(productRoot,
+    const output = await managed('/bin/bash', [join(coordinatorRoot,
       'scripts/install-aiworker-director-brain.sh'), '--dry-run', '--profile', 'qwen-current',
     '--state-dir', stateRoot, '--workspace', workspace])
     inspections.push(['directorBrain',
       !/Would change: plugin=0 skill=0 config=0\./u.test(output), output])
   }
   if (components.videoCommand.changed) {
-    const output = await managed('/bin/bash', [join(productRoot,
-      'scripts/install-aiworker-video-command-plugin.sh'), '--dry-run', '--target-sha', sourceCommit])
+    const output = await managed('/bin/bash', [join(coordinatorRoot,
+      'scripts/install-aiworker-video-command-plugin.sh'), '--dry-run', '--target-sha', resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')])
     inspections.push(['videoCommand',
       !/Current plugin .* is already installed and passed runtime validation\./u.test(output), output])
   }
@@ -626,6 +628,7 @@ async function applyPlan(values) {
   const pathname = values.get('--plan')
   if (!pathname) fail('plan path is required')
   const plan = validatePlan(privateRead(pathname))
+  const installerCommit = resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
   const deploy = (...args) => managed('/bin/bash', [join(productRoot, 'scripts/deploy-blue-green.sh'), ...args])
   let runtimeProof = plan.runtimeConvergenceProof
@@ -661,22 +664,22 @@ async function applyPlan(values) {
     install: async component => {
       const output = join(plan.receiptDir, `${plan.sourceCommit}.${component}.apply.json`)
       if (existsSync(output)) fail(`installer receipt already exists: ${component}`)
-      if (component === 'taskFlow') await managed('/bin/bash', [join(productRoot,
+      if (component === 'taskFlow') await managed('/bin/bash', [join(coordinatorRoot,
         'scripts/install-aiworker-task-flow-skill.sh'), '--apply', '--result-output', output])
-      if (component === 'directorBrain') await managed('/bin/bash', [join(productRoot,
+      if (component === 'directorBrain') await managed('/bin/bash', [join(coordinatorRoot,
         'scripts/install-aiworker-director-brain.sh'), '--apply', '--profile', 'qwen-current',
       '--state-dir', join(homedir(), '.openclaw-qwen-current'), '--workspace',
       join(homedir(), 'AI-worker-second-original-workspace'), '--result-output', output])
-      if (component === 'videoCommand') await managed('/bin/bash', [join(productRoot,
+      if (component === 'videoCommand') await managed('/bin/bash', [join(coordinatorRoot,
         'scripts/install-aiworker-video-command-plugin.sh'), '--apply', '--target-sha',
-      plan.sourceCommit, '--result-output', output])
-      return installerReceipt(output, component, plan.sourceCommit)
+      installerCommit, '--result-output', output])
+      return installerReceipt(output, component, installerCommit)
     },
     converge: async () => {
       if (!plan.components.videoCommand.changed) {
-        await managed('openclaw', ['--profile', 'qwen-current', 'gateway', 'restart', '--wait', '60s', '--json'], 90_000)
+        await managed('openclaw', ['--profile', 'qwen-current', 'gateway', 'restart'], 90_000)
       }
-      const output = await managed('/bin/bash', [join(productRoot,
+      const output = await managed('/bin/bash', [join(coordinatorRoot,
         'scripts/apply-openclaw-runtime-convergence.sh'), '--apply', '--tool-baseline', plan.toolBaseline],
       180_000)
       const match = /Verified session-scoped runtime convergence proof: (\/[^\r\n]+)$/mu.exec(output)
@@ -703,22 +706,22 @@ async function applyPlan(values) {
         const rollbackOutput = join(plan.receiptDir,
           `${plan.sourceCommit}.${receipt.componentKey}.rollback.json`)
         if (existsSync(rollbackOutput)) fail(`rollback receipt already exists: ${receipt.componentKey}`)
-        if (receipt.componentKey === 'taskFlow') await managed('/bin/bash', [join(productRoot,
+        if (receipt.componentKey === 'taskFlow') await managed('/bin/bash', [join(coordinatorRoot,
           'scripts/install-aiworker-task-flow-skill.sh'), '--rollback', '--backup',
         receipt.backup.path, '--result-output', rollbackOutput])
         if (receipt.componentKey === 'directorBrain') {
-          await managed('/bin/bash', [join(productRoot,
+          await managed('/bin/bash', [join(coordinatorRoot,
             'scripts/install-aiworker-director-brain.sh'), '--rollback', '--profile', 'qwen-current',
           '--state-dir', join(homedir(), '.openclaw-qwen-current'), '--workspace',
           join(homedir(), 'AI-worker-second-original-workspace'), '--backup', receipt.backup.path,
           '--result-output', rollbackOutput])
           directorRolledBack = true
         }
-        if (receipt.componentKey === 'videoCommand') await managed('/bin/bash', [join(productRoot,
+        if (receipt.componentKey === 'videoCommand') await managed('/bin/bash', [join(coordinatorRoot,
           'scripts/install-aiworker-video-command-plugin.sh'), '--rollback', '--target-sha',
-        plan.sourceCommit, '--backup', receipt.backup.path, '--result-output', rollbackOutput])
+        installerCommit, '--backup', receipt.backup.path, '--result-output', rollbackOutput])
         rollbackReceipts.push(installerReceipt(
-          rollbackOutput, receipt.componentKey, plan.sourceCommit, 'rollback',
+          rollbackOutput, receipt.componentKey, installerCommit, 'rollback',
         ))
       }
       if (directorRolledBack) {
@@ -769,6 +772,13 @@ async function main() {
       } catch { /* The other immutable checkout may contain the newer commit. */ }
     }
     if (!related) fail('coordinator and application history mismatch')
+    const controlTree = commitProductTree(coordinator.gitRoot, controlCommit)
+    const applicationTree = commitProductTree(application.gitRoot, applicationCommit)
+    for (const name of ['taskFlow', 'directorBrain', 'videoCommand']) {
+      if (componentDigest(controlTree, name) !== componentDigest(applicationTree, name)) {
+        fail(`coordinator ${name} payload differs from the verified application source`)
+      }
+    }
   }
   const { command, values } = parseArgs(process.argv.slice(2))
   assertAllowedArguments(command, values)
