@@ -9,10 +9,10 @@ import {
   realpathSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { runManagedChild } from './legacy-release-runner.mjs'
+import { runManagedChild, sanitizeMaintenanceFailure } from './legacy-release-runner.mjs'
 import {
   assertCleanGitSource,
   gitSourceEnvironment,
@@ -459,6 +459,10 @@ async function managed(command, args, timeoutMs = 900_000, extraEnvironment = {}
   return runManagedChild(command, args, {
     cwd: productRoot, timeoutMs, env: releaseCommandEnvironment(process.env, extraEnvironment),
     maxBytes: 8 * 1024 * 1024,
+    onFailure: failure => process.stderr.write(`${JSON.stringify({
+      step: basename(args[0] || command),
+      ...sanitizeMaintenanceFailure(failure, process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''),
+    })}\n`),
   })
 }
 
