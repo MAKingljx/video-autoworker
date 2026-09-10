@@ -757,7 +757,23 @@ async function applyPlan(values) {
     },
     routerStatus,
     intake: intakeClient(plan.intakeUrl),
-    stage: () => deploy('stage', plan.router.releaseId, plan.artifactRoot),
+    stage: async () => {
+      const releases = process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
+      const target = join(releases, plan.router.releaseId)
+      if (!existsSync(target)) return deploy('stage', plan.router.releaseId, plan.artifactRoot)
+      const entry = lstatSync(target)
+      if (!entry.isDirectory() || entry.isSymbolicLink() || realpathSync.native(target) !== target) {
+        fail('existing release directory is unsafe')
+      }
+      const standalone = join(target, 'standalone')
+      await managed(process.execPath, [join(productRoot, 'scripts/check-standalone-artifact.mjs'), standalone], 180_000)
+      if (sha256(readFileSync(join(standalone, 'release-manifest.json')))
+        !== sha256(readFileSync(join(plan.artifactRoot, 'release-manifest.json')))
+        || JSON.parse(readFileSync(join(standalone, 'release-provenance.json'))).gitCommit !== plan.sourceCommit) {
+        fail('existing release differs from the verified artifact')
+      }
+      return 'verified-existing-release'
+    },
     retire: slot => deploy('retire', slot),
     bind: () => deploy('bind', plan.router.target, plan.router.releaseId,
       join(process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases'),
