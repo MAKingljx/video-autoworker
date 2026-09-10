@@ -306,6 +306,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
   const receipts = []
   let installInFlight = null
   let switched = false
+  let workerMaintenance = false
   let recovery = { ok: true, reason: 'not_needed' }
   try {
     if (before.accepting) {
@@ -323,6 +324,10 @@ export async function applyReleaseImpactPlan(planSource, services) {
         || paused.counts.active !== 0) fail('intake did not reach the owned paused revision')
     } else if (before.mode !== 'paused' || before.counts.active !== 0) {
       fail('pre-existing intake hold has not drained')
+    }
+    if (['taskFlow', 'directorBrain', 'videoCommand'].some(name => plan.components[name].changed)) {
+      workerMaintenance = true
+      await services.pauseSharedWorker(plan)
     }
     for (const component of ['taskFlow', 'directorBrain', 'videoCommand']) {
       if (plan.components[component].changed) {
@@ -345,6 +350,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
     }
     if (plan.actions.includes('attest-current')) await services.attest(plan)
   } catch (error) {
+    if (error?.mutationNotStarted) installInFlight = null
     operationError = error
   } finally {
     if (operationError) {
@@ -352,6 +358,13 @@ export async function applyReleaseImpactPlan(planSource, services) {
         recovery = await services.recover({ plan, receipts, installInFlight, switched })
       } catch (error) {
         recovery = { ok: false, reason: 'recovery_failed', error: String(error?.message || error) }
+      }
+    }
+    if (workerMaintenance && (!operationError || recovery.ok)) {
+      try { await services.resumeSharedWorker(plan) }
+      catch (error) {
+        operationError ||= error
+        recovery = { ok: false, reason: 'video_worker_restore_failed' }
       }
     }
     if (!operationError || recovery.ok) {
@@ -461,10 +474,18 @@ async function managed(command, args, timeoutMs = 900_000, extraEnvironment = {}
       ? coordinatorRoot : productRoot,
     timeoutMs, env: releaseCommandEnvironment(process.env, extraEnvironment),
     maxBytes: 8 * 1024 * 1024,
-    onFailure: failure => process.stderr.write(`${JSON.stringify({
-      step: basename(args[0] || command),
-      ...sanitizeMaintenanceFailure(failure, process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''),
-    })}\n`),
+    onFailure: failure => {
+      const step = basename(args[0] || command)
+      process.stderr.write(`${JSON.stringify({ step,
+        ...sanitizeMaintenanceFailure(failure, process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''),
+      })}\n`)
+      if (step === 'install-aiworker-director-brain.sh' && args.includes('--apply')
+        && failure.stderr.includes('shared_runtime_install_not_ready:')) {
+        const error = new Error('director installer preflight rejected before target mutation')
+        error.mutationNotStarted = true
+        throw error
+      }
+    },
   })
 }
 
@@ -635,7 +656,74 @@ async function applyPlan(values) {
   const deployWithProof = (...args) => managed('/bin/bash', [join(productRoot,
     'scripts/deploy-blue-green.sh'), ...args], 900_000,
   { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
+  let workerHold = null
+  const workerRoot = join(homedir(), 'ai-worker/state/video-autoworker/video-batches')
+  const workerPlist = join(homedir(), 'Library/LaunchAgents/ai.aiworker.video-lane-supervisor.plist')
+  const workerLabel = `gui/${process.getuid()}/ai.aiworker.video-lane-supervisor`
+  const workerModule = await import(pathToFileURL(join(coordinatorRoot,
+    'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs')).href)
+  const pauseSharedWorker = async () => {
+    const snapshot = workerModule.inspectVideoExecutionControlSnapshotSync(workerRoot)
+    if (snapshot.status === 'blocked' && snapshot.reason === 'worker_unavailable') return
+    if (snapshot.status !== 'available' || !snapshot.worker?.alive) fail('video worker ownership is not ready')
+    const pid = snapshot.worker.pid
+    const command = execFileSync('/bin/ps', ['-ww', '-p', String(pid), '-o', 'command='], { encoding: 'utf8' })
+    if (!command.includes(join(homedir(), 'AI-worker-second-original-workspace',
+      'skills/aiworker-task-flow/scripts/run-video-batch.mjs')) || !command.includes('--serve-root')) {
+      fail('video worker process identity mismatch')
+    }
+    const entry = lstatSync(workerPlist)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid()
+      || (entry.mode & 0o022) !== 0) fail('video supervisor plist is unsafe')
+    const loaded = execFileSync('/bin/launchctl', ['print', workerLabel], { encoding: 'utf8' })
+    const owner = /\n\s*pid = (\d+)/u.exec(loaded)?.[1]
+    let ancestor = pid
+    for (let n = 0; String(ancestor) !== owner && ancestor > 1 && n < 12; n++) {
+      ancestor = Number(execFileSync('/bin/ps', ['-p', String(ancestor), '-o', 'ppid='], { encoding: 'utf8' }).trim())
+    }
+    if (!owner || String(ancestor) !== owner) fail('video worker is not owned by the managed supervisor')
+    workerHold = { pid, plistSha256: sha256(readFileSync(workerPlist)), label: workerLabel }
+    privateWrite(join(plan.receiptDir, 'video-worker-hold.json'), workerHold)
+    await managed('/bin/launchctl', ['bootout', workerLabel], 60_000)
+    let stopped = false
+    for (let n = 0; n < 90; n++) {
+      try { process.kill(pid, 0) } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+        stopped = true; break
+      }
+      await new Promise(resolveWait => setTimeout(resolveWait, 500))
+    }
+    if (!stopped) fail('video worker did not finish stopping')
+    if (existsSync(join(workerRoot, '.global-video-worker.lock'))) {
+      const lock = await workerModule.acquireGlobalBatchLock(join(workerRoot, '.serve-root-anchor'))
+      if (!lock.acquired) fail('video worker lock still has an owner')
+      await lock.release()
+    }
+    const { scanOfflineDurableBatchStates } = await import(pathToFileURL(join(coordinatorRoot,
+      'scripts/lib/runtime-safe-offline-queue.mjs')).href)
+    scanOfflineDurableBatchStates(workerRoot, { includeEvidence: true })
+  }
+  const resumeSharedWorker = async () => {
+    if (!workerHold) return
+    if (sha256(readFileSync(workerPlist)) !== workerHold.plistSha256) fail('video supervisor changed during maintenance')
+    let loaded = false
+    try { execFileSync('/bin/launchctl', ['print', workerLabel], { stdio: 'ignore' }); loaded = true } catch { /* bootstrap only our unloaded job */ }
+    if (!loaded) await managed('/bin/launchctl', ['bootstrap', `gui/${process.getuid()}`, workerPlist], 60_000)
+    for (let n = 0; n < 90; n++) {
+      const value = workerModule.inspectVideoExecutionControlSnapshotSync(workerRoot)
+      if (value.status === 'available' && value.worker?.alive) {
+        privateWrite(join(plan.receiptDir, 'video-worker-restored.json'), {
+          available: true, pid: value.worker.pid, plistSha256: workerHold.plistSha256,
+        })
+        workerHold = null
+        return
+      }
+      await new Promise(resolveWait => setTimeout(resolveWait, 500))
+    }
+    fail('video worker did not become available')
+  }
   const services = {
+    pauseSharedWorker, resumeSharedWorker,
     assertSource: commit => assertCleanGitSource(productRoot, commit),
     assertComponents: async currentPlan => {
       const sourceLayout = resolveGitSourceLayout(productRoot)

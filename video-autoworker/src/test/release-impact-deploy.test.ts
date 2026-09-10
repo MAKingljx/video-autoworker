@@ -90,6 +90,8 @@ function services(events: string[], {
     assertComponents: async () => action('components'),
     routerStatus: async () => { await action('status'); return router },
     stage: async () => action('stage'),
+    pauseSharedWorker: async () => action('worker:pause'),
+    resumeSharedWorker: async () => action('worker:resume'),
     install: async (name: string) => {
       await action(`install:${name}`)
       return { component: name, status: 'applied' }
@@ -207,6 +209,8 @@ describe('release impact deployment', () => {
       ok: true,
     })
     expect(events).toContain('install:taskFlow')
+    expect(events.indexOf('worker:pause')).toBeLessThan(events.indexOf('install:taskFlow'))
+    expect(events.indexOf('worker:resume')).toBeLessThan(events.indexOf('intake:resume:19'))
     expect(events).not.toContain('converge')
     expect(events).not.toContain('stage')
     expect(events).not.toContain('switch')
@@ -288,5 +292,15 @@ describe('release impact deployment', () => {
       failAt: 'converge', recoveryOk: false,
     }))).rejects.toThrow('recovery=official_rollback_failed; intake=recovery_incomplete')
     expect(events).not.toContain('intake:resume:19')
+    expect(events).not.toContain('worker:resume')
   })
+  it('keeps intake paused when the owned video worker cannot be restored', async () => {
+    const events: string[] = []
+    await expect(applyReleaseImpactPlan(plan(['directorBrain']), services(events, {
+      failAt: 'worker:resume',
+    }))).rejects.toThrow('video_worker_restore_failed')
+    expect(events).toContain('worker:pause')
+    expect(events).not.toContain('intake:resume:19')
+  })
+
 })
