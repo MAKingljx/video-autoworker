@@ -490,6 +490,34 @@ async function managed(command, args, timeoutMs = 900_000, extraEnvironment = {}
   })
 }
 
+export async function waitForGatewayListener(inspect, {
+  sleep = milliseconds => new Promise(resolveWait => setTimeout(resolveWait, milliseconds)),
+  attempts = 120,
+} = {}) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const pids = [...new Set(await inspect())]
+    if (pids.length > 1 || pids.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) {
+      fail('Gateway listener identity is ambiguous')
+    }
+    if (pids.length === 1) return pids[0]
+    await sleep(500)
+  }
+  fail('Gateway listener did not become ready after restart')
+}
+
+async function waitForCurrentGateway() {
+  return waitForGatewayListener(() => {
+    try {
+      return execFileSync('/usr/sbin/lsof', ['-nP', '-iTCP:18889', '-sTCP:LISTEN', '-t'],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000 })
+        .trim().split('\n').filter(Boolean).map(Number)
+    } catch (error) {
+      if (error.status === 1 && !String(error.stdout || '').trim()) return []
+      throw error
+    }
+  })
+}
+
 function controlHeaders() {
   let token = process.env.AIWORKER_BG_CONTROL_TOKEN || ''
   const tokenFile = process.env.AIWORKER_BG_CONTROL_TOKEN_FILE || ''
@@ -778,7 +806,13 @@ async function applyPlan(values) {
     bind: () => deploy('bind', plan.router.target, plan.router.releaseId,
       join(process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases'),
         plan.router.releaseId, 'standalone')),
-    start: slot => managed('/bin/bash', [join(productRoot, 'scripts/manage-blue-green-services.sh'), 'start', slot]),
+    start: slot => {
+      const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: productRoot,
+        runDir: process.env.AIWORKER_BG_RUN_DIR || join(productRoot, '.run/blue-green'),
+        releasesDir: process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases'),
+        launchAgentsDir: process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR || join(homedir(), 'Library/LaunchAgents') })
+      return managed('/bin/bash', [installed.manager.path, 'start', slot])
+    },
     probe: slot => deploy('probe', slot),
     switch: slot => deployWithProof('switch', slot),
     install: async component => {
@@ -799,6 +833,7 @@ async function applyPlan(values) {
       if (!plan.components.videoCommand.changed) {
         await managed('openclaw', ['--profile', 'qwen-current', 'gateway', 'restart'], 90_000)
       }
+      await waitForCurrentGateway()
       const output = await managed('/bin/bash', [join(coordinatorRoot,
         'scripts/apply-openclaw-runtime-convergence.sh'), '--apply', '--tool-baseline', plan.toolBaseline],
       180_000)
@@ -847,6 +882,7 @@ async function applyPlan(values) {
       if (directorRolledBack) {
         await managed('openclaw', ['--profile', 'qwen-current', 'gateway', 'restart',
           '--wait', '60s', '--json'], 90_000)
+        await waitForCurrentGateway()
       }
       current = await routerStatus()
       if (current.active !== plan.router.active

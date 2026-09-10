@@ -10,6 +10,7 @@ import {
   releaseCommandEnvironment,
   releaseComponentSummary,
   restoreOwnedIntake,
+  waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
 
 const baseCommit = '1'.repeat(40)
@@ -301,6 +302,15 @@ describe('release impact deployment', () => {
     }))).rejects.toThrow('video_worker_restore_failed')
     expect(events).toContain('worker:pause')
     expect(events).not.toContain('intake:resume:19')
+  })
+
+  it('waits for asynchronous Gateway startup and rejects ambiguous listeners', async () => {
+    let calls = 0
+    const inspect = async () => ++calls < 3 ? [] : [321, 321]
+    await expect(waitForGatewayListener(inspect, { sleep: async () => {}, attempts: 4 })).resolves.toBe(321)
+    expect(calls).toBe(3)
+    await expect(waitForGatewayListener(async () => [321, 322], { sleep: async () => {} }))
+      .rejects.toThrow('Gateway listener identity is ambiguous')
   })
 
 })
