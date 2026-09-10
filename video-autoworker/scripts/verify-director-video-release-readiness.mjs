@@ -40,7 +40,7 @@ import {
   loadDirectorProjectionContractCompatibility,
   validateDirectorProjectionContractCompatibility,
 } from './lib/director-projection-contract-compatibility.mjs'
-import { gitSourceEnvironment, resolveGitSourceLayout } from './lib/git-source-layout.mjs'
+import { gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const SHA256 = /^[a-f0-9]{64}$/u
@@ -1015,6 +1015,37 @@ export function assertDirectorEvidenceOutboxReleaseReady(projectionOutbox) {
   }
 }
 
+function compatibleDirectorSkill(repositoryRoot, installedRoot, members, version) {
+  const actual = walkTree(assertPhysicalDirectory(installedRoot, 'director_brain_skill'))
+  const expected = selectedSourceManifest(repositoryRoot, members)
+  if (JSON.stringify(actual) === JSON.stringify(expected)) {
+    return { root: installedRoot, manifestSha256: manifestDigest(actual), files: actual.files.length }
+  }
+  if (!['0.4.1', '0.4.2'].includes(version) || actual.directories.length !== 0
+    || actual.files.length !== 1 || actual.files[0].path !== 'SKILL.md') {
+    fail('director_brain_skill_manifest_mismatch')
+  }
+  // A compatible installed plugin retains the Skill from its own published
+  // version until that component is upgraded. Resolve that identity from Git.
+  const { gitRoot } = resolveGitSourceLayout(repositoryRoot)
+  const skillPath = 'openclaw-skills/aiworker-director-brain/SKILL.md'
+  const packagePath = 'openclaw-plugins/aiworker-director-brain/package.json'
+  const commits = gitOutput(gitRoot, ['log', '--first-parent', '--format=%H', 'HEAD', '--',
+    skillPath, packagePath, `video-autoworker/${skillPath}`, `video-autoworker/${packagePath}`])
+    .split('\n').filter(Boolean)
+  for (const commit of commits) {
+    try {
+      const prefix = resolveGitCommitProductPrefix(gitRoot, commit)
+      const read = member => execFileSync('git', ['-C', gitRoot, 'show', `${commit}:${prefix}${member}`],
+        { stdio: ['ignore', 'pipe', 'ignore'], env: gitSourceEnvironment() })
+      if (JSON.parse(read(packagePath).toString('utf8')).version !== version) continue
+      if (sha256(read(skillPath)) !== actual.files[0].sha256) continue
+      return { root: installedRoot, manifestSha256: manifestDigest(actual), files: 1, sourceCommit: commit }
+    } catch { /* An older commit may predate this component or product layout. */ }
+  }
+  fail('director_brain_skill_manifest_mismatch')
+}
+
 function assertTaskFlowDirectorWork(repositoryRoot, installedTaskFlowRoot) {
   const source = readFileSync(join(repositoryRoot,
     'openclaw-skills/aiworker-task-flow/scripts/submit-task.mjs'), 'utf8')
@@ -1055,8 +1086,8 @@ export function verifyInstalledReleasePayloads({
   const directorSkillMembers = recursiveSourceMembers(
     repository, 'openclaw-skills/aiworker-director-brain', '',
   )
-  const directorSkill = assertManifestMatches(
-    repository, directorSkillRoot, directorSkillMembers, 'director_brain_skill',
+  const directorSkill = compatibleDirectorSkill(
+    repository, directorSkillRoot, directorSkillMembers, directorBrain.version,
   )
   assertTaskFlowDirectorWork(repository, taskFlowRoot)
   const closure = parseOutboxClosure(repository)

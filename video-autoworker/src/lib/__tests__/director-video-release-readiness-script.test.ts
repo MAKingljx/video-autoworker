@@ -373,6 +373,15 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     }).directorBrain.version).toBe('0.4.1')
+    const skill = join(workspaceRoot, 'skills/aiworker-director-brain/SKILL.md')
+    const historicalSkill = execFileSync('git', ['-C', repositoryRoot, 'show',
+      'ff65ba6:openclaw-skills/aiworker-director-brain/SKILL.md'])
+    await writeFile(skill, historicalSkill, { mode: 0o600 })
+    expect(verifyInstalledReleasePayloads({ repositoryRoot, profileStateRoot: profileRoot,
+      workspaceRoot }).directorSkill?.sourceCommit).toMatch(/^[a-f0-9]{40}$/u)
+    await writeFile(skill, Buffer.concat([historicalSkill, Buffer.from('\nunregistered edit\n')]), { mode: 0o600 })
+    expect(() => verifyInstalledReleasePayloads({ repositoryRoot, profileStateRoot: profileRoot,
+      workspaceRoot })).toThrow('director_brain_skill_manifest_mismatch')
     for (const name of ['package.json', 'openclaw.plugin.json']) {
       const pathname = join(installedRoot, name)
       const value = JSON.parse(readFileSync(pathname, 'utf8'))
