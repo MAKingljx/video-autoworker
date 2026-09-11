@@ -267,6 +267,9 @@ function validatePlan(plan) {
     if (!value || !SHA256.test(value.before) || !SHA256.test(value.after)
       || value.changed !== (value.before !== value.after)) fail('component summary is invalid')
   }
+  if (plan.components.app.changed && !SHA256.test(plan.artifactManifestSha256 || '')) {
+    fail('artifact manifest binding is invalid')
+  }
   const pluginChanged = ['taskFlow', 'directorBrain', 'videoCommand']
     .some(name => plan.components[name].changed)
   if (pluginChanged && !isAbsolute(plan.receiptDir || '')) fail('plan receipt directory is invalid')
@@ -288,6 +291,7 @@ function sealPlan(plan) {
 export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intake,
   components, artifactRoot = null, runtimeConvergenceProof = null, toolBaseline = null,
   receiptDir = null, runtimeConfigSha256 = null, runtimeBinding = null,
+  artifactManifestSha256 = null,
   intakeUrl = 'http://127.0.0.1:3017/api/n8n/intake-control' }) {
   if (!COMMIT.test(baseCommit) || !COMMIT.test(sourceCommit)) fail('plan commits are invalid')
   validateIntake(intake)
@@ -296,6 +300,9 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
     .some(name => components[name].changed)
   const runtimeChanged = components.directorBrain.changed || components.videoCommand.changed
   if (appChanged && !isAbsolute(artifactRoot || '')) fail('changed app requires an artifact')
+  if (appChanged && !SHA256.test(artifactManifestSha256 || '')) {
+    fail('changed app requires an artifact manifest binding')
+  }
   if (runtimeChanged && !isAbsolute(toolBaseline || '')) {
     fail('changed OpenClaw payload requires a tool baseline')
   }
@@ -327,6 +334,7 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
     runtimeConvergenceProof, toolBaseline, receiptDir, intakeUrl,
     runtimeConfigSha256,
     runtimeBinding: runtimeBinding ? structuredClone(runtimeBinding) : null,
+    artifactManifestSha256,
   })
 }
 
@@ -604,6 +612,37 @@ function privateFileSha256(pathname, maxBytes = 1024 * 1024) {
     fail('private evidence file is unsafe')
   }
   return sha256(readFileSync(pathname))
+}
+
+function artifactPlanBinding(rootPath, sourceCommit) {
+  if (!isAbsolute(rootPath || '') || realpathSync.native(rootPath) !== rootPath) {
+    fail('artifact root is unsafe')
+  }
+  const root = lstatSync(rootPath)
+  if (!root.isDirectory() || root.isSymbolicLink()) fail('artifact root is unsafe')
+  const values = {}
+  for (const [name, maximum] of [['release-manifest.json', 32 * 1024 * 1024],
+    ['release-provenance.json', 1024 * 1024]]) {
+    const pathname = join(rootPath, name)
+    const entry = lstatSync(pathname)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1
+      || entry.size < 2 || entry.size > maximum || (entry.mode & 0o022) !== 0) {
+      fail(`artifact ${name} is unsafe`)
+    }
+    values[name] = readFileSync(pathname)
+  }
+  let manifest
+  let provenance
+  try {
+    manifest = JSON.parse(values['release-manifest.json'].toString('utf8'))
+    provenance = JSON.parse(values['release-provenance.json'].toString('utf8'))
+  } catch { fail('artifact attestations are invalid') }
+  if (manifest?.schemaVersion !== 2 || manifest.algorithm !== 'sha256'
+    || !Array.isArray(manifest.files) || !Array.isArray(manifest.directories)
+    || !Array.isArray(manifest.symlinks) || provenance?.gitCommit !== sourceCommit) {
+    fail('artifact attestations do not match the plan source')
+  }
+  return { manifestSha256: sha256(values['release-manifest.json']) }
 }
 
 function runtimeProofReferencePath(planPath, attemptId) {
@@ -1015,22 +1054,19 @@ async function createPlan(values) {
   )
   const components = await actualInstalledComponents(sourceComponents, sourceCommit)
   const runtimeBinding = runtimeBindingSnapshot()
+  const artifactRoot = values.get('--artifact') || null
+  const artifactBinding = components.app.changed
+    ? artifactPlanBinding(artifactRoot, sourceCommit) : null
   const plan = buildReleaseImpactPlan({
     baseCommit, sourceCommit, router, intake: await intakeClient(url).read(), components,
-    artifactRoot: values.get('--artifact') || null,
+    artifactRoot,
     runtimeConvergenceProof: values.get('--runtime-convergence-proof') || null,
     toolBaseline: values.get('--tool-baseline') || null,
     receiptDir: values.get('--receipt-dir') || null, intakeUrl,
     runtimeConfigSha256: runtimeBinding.configSha256, runtimeBinding,
+    artifactManifestSha256: artifactBinding?.manifestSha256 || null,
   })
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
-  if (components.app.changed) {
-    await managed(process.execPath, [join(productRoot, 'scripts/check-standalone-artifact.mjs'),
-      plan.artifactRoot], 180_000)
-    const provenance = JSON.parse(readFileSync(join(plan.artifactRoot,
-      'release-provenance.json'), 'utf8'))
-    if (provenance?.gitCommit !== sourceCommit) fail('artifact source commit does not match the plan')
-  }
   const output = values.get('--output')
   if (!output) fail('plan output is required')
   privateWrite(output, plan)
@@ -1193,6 +1229,10 @@ async function executePlan(values, operation = null) {
     routeReadback: () => plannedRouterState(plan.intakeUrl, plan.runtimeBinding),
     intake: intakeClient(plan.intakeUrl),
     stage: async () => {
+      const artifactBinding = artifactPlanBinding(plan.artifactRoot, plan.sourceCommit)
+      if (artifactBinding.manifestSha256 !== plan.artifactManifestSha256) {
+        fail('artifact manifest changed after plan')
+      }
       const target = join(releases, plan.router.releaseId)
       if (!existsSync(target)) return runBlueGreen('stage')
       const entry = lstatSync(target)

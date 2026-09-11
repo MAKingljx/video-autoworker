@@ -43,6 +43,7 @@ type BuildPlan = (options: {
   receiptDir?: string | null
   runtimeConfigSha256?: string | null
   runtimeBinding?: Record<string, unknown> | null
+  artifactManifestSha256?: string | null
 }) => ReturnType<typeof buildReleaseImpactPlan>
 const digest = (value: string) => (value.charCodeAt(0) % 16).toString(16).repeat(64)
 const router = {
@@ -75,6 +76,7 @@ function plan(changed: ComponentName[]) {
   return buildPlan({
     baseCommit, sourceCommit, router, intake: activeIntake(), components: components(changed),
     artifactRoot: changed.includes('app') ? '/private/tmp/release/standalone' : null,
+    artifactManifestSha256: changed.includes('app') ? 'a'.repeat(64) : null,
     runtimeConvergenceProof: '/private/tmp/runtime-proof.json',
     toolBaseline: changed.some(name => ['taskFlow', 'directorBrain', 'videoCommand'].includes(name))
       ? '/private/tmp/tool-baseline.json' : null,
