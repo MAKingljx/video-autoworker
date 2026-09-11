@@ -651,19 +651,22 @@ function artifactPlanBinding(rootPath, sourceCommit) {
   return { manifestSha256: sha256(values['release-manifest.json']) }
 }
 
-function runtimeProofReferencePath(planPath, attemptId) {
-  return join(dirname(planPath), `.${basename(planPath)}.runtime-proof.${attemptId}.json`)
+function runtimeProofReferencePath(planPath, attemptId, kind = 'runtime-proof') {
+  if (!['runtime-proof', 'runtime-proof-override'].includes(kind)) {
+    fail('runtime proof reference kind is invalid')
+  }
+  return join(dirname(planPath), `.${basename(planPath)}.${kind}.${attemptId}.json`)
 }
 
-function persistRuntimeProofReference(planPath, attemptId, proofPath) {
+function persistRuntimeProofReference(planPath, attemptId, proofPath, kind = 'runtime-proof') {
   const reference = { schema: 'video-autoworker-runtime-proof-reference/v1',
     attemptId, proofPath, proofSha256: privateFileSha256(proofPath) }
-  privateWrite(runtimeProofReferencePath(planPath, attemptId), reference)
+  privateWrite(runtimeProofReferencePath(planPath, attemptId, kind), reference)
   return reference
 }
 
-function readRuntimeProofReference(planPath, attemptId) {
-  const reference = privateRead(runtimeProofReferencePath(planPath, attemptId))
+function readRuntimeProofReference(planPath, attemptId, kind = 'runtime-proof') {
+  const reference = privateRead(runtimeProofReferencePath(planPath, attemptId, kind))
   if (reference?.schema !== 'video-autoworker-runtime-proof-reference/v1'
     || reference.attemptId !== attemptId || !isAbsolute(reference.proofPath || '')
     || !SHA256.test(reference.proofSha256 || '')
@@ -674,10 +677,18 @@ function readRuntimeProofReference(planPath, attemptId) {
 }
 
 function runtimeProofForResume(contract, events) {
-  const convergence = [...events].reverse().find(event => event.step === 'converge-runtime'
-    && ['started', 'completed'].includes(event.status) && event.attemptId
-    && existsSync(runtimeProofReferencePath(contract.pathname, event.attemptId)))
-  if (convergence) return readRuntimeProofReference(contract.pathname, convergence.attemptId)
+  const evidenced = [...events].reverse().find(event => {
+    const kind = event.step === 'runtime-proof-override'
+      ? 'runtime-proof-override' : 'runtime-proof'
+    return ['converge-runtime', 'runtime-proof-override'].includes(event.step)
+      && ['started', 'completed'].includes(event.status) && event.attemptId
+      && existsSync(runtimeProofReferencePath(contract.pathname, event.attemptId, kind))
+  })
+  if (evidenced) {
+    const kind = evidenced.step === 'runtime-proof-override'
+      ? 'runtime-proof-override' : 'runtime-proof'
+    return readRuntimeProofReference(contract.pathname, evidenced.attemptId, kind)
+  }
   const runtimeChanged = contract.plan.components.directorBrain.changed
     || contract.plan.components.videoCommand.changed
   if (runtimeChanged) fail('resume runtime proof is missing')
@@ -838,13 +849,20 @@ function parseArgs(argv) {
   return { command, values }
 }
 
-function assertAllowedArguments(command, values) {
+export function assertAllowedArguments(command, values) {
   const allowed = command === 'plan'
     ? new Set(['--source-commit', '--artifact', '--runtime-convergence-proof',
       '--tool-baseline', '--receipt-dir', '--intake-url', '--output'])
-    : ['apply', 'resume', 'status', 'cancel', 'doctor', 'prewarm'].includes(command)
+    : command === 'resume'
+      ? new Set(['--plan', '--runtime-convergence-proof'])
+      : ['apply', 'status', 'cancel', 'doctor', 'prewarm'].includes(command)
       ? new Set(['--plan']) : new Set()
   if ([...values.keys()].some(key => !allowed.has(key))) fail('arguments are invalid')
+}
+
+export function validateResumeRuntimeProofOverride(pathname) {
+  privateFileSha256(pathname)
+  return pathname
 }
 
 export function releaseCommandEnvironment(source = process.env, extra = {}) {
@@ -1119,7 +1137,7 @@ async function executePlan(values, operation = null) {
     const command = blueGreen(step)
     return managed(command.command, command.args, timeoutMs, extraEnvironment, signal)
   }
-  let runtimeProof = plan.runtimeConvergenceProof
+  let runtimeProof = operation?.runtimeProofOverride || plan.runtimeConvergenceProof
   const deployWithProof = (...args) => managed('/bin/bash', [join(productRoot,
     'scripts/deploy-blue-green.sh'), ...args], 900_000,
   { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
@@ -1500,6 +1518,10 @@ async function resumeCommittedPlan(contract, previousStatus, operation) {
 
 async function applyPlan(values, { resume = false } = {}) {
   const contract = operationContract(values)
+  const runtimeProofOverride = resume
+    ? values.get('--runtime-convergence-proof') || null
+    : null
+  if (runtimeProofOverride) validateResumeRuntimeProofOverride(runtimeProofOverride)
   const previous = readReleaseOperationJournal(contract.paths.journal, contract.scope.operationId)
   const previousStatus = releaseOperationStatus(contract.scope, previous)
   if (resume && previousStatus.state === 'completed') {
@@ -1536,14 +1558,24 @@ async function applyPlan(values, { resume = false } = {}) {
   const operation = {
     owner, scope: contract.scope, signal: cancellation.signal, record,
     resume, previousEvents: previous,
-    resolveResumeRuntimeProof: () => runtimeProofForResume(contract, previous),
+    runtimeProofOverride,
+    resolveResumeRuntimeProof: () => runtimeProofOverride
+      || runtimeProofForResume(contract, previous),
     previousWorkerHold: resume ? previousWorkerHold(contract.plan, previous) : null,
     persistRuntimeProof: proofPath => persistRuntimeProofReference(
       contract.pathname, owner.attemptId, proofPath,
     ),
+    persistRuntimeProofOverride: proofPath => persistRuntimeProofReference(
+      contract.pathname, owner.attemptId, proofPath, 'runtime-proof-override',
+    ),
     beginRecovery: () => { activeOperationSignal = null },
   }
   try {
+    if (runtimeProofOverride) {
+      operation.persistRuntimeProofOverride(runtimeProofOverride)
+      record({ step: 'runtime-proof-override', status: 'completed', phase: 'resume',
+        effectState: 'attempt-reference-persisted' })
+    }
     let result
     if (resume) {
       result = await resumeCommittedPlan(contract, previousStatus, operation)

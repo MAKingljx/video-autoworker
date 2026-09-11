@@ -1,9 +1,13 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from 'vitest'
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import {
   applyReleaseImpactPlan,
+  assertAllowedArguments,
   buildReleaseImpactPlan,
   installedControlComponentState,
   isCommittedPlanRoute,
@@ -13,6 +17,7 @@ import {
   releaseComponentSummary,
   recoveryTargetDisposition,
   restoreOwnedIntake,
+  validateResumeRuntimeProofOverride,
   waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
 
@@ -226,6 +231,28 @@ describe('release impact deployment', () => {
     expect(environment.AIWORKER_BG_TEST_MODE).toBeUndefined()
     expect(environment.AIWORKER_INSTALLER_ISOLATED_TEST_ROOT).toBeUndefined()
     expect(environment.AIWORKER_VIDEO_COMMAND_INSTALL_TEST_FAILPOINT).toBeUndefined()
+  })
+
+  it('accepts a private runtime proof override only for resume', () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'release-proof-override-')))
+    const proof = join(root, 'runtime-proof.json')
+    try {
+      writeFileSync(proof, '{"schema":"proof"}\n', { mode: 0o600 })
+      expect(validateResumeRuntimeProofOverride(proof)).toBe(proof)
+      expect(() => assertAllowedArguments('resume', new Map([
+        ['--plan', join(root, 'plan.json')],
+        ['--runtime-convergence-proof', proof],
+      ]))).not.toThrow()
+      expect(() => assertAllowedArguments('apply', new Map([
+        ['--plan', join(root, 'plan.json')],
+        ['--runtime-convergence-proof', proof],
+      ]))).toThrow('arguments are invalid')
+      chmodSync(proof, 0o644)
+      expect(() => validateResumeRuntimeProofOverride(proof))
+        .toThrow('private evidence file is unsafe')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('binds the external runtime configuration digest and checks it before components', async () => {

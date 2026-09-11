@@ -28,7 +28,11 @@ const plan = {
   planSha256: 'b'.repeat(64), sourceCommit: commit,
   actions: ['stage-app', 'switch-target', 'attest-current'],
   components: { app: { changed: true } },
-  router: { target: 'green', releaseId: `${commit}-runtime` },
+  router: {
+    active: 'blue', previous: 'green', generation: 7,
+    slots: { blue: 'release-active', green: 'release-original-target' },
+    target: 'green', releaseId: `${commit}-runtime`,
+  },
 }
 
 function privateTask() {
@@ -50,6 +54,11 @@ describe('release operation contract', () => {
       command: '/bin/bash', step: 'bind', args: ['/private/tmp/deploy-blue-green.sh', 'bind',
         'green', `${commit}-runtime`, `/private/tmp/releases/${commit}-runtime/standalone`],
     })
+    expect(buildBlueGreenCommand({ script: '/private/tmp/deploy-blue-green.sh',
+      step: 'transition-app', plan, releasesDir: '/private/tmp/releases' }).args).toEqual([
+      '/private/tmp/deploy-blue-green.sh', 'transition-app', 'green', `${commit}-runtime`,
+      `/private/tmp/releases/${commit}-runtime/standalone`, '7', 'release-original-target',
+    ])
   })
 
   it('keeps a chained private journal and distinguishes route commit from acceptance', () => {

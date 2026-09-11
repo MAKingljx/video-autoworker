@@ -411,6 +411,56 @@ printf 'COUNTS_AFTER full=%s fast=%s fallback=%s\\n' \
     expect(result.stdout).toContain('COUNTS_AFTER full=3 fast=3 fallback=1')
   })
 
+  it('reuses only an identical existing immutable release without overwriting it', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-stage-reuse-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const sourceRoot = join(root, 'source')
+    const releasesRoot = join(root, 'releases')
+    const runRoot = join(root, 'run')
+    mkdirSync(sourceRoot, { mode: 0o700 })
+    mkdirSync(releasesRoot, { mode: 0o700 })
+    mkdirSync(runRoot, { mode: 0o700 })
+    const sourceManifest = join(sourceRoot, 'release-manifest.json')
+    writeFileSync(sourceManifest, '{"schemaVersion":2,"files":[]}\n', { mode: 0o600 })
+    writeFileSync(join(sourceRoot, 'release-provenance.json'), '{}\n', { mode: 0o600 })
+    const auditor = join(root, 'auditor.mjs')
+    writeFileSync(auditor, `
+if (process.argv[2] === '--verify-bundle') process.exit(0)
+if (process.argv[2] === '--write-manifest') process.exit(0)
+process.stdout.write(JSON.stringify({ok:true,verificationBundle:{
+  schema:'video-autoworker-standalone-verification-bundle/v1',bundleSha256:'${'a'.repeat(64)}'
+}})+'\\n')
+`)
+    const deploy = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
+    const prelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'stage-reuse.sh')
+    writeFileSync(harness, `${prelude}
+AUDITOR="$1"
+RUN_DIR="$2"
+RELEASES_DIR="$3"
+NODE_BIN="$4"
+source_root="$5"
+acquire_lock() { prepare_run_dir; ensure_release_verification_cache; }
+stage_release release-test "$source_root"
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const args = [harness, auditor, runRoot, releasesRoot, process.execPath, sourceRoot]
+    const first = spawnSync('/bin/bash', args, { encoding: 'utf8' })
+    expect(first.status, first.stderr).toBe(0)
+    const publishedManifest = join(releasesRoot, 'release-test', 'standalone', 'release-manifest.json')
+    const published = readFileSync(publishedManifest)
+    const second = spawnSync('/bin/bash', args, { encoding: 'utf8' })
+    expect(second.status, second.stderr).toBe(0)
+    expect(second.stdout).toContain('Reused identical immutable release')
+    expect(readFileSync(publishedManifest)).toEqual(published)
+
+    writeFileSync(sourceManifest, '{"schemaVersion":2,"files":["changed"]}\n', { mode: 0o600 })
+    const different = spawnSync('/bin/bash', args, { encoding: 'utf8' })
+    expect(different.status).not.toBe(0)
+    expect(different.stderr).toContain('existing release differs from the audited source manifest')
+    expect(readFileSync(publishedManifest)).toEqual(published)
+  })
+
   it.each([
     ['success', 0, false],
     ['probe-failure', 1, true],
@@ -427,7 +477,8 @@ printf 'COUNTS_AFTER full=%s fast=%s fallback=%s\\n' \
 MODE="$1"
 EVENTS="$2"
 ACTIVE=green
-BOUND=release-old
+ROUTER_BOUND=release-old
+BINDING=release-old
 GENERATION=7
 record_event() { printf '%s\n' "$*" >> "$EVENTS"; }
 require_slot() { printf '%s\n' "$1"; }
@@ -441,16 +492,17 @@ managed_runtime_paths() { :; }
 read_state_field() {
   case "$1" in active) printf '%s\n' "$ACTIVE" ;; generation) printf '%s\n' "$GENERATION" ;; previous) printf 'green\n' ;; esac
 }
-read_state_slot_release() { if [[ "$1" == blue ]]; then printf '%s\n' "$BOUND"; else printf 'release-source\n'; fi; }
+read_state_slot_release() { if [[ "$1" == blue ]]; then printf '%s\n' "$ROUTER_BOUND"; else printf 'release-source\n'; fi; }
+binding_values() { printf '%s\n/release/root\nmanifest\n' "$BINDING"; }
 retire_slot() { record_event "retire:$1"; acquire_lock; }
-bind_slot() { record_event "bind:$1:$2"; acquire_lock; BOUND="$2"; }
+bind_slot() { record_event "bind:$1:$2"; acquire_lock; BINDING="$2"; }
 normal_service_manager() { record_event "manager:$*"; return 0; }
 probe_slot() { record_event "probe:$1"; [[ "$MODE" != probe-failure ]]; }
 prewarm_slot() { record_event "prewarm:$1"; }
 switch_slot() {
   record_event "switch:$1"; acquire_lock
   if [[ "$MODE" == switch-compensated ]]; then ACTIVE=green; GENERATION=9; return 1; fi
-  ACTIVE="$1"; GENERATION=8
+  ACTIVE="$1"; ROUTER_BOUND="$BINDING"; GENERATION=8
 }
 attest_current() { record_event attest; [[ "$MODE" != attest-failure ]]; }
 transition_app blue release-new /release/new
@@ -483,6 +535,78 @@ transition_app blue release-new /release/new
       expect(sequence).not.toContain('manager:stop blue')
       expect(result.stderr).toContain('Route commit was compensated before settlement')
     }
+  })
+
+  it('resumes an exact stopped prebound candidate only with the sealed router snapshot', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-prebound-resume-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const events = join(root, 'events')
+    const runRoot = join(root, 'run')
+    mkdirSync(join(runRoot, 'slots'), { recursive: true, mode: 0o700 })
+    writeFileSync(join(runRoot, 'slots', 'blue.pid'), '999999\n', { mode: 0o600 })
+    const deploy = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
+    const prelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'prebound-resume.sh')
+    writeFileSync(harness, `${prelude}
+EVENTS="$1"
+RUN_DIR="$2"
+LIVE_DB_PATH=/runtime/live.db
+STATE_FILE=/runtime/router-state.json
+ACTIVE=green
+PREVIOUS=blue
+GENERATION=7
+ROUTER_BOUND=release-old
+BINDING=release-new
+record_event() { printf '%s\\n' "$*" >> "$EVENTS"; }
+require_slot() { printf '%s\\n' "$1"; }
+acquire_lock() { DEPLOYMENT_LOCK_OWNED=1; trap cleanup_operation EXIT; record_event acquire; }
+release_shared_deployment_lock() { DEPLOYMENT_LOCK_OWNED=0; record_event release-lock; }
+validate_state() { record_event validate; }
+managed_runtime_paths() { :; }
+validate_release_id() { [[ -n "$1" ]]; }
+read_state_field() {
+  case "$1" in active) printf '%s\\n' "$ACTIVE" ;; previous) printf '%s\\n' "$PREVIOUS" ;; generation) printf '%s\\n' "$GENERATION" ;; esac
+}
+read_state_slot_release() { [[ "$1" == blue ]] && printf '%s\\n' "$ROUTER_BOUND" || printf 'release-active\\n'; }
+binding_values() { printf '%s\\n/release/new\\nmanifest\\n127.0.0.1\\n3317\\n' "$BINDING"; }
+runtime_attestation_values() { printf '999999\\nblue\\nactive\\nrelease-new\\nmanifest\\n127.0.0.1\\n3317\\n/runtime/live.db\\n/runtime/router-state.json\\n'; }
+assert_release() { printf '%s\\n' "$2"; }
+release_manifest_sha() { printf 'manifest\\n'; }
+physical_path() { printf '%s\\n' "$1"; }
+slot_port() { printf '3317\\n'; }
+assert_private_file() { :; }
+kill() { return 1; }
+lsof() { return 0; }
+retire_slot() { record_event "retire:$1"; }
+bind_slot() { record_event "bind:$1:$2"; BINDING="$2"; }
+normal_service_manager() {
+  record_event "manager:$*"
+  [[ "$1" != status ]]
+}
+probe_slot() { record_event "probe:$1"; }
+prewarm_slot() { record_event "prewarm:$1"; }
+switch_slot() { record_event "switch:$1"; ACTIVE="$1"; ROUTER_BOUND="$BINDING"; GENERATION=8; }
+attest_current() { record_event attest; }
+ROUTER_BOUND=unbound-blue
+assert_planned_transition_snapshot blue 7 unbound-blue
+record_event unbound-snapshot
+ROUTER_BOUND=release-old
+transition_app blue release-new /release/new 7 release-old
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const result = spawnSync('/bin/bash', [harness, events, runRoot], {
+      encoding: 'utf8', env: { ...process.env, NODE_BIN: process.execPath },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Reusing stopped prebound candidate')
+    const sequence = readFileSync(events, 'utf8').trim().split('\n')
+    expect(sequence).not.toContain('retire:blue')
+    expect(sequence).not.toContain('bind:blue:release-new')
+    expect(sequence).toContain('unbound-snapshot')
+    expect(sequence).toContain('manager:status blue')
+    expect(sequence).toContain('manager:start blue')
+    expect(sequence).toContain('switch:blue')
+    expect(sequence).toContain('attest')
   })
 
   it('prewarms only candidate health and one manifest-bound static asset', async () => {

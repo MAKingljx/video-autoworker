@@ -86,15 +86,16 @@ TRANSITION_ROUTE_COMMITTED=0
 TRANSITION_BASE_GENERATION=""
 
 cleanup_operation() {
-  local original_status=$? physical_releases="" active="" active_release="" generation=""
+  local original_status=$? physical_releases="" active="" routed_release="" binding_release="" generation=""
   local full="?" fast="?" fallback="?" counter="" value=""
   set +e
   if [[ -n "$TRANSITION_CANDIDATE_SLOT" && "$TRANSITION_ROUTE_COMMITTED" == 0 ]]; then
     active="$(read_state_field active 2>/dev/null)"
-    active_release="$(read_state_slot_release "$TRANSITION_CANDIDATE_SLOT" 2>/dev/null)"
+    routed_release="$(read_state_slot_release "$TRANSITION_CANDIDATE_SLOT" 2>/dev/null)"
+    binding_release="$(binding_values "$TRANSITION_CANDIDATE_SLOT" 2>/dev/null | sed -n '1p')"
     generation="$(read_state_field generation 2>/dev/null)"
     if [[ "$active" == "$TRANSITION_CANDIDATE_SLOT" \
-      && "$active_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
+      && "$routed_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
       TRANSITION_ROUTE_COMMITTED=1
       printf 'Route commit observed during settlement: target=%s release=%s generation=%s\n' \
         "$TRANSITION_CANDIDATE_SLOT" "$TRANSITION_CANDIDATE_RELEASE" \
@@ -104,7 +105,7 @@ cleanup_operation() {
       printf 'Route commit was compensated before settlement: target=%s release=%s generation=%s; retain for formal retirement\n' \
         "$TRANSITION_CANDIDATE_SLOT" "$TRANSITION_CANDIDATE_RELEASE" "$generation" >&2
     elif [[ "$active" != "$TRANSITION_CANDIDATE_SLOT" \
-      && "$active_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
+      && "$binding_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
       normal_service_manager stop "$TRANSITION_CANDIDATE_SLOT" >/dev/null 2>&1 \
         || printf 'error: unable to stop the operation-owned candidate safely\n' >&2
     fi
@@ -252,8 +253,8 @@ Usage:
   deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh probe <blue|green>
   deploy-blue-green.sh retire <blue|green>
-  deploy-blue-green.sh preflight-app <blue|green> <release-id> <absolute-standalone-root>
-  deploy-blue-green.sh transition-app <blue|green> <release-id> <absolute-standalone-root>
+  deploy-blue-green.sh preflight-app <blue|green> <release-id> <absolute-standalone-root> [planned-generation original-target-release]
+  deploy-blue-green.sh transition-app <blue|green> <release-id> <absolute-standalone-root> [planned-generation original-target-release]
   deploy-blue-green.sh switch <blue|green>
   deploy-blue-green.sh rollback
   deploy-blue-green.sh status
@@ -1116,12 +1117,22 @@ stage_release() {
       fail "release directory must not be the source artifact or one of its descendants"
       ;;
   esac
-  target_root="$physical_releases/$release_id"
-  [[ ! -e "$target_root" && ! -L "$target_root" ]] || fail "release already exists: $target_root"
   [[ -f "$AUDITOR" ]] || fail "standalone artifact auditor is missing"
   full_audit_release "$physical_source" \
     || fail "source standalone artifact failed verification"
   source_manifest="$(release_manifest_sha "$physical_source")"
+  target_root="$physical_releases/$release_id"
+  if [[ -e "$target_root" || -L "$target_root" ]]; then
+    [[ -d "$target_root" && ! -L "$target_root" \
+      && "$(physical_path "$target_root")" == "$target_root" ]] \
+      || fail "existing release directory is unsafe: $target_root"
+    staged_root="$(assert_release "$release_id" "$target_root/standalone")"
+    staged_manifest="$(release_manifest_sha "$staged_root")"
+    [[ "$staged_manifest" == "$source_manifest" ]] \
+      || fail "existing release differs from the audited source manifest"
+    printf 'Reused identical immutable release: %s manifest=%s\n' "$release_id" "$staged_manifest"
+    return
+  fi
 
   STAGING_WORK_ROOT="$(mktemp -d "$physical_releases/.staging-$release_id.XXXXXX")"
   chmod 700 "$STAGING_WORK_ROOT"
@@ -4212,12 +4223,74 @@ switch_slot() {
   transition_with_verification "$target" switch
 }
 
+assert_planned_transition_snapshot() {
+  local target="$1" planned_generation="$2" original_target_release="$3"
+  [[ "$planned_generation" =~ ^[1-9][0-9]*$ ]] \
+    || fail "planned router generation must be a positive integer"
+  if [[ "$original_target_release" != "unbound-$target" ]]; then
+    validate_release_id "$original_target_release"
+  fi
+  [[ "$(read_state_field generation)" == "$planned_generation" \
+    && "$(read_state_field active)" != "$target" \
+    && "$(read_state_field previous)" == "$target" \
+    && "$(read_state_slot_release "$target")" == "$original_target_release" ]] \
+    || fail "router state changed after the application transition plan"
+}
+
+assert_stopped_prebound_candidate() {
+  local target="$1" release_id="$2" release_root="$3"
+  local binding manifest host port attestation pid role attested_release attested_manifest
+  local attested_host attested_port attested_db attested_router live_db canonical_router pid_file recorded_pid
+  release_root="$(assert_release "$release_id" "$release_root")"
+  binding="$(binding_values "$target")" || fail "$target prebound candidate binding is invalid"
+  manifest="$(release_manifest_sha "$release_root")"
+  host="$(printf '%s\n' "$binding" | sed -n '4p')"
+  port="$(printf '%s\n' "$binding" | sed -n '5p')"
+  [[ "$(printf '%s\n' "$binding" | sed -n '1p')" == "$release_id" \
+    && "$(printf '%s\n' "$binding" | sed -n '2p')" == "$release_root" \
+    && "$(printf '%s\n' "$binding" | sed -n '3p')" == "$manifest" \
+    && "$host" == 127.0.0.1 && "$port" == "$(slot_port "$target")" ]] \
+    || fail "$target prebound candidate does not match the planned release"
+  attestation="$(runtime_attestation_values "$target")" \
+    || fail "$target prebound runtime attestation is invalid"
+  pid="$(printf '%s\n' "$attestation" | sed -n '1p')"
+  role="$(printf '%s\n' "$attestation" | sed -n '3p')"
+  attested_release="$(printf '%s\n' "$attestation" | sed -n '4p')"
+  attested_manifest="$(printf '%s\n' "$attestation" | sed -n '5p')"
+  attested_host="$(printf '%s\n' "$attestation" | sed -n '6p')"
+  attested_port="$(printf '%s\n' "$attestation" | sed -n '7p')"
+  attested_db="$(printf '%s\n' "$attestation" | sed -n '8p')"
+  attested_router="$(printf '%s\n' "$attestation" | sed -n '9p')"
+  live_db="$(physical_path "$LIVE_DB_PATH")" || fail "unable to resolve AIWORKER_BG_LIVE_DB_PATH"
+  canonical_router="$(physical_path "$STATE_FILE")" || fail "unable to resolve router state path"
+  [[ "$role" == active && "$attested_release" == "$release_id" \
+    && "$attested_manifest" == "$manifest" && "$attested_host" == "$host" \
+    && "$attested_port" == "$port" && "$attested_db" == "$live_db" \
+    && "$attested_router" == "$canonical_router" ]] \
+    || fail "$target prebound runtime identity changed"
+  pid_file="$RUN_DIR/slots/$target.pid"
+  assert_private_file "$target PID file" "$pid_file"
+  recorded_pid="$(tr -d '[:space:]' < "$pid_file")"
+  [[ "$recorded_pid" == "$pid" ]] || fail "$target prebound PID file changed"
+  ! kill -0 "$pid" 2>/dev/null || fail "$target prebound PID is still running"
+  [[ -z "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)" ]] \
+    || fail "$target prebound port is still listening"
+  ! normal_service_manager status "$target" >/dev/null 2>&1 \
+    || fail "$target prebound service is still enabled or loaded"
+}
+
 preflight_app_transition() {
-  local target release_id release_root active previous state_release values pid manager
+  local target release_id release_root planned_generation original_target_release
+  local active previous state_release values pid manager binding_release lifecycle
   target="$(require_slot "${1:-}")"
   release_id="${2:-}"
   release_root="${3:-}"
+  planned_generation="${4:-}"
+  original_target_release="${5:-}"
   [[ -n "$release_id" && -n "$release_root" ]] || { usage >&2; exit 2; }
+  [[ -z "$planned_generation" && -z "$original_target_release" \
+    || -n "$planned_generation" && -n "$original_target_release" ]] \
+    || fail "planned generation and original target release must be provided together"
   verify_deployment_source_gate
   # Resolve the installed manager and every deterministic file/argument
   # contract before the coordinator pauses intake.
@@ -4239,6 +4312,21 @@ preflight_app_transition() {
   previous="$(read_state_field previous)"
   [[ "$active" != "$target" ]] || fail "target slot is already active"
   state_release="$(read_state_slot_release "$target")"
+  lifecycle="$state_release"
+  if [[ -n "$planned_generation" ]]; then
+    assert_planned_transition_snapshot "$target" "$planned_generation" "$original_target_release"
+    binding_release="$(binding_values "$target" 2>/dev/null | sed -n '1p' || true)"
+    if [[ "$binding_release" == "$release_id" ]]; then
+      assert_stopped_prebound_candidate "$target" "$release_id" "$release_root"
+      lifecycle="prebound-stopped"
+    fi
+  fi
+  if [[ "$lifecycle" == prebound-stopped ]]; then
+    normal_service_manager preflight all >/dev/null
+    printf 'Application transition preflight passed: target=%s release=%s lifecycle=%s\n' \
+      "$target" "$release_id" "$lifecycle"
+    return
+  fi
   if [[ "$state_release" != unbound-* ]]; then
     [[ "$previous" == "$target" ]] \
       || fail "a bound target must be the immediately previous slot"
@@ -4261,11 +4349,17 @@ preflight_app_transition() {
 }
 
 transition_app() {
-  local target release_id release_root state_release active generation
+  local target release_id release_root planned_generation original_target_release
+  local state_release active generation binding_release reuse_prebound=0
   target="$(require_slot "${1:-}")"
   release_id="${2:-}"
   release_root="${3:-}"
+  planned_generation="${4:-}"
+  original_target_release="${5:-}"
   [[ -n "$release_id" && -n "$release_root" ]] || { usage >&2; exit 2; }
+  [[ -z "$planned_generation" && -z "$original_target_release" \
+    || -n "$planned_generation" && -n "$original_target_release" ]] \
+    || fail "planned generation and original target release must be provided together"
   acquire_lock
   validate_state
   TRANSITION_BASE_GENERATION="$(read_state_field generation)"
@@ -4274,10 +4368,23 @@ transition_app() {
   managed_runtime_paths >/dev/null \
     || fail "managed runtime data paths changed after transition preflight"
   state_release="$(read_state_slot_release "$target")"
-  if [[ "$state_release" != unbound-* ]]; then
-    retire_slot "$target"
+  if [[ -n "$planned_generation" ]]; then
+    assert_planned_transition_snapshot "$target" "$planned_generation" "$original_target_release"
+    binding_release="$(binding_values "$target" 2>/dev/null | sed -n '1p' || true)"
+    if [[ "$binding_release" == "$release_id" ]]; then
+      assert_stopped_prebound_candidate "$target" "$release_id" "$release_root"
+      reuse_prebound=1
+    fi
   fi
-  bind_slot "$target" "$release_id" "$release_root"
+  if (( reuse_prebound == 0 )); then
+    if [[ "$state_release" != unbound-* ]]; then
+      retire_slot "$target"
+    fi
+    bind_slot "$target" "$release_id" "$release_root"
+  else
+    printf 'Reusing stopped prebound candidate: slot=%s release=%s generation=%s\n' \
+      "$target" "$release_id" "$planned_generation"
+  fi
   TRANSITION_CANDIDATE_SLOT="$target"
   TRANSITION_CANDIDATE_RELEASE="$release_id"
   normal_service_manager start "$target" >/dev/null \

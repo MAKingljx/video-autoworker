@@ -378,8 +378,13 @@ export function buildBlueGreenCommand({ script, step, plan, releasesDir }) {
   if (!isAbsolute(script) || resolve(script) !== script || !isAbsolute(releasesDir || '')
     || resolve(releasesDir) !== releasesDir) fail('command path is invalid')
   const target = plan?.router?.target
+  const plannedGeneration = plan?.router?.generation
+  const originalTargetRelease = plan?.router?.slots?.[target]
   if (!['blue', 'green'].includes(target) || !COMMIT.test(plan?.sourceCommit || '')
-    || plan.router.releaseId !== `${plan.sourceCommit}-runtime`) fail('command plan is invalid')
+    || plan.router.releaseId !== `${plan.sourceCommit}-runtime`
+    || !Number.isSafeInteger(plannedGeneration) || plannedGeneration < 1
+    || typeof originalTargetRelease !== 'string' || !originalTargetRelease
+    || /[\r\n\0]/u.test(originalTargetRelease)) fail('command plan is invalid')
   const definitions = {
     stage: [script, 'stage', plan.router.releaseId, plan.artifactRoot],
     retire: [script, 'retire', target],
@@ -389,9 +394,11 @@ export function buildBlueGreenCommand({ script, step, plan, releasesDir }) {
     switch: [script, 'switch', target],
     attest: [script, 'attest-current'],
     'preflight-app': [script, 'preflight-app', target, plan.router.releaseId,
-      join(releasesDir, plan.router.releaseId, 'standalone')],
+      join(releasesDir, plan.router.releaseId, 'standalone'), String(plannedGeneration),
+      originalTargetRelease],
     'transition-app': [script, 'transition-app', target, plan.router.releaseId,
-      join(releasesDir, plan.router.releaseId, 'standalone')],
+      join(releasesDir, plan.router.releaseId, 'standalone'), String(plannedGeneration),
+      originalTargetRelease],
   }
   const args = definitions[step]
   if (!args || args.some(value => typeof value !== 'string' || !value || /[\r\n\0]/u.test(value))) {
