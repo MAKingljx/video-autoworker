@@ -213,6 +213,7 @@ function seedSource(
     timeline?: Array<Record<string, unknown>>
     maxAttempts?: number
     register?: boolean
+    evidenceItems?: Array<Record<string, unknown>>
   },
 ): void {
   const selectedWorkId = input.selectedWorkId || workId
@@ -285,7 +286,7 @@ function seedSource(
   persistDirectorEvidenceFixtureReceipt(
     db,
     getDirectorEvidenceOutbox(db, registered.job.sourceTaskId)!,
-    [directorEvidenceFixtureItem(1, {
+    input.evidenceItems || [directorEvidenceFixtureItem(1, {
       '任务 ID': input.taskId,
       '素材 ID': String(outputValue.materialId),
     })],
@@ -1259,5 +1260,87 @@ describe('director extraction queue and service resilience', () => {
     expect(over.phaseInputBytes).toBeNull()
     expect(over.modelCalls).toBe(0)
     expect(over.proposalWrites).toBe(0)
+  })
+
+  it('keeps 38 reviewed material records inside the bounded understanding input', async () => {
+    const db = database()
+    const taskId = 'reviewed-evidence-38'
+    const materialId = `MAT-${taskId}`
+    const evidenceItems = Array.from({ length: 38 }, (_, index) => (
+      directorEvidenceFixtureItem(index + 1, {
+        '任务 ID': taskId,
+        '素材 ID': materialId,
+        '版本': 'v0.2.1',
+        'OCR 信息': '重复字幕'.repeat(120),
+        '人物信息': '人物观察'.repeat(120),
+        '声音信息': '环境声音'.repeat(120),
+      })
+    ))
+    seedSource(db, {
+      taskId,
+      timeline: visualPayload(70_000),
+      evidenceItems,
+    })
+    const brain = brainHarness()
+    await expect(runNextDirectorExtractionPhase(db, {
+      commandRunner: brain.commandRunner,
+      nowSeconds: 2_000,
+    })).resolves.toMatchObject({ outcome: 'awaiting_review' })
+    const evidenceIds = getDirectorExtractionCheckpoint(db, taskId, 'perception')!
+      .projectionReceipt!.entries.map(entry => entry.stableId)
+    expect(evidenceIds).toHaveLength(38)
+    resumeDirectorExtractionAfterReview(db, taskId, scope, {
+      material_evidence: evidenceIds,
+    }, { nowSeconds: 2_001 })
+
+    const fieldsById = new Map(evidenceIds.map((stableId, index) => [
+      stableId,
+      { ...evidenceItems[index], '作品 ID': workId },
+    ]))
+    const commandRunner: DirectorCommandRunner = async (command, input) => {
+      if (command === 'operate' && input.action === 'get_many'
+        && input.table === 'material_evidence') {
+        const stableIds = input.stableIds as string[]
+        return {
+          ok: true,
+          action: 'get_many',
+          table: input.table,
+          workId: input.workId,
+          missing: [],
+          records: stableIds.map(stableId => ({
+            table: input.table,
+            stableId,
+            state: '已核验',
+            reviewed: true,
+            fields: fieldsById.get(stableId),
+          })),
+        }
+      }
+      return brain.commandRunner(command, input)
+    }
+    let phaseInput: Record<string, unknown> | null = null
+    await expect(runNextDirectorExtractionPhase(db, {
+      commandRunner,
+      runner: understandingRunner(input => { phaseInput = input }),
+      nowSeconds: 2_002,
+    })).resolves.toMatchObject({ outcome: 'awaiting_review' })
+    expect(phaseInput).not.toBeNull()
+    expect(Buffer.byteLength(JSON.stringify(phaseInput), 'utf8'))
+      .toBeLessThanOrEqual(DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES)
+    const reviewed = phaseInput!.reviewedCandidates as Array<{
+      stableId: string
+      fields: Record<string, unknown>
+    }>
+    expect(reviewed).toHaveLength(38)
+    expect(reviewed.map(record => record.stableId)).toEqual(evidenceIds)
+    for (const record of reviewed) {
+      expect(record.fields).toMatchObject({
+        '素材 ID': materialId,
+        '版本': 'v0.2.1',
+      })
+      expect(record.fields).not.toHaveProperty('OCR 信息')
+      expect(record.fields).not.toHaveProperty('人物信息')
+      expect(record.fields).not.toHaveProperty('声音信息')
+    }
   })
 })

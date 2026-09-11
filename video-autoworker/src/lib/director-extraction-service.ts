@@ -218,6 +218,30 @@ function reviewedReferenceDigests(
     }).sort((left, right) => left.stableId.localeCompare(right.stableId))]))
 }
 
+const REVIEWED_MATERIAL_EVIDENCE_INPUT_FIELDS = Object.freeze([
+  '素材 ID',
+  '起始时间码',
+  '结束时间码',
+  '证据摘要',
+  '置信度',
+  '分析版本',
+  '版本',
+] as const)
+
+function reviewedCandidateFieldsForInput(
+  table: string,
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = normalizedReviewedReferenceRecord(record)
+  if (table !== 'material_evidence') {
+    return compactDirectorLearningRecord(normalized as DirectorLearningRecord).fields
+  }
+  const fields = normalized.fields as Record<string, unknown>
+  return Object.fromEntries(REVIEWED_MATERIAL_EVIDENCE_INPUT_FIELDS
+    .filter(name => Object.hasOwn(fields, name))
+    .map(name => [name, fields[name]]))
+}
+
 function reviewedCandidatesForInput(
   acceptedEntries: DirectorExtractionProjectionEntry[],
   reviewedRecords: Record<string, Array<Record<string, unknown>>>,
@@ -231,7 +255,11 @@ function reviewedCandidatesForInput(
       kind: entry.kind,
       table: entry.table,
       stableId: entry.stableId,
-      fields: normalizedReviewedReferenceRecord(record).fields,
+      // The governed history seed already carries the detailed visual evidence.
+      // Keep only the human-reviewed evidence anchor here; the full normalized
+      // record remains protected by reviewedReferenceDigests and is re-read
+      // before projection.
+      fields: reviewedCandidateFieldsForInput(entry.table, record),
     }
   })
 }
