@@ -802,7 +802,9 @@ async function applyPlan(values) {
       }
       return 'verified-existing-release'
     },
-    retire: slot => deploy('retire', slot),
+    // Retirement runs the same release-readiness verifier as switching, so it
+    // must receive the fresh session-scoped convergence proof as well.
+    retire: slot => deployWithProof('retire', slot),
     bind: () => deploy('bind', plan.router.target, plan.router.releaseId,
       join(process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases'),
         plan.router.releaseId, 'standalone')),
