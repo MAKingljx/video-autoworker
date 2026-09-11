@@ -2038,6 +2038,7 @@ init_state() {
 
 assert_baseline() {
   local pathname live_db canonical_router_state values baseline_release baseline_root baseline_manifest
+  local physical_releases expected_baseline_root baseline_parent expected_baseline_parent
   pathname="$(baseline_file)"
   assert_private_file "blue-green baseline" "$pathname"
   [[ -n "$LIVE_DB_PATH" ]] || fail "AIWORKER_BG_LIVE_DB_PATH is required for blue-green lifecycle operations"
@@ -2083,9 +2084,22 @@ NODE
   baseline_release="$(printf '%s\n' "$values" | sed -n '2p')"
   baseline_root="$(printf '%s\n' "$values" | sed -n '3p')"
   baseline_manifest="$(printf '%s\n' "$values" | sed -n '4p')"
-  baseline_root="$(assert_release "$baseline_release" "$baseline_root")"
-  [[ "$(release_manifest_sha "$baseline_root")" == "$baseline_manifest" ]] \
-    || fail "blue-green baseline release manifest changed"
+  physical_releases="$(physical_path "$RELEASES_DIR")"
+  expected_baseline_root="$physical_releases/$baseline_release/standalone"
+  [[ "$baseline_root" == "$expected_baseline_root" ]] \
+    || fail "blue-green baseline release root is not canonical"
+  baseline_parent="${baseline_root%/standalone}"
+  expected_baseline_parent="$physical_releases/$baseline_release"
+  if [[ -e "$baseline_parent" || -L "$baseline_parent" ]]; then
+    [[ -d "$baseline_parent" && ! -L "$baseline_parent" \
+      && "$(physical_path "$baseline_parent")" == "$expected_baseline_parent" ]] \
+      || fail "blue-green baseline release parent is unsafe"
+  fi
+  if [[ -e "$baseline_root" || -L "$baseline_root" ]]; then
+    baseline_root="$(assert_release "$baseline_release" "$baseline_root")"
+    [[ "$(release_manifest_sha "$baseline_root")" == "$baseline_manifest" ]] \
+      || fail "blue-green baseline release manifest changed"
+  fi
   printf '%s\n' "$values"
 }
 

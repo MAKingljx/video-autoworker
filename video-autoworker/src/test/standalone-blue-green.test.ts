@@ -1802,6 +1802,51 @@ printf '%s\\n' "$MC_OPENCLAW_PROFILE_TARGET" "$MC_MATERIALS_REMOTE_PYTHON"
     expect(JSON.parse(readFileSync(join(runDir, 'router-state.json'), 'utf8')).active).toBe('blue')
   })
 
+  it('retains the immutable baseline identity fence after its old artifact is retired', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-retired-baseline-artifact-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const runDir = join(root, 'run')
+    const releasesDir = join(root, 'releases')
+    const stateFile = join(runDir, 'router-state.json')
+    const liveDb = join(root, 'mission-control.db')
+    const baselineCommit = 'a'.repeat(40)
+    const baselineRelease = `${baselineCommit}-runtime`
+    const baselineRoot = join(releasesDir, baselineRelease, 'standalone')
+    mkdirSync(runDir, { recursive: true, mode: 0o700 })
+    mkdirSync(releasesDir, { recursive: true, mode: 0o700 })
+    writeFileSync(stateFile, '{}\n', { mode: 0o600 })
+    writeFileSync(liveDb, 'fixture\n', { mode: 0o600 })
+    writeFileSync(join(runDir, 'baseline.json'), `${JSON.stringify({
+      schema: 'video-autoworker-blue-green-baseline/v3',
+      baselineSlot: 'blue', baselineReleaseId: baselineRelease,
+      baselineReleaseRoot: baselineRoot, baselineManifestSha256: 'b'.repeat(64),
+      legacyReleaseId: 'legacy-runtime', legacyPid: 123,
+      evidenceSha256: 'c'.repeat(64), dbPath: liveDb,
+      routerStatePath: stateFile, routerPort: 3017,
+      n8nPid: 456, n8nDbPath: join(root, 'n8n.sqlite'),
+      baselineSourceCommit: baselineCommit,
+      n8nWorkflowSourceCommit: 'd'.repeat(40),
+      n8nWorkflowProtocol: 'slot-v1-execution-owner-v1',
+      n8nWorkflowDigest: 'e'.repeat(64), completedAt: 1,
+    })}\n`, { mode: 0o600 })
+    const deployScript = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = deployScript.slice(0, deployScript.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'baseline-harness.sh')
+    writeFileSync(harness, `${functionPrelude}
+RUN_DIR=${JSON.stringify(runDir)}
+RELEASES_DIR=${JSON.stringify(releasesDir)}
+STATE_FILE=${JSON.stringify(stateFile)}
+LIVE_DB_PATH=${JSON.stringify(liveDb)}
+assert_baseline
+`)
+
+    const output = execFileSync('bash', [harness], {
+      env: { ...process.env, NODE_BIN: process.execPath }, encoding: 'utf8',
+    }).trim().split('\n')
+    expect(output).toEqual(['legacy-runtime', baselineRelease, baselineRoot, 'b'.repeat(64)])
+    expect(existsSync(baselineRoot)).toBe(false)
+  })
+
   it('rejects a tenant-scoped intake response as a global release gate', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-global-readiness-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
