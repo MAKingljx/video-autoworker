@@ -983,27 +983,26 @@ export function parseDirectorExtractionOutput(
     const fields = candidateFieldSchemas[candidate.kind]
     if (!fields) throw new Error('director_extraction_candidate_kind_invalid')
     candidate.fields = fields.parse(candidate.fields)
-    assertSafeCandidateValue(candidate.fields)
     const semanticFields = DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND[
       candidate.kind as keyof typeof DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND
     ]
     if (!semanticFields) throw new Error('director_extraction_candidate_kind_invalid')
+    const canonicalByField = new Map<string, string[]>()
     for (const semantic of ['title', 'summary', 'rationale'] as const) {
-      const fieldValue = String(candidate.fields[semanticFields[semantic]] || '').trim()
+      const fieldName = semanticFields[semantic]
       const expected = candidate[semantic].trim()
-      const present = semantic === 'title'
-        ? fieldValue === expected
-        : fieldValue.includes(expected)
-      if (!present) {
-        throw new Error(
-          `director_extraction_candidate_semantics_missing:${candidate.kind}:${semantic}`,
-        )
-      }
+      const values = canonicalByField.get(fieldName) || []
+      if (!values.includes(expected)) values.push(expected)
+      canonicalByField.set(fieldName, values)
     }
-    const fieldConfidence = candidate.fields['置信度']
-    if (typeof fieldConfidence === 'number' && fieldConfidence !== candidate.confidence) {
-      throw new Error('director_extraction_confidence_mismatch')
+    for (const [fieldName, values] of canonicalByField) {
+      candidate.fields[fieldName] = values.join('\n')
     }
+    if (Object.hasOwn(candidate.fields, '置信度')) {
+      candidate.fields['置信度'] = candidate.confidence
+    }
+    candidate.fields = fields.parse(candidate.fields)
+    assertSafeCandidateValue(candidate.fields)
     assertCandidateLineage(candidate)
   }
   const serialized = JSON.stringify(parsed)

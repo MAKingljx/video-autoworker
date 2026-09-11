@@ -1190,6 +1190,90 @@ export function retryLegacyOversizedUnderstandingPhase(
   return after
 }
 
+export function retryCorrectedUnderstandingSemanticFailure(
+  db: Database.Database,
+  sourceTaskId: string,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number } = {},
+): DirectorExtractionJob {
+  const errorPattern = /^director_extraction_candidate_semantics_missing:(?:person_profile|story_node):(?:title|summary|rationale)$/u
+  const before = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (!before) throw new Error('director_extraction_source_not_found')
+  if (before.status !== 'failed' || before.currentPhase !== 'understanding'
+    || !before.lastErrorCode || !errorPattern.test(before.lastErrorCode)
+    || !before.phaseTaskId || before.attemptCount !== 1 || before.revision !== 3
+    || !(before.reviewedReferences.material_evidence?.length)) return before
+  const identity = directorExtractionDigest({
+    sourceBindingId: before.sourceBindingId,
+    workId: before.workId,
+    workQueryDigest: before.workQueryDigest,
+    materialId: before.materialId,
+    sourceResultSha256: before.sourceResultSha256,
+    extractionContractDigest: before.extractionContractDigest,
+    reviewedReferences: before.reviewedReferences,
+    phaseTaskId: before.phaseTaskId,
+  })
+  const now = options.nowSeconds ?? Math.floor(Date.now() / 1_000)
+  const repaired = db.transaction(() => {
+    const current = getDirectorExtractionJob(db, sourceTaskId, scope)
+    if (!current || current.status !== 'failed' || current.currentPhase !== 'understanding'
+      || current.lastErrorCode !== before.lastErrorCode
+      || current.phaseTaskId !== before.phaseTaskId || current.attemptCount !== 1
+      || current.revision !== 3 || directorExtractionDigest({
+        sourceBindingId: current.sourceBindingId,
+        workId: current.workId,
+        workQueryDigest: current.workQueryDigest,
+        materialId: current.materialId,
+        sourceResultSha256: current.sourceResultSha256,
+        extractionContractDigest: current.extractionContractDigest,
+        reviewedReferences: current.reviewedReferences,
+        phaseTaskId: current.phaseTaskId,
+      }) !== identity) throw new Error('director_extraction_semantic_retry_conflict')
+    return db.prepare(`
+      UPDATE n8n_task_runs AS phase
+      SET status = 'queued', attempt_count = 0, error = NULL,
+          started_at = NULL, completed_at = NULL, updated_at = ?,
+          routing = json_set(routing, '$.retryRevision', 3)
+      WHERE phase.task_id = ? AND phase.tenant_id = ? AND phase.workspace_id = ?
+        AND phase.source = 'n8n-node' AND phase.status = 'failed'
+        AND phase.attempt_count = 1 AND phase.error = ? AND phase.updated_at = ?
+        AND COALESCE(json_extract(phase.routing, '$.retryRevision'), 0) = 2
+        AND json_valid(phase.input) = 1
+        AND json_extract(phase.input, '$.childKind') = ?
+        AND json_extract(phase.input, '$.directorPhase') = 'understanding'
+        AND json_extract(phase.input, '$.parentTaskId') = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM n8n_child_execution_leases lease
+          WHERE lease.task_id = phase.task_id AND lease.tenant_id = phase.tenant_id
+            AND lease.workspace_id = phase.workspace_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_checkpoints checkpoint
+          WHERE checkpoint.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_projection_receipts projection
+          WHERE projection.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_segments segment
+          WHERE segment.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_review_receipts review
+          WHERE review.phase_task_id = phase.task_id
+        )
+    `).run(now, before.phaseTaskId, scope.tenantId, scope.workspaceId,
+      before.lastErrorCode, before.updatedAt, CHILD_KIND, sourceTaskId).changes
+  }).immediate()
+  if (repaired !== 1) throw new Error('director_extraction_semantic_retry_conflict')
+  const after = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (!after || after.status !== 'pending' || after.currentPhase !== 'understanding'
+    || after.phaseTaskId !== before.phaseTaskId || after.lastErrorCode !== null
+    || after.revision !== 4) throw new Error('director_extraction_semantic_retry_conflict')
+  return after
+}
+
 function insertReview(
   db: Database.Database,
   phaseTaskId: string,

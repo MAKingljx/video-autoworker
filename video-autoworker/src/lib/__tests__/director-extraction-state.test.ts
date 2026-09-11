@@ -212,6 +212,30 @@ describe('director extraction state contract', () => {
     ]))).toThrow()
   })
 
+  it('derives duplicated projection semantics from the canonical candidate fields', () => {
+    const profile = candidate('person_profile', {
+      '人物名称': '模型重复名称',
+      '人物 ID': 'PERSON-XIAOLIN',
+      '人物弧光': '模型重复摘要',
+      '矛盾': '模型重复理由',
+      '置信度': 0.2,
+    })
+    profile.title = '小林'
+    profile.summary = '人物开始重新检验原有判断。'
+    profile.rationale = '该变化由已核验证据支持。'
+    profile.confidence = 0.8
+
+    const parsed = parseDirectorExtractionOutput(
+      'understanding', output('understanding', [profile]),
+    ).candidates[0]
+    expect(parsed.fields).toMatchObject({
+      '人物名称': '小林',
+      '人物弧光': '人物开始重新检验原有判断。',
+      '矛盾': '该变化由已核验证据支持。',
+      '置信度': 0.8,
+    })
+  })
+
   it('rejects sensitive content before it can become a projection candidate', () => {
     const unsafeValues = [
       '/Users/operator/private/video.mov',

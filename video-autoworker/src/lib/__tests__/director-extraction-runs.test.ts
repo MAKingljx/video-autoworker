@@ -16,6 +16,7 @@ import {
   listDirectorExtractionJobsForWork,
   projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
+  retryCorrectedUnderstandingSemanticFailure,
   retryLegacyOversizedUnderstandingPhase,
   retryExhaustedDirectorExtractionJob,
   renewDirectorExtractionLease,
@@ -763,6 +764,39 @@ describe('director extraction source-child task chain', () => {
       db, sourceTaskId, scope, { nowSeconds: 108 },
     )).toMatchObject({ status: 'conflict', revision: 2,
       lastErrorCode: 'director_extraction_phase_input_too_large' })
+  })
+
+  it('repairs the one corrected understanding semantic mirror failure only once', async () => {
+    const sourceTaskId = seedSource(db, 'corrected-understanding-semantics')
+    registerDirectorExtractionJob(db, sourceTaskId, scope)
+    await completeCurrent(db, 100)
+    const understanding = resumeDirectorExtractionAfterReview(db, sourceTaskId, scope, {
+      material_evidence: ['EVIDENCE-001'],
+    }, { nowSeconds: 102 })
+    const phaseTaskId = understanding.phaseTaskId!
+    db.prepare(`
+      UPDATE n8n_task_runs SET routing = json_set(routing, '$.retryRevision', 2)
+      WHERE task_id = ?
+    `).run(phaseTaskId)
+    const claimed = claimNextDirectorExtractionJob(db, {
+      nowSeconds: 103, ownerInstanceId: '1'.repeat(64), leaseToken: '2'.repeat(64),
+    })!
+    expect(failDirectorExtractionPhase(
+      db, claimed, 'director_extraction_candidate_semantics_missing:person_profile:title',
+      { nowSeconds: 104, conflict: true },
+    )).toMatchObject({ status: 'failed', currentPhase: 'understanding', revision: 3 })
+    const reviewCount = db.prepare('SELECT COUNT(*) FROM director_extraction_review_receipts')
+      .pluck().get()
+    expect(retryCorrectedUnderstandingSemanticFailure(
+      db, sourceTaskId, scope, { nowSeconds: 105 },
+    )).toMatchObject({ status: 'pending', phaseTaskId, attemptCount: 0,
+      lastErrorCode: null, revision: 4 })
+    expect(db.prepare('SELECT COUNT(*) FROM director_extraction_review_receipts').pluck().get())
+      .toBe(reviewCount)
+    expect(db.prepare('SELECT status FROM n8n_director_evidence_outbox WHERE task_id = ?')
+      .pluck().get(sourceTaskId)).toBe('delivered')
+    expect(retryCorrectedUnderstandingSemanticFailure(db, sourceTaskId, scope))
+      .toMatchObject({ status: 'pending', revision: 4 })
   })
 
   it('creates each later phase only after append-only review and intent receipts', async () => {

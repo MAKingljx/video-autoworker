@@ -8,6 +8,7 @@ import {
   listDirectorExtractionJobsForWork,
   projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
+  retryCorrectedUnderstandingSemanticFailure,
   retryLegacyOversizedUnderstandingPhase,
   retryExhaustedDirectorExtractionJob,
   type DirectorExtractionJob,
@@ -131,6 +132,11 @@ export async function startDirectorExtractionForWork(
     if (repaired.status === 'pending' && repaired.currentPhase === 'understanding') {
       return repaired
     }
+    const semanticRepair = retryCorrectedUnderstandingSemanticFailure(
+      db, existing.sourceTaskId, scope,
+    )
+    if (semanticRepair.status === 'pending'
+      && semanticRepair.currentPhase === 'understanding') return semanticRepair
     return retryExhaustedDirectorExtractionJob(db, existing.sourceTaskId, scope)
   }
   // An explicit start may repair only a fully verified, already-written projection.

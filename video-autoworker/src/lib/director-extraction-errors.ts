@@ -90,6 +90,7 @@ export function directorExtractionHttpFailure(error: unknown): DirectorExtractio
 }
 
 export function isDirectorExtractionDeterministicConflict(code: string): boolean {
+  if (/^director_extraction_candidate_semantics_missing:/u.test(code)) return false
   return DETERMINISTIC_SIZE_CONFLICTS.has(code)
     || /(?:source|binding|contract|checkpoint|projection|authority|evidence_reference|reviewed_(?:cases|reference|candidate)|candidate_|learning_reference|previous_version|previous_entity|technique_reference)/u
     .test(code)
