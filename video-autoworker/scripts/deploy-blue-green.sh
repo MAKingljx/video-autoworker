@@ -44,6 +44,7 @@ BOOTSTRAP_RECOVERY_GUARD_READY_SECONDS=120
 GUARD_STATUS_TIMEOUT_MS=10000
 LEADER_TIMEOUT_SECONDS="${AIWORKER_BG_LEADER_TIMEOUT_SECONDS:-90}"
 RETIRE_QUIESCE_WAIT_SECONDS="${AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS:-900}"
+AUTHORIZED_LEGACY_STOP="${AIWORKER_BG_AUTHORIZED_LEGACY_STOP:-0}"
 STAGING_WORK_ROOT=""
 BOOTSTRAP_MAINTENANCE=0
 DEPLOYMENT_SOURCE_GATE_COMPLETE=0
@@ -931,6 +932,8 @@ validate_run_configuration() {
   [[ "$RETIRE_QUIESCE_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
     && (( 10#$RETIRE_QUIESCE_WAIT_SECONDS >= 30 && 10#$RETIRE_QUIESCE_WAIT_SECONDS <= 14400 )) \
     || fail "AIWORKER_BG_RETIRE_QUIESCE_WAIT_SECONDS must be between 30 and 14400"
+  [[ "$AUTHORIZED_LEGACY_STOP" == 0 || "$AUTHORIZED_LEGACY_STOP" == 1 ]] \
+    || fail "AIWORKER_BG_AUTHORIZED_LEGACY_STOP must be 0 or 1"
 }
 
 prepare_run_dir() {
@@ -3521,6 +3524,14 @@ if (drain.active !== 0 || drain.childExecutionLeases !== 0
 NODE
 }
 
+verify_retirement_projection_compatibility() {
+  if [[ "$AUTHORIZED_LEGACY_STOP" == 1 ]]; then
+    printf 'Authorized legacy stop: current projection-chain source compatibility check skipped after drain, scheduler, router, and identity gates\n' >&2
+    return 0
+  fi
+  verify_active_director_projection_chain
+}
+
 retire_slot() {
   local slot active previous generation release_id state_release binding manifest host port manager
   local attestation pid role attested_release attested_manifest attested_db attested_router live_db canonical_router_state
@@ -3631,7 +3642,7 @@ retire_slot() {
     && "$(read_state_field generation)" == "$generation" ]] \
     || fail "$slot router state changed after frozen callback quiescence"
 
-  if ! verify_active_director_projection_chain; then
+  if ! verify_retirement_projection_compatibility; then
     rm -f -- "$(callback_freeze_file "$slot")"
     fail "$slot produced an incompatible projection outbox row; callback admission was reopened and the old slot remains running"
   fi

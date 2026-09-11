@@ -1062,6 +1062,59 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     })
   })
 
+  it('rejects an invalid authorized maintenance replacement mode before creating state', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-maintenance-replace-config-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = cleanDeployScriptFixture(root)
+    const runDir = join(root, 'run')
+
+    const result = spawnSync('bash', [script, 'init', 'blue'], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        AIWORKER_BG_RUN_DIR: runDir,
+        AIWORKER_BG_RELEASES_DIR: join(root, 'releases'),
+        AIWORKER_BG_AUTHORIZED_LEGACY_STOP: '2',
+        NODE_BIN: process.execPath,
+      },
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('AIWORKER_BG_AUTHORIZED_LEGACY_STOP must be 0 or 1')
+    expect(existsSync(join(runDir, 'router-state.json'))).toBe(false)
+  })
+
+  it('skips only the retirement projection check in authorized maintenance replacement mode', () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-maintenance-replace-policy-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const script = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const functionPrelude = script.slice(0, script.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'maintenance-replace-policy.sh')
+    const eventsFile = join(root, 'events')
+    writeFileSync(harness, `${functionPrelude}
+EVENTS_FILE="$1"
+verify_active_director_projection_chain() {
+  printf 'projection-check\\n' >> "$EVENTS_FILE"
+  return 1
+}
+AUTHORIZED_LEGACY_STOP=0
+if verify_retirement_projection_compatibility; then
+  printf 'strict mode accepted a failed projection check\\n' >&2
+  exit 9
+fi
+AUTHORIZED_LEGACY_STOP=1
+verify_retirement_projection_compatibility
+`)
+
+    const result = spawnSync('bash', [harness, eventsFile], {
+      env: { ...process.env, NODE_BIN: process.execPath },
+      encoding: 'utf8',
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('current projection-chain source compatibility check skipped')
+    expect(readFileSync(eventsFile, 'utf8').trim().split('\n')).toEqual(['projection-check'])
+  })
+
   it('binds the unchanged product directory inside a prefixed repository tree', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-router-prefixed-cli-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -2704,6 +2757,10 @@ check_legacy_databases_quiescent "$1" "$2"
     )
     expect(transitionBody).toContain('[[ "$mode" == switch ]]')
     expect(transitionBody).toContain('"$transition_from_projection_contract"')
+    expect(retireBody.indexOf('wait_for_frozen_retirement_quiescence'))
+      .toBeLessThan(retireBody.indexOf('verify_retirement_projection_compatibility'))
+    expect(retireBody.indexOf('verify_retirement_projection_compatibility'))
+      .toBeLessThan(retireBody.indexOf('"$manager" stop "$slot"'))
     expect(deployScript).not.toMatch(/\b(?:launchctl|n8n-stop|n8n-start)\b/u)
     expect(deployScript).toContain('source "$SHARED_DEPLOYMENT_LOCK_SHELL"')
     expect(deployScript).toContain('acquire_shared_deployment_lock')
@@ -2872,10 +2929,10 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(retireBody).toContain('$DRAIN_PATH')
     expect(retireBody).toContain('$SCHEDULER_PATH')
     expect(retireBody).not.toContain('$READINESS_PATH')
-    expect(retireBody).toContain('verify_active_director_projection_chain')
+    expect(retireBody).toContain('verify_retirement_projection_compatibility')
     expect(retireBody.indexOf('wait_for_frozen_retirement_quiescence'))
-      .toBeLessThan(retireBody.indexOf('verify_active_director_projection_chain'))
-    expect(retireBody.indexOf('verify_active_director_projection_chain'))
+      .toBeLessThan(retireBody.indexOf('verify_retirement_projection_compatibility'))
+    expect(retireBody.indexOf('verify_retirement_projection_compatibility'))
       .toBeLessThan(retireBody.indexOf('"$manager" stop "$slot"'))
     expect(deployScript).toContain('slot_established_connection_count')
     expect(deployScript).toContain('-sTCP:ESTABLISHED')
