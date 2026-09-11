@@ -51,6 +51,11 @@ const productRoot = requestedProductRoot ? realpathSync.native(requestedProductR
 const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const PLAN_SCHEMA = 'video-autoworker-release-impact-plan/v2'
+const INSTALL_STEP_BY_COMPONENT = Object.freeze({
+  taskFlow: 'install-task-flow',
+  directorBrain: 'install-director-brain',
+  videoCommand: 'install-video-command',
+})
 let activeOperationSignal = null
 let activeRuntimeEnvironment = {}
 
@@ -482,15 +487,16 @@ export async function applyReleaseImpactPlan(planSource, services) {
     }
     for (const component of ['taskFlow', 'directorBrain', 'videoCommand']) {
       if (plan.components[component].changed) {
+        const installStep = INSTALL_STEP_BY_COMPONENT[component]
         const completed = services.completedInstall?.(component) || null
         if (completed) {
           receipts.push(completed)
-          await record({ step: `install-${component}`, status: 'skipped',
-            phase: `install-${component}`, effectState: 'verified_previous_receipt' })
+          await record({ step: installStep, status: 'skipped',
+            phase: installStep, effectState: 'verified_previous_receipt' })
           continue
         }
         installInFlight = component
-        receipts.push(await runStep(`install-${component}`, () => services.install(component, plan),
+        receipts.push(await runStep(installStep, () => services.install(component, plan),
           { effectState: 'component_installed' }))
         installInFlight = null
       }
@@ -1085,7 +1091,8 @@ async function executePlan(values, operation = null) {
   const priorInstallReceipt = component => {
     if (!operation?.resume || !plan.receiptDir) return null
     const event = [...(operation.previousEvents || [])].reverse().find(item => (
-      item.step === `install-${component}` && ['started', 'completed'].includes(item.status)
+      item.step === INSTALL_STEP_BY_COMPONENT[component]
+      && ['started', 'completed'].includes(item.status)
       && item.attemptId
     ))
     if (!event) return null

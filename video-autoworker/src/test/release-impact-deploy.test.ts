@@ -67,7 +67,7 @@ const componentNames: ComponentName[] = [
 function components(changed: ComponentName[] = []): ComponentSummary {
   return Object.fromEntries(componentNames
     .map(name => [name, {
-      before: digest(name[0]), after: digest(changed.includes(name) ? 'f' : name[0]),
+      before: digest(name[0]), after: digest(changed.includes(name) ? '9' : name[0]),
       changed: changed.includes(name),
     }])) as ComponentSummary
 }
@@ -282,6 +282,26 @@ describe('release impact deployment', () => {
     expect(events).not.toContain('switch')
   })
 
+  it('records plugin installation steps with journal-safe stable names', async () => {
+    const events: string[] = []
+    const records: string[] = []
+    const journaled = services(events) as ReturnType<typeof services> & {
+      operation?: { record: (event: { step: string }) => void }
+    }
+    journaled.operation = { record: event => {
+      if (!/^[a-z0-9][a-z0-9._:-]{0,100}$/u.test(event.step)) {
+        throw new Error('journal rejected an unsafe step name')
+      }
+      records.push(event.step)
+    } }
+    await expect(applyReleaseImpactPlan(
+      plan(['taskFlow', 'directorBrain', 'videoCommand']), journaled,
+    )).resolves.toMatchObject({ ok: true })
+    expect(records).toEqual(expect.arrayContaining([
+      'install-task-flow', 'install-director-brain', 'install-video-command',
+    ]))
+  })
+
   it('stages before pausing and delegates the app transition in canonical order', async () => {
     const events: string[] = []
     await expect(applyReleaseImpactPlan(plan(['app']), services(events))).resolves.toMatchObject({
@@ -361,7 +381,7 @@ describe('release impact deployment', () => {
       operation?: { record: (event: { step: string; status: string }) => void }
     }
     journaled.operation = { record: event => {
-      if (event.step === 'install-directorBrain' && event.status === 'started') {
+      if (event.step === 'install-director-brain' && event.status === 'started') {
         throw new Error('journal unavailable')
       }
     } }
