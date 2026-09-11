@@ -9,11 +9,17 @@ const targetSchema = z.object({
   table: stableText.max(64),
   stableId: stableText.max(160),
   workId: stableText.max(160).nullable().optional(),
+  candidateKey: stableText.max(120).optional(),
+  kind: stableText.max(60).optional(),
+  reviewId: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  reviewRevision: z.number().int().nonnegative().safe().optional(),
+  sourceTaskId: stableText.max(160).optional(),
+  workVersion: z.string().regex(/^v\d+\.\d+\.\d+$/u).optional(),
   state: stableText.max(32),
   version: z.string().regex(/^v\d+\.\d+\.\d+$/u),
   targetStatuses: z.array(stableText.max(32)).min(1).max(3),
   name: z.string().max(240).optional(),
-  workName: z.string().max(80).optional(),
+  workName: z.string().max(240).optional(),
   start: z.string().max(32).optional(),
   end: z.string().max(32).optional(),
   summary: z.string().max(2_000).optional(),
@@ -105,6 +111,29 @@ export function getDirectorReviewBatch(
   batchId: string,
 ): DirectorReviewBatch | null {
   return readBatch(db, scope, actorKey, batchId)
+}
+
+export function getDirectorReviewBatchByRequest(
+  db: Database.Database,
+  scope: N8nTaskScope,
+  input: {
+    actorKey: string
+    requestKey: string
+    decision: 'approve' | 'reject'
+  },
+): DirectorReviewBatch | null {
+  ensureDirectorMaintainabilitySchema(db)
+  assertScope(scope)
+  const row = db.prepare(`
+    SELECT batch_id FROM director_review_batches
+    WHERE tenant_id = ? AND workspace_id = ? AND actor_digest = ? AND request_digest = ?
+  `).get(
+    scope.tenantId,
+    scope.workspaceId,
+    actorDigest(input.actorKey),
+    requestDigest(`${input.requestKey}\0${input.decision}`),
+  ) as { batch_id: string } | undefined
+  return row ? readBatch(db, scope, input.actorKey, row.batch_id) : null
 }
 
 export function prepareDirectorReviewBatch(

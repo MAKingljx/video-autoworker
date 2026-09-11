@@ -14,7 +14,7 @@ const reviewBatchTarget = z.object({
   version: z.string().regex(/^v\d+\.\d+\.\d+$/u),
   targetStatuses: z.array(z.string().trim().min(1).max(32)).min(1).max(3),
   name: z.string().max(240).optional(),
-  workName: z.string().max(80).optional(),
+  workName: z.string().max(240).optional(),
   start: z.string().max(32).optional(),
   end: z.string().max(32).optional(),
   summary: z.string().max(2_000).optional(),

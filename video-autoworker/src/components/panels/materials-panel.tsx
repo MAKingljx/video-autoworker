@@ -8,10 +8,11 @@ import {
   VideoAnalysisResultsPanel,
   type AnalysisMaterialVideo,
 } from '@/components/panels/video-analysis-results-panel'
+import { DirectorLearningReviewPanel } from '@/components/panels/director-learning-review-panel'
 
 type SearchMode = 'keyword' | 'vector' | 'hybrid'
 type SearchScope = 'all' | 'selected'
-type WorkspaceView = 'materials' | 'recognition' | 'analysis'
+type WorkspaceView = 'materials' | 'recognition' | 'analysis' | 'review'
 
 interface MaterialVideo {
   name: string
@@ -346,6 +347,7 @@ export function MaterialsPanel() {
   const [loading, setLoading] = useState(true)
   const [searching, setSearching] = useState(false)
   const [indexing, setIndexing] = useState(false)
+  const [pendingReviewCount, setPendingReviewCount] = useState<number | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
   const [playerNotice, setPlayerNotice] = useState<string | null>(null)
   const [pendingCue, setPendingCue] = useState<{ projectId: string; videoPath: string; seconds: number } | null>(null)
@@ -541,12 +543,13 @@ export function MaterialsPanel() {
           { id: 'materials', label: '素材预览', count: activeProject?.videos.length },
           { id: 'recognition', label: '识别结果', count: searchData?.results.length },
           { id: 'analysis', label: '学习内容', count: analysisVideos.length },
+          { id: 'review', label: '学习审核', count: pendingReviewCount },
         ]}
         activeItem={workspaceView}
         onSelect={setWorkspaceView}
         className="@4xl:h-[calc(100dvh-5.5rem)]"
         contentClassName="@4xl:overflow-y-auto"
-        sidebarContent={workspaceView !== 'analysis' ? (
+        sidebarContent={!['analysis', 'review'].includes(workspaceView) ? (
           <div>
             <div className="flex items-center justify-between gap-2 px-1">
               <h2 className="text-xs font-semibold text-foreground">项目</h2>
@@ -566,7 +569,7 @@ export function MaterialsPanel() {
         ) : undefined}
       >
         <div className="space-y-4 p-3.5 md:p-4">
-          {error && (
+          {error && workspaceView !== 'review' && (
             <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
               {error}
             </div>
@@ -574,6 +577,8 @@ export function MaterialsPanel() {
 
           {workspaceView === 'analysis' ? (
             <VideoAnalysisResultsPanel videos={analysisVideos} />
+          ) : workspaceView === 'review' ? (
+            <DirectorLearningReviewPanel onPendingCountChange={setPendingReviewCount} />
           ) : loading ? (
             <div className="rounded-lg border border-border bg-card px-5 py-10 text-sm text-muted-foreground">
               正在加载媒体片段库...

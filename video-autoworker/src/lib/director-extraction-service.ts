@@ -1169,7 +1169,7 @@ const REQUIRED_REVIEW_TABLES: Record<DirectorExtractionPhase, readonly string[]>
   technique: ['skills_techniques'],
 }
 
-async function loadProjectionRecords(
+export async function loadDirectorExtractionProjectionRecords(
   workId: string,
   entries: DirectorExtractionProjectionEntry[],
   commandRunner: DirectorCommandRunner,
@@ -1256,7 +1256,9 @@ async function reconcileReviewJob(
   if (!phase || !checkpoint?.projectionReceipt) {
     throw new Error('director_extraction_projection_receipt_missing')
   }
-  const records = await loadProjectionRecords(job.workId, checkpoint.projectionReceipt.entries, commandRunner)
+  const records = await loadDirectorExtractionProjectionRecords(
+    job.workId, checkpoint.projectionReceipt.entries, commandRunner,
+  )
   const reviewed: Record<string, string[]> = {}
   let unresolved = false
   for (const entry of checkpoint.projectionReceipt.entries) {

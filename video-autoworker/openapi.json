@@ -11867,6 +11867,73 @@
         }
       }
     },
+    "/api/n8n/director-extraction/review": {
+      "post": {
+        "tags": ["n8n"],
+        "summary": "List, prepare, confirm, or cancel a director-learning review batch",
+        "operationId": "operateDirectorExtractionReview",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action"],
+              "properties": { "action": { "type": "string", "enum": ["list"] } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "requestId", "reviewId", "reviewRevision", "decision", "candidateIds"],
+              "properties": {
+                "action": { "type": "string", "enum": ["prepare"] },
+                "requestId": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" },
+                "reviewId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "reviewRevision": { "type": "integer", "minimum": 0 },
+                "decision": { "type": "string", "enum": ["approve", "reject"] },
+                "candidateIds": {
+                  "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" }
+                }
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "requestId", "reviewId", "reviewRevision", "decision", "candidateIds", "batchId", "confirmationCode", "count"],
+              "properties": {
+                "action": { "type": "string", "enum": ["confirm"] },
+                "requestId": { "type": "string", "minLength": 8, "maxLength": 160, "pattern": "^[A-Za-z0-9._:-]+$" },
+                "reviewId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                "reviewRevision": { "type": "integer", "minimum": 0 },
+                "decision": { "type": "string", "enum": ["approve", "reject"] },
+                "candidateIds": {
+                  "type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[a-f0-9]{64}$" }
+                },
+                "batchId": { "type": "string", "pattern": "^DRB-[a-f0-9]{32}$" },
+                "confirmationCode": { "type": "string", "pattern": "^[A-Z0-9]{6,12}$" },
+                "count": { "type": "integer", "minimum": 1, "maximum": 50 }
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["action", "batchId", "confirmationCode"],
+              "properties": {
+                "action": { "type": "string", "enum": ["cancel"] },
+                "batchId": { "type": "string", "pattern": "^DRB-[a-f0-9]{32}$" },
+                "confirmationCode": { "type": "string", "pattern": "^[A-Z0-9]{6,12}$" }
+              }
+            }
+          ]
+        } } } },
+        "responses": {
+          "200": { "description": "Current candidates, a persisted confirmation preview, a cancelled pending batch, or a verified confirmation result" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "description": "The review snapshot, selection, or candidate version changed" },
+          "429": { "description": "Mutation rate limit exceeded" },
+          "503": { "description": "Review outcome is unknown or the director service is unavailable" }
+        }
+      }
+    },
     "/api/n8n/trigger": {
       "post": {
         "tags": ["n8n"], "summary": "Trigger an enabled n8n workflow binding", "operationId": "triggerN8nWorkflowBinding",

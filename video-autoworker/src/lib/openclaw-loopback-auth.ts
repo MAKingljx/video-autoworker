@@ -14,6 +14,9 @@ const N8N_OPENCLAW_OPERATOR_PATHS = new Set([
   '/api/n8n/trigger',
   '/api/n8n/director-brain',
   '/api/n8n/director-extraction',
+  // This exact loopback path is a local control-plane trust boundary for the
+  // on-device review UI. It is not authentication for an external user or host.
+  '/api/n8n/director-extraction/review',
 ])
 
 const N8N_GLOBAL_RELEASE_PATHS = new Set([

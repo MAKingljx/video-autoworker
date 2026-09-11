@@ -68,6 +68,38 @@ const PUBLIC_FAILURES: Readonly<Record<string, Omit<DirectorExtractionHttpFailur
     status: 409,
     message: '复核结果与已保存状态不一致',
   },
+  director_extraction_review_request_invalid: {
+    status: 400,
+    message: '学习审核请求无效',
+  },
+  director_extraction_review_request_conflict: {
+    status: 409,
+    message: '同一审核请求已绑定其他选择或决定',
+  },
+  director_extraction_review_revision_stale: {
+    status: 409,
+    message: '候选已发生变化，请刷新后重新审核',
+  },
+  director_extraction_review_selection_invalid: {
+    status: 409,
+    message: '所选候选不属于当前待审核内容',
+  },
+  director_extraction_review_batch_invalid: {
+    status: 409,
+    message: '已保存的审核批次无法继续，请刷新后重试',
+  },
+  director_extraction_review_batch_not_found: {
+    status: 404,
+    message: '没有找到对应的待确认审核批次',
+  },
+  director_extraction_review_confirmation_mismatch: {
+    status: 409,
+    message: '审核确认信息与已保存批次不一致',
+  },
+  director_extraction_review_batch_not_cancellable: {
+    status: 409,
+    message: '该审核批次已经开始或完成，不能取消',
+  },
 }
 
 export function safeDirectorExtractionErrorCode(

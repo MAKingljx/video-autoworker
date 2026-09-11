@@ -51,7 +51,11 @@ describe('OpenClaw loopback authentication boundary', () => {
     ))).toBe(false)
   })
 
-  it.each(['/api/n8n/director-brain', '/api/n8n/director-extraction'])(
+  it.each([
+    '/api/n8n/director-brain',
+    '/api/n8n/director-extraction',
+    '/api/n8n/director-extraction/review',
+  ])(
     'admits %s only as a local POST through the existing OpenClaw boundary', pathname => {
       const endpoint = `http://127.0.0.1:3017${pathname}`
 

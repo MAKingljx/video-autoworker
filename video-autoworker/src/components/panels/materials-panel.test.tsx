@@ -39,6 +39,35 @@ afterEach(() => {
 })
 
 describe('MaterialsPanel', () => {
+  it('opens learning review as a first-class media-library view', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/n8n/director-extraction/review') {
+        expect(init?.method).toBe('POST')
+        expect(JSON.parse(String(init?.body))).toEqual({ action: 'list' })
+        return jsonResponse({ ok: true, action: 'list', reviews: [] })
+      }
+      return jsonResponse({
+        workspaceRoot: '/materials',
+        botLearningRoot: '/learning',
+        generatedAt: '2026-08-28T00:00:00.000Z',
+        vector: { exists: false, path: '', chunks: 0, indexedAt: null, model: null, dims: null },
+        totals: { projects: 0, videos: 0, notes: 0, pipelines: 0, scenes: 0, visualDone: 0, visualPending: 0, vectorChunks: 0 },
+        projects: [],
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<MaterialsPanel />)
+    fireEvent.click(screen.getByRole('button', { name: '学习审核' }))
+
+    expect(await screen.findByRole('region', { name: '学习审核' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '暂无待审核候选' })).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/n8n/director-extraction/review',
+      expect.objectContaining({ method: 'POST' }),
+    ))
+  })
+
   it('opens recognition results after search and clears stale results when navigating to another project', async () => {
     const projects = [project('project-a', '项目甲', 4), project('project-b', '项目乙', 2)]
 
