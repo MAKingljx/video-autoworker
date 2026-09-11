@@ -65,6 +65,78 @@ function exactSearch(request, matches) {
 }
 
 describe('director brain chat review', () => {
+  it('resumes a durable review batch after the plugin store is recreated', async () => {
+    let batch = null
+    const reviewBatch = vi.fn(async request => {
+      if (request.action === 'prepare') {
+        batch = {
+          batchId: 'DRB-PERSISTED', decision: request.decision,
+          confirmationCode: 'ABC123', status: 'pending', targets: request.targets,
+          itemStatuses: ['pending'], completedCount: 0, unknownCount: 0,
+          expiresAt: Math.floor(Date.now() / 1000) + 600,
+        }
+      } else if (request.action === 'claim') {
+        batch = { ...batch, status: 'applying' }
+      } else if (request.action === 'record') {
+        batch = { ...batch, status: 'completed', itemStatuses: ['completed'], completedCount: 1 }
+      }
+      return batch
+    })
+    const loadServices = async () => ({ reviewBatch })
+    const firstStore = createDirectorReviewSessionStore({ loadServices })
+    const target = {
+      table: 'material_evidence', stableId: 'EVIDENCE-1', workId: 'WORK-1',
+      state: '候选', version: 'v0.2.0', name: '证据一',
+    }
+    const prepared = await firstStore.prepare(context, 'approve', [target], 'tool-call-1')
+    expect(prepared).toMatchObject({ batchId: 'DRB-PERSISTED', code: 'ABC123' })
+
+    const restartedStore = createDirectorReviewSessionStore({ loadServices })
+    const claimed = await restartedStore.claim(context, {
+      decision: 'approve', code: 'ABC123', count: 1,
+    })
+    expect(claimed).toMatchObject({ batchId: 'DRB-PERSISTED', itemStatuses: ['pending'] })
+    await restartedStore.record(context, claimed, 0, 'completed', { resultVersion: 'v0.2.1' })
+    expect(reviewBatch.mock.calls.map(call => call[0].action))
+      .toEqual(['prepare', 'claim', 'record'])
+  })
+
+  it('recovers a response-lost item from formal readback without repeating the review write', async () => {
+    const target = {
+      table: 'material_evidence', stableId: 'EVIDENCE-1', workId: 'WORK-INTERNAL-1',
+      state: '候选', version: 'v0.2.0', name: '证据一',
+    }
+    const receipt = {
+      kind: 'review', decision: 'approve', code: 'ABC123', batchId: 'DRB-1',
+      targets: [target], itemStatuses: ['unknown'], expiresAt: Date.now() + 60_000,
+    }
+    const store = {
+      get: vi.fn(() => null),
+      claim: vi.fn(async () => receipt),
+      record: vi.fn(async () => ({ status: 'completed' })),
+    }
+    const executeOperation = vi.fn(async () => exactGet({
+      ...candidate({ table: 'material_evidence', stableId: 'EVIDENCE-1' }),
+      state: '已核验', reviewed: true,
+      fields: {
+        ...candidate({ table: 'material_evidence', stableId: 'EVIDENCE-1' }).fields,
+        '版本': 'v0.2.1',
+      },
+    }))
+    const reviewRecord = vi.fn()
+    const handler = createDirectorBrainChatReviewHandler({
+      releaseReady: true, targetAgentId: 'second-original', store,
+      loadServices: async () => ({ executeOperation, reviewRecord }),
+    })
+    const result = await handler({ cleanedBody: '确认批准批次 ABC123 共1条' }, context)
+    expect(result.reason).toBe('director_brain_review_applied')
+    expect(reviewRecord).not.toHaveBeenCalled()
+    expect(store.record).toHaveBeenCalledWith(
+      context, receipt, 0, 'completed', { resultVersion: 'v0.2.1' },
+    )
+  })
+
+
   it('exposes preview only and rejects model-supplied confirmation flags', async () => {
     expect(normalizeDirectorBrainToolRequest({
       action: 'review_preview', decision: 'approve', table: 'story_nodes',

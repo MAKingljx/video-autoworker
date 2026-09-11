@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 const ROOT = resolve(process.cwd(), 'openclaw-plugins/aiworker-director-brain')
 
 describe('director brain static boundaries', () => {
-  it('uses only the bounded formal review child and has no shell, scheduler, database, or task-chain adapter', async () => {
+  it('uses only loopback application clients and has no process, database, or task-chain adapter', async () => {
     const runtime = [
       await readFile(resolve(ROOT, 'index.js'), 'utf8'),
       await readFile(resolve(ROOT, 'lib/director-brain-tool.js'), 'utf8'),
@@ -16,15 +16,14 @@ describe('director brain static boundaries', () => {
       'utf8',
     )
 
-    expect(runtime.match(/node:child_process/gu)).toHaveLength(1)
-    expect(runtime).not.toMatch(/execFile|shell\s*:|launchctl/iu)
-    expect(runtime).toContain("spawnImpl(nodePath, [cliPath, 'review']")
+    expect(runtime).not.toMatch(/node:child_process|execFile|spawn\(|shell\s*:|launchctl/iu)
     expect(runtime).not.toMatch(/better-sqlite3|sqlite3|\.db\b/iu)
     expect(runtime).not.toMatch(/dispatchVideo|dispatchDirectory|submit-task|run-video-batch/iu)
     expect(runtime).not.toMatch(/registerHook/u)
     expect(runtime.match(/api\.on\(/gu)).toHaveLength(3)
     expect(runtime.match(/https?:\/\/[^'"\s]+/gu)).toEqual([
       'http://127.0.0.1:3017/api/n8n/director-extraction',
+      'http://127.0.0.1:3017/api/n8n/director-brain',
     ])
     expect(runtime).not.toMatch(/Authorization|Bearer|api.?key|password/iu)
     expect(runtime).not.toMatch(/appId|appToken|catalogPath|schemaPath/iu)

@@ -27,7 +27,9 @@ export default definePluginEntry({
     const releaseReady = api.pluginConfig?.releaseReady === true
     const targetAgentId = api.pluginConfig?.targetAgentId?.trim() || DEFAULT_TARGET_AGENT_ID
     const onDiagnostic = diagnostic => api.logger?.warn?.(JSON.stringify(diagnostic))
-    const reviewSessionStore = createDirectorReviewSessionStore()
+    const reviewSessionStore = createDirectorReviewSessionStore({
+      loadServices: loadInstalledDirectorBrainReviewServices,
+    })
     api.registerTool(context => createDirectorBrainTool({
       context,
       releaseReady,

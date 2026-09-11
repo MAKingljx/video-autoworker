@@ -661,7 +661,7 @@ fi
 ACTIVATION_CONFIG_SNAPSHOT="$(config_snapshot)"
 if [[ "$MODE" == "apply" ]]; then
   BASELINE_RUNTIME_PROOF="$(verify_runtime_hooks "$ACTIVATION_CONFIG_SNAPSHOT")" || {
-    printf 'Runtime convergence requires the installed 0.4.3 persistence hooks on a freshly restarted qwen-current Gateway.\n' >&2
+    printf 'Runtime convergence requires the installed 0.4.4 persistence hooks on a freshly restarted qwen-current Gateway.\n' >&2
     exit 1
   }
 elif [[ "$MODE" == "dry-run" ]]; then

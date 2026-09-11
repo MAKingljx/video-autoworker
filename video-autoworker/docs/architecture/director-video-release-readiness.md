@@ -12,7 +12,7 @@
 | Video AutoWorker standalone | Git release ID + `2.0.1` + `release-manifest.json` |
 | `aiworker-video-command` | `0.5.15` |
 | `aiworker-task-flow` | 与同一 Git 提交生成的精确安装清单 |
-| `aiworker-director-brain` | 已验证接口兼容的 `0.4.1`、`0.4.2` 或薄客户端 `0.4.3`；安装树由独立 runtime proof 绑定 |
+| `aiworker-director-brain` | 已验证接口兼容的 `0.4.1`～`0.4.3` 或持久审核薄客户端 `0.4.4`；安装树由独立 runtime proof 绑定 |
 
 ## 验证范围
 
@@ -31,7 +31,7 @@ Git HEAD。standalone 必须位于声明的不可变 releases 根下，并通过
 
 Video command 与 Skill 继续按安装器 payload 精确比较。director-brain 在 app 发布门只核对已知版本、
 工具/钩子接口、manifest/package 版本一致性和安全文件类型；插件树字节身份由同一会话的 runtime proof
-绑定。`0.4.1`/`0.4.2` 的历史厚插件可先服务新 app，`0.4.3` 薄客户端再独立安装和重启 Gateway，
+绑定。`0.4.1`/`0.4.2` 的历史厚插件和 `0.4.3` 薄客户端可先服务新 app，`0.4.4` 持久审核薄客户端再独立安装和重启 Gateway，
 避免 app 与插件互相要求对方先上线。
 
 集成契约另行确认：
@@ -119,14 +119,14 @@ transition claim、runtime convergence proof 和 readiness 摘要的 handoff，b
 
 ### 插件安装与数据库迁移边界
 
-`aiworker-director-brain 0.4.3` 安装器只替换目标 OpenClaw profile 下的薄插件和该 Agent 的窄授权；
+`aiworker-director-brain 0.4.4` 安装器只替换目标 OpenClaw profile 下的薄插件和该 Agent 的窄授权；
 Feishu CLI、service、scanner 与 schema 随 app release 交付。安装器不打开 Mission Control SQLite、
 不调用 `runMigrations`，也不创建、
 更新或回填导演提炼记录，也不会迁移飞书导演脑 catalog。当前真实测试 catalog 是 v2，随安装包
 携带的 schema v3 只是待迁移候选；在另行完成 v3 迁移和真实 API 回读前，加载 0.4.1 的运行时会
 对版本不匹配失败关闭。发布顺序应先用 `migrate --dry-run` 固定无破坏性计划，再由显式外部写入任务
 生成权限受控的全表备份、执行 v2 → v3 追加迁移并真实回读，最后才由统一 preinstall orchestrator
-安装 0.4.1 并 fresh restart 目标 Gateway 一次；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现 058/059，也不能作为飞书
+安装 0.4.4 并 fresh restart 目标 Gateway 一次；不能把插件安装当成飞书迁移器。安装本身不要求生产数据库先出现新增附加表，也不能作为飞书
 v3 已就绪的证据。
 
 生产数据库对象只由新的 3017 application release 首次打开权威 Mission Control SQLite 时按既有

@@ -8,6 +8,7 @@ import {
   listDirectorExtractionJobsForWork,
   projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
+  retryLegacyOversizedUnderstandingPhase,
   retryExhaustedDirectorExtractionJob,
   type DirectorExtractionJob,
 } from '@/lib/director-extraction-runs'
@@ -124,6 +125,12 @@ export async function startDirectorExtractionForWork(
     registerDirectorExtractionJob(db, sourceTaskId, scope, {
       binding: sourceBinding, objective: input.objective,
     })
+    const repaired = retryLegacyOversizedUnderstandingPhase(
+      db, existing.sourceTaskId, scope,
+    )
+    if (repaired.status === 'pending' && repaired.currentPhase === 'understanding') {
+      return repaired
+    }
     return retryExhaustedDirectorExtractionJob(db, existing.sourceTaskId, scope)
   }
   // An explicit start may repair only a fully verified, already-written projection.
@@ -178,6 +185,8 @@ export function getDirectorExtractionStatusForWork(
   const base = {
     phase: 'perception',
     progress: 0,
+    progressKnown: false,
+    progressBasis: 'no_registered_phase',
     completedPhases: [],
     candidateCount: null,
     candidateCountKnown: false,
@@ -248,7 +257,15 @@ export function projectDirectorExtractionWorkStatus(
     status,
     phase: representative.job.currentPhase,
     progress,
+    progressKnown: projected.every(item => item.progressKnown === true),
+    progressBasis: 'completed_phase_projections',
     candidateCount,
+    candidateCountKnown: projected.every(item => item.candidateCountKnown === true),
+    lastProgressAt: Math.max(...projected.map(item => Number(item.lastProgressAt || 0))),
+    heartbeatAt: Math.max(...projected.map(item => Number(item.heartbeatAt || 0))) || null,
+    blockedOn: projected[representative.index]?.blockedOn || null,
+    lastErrorCode: projected[representative.index]?.lastErrorCode || null,
+    nextAction: projected[representative.index]?.nextAction || null,
     sourceCount: jobs.length,
     counts: { completed, active, failed, waitingReview },
     sources: visibleSources,

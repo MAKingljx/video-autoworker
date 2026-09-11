@@ -13,7 +13,6 @@ import {
   directorExtractionDigest,
   directorExtractionIdentitySchema,
   directorExtractionProjectionReceiptSchema,
-  directorExtractionProgress,
   directorExtractionPhases,
   parseDirectorExtractionOutput,
   reviewedDirectorReferencesSchema,
@@ -87,6 +86,7 @@ export interface DirectorExtractionJob extends DirectorExtractionIdentity {
   ownerInstanceId: string | null
   leaseToken: string | null
   leaseExpiresAt: number | null
+  heartbeatAt: number | null
   revision: number
   lastErrorCode: string | null
   createdAt: number
@@ -302,19 +302,24 @@ function mergeReviewed(rows: ReviewRow[]): ReviewedDirectorReferences {
   return Object.keys(merged).length ? reviewedDirectorReferencesSchema.parse(merged) : {}
 }
 
-function leaseForRun(db: Database.Database, run: N8nTaskRun): N8nChildExecutionLease | null {
+function leaseForRun(
+  db: Database.Database,
+  run: N8nTaskRun,
+): (N8nChildExecutionLease & { heartbeatAt: number }) | null {
   const row = db.prepare(`
-    SELECT owner_instance_id, lease_token, lease_expires_at, revision
+    SELECT owner_instance_id, lease_token, lease_expires_at, heartbeat_at, revision
     FROM n8n_child_execution_leases
     WHERE task_id = ? AND tenant_id = ? AND workspace_id = ?
   `).get(run.taskId, run.tenantId, run.workspaceId) as {
-    owner_instance_id: string; lease_token: string; lease_expires_at: number; revision: number
+    owner_instance_id: string; lease_token: string; lease_expires_at: number
+    heartbeat_at: number; revision: number
   } | undefined
   return row ? {
     taskId: run.taskId,
     ownerInstanceId: row.owner_instance_id,
     leaseToken: row.lease_token,
     leaseExpiresAt: row.lease_expires_at,
+    heartbeatAt: row.heartbeat_at,
     revision: row.revision,
   } : null
 }
@@ -398,6 +403,7 @@ function deriveJob(db: Database.Database, source: N8nTaskRun): DirectorExtractio
     ownerInstanceId: lease?.ownerInstanceId || null,
     leaseToken: lease?.leaseToken || null,
     leaseExpiresAt: lease?.leaseExpiresAt || null,
+    heartbeatAt: lease?.heartbeatAt || null,
     revision: lease?.revision || retryRevision(currentRun) + 1,
     lastErrorCode: sourceIdentityConflict ? 'director_extraction_source_conflict'
       : currentRun?.error
@@ -1098,6 +1104,92 @@ export function retryExhaustedDirectorExtractionJob(
   throw new Error('director_extraction_retry_conflict')
 }
 
+export function retryLegacyOversizedUnderstandingPhase(
+  db: Database.Database,
+  sourceTaskId: string,
+  scope: N8nTaskScope,
+  options: { nowSeconds?: number } = {},
+): DirectorExtractionJob {
+  const expectedError = 'director_extraction_phase_input_too_large'
+  const before = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (!before) throw new Error('director_extraction_source_not_found')
+  if (before.status !== 'conflict' || before.currentPhase !== 'understanding'
+    || before.lastErrorCode !== expectedError || !before.phaseTaskId
+    || before.attemptCount !== 1 || before.revision !== 1
+    || !(before.reviewedReferences.material_evidence?.length)) return before
+  const identity = directorExtractionDigest({
+    sourceBindingId: before.sourceBindingId,
+    workId: before.workId,
+    workQueryDigest: before.workQueryDigest,
+    materialId: before.materialId,
+    sourceResultSha256: before.sourceResultSha256,
+    extractionContractDigest: before.extractionContractDigest,
+    reviewedReferences: before.reviewedReferences,
+    phaseTaskId: before.phaseTaskId,
+  })
+  const now = options.nowSeconds ?? Math.floor(Date.now() / 1_000)
+  const repaired = db.transaction(() => {
+    const current = getDirectorExtractionJob(db, sourceTaskId, scope)
+    if (!current || current.status !== 'conflict' || current.currentPhase !== 'understanding'
+      || current.lastErrorCode !== expectedError || current.phaseTaskId !== before.phaseTaskId
+      || current.attemptCount !== 1 || current.revision !== 1
+      || directorExtractionDigest({
+        sourceBindingId: current.sourceBindingId,
+        workId: current.workId,
+        workQueryDigest: current.workQueryDigest,
+        materialId: current.materialId,
+        sourceResultSha256: current.sourceResultSha256,
+        extractionContractDigest: current.extractionContractDigest,
+        reviewedReferences: current.reviewedReferences,
+        phaseTaskId: current.phaseTaskId,
+      }) !== identity) throw new Error('director_extraction_legacy_retry_conflict')
+    return db.prepare(`
+      UPDATE n8n_task_runs AS phase
+      SET status = 'queued', attempt_count = 0, error = NULL,
+          started_at = NULL, completed_at = NULL, updated_at = ?,
+          routing = json_set(routing, '$.retryRevision',
+            COALESCE(json_extract(routing, '$.retryRevision'), 0) + 1)
+      WHERE phase.task_id = ? AND phase.tenant_id = ? AND phase.workspace_id = ?
+        AND phase.source = 'n8n-node' AND phase.status = 'failed'
+        AND phase.error = ? AND phase.updated_at = ?
+        AND COALESCE(json_extract(phase.routing, '$.retryRevision'), 0) = 0
+        AND json_valid(phase.input) = 1
+        AND json_extract(phase.input, '$.childKind') = ?
+        AND json_extract(phase.input, '$.directorPhase') = 'understanding'
+        AND json_extract(phase.input, '$.parentTaskId') = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM n8n_child_execution_leases lease
+          WHERE lease.task_id = phase.task_id AND lease.tenant_id = phase.tenant_id
+            AND lease.workspace_id = phase.workspace_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_checkpoints checkpoint
+          WHERE checkpoint.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_projection_receipts projection
+          WHERE projection.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_segments segment
+          WHERE segment.phase_task_id = phase.task_id
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM director_extraction_review_receipts review
+          WHERE review.phase_task_id = phase.task_id
+        )
+    `).run(now, before.phaseTaskId, scope.tenantId, scope.workspaceId,
+      expectedError, before.updatedAt, CHILD_KIND, sourceTaskId).changes
+  }).immediate()
+  if (repaired !== 1) throw new Error('director_extraction_legacy_retry_conflict')
+  const after = getDirectorExtractionJob(db, sourceTaskId, scope)
+  if (!after || after.status !== 'pending' || after.currentPhase !== 'understanding'
+    || after.phaseTaskId !== before.phaseTaskId || after.lastErrorCode !== null) {
+    throw new Error('director_extraction_legacy_retry_conflict')
+  }
+  return after
+}
+
 function insertReview(
   db: Database.Database,
   phaseTaskId: string,
@@ -1269,12 +1361,41 @@ export function projectDirectorExtractionStatus(
       ? (item.projectionReceipt?.entries.length || 0)
       : item.candidateOutput.candidates.length)
   ), 0)
+  const completedPhases = checkpoints
+    .filter(item => item.projectionState === 'delivered').map(item => item.phase)
+  const segmentProgress = job.phaseTaskId ? db.prepare(`
+    SELECT COUNT(*) AS total,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      MAX(updated_at) AS updated_at
+    FROM director_extraction_segments WHERE phase_task_id = ?
+  `).get(job.phaseTaskId) as { total: number; completed: number | null; updated_at: number | null } : null
+  const blockedOn = job.status === 'awaiting_evidence_projection' ? 'evidence_projection'
+    : job.status === 'awaiting_intent_review' ? 'director_intent_review'
+      : job.status.startsWith('awaiting_') ? 'candidate_review'
+        : job.status === 'failed' || job.status === 'conflict' ? 'operator_attention'
+          : job.status === 'pending' ? 'executor_queue' : null
+  const progress = job.status === 'completed' ? 100 : completedPhases.length * 20
   return {
     status: job.status,
     phase: job.currentPhase,
-    progress: directorExtractionProgress(job.currentPhase),
-    completedPhases: checkpoints.filter(item => item.projectionState === 'delivered').map(item => item.phase),
+    progress,
+    progressKnown: true,
+    progressBasis: 'completed_phase_projections',
+    completedPhases,
     candidateCount,
+    candidateCountKnown: true,
+    lastProgressAt: Math.max(job.updatedAt, segmentProgress?.updated_at || 0),
+    heartbeatAt: job.heartbeatAt,
+    blockedOn,
+    lastErrorCode: job.lastErrorCode,
+    segmentProgress: segmentProgress?.total
+      ? { completed: Number(segmentProgress.completed || 0), total: segmentProgress.total }
+      : null,
+    nextAction: blockedOn === 'candidate_review' || blockedOn === 'director_intent_review'
+      ? 'human_review'
+      : blockedOn === 'operator_attention' ? 'inspect_error'
+        : blockedOn === 'evidence_projection' ? 'wait_for_evidence'
+          : job.status === 'completed' ? 'none' : 'wait_for_executor',
     message: job.status === 'awaiting_evidence_projection' ? '素材证据正在写入导演脑，完成后会自动继续'
       : job.status === 'awaiting_intent_review' ? '需要先确认唯一生效的导演意图，确认后会自动继续'
         : job.status === 'completed' ? '导演知识链已完成复核'

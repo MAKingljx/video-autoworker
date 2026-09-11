@@ -174,6 +174,7 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
       ['sensitiveValueScanner', 'scripts/lib/sensitive-value-scanner.mjs'],
       ['directorExtractionProvenance', 'scripts/lib/director-extraction-release-provenance.mjs'],
       ['directorProjectionContractCompatibility', 'scripts/lib/director-projection-contract-compatibility.mjs'],
+      ['gitSourceLayout', 'scripts/lib/git-source-layout.mjs'],
       ['applicationReleaseManifestContract', 'scripts/lib/application-release-manifest-contract.mjs'],
     ].map(([name, relativePath]) => [name, reference(join(control, relativePath))])),
   }
@@ -273,7 +274,7 @@ process.stdout.write(JSON.stringify({alreadyConsumed:true,recoveryAttemptId:${JS
     schema: 'video-autoworker-openclaw-runtime-compatibility/v1',
     openclaw: { name: 'openclaw', version: '2026.9.2', packageJsonSha256: 'e'.repeat(64), gatewayRuntimeExport: 'openclaw/plugin-sdk/gateway-runtime' },
     rpc: { methods: ['tools.catalog', 'tools.effective', 'health', 'logs.tail', 'config.get', 'config.patch'], sharedStateMode: 'read-only' },
-    plugins: { video: { id: 'aiworker-video-command', version: '0.5.15', peerPolicy: '>=2026.9.2' }, director: { id: 'aiworker-director-brain', version: '0.4.3', peerPolicy: '>=2026.9.2' } },
+    plugins: { video: { id: 'aiworker-video-command', version: '0.5.15', peerPolicy: '>=2026.9.2' }, director: { id: 'aiworker-director-brain', version: '0.4.4', peerPolicy: '>=2026.9.2' } },
     secretRef: { wrapperSourceCommit: '627208bb723ed7a040e02ab0adf89210ac3f0ee2', wrapperSha256: 'f545f740273bd520e4c3ddcd755c180ae0f955c84a81ed4de2b5ae7c0f4172a7', commandRelativePath: 'ai-worker/bin/aiworker-openclaw-keychain-secretref', passEnv: ['HOME'], argumentCount: 3 },
     source: { commit: controlCommit, contractSha256: sha256(readFileSync(runtimeContractPath)) },
   }

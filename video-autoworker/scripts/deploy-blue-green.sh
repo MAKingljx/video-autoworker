@@ -78,10 +78,37 @@ BOOTSTRAP_HISTORICAL_PENDING=""
 BOOTSTRAP_HISTORICAL_RUN_DIRECTORY=""
 BOOTSTRAP_HISTORICAL_ROUTER_STATE=""
 BOOTSTRAP_HISTORICAL_SLOT=""
+RELEASE_VERIFICATION_CACHE_DIR=""
+TRANSITION_CANDIDATE_SLOT=""
+TRANSITION_CANDIDATE_RELEASE=""
+TRANSITION_ROUTE_COMMITTED=0
+TRANSITION_BASE_GENERATION=""
 
 cleanup_operation() {
+  local original_status=$? physical_releases="" active="" active_release="" generation=""
+  local full="?" fast="?" fallback="?" counter="" value=""
+  set +e
+  if [[ -n "$TRANSITION_CANDIDATE_SLOT" && "$TRANSITION_ROUTE_COMMITTED" == 0 ]]; then
+    active="$(read_state_field active 2>/dev/null)"
+    active_release="$(read_state_slot_release "$TRANSITION_CANDIDATE_SLOT" 2>/dev/null)"
+    generation="$(read_state_field generation 2>/dev/null)"
+    if [[ "$active" == "$TRANSITION_CANDIDATE_SLOT" \
+      && "$active_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
+      TRANSITION_ROUTE_COMMITTED=1
+      printf 'Route commit observed during settlement: target=%s release=%s generation=%s\n' \
+        "$TRANSITION_CANDIDATE_SLOT" "$TRANSITION_CANDIDATE_RELEASE" \
+        "$(read_state_field generation 2>/dev/null || printf '?')" >&2
+    elif [[ "$generation" =~ ^[1-9][0-9]*$ && "$TRANSITION_BASE_GENERATION" =~ ^[1-9][0-9]*$ \
+      && 10#$generation -gt 10#$TRANSITION_BASE_GENERATION ]]; then
+      printf 'Route commit was compensated before settlement: target=%s release=%s generation=%s; retain for formal retirement\n' \
+        "$TRANSITION_CANDIDATE_SLOT" "$TRANSITION_CANDIDATE_RELEASE" "$generation" >&2
+    elif [[ "$active" != "$TRANSITION_CANDIDATE_SLOT" \
+      && "$active_release" == "$TRANSITION_CANDIDATE_RELEASE" ]]; then
+      normal_service_manager stop "$TRANSITION_CANDIDATE_SLOT" >/dev/null 2>&1 \
+        || printf 'error: unable to stop the operation-owned candidate safely\n' >&2
+    fi
+  fi
   if [[ -n "$STAGING_WORK_ROOT" ]]; then
-    local physical_releases=""
     physical_releases="$(physical_path "$RELEASES_DIR" 2>/dev/null || true)"
     case "$STAGING_WORK_ROOT" in
       "$physical_releases"/.staging-*) rm -rf -- "$STAGING_WORK_ROOT" ;;
@@ -94,6 +121,25 @@ cleanup_operation() {
   if (( BOOTSTRAP_MAINTENANCE == 1 )); then
     printf 'error: bootstrap remains in externally frozen maintenance mode; do not reopen ingress\n' >&2
   fi
+  if [[ -n "$RELEASE_VERIFICATION_CACHE_DIR" && -d "$RELEASE_VERIFICATION_CACHE_DIR" ]]; then
+    case "$RELEASE_VERIFICATION_CACHE_DIR" in
+      "$RUN_DIR"/.release-verification."$$".*) ;;
+      *) printf 'error: release verification cache path is unsafe\n' >&2
+        RELEASE_VERIFICATION_CACHE_DIR=""
+        return "$original_status" ;;
+    esac
+    for counter in full fast fallback; do
+      value="$(cat "$RELEASE_VERIFICATION_CACHE_DIR/$counter" 2>/dev/null)"
+      if [[ "$value" =~ ^[0-9]+$ ]]; then
+        case "$counter" in full) full="$value" ;; fast) fast="$value" ;; fallback) fallback="$value" ;; esac
+      fi
+    done
+    printf 'Release verification counts: full=%s fast=%s fallback=%s\n' \
+      "$full" "$fast" "$fallback" >&2
+    rm -rf -- "$RELEASE_VERIFICATION_CACHE_DIR"
+    RELEASE_VERIFICATION_CACHE_DIR=""
+  fi
+  return "$original_status"
 }
 
 openclaw_scope_values() {
@@ -140,6 +186,61 @@ BASH
   printf '%s\t%s\n' "$tenant" "$workspace"
 }
 
+managed_runtime_paths() {
+  local file mode values data_dir db_path tokens_path live_db physical_releases
+  local physical_data physical_db physical_tokens
+  local -a files=("$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.local" "$PLATFORM_ENV_FILE")
+  for file in "${files[@]}"; do
+    [[ "$file" == /* && "$file" != *[$'\r\n']* ]] || return 1
+    if [[ -e "$file" || -L "$file" ]]; then
+      [[ -f "$file" && ! -L "$file" && -O "$file" ]] || return 1
+      mode="$(stat -f '%Lp' "$file" 2>/dev/null || stat -c '%a' "$file")"
+      [[ "$mode" == 600 ]] || return 1
+    fi
+  done
+  values="$(/usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+    MISSION_CONTROL_DATA_DIR="${MISSION_CONTROL_DATA_DIR:-}" \
+    MISSION_CONTROL_DB_PATH="${MISSION_CONTROL_DB_PATH:-}" \
+    MISSION_CONTROL_TOKENS_PATH="${MISSION_CONTROL_TOKENS_PATH:-}" \
+    /bin/bash -s -- "${files[@]}" <<'BASH'
+set -euo pipefail
+for file in "$@"; do
+  if [[ -f "$file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$file" >/dev/null 2>&1
+    set +a
+  fi
+done
+for name in MISSION_CONTROL_DATA_DIR MISSION_CONTROL_DB_PATH MISSION_CONTROL_TOKENS_PATH; do
+  value="${!name:-}"
+  [[ "$value" == /* && "$value" != *[$'\r\n']* ]] || exit 2
+  printf '%s\n' "$value"
+done
+BASH
+  )" || return 1
+  data_dir="$(printf '%s\n' "$values" | sed -n '1p')"
+  db_path="$(printf '%s\n' "$values" | sed -n '2p')"
+  tokens_path="$(printf '%s\n' "$values" | sed -n '3p')"
+  [[ "$LIVE_DB_PATH" == /* && "$LIVE_DB_PATH" != *[$'\r\n']* \
+    && -f "$LIVE_DB_PATH" && ! -L "$LIVE_DB_PATH" \
+    && -d "$data_dir" && ! -L "$data_dir" && -O "$data_dir" \
+    && -f "$db_path" && ! -L "$db_path" && -O "$db_path" \
+    && ! -L "$tokens_path" && ( ! -e "$tokens_path" || -f "$tokens_path" ) ]] \
+    || return 1
+  [[ ! -e "$tokens_path" || -O "$tokens_path" ]] || return 1
+  physical_releases="$(physical_path_without_symlinks "$RELEASES_DIR")" || return 1
+  physical_data="$(physical_path_without_symlinks "$data_dir")" || return 1
+  physical_db="$(physical_path_without_symlinks "$db_path")" || return 1
+  physical_tokens="$(physical_path_without_symlinks "$tokens_path")" || return 1
+  live_db="$(physical_path_without_symlinks "$LIVE_DB_PATH")" || return 1
+  [[ "$physical_db" == "$live_db" ]] || return 1
+  for file in "$physical_data" "$physical_db" "$physical_tokens"; do
+    case "$file" in "$physical_releases"|"$physical_releases"/*) return 1 ;; esac
+  done
+  printf '%s\n%s\n%s\n' "$data_dir" "$db_path" "$tokens_path"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -150,6 +251,8 @@ Usage:
   deploy-blue-green.sh bind <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh probe <blue|green>
   deploy-blue-green.sh retire <blue|green>
+  deploy-blue-green.sh preflight-app <blue|green> <release-id> <absolute-standalone-root>
+  deploy-blue-green.sh transition-app <blue|green> <release-id> <absolute-standalone-root>
   deploy-blue-green.sh switch <blue|green>
   deploy-blue-green.sh rollback
   deploy-blue-green.sh status
@@ -291,7 +394,7 @@ wait_for_recovery_guard_ready() {
 
 verify_deployment_source_gate() {
   (( DEPLOYMENT_SOURCE_GATE_COMPLETE == 0 )) || return 0
-  local invoked_path expected_path head relative absolute layout binding expected_sha actual_sha
+  local invoked_path expected_path head layout verification
   local -a critical_paths=(
     scripts/deploy-blue-green.sh
     scripts/lib/shared-deployment-lock.sh
@@ -355,25 +458,17 @@ verify_deployment_source_gate() {
       || typeof value.gitRoot !== "string" || !value.gitRoot.startsWith("/")) process.exit(2)
   ' "$layout" "$PROJECT_ROOT" \
     || fail "deployment Git source layout is invalid"
-  for relative in "${critical_paths[@]}"; do
-    absolute="$PROJECT_ROOT/$relative"
-    [[ -f "$absolute" && ! -L "$absolute" ]] \
-      || fail "critical deployment source is missing or unsafe: $relative"
-    binding="$("$NODE_BIN" "$GIT_SOURCE_LAYOUT" verify-file \
-      "$PROJECT_ROOT" "$relative" "$head")" \
-      || fail "critical deployment source is not bound to Git HEAD: $relative"
-    expected_sha="$("$NODE_BIN" -e '
-      const value = JSON.parse(process.argv[1])
-      if (!/^[a-f0-9]{64}$/u.test(value.sha256)) process.exit(2)
-      process.stdout.write(value.sha256)
-    ' "$binding")" || fail "critical deployment Git binding is invalid: $relative"
-    actual_sha="$(shasum -a 256 "$absolute" | awk '{print $1}')" \
-      || fail "unable to hash critical deployment source: $relative"
-    [[ "$actual_sha" == "$expected_sha" ]] \
-      || fail "critical deployment source differs from Git HEAD: $relative"
-  done
-  "$NODE_BIN" "$GIT_SOURCE_LAYOUT" assert-clean "$PROJECT_ROOT" "$head" >/dev/null \
-    || fail "deployment source worktree and index must be clean before any blue-green mutation"
+  verification="$("$NODE_BIN" "$GIT_SOURCE_LAYOUT" verify-files \
+    "$PROJECT_ROOT" "$head" "${critical_paths[@]}")" \
+    || fail "critical deployment source batch verification failed"
+  "$NODE_BIN" -e '
+    const value = JSON.parse(process.argv[1])
+    if (value?.schema !== "video-autoworker-git-source-verification/v1"
+      || value.productRoot !== process.argv[2] || value.commit !== process.argv[3]
+      || value.files?.length !== Number(process.argv[4])
+      || !/^[a-f0-9]{64}$/u.test(value.closureSha256)) process.exit(2)
+  ' "$verification" "$PROJECT_ROOT" "$head" "${#critical_paths[@]}" \
+    || fail "critical deployment source batch evidence is invalid"
   DEPLOYMENT_SOURCE_GATE_COMPLETE=1
 }
 
@@ -851,7 +946,23 @@ assert_existing_run_layout() {
   [[ -d "$RELEASES_DIR" && ! -L "$RELEASES_DIR" ]] || fail "blue-green releases directory does not exist"
 }
 
+ensure_release_verification_cache() {
+  [[ -z "$RELEASE_VERIFICATION_CACHE_DIR" ]] || return 0
+  RELEASE_VERIFICATION_CACHE_DIR="$(mktemp -d "$RUN_DIR/.release-verification.$$.XXXXXX")"
+  chmod 700 "$RELEASE_VERIFICATION_CACHE_DIR"
+  printf '0\n' > "$RELEASE_VERIFICATION_CACHE_DIR/full"
+  printf '0\n' > "$RELEASE_VERIFICATION_CACHE_DIR/fast"
+  printf '0\n' > "$RELEASE_VERIFICATION_CACHE_DIR/fallback"
+  chmod 600 "$RELEASE_VERIFICATION_CACHE_DIR/full" \
+    "$RELEASE_VERIFICATION_CACHE_DIR/fast" "$RELEASE_VERIFICATION_CACHE_DIR/fallback"
+}
+
 acquire_lock() {
+  if [[ "${DEPLOYMENT_LOCK_OWNED:-0}" == 1 ]]; then
+    prepare_run_dir
+    ensure_release_verification_cache
+    return
+  fi
   verify_deployment_source_gate
   # Source only after its exact HEAD blob has passed the fail-closed gate.
   # shellcheck source=scripts/lib/shared-deployment-lock.sh
@@ -863,6 +974,7 @@ acquire_lock() {
     || fail "another blue-green operation holds $LOCK_DIR or its stale owner is unsafe"
   trap cleanup_operation EXIT
   prepare_run_dir
+  ensure_release_verification_cache
 }
 
 validate_release_id() {
@@ -874,12 +986,91 @@ physical_path() {
   "$NODE_BIN" -e 'process.stdout.write(require("node:fs").realpathSync.native(process.argv[1]))' "$1"
 }
 
+physical_path_without_symlinks() {
+  "$NODE_BIN" - "$1" <<'NODE'
+const fs = require('node:fs')
+const path = require('node:path')
+const input = process.argv[2]
+if (!path.isAbsolute(input) || path.resolve(input) !== input || /[\r\n\0]/u.test(input)) process.exit(2)
+let cursor = path.parse(input).root
+const parts = path.relative(cursor, input).split(path.sep).filter(Boolean)
+for (let index = 0; index < parts.length; index += 1) {
+  cursor = path.join(cursor, parts[index])
+  let entry
+  try { entry = fs.lstatSync(cursor) } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    const remainder = parts.slice(index)
+    process.stdout.write(path.join(fs.realpathSync.native(path.dirname(cursor)), ...remainder))
+    process.exit(0)
+  }
+  if (entry.isSymbolicLink()) process.exit(3)
+}
+process.stdout.write(fs.realpathSync.native(input))
+NODE
+}
+
 release_manifest_sha() {
   file_sha256 "$1/release-manifest.json"
 }
 
 file_sha256() {
   shasum -a 256 "$1" | awk '{print $1}'
+}
+
+release_verification_cache_path() {
+  local key
+  [[ -n "$RELEASE_VERIFICATION_CACHE_DIR" ]] || return 1
+  key="$(printf '%s' "$1" | shasum -a 256 | awk '{print $1}')" || return 1
+  printf '%s/%s.json\n' "$RELEASE_VERIFICATION_CACHE_DIR" "$key"
+}
+
+increment_release_verification_count() {
+  local name="$1" path value
+  [[ -n "$RELEASE_VERIFICATION_CACHE_DIR" ]] || return 0
+  path="$RELEASE_VERIFICATION_CACHE_DIR/$name"
+  value="$(cat "$path")"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "release verification counter is invalid"
+  printf '%s\n' "$(( 10#$value + 1 ))" > "$path"
+}
+
+cache_release_verification() {
+  local root="$1" audit="$2" cache temporary
+  [[ -n "$RELEASE_VERIFICATION_CACHE_DIR" ]] || return 0
+  cache="$(release_verification_cache_path "$root")" || return 1
+  temporary="$cache.tmp.$$"
+  "$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(process.argv[1])
+    if (value?.ok !== true
+      || value?.verificationBundle?.schema !== "video-autoworker-standalone-verification-bundle/v1"
+      || !/^[a-f0-9]{64}$/u.test(value.verificationBundle.bundleSha256 || "")) process.exit(2)
+    fs.writeFileSync(process.argv[2], JSON.stringify(value.verificationBundle), { flag: "wx", mode: 0o600 })
+  ' "$audit" "$temporary" || return 1
+  mv -f "$temporary" "$cache"
+}
+
+full_audit_release() {
+  local root="$1" audit
+  increment_release_verification_count full
+  audit="$("$NODE_BIN" "$AUDITOR" "$root")" || return 1
+  cache_release_verification "$root" "$audit" || return 1
+}
+
+quick_verify_release() {
+  local root="$1" cache bundle
+  cache="$(release_verification_cache_path "$root")" || return 1
+  [[ -f "$cache" && ! -L "$cache" ]] || return 1
+  bundle="$(cat "$cache")" || return 1
+  "$NODE_BIN" "$AUDITOR" --verify-bundle "$root" "$bundle" >/dev/null || return 1
+  increment_release_verification_count fast
+}
+
+rebind_release_verification_cache() {
+  local old_root="$1" new_root="$2" old_cache new_cache
+  old_cache="$(release_verification_cache_path "$old_root")" || return 1
+  new_cache="$(release_verification_cache_path "$new_root")" || return 1
+  [[ -f "$old_cache" && ! -e "$new_cache" && ! -L "$new_cache" ]] || return 1
+  mv "$old_cache" "$new_cache"
 }
 
 assert_release() {
@@ -895,8 +1086,14 @@ assert_release() {
   [[ "$physical_root" == "$physical_expected" ]] \
     || fail "release root must resolve to $physical_expected"
   [[ -f "$AUDITOR" ]] || fail "standalone artifact auditor is missing"
-  "$NODE_BIN" "$AUDITOR" "$physical_root" >/dev/null \
-    || fail "standalone release failed artifact verification"
+  if ! quick_verify_release "$physical_root"; then
+    if [[ -n "$RELEASE_VERIFICATION_CACHE_DIR" \
+      && -f "$(release_verification_cache_path "$physical_root")" ]]; then
+      increment_release_verification_count fallback
+    fi
+    full_audit_release "$physical_root" \
+      || fail "standalone release failed artifact verification"
+  fi
   printf '%s\n' "$physical_root"
 }
 
@@ -919,7 +1116,7 @@ stage_release() {
   target_root="$physical_releases/$release_id"
   [[ ! -e "$target_root" && ! -L "$target_root" ]] || fail "release already exists: $target_root"
   [[ -f "$AUDITOR" ]] || fail "standalone artifact auditor is missing"
-  "$NODE_BIN" "$AUDITOR" "$physical_source" >/dev/null \
+  full_audit_release "$physical_source" \
     || fail "source standalone artifact failed verification"
   source_manifest="$(release_manifest_sha "$physical_source")"
 
@@ -930,7 +1127,7 @@ stage_release() {
   cp -pR "$physical_source/." "$staged_root/"
   "$NODE_BIN" "$AUDITOR" --write-manifest "$staged_root" >/dev/null \
     || fail "unable to regenerate staged release manifest"
-  "$NODE_BIN" "$AUDITOR" "$staged_root" >/dev/null \
+  full_audit_release "$staged_root" \
     || fail "staged standalone artifact failed verification"
   staged_manifest="$(release_manifest_sha "$staged_root")"
   [[ "$staged_manifest" == "$source_manifest" ]] \
@@ -938,7 +1135,9 @@ stage_release() {
   [[ ! -e "$target_root" && ! -L "$target_root" ]] || fail "release target appeared during staging"
   mv "$STAGING_WORK_ROOT" "$target_root"
   STAGING_WORK_ROOT=""
-  "$NODE_BIN" "$AUDITOR" "$target_root/standalone" >/dev/null \
+  rebind_release_verification_cache "$staged_root" "$target_root/standalone" \
+    || fail "unable to rebind staged release verification evidence"
+  quick_verify_release "$target_root/standalone" \
     || fail "published immutable release failed final verification"
   printf 'Staged immutable release: %s manifest=%s\n' "$release_id" "$staged_manifest"
 }
@@ -3560,6 +3759,39 @@ probe_slot() {
     "$slot" "$attested_role" "$release_id" "$pid" "$port"
 }
 
+prewarm_slot() {
+  local slot values release_root host port health static_path
+  slot="$(require_slot "${1:-}")"
+  values="$(binding_values "$slot")" || fail "$slot binding is invalid for prewarm"
+  release_root="$(printf '%s\n' "$values" | sed -n '2p')"
+  host="$(printf '%s\n' "$values" | sed -n '4p')"
+  port="$(printf '%s\n' "$values" | sed -n '5p')"
+  [[ "$host" == 127.0.0.1 && "$port" == "$(slot_port "$slot")" ]] \
+    || fail "$slot prewarm endpoint changed"
+  health="$(curl -fsS --max-time 8 "http://$host:$port/api/status?action=health")" \
+    || fail "$slot read-only health prewarm failed"
+  "$NODE_BIN" -e '
+    const value = JSON.parse(process.argv[1])
+    const database = Array.isArray(value?.checks)
+      ? value.checks.find(item => item?.name === "Database") : null
+    if (!["healthy", "warning", "degraded"].includes(value?.status)
+      || !database || !["healthy", "warning"].includes(database.status)) process.exit(2)
+  ' "$health" || fail "$slot health prewarm result is invalid"
+  static_path="$("$NODE_BIN" -e '
+    const fs = require("node:fs")
+    const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const item = value.files?.find(entry => typeof entry?.path === "string"
+      && entry.path.startsWith(".next/static/") && entry.path.length < 1000)
+    if (!item) process.exit(2)
+    process.stdout.write(`/_next/static/${item.path.slice(".next/static/".length)
+      .split("/").map(encodeURIComponent).join("/")}`)
+  ' "$release_root/release-manifest.json")" \
+    || fail "$slot has no bound static resource for prewarm"
+  curl -fsSI --max-time 8 "http://$host:$port$static_path" >/dev/null \
+    || fail "$slot static-resource prewarm failed"
+  printf 'Candidate prewarm completed: slot=%s sideEffects=unverified contract=read-only\n' "$slot"
+}
+
 assert_existing_candidate_runtime_compatible() {
   local slot="$1" pathname attestation role attested_db live_db
   pathname="$(runtime_attestation_file "$slot")"
@@ -3955,6 +4187,91 @@ switch_slot() {
   transition_with_verification "$target" switch
 }
 
+preflight_app_transition() {
+  local target release_id release_root active previous state_release values pid manager
+  target="$(require_slot "${1:-}")"
+  release_id="${2:-}"
+  release_root="${3:-}"
+  [[ -n "$release_id" && -n "$release_root" ]] || { usage >&2; exit 2; }
+  verify_deployment_source_gate
+  # Resolve the installed manager and every deterministic file/argument
+  # contract before the coordinator pauses intake.
+  source "$SHARED_DEPLOYMENT_LOCK_SHELL"
+  DEPLOYMENT_RUN_DIR="$RUN_DIR"
+  DEPLOYMENT_LOCK_DIR="$LOCK_DIR"
+  export DEPLOYMENT_RUN_DIR DEPLOYMENT_LOCK_DIR
+  assert_shared_deployment_lock_available \
+    || fail "another blue-green operation is active or its lock is unsafe"
+  assert_existing_run_layout
+  validate_state
+  managed_runtime_paths >/dev/null \
+    || fail "managed runtime data paths are missing, unsafe, or do not identify the live database"
+  validate_release_id "$release_id"
+  release_root="$(assert_release "$release_id" "$release_root")"
+  [[ "$release_root" == "$(physical_path "$RELEASES_DIR")/$release_id/standalone" ]] \
+    || fail "candidate release root is not canonical"
+  active="$(read_state_field active)"
+  previous="$(read_state_field previous)"
+  [[ "$active" != "$target" ]] || fail "target slot is already active"
+  state_release="$(read_state_slot_release "$target")"
+  if [[ "$state_release" != unbound-* ]]; then
+    [[ "$previous" == "$target" ]] \
+      || fail "a bound target must be the immediately previous slot"
+    if [[ -e "$(retirement_file "$target")" || -L "$(retirement_file "$target")" ]]; then
+      assert_retirement_proof "$target" "$state_release"
+    else
+      values="$(runtime_attestation_values "$target")" \
+        || fail "$target cannot be retired because its runtime attestation is missing"
+      pid="$(printf '%s\n' "$values" | sed -n '1p')"
+      [[ "$pid" =~ ^[1-9][0-9]*$ ]] && kill -0 "$pid" 2>/dev/null \
+        || fail "$target is stopped without a certified retirement proof"
+      manager="normal_service_manager"
+      "$manager" status "$target" >/dev/null \
+        || fail "$target is not controlled by the service manager"
+    fi
+  fi
+  normal_service_manager preflight all >/dev/null
+  printf 'Application transition preflight passed: target=%s release=%s lifecycle=%s\n' \
+    "$target" "$release_id" "$state_release"
+}
+
+transition_app() {
+  local target release_id release_root state_release active generation
+  target="$(require_slot "${1:-}")"
+  release_id="${2:-}"
+  release_root="${3:-}"
+  [[ -n "$release_id" && -n "$release_root" ]] || { usage >&2; exit 2; }
+  acquire_lock
+  validate_state
+  TRANSITION_BASE_GENERATION="$(read_state_field generation)"
+  [[ "$TRANSITION_BASE_GENERATION" =~ ^[1-9][0-9]*$ ]] \
+    || fail "router generation is invalid before application transition"
+  managed_runtime_paths >/dev/null \
+    || fail "managed runtime data paths changed after transition preflight"
+  state_release="$(read_state_slot_release "$target")"
+  if [[ "$state_release" != unbound-* ]]; then
+    retire_slot "$target"
+  fi
+  bind_slot "$target" "$release_id" "$release_root"
+  TRANSITION_CANDIDATE_SLOT="$target"
+  TRANSITION_CANDIDATE_RELEASE="$release_id"
+  normal_service_manager start "$target" >/dev/null \
+    || fail "candidate slot could not be started under the service manager"
+  probe_slot "$target"
+  prewarm_slot "$target"
+  switch_slot "$target"
+  active="$(read_state_field active)"
+  generation="$(read_state_field generation)"
+  [[ "$active" == "$target" && "$(read_state_slot_release "$target")" == "$release_id" ]] \
+    || fail "router state does not prove the application route commit"
+  TRANSITION_ROUTE_COMMITTED=1
+  printf 'Route commit observed: target=%s release=%s generation=%s\n' \
+    "$target" "$release_id" "$generation"
+  attest_current >/dev/null
+  printf 'Application transition accepted: target=%s release=%s generation=%s\n' \
+    "$target" "$release_id" "$generation"
+}
+
 rollback_state() {
   acquire_lock
   validate_state
@@ -4036,7 +4353,7 @@ attest_current() {
 command="${1:-}"
 shift || true
 case "$command" in
-  init|bootstrap|bootstrap-successor|stage|bind|retire|switch|rollback|status|attest-current)
+  init|bootstrap|bootstrap-successor|stage|bind|retire|preflight-app|transition-app|switch|rollback|status|attest-current)
     assert_bootstrap_operation_gate "$command" "$@"
     ;;
 esac
@@ -4061,6 +4378,8 @@ case "$command" in
   bind) bind_slot "$@" ;;
   probe) probe_slot "$@" ;;
   retire) retire_slot "$@" ;;
+  preflight-app) preflight_app_transition "$@" ;;
+  transition-app) transition_app "$@" ;;
   switch) switch_slot "$@" ;;
   rollback) rollback_state "$@" ;;
   status) show_status "$@" ;;

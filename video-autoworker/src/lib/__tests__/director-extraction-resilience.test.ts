@@ -472,9 +472,9 @@ async function runSizedUnderstanding(totalCharacters: number) {
   const brain = brainHarness()
   await advanceToUnderstanding(db, taskId, brain)
   const writesBefore = brain.proposalWrites()
-  let phaseInputBytes: number | null = null
+  const phaseInputBytes: number[] = []
   const runner = vi.fn<DirectorExtractionPhaseRunner>(understandingRunner(input => {
-    phaseInputBytes = Buffer.byteLength(JSON.stringify(input), 'utf8')
+    phaseInputBytes.push(Buffer.byteLength(JSON.stringify(input), 'utf8'))
   }))
   const result = await runNextDirectorExtractionPhase(db, {
     commandRunner: brain.commandRunner,
@@ -1213,53 +1213,38 @@ describe('director extraction queue and service resilience', () => {
     },
   )
 
-  it('enforces the 128 KiB phase gate with zero model or Feishu writes past the boundary', async () => {
-    const attempts = new Map<number, Awaited<ReturnType<typeof runSizedUnderstanding>>>()
-    const attempt = async (characters: number) => {
-      const cached = attempts.get(characters)
-      if (cached) return cached
-      const result = await runSizedUnderstanding(characters)
-      attempts.set(characters, result)
-      return result
-    }
-    let acceptedCharacters = 100_000
-    let rejectedCharacters = 150_000
-    expect((await attempt(acceptedCharacters)).result)
-      .toMatchObject({ outcome: 'awaiting_review' })
-    expect((await attempt(rejectedCharacters)).modelCalls).toBe(0)
-    while (rejectedCharacters - acceptedCharacters > 1) {
-      const middle = Math.floor((acceptedCharacters + rejectedCharacters) / 2)
-      const result = await attempt(middle)
-      if (result.modelCalls === 1) acceptedCharacters = middle
-      else rejectedCharacters = middle
-    }
+  it('segments aggregate input at 128 KiB and projects the merged phase only once', async () => {
+    const value = await runSizedUnderstanding(150_000)
+    expect(value.result).toMatchObject({ outcome: 'awaiting_review' })
+    expect(value.modelCalls).toBeGreaterThan(1)
+    expect(value.phaseInputBytes).toHaveLength(value.modelCalls)
+    expect(value.phaseInputBytes.every(bytes => (
+      bytes <= DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES
+    ))).toBe(true)
+    expect(value.proposalWrites).toBe(1)
+  })
 
-    const accepted = await attempt(acceptedCharacters)
-    expect(accepted.result).toMatchObject({ outcome: 'awaiting_review' })
-    expect(accepted.phaseInputBytes).not.toBeNull()
-    expect(accepted.phaseInputBytes!).toBeLessThanOrEqual(
-      DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES,
-    )
-    expect(DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES - accepted.phaseInputBytes!)
-      .toBeLessThan(2 * 1024)
-    expect(accepted.modelCalls).toBe(1)
-    expect(accepted.proposalWrites).toBe(1)
-
-    const over = await attempt(rejectedCharacters)
-    expect(over.result).toMatchObject({
-      outcome: 'failed',
-      job: {
-        status: 'conflict',
-        attemptCount: 1,
-        lastErrorCode: expect.stringMatching(
-          /^director_extraction_(?:learning_context_budget_exceeded|phase_input_too_large)$/u,
-        ),
-      },
+  it('rejects one indivisible oversized unit before model or Feishu writes', async () => {
+    const db = database()
+    const taskId = 'oversized-indivisible-unit'
+    seedSource(db, {
+      taskId,
+      timeline: [{ index: 1, timeRange: '00:00:00-00:00:01',
+        visualAnalysis: 'x'.repeat(150_000), confidence: 0.9 }],
     })
-    expect(rejectedCharacters).toBe(acceptedCharacters + 1)
-    expect(over.phaseInputBytes).toBeNull()
-    expect(over.modelCalls).toBe(0)
-    expect(over.proposalWrites).toBe(0)
+    const brain = brainHarness()
+    await advanceToUnderstanding(db, taskId, brain)
+    const writesBefore = brain.proposalWrites()
+    const runner = vi.fn<DirectorExtractionPhaseRunner>(understandingRunner())
+    await expect(runNextDirectorExtractionPhase(db, {
+      commandRunner: brain.commandRunner, runner, nowSeconds: 1_002,
+    })).resolves.toMatchObject({
+      outcome: 'failed',
+      job: { status: 'failed', attemptCount: 1,
+        lastErrorCode: 'director_extraction_timeline_visual_summary_1_too_long' },
+    })
+    expect(runner).not.toHaveBeenCalled()
+    expect(brain.proposalWrites()).toBe(writesBefore)
   })
 
   it('keeps 38 reviewed material records inside the bounded understanding input', async () => {

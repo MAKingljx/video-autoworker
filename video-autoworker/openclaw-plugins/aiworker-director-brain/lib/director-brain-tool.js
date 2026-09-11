@@ -54,6 +54,7 @@ export const DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL =
   'http://127.0.0.1:3017/api/n8n/director-extraction'
 export const DIRECTOR_BRAIN_APPLICATION_SERVICE_URL =
   'http://127.0.0.1:3017/api/n8n/director-brain'
+export const DIRECTOR_BRAIN_APPLICATION_PROTOCOL = 'director-brain-application/v1'
 const EXTRACTION_ACTIONS = new Set([
   'extraction_status',
 ])
@@ -488,14 +489,14 @@ export function normalizeDirectorBrainToolRequest(value) {
 export function createDirectorBrainApplicationService({ fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('director_brain_application_service_invalid')
   return async (command, input) => {
-    if (!['operate', 'review'].includes(command)
+    if (!['operate', 'propose', 'review', 'review-batch'].includes(command)
       || !input || typeof input !== 'object' || Array.isArray(input)) {
       throw new Error('director_brain_application_operation_invalid')
     }
     const response = await fetchImpl(DIRECTOR_BRAIN_APPLICATION_SERVICE_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command, input }),
+      body: JSON.stringify({ protocol: DIRECTOR_BRAIN_APPLICATION_PROTOCOL, command, input }),
       cache: 'no-store',
       redirect: 'error',
     })
@@ -515,7 +516,7 @@ export function createDirectorBrainApplicationService({ fetchImpl = globalThis.f
 
 export async function loadInstalledDirectorBrainService() {
   const service = createDirectorBrainApplicationService()
-  return operation => service('operate', operation)
+  return operation => service(operation?.action === 'propose' ? 'propose' : 'operate', operation)
 }
 
 export async function loadInstalledDirectorBrainReviewServices() {
@@ -523,6 +524,13 @@ export async function loadInstalledDirectorBrainReviewServices() {
   return {
     executeOperation: operation => service('operate', operation),
     reviewRecord: request => service('review', request),
+    reviewBatch: async request => {
+      const result = await service('review-batch', request)
+      if (result.action !== 'review_batch' || !result.batch) {
+        throw new Error('director_review_batch_response_invalid')
+      }
+      return result.batch
+    },
   }
 }
 
@@ -953,11 +961,27 @@ function extractionUserVisibleAnswer(value) {
   if (/awaiting_technique_review/iu.test(state)) {
     return `《${workName}》的导演技法已经整理成候选，正在等你确认。`
   }
+  if (/running|in_progress|extracting|backfill/iu.test(state)) {
+    const phaseName = {
+      perception: '素材感知', understanding: '人物与故事理解', judgment: '导演判断',
+      case: '导演案例', technique: '导演技法',
+    }[value.phase]
+    const segment = value.segmentProgress
+    if (phaseName && Number.isSafeInteger(segment?.completed)
+      && Number.isSafeInteger(segment?.total) && segment.total > 0
+      && segment.completed >= 0 && segment.completed <= segment.total) {
+      return `《${workName}》正在进行${phaseName}，当前分段已完成 ${segment.completed}/${segment.total}。`
+    }
+    if (phaseName) return `《${workName}》正在进行${phaseName}。`
+    return `《${workName}》正在整理导演知识。`
+  }
+  if (/queue|queued|pending/iu.test(state) && value.blockedOn === 'executor_queue') {
+    return `《${workName}》已进入导演知识执行队列，正在等待可用执行器。`
+  }
   if (/complete|completed|succeeded|done/iu.test(state)) return `《${workName}》的导演知识已经整理完成。`
   if (/conflict/iu.test(state)) return `《${workName}》的视频和作品关系发生了变化，已停止整理，请先检查。`
   if (/fail|failed|error/iu.test(state)) return `《${workName}》的导演知识没有整理完成，可以稍后重试。`
   if (/queue|queued|pending/iu.test(state)) return `《${workName}》已经排队，正在等待开始。`
-  if (/running|in_progress|extracting|backfill/iu.test(state)) return `《${workName}》正在整理导演知识。`
   if (/not_started|missing|none/iu.test(state)) return `《${workName}》还没有开始整理导演知识。`
   return `《${workName}》的导演知识状态暂时无法确认，请稍后再试。`
 }
@@ -1151,6 +1175,7 @@ export function createDirectorBrainTool({
         if (request.action === 'review_preview') {
           const preview = await prepareDirectorBrainReview({
             request, executeOperation, store: reviewSessionStore, context,
+            requestKey: _toolCallId,
           })
           return textResult(serializeServiceResult(handledAnswer(
             request.action, preview.outcome, preview.answer,
@@ -1162,7 +1187,9 @@ export function createDirectorBrainTool({
           : null
         const result = await executeResolvedRequest(executeOperation, getExtractionService, request)
         if (request.action === 'propose') {
-          rememberProposedDirectorBrainRecord({ result, store: reviewSessionStore, context })
+          await rememberProposedDirectorBrainRecord({
+            result, store: reviewSessionStore, context, requestKey: _toolCallId,
+          })
         }
         return textResult(serializeServiceResult(result))
       } catch (error) {

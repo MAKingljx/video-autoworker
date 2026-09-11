@@ -1,17 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { z } from 'zod'
 import { requireN8nRole } from '@/lib/n8n'
 import { runDirectorCommand } from '@/lib/director-evidence-outbox'
 import { isDirectorBrainScope } from '@/lib/director-brain-scope'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
+import { getDatabase } from '@/lib/db'
+import {
+  cancelDirectorReviewBatch,
+  claimDirectorReviewBatch,
+  prepareDirectorReviewBatch,
+  recordDirectorReviewBatchItem,
+} from '@/lib/director-review-batches'
+import {
+  directorBrainCommandPort,
+  executeDirectorBrainApplicationRequest,
+  parseDirectorBrainApplicationRequest,
+  type DirectorReviewBatchApplicationInput,
+} from '@/lib/director-brain-application-port'
 
 export const runtime = 'nodejs'
-
-const requestSchema = z.object({
-  command: z.enum(['operate', 'review']),
-  input: z.record(z.string(), z.unknown()),
-}).strict()
 
 function unavailable(): NextResponse {
   return NextResponse.json({
@@ -47,8 +54,8 @@ export async function POST(request: NextRequest) {
   }
   const limited = mutationLimiter(request)
   if (limited) return limited
-  const parsed = requestSchema.safeParse(await request.json().catch(() => null))
-  if (!parsed.success) {
+  const parsed = parseDirectorBrainApplicationRequest(await request.json().catch(() => null))
+  if (!parsed) {
     return NextResponse.json({ ok: false, error: '导演脑应用请求无效' }, {
       status: 400,
       headers: { 'Cache-Control': 'no-store' },
@@ -56,12 +63,25 @@ export async function POST(request: NextRequest) {
   }
   const startedAt = Date.now()
   try {
-    const result = await runDirectorCommand(parsed.data.command, parsed.data.input)
+    const reviewBatch = async (input: DirectorReviewBatchApplicationInput) => {
+      const db = getDatabase()
+      const batch = input.action === 'prepare'
+        ? prepareDirectorReviewBatch(db, scope, input)
+        : input.action === 'claim'
+          ? claimDirectorReviewBatch(db, scope, input)
+          : input.action === 'record'
+            ? recordDirectorReviewBatchItem(db, scope, input)
+            : cancelDirectorReviewBatch(db, scope, input)
+      return { ok: true, action: 'review_batch', operation: input.action, batch }
+    }
+    const result = await executeDirectorBrainApplicationRequest(
+      directorBrainCommandPort(runDirectorCommand, reviewBatch), parsed,
+    )
     return NextResponse.json(result, { headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
     logger.warn({
       code: runtimeDiagnosticCode(error),
-      command: parsed.data.command,
+      command: parsed.command,
       elapsedMs: Math.max(0, Date.now() - startedAt),
     }, 'Director brain application operation failed')
     return unavailable()

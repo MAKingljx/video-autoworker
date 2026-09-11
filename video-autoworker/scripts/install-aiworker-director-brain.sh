@@ -725,12 +725,12 @@ const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
 const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 if (manifest?.id !== 'aiworker-director-brain'
-  || manifest?.version !== '0.4.3'
+  || manifest?.version !== '0.4.4'
   || manifest?.activation?.onStartup !== true
   || !same(manifest?.activation?.onCapabilities, ['hook', 'tool'])
   || !same(manifest?.contracts?.tools, ['aiworker_director_brain'])
   || manifest?.toolMetadata?.aiworker_director_brain?.optional !== true
-  || packageManifest?.version !== '0.4.3'
+  || packageManifest?.version !== '0.4.4'
   || packageManifest?.peerDependencies?.openclaw !== expectedPeer) {
   throw new Error('director_brain_plugin_contract_mismatch')
 }

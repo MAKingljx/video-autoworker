@@ -214,6 +214,16 @@ function jsonResponse(response, statusCode, payload) {
   response.end(body)
 }
 
+function beginActivity(counter, field) {
+  counter[field] += 1
+  let active = true
+  return () => {
+    if (!active) return
+    active = false
+    counter[field] = Math.max(0, counter[field] - 1)
+  }
+}
+
 export function createStandaloneRouter(options) {
   const stateFile = resolve(options.stateFile)
   const counters = {
@@ -259,35 +269,58 @@ export function createStandaloneRouter(options) {
     const slot = state.active
     const backend = state.slots[slot]
     counters[slot].requests += 1
-    counters[slot].activeRequests += 1
-    let settled = false
-    const settle = () => {
-      if (settled) return
-      settled = true
-      counters[slot].activeRequests = Math.max(0, counters[slot].activeRequests - 1)
+    const settle = beginActivity(counters[slot], 'activeRequests')
+    let backendResponse = null
+    let proxied
+    const abortProxy = error => {
+      if (backendResponse && !backendResponse.destroyed) backendResponse.destroy(error)
+      if (proxied && !proxied.destroyed) proxied.destroy(error)
     }
-    outgoing.once('close', settle)
+    outgoing.once('close', () => {
+      settle()
+      if (!outgoing.writableFinished) abortProxy()
+    })
     outgoing.once('finish', settle)
+    outgoing.once('error', settle)
 
-    const proxied = httpRequest({
+    proxied = httpRequest({
       hostname: backend.host,
       port: backend.port,
       method: incoming.method,
       path: incoming.url,
       headers: proxyHeaders(incoming.headers, false, originalHost),
-    }, backendResponse => {
+    }, response => {
+      backendResponse = response
+      const abortResponse = error => {
+        settle()
+        if (!outgoing.destroyed) outgoing.destroy(error)
+      }
+      response.once('aborted', abortResponse)
+      response.once('error', abortResponse)
+      response.once('close', () => {
+        if (!response.complete) abortResponse()
+      })
       const headers = proxyHeaders(backendResponse.headers)
       outgoing.writeHead(backendResponse.statusCode || 502, backendResponse.statusMessage, headers)
       backendResponse.pipe(outgoing)
     })
-    proxied.on('error', error => {
+    proxied.once('abort', settle)
+    proxied.once('error', error => {
+      settle()
       if (!outgoing.headersSent) {
         jsonResponse(outgoing, 502, { ok: false, error: 'standalone_backend_unavailable', detail: error.code || null })
       } else {
         outgoing.destroy(error)
       }
     })
-    incoming.on('aborted', () => proxied.destroy())
+    incoming.once('aborted', () => {
+      settle()
+      abortProxy()
+    })
+    incoming.once('error', error => {
+      settle()
+      abortProxy(error)
+    })
     incoming.pipe(proxied)
   })
 
@@ -310,9 +343,14 @@ export function createStandaloneRouter(options) {
     const backend = state.slots[slot]
     const upstream = createConnection({ host: backend.host, port: backend.port })
     let connected = false
+    let settle = () => {}
     upstream.once('connect', () => {
+      if (socket.destroyed) {
+        upstream.destroy()
+        return
+      }
       connected = true
-      counters[slot].upgradedSockets += 1
+      settle = beginActivity(counters[slot], 'upgradedSockets')
       const headers = proxyHeaders(incoming.headers, true, originalHost)
       const lines = [`${incoming.method || 'GET'} ${incoming.url || '/'} HTTP/${incoming.httpVersion}`]
       for (const [name, value] of Object.entries(headers)) {
@@ -326,18 +364,26 @@ export function createStandaloneRouter(options) {
       if (head.length) upstream.write(head)
       socket.pipe(upstream).pipe(socket)
     })
-    const settle = () => {
-      if (!connected) return
-      connected = false
-      counters[slot].upgradedSockets = Math.max(0, counters[slot].upgradedSockets - 1)
-    }
-    socket.once('close', settle)
-    upstream.once('close', settle)
-    upstream.once('error', () => {
-      if (!connected) socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
-      else socket.destroy()
+    socket.once('close', () => {
+      settle()
+      if (!upstream.destroyed) upstream.destroy()
     })
-    socket.once('error', () => upstream.destroy())
+    upstream.once('close', () => {
+      settle()
+      if (connected && !socket.destroyed) socket.destroy()
+      else if (!connected && !socket.destroyed && !socket.writableEnded) {
+        socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
+      }
+    })
+    upstream.once('error', () => {
+      settle()
+      if (!socket.destroyed && !connected) socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n')
+      else if (!socket.destroyed) socket.destroy()
+    })
+    socket.once('error', () => {
+      settle()
+      upstream.destroy()
+    })
   })
 
   return server

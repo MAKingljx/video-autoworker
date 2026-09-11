@@ -4,6 +4,7 @@ import {
   createDirectorBrainApplicationService,
   createDirectorBrainExtractionService,
   createDirectorBrainTool,
+  DIRECTOR_BRAIN_APPLICATION_PROTOCOL,
   DIRECTOR_BRAIN_APPLICATION_SERVICE_URL,
   DIRECTOR_BRAIN_EXTRACTION_SERVICE_URL,
 } from '../lib/director-brain-tool.js'
@@ -46,8 +47,10 @@ function expectHandledShortAnswer(result, expected) {
 }
 
 describe('director brain extraction loopback client', () => {
-  it.each(['operate', 'review'])('routes %s through the credential-free app service', async command => {
-    const action = command === 'operate' ? 'health' : 'review'
+  it.each(['operate', 'propose', 'review', 'review-batch'])('routes %s through the credential-free app service', async command => {
+    const action = command === 'operate' ? 'health'
+      : command === 'propose' ? 'propose'
+        : command === 'review-batch' ? 'review_batch' : 'review'
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(200, { ok: true, action }))
     const service = createDirectorBrainApplicationService({ fetchImpl })
     const input = { action }
@@ -61,7 +64,11 @@ describe('director brain extraction loopback client', () => {
     })
     expect(init).not.toHaveProperty('signal')
     expect(init.headers).not.toHaveProperty('Authorization')
-    expect(JSON.parse(init.body)).toEqual({ command, input })
+    expect(JSON.parse(init.body)).toEqual({
+      protocol: DIRECTOR_BRAIN_APPLICATION_PROTOCOL,
+      command,
+      input,
+    })
   })
 
   it('queries status through the fixed credential-free loopback', async () => {
@@ -127,6 +134,22 @@ describe('director brain extraction loopback client', () => {
       '《冰原纪事》的导演案例已经整理好，正在等你确认。确认后才会继续沉淀技法。',
     )
     expect(JSON.stringify(result)).not.toMatch(/WORK-INTERNAL|CASE-INTERNAL/iu)
+  })
+
+  it('reports real phase segment progress when the authority provides it', async () => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: workService(),
+      extractionService: vi.fn(async () => ({
+        ok: true, action: 'extraction_status', found: true, status: 'running',
+        phase: 'understanding', segmentProgress: { completed: 2, total: 5 },
+      })),
+    })
+    const result = resultJson(await tool.execute('status-segments', {
+      action: 'extraction_status', query: '冰原纪事',
+    }))
+    expect(result.responseContract.userVisibleAnswer)
+      .toBe('《冰原纪事》正在进行人物与故事理解，当前分段已完成 2/5。')
   })
 
   it('summarizes failed sources in a multi-source status without exposing IDs', async () => {

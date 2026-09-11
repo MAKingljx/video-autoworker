@@ -75,6 +75,7 @@ function sessionIdentity(context) {
 export function createDirectorReviewSessionStore({
   now = () => Date.now(),
   createCode = () => randomBytes(3).toString('hex').toUpperCase(),
+  loadServices,
 } = {}) {
   const pending = new Map()
   const prune = () => {
@@ -96,17 +97,33 @@ export function createDirectorReviewSessionStore({
     return value
   }
   return {
-    rememberProposal(context, targets) {
+    rememberProposal(context, targets, requestKey) {
       const key = sessionIdentity(context)
       if (!key || !Array.isArray(targets) || targets.length !== 1) return false
       prune()
-      pending.set(key, { kind: 'proposal', targets: structuredClone(targets), expiresAt: now() + REVIEW_TTL_MS })
+      pending.set(key, {
+        kind: 'proposal', targets: structuredClone(targets), requestKey,
+        expiresAt: now() + REVIEW_TTL_MS,
+      })
       return true
     },
-    prepare(context, decision, targets) {
+    prepare(context, decision, targets, requestKey = randomBytes(12).toString('hex')) {
       const key = sessionIdentity(context)
       if (!key || !['approve', 'reject'].includes(decision)
         || !Array.isArray(targets) || targets.length < 1 || targets.length > MAX_REVIEW_TARGETS) return false
+      if (typeof loadServices === 'function') {
+        return loadServices().then(services => services.reviewBatch({
+          action: 'prepare', actorKey: key, requestKey, decision,
+          targets: targets.map(target => ({
+            ...target,
+            targetStatuses: TABLE_CONTRACTS[target.table]?.[decision]?.[target.state],
+          })),
+        })).then(batch => ({
+          kind: 'review', decision: batch.decision, code: batch.confirmationCode,
+          batchId: batch.batchId, targets: batch.targets, itemStatuses: batch.itemStatuses,
+          expiresAt: batch.expiresAt * 1000,
+        }))
+      }
       prune()
       const code = safeText(createCode(), 12)
       if (!code || !/^[A-Z0-9]{6,12}$/u.test(code)) return false
@@ -115,6 +132,45 @@ export function createDirectorReviewSessionStore({
       }
       pending.set(key, receipt)
       return receipt
+    },
+    claim(context, confirmation) {
+      const key = sessionIdentity(context)
+      if (!key) return null
+      if (typeof loadServices !== 'function') {
+        const value = read(context)
+        if (value?.kind !== 'review' || value.decision !== confirmation.decision
+          || value.code !== confirmation.code || value.targets.length !== confirmation.count) return null
+        pending.delete(key)
+        return value
+      }
+      return loadServices().then(services => services.reviewBatch({
+        action: 'claim', actorKey: key,
+        confirmationCode: confirmation.code, decision: confirmation.decision,
+        count: confirmation.count,
+      })).then(batch => ({
+        kind: 'review', decision: batch.decision, code: batch.confirmationCode,
+        batchId: batch.batchId, targets: batch.targets, itemStatuses: batch.itemStatuses,
+        expiresAt: batch.expiresAt * 1000,
+      }))
+    },
+    cancelReview(context, code) {
+      const key = sessionIdentity(context)
+      if (!key || typeof loadServices !== 'function') {
+        const value = read(context)
+        if (value?.kind !== 'review' || value.code !== code) return null
+        pending.delete(key)
+        return value
+      }
+      return loadServices().then(services => services.reviewBatch({
+        action: 'cancel', actorKey: key, confirmationCode: code,
+      }))
+    },
+    record(context, receipt, ordinal, status, details = {}) {
+      const key = sessionIdentity(context)
+      if (!key || !receipt?.batchId || typeof loadServices !== 'function') return null
+      return loadServices().then(services => services.reviewBatch({
+        action: 'record', actorKey: key, batchId: receipt.batchId, ordinal, status, ...details,
+      }))
     },
     get: read,
     consume(context) {
@@ -194,7 +250,7 @@ function noMatchAnswer(decision) {
     : '没有找到可驳回的匹配候选。请补充准确的作品名、记录类型和候选名称。'
 }
 
-export async function prepareDirectorBrainReview({ request, executeOperation, store, context }) {
+export async function prepareDirectorBrainReview({ request, executeOperation, store, context, requestKey }) {
   const contract = TABLE_CONTRACTS[request.table]
   if (!contract || !['approve', 'reject'].includes(request.decision)) {
     return { outcome: 'invalid', answer: '审核对象不明确。请补充准确的作品名、记录类型和候选名称。' }
@@ -248,22 +304,23 @@ export async function prepareDirectorBrainReview({ request, executeOperation, st
   if (truncated || targets.length > MAX_REVIEW_TARGETS) {
     return { outcome: 'too_many', answer: '匹配候选超过50条，本次未建立批量审核。请缩小名称范围后重试。' }
   }
-  const receipt = store?.prepare(context, request.decision, targets)
+  const receipt = await store?.prepare(context, request.decision, targets, requestKey)
   if (!receipt) {
     return { outcome: 'session_unavailable', answer: '当前会话无法安全绑定审核对象，本次未更改状态。' }
   }
   const answer = previewAnswer(request.decision, targets, receipt.code)
   if (!answer) {
+    await store.cancelReview?.(context, receipt.code)
     store.clear(context)
     return { outcome: 'preview_too_large', answer: '候选清单超过安全显示上限，本次未建立审核批次。请缩小候选范围。' }
   }
   return { outcome: 'preview', answer }
 }
 
-export function rememberProposedDirectorBrainRecord({ result, store, context }) {
+export function rememberProposedDirectorBrainRecord({ result, store, context, requestKey }) {
   if (result?.ok !== true || result.action !== 'propose' || !result.record) return false
   const target = targetFromRecord(result.table, result.record)
-  return target ? store?.rememberProposal(context, [target]) === true : false
+  return target ? store?.rememberProposal(context, [target], requestKey) === true : false
 }
 
 function parseConfirmation(value) {
@@ -305,28 +362,46 @@ function exactCurrentRecord(current, target, state, version) {
     && (!target.workId || current.record?.fields?.['作品 ID'] === target.workId)
 }
 
-async function preflightTargets(targets, executeOperation, deadline) {
-  for (const target of targets) {
+async function preflightTargets(receipt, executeOperation, deadline) {
+  const recovered = []
+  for (let ordinal = 0; ordinal < receipt.targets.length; ordinal++) {
+    if (receipt.itemStatuses?.[ordinal] === 'completed') continue
+    const target = receipt.targets[ordinal]
     if (Date.now() + REVIEW_READ_RESERVE_MS > deadline) return 'budget'
     const current = await executeOperation({
       action: 'get', table: target.table, stableId: target.stableId,
       ...(target.workId ? { workId: target.workId } : {}),
     })
-    if (!exactCurrentRecord(current, target, target.state, target.version)) return 'stale'
+    if (exactCurrentRecord(current, target, target.state, target.version)) continue
+    const transitions = TABLE_CONTRACTS[target.table]?.[receipt.decision]?.[target.state] || []
+    let finalVersion = target.version
+    for (const _transition of transitions) finalVersion = nextVersion(finalVersion)
+    if (!finalVersion || !exactCurrentRecord(current, target, transitions.at(-1), finalVersion)
+      || current.record?.reviewed !== (receipt.decision === 'approve')) return 'stale'
+    recovered.push({ ordinal, version: finalVersion })
   }
-  return 'ready'
+  return { outcome: 'ready', recovered }
 }
 
-async function applyTargets(receipt, { executeOperation, reviewRecord }, deadline) {
-  const preflight = await preflightTargets(receipt.targets, executeOperation, deadline)
-  if (preflight !== 'ready') {
-    return { outcome: preflight, completed: 0, remaining: receipt.targets.length }
+async function applyTargets(receipt, { executeOperation, reviewRecord }, deadline, onItem) {
+  const preflight = await preflightTargets(receipt, executeOperation, deadline)
+  if (typeof preflight === 'string') {
+    const completed = receipt.itemStatuses?.filter(status => status === 'completed').length || 0
+    return { outcome: preflight, completed, remaining: receipt.targets.length - completed }
   }
-  let completed = 0
-  for (const target of receipt.targets) {
+  let completed = receipt.itemStatuses?.filter(status => status === 'completed').length || 0
+  for (const recovered of preflight.recovered) {
+    await onItem?.(recovered.ordinal, 'completed', { resultVersion: recovered.version })
+    completed += 1
+  }
+  for (let ordinal = 0; ordinal < receipt.targets.length; ordinal++) {
+    if (receipt.itemStatuses?.[ordinal] === 'completed'
+      || preflight.recovered.some(item => item.ordinal === ordinal)) continue
+    const target = receipt.targets[ordinal]
     let expectedVersion = target.version
     const transitions = TABLE_CONTRACTS[target.table]?.[receipt.decision]?.[target.state]
     if (!Array.isArray(transitions) || transitions.length === 0) {
+      await onItem?.(ordinal, 'failed', { errorCode: 'transition_invalid' })
       return {
         outcome: 'failed', completed, remaining: receipt.targets.length - completed,
         currentMayHaveChanged: false,
@@ -390,6 +465,7 @@ async function applyTargets(receipt, { executeOperation, reviewRecord }, deadlin
           completedTransitions += 1
           continue
         }
+        await onItem?.(ordinal, 'unknown', { errorCode: 'review_outcome_unknown' })
         return {
           outcome: 'failed', completed, remaining: receipt.targets.length - completed,
           currentMayHaveChanged: completedTransitions > 0
@@ -397,6 +473,7 @@ async function applyTargets(receipt, { executeOperation, reviewRecord }, deadlin
         }
       }
     }
+    await onItem?.(ordinal, 'completed', { resultVersion: expectedVersion })
     completed += 1
   }
   return { outcome: 'completed', completed, remaining: 0 }
@@ -413,42 +490,46 @@ export function createDirectorBrainChatReviewHandler({
     const bareDecision = parseBareDecision(event?.cleanedBody)
     if (!confirmation && !cancellation && !bareDecision) return undefined
     if (!releaseReady) return { handled: true, reply: { text: '导演脑正在维护，请稍后再试。' }, reason: 'director_brain_maintenance' }
-    const pending = store?.get(context)
+    const pending = await store?.get(context)
     if (cancellation) {
-      if (pending?.kind !== 'review' || pending.code !== cancellation.code) {
+      const cancelled = await store?.cancelReview(context, cancellation.code)
+      if (!cancelled) {
         return { handled: true, reply: { text: '没有匹配的待取消审核预览，本次未更改状态。' }, reason: 'director_brain_review_cancel_mismatch' }
       }
-      store.consume(context)
       return { handled: true, reply: { text: `已取消审核批次 ${cancellation.code}，没有更改任何导演脑记录。` }, reason: 'director_brain_review_cancelled' }
     }
     if (bareDecision) {
       if (pending?.kind !== 'proposal') return undefined
       const targets = pending.targets.filter(target => TABLE_CONTRACTS[target.table]?.[bareDecision]?.[target.state])
-      const receipt = targets.length === 1 ? store.prepare(context, bareDecision, targets) : null
+      const receipt = targets.length === 1
+        ? await store.prepare(context, bareDecision, targets, pending.requestKey) : null
       if (!receipt) {
         store.clear(context)
         return { handled: true, reply: { text: '这条候选当前不支持该审核决定，本次未更改状态。' }, reason: 'director_brain_review_unsupported' }
       }
       const answer = previewAnswer(bareDecision, targets, receipt.code)
       if (!answer) {
+        await store.cancelReview?.(context, receipt.code)
         store.clear(context)
         return { handled: true, reply: { text: '候选清单超过安全显示上限，本次未建立审核批次。' }, reason: 'director_brain_review_preview_too_large' }
       }
       return { handled: true, reply: { text: answer }, reason: 'director_brain_review_preview' }
     }
-    const pendingReview = store?.get(context)
-    if (pendingReview?.kind !== 'review' || pendingReview.decision !== confirmation.decision
-      || pendingReview.code !== confirmation.code
-      || pendingReview.targets.length !== confirmation.count) {
+    let receipt = null
+    try { receipt = await store?.claim(context, confirmation) } catch { /* mismatch below */ }
+    if (receipt?.kind !== 'review' || receipt.decision !== confirmation.decision
+      || receipt.code !== confirmation.code || receipt.targets.length !== confirmation.count) {
       return { handled: true, reply: { text: '没有匹配的待确认审核预览，本次未更改状态。请先重新发起审核。' }, reason: 'director_brain_review_confirmation_mismatch' }
     }
-    const receipt = store.consume(context)
     try {
       const services = await loadServices()
       const result = await applyTargets(
         receipt,
         services,
         handlerDeadline,
+        (ordinal, status, details) => store?.record(
+          context, receipt, ordinal, status, details,
+        ),
       )
       if (result.outcome === 'completed') {
         const verb = receipt.decision === 'approve' ? '批准' : '驳回'

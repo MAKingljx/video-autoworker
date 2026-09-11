@@ -16,6 +16,7 @@ import {
   listDirectorExtractionJobsForWork,
   projectDirectorExtractionStatus,
   registerDirectorExtractionJob,
+  retryLegacyOversizedUnderstandingPhase,
   retryExhaustedDirectorExtractionJob,
   renewDirectorExtractionLease,
   resumeDirectorExtractionAfterIntent,
@@ -320,6 +321,8 @@ describe('director extraction source-child task chain', () => {
       status: 'conflict',
       phase: 'perception',
       progress: 0,
+      progressKnown: false,
+      progressBasis: 'no_registered_phase',
       completedPhases: [],
       candidateCount: null,
       candidateCountKnown: false,
@@ -546,6 +549,9 @@ describe('director extraction source-child task chain', () => {
       { workVerifier: async workId => ({ workId }) },
     )
     expect(pending).toMatchObject({ sourceTaskId: pendingSource, status: 'pending' })
+    expect(projectDirectorExtractionStatus(db, pending)).toMatchObject({
+      status: 'pending', blockedOn: 'executor_queue', nextAction: 'wait_for_executor',
+    })
 
     db.prepare('DELETE FROM n8n_task_runs WHERE task_id = ?').run(pending.phaseTaskId)
     db.prepare('DELETE FROM director_extraction_checkpoints WHERE phase_task_id = ?')
@@ -718,6 +724,47 @@ describe('director extraction source-child task chain', () => {
     }
   })
 
+  it('repairs only the legacy oversized understanding phase without replaying evidence review', async () => {
+    const sourceTaskId = seedSource(db, 'legacy-oversized-understanding')
+    registerDirectorExtractionJob(db, sourceTaskId, scope)
+    await completeCurrent(db, 100)
+    const understanding = resumeDirectorExtractionAfterReview(db, sourceTaskId, scope, {
+      material_evidence: ['EVIDENCE-001'],
+    }, { nowSeconds: 102 })
+    const phaseTaskId = understanding.phaseTaskId!
+    const claimed = claimNextDirectorExtractionJob(db, {
+      nowSeconds: 103, ownerInstanceId: '9'.repeat(64), leaseToken: 'a'.repeat(64),
+    })!
+    expect(failDirectorExtractionPhase(
+      db, claimed, 'director_extraction_phase_input_too_large', { nowSeconds: 104 },
+    )).toMatchObject({ status: 'conflict', currentPhase: 'understanding' })
+    const reviewCount = db.prepare(`SELECT COUNT(*) FROM director_extraction_review_receipts`)
+      .pluck().get()
+    expect(getDirectorExtractionCheckpoint(db, sourceTaskId, 'understanding')).toBeNull()
+    const repaired = retryLegacyOversizedUnderstandingPhase(
+      db, sourceTaskId, scope, { nowSeconds: 105 },
+    )
+    expect(repaired).toMatchObject({ status: 'pending', currentPhase: 'understanding',
+      phaseTaskId, attemptCount: 0, lastErrorCode: null })
+    expect(db.prepare(`SELECT COUNT(*) FROM director_extraction_review_receipts`).pluck().get())
+      .toBe(reviewCount)
+    expect(db.prepare(`SELECT status FROM n8n_director_evidence_outbox WHERE task_id = ?`)
+      .pluck().get(sourceTaskId)).toBe('delivered')
+    expect(retryLegacyOversizedUnderstandingPhase(db, sourceTaskId, scope)).toMatchObject({
+      status: 'pending', phaseTaskId,
+    })
+    const retriedClaim = claimNextDirectorExtractionJob(db, {
+      nowSeconds: 106, ownerInstanceId: 'b'.repeat(64), leaseToken: 'c'.repeat(64),
+    })!
+    expect(failDirectorExtractionPhase(
+      db, retriedClaim, 'director_extraction_phase_input_too_large', { nowSeconds: 107 },
+    )).toMatchObject({ status: 'conflict', revision: 2 })
+    expect(retryLegacyOversizedUnderstandingPhase(
+      db, sourceTaskId, scope, { nowSeconds: 108 },
+    )).toMatchObject({ status: 'conflict', revision: 2,
+      lastErrorCode: 'director_extraction_phase_input_too_large' })
+  })
+
   it('creates each later phase only after append-only review and intent receipts', async () => {
     const sourceTaskId = seedSource(db)
     registerDirectorExtractionJob(db, sourceTaskId, scope)
@@ -746,7 +793,13 @@ describe('director extraction source-child task chain', () => {
     const perception = await completeCurrent(db, 100)
     expect(projectDirectorExtractionStatus(db, perception)).toMatchObject({
       candidateCount: 1,
+      candidateCountKnown: true,
       completedPhases: ['perception'],
+      progress: 20,
+      progressKnown: true,
+      progressBasis: 'completed_phase_projections',
+      blockedOn: 'candidate_review',
+      nextAction: 'human_review',
     })
     resumeDirectorExtractionAfterReview(db, sourceTaskId, scope, {
       material_evidence: ['EVIDENCE-001'],
@@ -755,6 +808,8 @@ describe('director extraction source-child task chain', () => {
     expect(projectDirectorExtractionStatus(db, understanding)).toMatchObject({
       candidateCount: 4,
       completedPhases: ['perception', 'understanding'],
+      progress: 40,
+      blockedOn: 'candidate_review',
     })
     expect(projectDirectorExtractionStatus(db, understanding).candidateCount).toBe(4)
   })

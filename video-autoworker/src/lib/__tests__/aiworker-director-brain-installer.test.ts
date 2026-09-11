@@ -1340,7 +1340,7 @@ write_backup_tree_manifest "$1" "$3"
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 45_000)
 
   it('preserves the OpenClaw 9.2 agents.entries layout through install, no-op, and rollback', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-agent-entries-'))

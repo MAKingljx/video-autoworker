@@ -35,7 +35,8 @@
       "compatibleVersions": [
         "0.4.1",
         "0.4.2",
-        "0.4.3"
+        "0.4.3",
+        "0.4.4"
       ],
       "tool": "aiworker_director_brain",
       "requiredHooks": [

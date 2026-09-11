@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   mutationLimiter: vi.fn(() => null),
   runDirectorCommand: vi.fn(),
   loggerWarn: vi.fn(),
+  getDatabase: vi.fn(() => ({ marker: 'db' })),
+  prepareReviewBatch: vi.fn(),
 }))
 
 vi.mock('@/lib/n8n', () => ({ requireN8nRole: mocks.requireN8nRole }))
@@ -14,6 +16,13 @@ vi.mock('@/lib/director-brain-scope', () => ({ isDirectorBrainScope: mocks.isDir
 vi.mock('@/lib/rate-limit', () => ({ mutationLimiter: mocks.mutationLimiter }))
 vi.mock('@/lib/director-evidence-outbox', () => ({ runDirectorCommand: mocks.runDirectorCommand }))
 vi.mock('@/lib/logger', () => ({ logger: { warn: mocks.loggerWarn } }))
+vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
+vi.mock('@/lib/director-review-batches', () => ({
+  prepareDirectorReviewBatch: mocks.prepareReviewBatch,
+  claimDirectorReviewBatch: vi.fn(),
+  recordDirectorReviewBatchItem: vi.fn(),
+  cancelDirectorReviewBatch: vi.fn(),
+}))
 
 import { POST } from '@/app/api/n8n/director-brain/route'
 
@@ -33,11 +42,16 @@ describe('director brain application runtime route', () => {
     mocks.mutationLimiter.mockReturnValue(null)
   })
 
-  it.each(['operate', 'review'] as const)('runs %s through the shared app runtime', async command => {
+  it.each(['operate', 'propose', 'review'] as const)('runs %s through the shared app runtime', async command => {
     const input = command === 'operate'
       ? { action: 'get', table: 'works', stableId: 'WORK-1' }
-      : { table: 'works', stableId: 'WORK-1', targetStatus: '生效' }
-    mocks.runDirectorCommand.mockResolvedValue({ ok: true, action: command === 'operate' ? 'get' : 'review' })
+      : command === 'propose'
+        ? { action: 'propose', table: 'works', fields: { name: '作品' } }
+        : { table: 'works', stableId: 'WORK-1', targetStatus: '生效' }
+    mocks.runDirectorCommand.mockResolvedValue({
+      ok: true,
+      action: command === 'operate' ? 'get' : command,
+    })
 
     const response = await POST(request({ command, input }))
 
@@ -45,7 +59,10 @@ describe('director brain application runtime route', () => {
     expect(response.headers.get('Cache-Control')).toBe('no-store')
     expect(await response.json()).toMatchObject({ ok: true })
     expect(mocks.requireN8nRole).toHaveBeenCalledWith(expect.anything(), 'operator')
-    expect(mocks.runDirectorCommand).toHaveBeenCalledWith(command, input)
+    expect(mocks.runDirectorCommand).toHaveBeenCalledWith(
+      command === 'propose' ? 'operate' : command,
+      input,
+    )
   })
 
   it('rejects expanded commands and the wrong director scope before execution', async () => {
@@ -59,6 +76,28 @@ describe('director brain application runtime route', () => {
     const forbidden = await POST(request({ command: 'operate', input: { action: 'health' } }))
     expect(forbidden.status).toBe(403)
     expect(mocks.mutationLimiter).not.toHaveBeenCalled()
+    expect(mocks.runDirectorCommand).not.toHaveBeenCalled()
+  })
+
+  it('persists a review batch through the same authenticated application boundary', async () => {
+    const input = {
+      action: 'prepare', actorKey: 'openclaw-session', requestKey: 'tool-call-1',
+      decision: 'approve',
+      targets: [{
+        table: 'material_evidence', stableId: 'EVIDENCE-1', workId: 'WORK-1',
+        state: '候选', version: 'v0.2.0', targetStatuses: ['已核验'],
+      }],
+    }
+    mocks.prepareReviewBatch.mockReturnValue({ batchId: 'DRB-1', status: 'pending' })
+    const response = await POST(request({ command: 'review-batch', input }))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      ok: true, action: 'review_batch', operation: 'prepare',
+      batch: { batchId: 'DRB-1', status: 'pending' },
+    })
+    expect(mocks.prepareReviewBatch).toHaveBeenCalledWith(
+      { marker: 'db' }, { workspaceId: 2, tenantId: 3 }, input,
+    )
     expect(mocks.runDirectorCommand).not.toHaveBeenCalled()
   })
 

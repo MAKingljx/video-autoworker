@@ -77,7 +77,10 @@ describe('n8n rolling and callback OpenAPI contract', () => {
       additionalProperties: false,
       required: ['command', 'input'],
     })
-    expect(request.properties.command.enum).toEqual(['operate', 'review'])
+    expect(request.properties.command.enum).toEqual([
+      'operate', 'propose', 'review', 'review-batch',
+    ])
+    expect(request.properties.protocol.enum).toEqual(['director-brain-application/v1'])
     expect(request.properties.input.type).toBe('object')
     expect(operation.responses).toHaveProperty('503')
   })

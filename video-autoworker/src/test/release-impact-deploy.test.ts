@@ -6,9 +6,12 @@ import {
   applyReleaseImpactPlan,
   buildReleaseImpactPlan,
   installedControlComponentState,
+  isCommittedPlanRoute,
+  isOriginalPlanRoute,
   parseBlueGreenStatus,
   releaseCommandEnvironment,
   releaseComponentSummary,
+  recoveryTargetDisposition,
   restoreOwnedIntake,
   waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
@@ -38,6 +41,8 @@ type BuildPlan = (options: {
   runtimeConvergenceProof?: string | null
   toolBaseline?: string | null
   receiptDir?: string | null
+  runtimeConfigSha256?: string | null
+  runtimeBinding?: Record<string, unknown> | null
 }) => ReturnType<typeof buildReleaseImpactPlan>
 const digest = (value: string) => (value.charCodeAt(0) % 16).toString(16).repeat(64)
 const router = {
@@ -80,8 +85,9 @@ function plan(changed: ComponentName[]) {
 
 function services(events: string[], {
   failAt = '', revisionDrift = false, uncertainDrain = false, recoveryOk = true,
+  initialControl = activeIntake(),
 } = {}) {
-  let control = activeIntake()
+  let control = initialControl
   const action = async (name: string) => {
     events.push(name)
     if (name === failAt) throw new Error(`failed:${name}`)
@@ -115,11 +121,13 @@ function services(events: string[], {
         events.push('intake:read')
         return revisionDrift && control.accepting === false ? pausedIntake(control.revision + 1) : control
       },
-      mutate: async (operation: string, expectedRevision: number) => {
+      mutate: async (operation: string, expectedRevision: number, reason?: string) => {
         events.push(`intake:${operation}:${expectedRevision}`)
         control = operation === 'drain'
-          ? { ...pausedIntake(expectedRevision + 1), reason: '准备受控增量发布，暂停接收新任务' }
-          : { ...activeIntake(expectedRevision + 1), reason: '受控发布已结束，恢复本次暂停的新任务入口' }
+          ? { ...pausedIntake(expectedRevision + 1),
+              reason: reason || '准备受控增量发布，暂停接收新任务' }
+          : { ...activeIntake(expectedRevision + 1),
+              reason: reason || '受控发布已结束，恢复本次暂停的新任务入口' }
         if (operation === 'drain' && uncertainDrain) throw new Error('response lost')
         return control
       },
@@ -167,6 +175,32 @@ describe('release impact deployment', () => {
       })
   })
 
+  it('attributes a route commit only to the exact next generation and previous slot', () => {
+    const value = plan(['app'])
+    const committed = { ...router, active: 'blue', previous: 'green', generation: 8,
+      slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }
+    expect(isCommittedPlanRoute(value, committed)).toBe(true)
+    expect(isCommittedPlanRoute(value, { ...committed, generation: 9 })).toBe(false)
+    expect(isCommittedPlanRoute(value, { ...committed, previous: 'blue' })).toBe(false)
+    expect(isOriginalPlanRoute(value, router)).toBe(true)
+    expect(isOriginalPlanRoute(value, { ...router, generation: 8 })).toBe(false)
+  })
+
+  it('formally retires a target that was active before automatic compensation', () => {
+    const value = plan(['app'])
+    const bound = { ...router, slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }
+    expect(recoveryTargetDisposition(value, bound)).toBe('verify-stopped')
+    expect(recoveryTargetDisposition(value, {
+      ...bound, active: 'green', previous: 'blue', generation: 9,
+    })).toBe('retire-then-verify')
+    expect(recoveryTargetDisposition(value, {
+      ...bound, active: 'green', previous: 'green', generation: 9,
+    })).toBe('invalid')
+    expect(recoveryTargetDisposition(value, {
+      ...bound, active: 'green', previous: 'blue', generation: 10,
+    })).toBe('invalid')
+  })
+
   it('treats a different app commit as control-unchanged when installed control bytes pass preflight', () => {
     const sourceDiff = { before: digest('a'), after: digest('b'), changed: true }
     expect(installedControlComponentState(sourceDiff, true)).toEqual({
@@ -190,6 +224,35 @@ describe('release impact deployment', () => {
     expect(environment.AIWORKER_BG_TEST_MODE).toBeUndefined()
     expect(environment.AIWORKER_INSTALLER_ISOLATED_TEST_ROOT).toBeUndefined()
     expect(environment.AIWORKER_VIDEO_COMMAND_INSTALL_TEST_FAILPOINT).toBeUndefined()
+  })
+
+  it('binds the external runtime configuration digest and checks it before components', async () => {
+    const events: string[] = []
+    const bound = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(),
+      components: components([]), runtimeConvergenceProof: '/private/tmp/runtime-proof.json',
+      runtimeConfigSha256: 'c'.repeat(64) })
+    const boundServices = services(events) as ReturnType<typeof services> & {
+      assertRuntimeConfig?: (expected: string) => Promise<void>
+    }
+    boundServices.assertRuntimeConfig = async expected => {
+      expect(expected).toBe('c'.repeat(64)); events.push('runtime-config')
+    }
+    await expect(applyReleaseImpactPlan(bound, boundServices)).resolves.toMatchObject({ ok: true })
+    expect(events.slice(0, 3)).toEqual(['source', 'runtime-config', 'components'])
+  })
+
+  it('seals the physical runtime roots and database identity into the plan', () => {
+    const configSha256 = 'c'.repeat(64)
+    const runtimeBinding = {
+      schema: 'video-autoworker-release-runtime-binding/v1',
+      runDir: '/private/runtime/run', releasesDir: '/private/runtime/releases',
+      platformEnvPath: '/private/runtime/platform.env', liveDbPath: '/private/runtime/live.db',
+      configSha256, database: { dev: '1', ino: '2' },
+      ports: { router: 3017, blue: 3317, green: 3417 },
+    }
+    expect(buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(),
+      components: components([]), runtimeConfigSha256: configSha256, runtimeBinding }))
+      .toMatchObject({ runtimeBinding })
   })
 
   it('does not schedule installation, restart, or switch for unchanged components', () => {
@@ -229,6 +292,31 @@ describe('release impact deployment', () => {
     ])
   })
 
+  it('preflights before intake pause and runs one managed app transition when available', async () => {
+    const events: string[] = []
+    const managedServices = services(events)
+    Object.assign(managedServices, {
+      transitionPreflight: async () => { events.push('transition:preflight') },
+      transition: async () => { events.push('transition:apply') },
+      transitionIncludesAcceptance: true,
+      routeReadback: async () => ({
+        ...router, active: 'blue', previous: 'green', generation: router.generation + 1,
+        slots: { ...router.slots, blue: `${sourceCommit}-runtime` },
+      }),
+    })
+    await expect(applyReleaseImpactPlan(plan(['app']), managedServices)).resolves.toMatchObject({
+      ok: true, intake: { restored: true },
+    })
+    expect(events).toEqual([
+      'source', 'components', 'status', 'intake:read', 'stage', 'transition:preflight',
+      'intake:drain:18', 'intake:wait', 'transition:apply', 'intake:read',
+      'intake:resume:19',
+    ])
+    expect(events).not.toContain('retire')
+    expect(events).not.toContain('bind')
+    expect(events).not.toContain('attest')
+  })
+
   it('restores only its exact paused revision after a failed operation', async () => {
     const events: string[] = []
     await expect(applyReleaseImpactPlan(plan(['app']), services(events, { failAt: 'probe' })))
@@ -236,10 +324,84 @@ describe('release impact deployment', () => {
     expect(events.at(-1)).toBe('intake:resume:19')
   })
 
+  it('uses router readback when the switch response is lost after commit', async () => {
+    const events: string[] = []
+    const uncertain = services(events, { failAt: 'switch' })
+    Object.assign(uncertain, {
+      routeReadback: async () => ({
+        ...router, active: 'blue', previous: 'green', generation: router.generation + 1,
+        slots: { ...router.slots, blue: `${sourceCommit}-runtime` },
+      }),
+    })
+    await expect(applyReleaseImpactPlan(plan(['app']), uncertain)).resolves.toMatchObject({ ok: true })
+    expect(events).toContain('switch')
+    expect(events).toContain('attest')
+    expect(events.some(event => event.startsWith('recover:'))).toBe(false)
+  })
+
+  it('honors cancellation before any deterministic preflight child starts', async () => {
+    const events: string[] = []
+    const controller = new AbortController()
+    controller.abort(new Error('cancelled by operator'))
+    const cancelled = services(events) as ReturnType<typeof services> & {
+      operation?: { signal: AbortSignal }
+    }
+    cancelled.operation = { signal: controller.signal }
+    await expect(applyReleaseImpactPlan(plan(['app']), cancelled)).rejects.toMatchObject({
+      errorCode: 'operation_cancelled', effectState: 'before_step',
+    })
+    expect(events).toEqual([])
+  })
+
+  it('stops before the next side effect when the control journal cannot persist its start', async () => {
+    const events: string[] = []
+    const journaled = services(events) as ReturnType<typeof services> & {
+      operation?: { record: (event: { step: string; status: string }) => void }
+    }
+    journaled.operation = { record: event => {
+      if (event.step === 'install-directorBrain' && event.status === 'started') {
+        throw new Error('journal unavailable')
+      }
+    } }
+    await expect(applyReleaseImpactPlan(plan(['directorBrain']), journaled))
+      .rejects.toThrow('recovery=official_rollbacks_verified; intake=cas_restored')
+    expect(events).not.toContain('install:directorBrain')
+    expect(events).toContain('recover:none')
+  })
+
   it('reads back an uncertain drain write and still restores its owned revision', async () => {
     const events: string[] = []
     await expect(applyReleaseImpactPlan(plan(['app']), services(events, { uncertainDrain: true })))
       .resolves.toMatchObject({ intake: { restored: true, reason: 'cas_restored' } })
+    expect(events).toContain('intake:resume:19')
+  })
+
+  it('binds pause and resume ownership to the release operation id', async () => {
+    const events: string[] = []
+    const owned = services(events)
+    const reasons: string[] = []
+    const mutate = owned.intake.mutate
+    owned.intake.mutate = async (action: string, revision: number, reason?: string) => {
+      reasons.push(reason || '')
+      return mutate(action, revision, reason)
+    }
+    Object.assign(owned, { operation: { scope: { operationId: 'f'.repeat(64) } } })
+    await expect(applyReleaseImpactPlan(plan(['app']), owned)).resolves.toMatchObject({ ok: true })
+    expect(reasons).toHaveLength(2)
+    expect(reasons.every(reason => reason.includes(`[operation:${'f'.repeat(64)}]`))).toBe(true)
+  })
+
+  it('continues an exact operation-owned paused revision without draining it again', async () => {
+    const events: string[] = []
+    const operationId = 'e'.repeat(64)
+    const initialControl = {
+      ...pausedIntake(19), reason: `准备受控增量发布，暂停接收新任务 [operation:${operationId}]`,
+    }
+    const resumed = services(events, { initialControl })
+    Object.assign(resumed, { operation: { resume: true, scope: { operationId } } })
+    await expect(applyReleaseImpactPlan(plan(['directorBrain']), resumed))
+      .resolves.toMatchObject({ ok: true, intake: { restored: true, revision: 20 } })
+    expect(events).not.toContain('intake:drain:18')
     expect(events).toContain('intake:resume:19')
   })
 
@@ -271,6 +433,14 @@ describe('release impact deployment', () => {
     })
   })
 
+  it('does not claim an intake that another operation already resumed', async () => {
+    await expect(restoreOwnedIntake({
+      before: activeIntake(18), paused: pausedIntake(19),
+      read: vi.fn(async () => ({ ...activeIntake(20), reason: 'another operation' })),
+      mutate: vi.fn(),
+    })).resolves.toEqual({ restored: false, reason: 'revision_changed', revision: 20 })
+  })
+
   it('routes deployment-control drift to its existing separate maintenance path', async () => {
     const events: string[] = []
     await expect(applyReleaseImpactPlan(plan(['control']), services(events)))
@@ -285,6 +455,20 @@ describe('release impact deployment', () => {
     }))).rejects.toThrow('recovery=official_rollbacks_verified; intake=cas_restored')
     expect(events).toContain('recover:directorBrain')
     expect(events.indexOf('recover:directorBrain')).toBeLessThan(events.indexOf('intake:resume:19'))
+  })
+
+  it('preserves a child preflight no-mutation proof through structured errors', async () => {
+    const events: string[] = []
+    const preflight = services(events)
+    preflight.install = async (name: string) => {
+      events.push(`install:${name}`)
+      const error = new Error('installer preflight rejected') as Error & { mutationNotStarted: boolean }
+      error.mutationNotStarted = true
+      throw error
+    }
+    await expect(applyReleaseImpactPlan(plan(['directorBrain']), preflight))
+      .rejects.toThrow('recovery=official_rollbacks_verified; intake=cas_restored')
+    expect(events).toContain('recover:none')
   })
 
   it('keeps intake paused when official component recovery cannot be verified', async () => {

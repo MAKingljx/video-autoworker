@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-本文描述 Video AutoWorker 项目内“导演脑”的目标架构、飞书云端基础设施、数据契约与分阶段接入边界。独立测试飞书环境当前真实 catalog 仍为 schema v2、共 11 张表，并已通过真实 API、六层验收样片和审核引用闭环验收；schema v3 只是当前代码候选，新增结构化视频感知字段和跨作品技法来源，尚未迁移到该测试环境。远端 OpenClaw 已安装导演脑 `0.3.0`，并完成 `health`、无 ID 作品解析、六层 `workflow` 和自然语言单工具调用验收。当前代码候选把导演脑升级到 `0.4.0`，同时以 video-command `0.5.14`、可信作品绑定、SQLite outbox、五阶段导演知识提炼、历史学习与集中 release-readiness 组成单向生产链；该候选尚未随新的 3017 不可变 release 上线。剪辑执行继续明确冻结，本地候选、飞书测试事实、远端 OpenClaw 已上线事实和 3017 生产事实必须分别表述。
+本文描述 Video AutoWorker 项目内“导演脑”的目标架构、飞书云端基础设施、数据契约与分阶段接入边界。当前代码以 director-brain `0.4.4` 薄插件、video-command `0.5.15`、可信作品绑定、SQLite outbox、五阶段导演知识提炼、持久审核批次和集中 release-readiness 组成单向生产链。飞书 catalog、远端插件和 3017 生产版本必须继续以当次真实回读为准，不能由本地候选版本推断；剪辑执行继续明确冻结。
 
 ## 核心定位
 
@@ -27,18 +27,18 @@
 - 9 条系统蓝图已经按稳定业务 ID 写入并精确回读，建设边界明确为“完整导演脑、剪辑执行暂缓”；
 - API 临时记录创建、更新、删除均成功，清理后残留为零；
 - 凭据模式扫描和本地 schema 契约测试通过；
-- 独立 `aiworker-director-brain` 只注册一个可选工具 `aiworker_director_brain`；`0.4.0` 另注册一个仅作用于目标 Agent 的 `before_agent_reply` 系统问题硬路由，以及两个持久化 transcript 投影 hook，不增加业务工具、队列、定时任务、LaunchAgent 或 n8n workflow。远端已验收版本为 `0.3.0`，当前提炼候选版本为 `0.4.0`；
+- 独立 `aiworker-director-brain 0.4.4` 只注册一个可选工具 `aiworker_director_brain`、目标 Agent 的 `before_agent_reply` 路由和两个 transcript 投影 hook；插件只通过 3017 loopback 应用合同访问业务，审核批次由应用附加表持久化，不增加任务队列、用户鉴权、LaunchAgent 或 n8n workflow；
 - 单一工具实现 `health`、`explain`、`resolve_work`、`get`、`search`、`assemble`、`workflow`、`propose` 和 `extraction_status` 9 个动作；作品名称或别名先解析为唯一作品，后续作品业务严格绑定同一 `workId`，用户不需要看到内部 ID；OpenClaw 对话面只读查询提炼状态，不启动、回填、重提提炼任务或触发素材投影；
 - `get`/`search` 可受控读取 11 张表；系统蓝图与作品目录为项目级单表读取，另外 9 张作品业务表和跨表检索必须绑定作品。`search` 默认只返回满足完整审核契约的记录；按稳定业务 ID 显式 `get` 候选时必须保留 `reviewed=false`，不能把候选冒充事实；
 - `assemble` 只组装同一作品的已审核引用并验证关系完整性；`workflow` 接受稳定作品业务 ID 或作品名/别名查询，查询模式先在插件内部完成唯一作品解析，再只读计算六层就绪度、质量门槛和下一步建议，不创建任务或触发执行；
 - `propose` 可向“作品”及 8 张作品业务候选表提交候选，由服务端生成稳定业务 ID、项目与作品归属、版本、状态、来源、更新时间和引用字段；系统蓝图与素材证据内容不能由口述候选入口改写；已展示的候选允许用户通过同会话明确确认进行正式审核，模型不能自行批准；
 - 管理端提供显式审核状态机、写前完整快照复读、版本与归属复核、写后回读和审核审计；受信素材证据只能由正式任务结果的单向投影入口写入；
-- video-command `0.5.14` 候选支持在单视频自然语言请求或结构化工具参数中显式给出作品名或别名；否定、歧义、多候选、模型遗漏或改写作品名均失败关闭，重复确认必须沿用同一作品指令；
+- video-command `0.5.15` 支持在单视频自然语言请求或结构化工具参数中显式给出作品名或别名；否定、歧义、多候选、模型遗漏或改写作品名均失败关闭，重复确认必须沿用同一作品指令；
 - `POST /api/n8n/trigger` 候选拒绝调用方在任务 `input` 中注入内部 `directorEvidence` 或 `directorWork`，仅允许视频分析顶层请求携带作品查询；服务端只解析一次并持久化 `workId + queryDigest`，幂等重放复用原绑定，不因飞书短时不可用重复解析或重复派发；
 - 迁移 `057_n8n_director_evidence_outbox`、finalize 事务接线和现有 Mission Control scheduler 已组成单一持久投影链；成功终态与 outbox 创建同事务提交，失败重放不改变视频任务终态，也不创建第二套任务状态机；
-- task-flow 已提供正式成功结果到确定性、作品级素材证据载荷的转换入口，导演脑 `0.4.0` 私有维护 CLI 提供幂等 `project-evidence` 写入；两者均失败关闭，且不会从飞书反向修改任务、队列或 n8n 状态；
+- task-flow 已提供正式成功结果到确定性、作品级素材证据载荷的转换入口，应用自身受管 CLI 提供幂等 `project-evidence` 写入；两者均失败关闭，且不会从飞书反向修改任务、队列或 n8n 状态；
 - Mission Control scheduler 以 `058_director_extraction_task_runs` 把导演提炼纳入唯一 `n8n_task_runs` 链：成功的确定性 root 持有唯一作品/视频绑定，每个阶段是独立 phase run；checkpoint 只保存不可变输入/候选工件，投影与人工审核均使用按 phase task 键控的 append-only receipt，等待状态完全由 root、phase 终态和 receipt 派生。`059_director_evidence_projection_receipts` 保存素材证据的可验证紧凑投影收据，不存在独立 extraction jobs 状态机或 `060` 拒绝账本。提炼仍按“感知 -> 人物/故事理解 -> 导演判断/叙事 -> 导演案例 -> 技法”五阶段进行；
-- 集中 `verify-director-video-release-readiness.mjs` 会在首次 bootstrap 和后续 forward switch 前核对 3017 release、video-command `0.5.14`、task-flow、director-brain `0.4.0` 及 CLI、服务、schema、转换器和转换库的完整摘要闭包；
+- 集中 `verify-director-video-release-readiness.mjs` 会在首次 bootstrap 和后续 forward switch 前核对 3017 release、video-command `0.5.15`、task-flow、director-brain `0.4.4` 及应用 CLI、服务、schema、转换器和转换库的完整摘要闭包；
 - 已用隔离验收作品走通作品解析、导演意图、两条已核验证据、人物、故事节点与因果关系、七维判断、叙事方案与故事脚本、导演案例和技能技法，`workflow` 六层全部就绪、引用完整性为真，`assemble` 成功；这是飞书测试数据闭环，不是正式业务素材生产化证明；
 - 离线质量评估已覆盖故事发现、人物变化、证据引用和安全边界的基础门槛，仍需用真实业务标注集持续扩充；
 - 新增配套 Skill，约束模型先检索证据、区分已审核事实与候选、证据不足时明确说明，并禁止以聊天记录、SQLite、n8n 或旧素材库替代导演脑；
@@ -46,7 +46,7 @@
 
 当前仍未完成或不得声明为生产能力的范围包括：
 
-- 将当前 `0.4.0` 候选随新的 3017 不可变 release、video-command 和 task-flow 一并安装并完成远端切换；
+- 将当前 `0.4.4` 候选随新的 3017 不可变 release、video-command 和 task-flow 按独立组件影响安装并完成远端验收；
 - 用一段真实生产视频验收可信作品绑定、finalize 原子 outbox、失败重放与飞书最终证据；
 - 投影告警、人工冲突处置和长期负载运行；
 - 在真实项目规模上自动持续更新跨素材、跨日期人物模型；
@@ -186,9 +186,9 @@ flowchart LR
 `scripts/verify-director-video-release-readiness.mjs` 是这组跨组件版本的唯一集中门禁。它同时核对：
 
 - 3017 不可变 release 与 Git 提交、release manifest；
-- video-command `0.5.14` 的精确安装树；
+- video-command `0.5.15` 的精确安装树；
 - task-flow 的精确安装树及 `directorWork` 契约；
-- director-brain `0.4.0` 插件、私有 CLI、服务、无密钥 schema 和 Agent Skill；
+- director-brain `0.4.4` 薄插件、持久审核合同和 Agent Skill；应用 CLI、服务与无密钥 schema 随 3017 制品交付；
 - outbox 源码中绑定的 CLI、服务、schema、转换器、转换库、应用侧封套/分批/回执语义模块，以及无自哈希常量的 delivery core SHA-256；
 - 七项闭包与投影 schema 版本计算出的当前契约摘要，以及权威 Mission Control SQLite 中 pending 与不兼容 pending 数；不兼容 pending 必须为零。
 

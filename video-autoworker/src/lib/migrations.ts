@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { lstatSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
+import { ensureDirectorMaintainabilitySchema } from '@/lib/director-maintainability-schema'
 
 type MigrationContext = {
   rootPath: string
@@ -1857,4 +1858,5 @@ export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
       db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(migration.id)
     })()
   }
+  ensureDirectorMaintainabilitySchema(db)
 }

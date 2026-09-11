@@ -20,6 +20,7 @@ import { createServer, type Server as HttpServer } from 'node:http'
 import { connect, createServer as createNetServer, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import type { Duplex } from 'node:stream'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
@@ -250,6 +251,30 @@ function rawHttp(port: number, lines: string[]): Promise<string> {
   })
 }
 
+type RouterHealth = {
+  counters: Record<'blue' | 'green', {
+    requests: number
+    activeRequests: number
+    upgradedSockets: number
+  }>
+} & Record<string, unknown>
+
+async function waitForRouterCounter(
+  port: number,
+  slot: 'blue' | 'green',
+  field: 'activeRequests' | 'upgradedSockets',
+  expected: number,
+): Promise<RouterHealth> {
+  let health: RouterHealth | null = null
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    health = await fetch(`http://127.0.0.1:${port}/__router/health`)
+      .then(response => response.json()) as RouterHealth
+    if (health.counters?.[slot]?.[field] === expected) return health
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 10))
+  }
+  throw new Error(`router counter did not reach ${slot}.${field}=${expected}`)
+}
+
 afterEach(() => {
   while (cleanup.length) cleanup.pop()?.()
 })
@@ -324,6 +349,184 @@ write_json_atomic "$1" "$2"
       expect(JSON.parse(readFileSync(destination, 'utf8'))).toEqual({ generation })
       expect(statSync(destination).mode & 0o777).toBe(0o600)
     }
+  })
+
+  it('keeps stage copy boundaries fully audited and fast-checks repeated transition assertions', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-verification-counts-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const sourceRoot = join(root, 'source')
+    const releasesRoot = join(root, 'releases')
+    const runRoot = join(root, 'run')
+    mkdirSync(sourceRoot, { mode: 0o700 })
+    mkdirSync(releasesRoot, { mode: 0o700 })
+    mkdirSync(runRoot, { mode: 0o700 })
+    writeFileSync(join(sourceRoot, 'release-manifest.json'), '{"schemaVersion":2}\n', { mode: 0o600 })
+    writeFileSync(join(sourceRoot, 'release-provenance.json'), '{}\n', { mode: 0o600 })
+    const auditor = join(root, 'auditor.mjs')
+    writeFileSync(auditor, `
+if (process.argv[2] === '--verify-bundle') {
+  const value = JSON.parse(process.argv[4] || 'null')
+  process.exit(value?.schema === 'video-autoworker-standalone-verification-bundle/v1' ? 0 : 2)
+}
+if (process.argv[2] === '--write-manifest') process.exit(0)
+process.stdout.write(JSON.stringify({ok:true,verificationBundle:{
+  schema:'video-autoworker-standalone-verification-bundle/v1',bundleSha256:'${'a'.repeat(64)}'
+}})+'\\n')
+`)
+    const deploy = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
+    const prelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'verification-counts.sh')
+    writeFileSync(harness, `${prelude}
+AUDITOR="$1"
+RUN_DIR="$2"
+RELEASES_DIR="$3"
+NODE_BIN="$4"
+source_root="$5"
+acquire_lock() {
+  prepare_run_dir
+  ensure_release_verification_cache
+}
+stage_release release-test "$source_root"
+published="$RELEASES_DIR/release-test/standalone"
+assert_release release-test "$published" >/dev/null
+assert_release release-test "$published" >/dev/null
+printf 'COUNTS_BEFORE full=%s fast=%s fallback=%s\\n' \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/full")" \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/fast")" \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/fallback")"
+cache="$(release_verification_cache_path "$published")"
+printf '{}\\n' > "$cache"
+assert_release release-test "$published" >/dev/null
+printf 'COUNTS_AFTER full=%s fast=%s fallback=%s\\n' \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/full")" \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/fast")" \
+  "$(cat "$RELEASE_VERIFICATION_CACHE_DIR/fallback")"
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const result = spawnSync('/bin/bash', [
+      harness, auditor, runRoot, releasesRoot, process.execPath, sourceRoot,
+    ], { encoding: 'utf8' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('COUNTS_BEFORE full=2 fast=3 fallback=0')
+    expect(result.stdout).toContain('COUNTS_AFTER full=3 fast=3 fallback=1')
+  })
+
+  it.each([
+    ['success', 0, false],
+    ['probe-failure', 1, true],
+    ['attest-failure', 1, false],
+    ['switch-compensated', 1, false],
+  ])('settles the operation-owned candidate for transition-app: %s', (mode, expectedStatus, stopped) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-transition-app-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const events = join(root, 'events')
+    const deploy = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
+    const prelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'transition-app.sh')
+    writeFileSync(harness, `${prelude}
+MODE="$1"
+EVENTS="$2"
+ACTIVE=green
+BOUND=release-old
+GENERATION=7
+record_event() { printf '%s\n' "$*" >> "$EVENTS"; }
+require_slot() { printf '%s\n' "$1"; }
+acquire_lock() {
+  if [[ "\${DEPLOYMENT_LOCK_OWNED:-0}" == 1 ]]; then record_event acquire-reused; return; fi
+  record_event acquire; DEPLOYMENT_LOCK_OWNED=1; trap cleanup_operation EXIT
+}
+release_shared_deployment_lock() { record_event release-lock; DEPLOYMENT_LOCK_OWNED=0; }
+validate_state() { record_event validate; }
+managed_runtime_paths() { :; }
+read_state_field() {
+  case "$1" in active) printf '%s\n' "$ACTIVE" ;; generation) printf '%s\n' "$GENERATION" ;; previous) printf 'green\n' ;; esac
+}
+read_state_slot_release() { if [[ "$1" == blue ]]; then printf '%s\n' "$BOUND"; else printf 'release-source\n'; fi; }
+retire_slot() { record_event "retire:$1"; acquire_lock; }
+bind_slot() { record_event "bind:$1:$2"; acquire_lock; BOUND="$2"; }
+normal_service_manager() { record_event "manager:$*"; return 0; }
+probe_slot() { record_event "probe:$1"; [[ "$MODE" != probe-failure ]]; }
+prewarm_slot() { record_event "prewarm:$1"; }
+switch_slot() {
+  record_event "switch:$1"; acquire_lock
+  if [[ "$MODE" == switch-compensated ]]; then ACTIVE=green; GENERATION=9; return 1; fi
+  ACTIVE="$1"; GENERATION=8
+}
+attest_current() { record_event attest; [[ "$MODE" != attest-failure ]]; }
+transition_app blue release-new /release/new
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const result = spawnSync('/bin/bash', [harness, mode, events], {
+      encoding: 'utf8', env: { ...process.env, NODE_BIN: process.execPath },
+    })
+    expect(result.status === 0 ? 0 : 1, result.stderr).toBe(expectedStatus)
+    const sequence = readFileSync(events, 'utf8').trim().split('\n')
+    expect(sequence.slice(0, 10)).toEqual([
+      'acquire', 'validate', 'retire:blue', 'acquire-reused',
+      'bind:blue:release-new', 'acquire-reused', 'manager:start blue',
+      'probe:blue', ...(mode === 'probe-failure'
+        ? ['manager:stop blue', 'release-lock'] : ['prewarm:blue', 'switch:blue']),
+    ])
+    expect(sequence.includes('manager:stop blue')).toBe(stopped)
+    if (mode === 'success') expect(sequence).toContain('attest')
+    if (mode !== 'probe-failure') {
+      expect(sequence.indexOf('prewarm:blue')).toBeLessThan(sequence.indexOf('switch:blue'))
+      expect(sequence.filter(item => item === 'acquire')).toHaveLength(1)
+      expect(sequence.filter(item => item === 'acquire-reused')).toHaveLength(3)
+    }
+    if (mode === 'attest-failure') {
+      expect(sequence).toContain('attest')
+      expect(sequence).not.toContain('manager:stop blue')
+      expect(result.stdout).toContain('Route commit observed')
+    }
+    if (mode === 'switch-compensated') {
+      expect(sequence).not.toContain('manager:stop blue')
+      expect(result.stderr).toContain('Route commit was compensated before settlement')
+    }
+  })
+
+  it('prewarms only candidate health and one manifest-bound static asset', async () => {
+    const requests: string[] = []
+    const endpoint = await listen(createServer((request, response) => {
+      requests.push(`${request.method} ${request.url}`)
+      if (request.url === '/api/status?action=health') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ status: 'healthy',
+          checks: [{ name: 'Database', status: 'healthy' }] }))
+        return
+      }
+      if (request.url === '/_next/static/chunk.js' && request.method === 'HEAD') {
+        response.statusCode = 200; response.end(); return
+      }
+      response.statusCode = 404; response.end()
+    }))
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-prewarm-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const release = join(root, 'release')
+    const database = join(root, 'mission-control.db')
+    mkdirSync(release, { mode: 0o700 })
+    writeFileSync(join(release, 'release-manifest.json'), JSON.stringify({
+      files: [{ path: '.next/static/chunk.js' }],
+    }), { mode: 0o600 })
+    writeFileSync(database, 'database-sentinel\n', { mode: 0o600 })
+    const before = createHash('sha256').update(readFileSync(database)).digest('hex')
+    const deploy = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
+    const prelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
+    const harness = join(root, 'prewarm.sh')
+    writeFileSync(harness, `${prelude}
+binding_values() { printf 'release-new\n${release}\nmanifest\n127.0.0.1\n${endpoint.port}\n'; }
+slot_port() { printf '${endpoint.port}\n'; }
+prewarm_slot blue
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const result = await execFileAsync('/bin/bash', [harness], {
+      encoding: 'utf8', env: { ...process.env, NODE_BIN: process.execPath },
+    })
+    expect(result.stdout).toContain('sideEffects=unverified contract=read-only')
+    expect(requests).toEqual([
+      'GET /api/status?action=health', 'HEAD /_next/static/chunk.js',
+    ])
+    expect(createHash('sha256').update(readFileSync(database)).digest('hex')).toBe(before)
   })
 
   it('durably finalizes a matching pending marker after a baseline-write crash and rejects an unknown router', async () => {
@@ -591,6 +794,76 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     })
   })
 
+  it('settles HTTP activity once when the backend aborts or the client cancels', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-router-http-settlement-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const abnormalBackend = createServer((request, response) => {
+      if (request.url === '/backend-abort') {
+        response.writeHead(200, { 'content-length': '100' })
+        response.write('partial')
+        setTimeout(() => response.socket?.destroy(), 10)
+        return
+      }
+      if (request.url === '/client-cancel') {
+        response.writeHead(200, { 'content-type': 'text/event-stream' })
+        response.write('started\n')
+        return
+      }
+      response.end('ok')
+    })
+    const blue = await listen(abnormalBackend)
+    const green = await listen(backend('green'))
+    const stateFile = join(root, 'router-state.json')
+    writeRouterStateAtomic(stateFile, state(blue.port, green.port))
+    const router = await listen(createStandaloneRouter({ stateFile }))
+
+    await expect(fetch(`http://127.0.0.1:${router.port}/backend-abort`)
+      .then(response => response.text())).rejects.toThrow()
+    await waitForRouterCounter(router.port, 'blue', 'activeRequests', 0)
+
+    const cancellation = new AbortController()
+    const response = await fetch(`http://127.0.0.1:${router.port}/client-cancel`, {
+      signal: cancellation.signal,
+    })
+    await waitForRouterCounter(router.port, 'blue', 'activeRequests', 1)
+    cancellation.abort()
+    await expect(response.text()).rejects.toThrow()
+    const health = await waitForRouterCounter(router.port, 'blue', 'activeRequests', 0)
+    expect(health.counters.blue).toMatchObject({ requests: 2, activeRequests: 0 })
+  })
+
+  it('settles an upgraded socket once when either side closes early', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'standalone-router-upgrade-settlement-'))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const earlyCloseBackend = createServer((_request, response) => response.end('ok'))
+    const backendSockets = new Set<Duplex>()
+    earlyCloseBackend.on('upgrade', (_request, socket) => {
+      backendSockets.add(socket)
+      socket.once('close', () => backendSockets.delete(socket))
+      socket.write([
+        'HTTP/1.1 101 Switching Protocols',
+        'Connection: Upgrade',
+        'Upgrade: test',
+        '',
+        'connected\n',
+      ].join('\r\n'))
+    })
+    const blue = await listen(earlyCloseBackend)
+    const green = await listen(backend('green'))
+    const stateFile = join(root, 'router-state.json')
+    writeRouterStateAtomic(stateFile, state(blue.port, green.port))
+    const router = await listen(createStandaloneRouter({ stateFile }))
+
+    const upgraded = await upgrade(router.port)
+    await waitForRouterCounter(router.port, 'blue', 'upgradedSockets', 1)
+    const [backendSocket] = backendSockets
+    if (!backendSocket) throw new Error('backend upgrade socket was not retained')
+    backendSocket.destroy()
+    await new Promise<void>(resolvePromise => upgraded.socket.once('close', () => resolvePromise()))
+    const health = await waitForRouterCounter(router.port, 'blue', 'upgradedSockets', 0)
+    expect(health.counters.blue).toMatchObject({ upgradedSockets: 0 })
+  })
+
   it('preserves the validated browser Host for same-origin CSRF and strips forged forwarding identity', async () => {
     const root = mkdtempSync(join(tmpdir(), 'standalone-router-origin-'))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -816,19 +1089,19 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
 
   it.each([
     ['self drift', 'scripts/deploy-blue-green.sh', false,
-      'critical deployment source differs from Git HEAD: scripts/deploy-blue-green.sh'],
+      'git_source_layout_verification_file_mismatch:scripts/deploy-blue-green.sh'],
     ['preinstall orchestrator drift', 'scripts/legacy-preinstall-orchestrator.mjs', false,
-      'critical deployment source differs from Git HEAD: scripts/legacy-preinstall-orchestrator.mjs'],
+      'git_source_layout_verification_file_mismatch:scripts/legacy-preinstall-orchestrator.mjs'],
     ['private Gateway RPC helper drift', 'scripts/lib/openclaw-private-gateway-rpc.mjs', false,
-      'critical deployment source differs from Git HEAD: scripts/lib/openclaw-private-gateway-rpc.mjs'],
+      'git_source_layout_verification_file_mismatch:scripts/lib/openclaw-private-gateway-rpc.mjs'],
     ['managed Markdown renderer drift', 'scripts/lib/render-managed-markdown-section.mjs', false,
-      'critical deployment source differs from Git HEAD: scripts/lib/render-managed-markdown-section.mjs'],
+      'git_source_layout_verification_file_mismatch:scripts/lib/render-managed-markdown-section.mjs'],
     ['runtime tree manifest helper drift', 'scripts/lib/runtime-tree-manifest.mjs', false,
-      'critical deployment source differs from Git HEAD: scripts/lib/runtime-tree-manifest.mjs'],
+      'git_source_layout_verification_file_mismatch:scripts/lib/runtime-tree-manifest.mjs'],
     ['dirty worktree', 'scripts/standalone-router.mjs', false,
-      'deployment source worktree and index must be clean'],
+      'git_source_layout_worktree_not_clean'],
     ['dirty index', 'scripts/standalone-router.mjs', true,
-      'deployment source worktree and index must be clean'],
+      'git_source_layout_worktree_not_clean'],
   ] as const)('fails closed before creating deployment state for %s', (_label, relative, staged, error) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-source-gate-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))
@@ -1101,6 +1374,53 @@ printf '%s\\t%s\\t%s\\n' "$MC_AUTH_MODE" "$MC_OPENCLAW_TENANT_ID" "$MC_OPENCLAW_
     expect(readFileSync(capture, 'utf8')).toBe('openclaw-loopback\t1\t1\n')
     expect(slot.stdout).toBe('openclaw-loopback\t1\t1\n')
     expect(existsSync(missingPlatform)).toBe(false)
+  })
+
+  it('preflights explicit managed data paths and rejects a missing database', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-runtime-paths-')))
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+    const project = join(root, 'project')
+    const scripts = join(project, 'scripts')
+    const runtime = join(root, 'runtime')
+    const database = join(runtime, 'mission-control.db')
+    const tokens = join(runtime, 'tokens.json')
+    const platform = join(root, 'platform.env')
+    mkdirSync(scripts, { recursive: true, mode: 0o700 })
+    mkdirSync(runtime, { mode: 0o700 })
+    writeFileSync(database, 'sqlite-fixture\n', { mode: 0o600 })
+    writeFileSync(tokens, '{}\n', { mode: 0o600 })
+    writeFileSync(platform, [
+      `MISSION_CONTROL_DATA_DIR=${runtime}`,
+      `MISSION_CONTROL_DB_PATH=${database}`,
+      `MISSION_CONTROL_TOKENS_PATH=${tokens}`,
+      '',
+    ].join('\n'), { mode: 0o600 })
+    const source = readFileSync(resolve(process.cwd(), 'scripts/deploy-blue-green.sh'), 'utf8')
+    const harness = join(scripts, 'runtime-path-harness.sh')
+    writeFileSync(harness, `${source.slice(0, source.indexOf('\ncommand="${1:-}"'))}
+managed_runtime_paths
+`, { mode: 0o700 })
+    chmodSync(harness, 0o700)
+    const environment = { ...process.env, AIWORKER_PLATFORM_ENV_FILE: platform,
+      AIWORKER_BG_RELEASES_DIR: join(root, 'releases'), AIWORKER_BG_LIVE_DB_PATH: database,
+      NODE_BIN: process.execPath }
+    const valid = spawnSync('/bin/bash', [harness], { encoding: 'utf8', env: environment })
+    expect(valid.status, valid.stderr).toBe(0)
+    expect(valid.stdout).toBe(`${runtime}\n${database}\n${tokens}\n`)
+    rmSync(database)
+    const missing = spawnSync('/bin/bash', [harness], { encoding: 'utf8', env: environment })
+    expect(missing.status).not.toBe(0)
+    writeFileSync(database, 'sqlite-fixture\n', { mode: 0o600 })
+    const linkedRuntime = join(root, 'linked-runtime')
+    symlinkSync(runtime, linkedRuntime)
+    writeFileSync(platform, [
+      `MISSION_CONTROL_DATA_DIR=${linkedRuntime}`,
+      `MISSION_CONTROL_DB_PATH=${join(linkedRuntime, 'mission-control.db')}`,
+      `MISSION_CONTROL_TOKENS_PATH=${join(linkedRuntime, 'tokens.json')}`,
+      '',
+    ].join('\n'), { mode: 0o600 })
+    const linked = spawnSync('/bin/bash', [harness], { encoding: 'utf8', env: environment })
+    expect(linked.status).not.toBe(0)
   })
 
   it('suppresses sourced scope-file output while preserving its full-readiness assignments', () => {
@@ -2389,7 +2709,7 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(deployScript).toContain('acquire_shared_deployment_lock')
     expect(deployScript).toContain('release_shared_deployment_lock')
     expect(deployScript).not.toContain('if ! mkdir "$LOCK_DIR"')
-    expect(deployScript).toContain('deployment source worktree and index must be clean')
+    expect(deployScript).toContain('critical deployment source batch verification failed')
     expect(deployScript).toContain('stage_release()')
     expect(deployScript).toContain('source standalone artifact failed verification')
     expect(deployScript).toContain('staged standalone artifact failed verification')
@@ -2398,6 +2718,8 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(launcher).toContain('probe role requires absolute AIWORKER_BG_PROBE_DATA_DIR')
     expect(launcher).toContain('probe role requires a non-empty, non-symlink SQLite snapshot')
     expect(launcher).toContain('AIWORKER_DISABLE_SCHEDULER=1')
+    expect(launcher).toContain('managed %s runtime requires explicit %s')
+    expect(launcher).toContain('refusing checkout-local fallback data')
     expect(launcher).toContain('AIWORKER_N8N_NODE_CALLBACK_URL="http://$LISTEN_HOST:$PORT/api/n8n/node-execute"')
     expect(launcher).toContain('AIWORKER_N8N_MEDIA_CALLBACK_URL="http://$LISTEN_HOST:$PORT/api/n8n/media-execute"')
     expect(launcher).toContain('AIWORKER_N8N_CLAIM_CALLBACK_URL="http://$LISTEN_HOST:$PORT/api/n8n/claim"')
@@ -2467,6 +2789,8 @@ check_legacy_databases_quiescent "$1" "$2"
     expect(sourceGate).toContain('scripts/install-aiworker-director-brain.sh')
     expect(sourceGate).toContain('scripts/apply-openclaw-runtime-convergence.sh')
     expect(sourceGate).toContain('GIT_OPTIONAL_LOCKS=0')
+    expect(sourceGate).toContain('"$GIT_SOURCE_LAYOUT" verify-files')
+    expect(sourceGate).not.toContain('for relative in "${critical_paths[@]}"')
     const managerResolver = deployScript.slice(
       deployScript.indexOf('assert_normal_service_manager_installation()'),
       deployScript.indexOf('verify_director_video_release_chain()'),

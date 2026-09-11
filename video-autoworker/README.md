@@ -51,6 +51,8 @@ rendering, export, and other editing side effects remain outside the current sco
 
 See [Director Brain architecture](docs/architecture/director-brain.md) for the data contract and
 the exact candidate-versus-production boundary.
+The shared platform-adapter, long-task, release, recovery, and focused-validation rules are in
+[Maintainable architecture and fast releases](docs/architecture/2026-09-11-maintainability-and-fast-release.md).
 
 ## Tech Stack
 

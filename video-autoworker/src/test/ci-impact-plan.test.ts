@@ -7,6 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { createBuildCacheDescriptor } from '../../scripts/ci-impact-plan.mjs'
 
 const script = resolve(process.cwd(), 'scripts/ci-impact-plan.mjs')
 const roots: string[] = []
@@ -80,6 +81,27 @@ describe('CI impact plan', () => {
         changedCount: 2, rootPartitions: [], relatedFiles: [], testFiles: [], pluginSuites: [],
         runIntegration: false, runBrowserTests: false, runPluginTests: false,
       })
+  })
+
+  it('binds build cache identity to OS, architecture, Node ABI, lock, and config', () => {
+    const entry = fixture(true)
+    const arm = createBuildCacheDescriptor({
+      productRoot: entry.productRoot, platform: 'darwin', arch: 'arm64', nodeAbi: '127',
+    })
+    const otherAbi = createBuildCacheDescriptor({
+      productRoot: entry.productRoot, platform: 'darwin', arch: 'arm64', nodeAbi: '128',
+    })
+    expect(arm).toMatchObject({
+      os: 'darwin', arch: 'arm64', nodeAbi: '127',
+      lockSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      buildConfigSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      key: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    expect(otherAbi.key).not.toBe(arm.key)
+    write(join(entry.productRoot, 'next.config.js'), 'export default { output: "standalone" }\n')
+    expect(createBuildCacheDescriptor({
+      productRoot: entry.productRoot, platform: 'darwin', arch: 'arm64', nodeAbi: '127',
+    }).key).not.toBe(arm.key)
   })
 
   it('selects targeted mode for ordinary UI source and requests integration', () => {

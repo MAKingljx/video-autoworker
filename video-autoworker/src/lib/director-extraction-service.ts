@@ -5,6 +5,12 @@ import {
 } from '@/lib/director-extraction-errors'
 import { buildDirectorExtractionHistorySeed } from '@/lib/director-extraction-seed'
 import {
+  completeDirectorExtractionSegment,
+  ensureDirectorExtractionSegments,
+  mergeDirectorExtractionSegments,
+  splitDirectorExtractionPhaseInput,
+} from '@/lib/director-extraction-segments'
+import {
   DIRECTOR_EXTRACTION_LEARNING_CONTEXT_MAX_BYTES,
   DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES,
   compactDirectorLearningRecord,
@@ -353,11 +359,15 @@ async function buildPhaseInput(
     reviewedReferenceDigests: reviewedReferenceDigests(reviewedRecords),
     outputContract: buildDirectorExtractionOutputContract(job.currentPhase),
   }
-  const baseBytes = Buffer.byteLength(JSON.stringify({
+  const sizingInput = {
     ...baseInput,
     learningContext: null,
     learningContextTrace: null,
-  }), 'utf8')
+  }
+  const sizingSegments = splitDirectorExtractionPhaseInput(sizingInput)
+  const baseBytes = Math.max(...sizingSegments.map(segment => (
+    Buffer.byteLength(JSON.stringify(segment), 'utf8')
+  )))
   const learningBudget = Math.min(
     DIRECTOR_EXTRACTION_LEARNING_CONTEXT_MAX_BYTES,
     DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES - baseBytes,
@@ -372,10 +382,9 @@ async function buildPhaseInput(
     maxBytes: learningBudget,
   })
   const input = { ...baseInput, ...selectedLearning }
-  if (Buffer.byteLength(JSON.stringify(input), 'utf8')
-    > DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES) {
-    throw new Error('director_extraction_phase_input_too_large')
-  }
+  // A large evidence set may exceed the per-call budget as a whole. Every
+  // resulting segment must independently satisfy the same governed ceiling.
+  splitDirectorExtractionPhaseInput(input)
   return input
 }
 
@@ -1526,8 +1535,22 @@ export async function runNextDirectorExtractionPhase(
     } else {
       input = await buildPhaseInput(db, job, commandRunner)
       const phaseRunner = options.runner || defaultDirectorExtractionPhaseRunner
-      const rawOutput = await leaseGuard.run(() => phaseRunner(phase, input, job))
-      output = parseDirectorExtractionOutput(phase, rawOutput)
+      const segmentInputs = splitDirectorExtractionPhaseInput(input)
+      if (segmentInputs.length === 1) {
+        const rawOutput = await leaseGuard.run(() => phaseRunner(phase, input, job))
+        output = parseDirectorExtractionOutput(phase, rawOutput)
+      } else {
+        let segments = ensureDirectorExtractionSegments(
+          db, job.phaseTaskId!, phase, segmentInputs, options.nowSeconds,
+        )
+        for (const segment of segments.filter(item => item.status === 'pending')) {
+          const rawOutput = await leaseGuard.run(() => phaseRunner(phase, segment.input, job))
+          segments = completeDirectorExtractionSegment(
+            db, job.phaseTaskId!, phase, segment.index, rawOutput, options.nowSeconds,
+          )
+        }
+        output = mergeDirectorExtractionSegments(phase, segments)
+      }
       assertCandidateKeysAvailable(db, job, output)
       validateEvidenceReferences(output, input)
       await revalidateStagedDependencies(db, job, output, input, commandRunner)

@@ -187,6 +187,15 @@ elif [[ "$ROLE" == drain ]]; then
   export AIWORKER_DISABLE_SCHEDULER=1
 fi
 
+if [[ "$ROLE" == active || "$ROLE" == drain ]]; then
+  for required_name in MISSION_CONTROL_DATA_DIR MISSION_CONTROL_DB_PATH MISSION_CONTROL_TOKENS_PATH; do
+    [[ -n "${!required_name:-}" ]] || {
+      printf 'managed %s runtime requires explicit %s; refusing checkout-local fallback data\n' \
+        "$ROLE" "$required_name" >&2
+      exit 1
+    }
+  done
+fi
 export MISSION_CONTROL_DATA_DIR="${MISSION_CONTROL_DATA_DIR:-$PROJECT_ROOT/.data}"
 export MISSION_CONTROL_DB_PATH="${MISSION_CONTROL_DB_PATH:-$MISSION_CONTROL_DATA_DIR/mission-control.db}"
 export MISSION_CONTROL_TOKENS_PATH="${MISSION_CONTROL_TOKENS_PATH:-$MISSION_CONTROL_DATA_DIR/mission-control-tokens.json}"

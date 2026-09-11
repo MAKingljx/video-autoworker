@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { lstatSync, readFileSync, realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -13,6 +14,42 @@ import {
 
 const COMMIT = /^[a-f0-9]{40}$/u
 const PLUGIN_SUITES = Object.freeze(['video-command', 'director-brain', 'task-flow'])
+const BUILD_CONFIG_FILES = Object.freeze([
+  'package.json', '.nvmrc', 'next.config.js', 'next.config.mjs', 'next.config.ts',
+  'tsconfig.json', 'scripts/build-standalone.mjs',
+])
+
+export function createBuildCacheDescriptor({
+  productRoot = process.cwd(),
+  platform = process.platform,
+  arch = process.arch,
+  nodeAbi = process.versions.modules,
+} = {}) {
+  const physicalRoot = realpathSync.native(productRoot)
+  const hashFile = member => {
+    const pathname = resolve(physicalRoot, member)
+    try {
+      const entry = lstatSync(pathname)
+      if (!entry.isFile() || entry.isSymbolicLink()) throw new Error('unsafe')
+      return createHash('sha256').update(readFileSync(pathname)).digest('hex')
+    } catch (error) {
+      if (error?.code === 'ENOENT') return null
+      throw new Error(`ci_build_cache_input_invalid:${member}`)
+    }
+  }
+  const lockSha256 = hashFile('pnpm-lock.yaml')
+  if (!lockSha256) throw new Error('ci_build_cache_lock_missing')
+  const buildConfig = Object.fromEntries(BUILD_CONFIG_FILES.map(member => [member, hashFile(member)]))
+  const packageValue = JSON.parse(readFileSync(resolve(physicalRoot, 'package.json'), 'utf8'))
+  const packageManager = typeof packageValue.packageManager === 'string'
+    ? packageValue.packageManager : 'pnpm-unspecified'
+  const buildConfigSha256 = createHash('sha256')
+    .update(JSON.stringify(buildConfig)).digest('hex')
+  const payload = { os: platform, arch, nodeAbi, packageManager, lockSha256,
+    buildConfigSha256 }
+  return { ...payload,
+    key: createHash('sha256').update(JSON.stringify(payload)).digest('hex') }
+}
 
 function parseArguments(argv) {
   const values = { head: 'HEAD', forceFull: false }
@@ -176,30 +213,33 @@ function unique(values) {
   return [...new Set(values)]
 }
 
-function fullPlan({ base, head, reasons, changedCount, partitions }) {
+function fullPlan({ base, head, reasons, changedCount, partitions, buildCache }) {
   return {
     mode: 'full', base, head, reasons: unique(reasons), changedCount,
     rootPartitions: partitions,
     relatedFiles: [],
     testFiles: [],
     pluginSuites: [...PLUGIN_SUITES],
+    buildCache,
     runIntegration: true,
     runBrowserTests: true,
     runPluginTests: true,
   }
 }
 
-function unknownTargetedPlan({ base, head, reason }) {
+function unknownTargetedPlan({ base, head, reason, buildCache }) {
   return {
     mode: 'targeted', base, head, reasons: [reason], changedCount: 0,
     rootPartitions: ['regular'], relatedFiles: [],
     testFiles: [], pluginSuites: [],
+    buildCache,
     runIntegration: true, runBrowserTests: false, runPluginTests: false,
   }
 }
 
 export function createCiImpactPlan({ productRoot = process.cwd(), ...options } = {}) {
   const partitions = loadRootPlan(productRoot)
+  const buildCache = createBuildCacheDescriptor({ productRoot })
   let layout
   let head
   try {
@@ -211,26 +251,26 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       head: options.head || 'HEAD',
       reasons: ['head_or_layout_unavailable'],
       changedCount: 0,
-      partitions,
+      partitions, buildCache,
     }) : unknownTargetedPlan({
       base: options.base || null,
       head: options.head || 'HEAD',
-      reason: 'head_or_layout_unknown_requires_build_static',
+      reason: 'head_or_layout_unknown_requires_build_static', buildCache,
     })
   }
   let base
   if (!options.base) {
     return options.forceFull
-      ? fullPlan({ base: null, head, reasons: ['force_full', 'base_missing'], changedCount: 0, partitions })
-      : unknownTargetedPlan({ base: null, head, reason: 'base_missing_requires_build_static' })
+      ? fullPlan({ base: null, head, reasons: ['force_full', 'base_missing'], changedCount: 0, partitions, buildCache })
+      : unknownTargetedPlan({ base: null, head, reason: 'base_missing_requires_build_static', buildCache })
   }
   try {
     base = resolveCommit(layout.gitRoot, options.base)
   } catch {
     return options.forceFull ? fullPlan({
-      base: options.base, head, reasons: ['base_unavailable'], changedCount: 0, partitions,
+      base: options.base, head, reasons: ['base_unavailable'], changedCount: 0, partitions, buildCache,
     }) : unknownTargetedPlan({
-      base: options.base, head, reason: 'base_unknown_requires_build_static',
+      base: options.base, head, reason: 'base_unknown_requires_build_static', buildCache,
     })
   }
   let basePrefix
@@ -240,9 +280,9 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     headPrefix = resolveGitCommitProductPrefix(layout.gitRoot, head)
   } catch {
     return options.forceFull ? fullPlan({
-      base, head, reasons: ['commit_layout_unavailable'], changedCount: 0, partitions,
+      base, head, reasons: ['commit_layout_unavailable'], changedCount: 0, partitions, buildCache,
     }) : unknownTargetedPlan({
-      base, head, reason: 'commit_layout_unknown_requires_build_static',
+      base, head, reason: 'commit_layout_unknown_requires_build_static', buildCache,
     })
   }
   const baseTrees = commitTrees(layout.gitRoot, base, basePrefix)
@@ -252,7 +292,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
   const changedCount = productPaths.length + repositoryPaths.length
   if (options.forceFull) {
     return fullPlan({
-      base, head, reasons: ['force_full'], changedCount, partitions,
+      base, head, reasons: ['force_full'], changedCount, partitions, buildCache,
     })
   }
   const layoutChanged = basePrefix !== headPrefix
@@ -261,6 +301,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['no_changes'], changedCount: 0,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
@@ -273,6 +314,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['documentation_only'], changedCount,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
@@ -304,6 +346,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     relatedFiles,
     testFiles,
     pluginSuites,
+    buildCache,
     runIntegration: layoutChanged || relatedFiles.length > 0
       || reasons.includes('unknown_requires_build_static'),
     runBrowserTests: needsBrowser(productPaths),

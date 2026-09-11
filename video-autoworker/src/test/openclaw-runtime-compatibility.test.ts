@@ -44,7 +44,7 @@ describe('OpenClaw 9.2 stable runtime compatibility', () => {
       return target
     }
     const video = plugin('aiworker-video-command', '0.5.15', '>=2026.7.1-2')
-    const director = plugin('aiworker-director-brain', '0.4.3', '2026.7.1-2')
+    const director = plugin('aiworker-director-brain', '0.4.4', '2026.7.1-2')
     const previousHome = process.env.HOME
     process.env.HOME = join(root, 'home')
     const bin = join(process.env.HOME, 'ai-worker/bin')

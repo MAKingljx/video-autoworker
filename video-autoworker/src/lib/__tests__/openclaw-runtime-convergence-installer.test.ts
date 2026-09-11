@@ -270,7 +270,7 @@ async function createFixture() {
     'aiworker-director-brain',
     'aiworker_director_brain',
     true,
-    '0.4.3',
+    '0.4.4',
   )
 
   await writeFile(fakeProgram, `
@@ -436,7 +436,7 @@ if (args[0] === 'plugins' && args[1] === 'inspect') {
           : process.env.FAKE_TYPED_HOOK_PRIORITY === '1' ? { priority: index + 1 } : {}),
       }))
   process.stdout.write(JSON.stringify({
-    plugin: { id: 'aiworker-director-brain', status: 'loaded', version: '0.4.3' },
+    plugin: { id: 'aiworker-director-brain', status: 'loaded', version: '0.4.4' },
     tools: [{ names: ['aiworker_director_brain'] }],
     typedHooks,
     diagnostics: [],
@@ -1159,7 +1159,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
         },
         {
           id: 'aiworker-director-brain',
-          compatibleVersions: ['0.4.1', '0.4.2', '0.4.3'],
+          compatibleVersions: ['0.4.1', '0.4.2', '0.4.3', '0.4.4'],
           tool: 'aiworker_director_brain',
           requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
           requiredHookConfig: { allowConversationAccess: true },
@@ -1270,7 +1270,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     15_000,
   )
 
-  it('captures the 0.4.0 pre-install baseline before the 0.4.3 plugin is present', async () => {
+  it('captures the 0.4.0 pre-install baseline before the 0.4.4 plugin is present', async () => {
     const entry = await createFixture()
     const pluginManifestPath = join(
       entry.state,
@@ -1667,7 +1667,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     entry.env[variable] = value
 
     await expect(run(entry, '--apply')).rejects.toMatchObject({
-      stderr: expect.stringContaining('requires the installed 0.4.3 persistence hooks'),
+      stderr: expect.stringContaining('requires the installed 0.4.4 persistence hooks'),
     })
     expect(await readFile(entry.config, 'utf8')).toBe(before)
     expect(await exists(entry.backupRoot)).toBe(false)

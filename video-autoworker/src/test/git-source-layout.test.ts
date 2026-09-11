@@ -3,7 +3,8 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync,
+  chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -20,6 +21,7 @@ import {
   resolveGitCommitProductPrefix,
   resolveGitSourceLayout,
   sha256GitProductFile,
+  verifyGitProductFiles,
 } from '../../scripts/lib/git-source-layout.mjs'
 
 const roots: string[] = []
@@ -200,5 +202,30 @@ describe('shared Git product source layout', () => {
     expect(() => execFileSync(process.execPath, [
       helper, 'verify-file', root, 'src/value.ts', flatCommit, '100755',
     ], { stdio: 'pipe' })).toThrow()
+  })
+
+  it('batch-verifies one clean source closure and rejects content or mode drift', () => {
+    const { root, flatCommit } = flatRepository()
+    const paths = ['package.json', 'pnpm-lock.yaml', 'next.config.js', 'src/value.ts']
+    const bundle = verifyGitProductFiles(root, flatCommit, paths)
+    expect(bundle).toMatchObject({
+      schema: 'video-autoworker-git-source-verification/v1',
+      productRoot: root,
+      commit: flatCommit,
+      files: paths.map(productRelative => ({ productRelative, gitMode: '100644' })),
+      closureSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    const cli = JSON.parse(execFileSync(process.execPath, [
+      helper, 'verify-files', root, flatCommit, ...paths,
+    ], { encoding: 'utf8' }))
+    expect(cli.closureSha256).toBe(bundle.closureSha256)
+
+    write(root, 'src/value.ts', 'export const value = 2\n')
+    expect(() => verifyGitProductFiles(root, flatCommit, paths))
+      .toThrow('git_source_layout_verification_file_mismatch:src/value.ts')
+    write(root, 'src/value.ts', 'export const value = 1\n')
+    chmodSync(join(root, 'src/value.ts'), 0o755)
+    expect(() => verifyGitProductFiles(root, flatCommit, paths))
+      .toThrow('git_source_layout_verification_file_mode_mismatch:src/value.ts')
   })
 })

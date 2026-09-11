@@ -1,6 +1,8 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, realpathSync } from 'node:fs'
+import {
+  closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
+} from 'node:fs'
 import { isAbsolute, posix, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -170,6 +172,101 @@ export function sha256GitProductFile(gitRoot, commit, productRelative) {
     .digest('hex')
 }
 
+function sameFileSnapshot(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode
+    && left.nlink === right.nlink && left.size === right.size
+    && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+}
+
+function hashPhysicalFile(pathname, objectFormat) {
+  const before = lstatSync(pathname, { bigint: true })
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+    fail('verification_file_unsafe')
+  }
+  const descriptor = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = fstatSync(descriptor, { bigint: true })
+    if (!sameFileSnapshot(before, opened)) fail('verification_file_changed')
+    const content = createHash('sha256')
+    const object = createHash(objectFormat)
+    object.update(`blob ${opened.size}\0`)
+    const buffer = Buffer.allocUnsafe(64 * 1024)
+    for (;;) {
+      const bytes = readSync(descriptor, buffer, 0, buffer.length, null)
+      if (bytes === 0) break
+      const chunk = buffer.subarray(0, bytes)
+      content.update(chunk)
+      object.update(chunk)
+    }
+    const after = fstatSync(descriptor, { bigint: true })
+    const current = lstatSync(pathname, { bigint: true })
+    if (!sameFileSnapshot(opened, after) || !sameFileSnapshot(after, current)) {
+      fail('verification_file_changed')
+    }
+    return Object.freeze({
+      sha256: content.digest('hex'), objectId: object.digest('hex'),
+      size: Number(after.size), mode: Number(after.mode & 0o7777n),
+      dev: after.dev.toString(), ino: after.ino.toString(),
+      mtimeNs: after.mtimeNs.toString(), ctimeNs: after.ctimeNs.toString(),
+    })
+  } finally { closeSync(descriptor) }
+}
+
+export function verifyGitProductFiles(productRootValue, commitValue, productRelatives) {
+  if (!Array.isArray(productRelatives) || productRelatives.length < 1
+    || productRelatives.length > 256) fail('verification_paths_invalid')
+  const productRelativesNormalized = productRelatives.map(normalizeProductRelativePath)
+  if (new Set(productRelativesNormalized).size !== productRelativesNormalized.length) {
+    fail('verification_paths_duplicate')
+  }
+  const layout = resolveGitSourceLayout(productRootValue)
+  const commit = commitId(layout.gitRoot, commitValue)
+  if (commitId(layout.gitRoot, 'HEAD') !== commit) fail('head_commit_mismatch')
+  const objectFormat = git(layout.gitRoot, ['rev-parse', '--show-object-format'], {
+    errorCode: 'object_format_invalid',
+  }).trim()
+  if (!['sha1', 'sha256'].includes(objectFormat)) fail('object_format_invalid')
+  const raw = git(layout.gitRoot, ['ls-tree', '-r', '-z', commit], {
+    encoding: 'buffer', errorCode: 'tree_read_failed',
+  }).toString('utf8')
+  const tree = new Map()
+  for (const row of raw.split('\0').filter(Boolean)) {
+    const match = /^(\d+)\s+(\w+)\s+([a-f0-9]{40,64})\t(.+)$/u.exec(row)
+    if (!match) fail('tree_read_failed')
+    tree.set(match[4], { mode: match[1], type: match[2], objectId: match[3] })
+  }
+  const files = []
+  for (const productRelative of productRelativesNormalized) {
+    const treePath = productTreePath(layout.productPrefix, productRelative)
+    const expected = tree.get(treePath)
+    if (!expected || expected.type !== 'blob' || !ALLOWED_FILE_MODES.has(expected.mode)) {
+      fail(`verification_file_missing:${productRelative}`)
+    }
+    const snapshot = hashPhysicalFile(resolve(layout.productRoot, productRelative), objectFormat)
+    if (snapshot.objectId !== expected.objectId) {
+      fail(`verification_file_mismatch:${productRelative}`)
+    }
+    const executable = (snapshot.mode & 0o111) !== 0
+    if ((expected.mode === '100755') !== executable) {
+      fail(`verification_file_mode_mismatch:${productRelative}`)
+    }
+    files.push({ productRelative, treePath, gitMode: expected.mode,
+      objectId: expected.objectId, ...snapshot })
+  }
+  assertCleanGitSource(layout.productRoot, commit)
+  const payload = {
+    schema: 'video-autoworker-git-source-verification/v1',
+    gitRoot: layout.gitRoot,
+    productRoot: layout.productRoot,
+    productPrefix: layout.productPrefix,
+    commit,
+    objectFormat,
+    files,
+  }
+  return Object.freeze({ ...payload,
+    closureSha256: createHash('sha256').update(JSON.stringify(payload)).digest('hex') })
+}
+
 /**
  * @param {string} productRoot
  * @param {string | null} [expectedCommit]
@@ -191,12 +288,15 @@ export function assertCleanGitSource(productRoot, expectedCommit = null) {
 }
 
 function usage() {
-  return 'usage: git-source-layout.mjs <resolve|assert-clean|tree-path|verify-file|show> ...'
+  return 'usage: git-source-layout.mjs <resolve|assert-clean|tree-path|verify-file|verify-files|show> ...'
 }
 
 function cli(argv) {
   const [command, productRoot, productRelative, commit = 'HEAD', expectedMode] = argv
   if (!command || !productRoot) fail('arguments_invalid')
+  if (command === 'verify-files' && argv.length >= 4) {
+    return verifyGitProductFiles(productRoot, productRelative, argv.slice(3))
+  }
   if (command === 'resolve' && argv.length === 2) return resolveGitSourceLayout(productRoot)
   if (command === 'assert-clean' && argv.length >= 2 && argv.length <= 3) {
     return assertCleanGitSource(productRoot, argv[2] || null)

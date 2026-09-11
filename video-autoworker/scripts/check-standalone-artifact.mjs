@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
 import {
   cp,
   lstat,
   mkdir,
+  open,
   readFile,
   readlink,
   readdir,
@@ -1375,6 +1377,9 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
   const importClosure = await assertStandaloneStaticImportClosure(root)
   const releaseManifest = await verifyStandaloneReleaseManifest(root)
   const sensitiveContent = scanStandaloneSensitiveContent(root)
+  const verificationBundle = await createStandaloneVerificationBundle(
+    root, releaseManifest, importClosure, sensitiveContent,
+  )
   return {
     ok: true,
     root,
@@ -1385,7 +1390,136 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
       bytesScanned: sensitiveContent.bytesScanned,
     },
     importClosure,
+    verificationBundle,
   }
+}
+
+export async function createStandaloneVerificationBundle(
+  rootPath,
+  releaseManifest,
+  importClosure,
+  sensitiveContent,
+) {
+  const root = await realpath(resolve(rootPath))
+  const identities = {}
+  for (const name of [RELEASE_MANIFEST_NAME, DIRECTOR_EXTRACTION_PROVENANCE_NAME]) {
+    const pathname = resolve(root, name)
+    const before = await lstat(pathname, { bigint: true })
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) {
+      throw new Error(`standalone_verification_bundle_unsafe:${name}`)
+    }
+    const source = await readFile(pathname)
+    const after = await lstat(pathname, { bigint: true })
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+      || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) {
+      throw new Error(`standalone_verification_bundle_changed:${name}`)
+    }
+    identities[name] = {
+      sha256: createHash('sha256').update(source).digest('hex'),
+      bytes: source.length,
+      mode: Number(after.mode & 0o7777n),
+      dev: after.dev.toString(),
+      ino: after.ino.toString(),
+      mtimeNs: after.mtimeNs.toString(),
+      ctimeNs: after.ctimeNs.toString(),
+    }
+  }
+  const rootEntry = await lstat(root, { bigint: true })
+  const treeMetadata = await collectStandaloneTreeMetadata(root)
+  const payload = {
+    schema: 'video-autoworker-standalone-verification-bundle/v1',
+    scope: 'post-full-audit-reference',
+    fullArtifactAuditRequiredAtCopyBoundary: true,
+    root: { path: root, dev: rootEntry.dev.toString(), ino: rootEntry.ino.toString(),
+      mode: Number(rootEntry.mode & 0o7777n) },
+    artifactContent: releaseManifest.artifactContent,
+    treeMetadata,
+    identities,
+    importClosure,
+    sensitiveContent: {
+      filesScanned: sensitiveContent.filesScanned,
+      bytesScanned: sensitiveContent.bytesScanned,
+    },
+  }
+  return { ...payload,
+    bundleSha256: createHash('sha256').update(JSON.stringify(payload)).digest('hex') }
+}
+
+async function collectStandaloneTreeMetadata(root) {
+  const rows = []
+  const visit = async (directory, prefix = '') => {
+    const entries = await readdir(directory, { withFileTypes: true })
+    entries.sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of entries) {
+      const member = prefix ? `${prefix}/${entry.name}` : entry.name
+      const pathname = resolve(directory, entry.name)
+      const stat = await lstat(pathname, { bigint: true })
+      const type = stat.isSymbolicLink() ? 'symlink'
+        : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'other'
+      const row = [member, type, Number(stat.mode & 0o7777n), stat.size.toString(),
+        stat.dev.toString(), stat.ino.toString(), stat.mtimeNs.toString(), stat.ctimeNs.toString()]
+      if (type === 'symlink') row.push(await readlink(pathname))
+      rows.push(row)
+      if (type === 'directory') await visit(pathname, member)
+    }
+  }
+  await visit(root)
+  return { entries: rows.length,
+    sha256: createHash('sha256').update(JSON.stringify(rows)).digest('hex') }
+}
+
+export async function verifyStandaloneVerificationBundle(rootPath, bundle) {
+  const copy = structuredClone(bundle)
+  delete copy.bundleSha256
+  if (bundle?.schema !== 'video-autoworker-standalone-verification-bundle/v1'
+    || bundle.scope !== 'post-full-audit-reference'
+    || bundle.fullArtifactAuditRequiredAtCopyBoundary !== true
+    || !/^[a-f0-9]{64}$/u.test(bundle.bundleSha256 || '')
+    || createHash('sha256').update(JSON.stringify(copy)).digest('hex') !== bundle.bundleSha256) {
+    throw new Error('standalone_verification_bundle_invalid')
+  }
+  const root = await realpath(resolve(rootPath))
+  const rootEntry = await lstat(root, { bigint: true })
+  if (rootEntry.dev.toString() !== bundle.root?.dev
+    || rootEntry.ino.toString() !== bundle.root?.ino
+    || Number(rootEntry.mode & 0o7777n) !== bundle.root?.mode) {
+    throw new Error('standalone_verification_bundle_root_changed')
+  }
+  for (const name of [RELEASE_MANIFEST_NAME, DIRECTOR_EXTRACTION_PROVENANCE_NAME]) {
+    const expected = bundle.identities?.[name]
+    const pathname = resolve(root, name)
+    const before = await lstat(pathname, { bigint: true })
+    if (!expected || !before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+      || before.dev.toString() !== expected.dev || before.ino.toString() !== expected.ino
+      || Number(before.mode & 0o7777n) !== expected.mode) {
+      throw new Error(`standalone_verification_bundle_identity_changed:${name}`)
+    }
+    const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+    let source
+    try {
+      const opened = await handle.stat({ bigint: true })
+      if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
+        throw new Error(`standalone_verification_bundle_identity_changed:${name}`)
+      }
+      source = await handle.readFile()
+      const after = await handle.stat({ bigint: true })
+      if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+        || after.mtimeNs !== opened.mtimeNs || after.ctimeNs !== opened.ctimeNs) {
+        throw new Error(`standalone_verification_bundle_identity_changed:${name}`)
+      }
+    } finally { await handle.close() }
+    if (source.length !== expected.bytes
+      || createHash('sha256').update(source).digest('hex') !== expected.sha256) {
+      throw new Error(`standalone_verification_bundle_digest_changed:${name}`)
+    }
+  }
+  const treeMetadata = await collectStandaloneTreeMetadata(root)
+  if (treeMetadata.entries !== bundle.treeMetadata?.entries
+    || treeMetadata.sha256 !== bundle.treeMetadata?.sha256) {
+    throw new Error('standalone_verification_bundle_tree_changed')
+  }
+  return { ok: true, mode: 'fast', root, bundleSha256: bundle.bundleSha256,
+    artifactContent: bundle.artifactContent, treeMetadata }
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null
@@ -1397,6 +1531,8 @@ if (invokedPath === import.meta.url) {
       ? await sanitizeStandaloneArtifact(rootPath)
       : command === '--write-manifest'
         ? await writeStandaloneReleaseManifest(rootPath)
+        : command === '--verify-bundle'
+          ? await verifyStandaloneVerificationBundle(rootPath, JSON.parse(process.argv[4] || 'null'))
         : await auditStandaloneArtifact(rootPath)
     process.stdout.write(`${JSON.stringify(result)}\n`)
   } catch (error) {

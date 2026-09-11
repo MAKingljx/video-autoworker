@@ -49,7 +49,7 @@ const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
 const EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
 const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.15'
-const COMPATIBLE_DIRECTOR_BRAIN_VERSIONS = new Set(['0.4.1', '0.4.2', '0.4.3'])
+const COMPATIBLE_DIRECTOR_BRAIN_VERSIONS = new Set(['0.4.1', '0.4.2', '0.4.3', '0.4.4'])
 const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
 const OUTBOX_CLOSURE_CONSTANTS = Object.freeze({
   DIRECTOR_BRAIN_CLI_SHA256: 'scripts/feishu-director-brain.mjs',

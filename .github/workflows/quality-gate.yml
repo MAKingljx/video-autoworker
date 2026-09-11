@@ -155,7 +155,42 @@ jobs:
           node-version-file: video-autoworker/.nvmrc
           cache: pnpm
           cache-dependency-path: video-autoworker/pnpm-lock.yaml
+      - name: Resolve platform and ABI build cache identity
+        id: build-cache
+        if: needs.plan.outputs.integration == 'true'
+        env:
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs'
+          import { createBuildCacheDescriptor } from './scripts/ci-impact-plan.mjs'
+          const plan = JSON.parse(process.env.CI_IMPACT_PLAN)
+          const current = createBuildCacheDescriptor({ productRoot: process.cwd() })
+          for (const field of ['packageManager', 'lockSha256', 'buildConfigSha256']) {
+            if (current[field] !== plan.buildCache?.[field]) throw new Error(`Build cache input changed: ${field}`)
+          }
+          appendFileSync(process.env.GITHUB_OUTPUT, `key=${current.key}\n`)
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `构建缓存：os=${current.os} arch=${current.arch} nodeAbi=${current.nodeAbi} lock=${current.lockSha256.slice(0,12)} config=${current.buildConfigSha256.slice(0,12)}\n`)
+          JS
+      - uses: actions/cache@v4
+        if: needs.plan.outputs.integration == 'true'
+        with:
+          path: video-autoworker/.next/cache
+          key: vaw-next-${{ steps.build-cache.outputs.key }}
       - run: pnpm install --frozen-lockfile
+      - name: Verify SQLite native ABI loading
+        run: |
+          node - <<'JS'
+          const Database = require('better-sqlite3')
+          const database = new Database(':memory:')
+          try {
+            const value = database.prepare('SELECT 1 AS ok').get()
+            if (value?.ok !== 1) throw new Error('SQLite native probe returned an invalid result')
+          } finally {
+            database.close()
+          }
+          JS
       - name: Source privacy and static checks
         run: |
           pnpm scan:sensitive:source

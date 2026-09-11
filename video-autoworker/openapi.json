@@ -11804,7 +11804,8 @@
           "type": "object", "additionalProperties": false,
           "required": ["command", "input"],
           "properties": {
-            "command": { "type": "string", "enum": ["operate", "review"] },
+            "protocol": { "type": "string", "enum": ["director-brain-application/v1"] },
+            "command": { "type": "string", "enum": ["operate", "propose", "review", "review-batch"] },
             "input": { "type": "object" }
           }
         } } } },

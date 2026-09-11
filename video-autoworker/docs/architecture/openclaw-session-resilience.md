@@ -119,7 +119,7 @@ profile，再另行评审和迁移，不能让默认策略静默扩散到新 Age
 
 1. 选取一个由真实入站建立且属于 `second-original` 的既有会话，同时保存全量 `tools.catalog` 与带该
    `sessionKey` 的 `tools.effective`；私有基线只保存会话键 SHA-256，不保存明文；
-2. orchestrator 固定安装 task-flow、video-command、`aiworker-director-brain 0.4.1`，确认导演脑载荷
+2. orchestrator 固定安装 task-flow、video-command、`aiworker-director-brain 0.4.4`，确认导演脑持久审核薄客户端载荷
    包含 `director-context-summary.js` 与 `transcript-tool-result-projection.js`；
 3. 由 orchestrator fresh restart `qwen-current`，整个前向发布只允许这一次 restart；
 4. 在任何本轮 runtime RPC 前固定全部必需插件树快照，再从真实 `18889` listener、

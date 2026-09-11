@@ -73,7 +73,7 @@ function validateManifest(pathname) {
       },
       {
         id: 'aiworker-director-brain',
-        compatibleVersions: ['0.4.1', '0.4.2', '0.4.3'],
+        compatibleVersions: ['0.4.1', '0.4.2', '0.4.3', '0.4.4'],
         tool: 'aiworker_director_brain',
         requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
         requiredHookConfig: { allowConversationAccess: true },
@@ -394,7 +394,7 @@ function sha256(value) {
 function directorPluginDescriptor(manifest) {
   const matches = manifest.requiredPlugins.filter(descriptor => descriptor.id === 'aiworker-director-brain')
   if (matches.length !== 1 || matches[0].id !== 'aiworker-director-brain'
-    || !same(matches[0].compatibleVersions, ['0.4.1', '0.4.2', '0.4.3'])
+    || !same(matches[0].compatibleVersions, ['0.4.1', '0.4.2', '0.4.3', '0.4.4'])
     || !Array.isArray(matches[0].requiredHooks)) {
     fail('director-brain runtime plugin descriptor is invalid')
   }

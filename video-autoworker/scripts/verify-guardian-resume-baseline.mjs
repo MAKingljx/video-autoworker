@@ -246,14 +246,14 @@ function captureInstalledComponents(inputs, dependencies = {}) {
     join(directorInstalledRoot, 'openclaw.plugin.json'), 'utf8',
   ))
   const directorVersion = directorPackage?.version
-  if (!['0.4.1', '0.4.2', '0.4.3'].includes(directorVersion)
+  if (!['0.4.1', '0.4.2', '0.4.3', '0.4.4'].includes(directorVersion)
     || directorManifest?.id !== 'aiworker-director-brain'
     || directorManifest?.version !== directorVersion
     || !directorManifest?.contracts?.tools?.includes('aiworker_director_brain')) {
     fail('installed director-brain compatibility identity is invalid')
   }
   for (const name of ['aiworker-video-command',
-    ...(directorVersion === '0.4.3' ? ['aiworker-director-brain'] : [])]) {
+    ...(['0.4.3', '0.4.4'].includes(directorVersion) ? ['aiworker-director-brain'] : [])]) {
     const source = join(REPOSITORY_ROOT, 'openclaw-plugins', name)
     const installed = join(home, '.openclaw-qwen-current/extensions', name)
     for (const part of ['index.js', 'package.json', 'openclaw.plugin.json', 'lib', ...(name === 'aiworker-video-command' ? ['scripts'] : [])]) add(join(source, part), join(installed, part))

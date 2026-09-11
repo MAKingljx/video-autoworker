@@ -269,6 +269,25 @@ describe('director brain tool contract', () => {
     expect(JSON.stringify(result)).not.toMatch(/WORK-HIDDEN|RUN-HIDDEN/iu)
   })
 
+  it('distinguishes a real executor queue from active phase work', async () => {
+    const tool = createDirectorBrainTool({
+      context: targetContext,
+      service: vi.fn().mockResolvedValue({
+        ok: true, action: 'resolve_work', found: true,
+        work: { workId: 'WORK-HIDDEN', name: '冰原纪事' },
+      }),
+      extractionService: vi.fn().mockResolvedValue({
+        ok: true, action: 'extraction_status', status: 'pending',
+        blockedOn: 'executor_queue',
+      }),
+    })
+    const result = JSON.parse(resultText(await tool.execute('queued-status', {
+      action: 'extraction_status', query: '冰原纪事',
+    })))
+    expect(result.responseContract.userVisibleAnswer)
+      .toBe('《冰原纪事》已进入导演知识执行队列，正在等待可用执行器。')
+  })
+
   it('reports evidence write confirmation attention without claiming the video is unfinished', async () => {
     const tool = createDirectorBrainTool({
       context: targetContext,
