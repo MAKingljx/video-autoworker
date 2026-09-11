@@ -1062,6 +1062,23 @@ for (const pathname of [value('--socket'), value('--token-file')]) {
     })
   })
 
+  it('uses a configurable startup window instead of the old fixed ten-second wait', () => {
+    const manager = resolve(process.cwd(), 'scripts/manage-blue-green-services.sh')
+    const source = readFileSync(manager, 'utf8')
+    const invalid = spawnSync('bash', [manager, 'status'], {
+      encoding: 'utf8',
+      env: { ...process.env, AIWORKER_BG_STARTUP_WAIT_SECONDS: '9' },
+    })
+
+    expect(invalid.status).not.toBe(0)
+    expect(invalid.stderr).toContain(
+      'AIWORKER_BG_STARTUP_WAIT_SECONDS must be between 10 and 3600',
+    )
+    expect(source).toContain('AIWORKER_BG_STARTUP_WAIT_SECONDS:-90')
+    expect(source).toContain('STARTUP_WAIT_ATTEMPTS=$((10#$STARTUP_WAIT_SECONDS * 10))')
+    expect(source).toContain('_attempt < STARTUP_WAIT_ATTEMPTS')
+  })
+
   it('rejects an invalid authorized maintenance replacement mode before creating state', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'standalone-maintenance-replace-config-')))
     cleanup.push(() => rmSync(root, { recursive: true, force: true }))

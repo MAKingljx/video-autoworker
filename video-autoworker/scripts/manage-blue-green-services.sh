@@ -21,6 +21,7 @@ EXECVE_CONTRACT="$PROJECT_ROOT/scripts/lib/blue-green-execve-contract.mjs"
 DOMAIN="gui/$(id -u)"
 LOCK_DIR="$SUPERVISOR_DIR/.service-operation.lock"
 LOCK_OWNED=0
+STARTUP_WAIT_SECONDS="${AIWORKER_BG_STARTUP_WAIT_SECONDS:-90}"
 
 usage() {
   cat <<'EOF'
@@ -66,6 +67,10 @@ esac
 for command_name in chmod id kill launchctl lsof mkdir mv node plutil rm rmdir shasum sleep stat; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command is unavailable: $command_name"
 done
+[[ "$STARTUP_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] \
+  && (( 10#$STARTUP_WAIT_SECONDS >= 10 && 10#$STARTUP_WAIT_SECONDS <= 3600 )) \
+  || fail "AIWORKER_BG_STARTUP_WAIT_SECONDS must be between 10 and 3600"
+STARTUP_WAIT_ATTEMPTS=$((10#$STARTUP_WAIT_SECONDS * 10))
 
 NODE_BIN_INPUT="${AIWORKER_BG_NODE_BIN:-${NODE_BIN:-$(command -v node)}}"
 [[ "$NODE_BIN_INPUT" == /* ]] || fail "Node.js executable must be an absolute path"
@@ -477,7 +482,7 @@ if [[ "$ACTION" == start ]]; then
   start_ok=0
   if launchctl bootstrap "$DOMAIN" "$plist" \
     && launchctl kickstart "$target"; then
-    for _attempt in {1..100}; do
+    for (( _attempt = 0; _attempt < STARTUP_WAIT_ATTEMPTS; _attempt += 1 )); do
       if status_service "$SERVICE" 1; then
         start_ok=1
         break
