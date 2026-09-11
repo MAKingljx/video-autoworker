@@ -77,6 +77,7 @@ import {
   buildDirectorPerceptionCheckpointInput,
   directorExtractionContractDigest,
   directorExtractionDigest,
+  directorExtractionOutputJsonSchema,
   directorExtractionProjectionReceiptSchema,
   parseDirectorLearningContextResult,
   parseDirectorExtractionOutput,
@@ -409,6 +410,10 @@ function validateEvidenceReferences(
 }
 
 function safeErrorCode(error: unknown): string {
+  if (error && typeof error === 'object'
+    && Array.isArray((error as { issues?: unknown[] }).issues)) {
+    return 'director_extraction_model_schema_invalid'
+  }
   return safeDirectorExtractionErrorCode(error, 'director_extraction_phase_failed')
 }
 
@@ -1433,7 +1438,14 @@ export const defaultDirectorExtractionPhaseRunner: DirectorExtractionPhaseRunner
     sessionKey: `director-extraction:${job.sourceResultSha256.slice(0, 24)}:${phase}`,
     delivery: { mode: 'none' },
     timeoutSeconds: Math.max(30, Math.min(600, route.timeoutSeconds)),
+    structuredOutput: {
+      name: `director_${phase}_v1`,
+      schema: directorExtractionOutputJsonSchema(phase),
+    },
   })
+  if (result.finishReason === 'length') {
+    throw new Error('director_extraction_model_truncated')
+  }
   return parseModelJson(result.text)
 }
 

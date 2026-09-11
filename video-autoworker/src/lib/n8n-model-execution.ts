@@ -61,6 +61,9 @@ async function executeOpenClaw(
   route: Extract<N8nModelRoute, { transport: 'openclaw' }>,
   options: ExecutionOptions,
 ): Promise<Record<string, unknown>> {
+  if (options.structuredOutput) {
+    throw new Error('OpenClaw 路由不支持严格结构化输出')
+  }
   const tempRoot = await mkdtemp(join(tmpdir(), 'aiworker-model-node-'))
   const promptPath = join(tempRoot, 'prompt.txt')
   const prompt = promptText(options.nodeKey, options.instruction || route.systemPrompt, options.input)
@@ -114,6 +117,20 @@ async function executeCompatibleApi(
   }
   const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
   if (route.apiKeyEnv && !apiKey) throw new Error(`模型路由缺少外部凭据引用 ${route.apiKeyEnv}`)
+  let responseFormat: Record<string, unknown> | undefined
+  if (options.structuredOutput) {
+    if (!route.capabilities.includes('structured-output')) {
+      throw new Error('模型路由不支持结构化输出')
+    }
+    const { name, schema } = options.structuredOutput
+    const encoded = JSON.stringify(schema)
+    if (!/^[a-z][a-z0-9_]{0,63}$/u.test(name)
+      || !schema || typeof schema !== 'object' || Array.isArray(schema)
+      || Buffer.byteLength(encoded, 'utf8') > 64 * 1024) {
+      throw new Error('结构化输出约束无效')
+    }
+    responseFormat = { type: 'json_schema', json_schema: { name, strict: true, schema } }
+  }
   const timeoutSeconds = options.timeoutSeconds || route.timeoutSeconds
   const response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
@@ -129,6 +146,7 @@ async function executeCompatibleApi(
       ],
       ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
       ...(route.maxTokens === undefined ? {} : { max_tokens: route.maxTokens }),
+      ...(responseFormat ? { response_format: responseFormat } : {}),
     }),
     signal: AbortSignal.timeout(timeoutSeconds * 1_000),
   })
@@ -148,6 +166,7 @@ async function executeCompatibleApi(
   }
   const text = parsed?.choices?.[0]?.message?.content
   if (typeof text !== 'string' || !text.trim()) throw new Error('模型 API 返回空结果')
+  const finishReason = parsed?.choices?.[0]?.finish_reason
   return {
     text: text.slice(0, 100_000),
     routeId: route.id,
@@ -156,6 +175,7 @@ async function executeCompatibleApi(
     provider: new URL(route.baseUrl).hostname,
     model: route.model,
     deliveryRequested: false,
+    ...(typeof finishReason === 'string' ? { finishReason } : {}),
     ...(parsed?.usage && typeof parsed.usage === 'object' ? { usage: parsed.usage } : {}),
   }
 }
@@ -167,6 +187,10 @@ export interface ExecutionOptions {
   sessionKey: string
   delivery: N8nTaskDelivery
   timeoutSeconds?: number
+  structuredOutput?: {
+    name: string
+    schema: Record<string, unknown>
+  }
 }
 
 export async function executeN8nModelRoute(

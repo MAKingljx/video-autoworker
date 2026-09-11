@@ -66,6 +66,53 @@ describe('n8n model execution', () => {
     expect(JSON.stringify(output)).not.toContain('external-secret-value')
   })
 
+  it('passes a bounded strict JSON schema to a compatible structured-output route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '{"ok":true}' }, finish_reason: 'stop' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const schema = {
+      type: 'object', properties: { ok: { type: 'boolean' } },
+      required: ['ok'], additionalProperties: false,
+    }
+
+    await executeN8nModelRoute({
+      id: 'local-structured', label: 'Local', description: '', location: 'local',
+      transport: 'openai-compatible', model: 'default_model',
+      baseUrl: 'http://127.0.0.1:18091/v1', enabled: true,
+      timeoutSeconds: 180, thinking: 'off',
+      capabilities: ['text', 'structured-output'], systemPrompt: '',
+    }, {
+      nodeKey: 'director-understanding', input: { evidence: 'reviewed' },
+      sessionKey: 'unused', delivery: noDelivery,
+      structuredOutput: { name: 'director_understanding_v1', schema },
+    })
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body))
+    expect(body.response_format).toEqual({
+      type: 'json_schema',
+      json_schema: { name: 'director_understanding_v1', strict: true, schema },
+    })
+  })
+
+  it('rejects a strict response schema on a transport that cannot enforce it', async () => {
+    await expect(executeN8nModelRoute({
+      id: 'openclaw-qwen', label: 'OpenClaw', description: '', location: 'local',
+      transport: 'openclaw', model: 'qwen/default', profile: 'qwen-current',
+      agentId: 'second-original', enabled: true, timeoutSeconds: 60,
+      thinking: 'off', capabilities: ['text', 'structured-output'], systemPrompt: '',
+    }, {
+      nodeKey: 'director', input: {}, sessionKey: 'agent:second-original:test',
+      delivery: noDelivery,
+      structuredOutput: {
+        name: 'director_understanding_v1',
+        schema: { type: 'object', additionalProperties: false },
+      },
+    })).rejects.toThrow('OpenClaw 路由不支持严格结构化输出')
+    expect(mocks.runOpenClaw).not.toHaveBeenCalled()
+  })
+
   it('does not let a direct model API perform conversation delivery', async () => {
     await expect(executeN8nModelRoute({
       id: 'cloud-qwen', label: 'Cloud', description: '', location: 'cloud',

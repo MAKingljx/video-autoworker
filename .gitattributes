@@ -1,2 +1,2 @@
 # Preserve valid CRLF records in existing CSV documents.
-docs/*.csv whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*.csv whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

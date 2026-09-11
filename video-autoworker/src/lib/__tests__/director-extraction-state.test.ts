@@ -16,6 +16,7 @@ import {
   buildDirectorExtractionOutputContract,
   directorExtractionContractDigest,
   directorExtractionContractManifest,
+  directorExtractionOutputJsonSchema,
   directorExtractionProjectionReceiptSchema,
   directorExtractionPhases,
   isDirectorExtractionAcceptedStatus,
@@ -510,6 +511,28 @@ describe('director extraction state contract', () => {
       ...DIRECTOR_EXTRACTION_DEFAULT_MODEL_IDENTITY,
       modelVersion: 'qwen-3.6-revision-2',
     })).not.toBe(baseline)
+  })
+
+  it('builds a strict model schema that contains only parser-supported candidate fields', () => {
+    const schema = directorExtractionOutputJsonSchema('understanding') as any
+    expect(schema).toMatchObject({
+      type: 'object', additionalProperties: false,
+      properties: {
+        schemaVersion: { const: 1 },
+        phase: { const: 'understanding' },
+        candidates: { minItems: 1, maxItems: 64 },
+      },
+    })
+    const candidates = schema.properties.candidates.items.anyOf
+    expect(candidates.map((entry: any) => entry.properties.kind.const).sort())
+      .toEqual(['person_profile', 'story_node'])
+    for (const entry of candidates) {
+      expect(entry.additionalProperties).toBe(false)
+      expect(entry.properties).not.toHaveProperty('sourceLineageRule')
+      expect(entry.properties).not.toHaveProperty('semanticFieldRule')
+      expect(entry.properties.fields.additionalProperties).toBe(false)
+    }
+    expect(Object.isFrozen(schema)).toBe(true)
   })
 
   it('builds a frozen non-sensitive perception checkpoint identity', () => {

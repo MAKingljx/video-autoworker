@@ -739,6 +739,40 @@ const candidateFieldSchemas: Record<string, z.ZodType<Record<string, unknown>>> 
   }).strict(),
 }
 
+type DirectorExtractionJsonSchema = Record<string, unknown>
+
+function directorModelCandidateJsonSchema(kind: string): DirectorExtractionJsonSchema {
+  const fields = candidateFieldSchemas[kind]
+  if (!fields) throw new Error('director_extraction_candidate_kind_invalid')
+  const schema = z.toJSONSchema(candidateSchema.extend({
+    kind: z.literal(kind),
+    fields,
+  }).strict(), { io: 'input' }) as DirectorExtractionJsonSchema
+  delete schema.$schema
+  return schema
+}
+
+export function directorExtractionOutputJsonSchema(
+  phase: DirectorExtractionPhase,
+): Readonly<DirectorExtractionJsonSchema> {
+  const phaseSchema = z.object({
+    schemaVersion: z.literal(1),
+    phase: z.literal(phase),
+    candidates: phase === 'perception'
+      ? z.array(z.never()).length(0)
+      : z.array(z.unknown()).min(1).max(64),
+  }).strict()
+  const schema = z.toJSONSchema(phaseSchema, { io: 'output' }) as DirectorExtractionJsonSchema
+  const kinds = DIRECTOR_EXTRACTION_KINDS_BY_PHASE[phase]
+  if (kinds.length) {
+    const properties = schema.properties as Record<string, DirectorExtractionJsonSchema>
+    properties.candidates.items = {
+      anyOf: kinds.map(directorModelCandidateJsonSchema),
+    }
+  }
+  return deepFreeze(schema)
+}
+
 function assertCandidateLineage(candidate: DirectorExtractionCandidate): void {
   const candidateKeyCount = candidate.sourceCandidateKeys.length
   const stableIdCount = candidate.sourceStableIds?.length || 0
