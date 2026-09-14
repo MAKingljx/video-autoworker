@@ -244,6 +244,10 @@ jobs:
             video-autoworker/.artifacts/runtime-*.json
           if-no-files-found: error
           retention-days: 7
+          # Only the two audited package patterns above are eligible. The
+          # directory is hidden so generated release files stay out of Git.
+          include-hidden-files: true
+          compression-level: 0
 
   quality-gate:
     name: quality-gate
