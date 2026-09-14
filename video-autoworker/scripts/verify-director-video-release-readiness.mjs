@@ -43,6 +43,7 @@ import {
 import { gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const runtimeRequire = createRequire(import.meta.url)
 const SHA256 = /^[a-f0-9]{64}$/u
 const GIT_COMMIT = /^[a-f0-9]{40}$/u
 const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
@@ -571,7 +572,7 @@ export function inspectDirectorExtractionIntegrity({
   const expectedProjectionVersion = extractionProjectionVersion(repository)
   let Database
   try {
-    Database = createRequire(join(repository, 'package.json'))('better-sqlite3')
+    Database = runtimeRequire('better-sqlite3')
   } catch {
     fail('live_database_driver_unavailable')
   }
@@ -925,7 +926,7 @@ export function inspectDirectorEvidenceOutboxCompatibility({
   }
   let Database
   try {
-    Database = createRequire(join(repository, 'package.json'))('better-sqlite3')
+    Database = runtimeRequire('better-sqlite3')
   } catch {
     fail('sqlite_runtime_unavailable')
   }

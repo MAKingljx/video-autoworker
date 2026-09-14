@@ -6,7 +6,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import {
   directorEvidenceProjectionContract,
@@ -557,6 +557,8 @@ describe('director video release readiness verifier', () => {
 
   it('reports incompatible contracts, invalid receipts, and rows outside the director scope', () => {
     const currentDigest = directorEvidenceProjectionContractDigest()
+    const evidenceSourceRoot = join(root, 'evidence-source-without-dependencies')
+    mkdirSync(evidenceSourceRoot)
     const databasePath = join(root, 'n8n.sqlite')
     const database = new Database(databasePath)
     try {
@@ -685,7 +687,7 @@ describe('director video release readiness verifier', () => {
     }
 
     expect(inspectDirectorEvidenceOutboxCompatibility({
-      repositoryRoot,
+      repositoryRoot: evidenceSourceRoot,
       liveDbPath: databasePath,
       currentDigest,
       scope: { tenantId: 3, workspaceId: 2 },
