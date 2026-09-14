@@ -16,6 +16,7 @@ import {
   parseBlueGreenStatus,
   releaseCommandEnvironment,
   releaseComponentSummary,
+  releaseSourceRoles,
   recoveryTargetDisposition,
   restoreOwnedIntake,
   resumeCommittedPlan,
@@ -168,6 +169,14 @@ describe('release impact deployment', () => {
     expect(assertControlSourceBinding(value, controlSourceCommit)).toBe(controlSourceCommit)
     expect(() => assertControlSourceBinding(value, '4'.repeat(40)))
       .toThrow('control source changed after plan')
+  })
+
+  it('uses one explicit source-role map for control, application, and worker evidence', () => {
+    expect(releaseSourceRoles('/private/control', '/private/application')).toEqual({
+      control: '/private/control', application: '/private/application', worker: '/private/control',
+    })
+    expect(() => releaseSourceRoles('relative-control', '/private/application'))
+      .toThrow('release source root is invalid')
   })
 
   it('preserves a committed route and its intake hold after failed acceptance by default', async () => {

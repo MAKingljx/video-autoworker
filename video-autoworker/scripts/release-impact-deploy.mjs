@@ -50,6 +50,15 @@ const coordinatorRoot = resolve(dirname(modulePath), '..')
 const requestedProductRoot = process.env.AIWORKER_RELEASE_PRODUCT_ROOT
 if (requestedProductRoot && !isAbsolute(requestedProductRoot)) throw new Error('release product root must be absolute')
 const productRoot = requestedProductRoot ? realpathSync.native(requestedProductRoot) : coordinatorRoot
+
+export function releaseSourceRoles(controlRoot, applicationRoot) {
+  if (![controlRoot, applicationRoot].every(pathname => isAbsolute(pathname)
+    && resolve(pathname) === pathname)) fail('release source root is invalid')
+  return Object.freeze({ control: controlRoot, application: applicationRoot,
+    worker: controlRoot })
+}
+
+const sourceRoles = releaseSourceRoles(coordinatorRoot, productRoot)
 const SHA256 = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const PLAN_SCHEMA = 'video-autoworker-release-impact-plan/v2'
@@ -321,9 +330,9 @@ export function assertControlSourceBinding(plan, currentCommit) {
 
 function assertPlannedControlSource(plan) {
   const expected = plan.controlSourceCommit || plan.sourceCommit
-  const current = resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')
+  const current = resolveCommit(resolveGitSourceLayout(sourceRoles.control).gitRoot, 'HEAD')
   assertControlSourceBinding(plan, current)
-  assertCleanGitSource(coordinatorRoot, expected)
+  assertCleanGitSource(sourceRoles.control, expected)
   return current
 }
 
@@ -946,7 +955,8 @@ async function assertPlannedWorker(plan) {
   const expected = plan.workerBinding
   if (!expected) return
   const current = await inspectWorkerRelease({ manifestPath: expected.manifestPath,
-    stateDir: expected.stateDir, databasePath: plan.runtimeBinding.liveDbPath, productRoot,
+    stateDir: expected.stateDir, databasePath: plan.runtimeBinding.liveDbPath,
+    productRoot: sourceRoles.worker,
     expectedHandoff: expected.handoffOperationId ? {
       operationId: expected.handoffOperationId,
       targetApplicationCommit: expected.targetApplicationCommit,
@@ -963,7 +973,7 @@ async function assertPlannedWorker(plan) {
 async function completePlannedWorkerHandoff(plan) {
   const expected = plan.workerBinding
   if (!expected?.handoffOperationId) return
-  const result = JSON.parse(await managed(process.execPath, [join(productRoot, 'scripts/manage-scheduler-worker.mjs'),
+  const result = JSON.parse(await managed(process.execPath, [join(sourceRoles.control, 'scripts/manage-scheduler-worker.mjs'),
     'complete-handoff', '--state-dir', expected.stateDir, '--operation-id', expected.handoffOperationId,
     '--manifest', expected.manifestPath, '--database', plan.runtimeBinding.liveDbPath,
     '--expected-pid', String(expected.pid), '--expected-content-sha256', expected.contentSha256], 60_000))
@@ -1080,7 +1090,7 @@ function intakeClient(url) {
 }
 
 async function routerStatus() {
-  return parseBlueGreenStatus(await managed('/bin/bash', [join(coordinatorRoot,
+  return parseBlueGreenStatus(await managed('/bin/bash', [join(sourceRoles.control,
     'scripts/deploy-blue-green.sh'), 'status'], 120_000))
 }
 
@@ -1157,7 +1167,7 @@ async function actualInstalledComponents(components, sourceCommit) {
     || join(homedir(), 'Library/LaunchAgents')
   try {
     const installed = resolveInstalledBlueGreenManager({
-      deploymentProjectRoot: coordinatorRoot, runDir, releasesDir, launchAgentsDir,
+      deploymentProjectRoot: sourceRoles.control, runDir, releasesDir, launchAgentsDir,
     })
     await managed(installed.manager.path, ['preflight', 'all'], 120_000, {
       AIWORKER_BG_RUN_DIR: runDir,
@@ -1196,7 +1206,8 @@ async function createPlan(values) {
     ? artifactPlanBinding(artifactRoot, sourceCommit) : null
   const workerManifest = values.get('--worker-manifest') || process.env.AIWORKER_SCHEDULER_MANIFEST
   const workerBinding = workerManifest ? await inspectWorkerRelease({ manifestPath: workerManifest,
-    stateDir: process.env.AIWORKER_SCHEDULER_STATE_DIR, databasePath: runtimeBinding.liveDbPath, productRoot }) : null
+    stateDir: process.env.AIWORKER_SCHEDULER_STATE_DIR,
+    databasePath: runtimeBinding.liveDbPath, productRoot: sourceRoles.worker }) : null
   if (workerBinding && !workerBinding.sourceUnchanged) {
     fail('worker source changed; prepare and validate its separate managed maintenance before creating the Web release plan')
   }
@@ -1208,7 +1219,7 @@ async function createPlan(values) {
     receiptDir: values.get('--receipt-dir') || null, intakeUrl,
     runtimeConfigSha256: runtimeBinding.configSha256, runtimeBinding,
     artifactManifestSha256: artifactBinding?.manifestSha256 || null, workerBinding,
-    controlSourceCommit: resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD'),
+    controlSourceCommit: resolveCommit(resolveGitSourceLayout(sourceRoles.control).gitRoot, 'HEAD'),
     failurePolicy: values.get('--failure-policy') || 'assess-first',
   })
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
@@ -1248,7 +1259,7 @@ async function executePlan(values, operation = null) {
     return receipt
   }
   const completedInstall = component => resumableInstalls.get(component) || null
-  const blueGreenScript = join(coordinatorRoot, 'scripts/deploy-blue-green.sh')
+  const blueGreenScript = join(sourceRoles.control, 'scripts/deploy-blue-green.sh')
   const releases = plan.runtimeBinding?.releasesDir || process.env.AIWORKER_BG_RELEASES_DIR
     || join(productRoot, '.runtime/releases')
   const blueGreen = step => buildBlueGreenCommand({
@@ -1256,14 +1267,14 @@ async function executePlan(values, operation = null) {
   })
   const workerEnvironment = { ...releaseWorkerEnvironment(plan),
     AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation?.failurePolicy || plan.failurePolicy),
-    AIWORKER_BG_APPLICATION_SOURCE_ROOT: productRoot }
+    AIWORKER_BG_APPLICATION_SOURCE_ROOT: sourceRoles.application }
   const deploy = (...args) => managed('/bin/bash', [blueGreenScript, ...args], 900_000, workerEnvironment)
   const runBlueGreen = (step, timeoutMs = 900_000, extraEnvironment = {}, signal) => {
     const command = blueGreen(step)
     return managed(command.command, command.args, timeoutMs, { ...workerEnvironment, ...extraEnvironment }, signal)
   }
   let runtimeProof = operation?.runtimeProofOverride || plan.runtimeConvergenceProof
-  const deployWithProof = (...args) => managed('/bin/bash', [join(coordinatorRoot,
+  const deployWithProof = (...args) => managed('/bin/bash', [join(sourceRoles.control,
     'scripts/deploy-blue-green.sh'), ...args], 900_000,
   { ...workerEnvironment, AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
   let workerHold = operation?.previousWorkerHold || null
@@ -1392,7 +1403,7 @@ async function executePlan(values, operation = null) {
         fail('existing release directory is unsafe')
       }
       const standalone = join(target, 'standalone')
-      await managed(process.execPath, [join(coordinatorRoot, 'scripts/check-standalone-artifact.mjs'), standalone], 180_000)
+      await managed(process.execPath, [join(sourceRoles.control, 'scripts/check-standalone-artifact.mjs'), standalone], 180_000)
       if (sha256(readFileSync(join(standalone, 'release-manifest.json')))
         !== sha256(readFileSync(join(plan.artifactRoot, 'release-manifest.json')))
         || JSON.parse(readFileSync(join(standalone, 'release-provenance.json'))).gitCommit !== plan.sourceCommit) {
@@ -1410,7 +1421,7 @@ async function executePlan(values, operation = null) {
       { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof }),
     bind: () => runBlueGreen('bind'),
     start: slot => {
-      const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: coordinatorRoot,
+      const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: sourceRoles.control,
         runDir: plan.runtimeBinding?.runDir || process.env.AIWORKER_BG_RUN_DIR
           || join(productRoot, '.run/blue-green'),
         releasesDir: plan.runtimeBinding?.releasesDir || process.env.AIWORKER_BG_RELEASES_DIR
@@ -1485,7 +1496,7 @@ async function executePlan(values, operation = null) {
             return { ok: false, reason: 'compensated_target_retirement_unverified' }
           }
         }
-        const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: coordinatorRoot,
+        const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: sourceRoles.control,
           runDir: plan.runtimeBinding.runDir, releasesDir: plan.runtimeBinding.releasesDir,
           launchAgentsDir: process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR
             || join(homedir(), 'Library/LaunchAgents') })
@@ -1647,7 +1658,7 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
     attest: async () => {
       const releases = contract.plan.runtimeBinding?.releasesDir
         || process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
-      const command = buildBlueGreenCommand({ script: join(coordinatorRoot, 'scripts/deploy-blue-green.sh'),
+      const command = buildBlueGreenCommand({ script: join(sourceRoles.control, 'scripts/deploy-blue-green.sh'),
         step: 'attest', plan: contract.plan, releasesDir: releases })
       await managed(command.command, command.args, 180_000, { ...releaseWorkerEnvironment(contract.plan),
         AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation.failurePolicy || contract.plan.failurePolicy),
@@ -1748,7 +1759,7 @@ async function applyPlan(values, { resume = false } = {}) {
     AIWORKER_BG_ROUTER_PORT: String(contract.plan.runtimeBinding.ports.router),
     AIWORKER_BG_BLUE_PORT: String(contract.plan.runtimeBinding.ports.blue),
     AIWORKER_BG_GREEN_PORT: String(contract.plan.runtimeBinding.ports.green),
-    AIWORKER_BG_APPLICATION_SOURCE_ROOT: productRoot,
+    AIWORKER_BG_APPLICATION_SOURCE_ROOT: sourceRoles.application,
   } : {}
   const operation = {
     owner, scope: contract.scope, signal: cancellation.signal, record,
