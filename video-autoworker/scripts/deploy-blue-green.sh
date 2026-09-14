@@ -546,7 +546,7 @@ verify_director_video_release_chain() {
   local release_root="$2"
   local repository_release_mode="${3:-head}"
   local transition_from_projection_contract="${4:-}"
-  local report scope tenant workspace
+  local report scope tenant workspace expected_projection_version
   [[ "$repository_release_mode" == head || "$repository_release_mode" == ancestor ]] \
     || { printf 'error: invalid director/video repository release mode\n' >&2; return 1; }
   if [[ -n "$transition_from_projection_contract" ]]; then
@@ -556,6 +556,10 @@ verify_director_video_release_chain() {
   fi
   [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
     || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
+  expected_projection_version="$("$NODE_BIN" \
+    "$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs" \
+    projection-version "$APPLICATION_SOURCE_ROOT")" \
+    || { printf 'error: director projection version source is unavailable\n' >&2; return 1; }
   scope="$(openclaw_scope_values)" || return 1
   tenant="${scope%%$'\t'*}"
   workspace="${scope#*$'\t'}"
@@ -572,19 +576,11 @@ verify_director_video_release_chain() {
     --verification-phase full)" \
     || { printf 'error: 3017, video-command, task-flow, director-brain, or projection outbox is incompatible\n' >&2; return 1; }
   "$NODE_BIN" - "$report" "$release_id" "$transition_from_projection_contract" \
-    "$PROJECT_ROOT" "$APPLICATION_SOURCE_ROOT" <<'NODE' \
+    "$expected_projection_version" <<'NODE' \
     || { printf 'error: director/video release-readiness verifier returned an invalid report\n' >&2; return 1; }
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
-const [raw, releaseId, transitionFromProjectionContract, controlRoot, applicationRoot] = process.argv.slice(2)
+const [raw, releaseId, transitionFromProjectionContract, expectedProjectionVersion] = process.argv.slice(2)
 let value
-let expectedProjectionVersion
-try {
-  const { extractionProjectionVersion } = await import(pathToFileURL(join(controlRoot,
-    'scripts/verify-director-video-release-readiness.mjs')).href)
-  expectedProjectionVersion = extractionProjectionVersion(applicationRoot)
-  value = JSON.parse(raw)
-} catch { process.exit(2) }
+try { value = JSON.parse(raw) } catch { process.exit(2) }
 const digest = value?.payloads?.projectionContract?.currentDigest
 const commitPrefix = releaseId.replace(/-runtime$/u, '')
 const transition = value?.projectionTransition

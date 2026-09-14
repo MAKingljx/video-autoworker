@@ -1478,11 +1478,15 @@ export function parseDirectorVideoReleaseReadinessArguments(argv, source = proce
 const invokedPath = process.argv[1] ? realpathSync.native(process.argv[1]) : null
 if (invokedPath === fileURLToPath(import.meta.url)) {
   try {
-    const options = parseDirectorVideoReleaseReadinessArguments(process.argv.slice(2))
-    const result = options.verificationPhase === 'pre-bootstrap'
-      ? await verifyDirectorVideoReleasePreflight(options)
-      : await verifyDirectorVideoReleaseReadiness(options)
-    process.stdout.write(`${JSON.stringify(result)}\n`)
+    if (process.argv[2] === 'projection-version' && process.argv.length === 4) {
+      process.stdout.write(`${extractionProjectionVersion(process.argv[3])}\n`)
+    } else {
+      const options = parseDirectorVideoReleaseReadinessArguments(process.argv.slice(2))
+      const result = options.verificationPhase === 'pre-bootstrap'
+        ? await verifyDirectorVideoReleasePreflight(options)
+        : await verifyDirectorVideoReleaseReadiness(options)
+      process.stdout.write(`${JSON.stringify(result)}\n`)
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : 'director_video_release_not_ready:unknown'
     process.stderr.write(`${JSON.stringify({ ok: false, error: message })}\n`)
