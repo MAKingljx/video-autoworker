@@ -772,7 +772,7 @@ describe('director video release readiness verifier', () => {
       scope: { tenantId: 3, workspaceId: 2 },
     })
     expect(report).toMatchObject({
-      expectedProjectionVersion: 'feishu-candidate-projection-v2',
+      expectedProjectionVersion: 'feishu-candidate-projection-v3',
       sources: 1,
       phases: 1,
       invalidCheckpoints: 1,

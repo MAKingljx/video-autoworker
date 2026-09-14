@@ -1,0 +1,15 @@
+{
+  "schema": "video-autoworker-database-backup/v1",
+  "sources": [
+    {
+      "name": "mission-control",
+      "database": "/absolute/private/path/mission-control.db",
+      "directory": "/absolute/private/backup-root/mission-control"
+    },
+    {
+      "name": "n8n",
+      "database": "/absolute/private/path/n8n/database.sqlite",
+      "directory": "/absolute/private/backup-root/n8n"
+    }
+  ]
+}

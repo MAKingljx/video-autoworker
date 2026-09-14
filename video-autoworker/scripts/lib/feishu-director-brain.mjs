@@ -5515,6 +5515,7 @@ async function executeOneDirectorBrainProposal({
   references: rawReferences,
   options,
   allowLongFields = false,
+  inspectOnly = false,
 }) {
   const proposalFields = normalizeProposalBusinessFields(
     table,
@@ -5542,6 +5543,20 @@ async function executeOneDirectorBrainProposal({
       : {}),
   }
   const { tableId } = tableContext(context.schema, context.catalog, table.key)
+  if (inspectOnly) {
+    const existing = await dependencies.findExact({ context, table, tableId, stableId })
+    if (!Array.isArray(existing)) throw new Error('operation_dependency_result_invalid')
+    if (existing.length > 1) throw new Error('duplicate_stable_record_id:' + table.key)
+    if (existing.length === 1) {
+      if (!businessFieldsMatch(table, existing[0], storedBusinessFields)) {
+        throw new Error('stable_record_id_hash_collision:' + table.key)
+      }
+      const record = operationRecord(table, existing[0])
+      assertOperationRecordScope(context, table, record, table.key === 'works' ? stableId : workId)
+      return { ok: true, action: 'inspect_proposal', table: table.key, stableId, found: true, record }
+    }
+    return { ok: true, action: 'inspect_proposal', table: table.key, stableId, found: false }
+  }
   return dependencies.withStableCreateLock({ context, table, tableId, stableId }, async () => {
     const existing = await dependencies.findExact({ context, table, tableId, stableId })
     if (!Array.isArray(existing)) throw new Error('operation_dependency_result_invalid')
@@ -5608,7 +5623,11 @@ async function executeOneDirectorBrainProposal({
 }
 
 function validateProposalBatchRequest(request, options = {}) {
-  assertOperationKeys(request, new Set(['action', 'table', 'workId', 'items']))
+  assertOperationKeys(request, new Set(['action', 'table', 'workId', 'items',
+    ...(options.allowInspection ? ['inspectOnly'] : [])]))
+  if (request.inspectOnly !== undefined && typeof request.inspectOnly !== 'boolean') {
+    throw new Error('operation_inspection_flag_invalid')
+  }
   if (request.action !== 'propose_batch') throw new Error('operation_action_invalid')
   assertSafeOperationContent(request, 'request', {
     maximumTextLength: options.allowLongFields
@@ -5635,7 +5654,7 @@ function validateProposalBatchRequest(request, options = {}) {
 
 async function executeProposalBatch(request, options, allowLongFields) {
   const dependencies = operationDependencies(options)
-  const items = validateProposalBatchRequest(request, { allowLongFields })
+  const items = validateProposalBatchRequest(request, { allowLongFields, allowInspection: true })
   const context = await dependencies.connect(options)
   const table = operationTable(context.schema, request.table)
   const workId = table.key === 'works'
@@ -5666,7 +5685,12 @@ async function executeProposalBatch(request, options, allowLongFields) {
       references: item.references,
       options,
       allowLongFields,
+      inspectOnly: request.inspectOnly === true,
     }))
+  }
+  if (request.inspectOnly === true) {
+    return { ok: true, action: 'inspect_proposal_batch', table: table.key, workId,
+      count: results.length, found: results.filter(result => result.found).length, results }
   }
   return {
     ok: true,

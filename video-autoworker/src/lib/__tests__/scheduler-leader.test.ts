@@ -178,7 +178,8 @@ describe('built-in scheduler leader lease', () => {
       AIWORKER_RUNTIME_ROLE: 'probe',
     })).toBe(true)
     expect(isMultiInstanceSchedulerRuntime({ AIWORKER_SLOT: 'blue' })).toBe(true)
-    expect(shouldStartBuiltinScheduler({})).toBe(true)
+    expect(shouldStartBuiltinScheduler({})).toBe(false)
+    expect(shouldStartBuiltinScheduler({ AIWORKER_SCHEDULER_MODE: 'worker' })).toBe(true)
     expect(shouldStartBuiltinScheduler({ MISSION_CONTROL_TEST_MODE: '1' })).toBe(false)
     expect(shouldStartBuiltinScheduler({
       MISSION_CONTROL_TEST_MODE: '1',
@@ -192,12 +193,26 @@ describe('built-in scheduler leader lease', () => {
     })).toBe(false)
     expect(shouldStartBuiltinScheduler({
       AIWORKER_DISABLE_SCHEDULER: 'true',
+      AIWORKER_SCHEDULER_MODE: 'worker',
     })).toBe(true)
     expect(shouldStartBuiltinScheduler({
       NEXT_PHASE: 'phase-production-build',
       AIWORKER_SLOT: 'green',
       AIWORKER_RUNTIME_ROLE: 'probe',
     })).toBe(false)
+  })
+
+  it('independent workers use the durable lease without following a web slot', () => {
+    const env = { AIWORKER_SCHEDULER_MODE: 'worker', AIWORKER_WORKER_CONTENT_SHA256: 'a'.repeat(64) }
+    expect(isMultiInstanceSchedulerRuntime(env)).toBe(true)
+    expect(getSchedulerRuntimeEligibility(env)).toMatchObject({
+      eligible: true, mode: 'worker', reason: 'worker_ready', generation: null,
+    })
+    expect(getSchedulerRuntimeEligibility({ ...env, AIWORKER_SLOT: 'blue' }))
+      .toMatchObject({ eligible: false, reason: 'worker_identity_invalid' })
+    expect(getSchedulerRuntimeEligibility({ AIWORKER_SCHEDULER_MODE: 'worker' }))
+      .toMatchObject({ eligible: false, reason: 'worker_identity_invalid' })
+    expect(shouldStartBuiltinScheduler({ ...env, AIWORKER_DISABLE_SCHEDULER: '1' })).toBe(false)
   })
 
   it('allows only the router-active slot to compete and fails closed on unsafe state', () => {

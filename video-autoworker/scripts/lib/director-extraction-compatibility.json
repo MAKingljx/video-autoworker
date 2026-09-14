@@ -1,0 +1,15 @@
+{
+  "schema": "director-extraction-compatibility/v1",
+  "legacyContracts": [
+    {
+      "extractionContractDigest": "6cc61feff9280f4ce47028817d3f8a9b3cb15550253daa90ed80fef4a54a0b53",
+      "contract": "director-extraction-v3",
+      "promptVersion": "director-extraction-prompts-v3",
+      "projectionVersion": "feishu-candidate-projection-v2",
+      "candidateOutputSchemaVersion": 1,
+      "normalizedOutputSchemaVersion": 2,
+      "supportsCheckpointRead": true,
+      "supportsUnprojectedNormalization": true
+    }
+  ]
+}

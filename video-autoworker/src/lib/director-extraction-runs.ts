@@ -8,13 +8,18 @@ import {
 } from '@/lib/director-evidence-delivery-core'
 import {
   DIRECTOR_EXTRACTION_REVIEW_STATUS_BY_PHASE,
+  DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION,
+  assertDirectorExtractionReadableContractDigest,
   buildDirectorPerceptionCheckpointInput,
+  buildDirectorPerceptionCheckpointInputForRead,
   directorExtractionContractDigest,
   directorExtractionDigest,
   directorExtractionIdentitySchema,
   directorExtractionProjectionReceiptSchema,
   directorExtractionPhases,
   parseDirectorExtractionOutput,
+  parseDirectorExtractionCheckpointOutput,
+  normalizeDirectorExtractionCheckpointForProjection,
   reviewedDirectorReferencesSchema,
   type DirectorExtractionCandidateOutput,
   type DirectorExtractionCurrentPhase,
@@ -154,6 +159,7 @@ function phaseInput(
   phase: DirectorExtractionPhase,
   objective: string,
   reviewedReferences: ReviewedDirectorReferences,
+  extractionContractDigest = directorExtractionContractDigest(),
 ): Record<string, unknown> {
   return {
     schemaVersion: 2,
@@ -162,7 +168,7 @@ function phaseInput(
     directorPhase: phase,
     parentTaskId: source.taskId,
     objective,
-    extractionContractDigest: directorExtractionContractDigest(),
+    extractionContractDigest,
     dependencyDigest: directorExtractionDigest({
       sourceTaskId: source.taskId,
       sourceResultSha256: directorEvidenceDigest(source.output),
@@ -192,14 +198,17 @@ function phaseRun(
     || run.input.childKind !== CHILD_KIND
     || run.input.directorPhase !== phase
     || run.input.parentTaskId !== source.taskId
-    || typeof run.input.objective !== 'string'
-    || run.input.extractionContractDigest !== directorExtractionContractDigest()) {
+    || typeof run.input.objective !== 'string') {
     throw new Error('director_extraction_phase_task_invalid')
   }
+  assertDirectorExtractionReadableContractDigest(run.input.extractionContractDigest)
   return run
 }
 
-function identityFromSource(source: N8nTaskRun): DirectorExtractionIdentity {
+function identityFromSource(
+  source: N8nTaskRun,
+  extractionContractDigest = directorExtractionContractDigest(),
+): DirectorExtractionIdentity {
   const binding = directorEvidenceBindingFromInput(source.input)
   if (!binding) throw new Error('director_extraction_work_not_registered')
   return directorExtractionIdentitySchema.parse({
@@ -211,7 +220,7 @@ function identityFromSource(source: N8nTaskRun): DirectorExtractionIdentity {
     workQueryDigest: binding.queryDigest,
     materialId: source.output?.materialId,
     sourceResultSha256: directorEvidenceDigest(source.output),
-    extractionContractDigest: directorExtractionContractDigest(),
+    extractionContractDigest,
   })
 }
 
@@ -245,7 +254,7 @@ function lockedIdentityFromPerceptionCheckpoint(
   })
   if (identity.sourceTaskId !== source.taskId
     || row.input_sha256 !== directorExtractionDigest(
-      buildDirectorPerceptionCheckpointInput(identity),
+      buildDirectorPerceptionCheckpointInputForRead(identity),
     )) {
     throw new Error('director_extraction_checkpoint_invalid')
   }
@@ -335,7 +344,7 @@ function deriveJob(db: Database.Database, source: N8nTaskRun): DirectorExtractio
   const lockedIdentity = lockedIdentityFromPerceptionCheckpoint(db, source, perception)
   let currentIdentity: DirectorExtractionIdentity | null = null
   try {
-    currentIdentity = identityFromSource(source)
+    currentIdentity = identityFromSource(source, String(perception.input.extractionContractDigest))
   } catch {
     // A registered chain keeps using its immutable perception identity. A
     // later malformed parent is a conflict, never a replacement identity.
@@ -356,6 +365,9 @@ function deriveJob(db: Database.Database, source: N8nTaskRun): DirectorExtractio
   for (const phase of directorExtractionPhases) {
     currentPhase = phase
     const run = phaseRun(db, source, phase)
+    if (run && run.input.extractionContractDigest !== identity.extractionContractDigest) {
+      throw new Error('director_extraction_phase_task_invalid')
+    }
     currentRun = run
     if (!run) { status = 'pending'; break }
     if (run.status === 'queued') {
@@ -424,7 +436,13 @@ function ensurePhase(
   maxAttempts: number,
   nowSeconds?: number,
 ): N8nTaskRun {
-  const input = phaseInput(source, phase, objective, reviewedReferences)
+  // A future phase keeps the immutable chain identity. Its model checkpoint
+  // separately records the current generation contract, so old reviewed
+  // stages can continue without rewriting or recomputing their checkpoints.
+  const perception = phaseRun(db, source, 'perception')
+  const chainDigest = perception?.input.extractionContractDigest
+  if (chainDigest !== undefined) assertDirectorExtractionReadableContractDigest(chainDigest)
+  const input = phaseInput(source, phase, objective, reviewedReferences, chainDigest)
   const scope = { tenantId: source.tenantId, workspaceId: source.workspaceId }
   const result = ensureN8nChildRunFromParent(db, {
     parentTaskId: source.taskId,
@@ -457,7 +475,7 @@ function createPerceptionCheckpoint(
   const taskId = directorExtractionPhaseTaskIdentity('task', source.taskId, 'perception')
   const input = buildDirectorPerceptionCheckpointInput(identity)
   const output = parseDirectorExtractionOutput('perception', {
-    schemaVersion: 1, phase: 'perception', candidates: [],
+    schemaVersion: DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION, phase: 'perception', candidates: [],
   })
   const existing = db.prepare(`
     SELECT input_sha256, output_sha256 FROM director_extraction_checkpoints WHERE phase_task_id = ?
@@ -639,7 +657,7 @@ export function getDirectorExtractionCheckpoint(
     || row.output_sha256 !== directorExtractionDigest(candidateValue)) {
     throw new Error('director_extraction_checkpoint_invalid')
   }
-  const candidateOutput = parseDirectorExtractionOutput(phase, candidateValue)
+  const candidateOutput = parseDirectorExtractionCheckpointOutput(phase, candidateValue)
   const projection = db.prepare(`
     SELECT * FROM director_extraction_projection_receipts WHERE phase_task_id = ?
   `).get(phaseTaskId) as ProjectionRow | undefined
@@ -992,6 +1010,10 @@ export function completeDirectorExtractionProjection(
     }
     const checkpoint = getDirectorExtractionCheckpoint(db, job.sourceTaskId, phase)
     if (!checkpoint) throw new Error('director_extraction_checkpoint_missing')
+    const normalization = checkpoint.candidateOutput.schemaVersion === 1
+      ? normalizeDirectorExtractionCheckpointForProjection(
+          phase, checkpoint.candidateOutput, checkpoint.phaseInput,
+        ).receipt : null
     db.prepare(`
       INSERT INTO director_extraction_projection_receipts (
         phase_task_id, receipt_json, receipt_sha256, created_at
@@ -1003,6 +1025,7 @@ export function completeDirectorExtractionProjection(
         childKind: CHILD_KIND,
         directorPhase: phase,
         checkpointSha256: checkpoint.outputSha256,
+        ...(normalization ? { candidateNormalization: normalization } : {}),
         projectionReceiptSha256: directorExtractionDigest(receipt),
       },
       { tenantId: job.tenantId, workspaceId: job.workspaceId },

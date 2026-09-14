@@ -1412,7 +1412,11 @@ check_json_endpoint() {
     token="$(read_control_token)"
   fi
   AIWORKER_BG_REQUEST_TOKEN="$token" AIWORKER_BG_REQUEST_TIMEOUT_MS="$HTTP_TIMEOUT_MS" \
+    AIWORKER_BG_EXPECTED_DB="$LIVE_DB_PATH" AIWORKER_BG_EXPECTED_ROUTER="$STATE_FILE" \
     "$NODE_BIN" - "$mode" "$url" "$@" <<'NODE'
+import { lstatSync, realpathSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { dirname, join } from 'node:path'
 const [mode, url, ...expected] = process.argv.slice(2)
 const timeoutMs = Number(process.env.AIWORKER_BG_REQUEST_TIMEOUT_MS)
 const token = process.env.AIWORKER_BG_REQUEST_TOKEN || ''
@@ -1436,6 +1440,52 @@ let payload
 try { payload = await response.json() } catch { fail('response is not JSON') }
 
 const nonNegativeInteger = value => Number.isSafeInteger(value) && value >= 0
+const validExternalWorker = (worker, allowPending = false) => {
+  const now = Date.now()
+  if (worker?.schema !== 'video-autoworker-scheduler-worker/v1'
+    || worker.executionMode !== 'external-worker'
+    || !Number.isSafeInteger(worker.observedAt) || Math.abs(now - worker.observedAt) > 15_000
+    || !Number.isSafeInteger(worker.worker?.pid) || worker.worker.pid < 1
+    || !/^[a-f0-9]{64}$/u.test(worker.worker?.contentSha256 || '')) return false
+  try {
+    const expectedContent = process.env.AIWORKER_BG_EXPECTED_WORKER_SHA
+    const expectedPid = Number(process.env.AIWORKER_BG_EXPECTED_WORKER_PID)
+    const expectedManifest = process.env.AIWORKER_BG_EXPECTED_WORKER_MANIFEST
+    const expectedManifestSha = process.env.AIWORKER_BG_EXPECTED_WORKER_MANIFEST_SHA
+    if (!/^[a-f0-9]{64}$/u.test(expectedContent || '') || worker.worker.contentSha256 !== expectedContent
+      || worker.worker.pid !== expectedPid || !expectedManifest || !/^[a-f0-9]{64}$/u.test(expectedManifestSha || '')) return false
+    const manifestInfo = lstatSync(expectedManifest)
+    if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink()
+      || manifestInfo.uid !== process.getuid() || (manifestInfo.mode & 0o022)
+      || createHash('sha256').update(readFileSync(expectedManifest)).digest('hex') !== expectedManifestSha) return false
+    const pathname = process.env.AIWORKER_BG_EXPECTED_DB
+    const entry = lstatSync(pathname)
+    const physical = realpathSync(pathname)
+    const databaseMatches = entry.isFile() && !entry.isSymbolicLink()
+      && String(entry.dev) === worker.worker.database?.dev
+      && String(entry.ino) === worker.worker.database?.ino
+      && createHash('sha256').update(physical).digest('hex') === worker.worker.database?.pathSha256
+    if (!databaseMatches) return false
+    if (worker.healthy === true && worker.leaseVerified === true && worker.currentState === 'ready'
+      && worker.leadership?.state === 'leader' && worker.leadership?.reason === 'worker_ready'
+      && worker.leadership?.leaseExpired === false
+      && worker.leadership?.leaseExpiresAt > Math.floor(now / 1000)) return true
+    if (!allowPending || worker.handoff?.migrationPending !== true
+      || worker.currentState !== 'waiting' || worker.leadership?.state !== 'follower'
+      || worker.handoff.operationId !== process.env.AIWORKER_BG_WORKER_HANDOFF_OPERATION
+      || worker.handoff.targetApplicationCommit !== process.env.AIWORKER_BG_WORKER_TARGET_COMMIT) return false
+    const previous = worker.handoff.previous
+    const statePath = process.env.AIWORKER_BG_EXPECTED_ROUTER
+    const router = JSON.parse(readFileSync(statePath, 'utf8'))
+    if (!previous || previous.slot !== router.active || previous.routerGeneration !== router.generation
+      || previous.releaseId !== router.slots?.[router.active]?.releaseId) return false
+    const runtime = JSON.parse(readFileSync(join(dirname(statePath), 'slots', `${router.active}.runtime.json`), 'utf8'))
+    if (runtime.pid !== previous.pid || runtime.releaseId !== previous.releaseId
+      || realpathSync(runtime.dbPath) !== physical) return false
+    process.kill(previous.pid, 0)
+    return true
+  } catch { return false }
+}
 const validRuntime = (runtime, slot, releaseId, rawPort) => runtime
   && runtime.callbackProtocol === 'slot-v1'
   && runtime.runtimeSlot === slot
@@ -1514,11 +1564,13 @@ if (mode === 'router') {
     'mediaNodes', 'modelNodes', 'childExecutionLeases', 'untrackedCallbacks', 'otherReleaseActive']
     .every(key => nonNegativeInteger(counts[key]))) fail('drain counts are invalid')
   const leadership = readiness.scheduler
+  const independent = leadership?.state === 'inactive'
+    && leadership?.reason === 'web_scheduler_disabled' && leadership?.routerGeneration === null
+  if (independent && !validExternalWorker(readiness.worker, true)) fail('independent worker is not healthy or has no valid migration source')
   if (!leadership || !['leader', 'follower', 'inactive'].includes(leadership.state)
     || !nonNegativeInteger(leadership.activeJobs) || !nonNegativeInteger(leadership.observedAt)
-    || !Number.isSafeInteger(leadership.routerGeneration) || leadership.routerGeneration < 1
-    || (specified(expectedGeneration)
-      && leadership.routerGeneration !== Number(expectedGeneration))
+    || (!independent && (!Number.isSafeInteger(leadership.routerGeneration) || leadership.routerGeneration < 1
+      || (specified(expectedGeneration) && leadership.routerGeneration !== Number(expectedGeneration))))
     || typeof leadership.reason !== 'string' || leadership.reason.length < 1
     || leadership.reason.length > 120 || typeof leadership.leaseExpired !== 'boolean') {
     fail('scheduler readiness is invalid')
@@ -1573,6 +1625,19 @@ if (mode === 'router') {
     || typeof payload?.version !== 'string' || !payload.version) fail('application health is not acceptable')
 } else if (mode === 'scheduler') {
   const [rawGeneration] = expected
+  // The independent worker may continue executing while an old Web process
+  // retires. Its live lease/database proof replaces only Web leadership checks.
+  if (payload?.executionMode === 'external-worker') {
+    if (!validExternalWorker(payload) || payload.webLeadership?.state !== 'inactive'
+      || payload.webLeadership?.reason !== 'web_scheduler_disabled'
+      || payload.webLeadership?.activeJobs !== 0 || payload.webLeadership?.leaseExpiresAt !== null) {
+      fail('independent worker or inactive Web scheduler verification failed')
+    }
+    process.stdout.write(JSON.stringify({ schedulerState: 'inactive',
+      schedulerObservedAt: Math.floor(payload.observedAt / 1000),
+      schedulerRouterGeneration: Number(rawGeneration) }))
+    process.exit(0)
+  }
   const leadership = payload?.leadership
   if (!leadership || leadership.state !== 'inactive' || leadership.activeJobs !== 0
     || leadership.leaseExpiresAt !== null || leadership.routerGeneration !== Number(rawGeneration)
@@ -1584,6 +1649,14 @@ if (mode === 'router') {
   }))
 } else if (mode === 'leader') {
   const [rawGeneration] = expected
+  if (payload?.executionMode === 'external-worker') {
+    if (!validExternalWorker(payload)) fail('independent worker verification failed')
+    process.stdout.write(JSON.stringify({ schedulerState: 'leader',
+      schedulerObservedAt: Math.floor(payload.observedAt / 1000),
+      schedulerRouterGeneration: Number(rawGeneration),
+      leaseExpiresAt: payload.leadership.leaseExpiresAt }))
+    process.exit(0)
+  }
   const leadership = payload?.leadership
   const now = Math.floor(Date.now() / 1000)
   if (!leadership || leadership.state !== 'leader' || leadership.reason !== 'slot_active'
@@ -3804,7 +3877,7 @@ prewarm_slot() {
   port="$(printf '%s\n' "$values" | sed -n '5p')"
   [[ "$host" == 127.0.0.1 && "$port" == "$(slot_port "$slot")" ]] \
     || fail "$slot prewarm endpoint changed"
-  health="$(curl -fsS --max-time 8 "http://$host:$port/api/status?action=health")" \
+  health="$(curl -fsS --max-time 8 "http://$host:$port/api/status?action=readiness")" \
     || fail "$slot read-only health prewarm failed"
   "$NODE_BIN" -e '
     const value = JSON.parse(process.argv[1])
@@ -4128,6 +4201,22 @@ preflight_transition() {
     || fail "global intake is not paused or the source runtime lacks the release-readiness protocol"
 }
 
+rollback_owned_worker_handoff() {
+  if [[ -n "${AIWORKER_BG_WORKER_HANDOFF_OPERATION:-}" ]]; then
+    local worker_rollback_result
+    worker_rollback_result="$("$NODE_BIN" "$PROJECT_ROOT/scripts/manage-scheduler-worker.mjs" \
+      rollback-handoff --state-dir "$AIWORKER_BG_WORKER_STATE_DIR" \
+      --operation-id "$AIWORKER_BG_WORKER_HANDOFF_OPERATION" \
+      --manifest "$AIWORKER_BG_EXPECTED_WORKER_MANIFEST" --database "$LIVE_DB_PATH" \
+      --expected-pid "$AIWORKER_BG_EXPECTED_WORKER_PID" \
+      --expected-content-sha256 "$AIWORKER_BG_EXPECTED_WORKER_SHA")" \
+      || fail "owned worker handoff rollback failed; current router and intake remain protected"
+    "$NODE_BIN" -e 'const v=JSON.parse(process.argv[1]);if(v.workerStopped!==true)process.exit(1)' \
+      "$worker_rollback_result" \
+      || fail "owned worker is still draining; continue the same recovery after its work finishes"
+  fi
+}
+
 transition_with_verification() {
   local target="$1"
   local mode="$2"
@@ -4137,6 +4226,8 @@ transition_with_verification() {
   local transition_from_projection_contract=""
   local source_evidence target_evidence target_verified_contract post_target_verified_contract
   local target_release_root
+  local failure_policy="${AIWORKER_RELEASE_FAILURE_POLICY:-assess-first}"
+  case "$failure_policy" in assess-first|restore-previous) ;; *) fail "release failure policy is invalid" ;; esac
   source="$(read_state_field active)"
   generation="$(read_state_field generation)"
   if [[ "$mode" == rollback ]]; then
@@ -4184,6 +4275,8 @@ transition_with_verification() {
     "$target_readiness" "$source" "$source_release" "$generation")" \
     || fail "unable to capture immutable target transition evidence"
   readonly source_evidence target_evidence
+  # A direct rollback is an explicit choice. Hand back only this operation's pending worker after compatibility preflight.
+  if [[ "$mode" == rollback ]]; then rollback_owned_worker_handoff; fi
   update_state "$target" "$mode"
   switched_generation="$(read_state_field generation)"
   if ( verify_captured_transition_release_evidence "$target_evidence" "$target" \
@@ -4201,18 +4294,27 @@ transition_with_verification() {
         "$target" "$switched_generation"
       return
     fi
-    printf 'error: projection compatibility changed during switch; attempting automatic rollback to %s\n' \
-      "$source" >&2
+    printf 'error: projection compatibility changed during switch\n' >&2
   fi
 
-  printf 'error: post-%s verification failed; attempting automatic rollback to %s\n' "$mode" "$source" >&2
+  if [[ "$failure_policy" != restore-previous || "$mode" == rollback ]]; then
+    local observed_route=unknown
+    if [[ "$(read_state_field active)" == "$target" \
+      && "$(read_state_slot_release "$target")" == "$target_release" \
+      && "$(read_state_field generation)" == "$switched_generation" ]]; then observed_route=committed; fi
+    "$NODE_BIN" "$PROJECT_ROOT/scripts/lib/release-failure-policy.mjs" \
+      assess-first "$observed_route" post_transition_acceptance_failed >&2
+    fail "post-$mode verification failed; preserve the observed route and intake hold for assessment and same-operation resume"
+  fi
+  printf 'error: post-%s verification failed; explicit restore-previous policy selected for %s\n' "$mode" "$source" >&2
   probe_slot "$source" active
+  rollback_owned_worker_handoff
   update_state "$source" rollback
   rollback_generation="$(read_state_field generation)"
   ( verify_captured_transition_release_evidence "$source_evidence" "$source" \
     "$source_release" "$rollback_generation" 2 ) \
-    || fail "automatic rollback selected $source but its captured release or routed projection evidence also failed"
-  fail "post-$mode verification failed; router automatically returned to $source generation $rollback_generation"
+    || fail "explicit rollback selected $source but its captured release or routed projection evidence also failed"
+  fail "post-$mode verification failed; router explicitly returned to $source generation $rollback_generation"
 }
 
 switch_slot() {

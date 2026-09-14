@@ -169,7 +169,7 @@ describe('director maintainability contracts', () => {
     let segments = ensureDirectorExtractionSegments(db, 'phase-1', 'perception', inputs, 100)
     expect(segments.map(segment => segment.status)).toEqual(['pending', 'pending'])
     segments = completeDirectorExtractionSegment(db, 'phase-1', 'perception', 0, {
-      schemaVersion: 1, phase: 'perception', candidates: [],
+      schemaVersion: 2, phase: 'perception', candidates: [],
     }, 101)
     expect(() => mergeDirectorExtractionSegments('perception', segments))
       .toThrow('director_extraction_segments_incomplete')
@@ -179,10 +179,10 @@ describe('director maintainability contracts', () => {
       db, 'phase-1', 'perception', [{ evidence: { window: [0, 99] } }], 102,
     )).toThrow('director_extraction_segment_plan_conflict')
     segments = completeDirectorExtractionSegment(db, 'phase-1', 'perception', 1, {
-      schemaVersion: 1, phase: 'perception', candidates: [],
+      schemaVersion: 2, phase: 'perception', candidates: [],
     }, 103)
     expect(mergeDirectorExtractionSegments('perception', segments))
-      .toEqual({ schemaVersion: 1, phase: 'perception', candidates: [] })
+      .toEqual({ schemaVersion: 2, phase: 'perception', candidates: [] })
 
     const shared = {
       candidateKey: 'same-key', kind: 'story_node', title: '节点', summary: '内容',
@@ -194,10 +194,10 @@ describe('director maintainability contracts', () => {
     }
     expect(() => mergeDirectorExtractionSegments('understanding', [
       { index: 0, count: 2, status: 'completed', output: {
-        schemaVersion: 1, phase: 'understanding', candidates: [shared],
+        schemaVersion: 2, phase: 'understanding', candidates: [shared],
       } },
       { index: 1, count: 2, status: 'completed', output: {
-        schemaVersion: 1, phase: 'understanding', candidates: [{ ...shared, summary: '不同内容' }],
+        schemaVersion: 2, phase: 'understanding', candidates: [{ ...shared, summary: '不同内容' }],
       } },
     ] as never)).toThrow('director_extraction_segment_candidate_conflict')
   })

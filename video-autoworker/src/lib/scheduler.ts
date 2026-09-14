@@ -1,8 +1,8 @@
 import { getDatabase, logAuditEvent } from './db'
 import { syncAgentsFromConfig } from './agent-sync'
-import { config, ensureDirExists } from './config'
-import { join, dirname } from 'path'
-import { readdirSync, statSync, unlinkSync } from 'fs'
+import { config } from './config'
+import { isAbsolute, join } from 'path'
+import { execFile } from 'node:child_process'
 import { logger } from './logger'
 import { processWebhookRetries } from './webhooks'
 import { syncClaudeSessions } from './claude-sessions'
@@ -23,10 +23,10 @@ import {
   isMultiInstanceSchedulerRuntime,
   relinquishSchedulerLeadership,
   renewSchedulerLeadership,
+  shouldStartBuiltinScheduler,
+  BUILTIN_SCHEDULER_LEASE,
   type SchedulerLeadershipResult,
 } from './scheduler-leader'
-
-const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
 
 interface ScheduledTask {
   name: string
@@ -35,6 +35,7 @@ interface ScheduledTask {
   nextRun: number
   enabled: boolean
   running: boolean
+  manualOnly?: boolean
   lastResult?: { ok: boolean; message: string; timestamp: number }
 }
 
@@ -209,6 +210,11 @@ function reconcileSchedulerLeadership(): boolean {
 }
 
 export function getSchedulerLeadershipStatus(): SchedulerLeadershipStatus {
+  if (!shouldStartBuiltinScheduler() && !tickInterval && !leadershipHeartbeatInterval) {
+    return { state: 'inactive', leaseExpiresAt: null, leaseExpired: false,
+      observedAt: Math.floor(Date.now() / 1000), reason: 'web_scheduler_disabled',
+      routerGeneration: null, activeJobs: 0 }
+  }
   const now = Math.floor(Date.now() / 1000)
   return {
     ...leadershipStatus,
@@ -216,6 +222,15 @@ export function getSchedulerLeadershipStatus(): SchedulerLeadershipStatus {
       && leadershipStatus.leaseExpiresAt <= now,
     activeJobs: runningJobIds.size,
   }
+}
+
+export function schedulerOwnsCurrentLease(): boolean {
+  if (heldLeaseRevision === null) return false
+  const row = getDatabase().prepare(`SELECT holder_id, revision, lease_expires_at
+    FROM scheduler_leader_leases WHERE lease_name = ?`).get(BUILTIN_SCHEDULER_LEASE) as
+    { holder_id: string; revision: number; lease_expires_at: number } | undefined
+  return row?.holder_id === schedulerHolderId && row.revision === heldLeaseRevision
+    && row.lease_expires_at > Math.floor(Date.now() / 1000)
 }
 
 function finishSchedulerStopIfIdle(): void {
@@ -301,42 +316,26 @@ function getSettingNumber(key: string, defaultValue: number): number {
 
 /** Run a database backup */
 async function runBackup(): Promise<{ ok: boolean; message: string }> {
-  ensureDirExists(BACKUP_DIR)
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
-  const backupPath = join(BACKUP_DIR, `mc-backup-${timestamp}.db`)
-
-  try {
-    const db = getDatabase()
-    await db.backup(backupPath)
-
-    const stat = statSync(backupPath)
-    logAuditEvent({
-      action: 'auto_backup',
-      actor: 'scheduler',
-      detail: { path: backupPath, size: stat.size },
-    })
-
-    // Prune old backups
-    const maxBackups = getSettingNumber('general.backup_retention_count', 10)
-    try {
-      const files = readdirSync(BACKUP_DIR)
-        .filter(f => f.startsWith('mc-backup-') && f.endsWith('.db'))
-        .map(f => ({ name: f, mtime: statSync(join(BACKUP_DIR, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)
-
-      for (const file of files.slice(maxBackups)) {
-        unlinkSync(join(BACKUP_DIR, file.name))
-      }
-    } catch {
-      // Best-effort pruning
-    }
-
-    const sizeKB = Math.round(stat.size / 1024)
-    return { ok: true, message: `Backup created (${sizeKB}KB)` }
-  } catch (err: any) {
-    return { ok: false, message: `Backup failed: ${err.message}` }
+  const configuration = process.env.AIWORKER_DATABASE_BACKUP_CONFIG
+  if (!configuration || !isAbsolute(configuration)) {
+    return { ok: false, message: '尚未配置受管备份' }
   }
+  const script = process.env.AIWORKER_DATABASE_BACKUP_SCRIPT || join(process.cwd(), 'scripts/database-backup.py')
+  const python = process.env.AIWORKER_DATABASE_BACKUP_PYTHON || '/usr/bin/python3'
+  if (!isAbsolute(script) || !isAbsolute(python)) return { ok: false, message: '受管备份配置无效' }
+  return new Promise(resolve => {
+    execFile(python, [script, 'run', '--config', configuration, '--source', 'mission-control', '--force'],
+      { maxBuffer: 65_536 }, (error, stdout) => {
+        try {
+          const receipt = JSON.parse(stdout)
+          if (error || !Array.isArray(receipt.result) || !receipt.result.length
+            || receipt.result.some((entry: { state?: string }) => !['verified', 'current'].includes(entry.state || ''))) {
+            resolve({ ok: false, message: '备份失败，请查看受管备份状态' }); return
+          }
+          resolve({ ok: true, message: '数据库备份已验证' })
+        } catch { resolve({ ok: false, message: '备份失败，请查看受管备份状态' }) }
+      })
+  })
 }
 
 /** Run data cleanup based on retention settings */
@@ -647,22 +646,21 @@ const TICK_MS = 60 * 1000 // Check every minute
 /** Initialize the scheduler */
 export function initScheduler() {
   if (tickInterval || leadershipHeartbeatInterval) return // Already running or draining
+  if (!shouldStartBuiltinScheduler()) {
+    publishLeadershipStatus({ state: 'inactive', leaseExpiresAt: null,
+      reason: 'web_scheduler_disabled', routerGeneration: null })
+    return
+  }
   schedulerStopping = false
 
   // Register tasks
   const now = Date.now()
   // Stagger the initial runs: backup at ~3 AM, cleanup at ~4 AM (relative to process start)
-  const msUntilNextBackup = getNextDailyMs(3)
   const msUntilNextCleanup = getNextDailyMs(4)
-
-  tasks.set('auto_backup', {
-    name: 'Auto Backup',
-    intervalMs: DAILY_MS,
-    lastRun: null,
-    nextRun: now + msUntilNextBackup,
-    enabled: true,
-    running: false,
-  })
+  // Backups have their own managed job and recovery receipt. They must not
+  // run a second time when the application scheduler starts or changes leader.
+  tasks.set('auto_backup', { name: 'Database Backup', intervalMs: 0, lastRun: null,
+    nextRun: 0, enabled: false, running: false, manualOnly: true })
 
   tasks.set('auto_cleanup', {
     name: 'Auto Cleanup',
@@ -807,7 +805,7 @@ export function initScheduler() {
 
   // Start the tick loop
   tickInterval = setInterval(tick, TICK_MS)
-  logger.info('Scheduler initialized - backup at ~3AM, cleanup at ~4AM, media cleanup debt and heartbeat every 5m, webhook/claude/skill/local-agent/gateway-agent sync every 60s')
+  logger.info('独立调度器已初始化；数据库备份由独立受管备份任务负责')
 }
 
 /** Calculate ms until next occurrence of a given hour (UTC) */
@@ -831,7 +829,7 @@ async function tick() {
     const now = Date.now()
 
     for (const [id, task] of tasks) {
-      if (task.running || runningJobIds.has(id) || now < task.nextRun) continue
+      if (task.manualOnly || task.running || runningJobIds.has(id) || now < task.nextRun) continue
 
       // Check if this task is enabled in settings (heartbeat is always enabled)
       const settingKey = id === 'auto_backup' ? 'general.auto_backup'
@@ -911,7 +909,7 @@ export function getSchedulerStatus() {
     result.push({
       id,
       name: task.name,
-      enabled: isSettingEnabled(settingKey, defaultEnabled),
+      enabled: !task.manualOnly && isSettingEnabled(settingKey, defaultEnabled),
       lastRun: task.lastRun,
       nextRun: task.nextRun,
       running: task.running,
@@ -925,7 +923,7 @@ export function getSchedulerStatus() {
 /** Manually trigger a scheduled task */
 export async function triggerTask(taskId: string): Promise<{ ok: boolean; message: string }> {
   if (!SCHEDULER_TASK_IDS.has(taskId)) return { ok: false, message: `Unknown task: ${taskId}` }
-  if (schedulerStopping || !reconcileSchedulerLeadership()) {
+  if (!shouldStartBuiltinScheduler() || schedulerStopping || !reconcileSchedulerLeadership()) {
     return { ok: false, message: 'Built-in scheduler is passive on this application instance' }
   }
   return runTrackedSchedulerJob(taskId, () => executeScheduledTask(taskId, 'manual'))
@@ -939,4 +937,10 @@ export function stopScheduler() {
     tickInterval = null
   }
   finishSchedulerStopIfIdle()
+}
+
+/** A stopping worker keeps its lease until every in-flight job has settled. */
+export function isSchedulerStopped(): boolean {
+  return schedulerStopping && runningJobIds.size === 0 && heldLeaseRevision === null
+    && !tickInterval && !leadershipHeartbeatInterval
 }

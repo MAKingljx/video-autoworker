@@ -32,6 +32,7 @@ next-env.d.ts
 .data/
 aegis/
 /need/
+.artifacts/
 
 # Playwright
 test-results/

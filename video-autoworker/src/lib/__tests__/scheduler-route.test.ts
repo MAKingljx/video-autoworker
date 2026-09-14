@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const mocks = vi.hoisted(() => ({
@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   getSchedulerLeadershipStatus: vi.fn(),
   getSchedulerStatus: vi.fn(),
   triggerTask: vi.fn(),
+  getExternalSchedulerStatus: vi.fn(),
+  requestSchedulerWorker: vi.fn(),
 }))
 
 vi.mock('@/lib/auth', () => ({ requireRole: mocks.requireRole }))
@@ -22,10 +24,15 @@ vi.mock('@/lib/scheduler', () => ({
   getSchedulerStatus: mocks.getSchedulerStatus,
   triggerTask: mocks.triggerTask,
 }))
+vi.mock('@/lib/scheduler-worker-ipc', () => ({
+  getExternalSchedulerStatus: mocks.getExternalSchedulerStatus,
+  requestSchedulerWorker: mocks.requestSchedulerWorker,
+}))
 
 import { GET, POST } from '@/app/api/scheduler/route'
 
 describe('scheduler status route', () => {
+  afterEach(() => vi.unstubAllEnvs())
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.isOpenClawLoopbackAuthMode.mockReturnValue(false)
@@ -43,6 +50,31 @@ describe('scheduler status route', () => {
       activeJobs: 1,
     })
     mocks.getSchedulerStatus.mockReturnValue([{ id: 'webhook_retry', running: true }])
+  })
+
+  it('reads the independent worker and never runs a web scheduler as fallback', async () => {
+    vi.stubEnv('AIWORKER_SCHEDULER_STATE_DIR', '/private-worker-state')
+    mocks.getExternalSchedulerStatus.mockResolvedValue({ executionMode: 'external-worker', healthy: true,
+      leadership: { state: 'leader', routerGeneration: null }, tasks: [{ id: 'webhook_retry' }] })
+    const response = await GET(new NextRequest('http://127.0.0.1:3017/api/scheduler'))
+    expect(response.status).toBe(200)
+    expect((await response.json()).executionMode).toBe('external-worker')
+    expect(mocks.getSchedulerLeadershipStatus).toHaveBeenCalledTimes(1)
+    mocks.getExternalSchedulerStatus.mockRejectedValue(new Error('socket unavailable'))
+    expect((await GET(new NextRequest('http://127.0.0.1:3017/api/scheduler'))).status).toBe(503)
+    expect(mocks.getSchedulerLeadershipStatus).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards manual tasks to the sole worker after checking the existing admin identity', async () => {
+    vi.stubEnv('AIWORKER_SCHEDULER_STATE_DIR', '/private-worker-state')
+    mocks.getExternalSchedulerStatus.mockResolvedValue({ healthy: true, tasks: [{ id: 'webhook_retry' }] })
+    mocks.requestSchedulerWorker.mockResolvedValue({ ok: true, message: 'done' })
+    const response = await POST(new NextRequest('http://127.0.0.1:3017/api/scheduler', {
+      method: 'POST', body: JSON.stringify({ task_id: 'webhook_retry' }),
+    }))
+    expect(response.status).toBe(200)
+    expect(mocks.requestSchedulerWorker).toHaveBeenCalledWith('/trigger', { task_id: 'webhook_retry' }, { timeoutMs: 0 })
+    expect(mocks.triggerTask).not.toHaveBeenCalled()
   })
 
   it('exposes live leadership with registered tasks and disables caching', async () => {

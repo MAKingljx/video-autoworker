@@ -7,7 +7,8 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createBuildCacheDescriptor } from '../../scripts/ci-impact-plan.mjs'
+import { createBuildCacheDescriptor, selectBrowserTests } from '../../scripts/ci-impact-plan.mjs'
+import { createBrowserTestInvocations } from '../../scripts/run-browser-tests.mjs'
 
 const script = resolve(process.cwd(), 'scripts/ci-impact-plan.mjs')
 const roots: string[] = []
@@ -44,6 +45,9 @@ function fixture(prefixed = false) {
   write(join(productRoot, 'scripts/run-root-vitest.mjs'),
     `process.stdout.write(${JSON.stringify(`${JSON.stringify({ partitions })}\n`)})\n`)
   write(join(productRoot, customHeavy), 'export {}\n')
+  for (const name of ['dashboard-overview-layout', 'login-flow', 'i18n-language-switcher']) {
+    write(join(productRoot, `tests/${name}.spec.ts`), 'export {}\n')
+  }
   git(gitRoot, 'init', '-b', 'main')
   git(gitRoot, 'config', 'user.name', 'CI Impact Test')
   git(gitRoot, 'config', 'user.email', 'ci-impact@example.invalid')
@@ -163,6 +167,92 @@ describe('CI impact plan', () => {
     expect(source).not.toContain('aiworker-task-flow-installer.test.ts')
   })
 
+  it('runs a changed browser spec and builds its required artifact even without production source changes', () => {
+    const entry = fixture(true)
+    write(join(entry.productRoot, 'tests/notifications.spec.ts'), 'export const changed = true\n')
+    const head = commit(entry.gitRoot, 'browser test only')
+    expect(run(entry.productRoot, ['--base', entry.base, '--head', head]).json).toMatchObject({
+      mode: 'targeted', testFiles: [], relatedFiles: [],
+      browserTestFiles: ['tests/notifications.spec.ts'], browserReasons: ['changed_browser_test'],
+      runBrowserTests: true, runIntegration: true,
+    })
+  })
+
+  it('selects a feature and the shared UI smoke tests without running unrelated API suites', () => {
+    const entry = fixture(true)
+    write(join(entry.productRoot, 'tests/notifications.spec.ts'), 'export {}\n')
+    write(join(entry.productRoot, 'tests/tasks-crud.spec.ts'), 'export {}\n')
+    const base = commit(entry.gitRoot, 'feature tests')
+    write(join(entry.productRoot, 'src/components/panels/notifications-panel.tsx'), 'export const panel = 1\n')
+    const head = commit(entry.gitRoot, 'notifications panel')
+    const plan = run(entry.productRoot, ['--base', base, '--head', head]).json
+    expect(plan.browserTestFiles).toEqual([
+      'tests/dashboard-overview-layout.spec.ts', 'tests/i18n-language-switcher.spec.ts',
+      'tests/login-flow.spec.ts', 'tests/notifications.spec.ts',
+    ])
+    expect(plan.browserTestFiles).not.toContain('tests/tasks-crud.spec.ts')
+  })
+
+  it('follows transitive test helpers and API imports without depending on the working-tree contents', () => {
+    const entry = fixture(true)
+    write(join(entry.productRoot, 'src/lib/notification-query.ts'), 'export const query = 1\n')
+    write(join(entry.productRoot, 'src/app/api/notifications/route.ts'), 'export { query } from "@/lib/notification-query"\n')
+    write(join(entry.productRoot, 'tests/helpers/notification.ts'), 'export const helper = 1\n')
+    write(join(entry.productRoot, 'tests/notifications.spec.ts'), 'import "./helpers/notification"\nconst route = "/api/notifications"\n')
+    const base = commit(entry.gitRoot, 'dependency sources')
+    write(join(entry.productRoot, 'src/lib/notification-query.ts'), 'export const query = 2\n')
+    write(join(entry.productRoot, 'tests/helpers/notification.ts'), 'export const helper = 2\n')
+    const head = commit(entry.gitRoot, 'dependency changed')
+    write(join(entry.productRoot, 'tests/notifications.spec.ts'), 'uncommitted source must not change selection\n')
+    const plan = run(entry.productRoot, ['--base', base, '--head', head]).json
+    expect(plan.browserTestFiles).toEqual(['tests/notifications.spec.ts'])
+    expect(plan.browserReasons).toEqual(['api_scope:/api/notifications', 'browser_dependency_changed'])
+  })
+
+  it('fails closed when a UI change cannot select any available browser test', () => {
+    expect(() => selectBrowserTests({ paths: ['src/components/new-panel.tsx'], sources: new Map() }))
+      .toThrow('ci_browser_selection_empty')
+  })
+
+  it('selects an API consumer whose endpoint is encapsulated in a test helper', () => {
+    const result = selectBrowserTests({ paths: ['src/app/api/notifications/route.ts'], sources: new Map([
+      ['src/app/api/notifications/route.ts', 'export const GET = () => {}'],
+      ['tests/notification-client.ts', 'export const endpoint = "/api/notifications"'],
+      ['tests/notifications.spec.ts', 'import { endpoint } from "./notification-client"'],
+      ['tests/tasks-crud.spec.ts', 'export {}'],
+    ]) })
+    expect(result.browserTestFiles).toEqual(['tests/notifications.spec.ts'])
+  })
+
+  it('falls back to the browser fixture scope when a changed helper cannot be resolved', () => {
+    const result = selectBrowserTests({ paths: ['tests/fixture.json'], sources: new Map([
+      ['tests/notifications.spec.ts', 'export {}'], ['tests/login-flow.spec.ts', 'export {}'],
+    ]) })
+    expect(result.browserTestFiles).toEqual(['tests/login-flow.spec.ts', 'tests/notifications.spec.ts'])
+    expect(result.browserReasons).toContain('browser_helper_scope_unknown')
+  })
+
+  it('uses a precise invocation and rejects empty, duplicate or escaping browser plans', () => {
+    const entry = fixture(true)
+    const plan = { runBrowserTests: true, browserTestFiles: ['tests/login-flow.spec.ts'] }
+    expect(createBrowserTestInvocations(plan, entry.productRoot)).toEqual([{
+      args: ['exec', 'playwright', 'test', 'tests/login-flow\\.spec\\.ts$'], env: {},
+    }])
+    expect(() => createBrowserTestInvocations({ ...plan, browserTestFiles: [] }, entry.productRoot)).toThrow('ci_browser_selection_empty')
+    expect(() => createBrowserTestInvocations({ ...plan, browserTestFiles: [...plan.browserTestFiles, ...plan.browserTestFiles] }, entry.productRoot)).toThrow('ci_browser_selection_duplicate')
+    expect(() => createBrowserTestInvocations({ ...plan, browserTestFiles: ['tests/../secret.spec.ts'] }, entry.productRoot)).toThrow('ci_browser_member_invalid')
+  })
+
+  it('runs the explicitly changed offline harness through its own configuration', () => {
+    const entry = fixture(true)
+    write(join(entry.productRoot, 'tests/openclaw-harness.spec.ts'), 'export {}\n')
+    expect(createBrowserTestInvocations({ runBrowserTests: true, browserTestFiles: ['tests/openclaw-harness.spec.ts'] }, entry.productRoot))
+      .toEqual([{
+        args: ['exec', 'playwright', 'test', '--config=playwright.openclaw.local.config.ts', 'tests/openclaw-harness\\.spec\\.ts$'],
+        env: { E2E_GATEWAY_EXPECTED: '0' },
+      }])
+  })
+
   it.each([
     ['root CI', '.github/workflows/ci.yml', 'name: CI\n', [], true, false, []],
     ['runtime skill', 'openclaw-skills/example/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow']],
@@ -226,7 +316,7 @@ describe('CI impact plan', () => {
   it('compares logical blobs so a pure flat-to-prefixed move stays targeted', () => {
     const entry = fixture()
     mkdirSync(join(entry.gitRoot, 'video-autoworker'), { mode: 0o700 })
-    for (const member of ['package.json', 'pnpm-lock.yaml', 'next.config.js', 'scripts', 'src']) {
+    for (const member of ['package.json', 'pnpm-lock.yaml', 'next.config.js', 'scripts', 'src', 'tests']) {
       git(entry.gitRoot, 'mv', member, `video-autoworker/${member}`)
     }
     const head = commit(entry.gitRoot, 'prefix product tree')

@@ -25,6 +25,8 @@ export interface DirectorLearningCandidate {
   summary: string
   rationale: string
   confidence: number | null
+  domainFields?: Array<{ label: string; value: string }>
+  evidenceRanges?: Array<{ startSeconds: number; endSeconds: number }>
   decision?: CandidateDecision
 }
 
@@ -530,6 +532,24 @@ export function DirectorLearningReviewPanel({
                                 <p className="text-xs text-muted-foreground">判断依据</p>
                                 <p className="mt-0.5 whitespace-pre-wrap text-foreground/85">{candidate.rationale}</p>
                               </div>
+                              {candidate.domainFields && candidate.domainFields.length > 0 && (
+                                <dl className="space-y-2 border-t border-border pt-3" aria-label="待审核内容">
+                                  {candidate.domainFields.map(field => (
+                                    <div key={field.label}>
+                                      <dt className="text-xs text-muted-foreground">{field.label}</dt>
+                                      <dd className="mt-0.5 whitespace-pre-wrap text-foreground">{field.value}</dd>
+                                    </div>
+                                  ))}
+                                </dl>
+                              )}
+                              {candidate.evidenceRanges && candidate.evidenceRanges.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-muted-foreground">证据时间窗</p>
+                                  <p className="text-foreground/85">
+                                    {candidate.evidenceRanges.map(range => `${range.startSeconds}–${range.endSeconds} 秒`).join('；')}
+                                  </p>
+                                </div>
+                              )}
                             </div>
                             <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-3">
                               {reviewedLabel ? (

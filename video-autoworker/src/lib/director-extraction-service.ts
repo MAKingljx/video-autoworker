@@ -74,13 +74,15 @@ import {
   DIRECTOR_EXTRACTION_TABLE_BY_KIND,
   DIRECTOR_EXTRACTION_WAITING_STATUSES,
   buildDirectorExtractionOutputContract,
-  buildDirectorPerceptionCheckpointInput,
+  buildDirectorPerceptionCheckpointInputForRead,
+  assertDirectorExtractionReadableContractDigest,
   directorExtractionContractDigest,
   directorExtractionDigest,
   directorExtractionOutputJsonSchema,
   directorExtractionProjectionReceiptSchema,
   parseDirectorLearningContextResult,
   parseDirectorExtractionOutput,
+  normalizeDirectorExtractionCheckpointForProjection,
   reviewedDirectorReferencesSchema,
   type DirectorLearningContextResult,
   type DirectorExtractionCandidate,
@@ -307,12 +309,10 @@ async function buildPhaseInput(
   if (!job.workId || job.currentPhase === 'complete') {
     throw new Error('director_extraction_work_not_registered')
   }
-  const extractionContractDigest = directorExtractionContractDigest(
+  const generationContractDigest = directorExtractionContractDigest(
     DIRECTOR_EXTRACTION_DEFAULT_MODEL_IDENTITY,
   )
-  if (job.extractionContractDigest !== extractionContractDigest) {
-    throw new Error('director_extraction_contract_mismatch')
-  }
+  assertDirectorExtractionReadableContractDigest(job.extractionContractDigest)
   const output = getDirectorExtractionSourceOutput(db, job)
   let evidence = buildDirectorExtractionHistorySeed({
     workId: job.workId,
@@ -345,7 +345,8 @@ async function buildPhaseInput(
   const baseInput = {
     schemaVersion: 2,
     contract: DIRECTOR_EXTRACTION_CONTRACT,
-    extractionContractDigest,
+    extractionContractDigest: job.extractionContractDigest,
+    generationContractDigest,
     promptVersion: DIRECTOR_EXTRACTION_PROMPT_VERSION,
     projectionVersion: DIRECTOR_EXTRACTION_PROJECTION_VERSION,
     phase: job.currentPhase,
@@ -980,6 +981,37 @@ async function projectCandidateOutput(
   })
 }
 
+async function assertLegacyProjectionAbsent(
+  db: Database.Database,
+  job: DirectorExtractionJob,
+  checkpoint: NonNullable<ReturnType<typeof getDirectorExtractionCheckpoint>>,
+  commandRunner: DirectorCommandRunner,
+): Promise<void> {
+  if (!job.workId) throw new Error('director_extraction_work_not_registered')
+  const items = proposalItems(db, job, checkpoint.candidateOutput, checkpoint.phaseInput)
+  for (const table of [...new Set(items.map(item => item.table))].sort()) {
+    for (const batch of directorExtractionProposalBatches(job.workId, table, items.filter(item => item.table === table))) {
+      // A legacy attempt may have committed remotely before losing its receipt.
+      // Query the exact old business identity through the same proposal core;
+      // do not create a second candidate under the normalized fields' new ID.
+      const inspected = await commandRunner('propose-batch', {
+        ...directorExtractionProposalRequest(job.workId, table, batch), inspectOnly: true,
+      })
+      const results = inspected.results as Array<Record<string, unknown>> | undefined
+      if (inspected.ok !== true || inspected.action !== 'inspect_proposal_batch'
+        || inspected.table !== table || inspected.workId !== (table === 'skills_techniques' ? null : job.workId)
+        || inspected.count !== batch.length || !Array.isArray(results) || results.length !== batch.length
+        || results.some(item => item.ok !== true || item.action !== 'inspect_proposal'
+          || item.table !== table || typeof item.stableId !== 'string' || !item.stableId
+          || typeof item.found !== 'boolean')
+        || inspected.found !== results.filter(item => item.found).length) {
+        throw new Error('director_extraction_legacy_projection_read_invalid')
+      }
+      if (inspected.found !== 0) throw new Error('director_extraction_legacy_projection_needs_readback')
+    }
+  }
+}
+
 const LEGACY_EVIDENCE_RECEIPT_RECOVERY_CONTRACT_DIGESTS = new Set([
   'ac621bcb61dfa4de840647a312d67445c22d5baa834b45818bb3ac89c4a58c1a',
 ])
@@ -1417,8 +1449,9 @@ export const defaultDirectorExtractionPhaseRunner: DirectorExtractionPhaseRunner
 ) => {
   const identity = DIRECTOR_EXTRACTION_DEFAULT_MODEL_IDENTITY
   const expectedContractDigest = directorExtractionContractDigest(identity)
-  if (job.extractionContractDigest !== expectedContractDigest
-    || input.extractionContractDigest !== expectedContractDigest
+  assertDirectorExtractionReadableContractDigest(job.extractionContractDigest)
+  if (input.extractionContractDigest !== job.extractionContractDigest
+    || input.generationContractDigest !== expectedContractDigest
     || input.phase !== phase
     || directorExtractionDigest(input.modelIdentity) !== directorExtractionDigest(identity)) {
     throw new Error('director_extraction_contract_mismatch')
@@ -1441,7 +1474,7 @@ export const defaultDirectorExtractionPhaseRunner: DirectorExtractionPhaseRunner
     delivery: { mode: 'none' },
     timeoutSeconds: Math.max(30, Math.min(600, route.timeoutSeconds)),
     structuredOutput: {
-      name: `director_${phase}_v1`,
+      name: `director_${phase}_v2`,
       schema: directorExtractionOutputJsonSchema(phase),
     },
   })
@@ -1476,11 +1509,7 @@ export async function runNextDirectorExtractionPhase(
   if (!job) return { outcome: 'idle', job: null }
   let leaseGuard: DirectorExtractionLeaseGuard | null = null
   try {
-    if (job.extractionContractDigest !== directorExtractionContractDigest(
-      DIRECTOR_EXTRACTION_DEFAULT_MODEL_IDENTITY,
-    )) {
-      throw new Error('director_extraction_contract_mismatch')
-    }
+    assertDirectorExtractionReadableContractDigest(job.extractionContractDigest)
     leaseGuard = createDirectorExtractionLeaseGuard(
       db,
       job,
@@ -1504,7 +1533,7 @@ export async function runNextDirectorExtractionPhase(
           job: pauseDirectorExtractionForEvidence(db, job, { nowSeconds: options.nowSeconds }),
         }
       }
-      input = buildDirectorPerceptionCheckpointInput({
+      input = buildDirectorPerceptionCheckpointInputForRead({
         sourceTaskId: job.sourceTaskId,
         sourceBindingId: job.sourceBindingId,
         tenantId: job.tenantId,
@@ -1519,7 +1548,9 @@ export async function runNextDirectorExtractionPhase(
       if (staged.inputSha256 !== directorExtractionDigest(input)) {
         throw new Error('director_extraction_checkpoint_conflict')
       }
-      output = parseDirectorExtractionOutput(phase, staged.candidateOutput)
+      output = normalizeDirectorExtractionCheckpointForProjection(
+        phase, staged.candidateOutput, staged.phaseInput,
+      ).output
       const receipt = await projectPerceptionEvidence(
         db,
         job,
@@ -1542,7 +1573,9 @@ export async function runNextDirectorExtractionPhase(
       if (staged.projectionState === 'delivered') {
         throw new Error('director_extraction_checkpoint_state_invalid')
       }
-      output = parseDirectorExtractionOutput(phase, staged.candidateOutput)
+      output = normalizeDirectorExtractionCheckpointForProjection(
+        phase, staged.candidateOutput, staged.phaseInput,
+      ).output
       assertCandidateKeysAvailable(db, job, output)
       input = staged.phaseInput
       await revalidateStagedDependencies(db, job, output, input, commandRunner)
@@ -1572,6 +1605,9 @@ export async function runNextDirectorExtractionPhase(
     }
     validateEvidenceReferences(output, input)
     await revalidateStagedDependencies(db, job, output, input, commandRunner)
+    if (staged?.candidateOutput.schemaVersion === 1) {
+      await assertLegacyProjectionAbsent(db, job, staged, commandRunner)
+    }
     const receipt = await projectCandidateOutput(db, job, output, input, commandRunner)
     const next = completeDirectorExtractionProjection(db, job, receipt, {
       nowSeconds: options.nowSeconds,

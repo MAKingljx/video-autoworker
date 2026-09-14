@@ -16,6 +16,10 @@ export type DirectorExtractionHttpFailure = {
 }
 
 const PUBLIC_FAILURES: Readonly<Record<string, Omit<DirectorExtractionHttpFailure, 'code'>>> = {
+  director_extraction_legacy_projection_needs_readback: {
+    status: 409,
+    message: '已有候选尚未完成结果核对，已停止重复创建，请先核对原候选',
+  },
   director_extraction_source_not_found: {
     status: 404,
     message: '没有找到这部作品已完成的视频分析',

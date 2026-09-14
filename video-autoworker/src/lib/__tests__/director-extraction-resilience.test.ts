@@ -9,6 +9,10 @@ import {
 } from '@/lib/director-extraction-learning'
 import {
   canonicalDirectorExtractionJson,
+  DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND,
+  DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+  buildDirectorPerceptionCheckpointInputForRead,
+  directorExtractionContractDigest,
   directorExtractionDigest,
   parseDirectorExtractionOutput,
   parseDirectorLearningContextResult,
@@ -161,33 +165,18 @@ function candidate(overrides: Partial<DirectorExtractionCandidate> = {}): Direct
     },
   }
   const value = { ...base, ...overrides }
-  const semanticKeys = {
-    person_profile: ['人物名称', '人物弧光', '矛盾'],
-    story_node: ['节点名称', '节点内容', '变化'],
-    story_relation: ['关系名称', '判断理由', '判断理由'],
-    material_judgment: ['判断名称', '使用理由', '使用理由'],
-    narrative_proposal: ['方案名称', '结构说明', '结构说明'],
-    director_case: ['案例名称', '上下文', '判断原因'],
-    technique: ['知识名称', '执行方法', '为什么有效'],
-  } as const
-  const [titleKey, summaryKey, rationaleKey] = semanticKeys[
-    value.kind as keyof typeof semanticKeys
-  ]
+  const titleKey = DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND[
+    value.kind as keyof typeof DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND
+  ].title
   const fields = { ...value.fields }
   if (overrides.title === undefined) value.title = String(fields[titleKey] || value.title)
   else fields[titleKey] = value.title
-  if (overrides.summary === undefined) value.summary = String(fields[summaryKey] || value.summary)
-  else fields[summaryKey] = value.summary
-  if (overrides.rationale === undefined) value.rationale = String(fields[rationaleKey] || value.rationale)
-  else fields[rationaleKey] = value.rationale
   if (fields[titleKey] === undefined) fields[titleKey] = value.title
-  if (fields[summaryKey] === undefined) fields[summaryKey] = value.summary
-  if (fields[rationaleKey] === undefined) fields[rationaleKey] = value.rationale
   return { ...value, fields }
 }
 
 function output(phase: DirectorExtractionPhase, candidates: DirectorExtractionCandidate[]) {
-  return { schemaVersion: 1 as const, phase, candidates }
+  return { schemaVersion: 2 as const, phase, candidates }
 }
 
 function visualPayload(totalCharacters: number, itemCount = 40): Array<Record<string, unknown>> {
@@ -382,6 +371,13 @@ function brainHarness(initialContext = learningContext()): BrainHarness {
     }
     if (input.action === 'learning_context') return context
     if (input.action === 'propose_batch') {
+      if (input.inspectOnly === true) {
+        const items = input.items as Array<Record<string, unknown>>
+        return { ok: true, action: 'inspect_proposal_batch', table: input.table,
+          workId: input.table === 'skills_techniques' ? null : input.workId, count: items.length, found: 0,
+          results: items.map((_, index) => ({ ok: true, action: 'inspect_proposal', table: input.table,
+            stableId: `LEGACY-ABSENT-${index}`, found: false })) }
+      }
       proposalWrites++
       if (shouldFailProposal) {
         shouldFailProposal = false
@@ -736,7 +732,154 @@ describe('director extraction learning-context resilience', () => {
   })
 })
 
+
+function makeLegacyCheckpointFixture(db: Database.Database, taskId: string): void {
+  const current = getDirectorExtractionJob(db, taskId, scope)!
+  const legacyIdentity = { ...current, extractionContractDigest: DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST }
+  const legacyPerception = buildDirectorPerceptionCheckpointInputForRead(legacyIdentity)
+  db.prepare(`UPDATE n8n_task_runs SET input = json_set(input, '$.extractionContractDigest', ?)
+    WHERE source = 'n8n-node' AND json_extract(input, '$.parentTaskId') = ?`)
+    .run(DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST, taskId)
+  for (const phase of ['perception', 'understanding'] as const) {
+    const id = directorExtractionPhaseTaskIdentity('task', taskId, phase)
+    const row = db.prepare(`SELECT phase_input, candidate_output FROM director_extraction_checkpoints
+      WHERE phase_task_id = ?`).get(id) as { phase_input: string; candidate_output: string }
+    const input = phase === 'perception' ? legacyPerception : {
+      ...JSON.parse(row.phase_input),
+      contract: 'director-extraction-v3',
+      extractionContractDigest: DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+      promptVersion: 'director-extraction-prompts-v3',
+      projectionVersion: 'feishu-candidate-projection-v2',
+    }
+    delete (input as Record<string, unknown>).generationContractDigest
+    const output = { ...JSON.parse(row.candidate_output), schemaVersion: 1 }
+    db.prepare(`UPDATE director_extraction_checkpoints SET phase_input = ?, input_sha256 = ?,
+      candidate_output = ?, output_sha256 = ? WHERE phase_task_id = ?`).run(
+      JSON.stringify(input), directorExtractionDigest(input), JSON.stringify(output), directorExtractionDigest(output), id,
+    )
+  }
+}
+
 describe('director extraction queue and service resilience', () => {
+  it('stops normalization when the old unreceipted proposal already exists remotely', async () => {
+    const db = database()
+    const taskId = 'legacy-partial-old-projection'
+    seedSource(db, { taskId })
+    const brain = brainHarness()
+    await advanceToUnderstanding(db, taskId, brain)
+    brain.failNextProposal()
+    await runNextDirectorExtractionPhase(db, {
+      commandRunner: brain.commandRunner, runner: understandingRunner(), nowSeconds: 1_002,
+    })
+    makeLegacyCheckpointFixture(db, taskId)
+    const before = JSON.stringify(getDirectorExtractionCheckpoint(db, taskId, 'understanding'))
+    const writes = brain.proposalWrites()
+    const commandRunner: DirectorCommandRunner = async (command, input) => {
+      const value = await brain.commandRunner(command, input)
+      if (input.inspectOnly === true) {
+        return { ...value, found: 1, results: (value.results as Array<Record<string, unknown>>)
+          .map((item, index) => ({ ...item, found: index === 0 })) }
+      }
+      return value
+    }
+    await expect(runNextDirectorExtractionPhase(db, {
+      commandRunner, runner: vi.fn(), nowSeconds: 1_003,
+    })).resolves.toMatchObject({ outcome: 'failed', job: {
+      status: 'conflict', lastErrorCode: 'director_extraction_legacy_projection_needs_readback',
+    } })
+    expect(brain.proposalWrites()).toBe(writes)
+    expect(JSON.stringify(getDirectorExtractionCheckpoint(db, taskId, 'understanding'))).toBe(before)
+  })
+
+  it('normalizes an unprojected v1 checkpoint and retries an unknown proposal outcome without duplication', async () => {
+    const db = database()
+    const taskId = 'legacy-unprojected-normalize'
+    seedSource(db, { taskId, maxAttempts: 3 })
+    const brain = brainHarness()
+    await advanceToUnderstanding(db, taskId, brain)
+    brain.failNextProposal()
+    await expect(runNextDirectorExtractionPhase(db, {
+      commandRunner: brain.commandRunner, runner: understandingRunner(), nowSeconds: 1_002,
+    })).resolves.toMatchObject({ outcome: 'failed' })
+    makeLegacyCheckpointFixture(db, taskId)
+    const original = getDirectorExtractionCheckpoint(db, taskId, 'understanding')!
+    const checkpointBytes = JSON.stringify(original)
+    const committed = new Map<string, Record<string, unknown>>()
+    let writes = 0
+    let lostFirstResult = false
+    const commandRunner: DirectorCommandRunner = async (command, input) => {
+      if (input.action !== 'propose_batch' || input.inspectOnly === true) return brain.commandRunner(command, input)
+      const key = directorExtractionDigest(input)
+      if (committed.has(key)) {
+        const value = committed.get(key)!
+        return { ...value, created: 0, unchanged: value.count,
+          results: (value.results as Array<Record<string, unknown>>).map(item => ({ ...item, outcome: 'unchanged' })) }
+      }
+      const value = await brain.commandRunner(command, input)
+      committed.set(key, value)
+      writes++
+      expect((input.items as Array<{ fields: Record<string, unknown> }>)[0].fields['变化'])
+        .toBe('未知,需补充事件前后状态证据。')
+      if (!lostFirstResult) {
+        lostFirstResult = true
+        throw new Error('remote_outcome_unknown')
+      }
+      return value
+    }
+    const noModel = vi.fn<DirectorExtractionPhaseRunner>()
+    await expect(runNextDirectorExtractionPhase(db, { commandRunner, runner: noModel, nowSeconds: 1_003 }))
+      .resolves.toMatchObject({ outcome: 'failed' })
+    await expect(runNextDirectorExtractionPhase(db, { commandRunner, runner: noModel, nowSeconds: 1_004 }))
+      .resolves.toMatchObject({ outcome: 'awaiting_review' })
+    expect(writes).toBe(1)
+    expect(noModel).not.toHaveBeenCalled()
+    const after = getDirectorExtractionCheckpoint(db, taskId, 'understanding')!
+    expect(JSON.stringify({ ...after, projectionState: original.projectionState,
+      projectionReceipt: original.projectionReceipt, projectedAt: original.projectedAt })).toBe(checkpointBytes)
+    const phase = db.prepare('SELECT output FROM n8n_task_runs WHERE task_id = ?')
+      .get(after.phaseTaskId) as { output: string }
+    expect(JSON.parse(phase.output).candidateNormalization).toMatchObject({
+      version: 'legacy-checkpoint-normalization-v1', sourceCheckpointSha256: original.outputSha256,
+      sourceInputSha256: original.inputSha256,
+    })
+  })
+
+  it('continues an exact legacy chain into new generation without rewriting reviewed checkpoints', async () => {
+    const db = database()
+    const taskId = 'legacy-chain-new-semantics'
+    const intent = learningRecord('director_intents', 'INTENT-LEGACY-CONTINUATION', {
+      '作品 ID': workId, '核心主题': '人物如何改变判断',
+    })
+    const brain = brainHarness(learningContext({ activeIntent: intent }))
+    await advanceToUnderstandingReview(db, taskId, brain)
+    makeLegacyCheckpointFixture(db, taskId)
+    const historicalRows = () => db.prepare(`SELECT * FROM director_extraction_checkpoints
+      WHERE phase IN ('perception', 'understanding') ORDER BY phase`).all()
+    const historicalBefore = JSON.stringify(historicalRows())
+    expect(getDirectorExtractionJob(db, taskId, scope)).toMatchObject({
+      status: 'awaiting_understanding_review', extractionContractDigest: DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+    })
+    let calls = 0
+    const fixtureRunner = createDeterministicDirectorExtractionFixtureRunner()
+    const runner: DirectorExtractionPhaseRunner = async (phase, input, job) => {
+      calls++
+      expect(phase).toBe('judgment')
+      expect(input.extractionContractDigest).toBe(DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST)
+      expect(input.generationContractDigest).toBe(directorExtractionContractDigest())
+      expect(input.outputContract).toMatchObject({ schemaVersion: 2 })
+      return fixtureRunner(phase, input, job)
+    }
+    await expect(drainDirectorExtractionJobs(db, {
+      commandRunner: brain.commandRunner, runner, limit: 1, nowSeconds: 902,
+    })).resolves.toMatchObject({ resumed: 1, awaitingReview: 1, failed: 0 })
+    expect(calls).toBe(1)
+    expect(getDirectorExtractionJob(db, taskId, scope)).toMatchObject({
+      status: 'awaiting_judgment_review', extractionContractDigest: DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+    })
+    expect(getDirectorExtractionCheckpoint(db, taskId, 'judgment')!.candidateOutput.schemaVersion).toBe(2)
+    expect(JSON.stringify(historicalRows())).toBe(historicalBefore)
+  })
+
   it('does not discover or register unrequested historical sources while draining', async () => {
     const db = database()
     seedSource(db, {

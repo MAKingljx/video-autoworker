@@ -13,6 +13,7 @@ const targetSchema = z.object({
   kind: stableText.max(60).optional(),
   reviewId: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   reviewRevision: z.number().int().nonnegative().safe().optional(),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   sourceTaskId: stableText.max(160).optional(),
   workVersion: z.string().regex(/^v\d+\.\d+\.\d+$/u).optional(),
   state: stableText.max(32),

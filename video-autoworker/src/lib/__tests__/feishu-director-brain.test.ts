@@ -3706,6 +3706,30 @@ describe('Feishu director brain OpenClaw operation service', () => {
     }, harness.options)).rejects.toThrow('operation_batch_duplicate_identity:items')
   })
 
+  it('inspects the exact proposal business identity without creating or updating candidates', async () => {
+    const directorBrain = await loadModule()
+    const schema = await directorBrain.loadDirectorBrainSchema()
+    const harness = operationHarness(schema, reviewedFoundation())
+    const request = {
+      action: 'propose_batch', table: 'people_profiles', workId: 'WORK-ICE-001',
+      items: [{ fields: { '人物名称': '观察中的同行者', '人物 ID': 'PERSON-INSPECT-001', '置信度': 0.8 },
+        references: { evidenceIds: ['EVIDENCE-REVIEWED-001'] } }],
+    }
+    const absent = await directorBrain.executeDirectorBrainProposalBatch({ ...request, inspectOnly: true }, harness.options)
+    expect(absent).toMatchObject({ action: 'inspect_proposal_batch', count: 1, found: 0 })
+    expect(harness.createCalls).toHaveLength(0)
+    const created = await directorBrain.executeDirectorBrainProposalBatch(request, harness.options)
+    expect(harness.createCalls).toHaveLength(1)
+    const found = await directorBrain.executeDirectorBrainProposalBatch({ ...request, inspectOnly: true }, harness.options)
+    expect(found).toMatchObject({ action: 'inspect_proposal_batch', count: 1, found: 1 })
+    expect((found.results as Array<Record<string, unknown>>)[0].stableId)
+      .toBe((created.results as Array<Record<string, unknown>>)[0].stableId)
+    expect(harness.createCalls).toHaveLength(1)
+    await expect(directorBrain.executeDirectorBrainOperation({ ...request, inspectOnly: true }, harness.options))
+      .rejects.toThrow()
+    expect(harness.createCalls).toHaveLength(1)
+  })
+
   it('bounds get_many read concurrency while preserving input order and missing IDs', async () => {
     const directorBrain = await loadModule()
     const schema = await directorBrain.loadDirectorBrainSchema()

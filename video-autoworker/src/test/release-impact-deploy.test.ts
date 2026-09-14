@@ -17,6 +17,7 @@ import {
   releaseComponentSummary,
   recoveryTargetDisposition,
   restoreOwnedIntake,
+  resumeCommittedPlan,
   validateResumeRuntimeProofOverride,
   waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
@@ -49,6 +50,8 @@ type BuildPlan = (options: {
   runtimeConfigSha256?: string | null
   runtimeBinding?: Record<string, unknown> | null
   artifactManifestSha256?: string | null
+  workerBinding?: Record<string, unknown> | null
+  failurePolicy?: 'assess-first' | 'restore-previous'
 }) => ReturnType<typeof buildReleaseImpactPlan>
 const digest = (value: string) => (value.charCodeAt(0) % 16).toString(16).repeat(64)
 const router = {
@@ -77,9 +80,11 @@ function components(changed: ComponentName[] = []): ComponentSummary {
     }])) as ComponentSummary
 }
 
-function plan(changed: ComponentName[]) {
+// Compensation regression cases explicitly select the prior-version recovery policy.
+function plan(changed: ComponentName[], failurePolicy: 'assess-first' | 'restore-previous' = 'restore-previous') {
   return buildPlan({
     baseCommit, sourceCommit, router, intake: activeIntake(), components: components(changed),
+    failurePolicy,
     artifactRoot: changed.includes('app') ? '/private/tmp/release/standalone' : null,
     artifactManifestSha256: changed.includes('app') ? 'a'.repeat(64) : null,
     runtimeConvergenceProof: '/private/tmp/runtime-proof.json',
@@ -144,6 +149,131 @@ function services(events: string[], {
 }
 
 describe('release impact deployment', () => {
+  it('defaults newly sealed plans to assessment before compensation', () => {
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(), components: components() })
+    expect(value.failurePolicy).toBe('assess-first')
+    expect(() => assertAllowedArguments('plan', new Map([['--failure-policy', 'automatic']]))).toThrow('release_failure_policy_invalid')
+    expect(() => assertAllowedArguments('resume', new Map([['--plan', '/private/plan.json'], ['--failure-policy', 'restore-previous']]))).not.toThrow()
+  })
+
+  it('preserves a committed route and its intake hold after failed acceptance by default', async () => {
+    const events: string[] = []
+    const value = plan(['app'], 'assess-first')
+    const actions = services(events, { failAt: 'attest' })
+    Object.assign(actions, { routeReadback: async () => ({ ...router, active: 'blue', previous: 'green', generation: 8,
+      slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }) })
+    await expect(applyReleaseImpactPlan(value, actions)).rejects.toMatchObject({
+      currentState: 'route_committed_unverified', nextAction: 'resume_after_assessment',
+      recovery: { components: { ok: false, reason: 'assessment_required' } },
+    })
+    expect(events.some(event => event.startsWith('recover:'))).toBe(false)
+    expect(events).not.toContain('intake:resume:19')
+  })
+
+  it('preserves installed components when convergence requires assessment', async () => {
+    const events: string[] = []
+    await expect(applyReleaseImpactPlan(plan(['directorBrain'], 'assess-first'), services(events, { failAt: 'converge' })))
+      .rejects.toMatchObject({ currentState: 'original_route_preserved', nextAction: 'resume_after_assessment' })
+    expect(events).toContain('install:directorBrain')
+    expect(events.some(event => event.startsWith('recover:'))).toBe(false)
+    expect(events).not.toContain('worker:resume')
+    expect(events).not.toContain('intake:resume:19')
+  })
+
+  it('honors an explicit attempt recovery choice without changing the sealed policy', async () => {
+    const events: string[] = []
+    const value = plan(['directorBrain'], 'assess-first')
+    const actions = services(events, { failAt: 'converge' })
+    Object.assign(actions, { operation: { failurePolicy: 'restore-previous' } })
+    await expect(applyReleaseImpactPlan(value, actions)).rejects.toMatchObject({ currentState: 'previous_restored', nextAction: 'prepare_new_release' })
+    expect(value.failurePolicy).toBe('assess-first')
+    expect(events).toContain('recover:directorBrain')
+    expect(events).toContain('intake:resume:19')
+  })
+
+  it('keeps unknown routing protected even when recovery was explicitly selected', async () => {
+    const events: string[] = []
+    const actions = services(events, { failAt: 'probe' })
+    Object.assign(actions, { routeReadback: async () => ({ ...router, generation: 999 }) })
+    await expect(applyReleaseImpactPlan(plan(['app']), actions)).rejects.toMatchObject({ currentState: 'state_unknown', nextAction: 'resume_after_assessment' })
+    expect(events.some(event => event.startsWith('recover:'))).toBe(false)
+    expect(events).not.toContain('intake:resume:19')
+  })
+
+  it('settles an exactly verified prior route when the explicit shell rollback already completed', async () => {
+    const events: string[] = []
+    const actions = services(events)
+    Object.assign(actions, { transition: async () => { throw new Error('post-check failed; explicit rollback complete') },
+      routeReadback: async () => ({ ...router, generation: 9,
+        slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }) })
+    await expect(applyReleaseImpactPlan(plan(['app']), actions)).rejects.toMatchObject({ currentState: 'previous_restored' })
+    expect(events).toContain('recover:none')
+    expect(events).toContain('intake:resume:19')
+  })
+
+  it('resumes acceptance and settlement on the same sealed operation after assessment', async () => {
+    const value = plan(['app'], 'assess-first')
+    const originalHash = value.planSha256
+    const operationId = 'f'.repeat(64)
+    const events: string[] = []
+    const actions = services(events, { failAt: 'attest' })
+    const committed = { ...router, active: 'blue', previous: 'green', generation: 8,
+      slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }
+    Object.assign(actions, { routeReadback: async () => committed, operation: { scope: { operationId } } })
+    await expect(applyReleaseImpactPlan(value, actions)).rejects.toMatchObject({ currentState: 'route_committed_unverified' })
+    const attest = vi.fn(async () => undefined)
+    const assertBindings = vi.fn(async () => undefined)
+    const records: unknown[] = []
+    await expect(resumeCommittedPlan({ plan: value, scope: { operationId } }, { acceptanceVerified: false }, {
+      record: (event: unknown) => records.push(event), failurePolicy: 'assess-first',
+    }, { readRouter: async () => committed, assertBindings, attest,
+      completeHandoff: async () => undefined, restoreWorker: async () => ({ reason: 'unchanged' }), intake: actions.intake }))
+      .resolves.toMatchObject({ ok: true, resumed: true, intake: { restored: true, revision: 20 } })
+    expect(value.planSha256).toBe(originalHash)
+    expect(assertBindings).toHaveBeenCalledTimes(1)
+    expect(attest).toHaveBeenCalledTimes(1)
+    expect(events.filter(event => event === 'stage')).toHaveLength(1)
+    expect(records).toContainEqual(expect.objectContaining({ step: 'acceptance', status: 'completed' }))
+  })
+  it('keeps running work and the independent worker alive for a verified Web-only release', async () => {
+    const events: string[] = []
+    const binding = { schema: 'video-autoworker-independent-worker-release/v1',
+      stateDir: '/private/worker', manifestPath: '/private/worker-artifact/worker-manifest.json',
+      manifestSha256: 'b'.repeat(64), contentSha256: 'c'.repeat(64), pid: 123,
+      database: { dev: '1', ino: '2', pathSha256: 'd'.repeat(64) }, sourceUnchanged: true, healthy: true }
+    let control = { ...activeIntake(), counts: { active: 3 } }
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: control,
+      components: components(['app']), artifactRoot: '/private/artifact',
+      artifactManifestSha256: 'a'.repeat(64), runtimeConvergenceProof: '/private/proof.json', workerBinding: binding })
+    expect(value.admissionPolicy).toBe('pause-new')
+    const actions = services(events, { initialControl: control })
+    const assertWorker = vi.fn(async () => binding)
+    actions.intake.read = async () => control
+    actions.intake.mutate = async (action, revision, reason) => {
+      control = { ...control, accepting: action === 'resume',
+        mode: action === 'resume' ? 'active' : 'draining', revision: revision + 1, reason: reason || null }
+      return control
+    }
+    actions.intake.waitPaused = vi.fn(async () => { throw new Error('must not drain active work') })
+    await applyReleaseImpactPlan(value, { ...actions, assertWorker })
+    expect(assertWorker).toHaveBeenCalledTimes(2)
+    expect(actions.intake.waitPaused).not.toHaveBeenCalled()
+    expect(events).not.toContain('worker:pause')
+    expect(events).not.toContain('worker:resume')
+    expect(control).toMatchObject({ accepting: true, counts: { active: 3 }, revision: 20 })
+  })
+
+  it('does not enable a fast release when worker source or health differs', () => {
+    const binding = { schema: 'video-autoworker-independent-worker-release/v1',
+      stateDir: '/private/worker', manifestPath: '/private/worker-artifact/worker-manifest.json',
+      manifestSha256: 'b'.repeat(64), contentSha256: 'c'.repeat(64), pid: 123,
+      database: { dev: '1', ino: '2', pathSha256: 'd'.repeat(64) }, sourceUnchanged: false, healthy: true }
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(),
+      components: components(['app']), artifactRoot: '/private/artifact',
+      artifactManifestSha256: 'a'.repeat(64), runtimeConvergenceProof: '/private/proof.json', workerBinding: binding })
+    expect(value.admissionPolicy).toBe('drain-all')
+  })
+
   it('uses logical component tree digests and ignores docs and tests', () => {
     const base = new Map([
       ['src/app/page.tsx', '100644:blob:a'],

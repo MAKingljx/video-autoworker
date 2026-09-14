@@ -807,8 +807,10 @@ export function buildN8nReleaseReadiness(
     || !Number.isSafeInteger(scheduler.observedAt) || scheduler.observedAt < 0
     || scheduler.observedAt > observedAt
     || !Number.isSafeInteger(scheduler.activeJobs) || scheduler.activeJobs < 0
-    || !Number.isSafeInteger(scheduler.routerGeneration)
-    || Number(scheduler.routerGeneration) < 1
+    || (!(scheduler.state === 'inactive' && scheduler.reason === 'web_scheduler_disabled'
+      && scheduler.routerGeneration === null)
+      && (!Number.isSafeInteger(scheduler.routerGeneration)
+        || Number(scheduler.routerGeneration) < 1))
     || typeof scheduler.reason !== 'string' || scheduler.reason.length < 1
     || scheduler.reason.length > 120
     || typeof scheduler.leaseExpired !== 'boolean') {

@@ -19,13 +19,22 @@ import { detectProviderSubscriptions, getPrimarySubscription } from '@/lib/provi
 import { APP_VERSION } from '@/lib/version'
 import { isHermesInstalled, scanHermesSessions } from '@/lib/hermes-sessions'
 import { registerMcAsDashboard } from '@/lib/gateway-runtime'
+import { healthHttpStatus, readStorageSnapshot, storageHealthCheck, summarizeHealth, type HealthCheck, type StorageTarget } from '@/lib/system-health'
 
 export async function GET(request: NextRequest) {
-  // Docker/Kubernetes health probes must work without auth/cookies.
+  // Process liveness never depends on the database or external runtimes.
   const preAction = new URL(request.url).searchParams.get('action') || 'overview'
-  if (preAction === 'health') {
-    const health = await performHealthCheck()
-    return NextResponse.json(health)
+  if (preAction === 'liveness') {
+    return NextResponse.json({ status: 'alive', version: APP_VERSION, uptime: process.uptime(), timestamp: Date.now() }, {
+      headers: { 'Cache-Control': 'no-store' },
+    })
+  }
+  // Readiness gates this application's traffic; health also reports its external Gateway dependency.
+  if (preAction === 'health' || preAction === 'readiness') {
+    const health = await performHealthCheck(preAction === 'health')
+    return NextResponse.json(health, {
+      status: healthHttpStatus(health.status), headers: { 'Cache-Control': 'no-store' },
+    })
   }
 
   const auth = requireRole(request, 'viewer')
@@ -53,11 +62,6 @@ export async function GET(request: NextRequest) {
     if (action === 'models') {
       const models = await getAvailableModels()
       return NextResponse.json({ models })
-    }
-
-    if (action === 'health') {
-      const health = await performHealthCheck()
-      return NextResponse.json(health)
     }
 
     if (action === 'capabilities') {
@@ -134,6 +138,17 @@ async function getMemorySnapshot() {
     availableBytes,
     usedBytes,
     usagePercent,
+  }
+}
+
+async function getStorageSnapshot() {
+  const targets: StorageTarget[] = [{ role: 'database', path: config.dbPath }]
+  const materialsRoot = process.env.MC_MATERIALS_WORKSPACE_ROOT?.trim()
+  const localMaterials = process.env.MC_OPENCLAW_PROFILE_TARGET?.trim().toLowerCase() === 'local'
+  if (localMaterials && materialsRoot) targets.push({ role: 'materials', path: materialsRoot })
+  return {
+    ...await readStorageSnapshot(targets),
+    materialsCoverage: !localMaterials ? 'remote_not_sampled' : materialsRoot ? 'local_sampled' : 'root_unconfigured',
   }
 }
 
@@ -257,7 +272,7 @@ async function getSystemStatus(workspaceId: number) {
     timestamp: Date.now(),
     uptime: 0,
     memory: { total: 0, used: 0, available: 0 },
-    disk: { total: 0, used: 0, available: 0 },
+    disk: { total: null, used: null, available: null, usage: null, status: 'error' },
     sessions: unavailableRuntimeSessionOverview(),
     processes: []
   }
@@ -297,20 +312,7 @@ async function getSystemStatus(workspaceId: number) {
   }
 
   try {
-    // Disk info
-    const { stdout: diskOutput } = await runCommand('df', ['-h', '/'], {
-      timeoutMs: 3000
-    })
-    const lastLine = diskOutput.trim().split('\n').pop() || ''
-    const diskParts = lastLine.split(/\s+/)
-    if (diskParts.length >= 4) {
-      status.disk = {
-        total: diskParts[1],
-        used: diskParts[2],
-        available: diskParts[3],
-        usage: diskParts[4]
-      }
-    }
+    status.disk = await getStorageSnapshot()
   } catch (error) {
     logger.error({ err: error }, 'Error getting disk info')
   }
@@ -459,12 +461,11 @@ async function getAvailableModels() {
   return models
 }
 
-async function performHealthCheck() {
-  const health: any = {
-    status: 'healthy',
+async function performHealthCheck(includeGateway: boolean) {
+  const health = {
     version: APP_VERSION,
     uptime: process.uptime(),
-    checks: [],
+    checks: [] as HealthCheck[],
     timestamp: Date.now()
   }
 
@@ -475,7 +476,7 @@ async function performHealthCheck() {
     db.prepare('SELECT 1').get()
     const elapsed = Date.now() - start
 
-    let dbStatus: string
+    let dbStatus: HealthCheck['status']
     if (elapsed > 1000) {
       dbStatus = 'warning'
     } else {
@@ -502,7 +503,7 @@ async function performHealthCheck() {
   try {
     const mem = process.memoryUsage()
     const rssMB = Math.round(mem.rss / (1024 * 1024))
-    let memStatus = 'healthy'
+    let memStatus: HealthCheck['status'] = 'healthy'
     if (mem.rss > 800 * 1024 * 1024) {
       memStatus = 'critical'
     } else if (mem.rss > 400 * 1024 * 1024) {
@@ -527,39 +528,28 @@ async function performHealthCheck() {
     })
   }
 
-  // Check gateway connection
-  try {
-    const gatewayStatus = await getGatewayStatus()
-    health.checks.push({
-      name: 'Gateway',
-      status: gatewayStatus.running ? 'healthy' : 'unhealthy',
-      message: gatewayStatus.running ? 'Gateway is running' : 'Gateway is not running'
-    })
-  } catch (error) {
-    health.checks.push({
-      name: 'Gateway',
-      status: 'error',
-      message: 'Failed to check gateway status'
-    })
+  // A process name alone does not prove the configured Gateway socket is reachable.
+  if (includeGateway) {
+    try {
+      const gatewayStatus = await getGatewayStatus()
+      health.checks.push({
+        name: 'Gateway',
+        status: gatewayStatus.port_listening ? 'healthy' : 'unhealthy',
+        message: gatewayStatus.port_listening ? 'Gateway is reachable' : 'Gateway is not reachable'
+      })
+    } catch {
+      health.checks.push({
+        name: 'Gateway', status: 'error', message: 'Failed to check gateway status'
+      })
+    }
   }
 
-  // Check disk space (cross-platform: use df -h / and parse capacity column)
+  // The database/materials volume can differ from the read-only macOS system volume.
   try {
-    const { stdout } = await runCommand('df', ['-h', '/'], {
-      timeoutMs: 3000
-    })
-    const lines = stdout.trim().split('\n')
-    const last = lines[lines.length - 1] || ''
-    const parts = last.split(/\s+/)
-    // On macOS capacity is col 4 ("85%"), on Linux use% is col 4 as well
-    const pctField = parts.find(p => p.endsWith('%')) || '0%'
-    const usagePercent = parseInt(pctField.replace('%', '') || '0')
-
-    health.checks.push({
-      name: 'Disk Space',
-      status: usagePercent < 90 ? 'healthy' : usagePercent < 95 ? 'warning' : 'critical',
-      message: `Disk usage: ${usagePercent}%`
-    })
+    const storage = await getStorageSnapshot()
+    health.checks.push({ ...storageHealthCheck(storage), detail: {
+      volumes: storage.volumes, materialsCoverage: storage.materialsCoverage,
+    } })
   } catch (error) {
     health.checks.push({
       name: 'Disk Space',
@@ -585,23 +575,7 @@ async function performHealthCheck() {
     })
   }
 
-  // Determine overall health
-  const hasError = health.checks.some((check: any) => check.status === 'error')
-  const hasCritical = health.checks.some((check: any) => check.status === 'critical')
-  const hasWarning = health.checks.some((check: any) => check.status === 'warning')
-  const hasDegraded = health.checks.some((check: any) =>
-    check.name === 'Database' && check.status === 'warning'
-  )
-
-  if (hasError || hasCritical) {
-    health.status = 'unhealthy'
-  } else if (hasDegraded) {
-    health.status = 'degraded'
-  } else if (hasWarning) {
-    health.status = 'warning'
-  }
-
-  return health
+  return { status: summarizeHealth(health.checks), ...health }
 }
 
 async function getCapabilities(request?: NextRequest) {

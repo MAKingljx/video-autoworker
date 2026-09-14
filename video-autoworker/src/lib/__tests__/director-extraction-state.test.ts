@@ -22,11 +22,17 @@ import {
   isDirectorExtractionAcceptedStatus,
   isDirectorExtractionTerminalStatus,
   parseDirectorExtractionOutput,
+  parseDirectorExtractionCheckpointOutput,
+  assertDirectorExtractionReadableContractDigest,
+  DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+  directorExtractionDigest,
+  normalizeDirectorExtractionCheckpointForProjection,
   reviewedDirectorReferencesSchema,
   type DirectorExtractionCandidate,
   type DirectorExtractionIdentity,
   type DirectorExtractionPhase,
 } from '@/lib/director-extraction-state'
+import { directorDomainCounterexamples } from './fixtures/director-domain-semantics'
 
 const evidenceRefs = [{
   materialId: 'MAT-001',
@@ -44,22 +50,10 @@ function candidate(
   const semanticFields = DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND[
     kind as keyof typeof DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND
   ]
-  const semanticValue = (field: 'title' | 'summary' | 'rationale', fallback: string) => {
-    const fieldName = semanticFields?.[field]
-    const value = fieldName ? fields[fieldName] : undefined
-    return typeof value === 'string' && value.trim() ? value.trim() : fallback
-  }
-  const title = semanticValue('title', `${kind} candidate`)
-  const summary = semanticValue('summary', '只包含可核验摘要。')
-  const rationale = semanticFields?.rationale === semanticFields?.summary
-    ? summary
-    : semanticValue('rationale', '只根据已核验证据判断。')
-  const semanticFieldsPayload = { ...fields }
-  if (semanticFields) {
-    semanticFieldsPayload[semanticFields.title] ??= title
-    semanticFieldsPayload[semanticFields.summary] ??= summary
-    semanticFieldsPayload[semanticFields.rationale] ??= rationale
-  }
+  const title = String(fields[semanticFields.title] || `${kind} candidate`)
+  const summary = '只包含可核验摘要。'
+  const rationale = '只根据已核验证据判断。'
+  const semanticFieldsPayload = { ...fields, [semanticFields.title]: title }
   return {
     candidateKey: `candidate-${kind}`,
     kind,
@@ -76,7 +70,7 @@ function candidate(
 }
 
 function output(phase: DirectorExtractionPhase, candidates: DirectorExtractionCandidate[]) {
-  return { schemaVersion: 1 as const, phase, candidates }
+  return { schemaVersion: 2 as const, phase, candidates }
 }
 
 function extractionIdentity(
@@ -212,12 +206,12 @@ describe('director extraction state contract', () => {
     ]))).toThrow()
   })
 
-  it('derives duplicated projection semantics from the canonical candidate fields', () => {
+  it('keeps domain facts independent of review summary and rationale', () => {
     const profile = candidate('person_profile', {
       '人物名称': '模型重复名称',
       '人物 ID': 'PERSON-XIAOLIN',
-      '人物弧光': '模型重复摘要',
-      '矛盾': '模型重复理由',
+      '人物弧光': '未观察到明确变化',
+      '矛盾': '证据不足,未知',
       '置信度': 0.2,
     })
     profile.title = '小林'
@@ -230,10 +224,70 @@ describe('director extraction state contract', () => {
     ).candidates[0]
     expect(parsed.fields).toMatchObject({
       '人物名称': '小林',
-      '人物弧光': '人物开始重新检验原有判断。',
-      '矛盾': '该变化由已核验证据支持。',
+      '人物弧光': '未观察到明确变化',
+      '矛盾': '证据不足,未知',
       '置信度': 0.8,
     })
+  })
+
+  it('preserves independently authored facts for four people and three stories at real evidence scale', () => {
+    const candidates = directorDomainCounterexamples()
+    const parsed = parseDirectorExtractionOutput('understanding', output('understanding', candidates))
+    expect(parsed.candidates).toHaveLength(7)
+    for (const [index, item] of parsed.candidates.entries()) {
+      expect(item.fields).toEqual(candidates[index].fields)
+      expect(item.evidenceRefs).toEqual(candidates[index].evidenceRefs)
+      expect(item.summary).toBe(candidates[index].summary)
+      expect(item.rationale).toBe(candidates[index].rationale)
+    }
+    const restaurantOwner = parsed.candidates.find(item => item.candidateKey === 'restaurant-owner')!
+    expect(restaurantOwner.fields).not.toHaveProperty('人物弧光')
+    expect(restaurantOwner.fields).not.toHaveProperty('矛盾')
+    const restaurant = parsed.candidates.find(item => item.candidateKey === 'restaurant')!
+    expect(restaurant.fields['变化']).toBe('生活问题的解决情况未知')
+    expect(restaurant.fields['变化']).not.toBe(restaurant.rationale)
+  })
+
+  it('reads known legacy checkpoints without changing data and refuses old or unknown model output', () => {
+    const legacy = { ...output('understanding', directorDomainCounterexamples()), schemaVersion: 1 }
+    legacy.candidates[0].fields['人物弧光'] = '旧的简介：没有重新解释。'
+    const before = JSON.stringify(legacy)
+    const digest = directorExtractionDigest(legacy)
+    const read = parseDirectorExtractionCheckpointOutput('understanding', legacy)
+    expect(JSON.stringify(read)).toBe(before)
+    expect(directorExtractionDigest(read)).toBe(digest)
+    expect(JSON.stringify(legacy)).toBe(before)
+    expect(() => parseDirectorExtractionOutput('understanding', legacy)).toThrow()
+    expect(() => parseDirectorExtractionCheckpointOutput('understanding', { ...legacy, schemaVersion: 999 })).toThrow()
+    expect(() => assertDirectorExtractionReadableContractDigest(DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST)).not.toThrow()
+    expect(() => assertDirectorExtractionReadableContractDigest('c'.repeat(64))).toThrow('director_extraction_contract_mismatch')
+  })
+
+  it('normalizes supported unprojected v1 once and keeps unverifiable old facts unknown', () => {
+    const legacy = { ...output('understanding', directorDomainCounterexamples()), schemaVersion: 1 }
+    legacy.candidates[0].fields['人物弧光'] = legacy.candidates[0].summary
+    legacy.candidates[0].fields['矛盾'] = legacy.candidates[0].rationale
+    const input = {
+      contract: 'director-extraction-v3', promptVersion: 'director-extraction-prompts-v3',
+      projectionVersion: 'feishu-candidate-projection-v2',
+      extractionContractDigest: DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST,
+    }
+    const original = JSON.stringify(legacy)
+    const first = normalizeDirectorExtractionCheckpointForProjection('understanding', legacy, input)
+    const retry = normalizeDirectorExtractionCheckpointForProjection('understanding', legacy, input)
+    expect(first).toEqual(retry)
+    expect(JSON.stringify(legacy)).toBe(original)
+    expect(first.output.schemaVersion).toBe(2)
+    expect(first.output.candidates[0].fields['人物弧光']).toBe('未知,需补充前后变化证据。')
+    expect(first.output.candidates[0].summary).toBe(legacy.candidates[0].summary)
+    expect(first.receipt).toMatchObject({
+      sourceCheckpointSha256: directorExtractionDigest(legacy),
+      normalizedOutputSha256: directorExtractionDigest(first.output),
+    })
+    expect(() => normalizeDirectorExtractionCheckpointForProjection('understanding', legacy, {
+      ...input, extractionContractDigest: 'f'.repeat(64),
+    })).toThrow('director_extraction_contract_mismatch')
+    expect(normalizeDirectorExtractionCheckpointForProjection('understanding', first.output, input).receipt).toBeNull()
   })
 
   it('rejects sensitive content before it can become a projection candidate', () => {
@@ -542,7 +596,7 @@ describe('director extraction state contract', () => {
     expect(schema).toMatchObject({
       type: 'object', additionalProperties: false,
       properties: {
-        schemaVersion: { const: 1 },
+        schemaVersion: { const: 2 },
         phase: { const: 'understanding' },
         candidates: { minItems: 1, maxItems: 64 },
       },
@@ -565,8 +619,8 @@ describe('director extraction state contract', () => {
       schemaVersion: 2,
       contract: DIRECTOR_EXTRACTION_CONTRACT,
       extractionContractDigest: directorExtractionContractDigest(),
-      promptVersion: 'director-extraction-prompts-v3',
-      projectionVersion: 'feishu-candidate-projection-v2',
+      promptVersion: 'director-extraction-prompts-v4',
+      projectionVersion: 'feishu-candidate-projection-v3',
       phase: 'perception',
       projectId: DIRECTOR_EXTRACTION_PROJECT_ID,
       workId: 'WORK-001',

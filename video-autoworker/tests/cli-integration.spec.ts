@@ -52,10 +52,11 @@ test.describe('CLI Integration', () => {
 
   // --- Status ---
 
-  test('status health returns healthy', async () => {
+  test('status health reports dependency failures through its exit code', async () => {
     const { parsed, exitCode } = await mc('status', 'health')
-    expect(exitCode).toBe(0)
-    expect(parsed.data?.status || parsed.status).toBeDefined()
+    const status = parsed.data?.status || parsed.status
+    expect(['healthy', 'warning', 'degraded', 'unhealthy']).toContain(status)
+    expect(exitCode === 0).toBe(status !== 'unhealthy')
   })
 
   test('status overview returns system info', async () => {
@@ -200,8 +201,8 @@ test.describe('CLI Integration', () => {
 
   // --- Raw passthrough ---
 
-  test('raw GET /api/status works', async () => {
-    const { exitCode } = await mc('raw', '--method', 'GET', '--path', '/api/status?action=health')
+  test('raw GET readiness works without an external Gateway', async () => {
+    const { exitCode } = await mc('raw', '--method', 'GET', '--path', '/api/status?action=readiness')
     expect(exitCode).toBe(0)
   })
 })

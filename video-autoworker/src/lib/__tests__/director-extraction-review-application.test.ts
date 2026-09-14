@@ -321,6 +321,43 @@ describe('platform-neutral director extraction review application', () => {
     expect(remote.reviewCalls()).toBe(0)
   })
 
+  it('presents actual domain fields without IDs and detects field drift even when version is unchanged', async () => {
+    const records = candidateRecords()
+    const profile = records.get('people_profiles:PERSON-REVIEW-001')!
+    Object.assign(profile.fields, {
+      '身份': '餐馆经营者', '人物弧光': '未观察到', '矛盾': '未知',
+      '人物 ID': 'PERSON-PRIVATE-IDENTITY', '关系 ID': 'RELATION-PRIVATE-IDENTITY',
+    })
+    const remote = remoteRunner(records)
+    const [review] = await listDirectorLearningReviews(db, scope, { commandRunner: remote.runner })
+    const candidate = review.candidates.find(item => item.kind === 'person_profile')!
+    expect(candidate.domainFields).toEqual([
+      { label: '身份', value: '餐馆经营者' },
+      { label: '矛盾', value: '未知' },
+      { label: '人物弧光', value: '未观察到' },
+    ])
+    expect(candidate.evidenceRanges).toEqual([{ startSeconds: 0, endSeconds: 1 }])
+    expect(JSON.stringify(candidate)).not.toContain('PRIVATE-IDENTITY')
+    const confirmation = await prepareConfirmation(db, {
+      requestId: 'request-domain-drift-001', reviewId: review.reviewId,
+      reviewRevision: review.reviewRevision, decision: 'approve', candidateIds: [candidate.candidateId],
+    }, remote.runner)
+    profile.fields['人物弧光'] = '在确认前被其他写入者改动'
+    expect((await confirmDirectorLearningReview(db, scope, actorKey, confirmation, {
+      commandRunner: remote.runner,
+    })).outcome).toBe('conflict')
+    expect(remote.reviewCalls()).toBe(0)
+  })
+
+  it('does not expose sensitive content introduced into remote domain fields', async () => {
+    const records = candidateRecords()
+    records.get('people_profiles:PERSON-REVIEW-001')!.fields['人物弧光'] = 'https://example.test/private'
+    const remote = remoteRunner(records)
+    await expect(listDirectorLearningReviews(db, scope, { commandRunner: remote.runner }))
+      .rejects.toThrow('director_extraction_candidate_sensitive')
+    expect(remote.reviewCalls()).toBe(0)
+  })
+
   it.each([
     ['approve', '已确认', true],
     ['reject', '失效', false],

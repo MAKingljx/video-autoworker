@@ -3,6 +3,7 @@ import { getDatabase } from '@/lib/db'
 import { requireN8nGlobalReleaseManager } from '@/lib/n8n-global-release-auth'
 import { getN8nIntakeControl } from '@/lib/n8n-intake-control'
 import { getSchedulerLeadershipStatus } from '@/lib/scheduler'
+import { getExternalSchedulerStatus } from '@/lib/scheduler-worker-ipc'
 import {
   directorEvidenceProjectionContractDigest,
   getDirectorEvidenceOutboxCounts,
@@ -41,6 +42,8 @@ export async function GET(request: NextRequest) {
     const database = getN8nRollingDatabaseCompatibility(db)
     const outbox = getDirectorEvidenceOutboxCounts(db)
     const control = getN8nIntakeControl(db)
+    const worker = process.env.AIWORKER_SCHEDULER_STATE_DIR
+      ? await getExternalSchedulerStatus() : null
     if (control.accepting) {
       return NextResponse.json({
         code: 'RELEASE_INTAKE_ACTIVE',
@@ -48,7 +51,7 @@ export async function GET(request: NextRequest) {
       }, { status: 409, headers: NO_STORE_HEADERS })
     }
     return NextResponse.json({
-      readiness: buildN8nReleaseReadiness(
+      readiness: { ...buildN8nReleaseReadiness(
         control,
         runtime,
         getN8nRuntimeDrainStatus(db, runtime),
@@ -63,7 +66,7 @@ export async function GET(request: NextRequest) {
           outOfScopeOutbox: outbox.outOfScopeOutbox,
           outOfScopeExtraction: outbox.outOfScopeExtraction,
         },
-      ),
+      ), ...(worker ? { worker } : {}) },
     }, { headers: NO_STORE_HEADERS })
   } catch {
     return NextResponse.json({

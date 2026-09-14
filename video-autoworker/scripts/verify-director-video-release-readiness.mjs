@@ -524,10 +524,22 @@ function extractionProjectionVersion(repositoryRoot) {
   const version = source.match(
     /DIRECTOR_EXTRACTION_PROJECTION_VERSION\s*=\s*'([^']+)'/u,
   )?.[1]
-  if (version !== 'feishu-candidate-projection-v2') {
+  if (!['feishu-candidate-projection-v2', 'feishu-candidate-projection-v3'].includes(version)) {
     fail('extraction_projection_boundary_source_invalid')
   }
   return version
+}
+
+function legacyExtractionCheckpointReadable(repositoryRoot, phaseInput, candidateOutput) {
+  const pathname = join(repositoryRoot, 'scripts/lib/director-extraction-compatibility.json')
+  const policy = JSON.parse(readFileSync(pathname, 'utf8'))
+  if (policy.schema !== 'director-extraction-compatibility/v1'
+    || !Array.isArray(policy.legacyContracts)) fail('extraction_compatibility_policy_invalid')
+  return policy.legacyContracts.some(contract => contract.supportsCheckpointRead === true
+    && contract.extractionContractDigest === phaseInput?.extractionContractDigest
+    && contract.contract === phaseInput?.contract && contract.promptVersion === phaseInput?.promptVersion
+    && contract.projectionVersion === phaseInput?.projectionVersion
+    && contract.candidateOutputSchemaVersion === candidateOutput?.schemaVersion)
 }
 
 function parsedJsonObject(value) {
@@ -740,7 +752,8 @@ export function inspectDirectorExtractionIntegrity({
         || (row.checkpoint_phase !== null && !checkpointValid)) {
         report.invalidCheckpoints++
       }
-      if (checkpointValid && phaseInput.projectionVersion !== expectedProjectionVersion) {
+      if (checkpointValid && phaseInput.projectionVersion !== expectedProjectionVersion
+        && !legacyExtractionCheckpointReadable(repository, phaseInput, candidateOutput)) {
         report.incompatibleProjectionBoundary++
       }
       const projection = parsedJsonObject(row.projection_receipt_json)

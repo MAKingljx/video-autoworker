@@ -23,6 +23,8 @@ import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-man
 import { readRouterState } from './standalone-router.mjs'
 import { verifyInstalledReleasePayloads } from './verify-director-video-release-readiness.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
+import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
+import { releaseFailureAssessment, releaseFailurePolicy } from './lib/release-failure-policy.mjs'
 import { operationsRecoveryBoundaryDeclaration } from './lib/operations-governance.mjs'
 import {
   buildReadOnlyPrewarmPlan,
@@ -199,6 +201,13 @@ export function recoveryTargetDisposition(plan, route) {
   return 'invalid'
 }
 
+function isRestoredOriginalPlanRoute(plan, route) {
+  return route?.active === plan.router.active && route.previous === plan.router.target
+    && route.generation === plan.router.generation + 2
+    && route.slots?.[route.active] === plan.router.slots[plan.router.active]
+    && route.slots?.[plan.router.target] === plan.router.releaseId
+}
+
 function validateIntake(control) {
   if (control?.schema !== 'video-autoworker-intake-control/v1'
     || control.globalScope !== true || control.canManage !== true
@@ -248,6 +257,7 @@ function validateIntakeUrl(value) {
 }
 
 function validatePlan(plan) {
+  releaseFailurePolicy(plan?.failurePolicy)
   const intakeUrl = validateIntakeUrl(plan?.intakeUrl)
   if (plan?.schema !== PLAN_SCHEMA || !COMMIT.test(plan.baseCommit)
     || !COMMIT.test(plan.sourceCommit) || !SHA256.test(plan.planSha256)
@@ -286,6 +296,13 @@ function validatePlan(plan) {
   delete copy.planSha256
   if (sha256(JSON.stringify(copy)) !== plan.planSha256) fail('plan digest is invalid')
   validateIntake(plan.intake)
+  if (plan.workerBinding) validateWorkerReleaseBinding(plan.workerBinding)
+  if (plan.workerBinding?.handoffOperationId
+    && plan.workerBinding.targetApplicationCommit !== plan.sourceCommit) fail('worker handoff target does not match this release')
+  if (plan.admissionPolicy !== undefined
+    && plan.admissionPolicy !== releaseAdmissionPolicy(plan.components, plan.workerBinding)) {
+    fail('release admission policy does not match verified component dependencies')
+  }
   return plan
 }
 
@@ -296,7 +313,7 @@ function sealPlan(plan) {
 export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intake,
   components, artifactRoot = null, runtimeConvergenceProof = null, toolBaseline = null,
   receiptDir = null, runtimeConfigSha256 = null, runtimeBinding = null,
-  artifactManifestSha256 = null,
+  artifactManifestSha256 = null, workerBinding = null, failurePolicy = 'assess-first',
   intakeUrl = 'http://127.0.0.1:3017/api/n8n/intake-control' }) {
   if (!COMMIT.test(baseCommit) || !COMMIT.test(sourceCommit)) fail('plan commits are invalid')
   validateIntake(intake)
@@ -335,7 +352,9 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
   return sealPlan({
     schema: PLAN_SCHEMA, baseCommit, sourceCommit, createdAt: Math.floor(Date.now() / 1000),
     router: { ...router, target, releaseId }, intake: structuredClone(intake),
-    components: structuredClone(components), actions, artifactRoot,
+    components: structuredClone(components), actions, artifactRoot, failurePolicy: releaseFailurePolicy(failurePolicy),
+    ...(workerBinding ? { workerBinding: structuredClone(workerBinding),
+      admissionPolicy: releaseAdmissionPolicy(components, workerBinding) } : {}),
     runtimeConvergenceProof, toolBaseline, receiptDir, intakeUrl,
     runtimeConfigSha256,
     runtimeBinding: runtimeBinding ? structuredClone(runtimeBinding) : null,
@@ -344,7 +363,7 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
 }
 
 export async function restoreOwnedIntake({ before, paused, read, mutate,
-  resumeReason = RESUME_REASON }) {
+  resumeReason = RESUME_REASON, allowDraining = false }) {
   if (!before.accepting) return { restored: false, reason: 'not_owned' }
   const current = validateIntake(await read())
   if (current.accepting === true) {
@@ -354,7 +373,8 @@ export async function restoreOwnedIntake({ before, paused, read, mutate,
     }
     return { restored: false, reason: 'revision_changed', revision: current.revision }
   }
-  if (current.revision !== paused.revision || current.mode !== 'paused') {
+  if (current.revision !== paused.revision
+    || (current.mode !== 'paused' && !(allowDraining && current.mode === 'draining'))) {
     return { restored: false, reason: 'revision_changed', revision: current.revision }
   }
   let restored
@@ -376,6 +396,8 @@ export async function restoreOwnedIntake({ before, paused, read, mutate,
 
 export async function applyReleaseImpactPlan(planSource, services) {
   const plan = validatePlan(structuredClone(planSource))
+  const failurePolicy = releaseFailurePolicy(services.operation?.failurePolicy || plan.failurePolicy)
+  const pauseNewOnly = plan.admissionPolicy === 'pause-new'
   const operationId = services.operation?.scope?.operationId || null
   const drainReason = operationReason(DRAIN_REASON, operationId)
   const resumeReason = operationReason(RESUME_REASON, operationId)
@@ -418,6 +440,9 @@ export async function applyReleaseImpactPlan(planSource, services) {
     ))
   }
   await runStep('component-preflight', () => services.assertComponents(plan))
+  if (plan.workerBinding) {
+    await runStep('worker-preflight', () => services.assertWorker(plan.workerBinding))
+  }
   const currentRouter = await runStep('router-preflight', () => services.routerStatus())
   if (currentRouter.active !== plan.router.active
     || currentRouter.generation !== plan.router.generation
@@ -429,9 +454,12 @@ export async function applyReleaseImpactPlan(planSource, services) {
   ))
   const resumingOwnedPause = services.operation?.resume === true
     && observedIntake.revision === plan.intake.revision + 1
-    && observedIntake.mode === 'paused' && !observedIntake.accepting
-    && observedIntake.counts.active === 0 && observedIntake.reason === drainReason
-  if (!sameIntake(observedIntake, plan.intake) && !resumingOwnedPause) {
+    && (observedIntake.mode === 'paused' || (pauseNewOnly && observedIntake.mode === 'draining'))
+    && !observedIntake.accepting && (pauseNewOnly || observedIntake.counts.active === 0)
+    && observedIntake.reason === drainReason
+  const sameAdmission = pauseNewOnly && observedIntake.accepting === plan.intake.accepting
+    && observedIntake.mode === plan.intake.mode && observedIntake.revision === plan.intake.revision
+  if (!sameIntake(observedIntake, plan.intake) && !sameAdmission && !resumingOwnedPause) {
     fail('intake state changed after plan')
   }
   const before = resumingOwnedPause ? validateIntake(plan.intake) : observedIntake
@@ -473,11 +501,13 @@ export async function applyReleaseImpactPlan(planSource, services) {
         paused = readback
       }
       if (paused.revision !== before.revision + 1 || paused.accepting) fail('intake drain result is invalid')
-      paused = validateIntake(await runStep('drain-intake',
-        () => services.intake.waitPaused(paused.revision), { effectState: 'intake_paused' }))
-      if (paused.accepting || paused.mode !== 'paused' || paused.revision !== before.revision + 1
-        || paused.counts.active !== 0) fail('intake did not reach the owned paused revision')
-    } else if (before.mode !== 'paused' || before.counts.active !== 0) {
+      if (!pauseNewOnly) {
+        paused = validateIntake(await runStep('drain-intake',
+          () => services.intake.waitPaused(paused.revision), { effectState: 'intake_paused' }))
+        if (paused.accepting || paused.mode !== 'paused' || paused.revision !== before.revision + 1
+          || paused.counts.active !== 0) fail('intake did not reach the owned paused revision')
+      }
+    } else if (!pauseNewOnly && (before.mode !== 'paused' || before.counts.active !== 0)) {
       fail('pre-existing intake hold has not drained')
     }
     if (['taskFlow', 'directorBrain', 'videoCommand'].some(name => plan.components[name].changed)) {
@@ -506,6 +536,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
         { effectState: 'runtime_converged' })
     }
     if (plan.components.app.changed) {
+      if (plan.workerBinding) await runStep('worker-before-transition', () => services.assertWorker(plan.workerBinding))
       try {
         if (services.transition) {
           await runStep('transition-app', () => services.transition(plan),
@@ -541,6 +572,10 @@ export async function applyReleaseImpactPlan(planSource, services) {
       await record({ step: 'acceptance', status: 'completed', phase: 'transition-app',
         effectState: 'acceptance_verified' })
     }
+    if (plan.workerBinding?.handoffOperationId) {
+      await runStep('complete-worker-handoff', () => services.completeWorkerHandoff(plan.workerBinding),
+        { effectState: 'worker_handoff_completed' })
+    }
   } catch (error) {
     if (error?.mutationNotStarted) installInFlight = null
     operationError = error
@@ -548,7 +583,16 @@ export async function applyReleaseImpactPlan(planSource, services) {
     if (operationError) {
       services.operation?.beginRecovery?.()
       try {
-        recovery = await services.recover({ plan, receipts, installInFlight, switched })
+        let current = null
+        try { current = await (services.routeReadback ? services.routeReadback() : services.routerStatus()) } catch { /* Unknown routes cannot authorize compensation. */ }
+        const assessment = releaseFailureAssessment({ policy: failurePolicy,
+          routeState: isCommittedPlanRoute(plan, current) ? 'committed'
+            : isOriginalPlanRoute(plan, current) || isRestoredOriginalPlanRoute(plan, current) ? 'original' : 'unknown',
+          errorCode: operationError.errorCode || 'release_step_failed' })
+        operationError.assessment = assessment
+        recovery = assessment.restorePrevious
+          ? await services.recover({ plan, receipts, installInFlight, switched, assessment })
+          : { ok: false, reason: 'assessment_required', assessment }
       } catch (error) {
         recovery = { ok: false, reason: 'recovery_failed', error: String(error?.message || error) }
       }
@@ -564,7 +608,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
       try {
         restore = await restoreOwnedIntake({
           before, paused, read: services.intake.read, mutate: services.intake.mutate,
-          resumeReason,
+          resumeReason, allowDraining: pauseNewOnly,
         })
       } catch (error) {
         restore = { restored: false, reason: 'restore_failed', error: String(error?.message || error) }
@@ -585,6 +629,10 @@ export async function applyReleaseImpactPlan(planSource, services) {
     )
     error.cause = operationError
     error.recovery = { components: recovery, intake: restore }
+    if (operationError.assessment) Object.assign(error, operationError.assessment)
+    if (failurePolicy === 'restore-previous' && recovery.ok && (restore.restored || !before.accepting)) {
+      Object.assign(error, { currentState: 'previous_restored', nextAction: 'prepare_new_release', keepIntakeHold: false })
+    }
     throw error
   }
   if (before.accepting && !restore.restored) fail(`intake recovery incomplete: ${restore.reason}`)
@@ -852,12 +900,53 @@ function parseArgs(argv) {
 export function assertAllowedArguments(command, values) {
   const allowed = command === 'plan'
     ? new Set(['--source-commit', '--artifact', '--runtime-convergence-proof',
-      '--tool-baseline', '--receipt-dir', '--intake-url', '--output'])
+      '--tool-baseline', '--receipt-dir', '--intake-url', '--output', '--worker-manifest', '--failure-policy'])
     : command === 'resume'
-      ? new Set(['--plan', '--runtime-convergence-proof'])
+      ? new Set(['--plan', '--runtime-convergence-proof', '--failure-policy'])
       : ['apply', 'status', 'cancel', 'doctor', 'prewarm'].includes(command)
       ? new Set(['--plan']) : new Set()
   if ([...values.keys()].some(key => !allowed.has(key))) fail('arguments are invalid')
+  if (values.has('--failure-policy')) releaseFailurePolicy(values.get('--failure-policy'))
+}
+
+export function releaseWorkerEnvironment(plan) {
+  const binding = plan.workerBinding
+  return binding ? {
+    AIWORKER_BG_EXPECTED_WORKER_SHA: binding.contentSha256,
+    AIWORKER_BG_EXPECTED_WORKER_PID: String(binding.pid),
+    AIWORKER_BG_EXPECTED_WORKER_MANIFEST: binding.manifestPath,
+    AIWORKER_BG_EXPECTED_WORKER_MANIFEST_SHA: binding.manifestSha256,
+    AIWORKER_BG_WORKER_STATE_DIR: binding.stateDir,
+    AIWORKER_BG_WORKER_HANDOFF_OPERATION: binding.handoffOperationId || '',
+    AIWORKER_BG_WORKER_TARGET_COMMIT: plan.sourceCommit,
+  } : {}
+}
+
+async function assertPlannedWorker(plan) {
+  const expected = plan.workerBinding
+  if (!expected) return
+  const current = await inspectWorkerRelease({ manifestPath: expected.manifestPath,
+    stateDir: expected.stateDir, databasePath: plan.runtimeBinding.liveDbPath, productRoot })
+  const expectedStatic = { ...expected }; const currentStatic = { ...current }
+  delete expectedStatic.healthy; delete currentStatic.healthy
+  if (JSON.stringify(currentStatic) !== JSON.stringify(expectedStatic)
+    || (expected.healthy && !current.healthy)
+    || (!expected.handoffOperationId && current.healthy !== expected.healthy)) {
+    fail('independent worker changed after plan')
+  }
+}
+
+async function completePlannedWorkerHandoff(plan) {
+  const expected = plan.workerBinding
+  if (!expected?.handoffOperationId) return
+  const result = JSON.parse(await managed(process.execPath, [join(productRoot, 'scripts/manage-scheduler-worker.mjs'),
+    'complete-handoff', '--state-dir', expected.stateDir, '--operation-id', expected.handoffOperationId,
+    '--manifest', expected.manifestPath, '--database', plan.runtimeBinding.liveDbPath,
+    '--expected-pid', String(expected.pid), '--expected-content-sha256', expected.contentSha256], 60_000))
+  if (result.currentState !== 'completed' || result.operationId !== expected.handoffOperationId) {
+    fail('worker handoff completion was not verified')
+  }
+  return result
 }
 
 export function validateResumeRuntimeProofOverride(pathname) {
@@ -1081,6 +1170,12 @@ async function createPlan(values) {
   const artifactRoot = values.get('--artifact') || null
   const artifactBinding = components.app.changed
     ? artifactPlanBinding(artifactRoot, sourceCommit) : null
+  const workerManifest = values.get('--worker-manifest') || process.env.AIWORKER_SCHEDULER_MANIFEST
+  const workerBinding = workerManifest ? await inspectWorkerRelease({ manifestPath: workerManifest,
+    stateDir: process.env.AIWORKER_SCHEDULER_STATE_DIR, databasePath: runtimeBinding.liveDbPath, productRoot }) : null
+  if (workerBinding && !workerBinding.sourceUnchanged) {
+    fail('worker source changed; prepare and validate its separate managed maintenance before creating the Web release plan')
+  }
   const plan = buildReleaseImpactPlan({
     baseCommit, sourceCommit, router, intake: await intakeClient(url).read(), components,
     artifactRoot,
@@ -1088,7 +1183,8 @@ async function createPlan(values) {
     toolBaseline: values.get('--tool-baseline') || null,
     receiptDir: values.get('--receipt-dir') || null, intakeUrl,
     runtimeConfigSha256: runtimeBinding.configSha256, runtimeBinding,
-    artifactManifestSha256: artifactBinding?.manifestSha256 || null,
+    artifactManifestSha256: artifactBinding?.manifestSha256 || null, workerBinding,
+    failurePolicy: values.get('--failure-policy') || 'assess-first',
   })
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
   const output = values.get('--output')
@@ -1132,16 +1228,18 @@ async function executePlan(values, operation = null) {
   const blueGreen = step => buildBlueGreenCommand({
     script: blueGreenScript, step, plan, releasesDir: releases,
   })
-  const deploy = (...args) => managed('/bin/bash', [blueGreenScript, ...args])
+  const workerEnvironment = { ...releaseWorkerEnvironment(plan),
+    AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation?.failurePolicy || plan.failurePolicy) }
+  const deploy = (...args) => managed('/bin/bash', [blueGreenScript, ...args], 900_000, workerEnvironment)
   const runBlueGreen = (step, timeoutMs = 900_000, extraEnvironment = {}, signal) => {
     const command = blueGreen(step)
-    return managed(command.command, command.args, timeoutMs, extraEnvironment, signal)
+    return managed(command.command, command.args, timeoutMs, { ...workerEnvironment, ...extraEnvironment }, signal)
   }
   let runtimeProof = operation?.runtimeProofOverride || plan.runtimeConvergenceProof
   const deployWithProof = (...args) => managed('/bin/bash', [join(productRoot,
     'scripts/deploy-blue-green.sh'), ...args], 900_000,
-  { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
-  let workerHold = null
+  { ...workerEnvironment, AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
+  let workerHold = operation?.previousWorkerHold || null
   const workerRoot = join(homedir(), 'ai-worker/state/video-autoworker/video-batches')
   const workerPlist = join(homedir(), 'Library/LaunchAgents/ai.aiworker.video-lane-supervisor.plist')
   const workerLabel = `gui/${process.getuid()}/ai.aiworker.video-lane-supervisor`
@@ -1222,6 +1320,8 @@ async function executePlan(values, operation = null) {
     completedInstall,
     pauseSharedWorker, resumeSharedWorker,
     assertSource: commit => assertCleanGitSource(productRoot, commit),
+    assertWorker: () => assertPlannedWorker(plan),
+    completeWorkerHandoff: () => completePlannedWorkerHandoff(plan),
     assertRuntimeConfig: expected => {
       if (runtimeConfigSnapshotSha256() !== expected) {
         fail('platform runtime configuration changed after plan')
@@ -1326,8 +1426,15 @@ async function executePlan(values, operation = null) {
     attest: () => runBlueGreen('attest', 180_000,
       { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof }),
     recover: async ({ receipts, installInFlight }) => {
+      if (workerEnvironment.AIWORKER_RELEASE_FAILURE_POLICY !== 'restore-previous') {
+        return { ok: false, reason: 'assessment_required' }
+      }
       if (installInFlight) return { ok: false, reason: `installer_uncertain:${installInFlight}` }
       let current = await routerStatus()
+      const restoredOriginal = isRestoredOriginalPlanRoute(plan, current)
+      if (!isCommittedPlanRoute(plan, current) && !isOriginalPlanRoute(plan, current) && !restoredOriginal) {
+        return { ok: false, reason: 'recovery_route_not_owned' }
+      }
       if (current.active === plan.router.target) {
         await deployWithProof('rollback')
         current = await routerStatus()
@@ -1417,6 +1524,31 @@ async function executePlan(values, operation = null) {
         rolledBackComponents: rollbackReceipts.map(item => item.componentKey) }
     },
   }
+  if (operation?.recoveryOnly) {
+    // A recovery choice is explicit and attempt-scoped; it never edits the sealed plan.
+    await services.assertSource(plan.sourceCommit)
+    if (plan.runtimeConfigSha256) await services.assertRuntimeConfig(plan.runtimeConfigSha256)
+    await services.assertComponents(plan)
+    const receipts = ['taskFlow', 'directorBrain', 'videoCommand']
+      .filter(name => plan.components[name].changed).map(priorInstallReceipt).filter(Boolean)
+    const recovered = await services.recover({ receipts, installInFlight: null })
+    if (!recovered.ok) fail(`explicit recovery incomplete: ${recovered.reason}`)
+    await restoreWorkerAfterInterruptedRelease(plan, operation.previousWorkerHold)
+    const intake = intakeClient(plan.intakeUrl)
+    const current = validateIntake(await intake.read())
+    const drainReason = operationReason(DRAIN_REASON, operation.scope.operationId)
+    if (!current.accepting && current.reason !== drainReason) fail('recovery intake is not owned by this operation')
+    const restored = await restoreOwnedIntake({ before: plan.intake, paused: { ...current, revision: plan.intake.revision + 1 },
+      read: intake.read, mutate: intake.mutate, allowDraining: plan.admissionPolicy === 'pause-new',
+      resumeReason: operationReason(RESUME_REASON, operation.scope.operationId) })
+    if (plan.intake.accepting && !restored.restored) fail(`recovery intake settlement failed: ${restored.reason}`)
+    operation.record({ step: 'recovery', status: 'completed', phase: 'resume', effectState: 'previous_restored' })
+    const error = new ReleaseOperationError('previous release restored; the requested new release remains unaccepted', {
+      phase: 'recovery', errorCode: 'release_restored_previous', effectState: 'previous_restored',
+    })
+    Object.assign(error, { currentState: 'previous_restored', nextAction: 'prepare_new_release' })
+    throw error
+  }
   const result = await applyReleaseImpactPlan(plan, services)
   process.stdout.write(`${JSON.stringify(result)}\n`)
   return result
@@ -1467,30 +1599,55 @@ async function restoreWorkerAfterInterruptedRelease(plan, hold = null) {
   fail('video worker did not become available during resume')
 }
 
-async function resumeCommittedPlan(contract, previousStatus, operation) {
-  const router = await plannedRouterState(contract.plan.intakeUrl, contract.plan.runtimeBinding)
+export async function resumeCommittedPlan(contract, previousStatus, operation, overrides = {}) {
+  const services = {
+    readRouter: () => plannedRouterState(contract.plan.intakeUrl, contract.plan.runtimeBinding),
+    assertBindings: async () => {
+      assertCleanGitSource(productRoot, contract.plan.sourceCommit)
+      if (contract.plan.runtimeConfigSha256 && runtimeConfigSnapshotSha256() !== contract.plan.runtimeConfigSha256) {
+        fail('platform runtime configuration changed after plan')
+      }
+      if (contract.plan.runtimeBinding && !sameRuntimeBinding(runtimeBindingSnapshot(), contract.plan.runtimeBinding)) {
+        fail('runtime binding changed after plan')
+      }
+      if (contract.plan.components.app.changed
+        && artifactPlanBinding(contract.plan.artifactRoot, contract.plan.sourceCommit).manifestSha256 !== contract.plan.artifactManifestSha256) {
+        fail('artifact manifest changed after plan')
+      }
+      await assertPlannedWorker(contract.plan)
+    },
+    attest: async () => {
+      const releases = contract.plan.runtimeBinding?.releasesDir
+        || process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
+      const command = buildBlueGreenCommand({ script: join(productRoot, 'scripts/deploy-blue-green.sh'),
+        step: 'attest', plan: contract.plan, releasesDir: releases })
+      await managed(command.command, command.args, 180_000, { ...releaseWorkerEnvironment(contract.plan),
+        AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation.failurePolicy || contract.plan.failurePolicy),
+        AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: operation.resolveResumeRuntimeProof() })
+    },
+    completeHandoff: () => completePlannedWorkerHandoff(contract.plan),
+    restoreWorker: () => restoreWorkerAfterInterruptedRelease(contract.plan, operation.previousWorkerHold),
+    intake: intakeClient(contract.plan.intakeUrl),
+    ...overrides,
+  }
+  const router = await services.readRouter()
   if (!isCommittedPlanRoute(contract.plan, router)) return null
+  await services.assertBindings()
   operation.record({ step: 'route', status: 'observed', phase: 'resume',
     effectState: 'route_committed' })
-  if (!previousStatus.acceptanceVerified) {
-    const releases = contract.plan.runtimeBinding?.releasesDir
-      || process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
-    const command = buildBlueGreenCommand({ script: join(productRoot, 'scripts/deploy-blue-green.sh'),
-      step: 'attest', plan: contract.plan, releasesDir: releases })
+  // Continuing an incomplete attempt requires fresh runtime acceptance; it does not rebuild the artifact.
+  if (!previousStatus.acceptanceVerified || previousStatus.state !== 'completed') {
     const startedAt = Date.now()
     operation.record({ step: 'acceptance', status: 'started', phase: 'resume' })
-    const runtimeProof = operation.resolveResumeRuntimeProof()
-    await managed(command.command, command.args, 180_000,
-      { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
+    await services.attest()
     operation.record({ step: 'acceptance', status: 'completed', phase: 'resume',
       effectState: 'acceptance_verified', elapsedMs: Date.now() - startedAt })
   }
-  const worker = await restoreWorkerAfterInterruptedRelease(
-    contract.plan, operation.previousWorkerHold,
-  )
+  await services.completeHandoff()
+  const worker = await services.restoreWorker()
   operation.record({ step: 'resume-shared-worker', status: 'completed', phase: 'resume',
     effectState: worker.reason })
-  const intake = intakeClient(contract.plan.intakeUrl)
+  const intake = services.intake
   const current = validateIntake(await intake.read())
   const drainReason = operationReason(DRAIN_REASON, contract.scope.operationId)
   const resumeReason = operationReason(RESUME_REASON, contract.scope.operationId)
@@ -1501,12 +1658,14 @@ async function resumeCommittedPlan(contract, previousStatus, operation) {
     if (!ownedResume) fail('active intake does not prove settlement by this release operation')
     restored = { restored: true, revision: current.revision, reason: 'already_active' }
   } else {
-    if (current.revision !== contract.plan.intake.revision + 1 || current.mode !== 'paused'
-      || current.counts.active !== 0 || current.reason !== drainReason) {
+    const pauseNewOnly = contract.plan.admissionPolicy === 'pause-new'
+    if (current.revision !== contract.plan.intake.revision + 1
+      || (current.mode !== 'paused' && !(pauseNewOnly && current.mode === 'draining'))
+      || (!pauseNewOnly && current.counts.active !== 0) || current.reason !== drainReason) {
       fail('paused intake is not owned by this release operation')
     }
     restored = await restoreOwnedIntake({ before: contract.plan.intake, paused: current,
-      read: intake.read, mutate: intake.mutate, resumeReason })
+      read: intake.read, mutate: intake.mutate, resumeReason, allowDraining: pauseNewOnly })
   }
   operation.record({ step: 'settlement', status: 'completed', phase: 'resume',
     effectState: 'owned_resources_restored' })
@@ -1569,20 +1728,27 @@ async function applyPlan(values, { resume = false } = {}) {
       contract.pathname, owner.attemptId, proofPath, 'runtime-proof-override',
     ),
     beginRecovery: () => { activeOperationSignal = null },
+    failurePolicy: releaseFailurePolicy(contract.plan.failurePolicy), recoveryOnly: false,
   }
   try {
+    const selectedPolicy = releaseFailurePolicy(values.get('--failure-policy') || contract.plan.failurePolicy)
+    record({ step: `failure-policy-${selectedPolicy}`, status: 'observed', phase: resume ? 'resume' : 'apply',
+      effectState: values.has('--failure-policy') ? 'attempt_override_selected' : 'sealed_policy_selected' })
+    operation.failurePolicy = selectedPolicy
+    operation.recoveryOnly = resume && values.get('--failure-policy') === 'restore-previous'
+    activeRuntimeEnvironment = { ...activeRuntimeEnvironment, ...releaseWorkerEnvironment(contract.plan),
+      AIWORKER_RELEASE_FAILURE_POLICY: selectedPolicy }
     if (runtimeProofOverride) {
       operation.persistRuntimeProofOverride(runtimeProofOverride)
       record({ step: 'runtime-proof-override', status: 'completed', phase: 'resume',
         effectState: 'attempt-reference-persisted' })
     }
     let result
-    if (resume) {
+    if (operation.recoveryOnly) {
+      result = await executePlan(values, operation)
+    } else if (resume) {
       result = await resumeCommittedPlan(contract, previousStatus, operation)
       if (!result) {
-        await restoreWorkerAfterInterruptedRelease(
-          contract.plan, operation.previousWorkerHold,
-        )
         result = await executePlan(values, operation)
       }
     } else {
@@ -1598,6 +1764,13 @@ async function applyPlan(values, { resume = false } = {}) {
     const structured = classifyReleaseOperationError(error, {
       phase: error?.phase || (resume ? 'resume' : 'apply'), effectState: error?.effectState || 'unknown',
     })
+    if (!structured.currentState) {
+      let router = null
+      try { router = await plannedRouterState(contract.plan.intakeUrl, contract.plan.runtimeBinding) } catch { /* Keep unknown state protected. */ }
+      Object.assign(structured, releaseFailureAssessment({ policy: operation.failurePolicy,
+        routeState: isCommittedPlanRoute(contract.plan, router) ? 'committed'
+          : isOriginalPlanRoute(contract.plan, router) || isRestoredOriginalPlanRoute(contract.plan, router) ? 'original' : 'unknown', errorCode: structured.errorCode }))
+    }
     try {
       record({ step: 'operation', status: cancellation.signal.aborted
         ? 'cancel_acknowledged' : 'failed', phase: structured.phase,
@@ -1776,5 +1949,10 @@ async function main() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
-  main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1 })
+  main().catch(error => {
+    process.stderr.write(`${JSON.stringify({ currentState: error.currentState || 'state_unknown',
+      errorCode: error.errorCode || 'release_preflight_failed', nextAction: error.nextAction || 'inspect_failed_preflight',
+      phase: error.phase || 'preflight', effectState: error.effectState || 'unknown' })}\n`)
+    process.exitCode = 1
+  })
 }

@@ -3,6 +3,7 @@ import {
   DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES,
 } from '@/lib/director-extraction-learning'
 import {
+  DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION,
   directorExtractionDigest,
   parseDirectorExtractionOutput,
   type DirectorExtractionCandidateOutput,
@@ -28,10 +29,10 @@ function parseSegmentOutput(
 ): DirectorExtractionCandidateOutput {
   if (phase !== 'perception' && value && typeof value === 'object' && !Array.isArray(value)) {
     const candidate = value as Record<string, unknown>
-    if (candidate.schemaVersion === 1 && candidate.phase === phase
+    if (candidate.schemaVersion === DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION && candidate.phase === phase
       && Array.isArray(candidate.candidates) && candidate.candidates.length === 0
       && Object.keys(candidate).sort().join(',') === 'candidates,phase,schemaVersion') {
-      return Object.freeze({ schemaVersion: 1, phase, candidates: [] }) as DirectorExtractionCandidateOutput
+      return Object.freeze({ schemaVersion: DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION, phase, candidates: [] }) as DirectorExtractionCandidateOutput
     }
   }
   return parseDirectorExtractionOutput(phase, value)
@@ -258,5 +259,7 @@ export function mergeDirectorExtractionSegments(
       candidates.push(candidate)
     }
   }
-  return parseDirectorExtractionOutput(phase, { schemaVersion: 1, phase, candidates })
+  return parseDirectorExtractionOutput(phase, {
+    schemaVersion: DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION, phase, candidates,
+  })
 }

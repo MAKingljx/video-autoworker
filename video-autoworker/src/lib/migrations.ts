@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import { lstatSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
-import { ensureDirectorMaintainabilitySchema } from '@/lib/director-maintainability-schema'
+import { ensureDirectorMaintainabilitySchema, assertDirectorMaintainabilitySchema } from '@/lib/director-maintainability-schema'
 
 type MigrationContext = {
   rootPath: string
@@ -1839,6 +1839,16 @@ const migrations: Migration[] = [
   }
 ]
 
+/** Read-only startup gate. Schema writes belong to the explicit prepare command. */
+export function assertDatabaseSchemaCurrent(db: Database.Database): void {
+  const applied = new Set(db.prepare('SELECT id FROM schema_migrations').all()
+    .map((row: any) => row.id))
+  if ([...migrations, ...extraMigrations].some(migration => !applied.has(migration.id))) {
+    throw new Error('database_schema_prepare_required')
+  }
+  assertDirectorMaintainabilitySchema(db)
+}
+
 export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1858,5 +1868,5 @@ export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
       db.prepare('INSERT OR IGNORE INTO schema_migrations (id) VALUES (?)').run(migration.id)
     })()
   }
-  ensureDirectorMaintainabilitySchema(db)
+  ensureDirectorMaintainabilitySchema(db, { allowCreate: true })
 }

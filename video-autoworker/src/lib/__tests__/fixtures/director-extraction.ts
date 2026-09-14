@@ -1,7 +1,8 @@
 import type { DirectorExtractionPhaseRunner } from '@/lib/director-extraction-service'
-import type {
-  DirectorExtractionCandidate,
-  DirectorExtractionPhase,
+import {
+  DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND,
+  type DirectorExtractionCandidate,
+  type DirectorExtractionPhase,
 } from '@/lib/director-extraction-state'
 
 export function createDeterministicDirectorExtractionFixtureRunner(): DirectorExtractionPhaseRunner {
@@ -21,23 +22,14 @@ export function createDeterministicDirectorExtractionFixtureRunner(): DirectorEx
       sourceCandidateKeys: string[] = [],
       lineage: Partial<Pick<DirectorExtractionCandidate, 'sourceNode' | 'targetNode'>> = {},
     ) => {
-      const semanticKeys: Record<string, [string, string, string]> = {
-        person_profile: ['人物名称', '人物弧光', '矛盾'],
-        story_node: ['节点名称', '节点内容', '变化'],
-        story_relation: ['关系名称', '判断理由', '判断理由'],
-        material_judgment: ['判断名称', '使用理由', '使用理由'],
-        narrative_proposal: ['方案名称', '结构说明', '结构说明'],
-        director_case: ['案例名称', '上下文', '判断原因'],
-        technique: ['知识名称', '执行方法', '为什么有效'],
-      }
-      const [titleKey, summaryKey, rationaleKey] = semanticKeys[kind]!
+      const titleKey = DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND[
+        kind as keyof typeof DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND
+      ].title
       const normalizedFields = { ...fields }
       const title = String(normalizedFields[titleKey] || `${kind} candidate`)
-      const summary = String(normalizedFields[summaryKey] || 'bounded fixture summary')
-      const rationale = String(normalizedFields[rationaleKey] || 'bounded fixture rationale')
+      const summary = 'bounded fixture summary'
+      const rationale = 'bounded fixture rationale'
       normalizedFields[titleKey] = title
-      normalizedFields[summaryKey] = summary
-      normalizedFields[rationaleKey] = rationale
       return {
         candidateKey,
         kind,
@@ -126,6 +118,6 @@ export function createDeterministicDirectorExtractionFixtureRunner(): DirectorEx
         '置信度': 0.8,
       }, ['fixture-case'])],
     }
-    return { schemaVersion: 1, phase, candidates: candidates[phase] }
+    return { schemaVersion: 2, phase, candidates: candidates[phase] }
   }
 }

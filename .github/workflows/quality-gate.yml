@@ -91,7 +91,7 @@ jobs:
           }
           appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''))
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-            `检查范围：${plan.mode}\n\n原因：${plan.reasons.join(', ')}\n\n变更文件：${plan.changedCount}；根测试分组：${plan.rootPartitions.length}。\n`)
+            `检查范围：${plan.mode}\n\n原因：${plan.reasons.join(', ')}\n\n变更文件：${plan.changedCount}；根测试分组：${plan.rootPartitions.length}。\n\n浏览器测试：${plan.browserTestFiles.join(', ') || '本次无相关项'}\n\n浏览器选择依据：${plan.browserReasons.join(', ')}\n`)
           JS
 
   root-tests:
@@ -229,7 +229,21 @@ jobs:
         run: pnpm exec playwright install --with-deps
       - name: E2E tests
         if: needs.plan.outputs.browser == 'true'
-        run: pnpm test:e2e
+        env:
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
+        run: node scripts/run-browser-tests.mjs
+      - name: Package the verified runtime artifact
+        if: needs.plan.outputs.integration == 'true'
+        run: node scripts/package-runtime-artifact.mjs pack --artifact .next/standalone --output .artifacts
+      - uses: actions/upload-artifact@v4
+        if: needs.plan.outputs.integration == 'true'
+        with:
+          name: runtime-${{ github.sha }}-${{ github.run_id }}-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            video-autoworker/.artifacts/runtime-*.tar.gz
+            video-autoworker/.artifacts/runtime-*.json
+          if-no-files-found: error
+          retention-days: 7
 
   quality-gate:
     name: quality-gate

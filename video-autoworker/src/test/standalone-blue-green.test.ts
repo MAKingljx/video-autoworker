@@ -2372,6 +2372,7 @@ probe_slot() {
 
 sleep() { :; }
 
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green switch
 `)
 
@@ -2382,8 +2383,8 @@ transition_with_verification green switch
         NODE_BIN: process.execPath,
       },
     }).then(() => null, error => error as Error & { stderr?: string })
-    expect(failure?.stderr).toContain('post-switch verification failed; attempting automatic rollback to blue')
-    expect(failure?.stderr).toContain('router automatically returned to blue generation 9')
+    expect(failure?.stderr).toContain('post-switch verification failed; explicit restore-previous policy selected for blue')
+    expect(failure?.stderr).toContain('router explicitly returned to blue generation 9')
     const events = readFileSync(eventsFile, 'utf8').trim().split('\n')
     const position = (event: string) => events.indexOf(event)
 
@@ -2427,6 +2428,7 @@ check_json_endpoint() {
 }
 verify_director_video_release_chain() { printf '%s\\n' '${'b'.repeat(64)}'; }
 update_state() { : > ${JSON.stringify(updateMarker)}; }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green switch
 `)
 
@@ -2530,6 +2532,7 @@ check_json_endpoint() {
 }
 verify_director_video_release_chain() { return 1; }
 update_state() { : > ${JSON.stringify(updateMarker)}; }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green switch
 `)
 
@@ -2576,6 +2579,7 @@ verify_director_video_release_chain() {
 capture_transition_release_evidence() { printf 'evidence-%s' "$1"; }
 verify_captured_transition_release_evidence() { :; }
 update_state() { printf 'update:%s:%s\\n' "$1" "$2" >> "$EVENTS_FILE"; }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green switch
 `)
 
@@ -2620,6 +2624,7 @@ check_json_endpoint() {
   fi
 }
 update_state() { : > ${JSON.stringify(updateMarker)}; }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green rollback
 `)
 
@@ -2692,6 +2697,7 @@ update_state() {
   printf 'update:%s:%s:%s\\n' "$2" "$1" "$state_generation" >> "$EVENTS_FILE"
 }
 probe_slot() { :; }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green switch
 `)
 
@@ -2699,7 +2705,7 @@ transition_with_verification green switch
       env: { ...process.env, NODE_BIN: process.execPath },
     }).then(() => null, error => error as Error & { stderr?: string })
     expect(failure?.stderr).toContain('projection compatibility changed during switch')
-    expect(failure?.stderr).toContain('router automatically returned to blue generation 9')
+    expect(failure?.stderr).toContain('router explicitly returned to blue generation 9')
     expect(failure).not.toBeNull()
     expect(readFileSync(eventsFile, 'utf8').trim().split('\n')).toEqual([
       `compatibility:${'b'.repeat(40)}-runtime:7`,
@@ -2759,6 +2765,7 @@ update_state() {
   state_generation=$((state_generation + 1))
   printf 'update:%s:%s:%s\\n' "$2" "$1" "$state_generation" >> "$EVENTS_FILE"
 }
+AIWORKER_RELEASE_FAILURE_POLICY=restore-previous
 transition_with_verification green rollback
 `)
 
@@ -2929,7 +2936,8 @@ check_legacy_databases_quiescent "$1" "$2"
       .toBeLessThan(transitionBody.indexOf(
         'verify_captured_transition_release_evidence "$target_evidence"',
       ))
-    expect(transitionBody).toContain('attempting automatic rollback')
+    expect(transitionBody).toContain('failure_policy')
+    expect(transitionBody).toContain('explicit restore-previous policy selected')
     expect(transitionBody).toContain('update_state "$source" rollback')
     expect(transitionBody).toContain(
       'verify_captured_transition_release_evidence "$source_evidence"',

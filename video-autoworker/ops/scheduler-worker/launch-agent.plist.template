@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.aiworker.scheduler-worker</string>
+  <key>ProgramArguments</key><array>
+    <string>__PINNED_NODE__</string><string>__START_SCRIPT__</string>
+    <string>--artifact</string><string>__WORKER_ARTIFACT__</string>
+    <string>--state-dir</string><string>__WORKER_STATE_DIR__</string>
+    <string>--env-file</string><string>__PLATFORM_ENV_FILE__</string>
+  </array>
+  <key>WorkingDirectory</key><string>__WORKER_ARTIFACT__</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ExitTimeOut</key><integer>0</integer>
+  <key>StandardOutPath</key><string>__WORKER_STDOUT__</string>
+  <key>StandardErrorPath</key><string>__WORKER_STDERR__</string>
+</dict></plist>

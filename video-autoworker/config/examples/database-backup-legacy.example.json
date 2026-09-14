@@ -1,0 +1,13 @@
+{
+  "schema": "video-autoworker-database-backup/v1",
+  "source": "n8n",
+  "entries": [
+    {
+      "path": "/absolute/private/legacy-recovery/n8n-state.tar.gz",
+      "format": "sqlite-tar",
+      "databaseMember": "n8n/.n8n/database.sqlite",
+      "sha256": "replace-with-verified-archive-sha256",
+      "completedAt": 0
+    }
+  ]
+}

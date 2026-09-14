@@ -2,8 +2,8 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { lstatSync, readFileSync, realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { lstatSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
@@ -87,9 +87,10 @@ function parseArguments(argv) {
 function git(gitRoot, args, options = {}) {
   return execFileSync('/usr/bin/git', ['-C', gitRoot, ...args], {
     encoding: options.encoding || 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'ignore'],
     maxBuffer: 64 * 1024 * 1024,
     env: gitSourceEnvironment(),
+    input: typeof options.input === 'string' ? Buffer.from(options.input) : options.input,
   })
 }
 
@@ -198,27 +199,146 @@ function isProductionSource(pathname) {
     && /\.(?:cjs|js|jsx|mjs|cts|ts|tsx|mts|sh)$/u.test(pathname)
 }
 
-function needsBrowser(paths) {
-  return paths.some(pathname => (
-    pathname.startsWith('public/')
-    || pathname.startsWith('messages/')
-    || pathname.startsWith('src/components/')
-    || pathname.startsWith('src/styles/')
+const BROWSER_SPEC = /^tests\/.*\.spec\.[cm]?[jt]sx?$/u
+const BROWSER_UI_SMOKE = ['tests/dashboard-overview-layout.spec.ts', 'tests/login-flow.spec.ts', 'tests/i18n-language-switcher.spec.ts']
+const BROWSER_FEATURES = [
+  [/notifications/u, ['notifications']],
+  [/(?:task-board|tasks-panel|task-runs)/u, ['tasks-crud', 'task-queue', 'task-regression', 'task-outcomes']],
+  [/workspace-projects/u, ['projects-crud', 'project-agents']],
+  [/gateway-config/u, ['gateway-config']],
+  [/multi-gateway/u, ['gateway-connect', 'gateway-health-history']],
+  [/cron-management/u, ['cron-operations']],
+  [/webhook-panel/u, ['webhooks-crud']],
+  [/alert-rules/u, ['alerts-crud']],
+  [/github-sync/u, ['github-sync']],
+  [/skills-panel/u, ['skills-crud', 'skills-registry']],
+  [/user-management/u, ['user-management']],
+  [/security-audit/u, ['security-audit', 'security-scan-api']],
+  [/exec-approval/u, ['exec-approval-allowlist']],
+  [/memory-(?:browser|graph)/u, ['memory-knowledge']],
+  [/documents-panel/u, ['docs-knowledge']],
+  [/channels-panel/u, ['channels-api']],
+  [/(?:agent-cost|cost-tracker|token-dashboard)/u, ['agent-costs']],
+  [/agent-comms/u, ['agent-comms']],
+  [/session-details/u, ['session-controls', 'sessions-continue']],
+  [/chat-page/u, ['chat-session-prefs']],
+]
+
+function isBrowserSurface(pathname) {
+  return !isTestOrFixture(pathname) && (pathname.startsWith('public/') || pathname.startsWith('messages/')
+    || pathname.startsWith('src/components/') || pathname.startsWith('src/styles/')
     || (pathname.startsWith('src/app/') && !pathname.startsWith('src/app/api/'))
-    || /\.(?:css|scss|sass|less)$/u.test(pathname)
+    || /\.(?:css|scss|sass|less)$/u.test(pathname))
+}
+
+function listBrowserFiles(productRoot) {
+  try {
+    return readdirSync(resolve(productRoot, 'tests'), { recursive: true, withFileTypes: true })
+      .filter(entry => entry.isFile())
+      .map(entry => posix.join('tests', posix.relative(resolve(productRoot, 'tests'), entry.parentPath || entry.path), entry.name))
+      .filter(pathname => BROWSER_SPEC.test(pathname)).sort()
+  } catch (error) {
+    if (error?.code === 'ENOENT') return []
+    throw error
+  }
+}
+
+// A single cat-file batch reads immutable source blobs; plan generation needs no dependency installation.
+function readBrowserSources(gitRoot, tree) {
+  const members = [...tree].filter(([member, identity]) => (
+    /^(?:src|tests)\/.+\.[cm]?[jt]sx?$/u.test(member)
+      && (!isTestOrFixture(member) || member.startsWith('tests/'))
+      && identity.startsWith('100')
   ))
+  if (!members.length) return new Map()
+  const output = git(gitRoot, ['cat-file', '--batch'], {
+    encoding: 'buffer', input: `${members.map(([, identity]) => identity.split(':').at(-1)).join('\n')}\n`,
+  })
+  let offset = 0
+  const sources = new Map()
+  for (const [member] of members) {
+    const end = output.indexOf(10, offset)
+    const match = /^[a-f0-9]+ blob (\d+)$/u.exec(output.subarray(offset, end).toString('utf8'))
+    if (!match) throw new Error('ci_browser_source_invalid')
+    const length = Number(match[1])
+    offset = end + 1
+    if (offset + length >= output.length) throw new Error('ci_browser_source_truncated')
+    sources.set(member, output.subarray(offset, offset + length).toString('utf8'))
+    offset += length + 1
+  }
+  return sources
+}
+
+/** Select changed specs, their helper dependants, API callers and the affected UI smoke/feature scopes. */
+export function selectBrowserTests({ paths, sources }) {
+  const available = [...sources.keys()].filter(member => BROWSER_SPEC.test(member)).sort()
+  const selected = new Set()
+  const reasons = new Set()
+  const add = (files, reason) => {
+    for (const member of files) if (available.includes(member)) selected.add(member)
+    reasons.add(reason)
+  }
+  const reverse = new Map()
+  const extensions = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '/index.ts', '/index.tsx', '/index.js']
+  for (const [member, source] of sources) {
+    const imports = source.matchAll(/(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"]([^'"]+)['"]/gu)
+    for (const [, specifier] of imports) {
+      const base = specifier.startsWith('@/') ? `src/${specifier.slice(2)}`
+        : specifier.startsWith('.') ? posix.normalize(posix.join(posix.dirname(member), specifier)) : null
+      if (!base) continue
+      const dependency = extensions.map(extension => `${base}${extension}`).find(candidate => sources.has(candidate) || paths.includes(candidate))
+      if (!dependency) continue
+      if (!reverse.has(dependency)) reverse.set(dependency, new Set())
+      reverse.get(dependency).add(member)
+    }
+  }
+  const affected = new Set(paths)
+  for (const member of affected) for (const consumer of reverse.get(member) || []) affected.add(consumer)
+  for (const member of affected) {
+    if (BROWSER_SPEC.test(member)) add([member], paths.includes(member) ? 'changed_browser_test' : 'browser_dependency_changed')
+    const route = /^src\/app(\/api\/.*?)\/route\.[jt]s$/u.exec(member)?.[1]
+    if (route) {
+      const prefix = route.split('/[')[0]
+      const callers = new Set([...sources].filter(([file, source]) => file.startsWith('tests/') && source.includes(prefix)).map(([file]) => file))
+      for (const caller of callers) for (const consumer of reverse.get(caller) || []) callers.add(consumer)
+      add(available.filter(file => callers.has(file)), `api_scope:${prefix}`)
+    }
+    if (isBrowserSurface(member)) {
+      add(BROWSER_UI_SMOKE, 'ui_smoke_scope')
+      for (const [pattern, specs] of BROWSER_FEATURES) {
+        if (pattern.test(member)) add(specs.map(name => `tests/${name}.spec.ts`), `ui_feature:${specs[0]}`)
+      }
+    }
+  }
+  if (paths.some(member => /^playwright(?:\.[^.]+)*\.config\.[cm]?[jt]s$/u.test(member)
+    || member.startsWith('scripts/e2e-openclaw/') || member === 'tests/e2e-artifact-integrity.ts')) {
+    add(available, 'browser_harness_changed')
+  }
+  if (!selected.size && paths.some(member => member.startsWith('tests/') && !BROWSER_SPEC.test(member))) {
+    add(available, 'browser_helper_scope_unknown')
+  }
+  const requiresBrowser = paths.some(member => BROWSER_SPEC.test(member) && sources.has(member))
+    || [...affected].some(isBrowserSurface)
+    || reasons.has('browser_harness_changed')
+    || reasons.has('browser_helper_scope_unknown')
+  if (requiresBrowser && !selected.size) throw new Error('ci_browser_selection_empty')
+  return { browserTestFiles: [...selected].sort(), browserReasons: [...reasons].sort() }
 }
 
 function unique(values) {
   return [...new Set(values)]
 }
 
-function fullPlan({ base, head, reasons, changedCount, partitions, buildCache }) {
+function fullPlan({ base, head, reasons, changedCount, partitions, buildCache, productRoot }) {
+  const browserTestFiles = listBrowserFiles(productRoot)
+  if (!browserTestFiles.length) throw new Error('ci_browser_selection_empty')
   return {
     mode: 'full', base, head, reasons: unique(reasons), changedCount,
     rootPartitions: partitions,
     relatedFiles: [],
     testFiles: [],
+    browserTestFiles,
+    browserReasons: ['explicit_full_suite'],
     pluginSuites: [...PLUGIN_SUITES],
     buildCache,
     runIntegration: true,
@@ -232,6 +352,7 @@ function unknownTargetedPlan({ base, head, reason, buildCache }) {
     mode: 'targeted', base, head, reasons: [reason], changedCount: 0,
     rootPartitions: ['regular'], relatedFiles: [],
     testFiles: [], pluginSuites: [],
+    browserTestFiles: [], browserReasons: [],
     buildCache,
     runIntegration: true, runBrowserTests: false, runPluginTests: false,
   }
@@ -251,7 +372,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       head: options.head || 'HEAD',
       reasons: ['head_or_layout_unavailable'],
       changedCount: 0,
-      partitions, buildCache,
+      partitions, buildCache, productRoot,
     }) : unknownTargetedPlan({
       base: options.base || null,
       head: options.head || 'HEAD',
@@ -261,14 +382,14 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
   let base
   if (!options.base) {
     return options.forceFull
-      ? fullPlan({ base: null, head, reasons: ['force_full', 'base_missing'], changedCount: 0, partitions, buildCache })
+      ? fullPlan({ base: null, head, reasons: ['force_full', 'base_missing'], changedCount: 0, partitions, buildCache, productRoot })
       : unknownTargetedPlan({ base: null, head, reason: 'base_missing_requires_build_static', buildCache })
   }
   try {
     base = resolveCommit(layout.gitRoot, options.base)
   } catch {
     return options.forceFull ? fullPlan({
-      base: options.base, head, reasons: ['base_unavailable'], changedCount: 0, partitions, buildCache,
+      base: options.base, head, reasons: ['base_unavailable'], changedCount: 0, partitions, buildCache, productRoot,
     }) : unknownTargetedPlan({
       base: options.base, head, reason: 'base_unknown_requires_build_static', buildCache,
     })
@@ -280,7 +401,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     headPrefix = resolveGitCommitProductPrefix(layout.gitRoot, head)
   } catch {
     return options.forceFull ? fullPlan({
-      base, head, reasons: ['commit_layout_unavailable'], changedCount: 0, partitions, buildCache,
+      base, head, reasons: ['commit_layout_unavailable'], changedCount: 0, partitions, buildCache, productRoot,
     }) : unknownTargetedPlan({
       base, head, reason: 'commit_layout_unknown_requires_build_static', buildCache,
     })
@@ -292,7 +413,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
   const changedCount = productPaths.length + repositoryPaths.length
   if (options.forceFull) {
     return fullPlan({
-      base, head, reasons: ['force_full'], changedCount, partitions, buildCache,
+      base, head, reasons: ['force_full'], changedCount, partitions, buildCache, productRoot,
     })
   }
   const layoutChanged = basePrefix !== headPrefix
@@ -301,6 +422,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['no_changes'], changedCount: 0,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      browserTestFiles: [], browserReasons: [],
       buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
@@ -314,12 +436,16 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['documentation_only'], changedCount,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      browserTestFiles: [], browserReasons: [],
       buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
   const relatedFiles = productPaths.filter(isProductionSource)
-  const testFiles = productPaths.filter(isTestFile)
+  const testFiles = productPaths.filter(pathname => isTestFile(pathname) && !pathname.startsWith('tests/'))
+  const browserSelection = selectBrowserTests({
+    paths: productPaths, sources: readBrowserSources(layout.gitRoot, headTrees.product),
+  })
   const pluginSuites = pluginSuitesFor(productPaths)
   const nonDocumentation = [...productPaths, ...repositoryPaths].filter(pathname => (
     isRuntimeSkill(pathname) || !isDocumentation(pathname)
@@ -345,11 +471,12 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     rootPartitions: ['regular'],
     relatedFiles,
     testFiles,
+    ...browserSelection,
     pluginSuites,
     buildCache,
     runIntegration: layoutChanged || relatedFiles.length > 0
-      || reasons.includes('unknown_requires_build_static'),
-    runBrowserTests: needsBrowser(productPaths),
+      || browserSelection.browserTestFiles.length > 0 || reasons.includes('unknown_requires_build_static'),
+    runBrowserTests: browserSelection.browserTestFiles.length > 0,
     runPluginTests: pluginSuites.length > 0,
   }
 }

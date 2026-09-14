@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { containsSensitiveValue } from '../../scripts/lib/sensitive-value-scanner.mjs'
+import extractionCompatibility from '../../scripts/lib/director-extraction-compatibility.json' with { type: 'json' }
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
@@ -9,10 +10,11 @@ function deepFreeze<T>(value: T): T {
 }
 
 export const DIRECTOR_EXTRACTION_PROJECT_ID = 'PROJ-VIDEO-AUTOWORKER'
-export const DIRECTOR_EXTRACTION_CONTRACT = 'director-extraction-v3'
-export const DIRECTOR_EXTRACTION_PROMPT_VERSION = 'director-extraction-prompts-v3'
-export const DIRECTOR_EXTRACTION_PROJECTION_VERSION = 'feishu-candidate-projection-v2'
-export const DIRECTOR_EXTRACTION_CANDIDATE_SCHEMA_VERSION = 'director-candidate-fields-v3'
+export const DIRECTOR_EXTRACTION_CONTRACT = 'director-extraction-v4'
+export const DIRECTOR_EXTRACTION_PROMPT_VERSION = 'director-extraction-prompts-v4'
+export const DIRECTOR_EXTRACTION_PROJECTION_VERSION = 'feishu-candidate-projection-v3'
+export const DIRECTOR_EXTRACTION_CANDIDATE_SCHEMA_VERSION = 'director-candidate-fields-v4'
+export const DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION = 2
 export const DIRECTOR_EXTRACTION_MAX_OUTPUT_BYTES = 128 * 1024
 export const DIRECTOR_EXTRACTION_LEASE_SECONDS = 15 * 60
 export const DIRECTOR_EXTRACTION_PROJECTION_BOUNDARY = deepFreeze({
@@ -107,6 +109,12 @@ export const DIRECTOR_EXTRACTION_PHASE_INSTRUCTIONS: Readonly<
   understanding: [
     '基于已核验素材观察，只生成候选人物档案和故事节点。',
     '人物推断必须保留证据时间码和不确定性；本阶段不生成故事关系。',
+    'summary是内容简介，rationale是判断依据；二者不得代替fields中的人物弧光、矛盾或事件变化。',
+    '可复用的身份、行动、事件与变化须分别写入对应fields，保留原有来源限定，不把必要事实只留在summary中。',
+    '人物弧光仅描述证据支持的前后变化；没有变化、证据不足时可省略或明确写未观察到/未知，不给配角编造成长。',
+    '矛盾只记录被观察到的对立，变化只记录事件前后状态；叙事作用、因果假设与节目陈述须标明来源和不确定性。',
+    '不同时间窗中的人物不能仅因相似处境合并身份；资料画面不等于当下采访。援助意图不等于交付、安装或改善结果。',
+    '每个事实须由evidenceRefs覆盖的具体时间窗支持；未覆盖的反应或结果不得写入，检索时间窗不冒充精确剪辑点。',
     '只输出符合输入中 outputContract 的 JSON 对象。',
   ].join(''),
   judgment: [
@@ -181,31 +189,31 @@ export const DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND = deepFreeze({
 } as const)
 
 /**
- * Model-facing title, summary, and rationale are durable semantics, not
- * disposable display metadata. Every value has an explicit governed-field
- * destination before a candidate can be projected to Feishu.
+ * Only the candidate title duplicates a governed field. Summary and rationale
+ * remain checkpoint/review metadata; domain fields are independently authored
+ * facts or explicitly qualified judgments, never destinations for that metadata.
  */
 export const DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND = deepFreeze({
   person_profile: {
-    title: '人物名称', summary: '人物弧光', rationale: '矛盾',
+    title: '人物名称',
   },
   story_node: {
-    title: '节点名称', summary: '节点内容', rationale: '变化',
+    title: '节点名称',
   },
   story_relation: {
-    title: '关系名称', summary: '判断理由', rationale: '判断理由',
+    title: '关系名称',
   },
   material_judgment: {
-    title: '判断名称', summary: '使用理由', rationale: '使用理由',
+    title: '判断名称',
   },
   narrative_proposal: {
-    title: '方案名称', summary: '结构说明', rationale: '结构说明',
+    title: '方案名称',
   },
   director_case: {
-    title: '案例名称', summary: '上下文', rationale: '判断原因',
+    title: '案例名称',
   },
   technique: {
-    title: '知识名称', summary: '执行方法', rationale: '为什么有效',
+    title: '知识名称',
   },
 } as const)
 
@@ -220,9 +228,9 @@ export const DIRECTOR_EXTRACTION_OUTPUT_FIELDS_BY_KIND = deepFreeze({
     '恐惧': '可选',
     '性格': '可选',
     '关系 ID': '可选',
-    '矛盾': '可选',
-    '情绪变化': '可选',
-    '人物弧光': '可选',
+    '矛盾': '可选；已观察到的对立，未知或未观察到须明示，不填写判断依据',
+    '情绪变化': '可选；有具体前后证据，允许未知或未观察到',
+    '人物弧光': '可选；有证据的前后变化，允许未知或未观察到，不填写人物简介',
     '观察日期': '可选；ISO 8601 或 Unix 毫秒',
     '置信度': 0.8,
   },
@@ -232,7 +240,7 @@ export const DIRECTOR_EXTRACTION_OUTPUT_FIELDS_BY_KIND = deepFreeze({
     '人物 ID': '可选',
     '发生时间': '可选',
     '节点内容': '可核验内容',
-    '变化': '可选',
+    '变化': '可选；事件前后状态及证据，允许未知或未观察到，不填写叙事解释或判断依据',
     '置信度': 0.8,
   },
   story_relation: {
@@ -301,7 +309,7 @@ export function buildDirectorExtractionOutputContract(phase: DirectorExtractionP
     technique: ['可与 candidateKey 混合，二者合计至少一个已审核 director_cases stable ID 来源'],
   }
   return deepFreeze({
-    schemaVersion: 1 as const,
+    schemaVersion: DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION,
     phase,
     candidates: phase === 'perception'
       ? []
@@ -309,8 +317,8 @@ export function buildDirectorExtractionOutputContract(phase: DirectorExtractionP
           candidateKey: `unique-${kind}-key`,
           kind,
           title: '1-160 字',
-          summary: '1-4000 字',
-          rationale: '只写可核验判断理由',
+          summary: '1-4000 字；审核简介，独立保存；事实须另入对应fields，不覆盖领域字段',
+          rationale: '只写可核验判断依据及不确定项，独立保存，不冒充领域事实',
           confidence: '0..1',
           evidenceRefs: [{
             materialId: '仅使用输入 materialId',
@@ -488,7 +496,7 @@ const forbiddenValues = [
   /(?<![A-Za-z0-9_])(?:cli_[A-Za-z0-9]{10,64}|bascn[A-Za-z0-9]{10,64}|(?:tbl|rec|fld)(?=[A-Za-z0-9]{10,32}(?![A-Za-z0-9_]))(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*[0-9])[A-Za-z0-9]{10,32})/u,
 ]
 
-function assertSafeCandidateValue(value: unknown, depth = 0): void {
+export function assertSafeCandidateValue(value: unknown, depth = 0): void {
   if (depth > 8) throw new Error('director_extraction_candidate_too_deep')
   if (typeof value === 'string') {
     if (value.length > 8_000
@@ -756,7 +764,7 @@ export function directorExtractionOutputJsonSchema(
   phase: DirectorExtractionPhase,
 ): Readonly<DirectorExtractionJsonSchema> {
   const phaseSchema = z.object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION),
     phase: z.literal(phase),
     candidates: phase === 'perception'
       ? z.array(z.never()).length(0)
@@ -808,7 +816,7 @@ function assertCandidateLineage(candidate: DirectorExtractionCandidate): void {
 }
 
 export interface DirectorExtractionCandidateOutput {
-  schemaVersion: 1
+  schemaVersion: 1 | typeof DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION
   phase: DirectorExtractionPhase
   candidates: DirectorExtractionCandidate[]
 }
@@ -954,12 +962,99 @@ export function directorExtractionContractDigest(
   return directorExtractionDigest(directorExtractionContractManifest(modelIdentity))
 }
 
+// Exact deployed v3 manifest identity, retained solely for existing task-chain
+// identity and checkpoint reads. Unprojected legacy output is normalized once
+// into the current semantics; there is no legacy model or projection runner.
+export const DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST =
+  extractionCompatibility.legacyContracts[0].extractionContractDigest
+
+export function assertDirectorExtractionReadableContractDigest(value: unknown): asserts value is string {
+  if (value !== directorExtractionContractDigest()
+    && value !== DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST) {
+    throw new Error('director_extraction_contract_mismatch')
+  }
+}
+
 export function parseDirectorExtractionOutput(
   phase: DirectorExtractionPhase,
   value: unknown,
 ): DirectorExtractionCandidateOutput {
+  return parseCandidateOutput(phase, value, false)
+}
+
+/** Validate historical checkpoints without normalizing or replacing their data. */
+export function parseDirectorExtractionCheckpointOutput(
+  phase: DirectorExtractionPhase,
+  value: unknown,
+): DirectorExtractionCandidateOutput {
+  return parseCandidateOutput(phase, value, true)
+}
+
+export const DIRECTOR_EXTRACTION_NORMALIZATION_VERSION = 'legacy-checkpoint-normalization-v1'
+
+// Retire this input adapter once both production and retained recovery points
+// contain no unprojected v1 checkpoints. Historical reads do not execute it.
+export function normalizeDirectorExtractionCheckpointForProjection(
+  phase: DirectorExtractionPhase,
+  value: unknown,
+  phaseInput: Record<string, unknown>,
+) {
+  const historical = parseDirectorExtractionCheckpointOutput(phase, value)
+  if (historical.schemaVersion === DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION) {
+    return { output: parseDirectorExtractionOutput(phase, historical), receipt: null }
+  }
+  const legacy = extractionCompatibility.legacyContracts.find(item => (
+    item.supportsUnprojectedNormalization
+    && item.extractionContractDigest === phaseInput.extractionContractDigest
+    && item.contract === phaseInput.contract
+    && item.promptVersion === phaseInput.promptVersion
+    && item.projectionVersion === phaseInput.projectionVersion
+    && item.candidateOutputSchemaVersion === historical.schemaVersion
+    && item.normalizedOutputSchemaVersion === DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION
+  ))
+  if (!legacy) throw new Error('director_extraction_contract_mismatch')
+  const candidates = historical.candidates.map(candidate => {
+    const fields = { ...candidate.fields }
+    // v3 overwrote these values with summary/rationale, so their original
+    // domain facts cannot be recovered. Preserve the explanation as metadata
+    // and explicitly require new evidence instead of promoting it to a fact.
+    if (candidate.kind === 'person_profile') {
+      fields['人物弧光'] = '未知,需补充前后变化证据。'
+      fields['矛盾'] = '未知,需补充对立关系证据。'
+    } else if (candidate.kind === 'story_node') {
+      fields['变化'] = '未知,需补充事件前后状态证据。'
+    }
+    return { ...candidate, fields }
+  })
+  const output = parseDirectorExtractionOutput(phase, {
+    schemaVersion: DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION, phase, candidates,
+  })
+  const source = {
+    version: DIRECTOR_EXTRACTION_NORMALIZATION_VERSION,
+    sourceInputSha256: directorExtractionDigest(phaseInput),
+    sourceCheckpointSha256: directorExtractionDigest(historical),
+    sourceContractDigest: legacy.extractionContractDigest,
+  }
+  return {
+    output,
+    receipt: deepFreeze({
+      ...source,
+      normalizationId: directorExtractionDigest(source),
+      targetContractDigest: directorExtractionContractDigest(),
+      normalizedOutputSha256: directorExtractionDigest(output),
+    }),
+  }
+}
+
+function parseCandidateOutput(
+  phase: DirectorExtractionPhase,
+  value: unknown,
+  checkpointRead: boolean,
+): DirectorExtractionCandidateOutput {
   const baseSchema = z.object({
-    schemaVersion: z.literal(1),
+    schemaVersion: checkpointRead
+      ? z.union([z.literal(1), z.literal(DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION)])
+      : z.literal(DIRECTOR_EXTRACTION_OUTPUT_SCHEMA_VERSION),
     phase: z.literal(phase),
     candidates: phase === 'perception'
       ? z.array(candidateSchema).length(0)
@@ -987,29 +1082,21 @@ export function parseDirectorExtractionOutput(
       candidate.kind as keyof typeof DIRECTOR_EXTRACTION_SEMANTIC_FIELDS_BY_KIND
     ]
     if (!semanticFields) throw new Error('director_extraction_candidate_kind_invalid')
-    const canonicalByField = new Map<string, string[]>()
-    for (const semantic of ['title', 'summary', 'rationale'] as const) {
-      const fieldName = semanticFields[semantic]
-      const expected = candidate[semantic].trim()
-      const values = canonicalByField.get(fieldName) || []
-      if (!values.includes(expected)) values.push(expected)
-      canonicalByField.set(fieldName, values)
-    }
-    for (const [fieldName, values] of canonicalByField) {
-      candidate.fields[fieldName] = values.join('\n')
-    }
-    if (Object.hasOwn(candidate.fields, '置信度')) {
-      candidate.fields['置信度'] = candidate.confidence
+    if (!checkpointRead) {
+      candidate.fields[semanticFields.title] = candidate.title
+      if (Object.hasOwn(candidate.fields, '置信度')) {
+        candidate.fields['置信度'] = candidate.confidence
+      }
     }
     candidate.fields = fields.parse(candidate.fields)
     assertSafeCandidateValue(candidate.fields)
     assertCandidateLineage(candidate)
   }
-  const serialized = JSON.stringify(parsed)
+  const serialized = JSON.stringify(checkpointRead ? value : parsed)
   if (Buffer.byteLength(serialized, 'utf8') > DIRECTOR_EXTRACTION_MAX_OUTPUT_BYTES) {
     throw new Error('director_extraction_output_too_large')
   }
-  return parsed
+  return checkpointRead ? structuredClone(value) as DirectorExtractionCandidateOutput : parsed
 }
 
 export function nextDirectorExtractionPhase(
@@ -1044,10 +1131,10 @@ export type DirectorExtractionIdentity = z.infer<typeof directorExtractionIdenti
 
 export interface DirectorPerceptionCheckpointInput {
   schemaVersion: 2
-  contract: typeof DIRECTOR_EXTRACTION_CONTRACT
+  contract: typeof DIRECTOR_EXTRACTION_CONTRACT | 'director-extraction-v3'
   extractionContractDigest: string
-  promptVersion: typeof DIRECTOR_EXTRACTION_PROMPT_VERSION
-  projectionVersion: typeof DIRECTOR_EXTRACTION_PROJECTION_VERSION
+  promptVersion: typeof DIRECTOR_EXTRACTION_PROMPT_VERSION | 'director-extraction-prompts-v3'
+  projectionVersion: typeof DIRECTOR_EXTRACTION_PROJECTION_VERSION | 'feishu-candidate-projection-v2'
   phase: 'perception'
   projectId: typeof DIRECTOR_EXTRACTION_PROJECT_ID
   workId: string
@@ -1065,6 +1152,28 @@ export interface DirectorPerceptionCheckpointInput {
  * perception evidence is written to Feishu. It deliberately contains no media
  * path, transcript, model output, remote record ID, credential, or runtime log.
  */
+export function buildDirectorPerceptionCheckpointInputForRead(
+  identity: DirectorExtractionIdentity,
+): Readonly<DirectorPerceptionCheckpointInput> {
+  assertDirectorExtractionReadableContractDigest(identity.extractionContractDigest)
+  if (identity.extractionContractDigest !== DIRECTOR_EXTRACTION_LEGACY_CONTRACT_DIGEST) {
+    return buildDirectorPerceptionCheckpointInput(identity)
+  }
+  const current = buildDirectorPerceptionCheckpointInput({
+    ...identity, extractionContractDigest: directorExtractionContractDigest(),
+  })
+  const legacy = extractionCompatibility.legacyContracts.find(item => (
+    item.extractionContractDigest === identity.extractionContractDigest && item.supportsCheckpointRead
+  ))!
+  return deepFreeze({
+    ...current,
+    extractionContractDigest: identity.extractionContractDigest,
+    contract: legacy.contract,
+    promptVersion: legacy.promptVersion,
+    projectionVersion: legacy.projectionVersion,
+  }) as Readonly<DirectorPerceptionCheckpointInput>
+}
+
 export function buildDirectorPerceptionCheckpointInput(
   identityValue: DirectorExtractionIdentity,
   modelIdentity: DirectorExtractionModelIdentity = DIRECTOR_EXTRACTION_DEFAULT_MODEL_IDENTITY,

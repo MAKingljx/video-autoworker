@@ -85,8 +85,14 @@ export function verifyWebhookSignature(
  * Subscribe to the event bus and fire webhooks for matching events.
  * Called once during server initialization.
  */
+let listenerInitialized = false
 export function initWebhookListener() {
+  if (listenerInitialized) return
+  listenerInitialized = true
   eventBus.on('server-event', (event: ServerEvent) => {
+    // The process that committed the mutation already owns webhook delivery.
+    // Cross-process SSE relays must not enqueue or send it a second time.
+    if (event.relayed) return
     const mapping = EVENT_MAP[event.type]
     if (!mapping) return
 

@@ -13,6 +13,8 @@ import {
 import {
   DIRECTOR_EXTRACTION_REVIEW_PHASE_BY_STATUS,
   DIRECTOR_EXTRACTION_REVIEW_STATUS_BY_PHASE,
+  DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND,
+  assertSafeCandidateValue,
   directorExtractionDigest,
   type DirectorExtractionCandidate,
   type DirectorExtractionPhase,
@@ -104,6 +106,8 @@ export interface DirectorLearningReviewCandidate {
   summary: string
   rationale: string
   confidence: number
+  domainFields: Array<{ label: string; value: string }>
+  evidenceRanges: Array<{ startSeconds: number; endSeconds: number }>
   decision: 'pending'
 }
 
@@ -120,6 +124,7 @@ export interface DirectorLearningReview {
 }
 
 type InternalCandidate = DirectorLearningReviewCandidate & {
+  contentSha256: string
   candidateKey: string
   kindLabel: string
   state: string
@@ -210,6 +215,16 @@ function recordVersion(record: Record<string, unknown>): string {
   return version
 }
 
+function candidateContentDigest(kind: string, record: Record<string, unknown>): string {
+  const fields = recordFields(record)
+  const names = kind === 'material_observation'
+    ? ['证据名称', '证据摘要', '判断理由', '置信度', '素材 ID', '起始时间码', '结束时间码']
+    : DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND[kind as keyof typeof DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND]
+  if (!names) throw new Error('director_extraction_review_projection_invalid')
+  return directorExtractionDigest(Object.fromEntries(names
+    .filter(name => Object.hasOwn(fields, name)).map(name => [name, fields[name]])))
+}
+
 function nextVersion(value: string): string {
   const match = VERSION.exec(value)
   if (!match) throw new Error('director_extraction_review_version_invalid')
@@ -269,17 +284,34 @@ function candidatePresentation(
   checkpoint: DirectorExtractionCheckpoint,
   entry: DirectorExtractionProjectionEntry,
   record: Record<string, unknown>,
-): Pick<DirectorLearningReviewCandidate, 'title' | 'summary' | 'rationale' | 'confidence'> {
+): Pick<DirectorLearningReviewCandidate,
+  'title' | 'summary' | 'rationale' | 'confidence' | 'domainFields' | 'evidenceRanges'> {
   if (entry.kind !== 'material_observation') {
     const candidate = checkpoint.candidateOutput.candidates.find(item => (
       item.candidateKey === entry.candidateKey && item.kind === entry.kind
     )) as DirectorExtractionCandidate | undefined
     if (!candidate) throw new Error('director_extraction_review_projection_invalid')
+    const projectedFields = recordFields(record)
+    const allowed = DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND[
+      candidate.kind as keyof typeof DIRECTOR_EXTRACTION_PROJECTION_FIELDS_BY_KIND
+    ]
+    // Read the actual proposed knowledge. IDs and other routing metadata stay
+    // server-side; the reviewer sees domain facts and source time windows.
+    const domainFields = allowed.filter(label => !/ID|置信度/u.test(label)).flatMap(label => {
+      const raw = projectedFields[label]
+      if (raw === undefined || raw === null || raw === '') return []
+      const value = safeString(typeof raw === 'number' ? String(raw) : raw, 4_000)
+      if (!value) throw new Error('director_extraction_review_projection_invalid')
+      assertSafeCandidateValue(value)
+      return [{ label, value }]
+    })
     return {
       title: candidate.title,
       summary: candidate.summary,
       rationale: candidate.rationale,
       confidence: candidate.confidence,
+      domainFields,
+      evidenceRanges: candidate.evidenceRefs.map(({ startSeconds, endSeconds }) => ({ startSeconds, endSeconds })),
     }
   }
   const fields = recordFields(record)
@@ -291,7 +323,11 @@ function candidatePresentation(
     || confidence < 0 || confidence > 1) {
     throw new Error('director_extraction_review_projection_invalid')
   }
-  return { title, summary, rationale, confidence }
+  return {
+    title, summary, rationale, confidence, domainFields: [],
+    evidenceRanges: entry.startSeconds !== undefined && entry.endSeconds !== undefined
+      ? [{ startSeconds: entry.startSeconds, endSeconds: entry.endSeconds }] : [],
+  }
 }
 
 function publicReview(value: InternalReview): DirectorLearningReview {
@@ -311,6 +347,8 @@ function publicReview(value: InternalReview): DirectorLearningReview {
       summary: candidate.summary,
       rationale: candidate.rationale,
       confidence: candidate.confidence,
+      domainFields: candidate.domainFields,
+      evidenceRanges: candidate.evidenceRanges,
       decision: 'pending',
     })),
   }
@@ -359,6 +397,7 @@ async function resolveInternalReview(
       state,
       version,
       reviewed: record.reviewed,
+      fieldsDigest: directorExtractionDigest(recordFields(record)),
     })
     if (!isPendingReviewRecord(entry.table, record)) continue
     const presentation = candidatePresentation(checkpoint, entry, record)
@@ -368,6 +407,7 @@ async function resolveInternalReview(
       kind: entry.kind,
       kindLabel: KIND_LABELS[entry.kind] || '导演知识候选',
       ...presentation,
+      contentSha256: candidateContentDigest(entry.kind, record),
       state,
       version,
       decision: 'pending',
@@ -521,6 +561,8 @@ function targetRecordPosition(
   target: DirectorReviewBatchTarget,
   record: Record<string, unknown>,
 ): number | null {
+  if (target.contentSha256 && (!target.kind
+    || candidateContentDigest(target.kind, record) !== target.contentSha256)) return null
   const states = [target.state, ...target.targetStatuses]
   const state = String(record.state || '')
   const version = recordVersion(record)
@@ -811,6 +853,7 @@ export async function prepareDirectorLearningReview(
       kind: value.kind,
       reviewId: input.reviewId,
       reviewRevision: input.reviewRevision,
+      contentSha256: value.contentSha256,
       state: value.state,
       version: value.version,
       targetStatuses: [...targetStatuses],

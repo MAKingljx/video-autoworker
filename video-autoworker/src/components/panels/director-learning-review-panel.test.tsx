@@ -49,6 +49,22 @@ function list(reviews: DirectorLearningReview[] = [pendingReview()]) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('DirectorLearningReviewPanel', () => {
+  it('shows domain facts and evidence ranges separately from summary and rationale', async () => {
+    const review = pendingReview()
+    review.candidates[0].domainFields = [
+      { label: '人物弧光', value: '未观察到明确变化' },
+      { label: '身份', value: '餐馆经营者' },
+    ]
+    review.candidates[0].evidenceRanges = [{ startSeconds: 1980, endSeconds: 2100 }]
+    vi.stubGlobal('fetch', vi.fn(async () => list([review])))
+    render(<DirectorLearningReviewPanel />)
+    expect(await screen.findByText('未观察到明确变化')).toBeInTheDocument()
+    expect(screen.getByText('餐馆经营者')).toBeInTheDocument()
+    expect(screen.getByText('1980–2100 秒')).toBeInTheDocument()
+    expect(screen.getByText('第 1 条候选的完整摘要。')).toBeInTheDocument()
+    expect(screen.getByText('第 1 条候选的判断依据。')).toBeInTheDocument()
+  })
+
   it('renders all seven candidates without internal identifiers', async () => {
     const review = {
       ...pendingReview(), workId: 'WORK-INTERNAL-001',

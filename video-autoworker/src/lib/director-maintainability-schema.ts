@@ -36,8 +36,14 @@ const TABLE_SQL_TOKENS = Object.freeze({
 })
 const verifiedDatabases = new WeakSet<object>()
 
-export function ensureDirectorMaintainabilitySchema(db: Database.Database): void {
+export function ensureDirectorMaintainabilitySchema(
+  db: Database.Database, options: { allowCreate?: boolean } = {},
+): void {
   if (verifiedDatabases.has(db)) return
+  if (process.env.NODE_ENV === 'production' && !options.allowCreate) {
+    assertDirectorMaintainabilitySchema(db)
+    return
+  }
   try {
     db.exec(`
     CREATE TABLE IF NOT EXISTS director_review_batches (
@@ -118,6 +124,11 @@ export function ensureDirectorMaintainabilitySchema(db: Database.Database): void
   } catch {
     throw new Error('director_maintainability_schema_invalid')
   }
+  assertDirectorMaintainabilitySchema(db)
+}
+
+export function assertDirectorMaintainabilitySchema(db: Database.Database): void {
+  if (verifiedDatabases.has(db)) return
   for (const [table, expected] of Object.entries(TABLE_COLUMNS)) {
     const columns = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
       .map(column => column.name)

@@ -41,10 +41,11 @@ type SchedulerLeaseMutationOptions = {
 
 export type SchedulerRuntimeEligibility = {
   eligible: boolean
-  mode: 'single-instance' | 'blue-green'
+  mode: 'single-instance' | 'blue-green' | 'worker'
   reason: 'single_instance' | 'slot_active' | 'slot_inactive' | 'slot_invalid'
     | 'release_mismatch'
     | 'router_state_unconfigured' | 'router_state_unsafe' | 'router_state_invalid'
+    | 'worker_ready' | 'worker_identity_invalid'
   activeSlot: 'blue' | 'green' | null
   generation: number | null
 }
@@ -64,6 +65,7 @@ export function isMultiInstanceSchedulerRuntime(
 ): boolean {
   const slot = env.AIWORKER_SLOT
   return slot === 'blue' || slot === 'green'
+    || env.AIWORKER_SCHEDULER_MODE === 'worker'
     || Boolean(env.AIWORKER_RUNTIME_ROLE)
     || Boolean(env.AIWORKER_BG_ROUTER_STATE)
 }
@@ -81,7 +83,7 @@ export function shouldStartBuiltinScheduler(
   if (env.NEXT_PHASE === 'phase-production-build') return false
   if (env.AIWORKER_DISABLE_SCHEDULER === '1') return false
   if (env.MISSION_CONTROL_TEST_MODE === '1') return false
-  return true
+  return env.AIWORKER_SCHEDULER_MODE === 'worker'
 }
 
 function invalidBlueGreenEligibility(
@@ -105,6 +107,13 @@ function invalidBlueGreenEligibility(
 export function getSchedulerRuntimeEligibility(
   env: Record<string, string | undefined> = process.env,
 ): SchedulerRuntimeEligibility {
+  if (env.AIWORKER_SCHEDULER_MODE === 'worker') {
+    const valid = /^[a-f0-9]{64}$/.test(env.AIWORKER_WORKER_CONTENT_SHA256 || '')
+      && !env.AIWORKER_SLOT && !env.AIWORKER_RELEASE_ID && !env.AIWORKER_RUNTIME_ROLE
+    return { eligible: valid, mode: 'worker',
+      reason: valid ? 'worker_ready' : 'worker_identity_invalid',
+      activeSlot: null, generation: null }
+  }
   const slot = env.AIWORKER_SLOT
   if (!slot) {
     if (env.AIWORKER_RUNTIME_ROLE || env.AIWORKER_BG_ROUTER_STATE) {

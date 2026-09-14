@@ -82,6 +82,8 @@ vi.mock('@/lib/n8n-media-cleanup', () => ({ drainN8nMediaCleanupDebts }))
 vi.mock('@/lib/director-evidence-outbox', () => ({ drainDirectorEvidenceOutbox }))
 vi.mock('@/lib/director-extraction-service', () => ({ drainDirectorExtractionJobs }))
 vi.mock('@/lib/scheduler-leader', () => ({
+  shouldStartBuiltinScheduler: () => true,
+  BUILTIN_SCHEDULER_LEASE: 'builtin_scheduler',
   acquireOrRenewSchedulerLeadership,
   createSchedulerHolderId: () => '00000000000000000000000000000000',
   getSchedulerRuntimeEligibility,
