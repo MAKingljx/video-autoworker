@@ -404,6 +404,7 @@ verify_deployment_source_gate() {
     scripts/deploy-blue-green.sh
     scripts/lib/shared-deployment-lock.sh
     scripts/lib/shared-deployment-lock.mjs
+    scripts/lib/router-retirement-control.mjs
     scripts/check-standalone-artifact.mjs
     scripts/check-sensitive-content.mjs
     scripts/lib/sensitive-value-scanner.mjs
@@ -556,13 +557,13 @@ verify_director_video_release_chain() {
   fi
   [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
     || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
+  scope="$(openclaw_scope_values)" || return 1
+  tenant="${scope%%$'\t'*}"
+  workspace="${scope#*$'\t'}"
   expected_projection_version="$("$NODE_BIN" \
     "$PROJECT_ROOT/scripts/verify-director-video-release-readiness.mjs" \
     projection-version "$APPLICATION_SOURCE_ROOT")" \
     || { printf 'error: director projection version source is unavailable\n' >&2; return 1; }
-  scope="$(openclaw_scope_values)" || return 1
-  tenant="${scope%%$'\t'*}"
-  workspace="${scope#*$'\t'}"
   report="$(MC_AUTH_MODE=openclaw-loopback \
     MC_OPENCLAW_TENANT_ID="$tenant" MC_OPENCLAW_WORKSPACE_ID="$workspace" \
     "$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
@@ -1981,6 +1982,33 @@ assert_router_identity() {
     || fail "router listener query failed"
   [[ "$listener" == "$pid" ]] || fail "port $ROUTER_PORT listener does not match the attested router PID"
   [[ -z "$transport_summary" ]] || printf '%s' "$transport_summary"
+}
+
+drain_retiring_router_connections() {
+  local slot="$1" active="$2" generation="$3" drain_summary="$4" scheduler_summary="$5"
+  [[ "${DEPLOYMENT_LOCK_OWNED:-0}" == 1 && -n "${DEPLOYMENT_LOCK_LEASE_JSON:-}" ]] \
+    || fail "router retirement requires this operation's shared deployment lock"
+  AIWORKER_ROUTER_RETIRE_LEASE="$DEPLOYMENT_LOCK_LEASE_JSON" \
+    "$NODE_BIN" --input-type=module - "$PROJECT_ROOT" "$STATE_FILE" \
+    "$(router_attestation_file)" "$ROUTER_HOST" "$ROUTER_PORT" "$slot" "$active" \
+    "$generation" "$drain_summary" "$scheduler_summary" <<'NODE'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const [root, stateFile, attestationFile, host, port, slot, active, generation, rawDrain, rawScheduler] = process.argv.slice(2)
+const { readRouterState } = await import(pathToFileURL(join(root, 'scripts/standalone-router.mjs')).href)
+const { requestRouterConnectionDrain } = await import(pathToFileURL(join(root, 'scripts/lib/router-retirement-control.mjs')).href)
+const state = readRouterState(stateFile)
+const attestation = JSON.parse(readFileSync(attestationFile, 'utf8'))
+if (state.active !== active || state.previous !== slot || state.generation !== Number(generation)
+  || attestation.stateFile !== stateFile || attestation.host !== host || attestation.port !== Number(port)) {
+  throw new Error('router_retirement_binding_changed')
+}
+const result = await requestRouterConnectionDrain({ stateFile, state, routerPid: attestation.pid,
+  routerUrl: `http://${host}:${port}/`, slot, lease: JSON.parse(process.env.AIWORKER_ROUTER_RETIRE_LEASE),
+  drain: JSON.parse(rawDrain), scheduler: JSON.parse(rawScheduler) })
+process.stdout.write(`${JSON.stringify(result)}\n`)
+NODE
 }
 
 check_routed_readonly_endpoint() {
@@ -3688,12 +3716,19 @@ retire_slot() {
   if [[ ! -e "$(callback_freeze_file "$slot")" && ! -L "$(callback_freeze_file "$slot")" ]]; then
     probe_slot "$slot" active
     "$manager" status "$slot" >/dev/null || fail "$slot is not controlled by the service manager"
-    router_summary="$(assert_router_identity "$active" "$(read_state_slot_release "$active")" \
-      "$generation" "$slot")" || fail "router identity changed before retirement freeze"
+    assert_router_identity "$active" "$(read_state_slot_release "$active")" \
+      "$generation" >/dev/null || fail "router identity changed before retirement freeze"
     drain_summary="$(check_json_endpoint drain "http://$host:$port$DRAIN_PATH" \
       "$slot" "$release_id" "$port")" || fail "$slot is not globally safe to freeze"
     scheduler_summary="$(check_json_endpoint scheduler "http://$host:$port$SCHEDULER_PATH" \
       "$generation")" || fail "$slot scheduler has not fully relinquished leadership"
+    # Close only reconnectable transports after the business/callback/scheduler
+    # gates. A remaining short HTTP or download still blocks the original gate.
+    drain_retiring_router_connections "$slot" "$active" "$generation" \
+      "$drain_summary" "$scheduler_summary" >/dev/null \
+      || fail "$slot reconnectable router transports could not be drained safely"
+    router_summary="$(assert_router_identity "$active" "$(read_state_slot_release "$active")" \
+      "$generation" "$slot")" || fail "$slot still owns non-reconnectable router requests"
     [[ "$(read_state_field active)" == "$active" && "$(read_state_field previous)" == "$slot" \
       && "$(read_state_field generation)" == "$generation" ]] \
       || fail "router state changed before callback freeze"

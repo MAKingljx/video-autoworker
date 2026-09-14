@@ -46,6 +46,8 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/director-projection-contract-compatibility.mjs',
   './scripts/lib/sensitive-value-scanner.mjs',
   './scripts/lib/shared-deployment-lock.mjs',
+  './scripts/standalone-router.mjs',
+  './scripts/lib/router-retirement-control.mjs',
   './scripts/lib/shared-deployment-lock.sh',
   './openclaw-plugins/aiworker-director-brain/index.js',
   './openclaw-plugins/aiworker-director-brain/openclaw.plugin.json',

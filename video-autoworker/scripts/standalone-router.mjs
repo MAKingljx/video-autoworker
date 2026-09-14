@@ -14,6 +14,8 @@ import {
 } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { consumeRouterRetirementRequest, ROUTER_RETIRE_CONNECTIONS_PATH,
+  ROUTER_RETIRE_CONNECTIONS_SCHEMA } from './lib/router-retirement-control.mjs'
 
 export const ROUTER_STATE_SCHEMA = 'video-autoworker-standalone-router/v1'
 export const ROUTER_HEALTH_SCHEMA = 'video-autoworker-standalone-router-health/v1'
@@ -230,6 +232,7 @@ export function createStandaloneRouter(options) {
     blue: { requests: 0, activeRequests: 0, upgradedSockets: 0 },
     green: { requests: 0, activeRequests: 0, upgradedSockets: 0 },
   }
+  const reconnectable = { blue: new Set(), green: new Set() }
 
   const server = createServer((incoming, outgoing) => {
     let originalHost
@@ -266,12 +269,41 @@ export function createStandaloneRouter(options) {
       return
     }
 
+    if (incoming.url === ROUTER_RETIRE_CONNECTIONS_PATH) {
+      const peer = incoming.socket.remoteAddress?.replace(/^::ffff:/u, '')
+      const host = new URL(`http://${originalHost}`).hostname
+      if (incoming.method !== 'POST' || !LOOPBACK_HOSTS.has(peer)
+        || !['127.0.0.1', '[::1]'].includes(host) || incoming.headers.origin
+        || incoming.headers['transfer-encoding'] || Number(incoming.headers['content-length'] || 0) !== 0) {
+        jsonResponse(outgoing, 403, { ok: false, error: 'standalone_retirement_request_denied' })
+        return
+      }
+      try {
+        const scope = consumeRouterRetirementRequest({ stateFile, state, routerPid: process.pid,
+          slot: incoming.headers['x-aiworker-retire-slot'],
+          requestId: incoming.headers['x-aiworker-retire-request'] })
+        const closed = { sse: 0, upgraded: 0 }
+        for (const connection of reconnectable[scope.slot]) {
+          closed[connection.kind] += 1
+          connection.close()
+        }
+        jsonResponse(outgoing, 200, { schema: ROUTER_RETIRE_CONNECTIONS_SCHEMA, ok: true,
+          pid: process.pid, generation: scope.generation, slot: scope.slot, closed })
+      } catch {
+        jsonResponse(outgoing, 409, { ok: false, error: 'standalone_retirement_scope_invalid' })
+      }
+      return
+    }
+
     const slot = state.active
     const backend = state.slots[slot]
     counters[slot].requests += 1
-    const settle = beginActivity(counters[slot], 'activeRequests')
+    const settleCounter = beginActivity(counters[slot], 'activeRequests')
+    let connection = null
+    const settle = () => { if (connection) reconnectable[slot].delete(connection); settleCounter() }
     let backendResponse = null
     let proxied
+    let retirementClosed = false
     const abortProxy = error => {
       if (backendResponse && !backendResponse.destroyed) backendResponse.destroy(error)
       if (proxied && !proxied.destroyed) proxied.destroy(error)
@@ -293,7 +325,7 @@ export function createStandaloneRouter(options) {
       backendResponse = response
       const abortResponse = error => {
         settle()
-        if (!outgoing.destroyed) outgoing.destroy(error)
+        if (!retirementClosed && !outgoing.destroyed) outgoing.destroy(error)
       }
       response.once('aborted', abortResponse)
       response.once('error', abortResponse)
@@ -301,12 +333,28 @@ export function createStandaloneRouter(options) {
         if (!response.complete) abortResponse()
       })
       const headers = proxyHeaders(backendResponse.headers)
+      const mediaType = String(backendResponse.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+      const attachment = /^attachment\b/iu.test(String(backendResponse.headers['content-disposition'] || ''))
+      if (incoming.method === 'GET' && backendResponse.statusCode === 200
+        && mediaType === 'text/event-stream' && !attachment) {
+        connection = { kind: 'sse', close: () => {
+          // End only this response; the EventSource client reconnects through
+          // the current router state. Ordinary HTTP/downloads are never here.
+          retirementClosed = true
+          settle()
+          backendResponse.unpipe(outgoing)
+          outgoing.end()
+          abortProxy()
+        } }
+        reconnectable[slot].add(connection)
+      }
       outgoing.writeHead(backendResponse.statusCode || 502, backendResponse.statusMessage, headers)
       backendResponse.pipe(outgoing)
     })
     proxied.once('abort', settle)
     proxied.once('error', error => {
       settle()
+      if (retirementClosed) return
       if (!outgoing.headersSent) {
         jsonResponse(outgoing, 502, { ok: false, error: 'standalone_backend_unavailable', detail: error.code || null })
       } else {
@@ -344,13 +392,21 @@ export function createStandaloneRouter(options) {
     const upstream = createConnection({ host: backend.host, port: backend.port })
     let connected = false
     let settle = () => {}
+    let connection = null
     upstream.once('connect', () => {
       if (socket.destroyed) {
         upstream.destroy()
         return
       }
       connected = true
-      settle = beginActivity(counters[slot], 'upgradedSockets')
+      const settleCounter = beginActivity(counters[slot], 'upgradedSockets')
+      settle = () => { if (connection) reconnectable[slot].delete(connection); settleCounter() }
+      connection = { kind: 'upgraded', close: () => {
+        settle()
+        socket.destroy()
+        upstream.destroy()
+      } }
+      reconnectable[slot].add(connection)
       const headers = proxyHeaders(incoming.headers, true, originalHost)
       const lines = [`${incoming.method || 'GET'} ${incoming.url || '/'} HTTP/${incoming.httpVersion}`]
       for (const [name, value] of Object.entries(headers)) {

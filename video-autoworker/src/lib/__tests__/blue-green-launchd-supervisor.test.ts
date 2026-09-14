@@ -26,6 +26,8 @@ const manager = resolve(projectRoot, 'scripts/manage-blue-green-services.sh')
 const routerScript = resolve(projectRoot, 'scripts/standalone-router.mjs')
 const slotStartScript = resolve(projectRoot, 'scripts/start-standalone-slot.sh')
 const execveContract = resolve(projectRoot, 'scripts/lib/blue-green-execve-contract.mjs')
+const retirementControl = resolve(projectRoot, 'scripts/lib/router-retirement-control.mjs')
+const sharedDeploymentLock = resolve(projectRoot, 'scripts/lib/shared-deployment-lock.mjs')
 const routerTemplate = resolve(
   projectRoot,
   'ops/video-autoworker/launchd/com.video-autoworker.blue-green.router.plist.template',
@@ -94,6 +96,8 @@ async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
     routerScript: join(scriptsDir, 'standalone-router.mjs'),
     slotStartScript: join(scriptsDir, 'start-standalone-slot.sh'),
     execveContract: join(scriptsLibDir, 'blue-green-execve-contract.mjs'),
+    retirementControl: join(scriptsLibDir, 'router-retirement-control.mjs'),
+    sharedDeploymentLock: join(scriptsLibDir, 'shared-deployment-lock.mjs'),
     routerTemplate: join(templatesDir, 'com.video-autoworker.blue-green.router.plist.template'),
     slotTemplate: join(templatesDir, 'com.video-autoworker.blue-green.slot.plist.template'),
   }
@@ -103,6 +107,8 @@ async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
     copyFile(routerScript, files.routerScript),
     copyFile(slotStartScript, files.slotStartScript),
     copyFile(execveContract, files.execveContract),
+    copyFile(retirementControl, files.retirementControl),
+    copyFile(sharedDeploymentLock, files.sharedDeploymentLock),
     copyFile(routerTemplate, files.routerTemplate),
     copyFile(slotTemplate, files.slotTemplate),
   ])
@@ -112,6 +118,8 @@ async function isolatedSupervisor(entry: Awaited<ReturnType<typeof fixture>>) {
     chmod(files.routerScript, 0o755),
     chmod(files.slotStartScript, 0o755),
     chmod(files.execveContract, 0o644),
+    chmod(files.retirementControl, 0o644),
+    chmod(files.sharedDeploymentLock, 0o644),
     chmod(files.routerTemplate, 0o644),
     chmod(files.slotTemplate, 0o644),
   ])
@@ -185,6 +193,12 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
       projectRoot,
       runDir: entry.runDir,
       releasesDir: entry.releasesDir,
+      routerDependencies: {
+        retirementControl: { path: retirementControl, uid: process.getuid?.(), mode: 0o644,
+          sha256: await sha256(retirementControl) },
+        sharedDeploymentLock: { path: sharedDeploymentLock, uid: process.getuid?.(), mode: 0o644,
+          sha256: await sha256(sharedDeploymentLock) },
+      },
       executables: {
         routerScript: {
           path: routerScript,
@@ -300,8 +314,8 @@ describe('blue-green macOS LaunchAgent supervisor', () => {
     })
   })
 
-  it('fails preflight, start, and status closed when either installed executable drifts', async () => {
-    await Promise.all((['routerScript', 'slotStartScript'] as const).map(async executableName => {
+  it('fails preflight, start, and status closed when an installed executable or router dependency drifts', async () => {
+    await Promise.all((['routerScript', 'slotStartScript', 'retirementControl', 'sharedDeploymentLock'] as const).map(async executableName => {
       const entry = await fixture()
       const isolated = await isolatedSupervisor(entry)
       await execFileAsync('bash', [isolated.installer], {

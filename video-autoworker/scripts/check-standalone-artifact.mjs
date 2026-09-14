@@ -151,6 +151,8 @@ const ALLOWED_NEXT_ROOT_FILES = new Set([
 ])
 
 const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
+  'scripts/standalone-router.mjs',
+  'scripts/lib/router-retirement-control.mjs',
   'scripts/lib/blue-green-installed-manager.mjs',
   'scripts/lib/blue-green-execve-contract.mjs',
   'scripts/apply-openclaw-runtime-convergence.sh',
@@ -1041,6 +1043,12 @@ export async function assertStandaloneStaticImportClosure(
   if (deploymentSource.includes('scripts/lib/blue-green-installed-manager.mjs')) {
     dynamicRuntimeDependencies.set('scripts/deploy-blue-green.sh', [
       'scripts/lib/blue-green-installed-manager.mjs',
+    ])
+  }
+  if (deploymentSource.includes('scripts/lib/router-retirement-control.mjs')) {
+    dynamicRuntimeDependencies.set('scripts/deploy-blue-green.sh', [
+      ...(dynamicRuntimeDependencies.get('scripts/deploy-blue-green.sh') || []),
+      'scripts/standalone-router.mjs', 'scripts/lib/router-retirement-control.mjs',
     ])
   }
   for (const importer of [

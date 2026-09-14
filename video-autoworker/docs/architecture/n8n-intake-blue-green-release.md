@@ -141,6 +141,9 @@ HEAD 的 target verifier。旧槽 callback 冻结静默后仍复查不兼容 pen
 延迟退役使用受限 ancestor 模式：active release 必须仍是干净 `main` HEAD 的祖先，才能避免
 docs-only 审计提交把已验证 release 永久挡在退役门外；该模式不接受分叉 release，也不放宽
 payload、投影闭包、standalone bundle 或 outbox 校验。
+切流前已经建立的EventSource或升级连接允许在旧槽继续到正式退役。retire先验证旧槽业务、回调、
+scheduler和数据库均已排空，再通过共享发布锁所有者绑定的单次私有请求，只关闭这两类可重连连接；
+客户端随后按新generation连接current槽。普通HTTP和下载仍受原连接计数保护，不参与强制排空。
 
 ## 数据库滚动兼容门
 

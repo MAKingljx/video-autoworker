@@ -10,6 +10,8 @@ macOS 远端维护应从已验证的固定 Node 运行环境启动该入口，�
 
 应用更新按已存在的 stage、bind、switch、rollback、retire 合同执行。绑定或切换前先读取实际路由、槽位和安装状态；已暂存但从未激活的候选不能当作生产退役槽位覆盖，须在精确证明其进程退出后保留原绑定证据，再重新准备候选。应用成功切换后，核验实际 HTTP、浏览器、数据库身份和业务数据，再按当前 revision 恢复入口。
 
+旧槽退役先完成数据库、任务、回调和scheduler门，再由持有共享发布锁的retire操作创建0600单次请求，绑定router PID、generation、previous slot和release。router只关闭旧槽的EventSource与升级连接，让客户端按当前路由自动重连；普通HTTP、下载和无法分类的请求继续阻止退役，不能为清零计数被强制中断。单次请求消费后删除，网页和普通loopback调用都不能生成有效请求。
+
 普通 `switch` 比较稳定的导演证据投影协议；源码闭包与制品摘要继续独立验证完整性。已知历史摘要通过 `src/lib/director-projection-contract-compatibility.json` 的明确映射兼容，历史outbox保留原摘要、ID和幂等键；未知协议或损坏数据拒绝切换。普通实现改动无需更新业务协议，也不要求重装未变化的薄插件。历史数据回执修复通过指定对象的幂等应用维护接口执行，不作为所有发布的前置任务。
 
 安装器或路由器升级属于独立维护步骤。目标 release 新增 auditor 依赖时，旧 slot launcher 会继续调用其安装绑定的旧 auditor，因此须先用官方 execve-adapter installer 以 CAS 更新 slot runtime 闭包；不能绕过 auditor，也不重做 legacy bootstrap。保留旧安装文件和原历史源码；所有被停止的服务须核实精确 label、PID 和监听缺席，再处理旧运行证明。维护 HTTP 复查使用短连接，避免跨进程重启复用连接；读取允许在明确期限内重试，写入不盲重试，响应不确定时先 GET 对账实际 revision。

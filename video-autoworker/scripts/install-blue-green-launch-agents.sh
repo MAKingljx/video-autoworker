@@ -291,6 +291,10 @@ const service = (name, source, port) => ({
   port: Number(port),
   sha256: digest(source),
 })
+const routerDependencies = fs.readFileSync(routerScript, 'utf8').includes("'./lib/router-retirement-control.mjs'")
+  ? { retirementControl: executable(path.join(projectRoot, 'scripts/lib/router-retirement-control.mjs'), 0o644),
+    sharedDeploymentLock: executable(path.join(projectRoot, 'scripts/lib/shared-deployment-lock.mjs'), 0o644) }
+  : null
 const payload = {
   schema: 'video-autoworker-blue-green-launchd/v2',
   projectRoot,
@@ -308,6 +312,7 @@ const payload = {
     routerScript: executable(routerScript, 0o755),
     slotStartScript: executable(slotStartScript, 0o755),
   },
+  ...(routerDependencies ? { routerDependencies } : {}),
   services: {
     router: service('router', routerSource, routerPort),
     blue: service('blue', blueSource, bluePort),

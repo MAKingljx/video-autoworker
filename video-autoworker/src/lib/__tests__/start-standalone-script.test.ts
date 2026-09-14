@@ -180,7 +180,8 @@ function createLauncherFixture(): LauncherFixture {
     'scripts/lib/openclaw-tool-capability-fingerprint.mjs': 'export {}\n',
     'scripts/lib/render-managed-markdown-section.mjs': 'export {}\n',
     'scripts/lib/runtime-tree-manifest.mjs': 'export {}\n',
-    'scripts/lib/director-extraction-release-provenance.mjs': 'export {}\n',
+    'scripts/lib/director-extraction-release-provenance.mjs':
+      "export const STANDALONE_PROVENANCE_SCHEMA = 'video-autoworker-standalone-provenance/v3'\n",
     'scripts/lib/director-projection-contract-compatibility.mjs': 'export {}\n',
     'scripts/lib/git-source-layout.mjs': 'export {}\n',
     'scripts/lib/git-source-layout.sh': '#!/bin/bash\n',
@@ -240,6 +241,29 @@ function runLauncher(fixture: LauncherFixture, overrides: Partial<NodeJS.Process
 }
 
 describe('standalone runtime launcher', () => {
+  it('requires router retirement imports only for artifacts that include the new router or retirement controller', async () => {
+    const fixture = createLauncherFixture()
+    try {
+      const checker = await import(pathToFileURL(artifactCheckerPath).href)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+      const router = join(fixture.standaloneRoot, 'scripts/standalone-router.mjs')
+      copyFileSync(resolve('scripts/standalone-router.mjs'), router)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing:scripts/standalone-router.mjs:./lib/router-retirement-control.mjs')
+      copyFileSync(resolve('scripts/lib/router-retirement-control.mjs'),
+        join(fixture.standaloneRoot, 'scripts/lib/router-retirement-control.mjs'))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+      const forbidden = await checker.findForbiddenStandaloneMembers(fixture.standaloneRoot)
+      expect(forbidden).not.toContain('scripts/standalone-router.mjs')
+      expect(forbidden).not.toContain('scripts/lib/router-retirement-control.mjs')
+      writeFileSync(join(fixture.standaloneRoot, 'scripts/deploy-blue-green.sh'),
+        '#!/bin/sh\nnode "$PROJECT_ROOT/scripts/lib/router-retirement-control.mjs"\n')
+      rmSync(router)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_dynamic_dependency_missing:scripts/deploy-blue-green.sh:scripts/standalone-router.mjs')
+    } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
+  })
+
   it('keeps rollback artifacts valid and requires the new manager closure when used', async () => {
     const fixture = createLauncherFixture()
     try {

@@ -227,6 +227,15 @@ const assertExecutable = (name, binding, expectedPath, expectedMode) => {
 }
 assertExecutable('router', manifest.executables?.routerScript, routerScript, 0o755)
 assertExecutable('slot start', manifest.executables?.slotStartScript, slotStartScript, 0o755)
+if (fs.readFileSync(routerScript, 'utf8').includes("'./lib/router-retirement-control.mjs'")) {
+  const dependencies = manifest.routerDependencies
+  if (!dependencies || JSON.stringify(Object.keys(dependencies).sort())
+    !== JSON.stringify(['retirementControl', 'sharedDeploymentLock'])) fail('router dependency bindings are incomplete')
+  assertExecutable('router retirement control', dependencies.retirementControl,
+    path.join(projectRoot, 'scripts/lib/router-retirement-control.mjs'), 0o644)
+  assertExecutable('router shared deployment lock', dependencies.sharedDeploymentLock,
+    path.join(projectRoot, 'scripts/lib/shared-deployment-lock.mjs'), 0o644)
+}
 const contractEntry = fs.lstatSync(execveContract)
 const contractSha256 = crypto.createHash('sha256').update(fs.readFileSync(execveContract)).digest('hex')
 if (manifest.execve?.schema !== 'video-autoworker-blue-green-execve/v1'
