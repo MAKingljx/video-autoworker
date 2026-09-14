@@ -10,6 +10,32 @@ import { verifyStandaloneBuildRuntime } from './build-standalone.mjs'
 const productRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const require = createRequire(import.meta.url)
 const sha256 = value => createHash('sha256').update(value).digest('hex')
+const GENERATED_ROOTS = new Set(['.next', '.artifacts', '.tmp', '.data', '.runtime', '.run',
+  '.turbo', '.cache', 'build', 'dist', 'out', 'coverage', 'test-results', 'playwright-report',
+  'output', 'private', 'memory', 'rollback', 'need'])
+const SOURCE_ROOTS = new Set(['src', 'scripts', 'ops', 'openclaw-skills', 'openclaw-plugins'])
+const SOURCE_ROOT_FILES = new Set(['package.json', 'pnpm-lock.yaml', '.nvmrc', 'tsconfig.json',
+  'next.config.js', 'next.config.mjs', 'next.config.ts'])
+export const WORKER_RUNTIME_RESOURCES = Object.freeze([
+  'ops/feishu-director-brain/schema.json', 'src/lib/schema.sql', 'scripts/database-backup.py',
+])
+
+/** One boundary for webpack sources, traced dependencies and copied artifact members. */
+export function workerBuildMemberKind(member, stagingPrefix) {
+  if (typeof member !== 'string' || isAbsolute(member) || member.includes('\\')
+    || member.split('/').some(part => ['', '.', '..'].includes(part))) {
+    throw new Error('scheduler_worker_dependency_outside_product')
+  }
+  if (member.startsWith(`${stagingPrefix}/`)) {
+    return member.startsWith(`${stagingPrefix}/source-receipts/`) ? 'excluded' : 'compiled'
+  }
+  const parts = member.split('/')
+  if (parts[0] === 'node_modules') return 'dependency'
+  if (GENERATED_ROOTS.has(parts[0])
+    || parts.some(part => part === 'node_modules' || part === '.PhoenixBrain'
+      || /^\.env(?:\.|$)/u.test(part))) return 'excluded'
+  return SOURCE_ROOTS.has(parts[0]) || SOURCE_ROOT_FILES.has(member) ? 'source' : 'excluded'
+}
 
 /** Build a separate artifact from the actual worker import/dependency closure. */
 export async function buildSchedulerWorker(outputPath) {
@@ -17,6 +43,7 @@ export async function buildSchedulerWorker(outputPath) {
   const output = resolve(outputPath)
   mkdirSync(output, { recursive: false, mode: 0o700 })
   const staging = join(productRoot, '.next', `scheduler-worker-build-${randomUUID()}`)
+  const stagingPrefix = relative(productRoot, staging)
   mkdirSync(staging, { recursive: true, mode: 0o700 })
   try {
     const { webpack } = require('next/dist/compiled/webpack/webpack')
@@ -58,7 +85,7 @@ export async function buildSchedulerWorker(outputPath) {
       "if (process.argv[2] !== '--prepare-existing' || !process.env.MISSION_CONTROL_DB_PATH) throw new Error('database_prepare_requires_explicit_existing_target'); process.stdout.write(JSON.stringify(require('./database-runtime.cjs').prepareExistingDatabase(process.env.MISSION_CONTROL_DB_PATH)) + '\\n')\n")
     const sourceMembers = [...stats.compilation.fileDependencies]
       .filter(pathname => pathname.startsWith(`${productRoot}/`)
-        && !pathname.includes('/node_modules/') && !pathname.startsWith(`${staging}/`))
+        && workerBuildMemberKind(relative(productRoot, pathname), stagingPrefix) === 'source')
       .filter(pathname => lstatSync(pathname).isFile())
       .map(pathname => relative(productRoot, pathname))
     const cliRoots = ['scripts/feishu-director-brain.mjs']
@@ -66,17 +93,20 @@ export async function buildSchedulerWorker(outputPath) {
     const entries = [...readdirSync(staging).filter(name => name.endsWith('.cjs')).map(name => join(staging, name)),
       ...cliRoots.map(name => join(productRoot, name)), ...externalScripts]
     const trace = await nodeFileTrace(entries, { base: productRoot, processCwd: productRoot,
+      // NFT can discover cwd-based resource candidates inside a pre-existing Web build.
+      // This build's own compiled entries are the sole permitted generated inputs.
+      ignore: member => !member.startsWith(`${stagingPrefix}/`) && GENERATED_ROOTS.has(member.split('/')[0]),
       mixedModules: true })
-    const sourceReceiptPrefix = `${relative(productRoot, staging)}/source-receipts/`
-    const files = new Set([...trace.fileList].filter(member => !member.startsWith(sourceReceiptPrefix)))
-    for (const member of ['ops/feishu-director-brain/schema.json', 'src/lib/schema.sql',
-      'scripts/database-backup.py']) files.add(member)
+    const files = new Set([...trace.fileList].filter(member => workerBuildMemberKind(member, stagingPrefix) !== 'excluded'))
+    for (const member of WORKER_RUNTIME_RESOURCES) files.add(member)
     const copiedSources = new Map()
     for (const member of [...files].sort((left, right) => left.split('/').length - right.split('/').length
       || left.localeCompare(right))) {
       const source = resolve(productRoot, member)
       if (!source.startsWith(`${productRoot}/`)) throw new Error('scheduler_worker_dependency_outside_product')
-      const targetMember = source.startsWith(`${staging}/`) ? relative(staging, source) : member
+      const memberKind = workerBuildMemberKind(member, stagingPrefix)
+      if (memberKind === 'excluded') throw new Error('scheduler_worker_generated_member_selected')
+      const targetMember = memberKind === 'compiled' ? relative(staging, source) : member
       if (/(^|\/)(?:\.PhoenixBrain|\.env(?:\.|$)|memory|private|output|rollback)(\/|$)/u.test(targetMember)) {
         throw new Error(`scheduler_worker_private_member:${targetMember}`)
       }
@@ -90,7 +120,7 @@ export async function buildSchedulerWorker(outputPath) {
         copyFileSync(source, target)
         chmodSync(target, sourceInfo.mode & 0o777)
       }
-      if (!member.startsWith('node_modules/') && !source.startsWith(`${staging}/`)) {
+      if (memberKind === 'source') {
         sourceMembers.push(member)
         copiedSources.set(member, sha256(readFileSync(target)))
       }
@@ -98,9 +128,10 @@ export async function buildSchedulerWorker(outputPath) {
     for (const member of ['package.json', 'pnpm-lock.yaml', '.nvmrc', 'scripts/build-scheduler-worker.mjs',
       'scripts/lib/scheduler-worker-typescript-loader.cjs', 'scripts/start-scheduler-worker.mjs',
       'ops/scheduler-worker/launch-agent.plist.template']) sourceMembers.push(member)
-    const sources = [...new Set(sourceMembers)].sort().map(member => ({
-      path: member, sha256: sha256(readFileSync(join(productRoot, member))),
-    }))
+    const sources = [...new Set(sourceMembers)].sort().map(member => {
+      if (workerBuildMemberKind(member, stagingPrefix) !== 'source') throw new Error('scheduler_worker_source_not_canonical')
+      return { path: member, sha256: sha256(readFileSync(join(productRoot, member))) }
+    })
     const sourceHashes = new Map(sources.map(source => [source.path, source.sha256]))
     for (const receipt of readdirSync(join(staging, 'source-receipts'))) {
       const observed = JSON.parse(readFileSync(join(staging, 'source-receipts', receipt), 'utf8'))
