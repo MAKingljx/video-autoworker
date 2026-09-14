@@ -408,7 +408,6 @@ verify_deployment_source_gate() {
     scripts/check-sensitive-content.mjs
     scripts/lib/sensitive-value-scanner.mjs
     scripts/verify-director-video-release-readiness.mjs
-    scripts/lib/director-extraction-projection-version.mjs
     scripts/lib/director-extraction-release-provenance.mjs
     scripts/lib/director-projection-contract-compatibility.mjs
     scripts/lib/openclaw-private-gateway-rpc.mjs
@@ -582,7 +581,7 @@ let value
 let expectedProjectionVersion
 try {
   const { extractionProjectionVersion } = await import(pathToFileURL(join(controlRoot,
-    'scripts/lib/director-extraction-projection-version.mjs')).href)
+    'scripts/verify-director-video-release-readiness.mjs')).href)
   expectedProjectionVersion = extractionProjectionVersion(applicationRoot)
   value = JSON.parse(raw)
 } catch { process.exit(2) }

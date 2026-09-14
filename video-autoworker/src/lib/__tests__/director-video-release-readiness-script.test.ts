@@ -23,6 +23,7 @@ import {
   assertDirectorEvidenceOutboxReleaseReady,
   assertDirectorExtractionReleaseReady,
   assertRepositoryRelease,
+  extractionProjectionVersion,
   inspectDirectorEvidenceOutboxCompatibility,
   inspectDirectorExtractionIntegrity,
   parseDirectorVideoReleaseReadinessArguments,
@@ -41,7 +42,6 @@ import {
   writeDirectorExtractionProvenance,
 } from '../../../scripts/lib/director-extraction-release-provenance.mjs'
 import { validateDirectorProjectionContractCompatibility } from '../../../scripts/lib/director-projection-contract-compatibility.mjs'
-import { extractionProjectionVersion } from '../../../scripts/lib/director-extraction-projection-version.mjs'
 
 const repositoryRoot = resolve(process.cwd())
 
