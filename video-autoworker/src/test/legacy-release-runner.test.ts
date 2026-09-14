@@ -9,6 +9,7 @@ import {
   sanitizeMaintenanceFailure, validateLegacyReleasePlan,
   settleFailedMaintenance, waitForGuardCleanup,
 } from '../../scripts/legacy-release-runner.mjs'
+import { classifyReleaseOperationError } from '../../scripts/lib/release-operation.mjs'
 
 const roots: string[] = []
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
@@ -48,14 +49,29 @@ describe('continuous legacy release execution', () => {
     expect(failure).toMatchObject({ code: 7, stderr: 'fixture failure' })
   })
 
+  it('preserves a real validation exit as an ordinary failure rather than a timeout', async () => {
+    const error = await runManagedChild(process.execPath, ['-e', 'process.exit(1)'], {
+      cwd: process.cwd(), env: process.env, timeoutMs: 3000,
+    }).then(() => { throw new Error('child unexpectedly succeeded') }, failure => failure)
+    expect(error).toMatchObject({ name: 'ManagedChildError', exitCode: 1,
+      timedOut: false, aborted: false, overflow: false, groupStopped: true })
+    expect(classifyReleaseOperationError(error))
+      .toMatchObject({ errorCode: 'release_step_failed', retryable: false })
+    expect(error).not.toHaveProperty('stderr')
+  })
+
   it('bounds a stalled child and terminates its process group', async () => {
     const { root } = ownerFixture()
     const pidFile = join(root, 'child.pid')
     const started = Date.now()
-    await expect(runManagedChild(process.execPath, ['-e', `
+    const error = await runManagedChild(process.execPath, ['-e', `
       require('node:fs').writeFileSync(process.argv[1], String(process.pid));
       setInterval(() => {}, 1000);
-    `, pidFile], { cwd: process.cwd(), env: process.env, timeoutMs: 1000 })).rejects.toThrow('timeout=true')
+    `, pidFile], { cwd: process.cwd(), env: process.env, timeoutMs: 1000 })
+      .then(() => { throw new Error('stalled child unexpectedly succeeded') }, failure => failure)
+    expect(error.message).toContain('timeout=true')
+    expect(error).toMatchObject({ timedOut: true, aborted: false, groupStopped: true })
+    expect(classifyReleaseOperationError(error)).toMatchObject({ errorCode: 'step_timeout', retryable: true })
     expect(Date.now() - started).toBeLessThan(7000)
     const pid = Number(readFileSync(pidFile, 'utf8'))
     expect(() => process.kill(pid, 0)).toThrow()

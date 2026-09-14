@@ -260,7 +260,9 @@ function validatePlan(plan) {
   releaseFailurePolicy(plan?.failurePolicy)
   const intakeUrl = validateIntakeUrl(plan?.intakeUrl)
   if (plan?.schema !== PLAN_SCHEMA || !COMMIT.test(plan.baseCommit)
-    || !COMMIT.test(plan.sourceCommit) || !SHA256.test(plan.planSha256)
+    || !COMMIT.test(plan.sourceCommit)
+    || !COMMIT.test(plan.controlSourceCommit || plan.sourceCommit)
+    || !SHA256.test(plan.planSha256)
     || !['blue', 'green'].includes(plan.router?.active)
     || !['blue', 'green'].includes(plan.router?.target)
     || plan.router.active === plan.router.target
@@ -314,8 +316,10 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
   components, artifactRoot = null, runtimeConvergenceProof = null, toolBaseline = null,
   receiptDir = null, runtimeConfigSha256 = null, runtimeBinding = null,
   artifactManifestSha256 = null, workerBinding = null, failurePolicy = 'assess-first',
+  controlSourceCommit = sourceCommit,
   intakeUrl = 'http://127.0.0.1:3017/api/n8n/intake-control' }) {
-  if (!COMMIT.test(baseCommit) || !COMMIT.test(sourceCommit)) fail('plan commits are invalid')
+  if (!COMMIT.test(baseCommit) || !COMMIT.test(sourceCommit)
+    || !COMMIT.test(controlSourceCommit)) fail('plan commits are invalid')
   validateIntake(intake)
   const appChanged = components.app.changed
   const pluginChanged = ['taskFlow', 'directorBrain', 'videoCommand']
@@ -350,7 +354,8 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
   const releaseId = `${sourceCommit}-runtime`
   const actions = plannedActions(components)
   return sealPlan({
-    schema: PLAN_SCHEMA, baseCommit, sourceCommit, createdAt: Math.floor(Date.now() / 1000),
+    schema: PLAN_SCHEMA, baseCommit, sourceCommit, controlSourceCommit,
+    createdAt: Math.floor(Date.now() / 1000),
     router: { ...router, target, releaseId }, intake: structuredClone(intake),
     components: structuredClone(components), actions, artifactRoot, failurePolicy: releaseFailurePolicy(failurePolicy),
     ...(workerBinding ? { workerBinding: structuredClone(workerBinding),
@@ -1056,7 +1061,7 @@ function intakeClient(url) {
 }
 
 async function routerStatus() {
-  return parseBlueGreenStatus(await managed('/bin/bash', [join(productRoot,
+  return parseBlueGreenStatus(await managed('/bin/bash', [join(coordinatorRoot,
     'scripts/deploy-blue-green.sh'), 'status'], 120_000))
 }
 
@@ -1133,7 +1138,7 @@ async function actualInstalledComponents(components, sourceCommit) {
     || join(homedir(), 'Library/LaunchAgents')
   try {
     const installed = resolveInstalledBlueGreenManager({
-      deploymentProjectRoot: productRoot, runDir, releasesDir, launchAgentsDir,
+      deploymentProjectRoot: coordinatorRoot, runDir, releasesDir, launchAgentsDir,
     })
     await managed(installed.manager.path, ['preflight', 'all'], 120_000, {
       AIWORKER_BG_RUN_DIR: runDir,
@@ -1184,13 +1189,15 @@ async function createPlan(values) {
     receiptDir: values.get('--receipt-dir') || null, intakeUrl,
     runtimeConfigSha256: runtimeBinding.configSha256, runtimeBinding,
     artifactManifestSha256: artifactBinding?.manifestSha256 || null, workerBinding,
+    controlSourceCommit: resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD'),
     failurePolicy: values.get('--failure-policy') || 'assess-first',
   })
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
   const output = values.get('--output')
   if (!output) fail('plan output is required')
   privateWrite(output, plan)
-  process.stdout.write(`${JSON.stringify({ schema: plan.schema, sourceCommit, components,
+  process.stdout.write(`${JSON.stringify({ schema: plan.schema, sourceCommit,
+    controlSourceCommit: plan.controlSourceCommit, components,
     actions: plan.actions, planSha256: plan.planSha256, output })}\n`)
 }
 
@@ -1200,6 +1207,10 @@ async function executePlan(values, operation = null) {
   const plan = validatePlan(privateRead(pathname))
   if (!plan.runtimeBinding) fail('plan runtime binding is required')
   const installerCommit = resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')
+  assertCleanGitSource(coordinatorRoot, plan.controlSourceCommit || plan.sourceCommit)
+  if (installerCommit !== (plan.controlSourceCommit || plan.sourceCommit)) {
+    fail('control source changed after plan')
+  }
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
   const resumableInstalls = new Map()
   const priorInstallReceipt = component => {
@@ -1222,21 +1233,22 @@ async function executePlan(values, operation = null) {
     return receipt
   }
   const completedInstall = component => resumableInstalls.get(component) || null
-  const blueGreenScript = join(productRoot, 'scripts/deploy-blue-green.sh')
+  const blueGreenScript = join(coordinatorRoot, 'scripts/deploy-blue-green.sh')
   const releases = plan.runtimeBinding?.releasesDir || process.env.AIWORKER_BG_RELEASES_DIR
     || join(productRoot, '.runtime/releases')
   const blueGreen = step => buildBlueGreenCommand({
     script: blueGreenScript, step, plan, releasesDir: releases,
   })
   const workerEnvironment = { ...releaseWorkerEnvironment(plan),
-    AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation?.failurePolicy || plan.failurePolicy) }
+    AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation?.failurePolicy || plan.failurePolicy),
+    AIWORKER_BG_APPLICATION_SOURCE_ROOT: productRoot }
   const deploy = (...args) => managed('/bin/bash', [blueGreenScript, ...args], 900_000, workerEnvironment)
   const runBlueGreen = (step, timeoutMs = 900_000, extraEnvironment = {}, signal) => {
     const command = blueGreen(step)
     return managed(command.command, command.args, timeoutMs, { ...workerEnvironment, ...extraEnvironment }, signal)
   }
   let runtimeProof = operation?.runtimeProofOverride || plan.runtimeConvergenceProof
-  const deployWithProof = (...args) => managed('/bin/bash', [join(productRoot,
+  const deployWithProof = (...args) => managed('/bin/bash', [join(coordinatorRoot,
     'scripts/deploy-blue-green.sh'), ...args], 900_000,
   { ...workerEnvironment, AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof })
   let workerHold = operation?.previousWorkerHold || null
@@ -1365,7 +1377,7 @@ async function executePlan(values, operation = null) {
         fail('existing release directory is unsafe')
       }
       const standalone = join(target, 'standalone')
-      await managed(process.execPath, [join(productRoot, 'scripts/check-standalone-artifact.mjs'), standalone], 180_000)
+      await managed(process.execPath, [join(coordinatorRoot, 'scripts/check-standalone-artifact.mjs'), standalone], 180_000)
       if (sha256(readFileSync(join(standalone, 'release-manifest.json')))
         !== sha256(readFileSync(join(plan.artifactRoot, 'release-manifest.json')))
         || JSON.parse(readFileSync(join(standalone, 'release-provenance.json'))).gitCommit !== plan.sourceCommit) {
@@ -1383,7 +1395,7 @@ async function executePlan(values, operation = null) {
       { AIWORKER_OPENCLAW_RUNTIME_CONVERGENCE_PROOF: runtimeProof }),
     bind: () => runBlueGreen('bind'),
     start: slot => {
-      const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: productRoot,
+      const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: coordinatorRoot,
         runDir: plan.runtimeBinding?.runDir || process.env.AIWORKER_BG_RUN_DIR
           || join(productRoot, '.run/blue-green'),
         releasesDir: plan.runtimeBinding?.releasesDir || process.env.AIWORKER_BG_RELEASES_DIR
@@ -1458,7 +1470,7 @@ async function executePlan(values, operation = null) {
             return { ok: false, reason: 'compensated_target_retirement_unverified' }
           }
         }
-        const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: productRoot,
+        const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: coordinatorRoot,
           runDir: plan.runtimeBinding.runDir, releasesDir: plan.runtimeBinding.releasesDir,
           launchAgentsDir: process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR
             || join(homedir(), 'Library/LaunchAgents') })
@@ -1619,7 +1631,7 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
     attest: async () => {
       const releases = contract.plan.runtimeBinding?.releasesDir
         || process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
-      const command = buildBlueGreenCommand({ script: join(productRoot, 'scripts/deploy-blue-green.sh'),
+      const command = buildBlueGreenCommand({ script: join(coordinatorRoot, 'scripts/deploy-blue-green.sh'),
         step: 'attest', plan: contract.plan, releasesDir: releases })
       await managed(command.command, command.args, 180_000, { ...releaseWorkerEnvironment(contract.plan),
         AIWORKER_RELEASE_FAILURE_POLICY: releaseFailurePolicy(operation.failurePolicy || contract.plan.failurePolicy),
@@ -1713,6 +1725,7 @@ async function applyPlan(values, { resume = false } = {}) {
     AIWORKER_BG_ROUTER_PORT: String(contract.plan.runtimeBinding.ports.router),
     AIWORKER_BG_BLUE_PORT: String(contract.plan.runtimeBinding.ports.blue),
     AIWORKER_BG_GREEN_PORT: String(contract.plan.runtimeBinding.ports.green),
+    AIWORKER_BG_APPLICATION_SOURCE_ROOT: productRoot,
   } : {}
   const operation = {
     owner, scope: contract.scope, signal: cancellation.signal, record,

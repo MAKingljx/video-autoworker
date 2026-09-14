@@ -338,15 +338,20 @@ export class ReleaseOperationError extends Error {
 export function classifyReleaseOperationError(error, { phase = 'unknown', effectState = 'unknown' } = {}) {
   if (error instanceof ReleaseOperationError) return error
   const message = String(error?.message || error)
-  const cancelled = /abort|cancel/iu.test(message)
-  const timeout = /timeout|timed out/iu.test(message)
+  // Structured child outcomes win over diagnostic words, including explicit
+  // false flags. Standard Node/AbortSignal errors remain recognizable too.
+  const cancelled = typeof error?.aborted === 'boolean' ? error.aborted
+    : error?.code === 'ABORT_ERR' || error?.name === 'AbortError' || /abort|cancel/iu.test(message)
+  const timeout = typeof error?.timedOut === 'boolean' ? error.timedOut
+    : error?.code === 'ETIMEDOUT' || error?.name === 'TimeoutError'
+      || /timeout|timed out/iu.test(message.replace(/\b(?:timeout|timedOut)\s*=\s*false\b/giu, ''))
   const conflict = /revision|changed after plan|already running/iu.test(message)
   return new ReleaseOperationError(message, {
     phase,
     errorCode: cancelled ? 'operation_cancelled' : timeout ? 'step_timeout'
       : conflict ? 'authority_conflict' : 'release_step_failed',
     effectState,
-    retryable: timeout || conflict,
+    retryable: !cancelled && (timeout || conflict),
     cause: error instanceof Error ? error : undefined,
   })
 }

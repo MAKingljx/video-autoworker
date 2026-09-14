@@ -52,6 +52,7 @@ type BuildPlan = (options: {
   artifactManifestSha256?: string | null
   workerBinding?: Record<string, unknown> | null
   failurePolicy?: 'assess-first' | 'restore-previous'
+  controlSourceCommit?: string
 }) => ReturnType<typeof buildReleaseImpactPlan>
 const digest = (value: string) => (value.charCodeAt(0) % 16).toString(16).repeat(64)
 const router = {
@@ -152,8 +153,17 @@ describe('release impact deployment', () => {
   it('defaults newly sealed plans to assessment before compensation', () => {
     const value = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(), components: components() })
     expect(value.failurePolicy).toBe('assess-first')
+    expect(value.controlSourceCommit).toBe(sourceCommit)
     expect(() => assertAllowedArguments('plan', new Map([['--failure-policy', 'automatic']]))).toThrow('release_failure_policy_invalid')
     expect(() => assertAllowedArguments('resume', new Map([['--plan', '/private/plan.json'], ['--failure-policy', 'restore-previous']]))).not.toThrow()
+  })
+
+  it('seals the independently versioned deployment controller into the application plan', () => {
+    const controlSourceCommit = '3'.repeat(40)
+    const value = buildPlan({ baseCommit, sourceCommit, controlSourceCommit,
+      router, intake: activeIntake(), components: components() })
+    expect(value).toMatchObject({ sourceCommit, controlSourceCommit })
+    expect(value.planSha256).toMatch(/^[a-f0-9]{64}$/u)
   })
 
   it('preserves a committed route and its intake hold after failed acceptance by default', async () => {

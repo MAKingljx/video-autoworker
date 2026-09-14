@@ -133,4 +133,28 @@ describe('release operation contract', () => {
     expect(classifyReleaseOperationError(new Error('operation aborted'), { phase: 'switch' }))
       .toMatchObject({ errorCode: 'operation_cancelled', retryable: false })
   })
+
+  it('does not treat a false timeout flag as a timed-out step', () => {
+    const ordinary = new Error('managed child failed: code=1 signal=none timeout=false overflow=false')
+    expect(classifyReleaseOperationError(ordinary, { phase: 'acceptance' }))
+      .toMatchObject({ errorCode: 'release_step_failed', retryable: false, phase: 'acceptance' })
+    const structured = Object.assign(new Error('validator rejected the timeout configuration'), {
+      exitCode: 1, timedOut: false, aborted: false,
+    })
+    expect(classifyReleaseOperationError(structured))
+      .toMatchObject({ errorCode: 'release_step_failed', retryable: false })
+  })
+
+  it('uses structured timeout and cancellation outcomes even without matching message text', () => {
+    for (const error of [
+      Object.assign(new Error('child exited'), { timedOut: true, aborted: false }),
+      Object.assign(new Error('request failed'), { code: 'ETIMEDOUT' }),
+      Object.assign(new Error('deadline reached'), { name: 'TimeoutError' }),
+    ]) {
+      expect(classifyReleaseOperationError(error)).toMatchObject({ errorCode: 'step_timeout', retryable: true })
+    }
+    expect(classifyReleaseOperationError(Object.assign(new Error('child exited'), {
+      aborted: true, timedOut: true,
+    }))).toMatchObject({ errorCode: 'operation_cancelled', retryable: false })
+  })
 })

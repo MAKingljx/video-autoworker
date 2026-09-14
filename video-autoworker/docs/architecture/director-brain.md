@@ -192,7 +192,7 @@ flowchart LR
 - outbox 源码中绑定的 CLI、服务、schema、转换器、转换库、应用侧封套/分批/回执语义模块，以及无自哈希常量的 delivery core SHA-256；
 - 七项闭包与投影 schema 版本计算出的当前契约摘要，以及权威 Mission Control SQLite 中 pending 与不兼容 pending 数；不兼容 pending 必须为零。
 
-首次 legacy bootstrap 和后续 forward switch 都必须在切换前通过该门禁。source/target 契约一致时可保留在途任务热切换；普通 switch 与显式 rollback 不允许跨契约，即使两侧任务和旧摘要 pending 都已归零也不能绕过。forward switch 还必须把 HEAD 绑定静态 verifier 的契约摘要与 target runtime readiness 直接对账。切换前会封存 source/target 的不可变 release、readiness、runtime/router attestation 和路由元组证据；切换后和自动回滚后均按该证据复验，所以历史 source 不依赖当前 HEAD verifier。旧槽 callback 冻结静默后仍会复查，窗口内出现不兼容 pending 时拒绝退役；任何回滚证明失败都保持入口暂停和维护态。该门不能替代隔离启动、页面/API、SQLite、OpenClaw、飞书写入及真实视频验收。
+首次 legacy bootstrap 和后续 forward switch 都必须在切换前通过该门禁。source/target 契约一致时可保留在途任务热切换；普通 switch 与显式 rollback 不允许跨契约，即使两侧任务和旧摘要 pending 都已归零也不能绕过。forward switch 还必须把 HEAD 绑定静态 verifier 的契约摘要与 target runtime readiness 直接对账。切换前会封存 source/target 的不可变 release、readiness、runtime/router attestation 和路由元组证据；切换后及明确选择 `restore-previous` 的回滚后均按该证据复验，所以历史 source 不依赖当前 HEAD verifier。验收失败默认采用 `assess-first`，保留真实路由和必要暂停，判断后沿同一操作继续。旧槽 callback 冻结静默后仍会复查，窗口内出现不兼容 pending 时拒绝退役；任何回滚证明失败都保持入口暂停和维护态。该门不能替代隔离启动、页面/API、SQLite、OpenClaw、飞书写入及真实视频验收。
 
 首次 legacy 发布还必须经过统一 preinstall 事务。orchestrator 绑定同一干净 Git 提交、bootstrap
 attempt、双库证据、工作流 transition/attestation/claim、真实会话工具基线和全部私有备份根；固定按

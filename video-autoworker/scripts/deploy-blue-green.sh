@@ -5,6 +5,7 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+APPLICATION_SOURCE_ROOT="${AIWORKER_BG_APPLICATION_SOURCE_ROOT:-$PROJECT_ROOT}"
 RUN_DIR="${AIWORKER_BG_RUN_DIR:-$PROJECT_ROOT/.run/blue-green}"
 RELEASES_DIR="${AIWORKER_BG_RELEASES_DIR:-$PROJECT_ROOT/.runtime/releases}"
 STATE_FILE="${AIWORKER_BG_ROUTER_STATE:-$RUN_DIR/router-state.json}"
@@ -269,8 +270,10 @@ release reports that its release-owned callbacks are drained. Rebinding a slot
 that has carried production traffic requires that proof and a stopped old PID.
 `switch` and `rollback` require AIWORKER_BG_LIVE_DB_PATH, an `active` runtime
 attestation for the same canonical SQLite database, and a paused intake gate.
-They verify the selected release through port 3017 and automatically roll back
-if the routed read-only checks fail. Explicit rollback remains contract-preserving.
+They verify the selected release through port 3017. Failed routed read-only
+checks default to assess-first: retain the observed route and necessary intake
+hold, then assess and resume the same operation. Only an explicit restore-previous
+choice enters the existing compatibility-checked rollback path.
 A forward switch may cross one director projection contract only when the target
 clean release, provenance, manifest, and readiness verifier carry the exact
 same-wire declaration for the live source and target digests. The declaration
@@ -405,6 +408,7 @@ verify_deployment_source_gate() {
     scripts/check-sensitive-content.mjs
     scripts/lib/sensitive-value-scanner.mjs
     scripts/verify-director-video-release-readiness.mjs
+    scripts/lib/director-extraction-projection-version.mjs
     scripts/lib/director-extraction-release-provenance.mjs
     scripts/lib/director-projection-contract-compatibility.mjs
     scripts/lib/openclaw-private-gateway-rpc.mjs
@@ -559,7 +563,7 @@ verify_director_video_release_chain() {
   report="$(MC_AUTH_MODE=openclaw-loopback \
     MC_OPENCLAW_TENANT_ID="$tenant" MC_OPENCLAW_WORKSPACE_ID="$workspace" \
     "$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
-    --repository-root "$PROJECT_ROOT" \
+    --repository-root "$APPLICATION_SOURCE_ROOT" \
     --releases-root "$RELEASES_DIR" \
     --release-id "$release_id" \
     --release-root "$release_root" \
@@ -568,11 +572,20 @@ verify_director_video_release_chain() {
     --transition-from-projection-contract "$transition_from_projection_contract" \
     --verification-phase full)" \
     || { printf 'error: 3017, video-command, task-flow, director-brain, or projection outbox is incompatible\n' >&2; return 1; }
-  "$NODE_BIN" - "$report" "$release_id" "$transition_from_projection_contract" <<'NODE' \
+  "$NODE_BIN" - "$report" "$release_id" "$transition_from_projection_contract" \
+    "$PROJECT_ROOT" "$APPLICATION_SOURCE_ROOT" <<'NODE' \
     || { printf 'error: director/video release-readiness verifier returned an invalid report\n' >&2; return 1; }
-const [raw, releaseId, transitionFromProjectionContract] = process.argv.slice(2)
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const [raw, releaseId, transitionFromProjectionContract, controlRoot, applicationRoot] = process.argv.slice(2)
 let value
-try { value = JSON.parse(raw) } catch { process.exit(2) }
+let expectedProjectionVersion
+try {
+  const { extractionProjectionVersion } = await import(pathToFileURL(join(controlRoot,
+    'scripts/lib/director-extraction-projection-version.mjs')).href)
+  expectedProjectionVersion = extractionProjectionVersion(applicationRoot)
+  value = JSON.parse(raw)
+} catch { process.exit(2) }
 const digest = value?.payloads?.projectionContract?.currentDigest
 const commitPrefix = releaseId.replace(/-runtime$/u, '')
 const transition = value?.projectionTransition
@@ -587,7 +600,7 @@ if (value?.schema !== 'video-autoworker-director-video-readiness/v1'
   || value?.projectionOutbox?.outOfScopeOutbox !== 0
   || value?.projectionOutbox?.outOfScopeExtraction !== 0
   || value?.extraction?.schema !== 'video-autoworker-director-extraction-readiness/v1'
-  || value?.extraction?.expectedProjectionVersion !== 'feishu-candidate-projection-v2'
+  || value?.extraction?.expectedProjectionVersion !== expectedProjectionVersion
   || value?.extraction?.activePhases !== 0
   || value?.extraction?.invalidSourcesWithoutPhase !== 0
   || value?.extraction?.invalidPhaseBindings !== 0
@@ -648,7 +661,7 @@ verify_director_video_release_preflight() {
   [[ -f "$DIRECTOR_VIDEO_READINESS" && ! -L "$DIRECTOR_VIDEO_READINESS" ]] \
     || { printf 'error: director/video release-readiness verifier is unavailable\n' >&2; return 1; }
   report="$("$NODE_BIN" "$DIRECTOR_VIDEO_READINESS" \
-    --repository-root "$PROJECT_ROOT" \
+    --repository-root "$APPLICATION_SOURCE_ROOT" \
     --releases-root "$RELEASES_DIR" \
     --release-id "$release_id" \
     --release-root "$release_root" \

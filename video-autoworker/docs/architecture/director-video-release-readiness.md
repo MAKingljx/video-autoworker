@@ -161,7 +161,8 @@ backup，并绑定源库 device/inode、队列摘要、freeze guard 和目标 re
 只执行 `CREATE ... IF NOT EXISTS`，不改写既有业务行。bootstrap 成功提交 baseline 后，旧
 `57f6e6c-runtime` 被永久 fence，不再允许作为普通 blue/green slot 或普通 rollback 目标；后续常规
 回滚只能在相同稳定 projection protocol 的新架构 release 之间进行。历史 implementation 摘要映射只允许原
-`switch` 在本次调用内使用；路由提交后的既有复验失败可按已捕获 source 证据自动补偿，成功返回后
+`switch` 在本次调用内使用；路由提交后的复验失败默认按 `assess-first` 保留现场并判断后继续，
+仅明确选择 `restore-previous` 且兼容性检查通过时按已捕获 source 证据回退；成功返回后
 不授权显式反向切换。除此之外的跨契约或需恢复旧 legacy
 数据库时必须保持入口冻结，走显式 restore/disaster-recovery 手册和完整双库回滚点，不能让部署器
 猜测性降级。
@@ -170,7 +171,7 @@ backup，并绑定源库 device/inode、队列摘要、freeze guard 和目标 re
 source/target protocol 相同即可按 release affinity 排空并热切换；仅历史 implementation 摘要需要通过
 目标 release 的精确映射，否则转换失败关闭。转换提交前同时捕获 source/target 的 release manifest、slot/runtime/router
 attestation 哈希、readiness revision/schema epoch/契约摘要与原路由元组，并以进程内只读、带
-SHA-256 封套的证据复验。这样 source=A、仓库 HEAD=B 时，自动回滚不会拿只接受 HEAD 的 target
+SHA-256 封套的证据复验。这样 source=A、仓库 HEAD=B 时，明确选择的回滚不会拿只接受 HEAD 的 target
 verifier 错验历史 source；显式 rollback 也使用同一证据路径。目标验证失败仍返回非零，任一
 source 回滚证据失败则保持 intake 暂停。旧槽 callback 冻结并达到静默后、停止旧槽前还会再查
 未知协议 pending；普通 app 实现变化不再因文件 SHA 改变而失去热切换能力。

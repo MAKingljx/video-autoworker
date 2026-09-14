@@ -41,6 +41,7 @@ import {
   writeDirectorExtractionProvenance,
 } from '../../../scripts/lib/director-extraction-release-provenance.mjs'
 import { validateDirectorProjectionContractCompatibility } from '../../../scripts/lib/director-projection-contract-compatibility.mjs'
+import { extractionProjectionVersion } from '../../../scripts/lib/director-extraction-projection-version.mjs'
 
 const repositoryRoot = resolve(process.cwd())
 
@@ -782,6 +783,58 @@ describe('director video release readiness verifier', () => {
       .toThrow('extraction_invalidCheckpoints:1')
   })
 
+  it('reads an exactly declared legacy v2 checkpoint under the current v3 release boundary without rewriting it', () => {
+    const policy = JSON.parse(readFileSync(join(repositoryRoot, 'scripts/lib/director-extraction-compatibility.json'), 'utf8'))
+    const legacy = policy.legacyContracts.find((entry: { projectionVersion: string }) => entry.projectionVersion === 'feishu-candidate-projection-v2')
+    expect(legacy.supportsCheckpointRead).toBe(true)
+    const databasePath = join(root, 'legacy-extraction.sqlite')
+    const database = new Database(databasePath)
+    const phaseInput = { phase: 'perception', contract: legacy.contract, promptVersion: legacy.promptVersion,
+      projectionVersion: legacy.projectionVersion, extractionContractDigest: legacy.extractionContractDigest }
+    const candidateOutput = { phase: 'perception', schemaVersion: legacy.candidateOutputSchemaVersion, candidates: [] }
+    try {
+      runMigrations(database)
+      database.prepare(`INSERT INTO n8n_workflow_bindings
+        (id, name, webhook_path, task_type, workspace_id, tenant_id)
+        VALUES (7, 'legacy fixture', 'legacy-fixture', 'video-analysis', 2, 3)`).run()
+      database.prepare(`INSERT INTO n8n_task_runs
+        (task_id, idempotency_key, binding_id, status, source, requested_by, routing, input, delivery, output, workspace_id, tenant_id)
+        VALUES ('legacy-source', 'legacy-source-key', 7, 'succeeded', 'openclaw', 'test', '{}', '{}', '{"mode":"none"}', '{}', 2, 3)`).run()
+      const binding = JSON.stringify({ taskType: 'video-analysis', childKind: 'director-extraction',
+        directorPhase: 'perception', parentTaskId: 'legacy-source' })
+      database.prepare(`INSERT INTO n8n_task_runs
+        (task_id, idempotency_key, binding_id, status, source, requested_by, routing, input, delivery, output, workspace_id, tenant_id)
+        VALUES ('legacy-phase', 'legacy-phase-key', 7, 'succeeded', 'n8n-node', 'test', ?, ?, '{"mode":"none"}', '{}', 2, 3)`).run(binding, binding)
+      database.prepare(`INSERT INTO director_extraction_checkpoints
+        (phase_task_id, phase, input_sha256, phase_input, output_sha256, candidate_output)
+        VALUES ('legacy-phase', 'perception', ?, ?, ?, ?)`).run(
+        directorEvidenceDigest(phaseInput), JSON.stringify(phaseInput),
+        directorEvidenceDigest(candidateOutput), JSON.stringify(candidateOutput))
+      const projection = { phase: 'perception', entries: [{ candidateKey: 'synthetic-legacy' }] }
+      database.prepare(`INSERT INTO director_extraction_projection_receipts
+        (phase_task_id, receipt_json, receipt_sha256) VALUES ('legacy-phase', ?, ?)`).run(
+        JSON.stringify(projection), directorEvidenceDigest(projection))
+    } finally { database.close() }
+    const before = createHash('sha256').update(readFileSync(databasePath)).digest('hex')
+    const report = inspectDirectorExtractionIntegrity({ repositoryRoot, liveDbPath: databasePath,
+      scope: { tenantId: 3, workspaceId: 2 } })
+    expect(report).toMatchObject({ expectedProjectionVersion: extractionProjectionVersion(repositoryRoot),
+      phases: 1, invalidCheckpoints: 0, incompatibleProjectionBoundary: 0 })
+    expect(() => assertDirectorExtractionReleaseReady(report)).not.toThrow()
+    expect(createHash('sha256').update(readFileSync(databasePath)).digest('hex')).toBe(before)
+
+    const changed = new Database(databasePath)
+    try {
+      const unknownInput = { ...phaseInput, extractionContractDigest: '0'.repeat(64) }
+      changed.prepare('UPDATE director_extraction_checkpoints SET phase_input = ?, input_sha256 = ?').run(
+        JSON.stringify(unknownInput), directorEvidenceDigest(unknownInput))
+    } finally { changed.close() }
+    const rejected = inspectDirectorExtractionIntegrity({ repositoryRoot, liveDbPath: databasePath,
+      scope: { tenantId: 3, workspaceId: 2 } })
+    expect(rejected?.incompatibleProjectionBoundary).toBe(1)
+    expect(() => assertDirectorExtractionReleaseReady(rejected)).toThrow('extraction_incompatibleProjectionBoundary:1')
+  })
+
   it.each([
     'activePhases',
     'invalidSourcesWithoutPhase',
@@ -933,10 +986,14 @@ describe('director video release readiness verifier', () => {
     expect(verifier).toContain("options.verificationPhase === 'pre-bootstrap'")
   })
 
-  it('returns only an authenticated projection digest from the full verifier report', async () => {
+  it('accepts current v3 reports from the shared source and rejects wrong versions while preserving declared transitions', async () => {
     const digest = 'a'.repeat(64)
     const verifierPath = join(root, 'fake-release-verifier.mjs')
     const harnessPath = join(root, 'release-verifier-report-harness.sh')
+    const applicationSourceRoot = join(root, 'application-source')
+    await mkdir(join(applicationSourceRoot, 'src/lib'), { recursive: true })
+    await writeFile(join(applicationSourceRoot, 'src/lib/director-extraction-state.ts'),
+      "export const DIRECTOR_EXTRACTION_PROJECTION_VERSION = 'feishu-candidate-projection-v3'\n")
     const deploy = readFileSync(join(repositoryRoot, 'scripts', 'deploy-blue-green.sh'), 'utf8')
     const functionPrelude = deploy.slice(0, deploy.indexOf('\ncommand="${1:-}"'))
     const report: any = {
@@ -972,7 +1029,7 @@ describe('director video release readiness verifier', () => {
       },
       extraction: {
         schema: 'video-autoworker-director-extraction-readiness/v1',
-        expectedProjectionVersion: 'feishu-candidate-projection-v2',
+        expectedProjectionVersion: extractionProjectionVersion(repositoryRoot),
         activePhases: 0,
         sourcesWithoutPhase: 0,
         invalidSourcesWithoutPhase: 0,
@@ -995,24 +1052,36 @@ describe('director video release readiness verifier', () => {
     }
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
     await writeFile(harnessPath, `${functionPrelude}
+PROJECT_ROOT="$2"
 DIRECTOR_VIDEO_READINESS="$1"
 verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone
 `)
     const environment = {
-      ...process.env,
+      NODE_ENV: 'test' as const, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
       HOME: root,
       NODE_BIN: process.execPath,
+      AIWORKER_BG_APPLICATION_SOURCE_ROOT: applicationSourceRoot,
       AIWORKER_PLATFORM_ENV_FILE: join(root, 'missing-platform.env'),
       MC_AUTH_MODE: '',
       MC_OPENCLAW_TENANT_ID: '',
       MC_OPENCLAW_WORKSPACE_ID: '',
     }
-    const accepted = spawnSync('bash', [harnessPath, verifierPath], {
+    expect(report.extraction.expectedProjectionVersion).toBe('feishu-candidate-projection-v3')
+    const accepted = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], {
       env: environment,
       encoding: 'utf8',
     })
     expect(accepted.status, accepted.stderr).toBe(0)
     expect(accepted.stdout).toBe(digest)
+
+    for (const wrongVersion of ['feishu-candidate-projection-v2', 'feishu-candidate-projection-v999']) {
+      report.extraction.expectedProjectionVersion = wrongVersion
+      await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
+      const wrong = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], { env: environment, encoding: 'utf8' })
+      expect(wrong.status).not.toBe(0)
+      expect(wrong.stderr).toContain('release-readiness verifier returned an invalid report')
+    }
+    report.extraction.expectedProjectionVersion = extractionProjectionVersion(repositoryRoot)
 
     const sourceDigest = '9'.repeat(64)
     const declarationSha256 = '8'.repeat(64)
@@ -1027,10 +1096,11 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     }
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
     await writeFile(harnessPath, `${functionPrelude}
+PROJECT_ROOT="$2"
 DIRECTOR_VIDEO_READINESS="$1"
 verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone head ${sourceDigest}
 `)
-    const transitionAccepted = spawnSync('bash', [harnessPath, verifierPath], {
+    const transitionAccepted = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], {
       env: environment,
       encoding: 'utf8',
     })
@@ -1039,7 +1109,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
 
     report.projectionTransition.fromContractDigest = '7'.repeat(64)
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
-    const transitionRejected = spawnSync('bash', [harnessPath, verifierPath], {
+    const transitionRejected = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], {
       env: environment,
       encoding: 'utf8',
     })
@@ -1051,12 +1121,13 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     report.projectionTransition = null
     delete report.provenance.projectionContractCompatibilitySha256
     await writeFile(harnessPath, `${functionPrelude}
+PROJECT_ROOT="$2"
 DIRECTOR_VIDEO_READINESS="$1"
 verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-runtime/standalone
 `)
     report.projectionOutbox.currentDigest = 'c'.repeat(64)
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
-    const rejected = spawnSync('bash', [harnessPath, verifierPath], {
+    const rejected = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], {
       env: environment,
       encoding: 'utf8',
     })
@@ -1066,7 +1137,7 @@ verify_director_video_release_chain bbbbbbb-runtime /private/releases/bbbbbbb-ru
     report.projectionOutbox.currentDigest = digest
     report.projectionOutbox.outOfScopeExtraction = 1
     await writeFile(verifierPath, `process.stdout.write(${JSON.stringify(JSON.stringify(report))})\n`)
-    const scopeRejected = spawnSync('bash', [harnessPath, verifierPath], {
+    const scopeRejected = spawnSync('bash', [harnessPath, verifierPath, repositoryRoot], {
       env: environment,
       encoding: 'utf8',
     })

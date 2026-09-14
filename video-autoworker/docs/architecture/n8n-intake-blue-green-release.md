@@ -135,8 +135,9 @@ blue/green 进程只有在受限 router state 中同时满足“当前 active sl
 可按原 slot 回调并由新 leader 使用同一契约继续投影；摘要不一致时，普通 switch/rollback
 无条件拒绝，不能把“页面热更新无需等待”误扩展成投影契约迁移。forward switch 还会把
 HEAD 绑定的静态 verifier 摘要与 target runtime 摘要直接对账。路由切换后按预提交时封存的
-release/readiness/router 证据复验；自动回滚历史 source 不再调用只接受当前 HEAD 的 target
-verifier。旧槽 callback 冻结静默后仍复查不兼容 pending，失败时拒绝退役。
+release/readiness/router 证据复验。验收失败默认保留真实路由和必要暂停，按 `assess-first`
+判断后继续；明确选择 `restore-previous` 时，历史 source 使用已捕获证据复验，不调用只接受当前
+HEAD 的 target verifier。旧槽 callback 冻结静默后仍复查不兼容 pending，失败时拒绝退役。
 延迟退役使用受限 ancestor 模式：active release 必须仍是干净 `main` HEAD 的祖先，才能避免
 docs-only 审计提交把已验证 release 永久挡在退役门外；该模式不接受分叉 release，也不放宽
 payload、投影闭包、standalone bundle 或 outbox 校验。
@@ -363,6 +364,10 @@ Git 提交校验实际文件。
 readiness 必须由 `legacy-preinstall-orchestrator.mjs` 统一编排。orchestrator 从 canonical 干净 Git
 仓库执行，standalone 内的发布控制源码只用于来源与完整性闭包；它不是一个可脱离仓库独立运行的
 控制面。成功 terminal handoff 后才允许 bootstrap controller 进入 `prepare -> current-confirm -> apply`。
+常规发布允许当前 control checkout 与应用制品属于同一仓库的不同提交：控制脚本、管理器及其依赖
+必须绑定当前控制提交，应用制品、投影语义和业务闭包必须绑定计划中的应用提交。协调器通过准确的
+`AIWORKER_RELEASE_PRODUCT_ROOT` 读取应用源码，计划同时封存两个提交；不能从旧standalone执行发布
+脚本，也不能用新控制提交冒充应用制品的构建来源。
 任一组件失败时固定逆序恢复 runtime convergence、director-brain、video-command、task-flow；如果已经
 发生前向 restart，全部磁盘恢复后只做一次 recovery restart。不得为失败重启 n8n、3017、模型、
 video worker 或重提任务。

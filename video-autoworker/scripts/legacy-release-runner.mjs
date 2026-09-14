@@ -130,6 +130,25 @@ export async function settleFailedMaintenance({ stopGateway, gatewayStopped, gua
 }
 
 /**
+ * Child outcome fields are authoritative; the message is diagnostic text only.
+ * Do not attach raw stdout/stderr to an error passed through public classifiers.
+ */
+export class ManagedChildError extends Error {
+  constructor({ exitCode = null, signal = null, timedOut = false, overflow = false,
+    aborted = false, groupStopped = true, beforeStart = false } = {}) {
+    super(beforeStart ? 'managed child aborted before start'
+      : `managed child failed: code=${exitCode} signal=${signal || 'none'} timeout=${timedOut} overflow=${overflow}`)
+    this.name = 'ManagedChildError'
+    this.exitCode = exitCode
+    this.signal = signal
+    this.timedOut = timedOut
+    this.overflow = overflow
+    this.aborted = aborted
+    this.groupStopped = groupStopped
+  }
+}
+
+/**
  * @param {string} command
  * @param {string[]} args
  * @param {{ cwd?: string, env?: Record<string, string | undefined>, timeoutMs: number,
@@ -141,7 +160,7 @@ export async function settleFailedMaintenance({ stopGateway, gatewayStopped, gua
 export function runManagedChild(command, args, { cwd, env, timeoutMs, onFailure, signal = null, maxBytes = 8 * 1024 * 1024 }) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 1800_000) fail('child timeout is invalid')
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 32 * 1024 * 1024) fail('child output budget is invalid')
-  if (signal?.aborted) return Promise.reject(new Error('managed child aborted before start'))
+  if (signal?.aborted) return Promise.reject(new ManagedChildError({ aborted: true, beforeStart: true }))
   return new Promise((resolveChild, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
     let stdout = ''; let stderr = ''; let timedOut = false; let overflow = false; let escalation
@@ -170,7 +189,8 @@ export function runManagedChild(command, args, { cwd, env, timeoutMs, onFailure,
       if (code !== 0 || timedOut || overflow || signal?.aborted) {
         const groupStopped = await stopChildGroup(child.pid)
         try { onFailure?.({ code, signal: exitSignal, timedOut, overflow, groupStopped, stderr }) } catch (error) { reject(error); return }
-        reject(new Error(`managed child failed: code=${code} signal=${exitSignal || 'none'} timeout=${timedOut} overflow=${overflow}`))
+        reject(new ManagedChildError({ exitCode: code, signal: exitSignal, timedOut, overflow,
+          aborted: signal?.aborted === true, groupStopped }))
       } else resolveChild(stdout)
     })
   })
