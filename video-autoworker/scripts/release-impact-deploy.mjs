@@ -312,6 +312,21 @@ function sealPlan(plan) {
   return { ...plan, planSha256: sha256(JSON.stringify(plan)) }
 }
 
+export function assertControlSourceBinding(plan, currentCommit) {
+  const expected = plan?.controlSourceCommit || plan?.sourceCommit
+  if (!COMMIT.test(expected || '') || !COMMIT.test(currentCommit || '')
+    || currentCommit !== expected) fail('control source changed after plan')
+  return expected
+}
+
+function assertPlannedControlSource(plan) {
+  const expected = plan.controlSourceCommit || plan.sourceCommit
+  const current = resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')
+  assertControlSourceBinding(plan, current)
+  assertCleanGitSource(coordinatorRoot, expected)
+  return current
+}
+
 export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intake,
   components, artifactRoot = null, runtimeConvergenceProof = null, toolBaseline = null,
   receiptDir = null, runtimeConfigSha256 = null, runtimeBinding = null,
@@ -931,7 +946,11 @@ async function assertPlannedWorker(plan) {
   const expected = plan.workerBinding
   if (!expected) return
   const current = await inspectWorkerRelease({ manifestPath: expected.manifestPath,
-    stateDir: expected.stateDir, databasePath: plan.runtimeBinding.liveDbPath, productRoot })
+    stateDir: expected.stateDir, databasePath: plan.runtimeBinding.liveDbPath, productRoot,
+    expectedHandoff: expected.handoffOperationId ? {
+      operationId: expected.handoffOperationId,
+      targetApplicationCommit: expected.targetApplicationCommit,
+    } : null })
   const expectedStatic = { ...expected }; const currentStatic = { ...current }
   delete expectedStatic.healthy; delete currentStatic.healthy
   if (JSON.stringify(currentStatic) !== JSON.stringify(expectedStatic)
@@ -1206,11 +1225,7 @@ async function executePlan(values, operation = null) {
   if (!pathname) fail('plan path is required')
   const plan = validatePlan(privateRead(pathname))
   if (!plan.runtimeBinding) fail('plan runtime binding is required')
-  const installerCommit = resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')
-  assertCleanGitSource(coordinatorRoot, plan.controlSourceCommit || plan.sourceCommit)
-  if (installerCommit !== (plan.controlSourceCommit || plan.sourceCommit)) {
-    fail('control source changed after plan')
-  }
+  const installerCommit = assertPlannedControlSource(plan)
   if (plan.receiptDir) privateDirectory(plan.receiptDir)
   const resumableInstalls = new Map()
   const priorInstallReceipt = component => {
@@ -1615,6 +1630,7 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
   const services = {
     readRouter: () => plannedRouterState(contract.plan.intakeUrl, contract.plan.runtimeBinding),
     assertBindings: async () => {
+      assertPlannedControlSource(contract.plan)
       assertCleanGitSource(productRoot, contract.plan.sourceCommit)
       if (contract.plan.runtimeConfigSha256 && runtimeConfigSnapshotSha256() !== contract.plan.runtimeConfigSha256) {
         fail('platform runtime configuration changed after plan')
@@ -1664,7 +1680,13 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
   const drainReason = operationReason(DRAIN_REASON, contract.scope.operationId)
   const resumeReason = operationReason(RESUME_REASON, contract.scope.operationId)
   let restored
-  if (current.accepting) {
+  if (!contract.plan.intake.accepting) {
+    if (!sameIntake(current, contract.plan.intake)
+      || current.reason !== contract.plan.intake.reason) {
+      fail('pre-existing intake state changed after plan')
+    }
+    restored = { restored: false, reason: 'not_owned' }
+  } else if (current.accepting) {
     const ownedResume = current.revision === contract.plan.intake.revision + 2
       && current.mode === 'active' && current.reason === resumeReason
     if (!ownedResume) fail('active intake does not prove settlement by this release operation')
@@ -1689,6 +1711,7 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
 
 async function applyPlan(values, { resume = false } = {}) {
   const contract = operationContract(values)
+  assertPlannedControlSource(contract.plan)
   const runtimeProofOverride = resume
     ? values.get('--runtime-convergence-proof') || null
     : null

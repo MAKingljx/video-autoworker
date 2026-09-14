@@ -78,7 +78,28 @@ export function validateWorkerReleaseBinding(binding) {
   return binding
 }
 
-export async function inspectWorkerRelease({ manifestPath, stateDir, databasePath, productRoot }, readStatus = readIndependentWorkerStatus) {
+/**
+ * @param {Record<string, any>} status
+ * @param {{ operationId: string, targetApplicationCommit: string } | null} [expected]
+ */
+export function workerHandoffBinding(status, expected = null) {
+  const live = status?.handoff
+  const pending = live?.migrationPending === true
+  if (!pending && !expected) return {}
+  const operationId = live?.operationId
+  const targetApplicationCommit = live?.targetApplicationCommit
+  if (typeof operationId !== 'string'
+    || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(operationId)
+    || !/^[a-f0-9]{40}$/u.test(targetApplicationCommit || '')
+    || (expected && (operationId !== expected.operationId
+      || targetApplicationCommit !== expected.targetApplicationCommit))) {
+    throw new Error('release_worker_handoff_identity_mismatch')
+  }
+  return { handoffOperationId: operationId, targetApplicationCommit }
+}
+
+export async function inspectWorkerRelease({ manifestPath, stateDir, databasePath, productRoot,
+  expectedHandoff = null }, readStatus = readIndependentWorkerStatus) {
   if (!isAbsolute(manifestPath) || resolve(manifestPath) !== manifestPath) throw new Error('release_worker_manifest_path_invalid')
   const entry = lstatSync(manifestPath)
   if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== process.getuid()
@@ -99,8 +120,7 @@ export async function inspectWorkerRelease({ manifestPath, stateDir, databasePat
   return validateWorkerReleaseBinding({ schema: SCHEMA, stateDir, manifestPath,
     manifestSha256: sha(raw), contentSha256: manifest.contentSha256, database: identity,
     pid: status.worker.pid, sourceUnchanged,
-    ...(status.handoff?.migrationPending === true ? { handoffOperationId: status.handoff.operationId,
-      targetApplicationCommit: status.handoff.targetApplicationCommit } : {}),
+    ...workerHandoffBinding(status, expectedHandoff),
     healthy: status.healthy === true && status.leaseVerified === true
       && status.leadership?.state === 'leader' && status.currentState === 'ready' })
 }

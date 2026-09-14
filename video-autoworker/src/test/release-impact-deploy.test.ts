@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import {
   applyReleaseImpactPlan,
   assertAllowedArguments,
+  assertControlSourceBinding,
   buildReleaseImpactPlan,
   installedControlComponentState,
   isCommittedPlanRoute,
@@ -164,6 +165,9 @@ describe('release impact deployment', () => {
       router, intake: activeIntake(), components: components() })
     expect(value).toMatchObject({ sourceCommit, controlSourceCommit })
     expect(value.planSha256).toMatch(/^[a-f0-9]{64}$/u)
+    expect(assertControlSourceBinding(value, controlSourceCommit)).toBe(controlSourceCommit)
+    expect(() => assertControlSourceBinding(value, '4'.repeat(40)))
+      .toThrow('control source changed after plan')
   })
 
   it('preserves a committed route and its intake hold after failed acceptance by default', async () => {
@@ -244,6 +248,28 @@ describe('release impact deployment', () => {
     expect(attest).toHaveBeenCalledTimes(1)
     expect(events.filter(event => event === 'stage')).toHaveLength(1)
     expect(records).toContainEqual(expect.objectContaining({ step: 'acceptance', status: 'completed' }))
+  })
+
+  it('leaves a pre-existing preparation pause for its original owner after resume', async () => {
+    const before = { ...pausedIntake(25), reason: 'worker handoff preparation' }
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: before,
+      components: components(['app']), artifactRoot: '/private/artifact',
+      artifactManifestSha256: 'a'.repeat(64),
+      runtimeConvergenceProof: '/private/proof.json' })
+    const committed = { ...router, active: 'blue', previous: 'green', generation: 8,
+      slots: { ...router.slots, blue: `${sourceCommit}-runtime` } }
+    const mutate = vi.fn()
+    await expect(resumeCommittedPlan({ plan: value, scope: { operationId: 'f'.repeat(64) } },
+      { acceptanceVerified: true, state: 'acceptance_verified_pending_settlement' },
+      { record: vi.fn(), failurePolicy: 'assess-first' }, {
+        readRouter: async () => committed,
+        assertBindings: async () => undefined,
+        attest: async () => undefined,
+        completeHandoff: async () => undefined,
+        restoreWorker: async () => ({ reason: 'unchanged' }),
+        intake: { read: async () => before, mutate },
+      })).resolves.toMatchObject({ intake: { restored: false, reason: 'not_owned' } })
+    expect(mutate).not.toHaveBeenCalled()
   })
   it('keeps running work and the independent worker alive for a verified Web-only release', async () => {
     const events: string[] = []

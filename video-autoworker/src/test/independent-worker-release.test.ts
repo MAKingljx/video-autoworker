@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
-import { workerSourceClosureUnchanged, releaseAdmissionPolicy } from '../../scripts/lib/independent-worker-release.mjs'
+import { workerSourceClosureUnchanged, releaseAdmissionPolicy,
+  workerHandoffBinding } from '../../scripts/lib/independent-worker-release.mjs'
 
 const hash = (x: string) => createHash('sha256').update(x).digest('hex')
 function manifest() {
@@ -29,5 +30,16 @@ describe('independent worker release dependency boundary', () => {
   })
   it('does not infer compatibility when there is no live worker binding', () => {
     expect(releaseAdmissionPolicy({}, null)).toBe('drain-all')
+  })
+  it('keeps the same handoff identity available for an idempotent completed resume', () => {
+    const expected = { operationId: 'worker-handoff-1', targetApplicationCommit: 'a'.repeat(40) }
+    const completed = { handoff: { ...expected, migrationPending: false } }
+    expect(workerHandoffBinding(completed)).toEqual({})
+    expect(workerHandoffBinding(completed, expected)).toEqual({
+      handoffOperationId: expected.operationId,
+      targetApplicationCommit: expected.targetApplicationCommit,
+    })
+    expect(() => workerHandoffBinding(completed, { ...expected, operationId: 'other' }))
+      .toThrow('release_worker_handoff_identity_mismatch')
   })
 })
