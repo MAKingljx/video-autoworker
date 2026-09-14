@@ -205,7 +205,7 @@ describe('DirectorLearningReviewPanel', () => {
     render(<DirectorLearningReviewPanel />)
     fireEvent.click(await screen.findByRole('button', { name: '驳回：人物档案 1' }))
     const dialog = await screen.findByRole('dialog', { name: '确认驳回候选' })
-    expect(dialog).toHaveFocus()
+    await waitFor(() => expect(dialog).toHaveFocus())
     fireEvent.keyDown(document, { key: 'Escape' })
 
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())

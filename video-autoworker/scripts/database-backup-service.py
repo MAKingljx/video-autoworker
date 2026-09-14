@@ -48,7 +48,9 @@ def launch_status():
     if result.returncode == 0:
         for line in result.stdout.splitlines():
             key, _, value = line.strip().partition(' = ')
-            if key in ['state', 'pid', 'last exit code']:
+            # The service fields occur before nested event-trigger fields.
+            # A trigger's "active" state must not replace "not running".
+            if key in ['state', 'pid', 'last exit code'] and key not in details:
                 details[key] = value
     return {'loaded': result.returncode == 0, **details}
 

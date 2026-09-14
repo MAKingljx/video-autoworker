@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
+import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
 import {
@@ -30,11 +31,21 @@ describe('n8n rolling database compatibility epoch', () => {
     })
 
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
-    const start = source.indexOf(`id: '${N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom}'`)
-    const end = source.indexOf('\n]\n\nexport function runMigrations', start)
+    // Inspect the migration array itself. Read-only startup helpers may sit
+    // between that declaration and runMigrations without changing its epoch.
+    const syntax = ts.createSourceFile('migrations.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const declaration = syntax.statements.flatMap(statement => ts.isVariableStatement(statement)
+      ? [...statement.declarationList.declarations] : [])
+      .find(value => ts.isIdentifier(value.name) && value.name.text === 'migrations')
+    const array = declaration?.initializer
+    if (!array || !ts.isArrayLiteralExpression(array)) throw new Error('migration_array_not_found')
+    const start = array.elements.findIndex(element => ts.isObjectLiteralExpression(element)
+      && element.properties.some(property => ts.isPropertyAssignment(property)
+        && ts.isIdentifier(property.name) && property.name.text === 'id'
+        && ts.isStringLiteral(property.initializer)
+        && property.initializer.text === N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom))
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(end).toBeGreaterThan(start)
-    const epoch = source.slice(start, end)
+    const epoch = array.elements.slice(start).map(element => element.getText(syntax)).join('\n')
     const ids = [...epoch.matchAll(/\bid:\s*'(\d{3}_[^']+)'/gu)].map(match => match[1])
     expect(ids.at(-1)).toBe('059_director_evidence_projection_receipts')
     expect(epoch).not.toMatch(/\bdb\.(?:prepare|pragma|transaction)\s*\(/gu)

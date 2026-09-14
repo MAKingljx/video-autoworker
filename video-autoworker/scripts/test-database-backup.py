@@ -9,6 +9,7 @@ import tarfile
 import time
 import io
 from unittest.mock import patch
+from types import SimpleNamespace
 import unittest
 
 spec = importlib.util.spec_from_file_location('database_backup', Path(__file__).with_name('database-backup.py'))
@@ -179,5 +180,10 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(len(backup.inventory(self.item)),2)
         backup.rotate(self.item)
         self.assertFalse(first_receipt.exists())
+
+    def test_launch_status_does_not_replace_service_state_with_nested_trigger_state(self):
+        result=SimpleNamespace(returncode=0,stdout='gui/501/job = {\n\tstate = not running\n\tlast exit code = 0\n\tevent triggers = {\n\t\tstate = active\n\t}\n}\n')
+        with patch.object(service.subprocess,'run',return_value=result):
+            self.assertEqual(service.launch_status(),{'loaded':True,'state':'not running','last exit code':'0'})
 
 if __name__ == '__main__': unittest.main()

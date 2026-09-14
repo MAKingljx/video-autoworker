@@ -16,6 +16,10 @@ export type DirectorExtractionHttpFailure = {
 }
 
 const PUBLIC_FAILURES: Readonly<Record<string, Omit<DirectorExtractionHttpFailure, 'code'>>> = {
+  director_brain_scope_invalid: {
+    status: 503,
+    message: '导演脑工作区配置尚未就绪，请联系管理员',
+  },
   director_extraction_legacy_projection_needs_readback: {
     status: 409,
     message: '已有候选尚未完成结果核对，已停止重复创建，请先核对原候选',

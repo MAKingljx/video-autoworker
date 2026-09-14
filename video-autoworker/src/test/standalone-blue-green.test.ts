@@ -613,7 +613,7 @@ transition_app blue release-new /release/new 7 release-old
     const requests: string[] = []
     const endpoint = await listen(createServer((request, response) => {
       requests.push(`${request.method} ${request.url}`)
-      if (request.url === '/api/status?action=health') {
+      if (request.url === '/api/status?action=readiness') {
         response.setHeader('content-type', 'application/json')
         response.end(JSON.stringify({ status: 'healthy',
           checks: [{ name: 'Database', status: 'healthy' }] }))
@@ -648,7 +648,7 @@ prewarm_slot blue
     })
     expect(result.stdout).toContain('sideEffects=unverified contract=read-only')
     expect(requests).toEqual([
-      'GET /api/status?action=health', 'HEAD /_next/static/chunk.js',
+      'GET /api/status?action=readiness', 'HEAD /_next/static/chunk.js',
     ])
     expect(createHash('sha256').update(readFileSync(database)).digest('hex')).toBe(before)
   })

@@ -38,11 +38,14 @@ const runtimeRoot = path.join(repoRoot, '.tmp', 'e2e-openclaw', mode)
 const dataDir = path.join(runtimeRoot, 'data')
 const mockBinDir = path.join(repoRoot, 'scripts', 'e2e-openclaw', 'bin')
 const skillsRoot = path.join(runtimeRoot, 'skills')
+const claudeHome = path.join(runtimeRoot, 'claude')
 const platformEnvFile = path.join(runtimeRoot, 'platform.env')
 
 fs.rmSync(runtimeRoot, { recursive: true, force: true })
 fs.mkdirSync(runtimeRoot, { recursive: true })
 fs.mkdirSync(dataDir, { recursive: true })
+// Capability probes use this isolated fixture, never the runner's real HOME.
+fs.mkdirSync(path.join(claudeHome, 'projects'), { recursive: true })
 fs.cpSync(fixtureSource, runtimeRoot, { recursive: true })
 fs.writeFileSync(platformEnvFile, '', { flag: 'wx', mode: 0o600 })
 
@@ -58,6 +61,7 @@ const baseEnv = {
   MC_DISABLE_RATE_LIMIT: '1',
   MISSION_CONTROL_DATA_DIR: dataDir,
   MISSION_CONTROL_DB_PATH: path.join(dataDir, 'mission-control.db'),
+  MC_CLAUDE_HOME: claudeHome,
   OPENCLAW_STATE_DIR: runtimeRoot,
   OPENCLAW_CONFIG_PATH: path.join(runtimeRoot, 'openclaw.json'),
   OPENCLAW_GATEWAY_HOST: gatewayHost,

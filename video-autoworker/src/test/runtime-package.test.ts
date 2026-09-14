@@ -1,10 +1,11 @@
 // @vitest-environment node
 import { createHash } from 'node:crypto'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { currentPackageRuntime, packageCiSource, validatePackageReceipt, verifyPackageCiSuccess, verifyRuntimePackage } from '../../scripts/package-runtime-artifact.mjs'
+import { currentPackageRuntime, packageCiSource, probeArtifactSqlite, resolveArtifactSqlitePackage, validatePackageReceipt, verifyPackageCiSuccess, verifyRuntimePackage } from '../../scripts/package-runtime-artifact.mjs'
 
 const paths: string[] = []
 afterEach(() => { for (const p of paths.splice(0)) rmSync(p, { recursive: true, force: true }) })
@@ -22,7 +23,93 @@ function fixture() {
   writeFileSync(receiptPath, JSON.stringify(receipt))
   return { root, receipt, receiptPath }
 }
+
+function artifactManifest(root: string) {
+  const files: Array<{ path: string; mode: string; bytes: number; sha256: string }> = []
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const pathname = join(directory, entry.name)
+      if (entry.isDirectory()) walk(pathname)
+      else if (entry.isFile()) {
+        const stat = lstatSync(pathname)
+        files.push({ path: relative(root, pathname), mode: (stat.mode & 0o7777).toString(8).padStart(4, '0'),
+          bytes: stat.size, sha256: createHash('sha256').update(readFileSync(pathname)).digest('hex') })
+      }
+    }
+  }
+  walk(root)
+  return { schemaVersion: 2, algorithm: 'sha256', files }
+}
+
+function pnpmSqliteFixture() {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'runtime-package-pnpm-'))); paths.push(root)
+  const require = createRequire(import.meta.url)
+  const source = realpathSync(dirname(require.resolve('better-sqlite3/package.json')))
+  const metadata = JSON.parse(readFileSync(join(source, 'package.json'), 'utf8'))
+  const packageRoot = join(root, `node_modules/.pnpm/better-sqlite3@${metadata.version}/node_modules/better-sqlite3`)
+  cpSync(source, packageRoot, { recursive: true, dereference: true })
+  const packageRequire = createRequire(join(source, 'package.json'))
+  const bindingsRoot = dirname(packageRequire.resolve('bindings/package.json'))
+  const bindingsRequire = createRequire(join(bindingsRoot, 'package.json'))
+  const uriRoot = dirname(bindingsRequire.resolve('file-uri-to-path/package.json'))
+  for (const [name, sourceRoot] of [['bindings', bindingsRoot], ['file-uri-to-path', uriRoot]]) {
+    cpSync(sourceRoot, join(dirname(packageRoot), name), { recursive: true, dereference: true })
+  }
+  const top = join(root, 'node_modules/better-sqlite3')
+  mkdirSync(top, { recursive: true })
+  cpSync(join(source, 'package.json'), join(top, 'package.json'))
+  return { root, source, packageRoot, top, metadata }
+}
 describe('verified runtime package promotion', () => {
+  it('opens real SQLite from the unique internal pnpm package when the top-level package is metadata-only', async () => {
+    const f = pnpmSqliteFixture()
+    const manifest = artifactManifest(f.root)
+    const resolved = await resolveArtifactSqlitePackage(f.root, manifest)
+    expect(resolved.entrypoint).toBe(join(f.packageRoot, 'lib/index.js'))
+    expect(resolved.nativeBinding).toBe(join(f.packageRoot, 'build/Release/better_sqlite3.node'))
+    expect(await probeArtifactSqlite(f.root, manifest)).toMatchObject({ ok: true, name: 'better-sqlite3', version: f.metadata.version })
+    expect(artifactManifest(f.root)).toEqual(manifest)
+    expect(readdirSync(f.top)).toEqual(['package.json'])
+  })
+
+  it('accepts equivalent top metadata without depending on package.json whitespace or extra fields', async () => {
+    const f = pnpmSqliteFixture()
+    writeFileSync(join(f.top, 'package.json'), JSON.stringify({ name: f.metadata.name, version: f.metadata.version, main: f.metadata.main }))
+    expect(await probeArtifactSqlite(f.root, artifactManifest(f.root))).toMatchObject({ ok: true, version: f.metadata.version })
+  })
+
+  it('rejects two complete internal packages with the same top-level identity before loading either', async () => {
+    const f = pnpmSqliteFixture()
+    cpSync(f.packageRoot, join(f.root, 'node_modules/.pnpm/second-copy/node_modules/better-sqlite3'), { recursive: true })
+    await expect(resolveArtifactSqlitePackage(f.root, artifactManifest(f.root)))
+      .rejects.toThrow('runtime_package_sqlite_package_ambiguous_or_missing')
+  })
+
+  it('rejects an entrypoint symlink escaping the artifact instead of loading source dependencies', async () => {
+    const f = pnpmSqliteFixture()
+    const entry = join(f.packageRoot, 'lib/index.js')
+    rmSync(entry)
+    symlinkSync(join(f.source, 'lib/index.js'), entry)
+    await expect(resolveArtifactSqlitePackage(f.root, artifactManifest(f.root)))
+      .rejects.toThrow('runtime_package_sqlite_outside_artifact')
+  })
+
+  it('rejects changed declared bytes and refuses a different-version package as a fallback', async () => {
+    const f = pnpmSqliteFixture()
+    const manifest = artifactManifest(f.root)
+    writeFileSync(join(f.packageRoot, 'lib/index.js'), 'module.exports = null\n')
+    await expect(resolveArtifactSqlitePackage(f.root, manifest)).rejects.toThrow('runtime_package_sqlite_member_changed')
+    writeFileSync(join(f.packageRoot, 'package.json'), JSON.stringify({ ...f.metadata, version: '0.0.0' }))
+    await expect(resolveArtifactSqlitePackage(f.root, artifactManifest(f.root)))
+      .rejects.toThrow('runtime_package_sqlite_package_ambiguous_or_missing')
+  })
+
+  it('propagates a real native loading error without treating it as a missing JavaScript entry', async () => {
+    const f = pnpmSqliteFixture()
+    writeFileSync(join(f.packageRoot, 'build/Release/better_sqlite3.node'), 'invalid native addon')
+    await expect(probeArtifactSqlite(f.root, artifactManifest(f.root))).rejects.toMatchObject({ code: 'ERR_DLOPEN_FAILED' })
+  })
+
   it('accepts the same bytes on the matching native platform', async () => {
     const f = fixture()
     expect(await verifyRuntimePackage(f.receiptPath)).toMatchObject({ ok: true, receipt: f.receipt })

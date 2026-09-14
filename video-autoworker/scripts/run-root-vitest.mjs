@@ -4,6 +4,8 @@ import { spawn } from 'node:child_process'
 import { access } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
+import { availableParallelism } from 'node:os'
+import { partitionTargetedTests } from './lib/targeted-test-partition.mjs'
 
 const repositoryRoot = process.cwd()
 const vitestCli = resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs')
@@ -29,6 +31,8 @@ const heavyInvocations = heavyRootTests.map(testFile => [
   'run',
   '--maxWorkers=1',
   '--no-file-parallelism',
+  '--testTimeout=30000',
+  '--hookTimeout=30000',
   testFile,
 ])
 
@@ -187,8 +191,18 @@ if (selectedPartition === 'regular') {
     }
     const files = [...selected]
     process.stdout.write(`${JSON.stringify({ selection: 'changed_production_dependencies', sourceFiles: related.length, testFiles: files.length })}\n`)
-    if (files.length) await runVitest(['run', '--maxWorkers=1', '--no-file-parallelism', ...files])
-    else process.stdout.write('No associated automated test was found; functional acceptance remains required.\n')
+    const partitioned = partitionTargetedTests(files, repositoryRoot, heavyRootTests)
+    process.stdout.write(`${JSON.stringify({ regular: partitioned.regularFiles.length,
+      isolatedHeavy: partitioned.heavyFiles, testProcessLimit: Math.min(3, availableParallelism()) })}\n`)
+    let next = 0
+    const failures = []
+    await Promise.all(Array.from({ length: Math.min(3, availableParallelism(), partitioned.invocations.length) }, async () => {
+      while (next < partitioned.invocations.length) {
+        const invocation = partitioned.invocations[next++]
+        try { await runVitest(invocation) } catch (error) { failures.push(error) }
+      }
+    }))
+    if (failures.length) throw new AggregateError(failures, 'Targeted test partition failed')
     process.exit(0)
   }
   await runVitest(regularInvocation)

@@ -51,7 +51,16 @@ export async function POST(request: NextRequest) {
   const auth = requireN8nRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
   const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
-  if (!isDirectorBrainScope(scope)) {
+  let matchesScope: boolean
+  try {
+    matchesScope = isDirectorBrainScope(scope)
+  } catch (error) {
+    const failure = directorExtractionHttpFailure(error)
+    return NextResponse.json({ ok: false, code: failure.code, error: failure.message }, {
+      status: failure.status, headers: { 'Cache-Control': 'no-store' },
+    })
+  }
+  if (!matchesScope) {
     return NextResponse.json({
       ok: false,
       code: 'director_brain_scope_forbidden',

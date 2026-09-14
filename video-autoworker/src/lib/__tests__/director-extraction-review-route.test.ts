@@ -60,6 +60,20 @@ describe('director extraction review route', () => {
     )
   })
 
+  it('returns a structured configuration failure before opening the database', async () => {
+    mocks.scope.mockImplementationOnce(() => { throw new Error('director_brain_scope_invalid') })
+    const response = await POST(request({ action: 'list' }))
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({
+      ok: false, code: 'director_brain_scope_invalid', error: '导演脑工作区配置尚未就绪，请联系管理员',
+    })
+    expect(response.headers.get('Cache-Control')).toBe('no-store')
+    expect(mocks.getDatabase).not.toHaveBeenCalled()
+    expect(mocks.list).not.toHaveBeenCalled()
+    expect(mocks.prepare).not.toHaveBeenCalled()
+    expect(mocks.confirm).not.toHaveBeenCalled()
+  })
+
   it('prepares a persistent batch without calling the confirm service', async () => {
     mocks.prepare.mockResolvedValue({
       requestId: 'request-route-001', reviewId: 'b'.repeat(64), reviewRevision: 9,

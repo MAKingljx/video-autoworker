@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, lstat, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, lstat, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { basename, resolve, join } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, join, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { auditStandaloneArtifact, verifyStandaloneVerificationBundle } from './check-standalone-artifact.mjs'
@@ -60,6 +60,87 @@ async function fileHash(pathname) {
   for await (const chunk of createReadStream(pathname)) digest.update(chunk)
   return digest.digest('hex')
 }
+
+/** Resolve from the already audited artifact manifest, never from the caller's node_modules. */
+export async function resolveArtifactSqlitePackage(artifactRoot, manifest) {
+  const root = await realpath(resolve(artifactRoot))
+  if (manifest?.schemaVersion !== 2 || manifest.algorithm !== 'sha256' || !Array.isArray(manifest.files)) {
+    throw new Error('runtime_package_sqlite_manifest_invalid')
+  }
+  const members = new Map()
+  for (const member of manifest.files) {
+    if (typeof member.path !== 'string' || isAbsolute(member.path) || member.path.includes('\\')
+      || member.path.split('/').some(part => ['', '.', '..'].includes(part))
+      || !SHA.test(member.sha256 || '') || members.has(member.path)) throw new Error('runtime_package_sqlite_manifest_invalid')
+    members.set(member.path, member)
+  }
+  const relativeMember = pathname => {
+    const value = relative(root, pathname)
+    if (!value || value === '..' || value.startsWith(`..${sep}`) || isAbsolute(value)) {
+      throw new Error('runtime_package_sqlite_outside_artifact')
+    }
+    return value.split(sep).join('/')
+  }
+  const declaredFile = async pathname => {
+    const physical = await realpath(pathname)
+    const member = relativeMember(physical)
+    const expected = members.get(member)
+    const entry = await lstat(physical)
+    if (!expected || !entry.isFile() || entry.isSymbolicLink() || entry.size !== expected.bytes
+      || (entry.mode & 0o7777).toString(8).padStart(4, '0') !== expected.mode
+      || await fileHash(physical) !== expected.sha256) throw new Error('runtime_package_sqlite_member_changed')
+    return { path: physical, member, expected }
+  }
+  const top = await declaredFile(join(root, 'node_modules/better-sqlite3/package.json'))
+  const topMetadata = JSON.parse(await readFile(top.path, 'utf8'))
+  const mainOf = value => typeof value.main === 'string' ? value.main : 'index.js'
+  if (topMetadata.name !== 'better-sqlite3' || typeof topMetadata.version !== 'string' || !topMetadata.version) {
+    throw new Error('runtime_package_sqlite_metadata_invalid')
+  }
+  const candidates = new Map()
+  for (const member of members.keys()) {
+    if (!/(?:^|\/)node_modules\/better-sqlite3\/package\.json$/u.test(member)) continue
+    const metadataFile = await declaredFile(resolve(root, member))
+    const metadata = JSON.parse(await readFile(metadataFile.path, 'utf8'))
+    if (metadataFile.expected.sha256 !== top.expected.sha256
+      && (metadata.name !== topMetadata.name || metadata.version !== topMetadata.version
+        || mainOf(metadata) !== mainOf(topMetadata))) continue
+    const packageRoot = dirname(metadataFile.path)
+    const entryPath = resolve(packageRoot, mainOf(metadata))
+    if (isAbsolute(mainOf(metadata)) || !entryPath.startsWith(`${packageRoot}${sep}`)) {
+      throw new Error('runtime_package_sqlite_entry_outside_package')
+    }
+    // A top-level metadata-only stub is valid. A declared but missing main file is corruption.
+    const entryStat = await lstat(entryPath).catch(error => {
+      if (error.code === 'ENOENT' && !members.has(relativeMember(entryPath))) return null
+      throw error
+    })
+    if (!entryStat) continue
+    const entry = await declaredFile(entryPath)
+    const packageMember = relativeMember(packageRoot)
+    const nativeMembers = [...members.keys()].filter(pathname => pathname.startsWith(`${packageMember}/`)
+      && pathname.endsWith('/better_sqlite3.node'))
+    if (nativeMembers.length !== 1) throw new Error('runtime_package_sqlite_native_ambiguous_or_missing')
+    const native = await declaredFile(resolve(root, nativeMembers[0]))
+    candidates.set(entry.path, { entrypoint: entry.path, nativeBinding: native.path,
+      packageJsonSha256: metadataFile.expected.sha256, name: metadata.name, version: metadata.version })
+  }
+  if (candidates.size !== 1) throw new Error('runtime_package_sqlite_package_ambiguous_or_missing')
+  return [...candidates.values()][0]
+}
+
+export async function probeArtifactSqlite(artifactRoot, manifest) {
+  const selected = await resolveArtifactSqlitePackage(artifactRoot, manifest)
+  const required = createRequire(selected.entrypoint)
+  const Database = required(selected.entrypoint)
+  // The explicit audited addon prevents native search paths or caller modules from supplying a different ABI.
+  // Native loading is deliberately outside the resolver: ABI failures are fatal, never another lookup attempt.
+  const db = new Database(':memory:', { nativeBinding: selected.nativeBinding })
+  try {
+    if (db.prepare('SELECT 1 AS ok').get()?.ok !== 1) throw new Error('runtime_package_sqlite_probe_failed')
+  } finally { db.close() }
+  return { ok: true, name: selected.name, version: selected.version, packageJsonSha256: selected.packageJsonSha256 }
+}
 export function validatePackageReceipt(receipt, runtime = currentPackageRuntime()) {
   if (receipt?.schema !== SCHEMA || !/^[a-f0-9]{40}$/u.test(receipt.sourceCommit || '')
     || !SHA.test(receipt.archiveSha256 || '') || !SHA.test(receipt.manifestSha256 || '')
@@ -105,16 +186,17 @@ export async function packRuntimeArtifact(artifactRoot, outputDir) {
     || provenance.buildSourceAnchor?.gitDirty !== false) throw new Error('runtime_package_source_not_sealed')
   // Loading an actual SQLite database verifies the package's native ABI on the
   // packaging host; runtime metadata must describe the bytes, not CI labels.
-  const required = createRequire(join(root, 'server.js'))
-  const Database = required('better-sqlite3')
-  const db = new Database(':memory:')
-  try { db.prepare('SELECT 1').get() } finally { db.close() }
+  const manifestSource = await readFile(join(root, 'release-manifest.json'))
+  if (hash(manifestSource) !== audited.verificationBundle.identities['release-manifest.json'].sha256) {
+    throw new Error('runtime_package_audited_manifest_changed')
+  }
+  await probeArtifactSqlite(root, JSON.parse(manifestSource.toString('utf8')))
   const runtime = currentPackageRuntime()
   const ci = packageCiSource(provenance.gitCommit)
   const name = `runtime-${provenance.gitCommit}-${runtime.platform}-${runtime.arch}-node${runtime.nodeAbi}`
   const archive = `${name}.tar.gz`
   const receiptPath = join(output, `${name}.json`)
-  const manifestSha256 = hash(await readFile(join(root, 'release-manifest.json')))
+  const manifestSha256 = hash(manifestSource)
   await mkdir(output, { recursive: true, mode: 0o700 })
   if (await lstat(receiptPath).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error))) {
     const previous = await verifyRuntimePackage(receiptPath)
