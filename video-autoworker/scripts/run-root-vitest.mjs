@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { availableParallelism } from 'node:os'
 import { partitionTargetedTests } from './lib/targeted-test-partition.mjs'
+import { assertExactRootTestCollection, parseRootVitestArguments, resolveExplicitRootTests } from './lib/root-vitest-selection.mjs'
 
 const repositoryRoot = process.cwd()
 const vitestCli = resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs')
@@ -36,24 +37,19 @@ const heavyInvocations = heavyRootTests.map(testFile => [
   testFile,
 ])
 
-// CI uses separate runners for these same verified partitions. Local execution
-// keeps the complete sequential run unless one exact partition is requested.
-const partitionFlag = process.argv.indexOf('--partition')
-const selectedPartition = partitionFlag < 0 ? null : process.argv[partitionFlag + 1]
-if (partitionFlag >= 0 && (
-  process.argv.lastIndexOf('--partition') !== partitionFlag
-  || !['regular', ...heavyRootTests].includes(selectedPartition)
-)) {
-  throw new Error('Root Vitest partition must be regular or one declared heavy test file')
-}
-const impactFlag = process.argv.indexOf('--impact-plan')
-const impactPath = impactFlag < 0 ? null : process.argv[impactFlag + 1]
-if (impactFlag >= 0 && (selectedPartition !== 'regular' || !impactPath || process.argv.lastIndexOf('--impact-plan') !== impactFlag)) {
-  throw new Error('Impact-plan selection requires the regular partition and one plan')
-}
+// Positional test paths are an exact selection, never ignored CLI filters.
+const selection = parseRootVitestArguments(process.argv.slice(2), heavyRootTests)
+const selectedPartition = selection.partition
+const impactPath = selection.impactPath
+const explicitFiles = selection.files.length
+  ? await resolveExplicitRootTests(selection.files, repositoryRoot)
+  : null
 
-if (process.argv.includes('--print-plan')) {
-  process.stdout.write(`${JSON.stringify({
+if (selection.printPlan) {
+  process.stdout.write(`${JSON.stringify(explicitFiles ? {
+    selection: 'explicit_files', files: explicitFiles,
+    ...partitionTargetedTests(explicitFiles, repositoryRoot, heavyRootTests),
+  } : {
     partitions: ['regular', ...heavyRootTests], regularInvocation, heavyInvocations,
   }, null, 2)}\n`)
   process.exit(0)
@@ -129,7 +125,7 @@ async function verifyPartition() {
   }
 }
 
-if (process.argv.includes('--verify-partition')) {
+if (selection.verifyPartition) {
   const partition = await verifyPartition()
   process.stdout.write(`${JSON.stringify(partition)}\n`)
   process.exit(0)
@@ -155,6 +151,31 @@ async function runVitest(args) {
       ))
     })
   })
+}
+
+async function runTargetedFiles(files) {
+  const partitioned = partitionTargetedTests(files, repositoryRoot, heavyRootTests)
+  process.stdout.write(`${JSON.stringify({ regular: partitioned.regularFiles.length,
+    isolatedHeavy: partitioned.heavyFiles, testProcessLimit: Math.min(3, availableParallelism()) })}\n`)
+  let next = 0
+  const failures = []
+  await Promise.all(Array.from({ length: Math.min(3, availableParallelism(), partitioned.invocations.length) }, async () => {
+    while (next < partitioned.invocations.length) {
+      const invocation = partitioned.invocations[next++]
+      try { await runVitest(invocation) } catch (error) { failures.push(error) }
+    }
+  }))
+  if (failures.length) throw new AggregateError(failures, 'Targeted test partition failed')
+}
+
+if (explicitFiles) {
+  // Vitest positional arguments are substring filters. Verify collection first
+  // so a similarly named test cannot silently widen this exact-file request.
+  const collected = await collectTestFiles(['list', '--filesOnly', ...explicitFiles])
+  assertExactRootTestCollection(explicitFiles, collected, repositoryRoot)
+  process.stdout.write(`${JSON.stringify({ selection: 'explicit_files', testFiles: explicitFiles.length })}\n`)
+  await runTargetedFiles(explicitFiles)
+  process.exit(0)
 }
 
 if (selectedPartition === 'regular') {
@@ -191,18 +212,7 @@ if (selectedPartition === 'regular') {
     }
     const files = [...selected]
     process.stdout.write(`${JSON.stringify({ selection: 'changed_production_dependencies', sourceFiles: related.length, testFiles: files.length })}\n`)
-    const partitioned = partitionTargetedTests(files, repositoryRoot, heavyRootTests)
-    process.stdout.write(`${JSON.stringify({ regular: partitioned.regularFiles.length,
-      isolatedHeavy: partitioned.heavyFiles, testProcessLimit: Math.min(3, availableParallelism()) })}\n`)
-    let next = 0
-    const failures = []
-    await Promise.all(Array.from({ length: Math.min(3, availableParallelism(), partitioned.invocations.length) }, async () => {
-      while (next < partitioned.invocations.length) {
-        const invocation = partitioned.invocations[next++]
-        try { await runVitest(invocation) } catch (error) { failures.push(error) }
-      }
-    }))
-    if (failures.length) throw new AggregateError(failures, 'Targeted test partition failed')
+    await runTargetedFiles(files)
     process.exit(0)
   }
   await runVitest(regularInvocation)

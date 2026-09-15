@@ -12,6 +12,8 @@ import {
 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { renderManagedMarkdownSection } from './lib/render-managed-markdown-section.mjs'
+import { readOpenClawAgentEntries } from './lib/openclaw-agent-config.mjs'
 import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import {
@@ -1075,6 +1077,175 @@ function assertTaskFlowDirectorWork(repositoryRoot, installedTaskFlowRoot) {
     }
   }
   return true
+}
+
+// Component planning uses the same payload contracts as release acceptance,
+// without executing an installer, a model, Git, or Gateway introspection.
+function inspectionEntry(pathname, label, optional = false) {
+  if (!isAbsolute(pathname) || resolve(pathname) !== pathname) fail(`${label}_path_invalid`)
+  let cursor = pathname
+  while (cursor !== dirname(cursor)) {
+    const entry = lstatSync(cursor, { throwIfNoEntry: false })
+    if (entry?.isSymbolicLink()) fail(`${label}_symlink`)
+    cursor = dirname(cursor)
+  }
+  const entry = lstatSync(pathname, { throwIfNoEntry: false })
+  if (!entry) {
+    if (optional) return null
+    fail(`${label}_missing`)
+  }
+  if (entry.uid !== process.getuid() || (entry.mode & 0o6022) !== 0
+    || (!entry.isDirectory() && (!entry.isFile() || entry.nlink !== 1))) fail(`${label}_unsafe`)
+  return entry
+}
+
+function inspectionTree(root, label, { optional = false, video = false } = {}) {
+  const rootEntry = inspectionEntry(root, label, optional)
+  if (!rootEntry) return null
+  if (!rootEntry.isDirectory()) fail(`${label}_unsafe`)
+  const entries = []
+  const visit = directory => {
+    for (const name of readdirSync(directory).sort()) {
+      const pathname = join(directory, name), member = relative(root, pathname)
+      const initial = lstatSync(pathname)
+      if (video && member === 'node_modules/openclaw' && initial.isSymbolicLink()) {
+        const sdk = validateOpenClawSdkLink(pathname, EXPECTED_OPENCLAW_VERSION)
+        entries.push([member, 'sdk', sdk.evidence])
+        continue
+      }
+      const entry = inspectionEntry(pathname, label)
+      entries.push([member, entry.isDirectory() ? 'directory' : 'file', entry.mode & 0o777,
+        entry.isFile() ? fileSha256(pathname) : null])
+      if (entry.isDirectory()) visit(pathname)
+    }
+  }
+  visit(root)
+  return { root, mode: rootEntry.mode & 0o777, entries }
+}
+
+function inspectionFile(pathname, label, optional = false) {
+  const entry = inspectionEntry(pathname, label, optional)
+  if (!entry) return null
+  if (!entry.isFile()) fail(`${label}_unsafe`)
+  return { path: pathname, mode: entry.mode & 0o777, sha256: fileSha256(pathname) }
+}
+
+function componentConfigProjection(config, component) {
+  const pluginId = component === 'videoCommand' ? 'aiworker-video-command' : 'aiworker-director-brain'
+  const toolId = component === 'videoCommand' ? 'aiworker_analyze_video' : 'aiworker_director_brain'
+  const agents = readOpenClawAgentEntries(config)
+  const scoped = agents.map(agent => ({ id: agent.id, workspace: agent.id === 'second-original' ? agent.workspace : null,
+    explicitAllow: agent.id === 'second-original' && Object.hasOwn(agent.tools || {}, 'allow'),
+    allow: (agent.tools?.allow || []).filter(value => value === toolId),
+    alsoAllow: (agent.tools?.alsoAllow || []).filter(value => value === toolId) }))
+  const entry = config.plugins?.entries?.[pluginId]
+  const target = scoped.filter(agent => agent.id === 'second-original')
+  const globalGrants = ['allow', 'alsoAllow'].flatMap(key => (config.tools?.[key] || []).filter(value => value === toolId))
+  const allowed = config.plugins?.allow === undefined || (Array.isArray(config.plugins.allow) && config.plugins.allow.includes(pluginId))
+  const matches = config.plugins?.enabled !== false && allowed && entry?.enabled === true
+    && entry?.config?.releaseReady === true && target.length === 1
+    && target[0].alsoAllow.length === 1 && globalGrants.length === 0
+    && scoped.filter(agent => agent.id !== 'second-original').every(agent => !agent.allow.length && !agent.alsoAllow.length)
+    && (component === 'videoCommand'
+      ? entry?.llm?.allowAgentIdOverride === true
+        && Object.keys(entry.config).every(key => key === 'releaseReady')
+        && target[0].allow.length === (target[0].explicitAllow ? 1 : 0)
+      : entry?.config?.targetAgentId === 'second-original' && entry?.hooks?.allowConversationAccess === true && !target[0].explicitAllow)
+  return { matches, projection: { enabled: config.plugins?.enabled, allowed, entry, agents: scoped, globalGrants } }
+}
+
+export function inspectInstalledReleaseComponent({ component, repositoryRoot, profileStateRoot, workspaceRoot }) {
+  if (!['taskFlow', 'videoCommand', 'directorBrain'].includes(component)) fail('component_invalid')
+  for (const pathname of [repositoryRoot, profileStateRoot, workspaceRoot]) {
+    if (typeof pathname !== 'string' || !isAbsolute(pathname) || resolve(pathname) !== pathname) fail('component_root_path_invalid')
+  }
+  const repository = assertPhysicalDirectory(repositoryRoot, 'repository')
+  const profile = assertPhysicalDirectory(profileStateRoot, 'profile_state')
+  const workspace = assertPhysicalDirectory(workspaceRoot, 'workspace')
+  for (const [pathname, label] of [[repository, 'repository'], [profile, 'profile_state'], [workspace, 'workspace']]) inspectionEntry(pathname, label)
+  let members, installedRoot, sourceRoot, secondary = null
+  if (component === 'taskFlow') {
+    sourceRoot = join(repository, 'openclaw-skills/aiworker-task-flow')
+    members = taskFlowMembers(repository)
+    installedRoot = join(workspace, 'skills/aiworker-task-flow')
+  } else if (component === 'videoCommand') {
+    sourceRoot = join(repository, 'openclaw-plugins/aiworker-video-command')
+    members = videoCommandMembers(repository)
+    installedRoot = join(profile, 'extensions/aiworker-video-command')
+    assertVersionPair(sourceRoot, EXPECTED_VIDEO_COMMAND_VERSION, 'video_command_source')
+  } else {
+    const base = 'openclaw-plugins/aiworker-director-brain'
+    sourceRoot = join(repository, base)
+    members = ['index.js', 'openclaw.plugin.json', 'package.json'].map(name => ({ source: `${base}/${name}`, target: name }))
+      .concat(recursiveSourceMembers(repository, `${base}/lib`, 'lib'))
+    installedRoot = join(profile, 'extensions/aiworker-director-brain')
+    assertVersionPair(sourceRoot, null, 'director_brain_source')
+    assertDirectorBrainPluginContract(sourceRoot)
+    const skillMembers = recursiveSourceMembers(repository, 'openclaw-skills/aiworker-director-brain')
+    secondary = { members: skillMembers, expected: selectedSourceManifest(repository, skillMembers),
+      actual: inspectionTree(join(workspace, 'skills/aiworker-director-brain'), 'director_skill', { optional: true }) }
+  }
+  inspectionEntry(sourceRoot, 'component_source')
+  const sourceFiles = [...members, ...(secondary?.members || [])].map(member => inspectionFile(join(repository, member.source), 'component_source'))
+  if (component === 'taskFlow') assertTaskFlowDirectorWork(repository, sourceRoot)
+  const expected = selectedSourceManifest(repository, members)
+  if (component !== 'taskFlow') maskedCompatiblePluginPackage(join(sourceRoot, 'package.json'),
+    component === 'videoCommand' ? 'aiworker-video-command' : 'aiworker-director-brain', 'component_source_package', true)
+  const actual = inspectionTree(installedRoot, 'component_target', { optional: true, video: component === 'videoCommand' })
+  const state = { component, repository, profile, workspace, sourceFiles, expected, actual, secondary }
+  let configuration = null, renderedMatches = true
+  if (component === 'taskFlow') {
+    state.sections = []
+    for (const [file, templateName, sectionId, legacyHeadings] of [
+      ['AGENTS.md', 'WORKSPACE_VIDEO_RULES.md', 'video-rules', ['## Video Learning Pipeline Rule', '## Video Analysis Task Flow Rule']],
+      ['MEMORY.md', 'WORKSPACE_VIDEO_MEMORY.md', 'video-memory', ['## Current AI-worker Video Analysis Memory']],
+    ]) {
+      const templatePath = join(sourceRoot, templateName)
+      const templateIdentity = inspectionFile(templatePath, 'managed_template')
+      const template = readFileSync(templatePath, 'utf8')
+      // Validate the source independently so an invalid template cannot be
+      // classified as ordinary installed-content drift.
+      renderManagedMarkdownSection({ current: '', template, sectionId, legacyHeadings })
+      const pathname = join(workspace, file), currentIdentity = inspectionFile(pathname, 'managed_target', true)
+      const current = currentIdentity ? readFileSync(pathname, 'utf8') : ''
+      let rendered = null
+      try { rendered = renderManagedMarkdownSection({ current, template, sectionId, legacyHeadings }) }
+      catch { renderedMatches = false }
+      if (rendered !== current) renderedMatches = false
+      state.sections.push({ templateIdentity, currentIdentity, renderedSha256: rendered === null ? null : sha256(rendered) })
+    }
+  } else {
+    const pathname = join(profile, 'openclaw.json')
+    inspectionFile(pathname, 'profile_config')
+    try { configuration = componentConfigProjection(JSON.parse(readFileSync(pathname, 'utf8')), component) }
+    catch { configuration = { matches: false, projection: { invalidSha256: fileSha256(pathname) } } }
+    state.config = configuration.projection
+  }
+  const fingerprint = sha256(canonicalJson(state))
+  if (!actual || (secondary && !secondary.actual)) return { matches: false, fingerprint, reason: 'component_missing' }
+  if (!renderedMatches) return { matches: false, fingerprint, reason: 'managed_sections_changed' }
+  if (configuration && !configuration.matches) return { matches: false, fingerprint, reason: 'component_config_changed' }
+  try {
+    if (component === 'taskFlow') {
+      assertManifestMatches(repository, installedRoot, members, 'task_flow')
+      assertTaskFlowDirectorWork(repository, installedRoot)
+    } else if (component === 'videoCommand') {
+      assertVideoCommandManifestMatches(repository, installedRoot)
+      assertVersionPair(installedRoot, EXPECTED_VIDEO_COMMAND_VERSION, 'video_command')
+    } else {
+      inspectCompatibleDirectorBrainPlugin(installedRoot)
+      assertVersionPair(installedRoot, readVersion(join(sourceRoot, 'package.json'), 'director_source'), 'director_brain')
+      assertManifestMatches(repository, installedRoot, members, 'director_brain', {
+        sourceRelative: 'openclaw-plugins/aiworker-director-brain/package.json', id: 'aiworker-director-brain',
+      })
+      assertManifestMatches(repository, join(workspace, 'skills/aiworker-director-brain'), secondary.members, 'director_skill')
+    }
+  } catch (error) {
+    const code = String(error?.message || '')
+    if (/unsafe|symlink|writable_by_others|owner_invalid|unsupported_member|setid/u.test(code)) throw error
+    return { matches: false, fingerprint, reason: 'component_payload_changed' }
+  }
+  return { matches: true, fingerprint }
 }
 
 export function verifyInstalledReleasePayloads({

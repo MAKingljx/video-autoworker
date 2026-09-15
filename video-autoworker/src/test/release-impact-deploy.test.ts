@@ -11,12 +11,14 @@ import {
   assertControlSourceBinding,
   buildReleaseImpactPlan,
   installedControlComponentState,
+  inspectReleasePayloadComponents,
   isCommittedPlanRoute,
   isOriginalPlanRoute,
   parseBlueGreenStatus,
   releaseCommandEnvironment,
   releaseComponentSummary,
   releaseFailureSummary,
+  prepareReleaseReceiptDirectory,
   releaseSourceRoles,
   recoveryTargetDisposition,
   restoreOwnedIntake,
@@ -26,6 +28,17 @@ import {
 } from '../../scripts/release-impact-deploy.mjs'
 
 describe('release failure diagnostics', () => {
+  it('prepares an idempotent private receipt leaf and rejects unsafe existing permissions', () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'release-receipt-')))
+    try {
+      const receipt = join(root, 'receipts')
+      expect(prepareReleaseReceiptDirectory(receipt)).toBe(receipt)
+      expect(prepareReleaseReceiptDirectory(receipt)).toBe(receipt)
+      chmodSync(receipt, 0o755)
+      expect(() => prepareReleaseReceiptDirectory(receipt)).toThrow('private directory is unsafe')
+      expect(() => prepareReleaseReceiptDirectory(join(root, 'missing', 'nested'))).toThrow()
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
   it('keeps the actionable cause without exposing session identifiers or credentials', () => {
     const failure = releaseFailureSummary(new Error(`release impact deploy failed: artifact source mismatch session-private-id token=${'a'.repeat(64)}`), 'session-private-id')
     expect(failure.diagnostic).toContain('artifact source mismatch')
@@ -732,4 +745,26 @@ describe('release impact deployment', () => {
       .rejects.toThrow('Gateway listener identity is ambiguous')
   })
 
+})
+
+
+describe('local component evidence reuse', () => {
+  it('reuses matching components independently and detects installed drift even with unchanged source', () => {
+    const tree = new Map([['src/app/page.tsx', 'app']])
+    const components = releaseComponentSummary(tree, tree) as ComponentSummary
+    const inspect = vi.fn(({ component }) => ({ matches: component !== 'taskFlow', fingerprint: component === 'taskFlow' ? 'a'.repeat(64) : 'b'.repeat(64) }))
+    const result = inspectReleasePayloadComponents(components, {}, inspect)
+    expect(inspect.mock.calls.map(([value]) => value.component)).toEqual(['taskFlow', 'directorBrain', 'videoCommand'])
+    expect(result.taskFlow.changed).toBe(true)
+    expect(result.taskFlow.before).not.toBe(result.taskFlow.after)
+    expect(result.directorBrain.changed).toBe(false)
+    expect(result.videoCommand.changed).toBe(false)
+    expect(result.videoCommand.installedFingerprint).toBe('b'.repeat(64))
+    expect(components.taskFlow.changed).toBe(false)
+  })
+  it('does not convert unsafe inspection failures or missing evidence into reusable results', () => {
+    const components = releaseComponentSummary(new Map(), new Map())
+    expect(() => inspectReleasePayloadComponents(components, {}, () => { throw new Error('unsafe source') })).toThrow('unsafe source')
+    expect(() => inspectReleasePayloadComponents(components, {}, () => ({ matches: true, fingerprint: "" }))).toThrow('inspection evidence is invalid')
+  })
 })

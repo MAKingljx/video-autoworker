@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
-  closeSync, constants, existsSync, fsyncSync, lstatSync, openSync, readFileSync,
+  closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
   realpathSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -21,7 +21,7 @@ import {
 } from './lib/git-source-layout.mjs'
 import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-manager.mjs'
 import { readRouterState } from './standalone-router.mjs'
-import { verifyInstalledReleasePayloads } from './verify-director-video-release-readiness.mjs'
+import { inspectInstalledReleaseComponent } from './verify-director-video-release-readiness.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
 import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
 import { releaseFailureAssessment, releaseFailurePolicy } from './lib/release-failure-policy.mjs'
@@ -291,6 +291,7 @@ function validatePlan(plan) {
   for (const name of ['app', 'taskFlow', 'directorBrain', 'videoCommand', 'control']) {
     const value = plan.components[name]
     if (!value || !SHA256.test(value.before) || !SHA256.test(value.after)
+      || (value.installedFingerprint !== undefined && !SHA256.test(value.installedFingerprint))
       || value.changed !== (value.before !== value.after)) fail('component summary is invalid')
   }
   if (plan.components.app.changed && !SHA256.test(plan.artifactManifestSha256 || '')) {
@@ -816,6 +817,19 @@ function privateDirectory(pathname) {
   return pathname
 }
 
+export function prepareReleaseReceiptDirectory(pathname) {
+  if (typeof pathname !== 'string' || !isAbsolute(pathname) || resolve(pathname) !== pathname
+    || /[\r\n\0]/u.test(pathname)) fail('receipt directory must be an absolute normalized path')
+  if (existsSync(pathname)) return privateDirectory(pathname)
+  // Create only the requested leaf under an already owned private operation
+  // directory. Never repair permissions or traverse a symlink on the caller's behalf.
+  privateDirectory(dirname(pathname))
+  try { mkdirSync(pathname, { mode: 0o700 }) } catch (error) {
+    if (error.code !== 'EEXIST') throw error
+  }
+  return privateDirectory(pathname)
+}
+
 function runtimeConfigSnapshotSha256(pathname = process.env.AIWORKER_PLATFORM_ENV_FILE
   || join(homedir(), '.config/video-autoworker/platform.env')) {
   if (!isAbsolute(pathname) || resolve(pathname) !== pathname) {
@@ -1116,51 +1130,31 @@ async function plannedRouterState(intakeUrl, runtimeBinding = null) {
   }
 }
 
-async function actualInstalledComponents(components, sourceCommit) {
+// Planning and revalidation inspect installed bytes and managed configuration
+// locally. Only the selected installer performs its full preflight at mutation.
+export function inspectReleasePayloadComponents(components, options, inspect = inspectInstalledReleaseComponent) {
+  const result = structuredClone(components)
+  for (const component of ['taskFlow', 'directorBrain', 'videoCommand']) {
+    const evidence = inspect({ ...options, component })
+    if (typeof evidence.matches !== 'boolean' || !SHA256.test(evidence.fingerprint)) {
+      fail('component inspection evidence is invalid')
+    }
+    result[component] = {
+      ...installedControlComponentState(result[component], evidence.matches, evidence.fingerprint),
+      installedFingerprint: evidence.fingerprint,
+    }
+  }
+  return result
+}
+
+async function actualInstalledComponents(components) {
   const stateRoot = process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR
     || join(homedir(), '.openclaw-qwen-current')
   const workspace = process.env.AIWORKER_QWEN_WORKSPACE
     || join(homedir(), 'AI-worker-second-original-workspace')
-  const result = structuredClone(components)
-  // Exact local payload validation is sufficient to reuse unchanged video and
-  // task-flow components; their installation preflight need not access GitHub.
-  let reusablePayloads = false
-  if (components.taskFlow.changed || components.videoCommand.changed) {
-    try {
-      verifyInstalledReleasePayloads({ repositoryRoot: productRoot,
-        profileStateRoot: stateRoot, workspaceRoot: workspace })
-      reusablePayloads = true
-    } catch { /* A changed or unknown payload still uses its own installer preflight. */ }
-  }
-  if (reusablePayloads) {
-    for (const name of ['taskFlow', 'videoCommand']) {
-      result[name] = { ...result[name], before: result[name].after, changed: false }
-    }
-  }
-  const inspections = []
-  if (components.taskFlow.changed && !reusablePayloads) {
-    const output = await managed('/bin/bash', [join(coordinatorRoot,
-      'scripts/install-aiworker-task-flow-skill.sh'), '--dry-run'])
-    inspections.push(['taskFlow',
-      !/skill_matches=1 agents_matches=1 memory_matches=1/u.test(output), output])
-  }
-  if (components.directorBrain.changed) {
-    const output = await managed('/bin/bash', [join(coordinatorRoot,
-      'scripts/install-aiworker-director-brain.sh'), '--dry-run', '--profile', 'qwen-current',
-    '--state-dir', stateRoot, '--workspace', workspace])
-    inspections.push(['directorBrain',
-      !/Would change: plugin=0 skill=0 config=0\./u.test(output), output])
-  }
-  if (components.videoCommand.changed && !reusablePayloads) {
-    const output = await managed('/bin/bash', [join(coordinatorRoot,
-      'scripts/install-aiworker-video-command-plugin.sh'), '--dry-run', '--target-sha', resolveCommit(resolveGitSourceLayout(coordinatorRoot).gitRoot, 'HEAD')])
-    inspections.push(['videoCommand',
-      !/Current plugin .* is already installed and passed runtime validation\./u.test(output), output])
-  }
-  for (const [name, changed, output] of inspections) {
-    result[name] = installedComponentState(result[name], changed, output)
-    if (!changed) result[name] = { ...result[name], before: result[name].after, changed: false }
-  }
+  const result = inspectReleasePayloadComponents(components, {
+    repositoryRoot: productRoot, profileStateRoot: stateRoot, workspaceRoot: workspace,
+  })
   const runDir = process.env.AIWORKER_BG_RUN_DIR || join(productRoot, '.run/blue-green')
   const releasesDir = process.env.AIWORKER_BG_RELEASES_DIR || join(productRoot, '.runtime/releases')
   const launchAgentsDir = process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR
@@ -1186,6 +1180,8 @@ async function actualInstalledComponents(components, sourceCommit) {
 }
 
 async function createPlan(values) {
+  // Validate/create local output locations before any expensive runtime probes.
+  if (values.get('--receipt-dir')) prepareReleaseReceiptDirectory(values.get('--receipt-dir'))
   const layout = resolveGitSourceLayout(productRoot)
   const sourceCommit = resolveCommit(layout.gitRoot, values.get('--source-commit') || 'HEAD')
   assertCleanGitSource(productRoot, sourceCommit)
@@ -1199,7 +1195,7 @@ async function createPlan(values) {
   const sourceComponents = releaseComponentSummary(
     commitProductTree(layout.gitRoot, baseCommit), commitProductTree(layout.gitRoot, sourceCommit),
   )
-  const components = await actualInstalledComponents(sourceComponents, sourceCommit)
+  const components = await actualInstalledComponents(sourceComponents)
   const runtimeBinding = runtimeBindingSnapshot()
   const artifactRoot = values.get('--artifact') || null
   const artifactBinding = components.app.changed
@@ -1374,7 +1370,7 @@ async function executePlan(values, operation = null) {
         commitProductTree(sourceLayout.gitRoot, currentPlan.baseCommit),
         commitProductTree(sourceLayout.gitRoot, currentPlan.sourceCommit),
       )
-      const current = await actualInstalledComponents(source, currentPlan.sourceCommit)
+      const current = await actualInstalledComponents(source)
       for (const name of ['app', 'taskFlow', 'directorBrain', 'videoCommand', 'control']) {
         const priorReceipt = currentPlan.components[name].changed
           ? priorInstallReceipt(name) : null
@@ -1382,7 +1378,9 @@ async function executePlan(values, operation = null) {
           && ['taskFlow', 'directorBrain', 'videoCommand'].includes(name)
           && priorReceipt
         if (resumedInstall) resumableInstalls.set(name, priorReceipt)
-        if (current[name].after !== currentPlan.components[name].after
+        if ((!resumedInstall && currentPlan.components[name].installedFingerprint
+          && current[name].installedFingerprint !== currentPlan.components[name].installedFingerprint)
+          || current[name].after !== currentPlan.components[name].after
           || (current[name].changed !== currentPlan.components[name].changed && !resumedInstall)) {
           fail(`component state changed after plan: ${name}`)
         }
