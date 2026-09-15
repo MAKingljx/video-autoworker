@@ -59,7 +59,7 @@ function validateManifest(pathname) {
         timeoutSeconds: 240,
         keepRecentTokens: 8_192,
         recentTurnsPreserve: 4,
-        maxActiveTranscriptBytes: '128kb',
+        maxActiveTranscriptBytes: '16mb',
         midTurnPrecheck: { enabled: true },
       },
       remove: ['identifierInstructions', 'truncateAfterCompaction'],

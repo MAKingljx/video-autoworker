@@ -368,7 +368,7 @@ if (args[0] === 'config' && args[1] === 'patch') {
     && compactionPatch.identifierInstructions === null
     && compactionPatch.recentTurnsPreserve === 4
     && compactionPatch.truncateAfterCompaction === null
-    && compactionPatch.maxActiveTranscriptBytes === '128kb'
+    && compactionPatch.maxActiveTranscriptBytes === '16mb'
     && isObject(compactionPatch.midTurnPrecheck)
     && Object.keys(compactionPatch.midTurnPrecheck).length === 1
     && compactionPatch.midTurnPrecheck.enabled === true
@@ -1144,7 +1144,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
           timeoutSeconds: 240,
           keepRecentTokens: 8192,
           recentTurnsPreserve: 4,
-          maxActiveTranscriptBytes: '128kb',
+          maxActiveTranscriptBytes: '16mb',
           midTurnPrecheck: { enabled: true },
         },
         remove: ['identifierInstructions', 'truncateAfterCompaction'],
@@ -1507,7 +1507,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
       timeoutSeconds: 240,
       keepRecentTokens: 8192,
       maxHistoryShare: 0.75,
-      maxActiveTranscriptBytes: '128kb',
+      maxActiveTranscriptBytes: '16mb',
       notifyUser: false,
       customInstructions: 'Preserve every tool value.',
       identifierPolicy: 'strict',

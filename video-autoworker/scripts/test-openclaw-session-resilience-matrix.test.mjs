@@ -856,7 +856,7 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
       timeoutSeconds: 240,
       keepRecentTokens: 8192,
       recentTurnsPreserve: 4,
-      maxActiveTranscriptBytes: '128kb',
+      maxActiveTranscriptBytes: '16mb',
       midTurnPrecheck: { enabled: true },
     },
     remove: ['identifierInstructions', 'truncateAfterCompaction'],
