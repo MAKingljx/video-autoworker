@@ -29,4 +29,5 @@
 禁止 `exec`、`find`、`grep`、旧 `bot-learning`、任意文件、聊天历史、SQLite、
 n8n执行、媒体目录、凭据或进程状态搜索。入口无插件 sender allowlist，
 release gate 只表示维护。worker `memoryMode=none`，提交 `delivery=none`。
-原生 before_dispatch 与工具共用受控 runner；文件/指定片段交给结构化工具。
+原生 `before_dispatch` 与工具共用受控 runner；文件/指定片段交给结构化工具。
+底层调度脚本不直接暴露给聊天调用（raw scheduler script is not exposed）。
