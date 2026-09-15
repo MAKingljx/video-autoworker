@@ -21,7 +21,7 @@ export async function buildProjectCacheFixture() {
       table.key, { name: table.name, tableId: `fixture-${table.key}` },
     ])),
   }
-  const context = { schema, catalog, accessToken: 'unused-fixture-token' }
+  const context = { schema, catalog }
   const workId = 'WORK-CACHE-FIXTURE-001'
   const stableId = 'STORY-CACHE-FIXTURE-001'
   const record = {

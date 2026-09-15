@@ -171,6 +171,11 @@ if (args.length === 1 && args[0] === '--version') {
   process.exit(0)
 }
 fs.appendFileSync(process.env.AIWORKER_TEST_OPENCLAW_LOG, JSON.stringify(args) + '\\n')
+if (process.env.AIWORKER_TEST_REJECT_GATEWAY_PORT_LEAK === '1'
+  && Object.hasOwn(process.env, 'OPENCLAW_GATEWAY_PORT')) {
+  process.stderr.write('fixture profile Gateway port override leaked\\n')
+  process.exit(86)
+}
 const state = path.join(process.env.HOME, '.openclaw-qwen-current')
 const installed = path.join(state, 'extensions', 'aiworker-video-command')
 const command = args.slice(2)
@@ -487,6 +492,28 @@ describe('current video-command plugin installer', () => {
       expect(gates.some(args => args.includes('--operation') && args.includes('install')
         && args.includes('--component') && args.includes('video-command'))).toBe(true)
       expect(gates.some(args => args.includes('--operation') && args.includes('rollback'))).toBe(true)
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('isolates the qwen-current Gateway from an inherited platform port for CLI and RPC calls', async () => {
+    const fixture = await createVideoInstallerFixture('entries')
+    try {
+      fixture.environment.OPENCLAW_GATEWAY_PORT = '18888'
+      fixture.environment.AIWORKER_TEST_REJECT_GATEWAY_PORT_LEAK = '1'
+      const configPath = resolve(fixture.stateDir, 'openclaw.json')
+      const before = await readJson(configPath)
+      before.gateway.port = 18889
+      await writeFile(configPath, `${JSON.stringify(before, null, 2)}\n`, { mode: 0o600 })
+      await runFixtureInstaller(fixture, '--apply')
+      const calls = await openclawCalls(fixture)
+      expect(calls.some(args => args.slice(2, 4).join(' ') === 'gateway status')).toBe(true)
+      expect(calls.some(args => args.slice(2, 4).join(' ') === 'plugins inspect')).toBe(true)
+      expect(calls.some(args => args.slice(2, 5).join(' ') === 'gateway call tools.catalog')).toBe(true)
+      expect(calls.every(args => args[0] === '--profile' && args[1] === 'qwen-current')).toBe(true)
+      expect((await readJson(configPath)).gateway).toEqual(before.gateway)
+      expect(fixture.environment.OPENCLAW_GATEWAY_PORT).toBe('18888')
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }

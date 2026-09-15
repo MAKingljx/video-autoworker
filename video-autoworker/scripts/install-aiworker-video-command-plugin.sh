@@ -209,7 +209,7 @@ wait_for_test_barrier() {
 
 run_qwen_openclaw() {
   env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
-    -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
+    -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS -u OPENCLAW_GATEWAY_PORT \
     openclaw --profile "$PROFILE" "$@"
 }
 
@@ -225,7 +225,7 @@ run_qwen_openclaw_gateway_call() {
   }
   if OPENCLAW_GATEWAY_TOKEN="$gateway_token" \
     env -u OPENCLAW_PROFILE -u OPENCLAW_STATE_DIR -u OPENCLAW_CONFIG_PATH \
-      -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS \
+      -u OPENCLAW_HOME -u OPENCLAW_INCLUDE_ROOTS -u OPENCLAW_GATEWAY_PORT \
       openclaw --profile "$PROFILE" gateway call "$@"; then
     status=0
   else
