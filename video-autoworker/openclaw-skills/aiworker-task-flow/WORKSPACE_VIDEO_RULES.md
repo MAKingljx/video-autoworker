@@ -1,4 +1,4 @@
-## Video Summary and Export Contract
+## Video Analysis Task Flow Rule
 
 `second-original` 使用 `aiworker_analyze_video`。用户无需 slash 命令。
 “查 S03E03 分析”默认 `segments`，首次只传当前消息中最小且明确的原始标题、
