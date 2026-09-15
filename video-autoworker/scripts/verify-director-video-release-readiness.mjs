@@ -17,6 +17,7 @@ import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-releas
 import {
   acceptedInstalledOpenClawPeer,
   OPENCLAW_RUNTIME_VERSION,
+  OPENCLAW_VIDEO_PLUGIN_VERSION,
   OPENCLAW_SOURCE_PLUGIN_PEER,
 } from './lib/openclaw-runtime-contract.mjs'
 import {
@@ -49,7 +50,7 @@ const GIT_COMMIT = /^[a-f0-9]{40}$/u
 const RELEASE_ID = /^([a-f0-9]{7,40})(?:-runtime)?$/u
 const EXPECTED_APP_VERSION = '2.0.1'
 const EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
-const EXPECTED_VIDEO_COMMAND_VERSION = '0.5.15'
+const EXPECTED_VIDEO_COMMAND_VERSION = OPENCLAW_VIDEO_PLUGIN_VERSION
 const COMPATIBLE_DIRECTOR_BRAIN_VERSIONS = new Set(['0.4.1', '0.4.2', '0.4.3', '0.4.4'])
 const VIDEO_COMMAND_AUXILIARY_ROOT_FILES = new Set(['README.md', 'vitest.config.mjs'])
 const OUTBOX_CLOSURE_CONSTANTS = Object.freeze({

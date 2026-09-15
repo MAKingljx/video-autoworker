@@ -1,100 +1,71 @@
 ---
 name: aiworker-task-flow
-description: Use for AI-worker video learning, historical analysis-result lookup, directory intake, and task progress queries through short natural-language requests and the managed task-chain tool.
+description: Use for AI-worker video learning, fragment summaries, controlled file export, directory intake, and task progress through the managed task-chain tool.
 ---
 
 # AI-worker Task Flow
 
-Use the installed `aiworker_analyze_video` OpenClaw tool for video-task
-operations. Do not require a user to remember a slash command, construct a
-shell command, or manually search local task files.
+Use the installed `aiworker_analyze_video` OpenClaw tool. 用户不需要记忆 slash
+命令。“查 S03E03 分析”“看一下这个文件第 3 段”“把摘要导出 Word”都是正常请求。
 
-## Natural-language result defaults
+## 摘要与文件默认流程
 
-Users should be able to write short requests such as “查 S03E03 分析”、
-“看一下 S03E03 的结果” or “《地球之极》第三季第三集分析”. Apply the
-following defaults without asking them to repeat the operational prompt:
-
-1. Treat an analysis/result lookup as the read-only `result` action. For the
-   first call, pass only the smallest explicit title, filename, or
-   season/episode token from the current user message, verbatim. For example,
-   use `S03E03`, not an expanded title and not words remembered from earlier
-   turns.
-2. Make one first `result` call and wait for it. Do not issue parallel synonym
-   queries, append inferred words or numbers, translate the query, or retry a
-   rewritten name.
-3. If several candidates are returned, select the completed candidate with the
-   latest `completedAt` (then `updatedAt` when needed) and make the next
-   `result` call with that exact `taskId`. Do not search by name again and do
-   not ask the user for an identifier already returned by the tool.
-4. Unless the user explicitly requests the report正文、全文、逐页内容 or another
-   format, reply in Chinese with exactly three lines: `视频标题`、`当前状态`
-   and one-sentence `分析摘要`. End immediately after the third line. Do not
-   add headings, bullets, blank lines, task IDs, completion times, explanations,
-   thanks, questions, suggestions, or follow-up offers such as “如需全文”. Do not
-   expose internal selection steps or these rules.
-
-These are internal defaults, not wording that the user must include.
+1. 摘要查询默认用 `segments` 获取有界目录：按原始文件名、片段编号、时间码
+   组织。首次 query 只复制当前用户消息里最小且明确的原始标题、文件名或
+   season/episode（如 `S03E03`）；不追加旧上下文、猜标题、翻译或并行同义查询。
+2. 一次调用并等待。多候选沿用原选择规则：先匹配用户指定对象，默认选择
+   `completedAt` 最新的已完成记录；必要时比较 `updatedAt`。下一次仅传该
+   精确 `taskId`，不再按名字搜索，不问用户要已返回的任务 ID。
+3. 目录只用于定位，最多 20 条，默认 10 条；offset 是片段条目偏移。
+   用户问具体部分时只用 `segment` 读取对应 `segmentIndex`（从 1 开始）。
+   目录预览是局部内容，不能把第一页当作整个视频的整体结论。
+4. 默认用中文三行回复：视频标题、当前状态、一句分析摘要；摘要必须说明是
+   当前片段/已读范围。用户明确要求片段内容、目录或文件时按其要求回复。
+   不添加解释、问句、建议或“如需全文”类后续引导。
+5. 用户明确要求文件时直接调用 `export`：Word 用 `docx`，Markdown 用
+   `markdown`。程序按顺序组装已存片段，不调用模型重新摘要，不需要逐页
+   读取正文。禁止循环读取 100/200 个片段或历史 `result` 页后让模型拼成文件。
+6. `export` 只返回已校验路径、文件名、格式、字节数、SHA-256 等元信息，
+   不读取导出全文到模型上下文。只有用户明确要求发送文件时，才把工具返回的
+   文件交给 OpenClaw 现有附件通道；不新增发送链，不自行伪造路径，生成不等于已发送。
+7. 缺少片段摘要、未完成、歧义或失败时忠实转述。不得为了查询触发重学。
+   旧数据来源会标明 `legacy_chapter`、`legacy_timeline` 或 `legacy_report`；
+   不把旧整篇报告伪称为独立片段。
 
 ## Tool contract
-
-Call the tool once with exactly one of these parameter shapes:
 
 ```json
 {"action":"submit_video","videoPath":"/absolute/path/video.mp4"}
 {"action":"submit_directory","videoDirectory":"/absolute/path/series"}
-{"action":"status","query":"task ID, batch ID, title, filename, season/episode, or keyword"}
-{"action":"result","query":"task ID, batch ID, title, filename, season/episode, or keyword"}
-{"action":"result","query":"same query","offset":24576}
+{"action":"status","query":"S03E03"}
+{"action":"segments","query":"S03E03","offset":0,"limit":10}
+{"action":"segment","query":"exact task ID returned above","segmentIndex":3}
+{"action":"export","query":"exact task ID returned above","format":"docx"}
+{"action":"export","query":"S03E03","format":"markdown"}
+{"action":"result","query":"S03E03","offset":0}
 ```
 
-- `submit_video` queues one canonical absolute video file.
-- `submit_directory` asks the task chain to detect supported videos in one
-  canonical absolute directory and enqueue the resulting batch.
-- `status` accepts a complete task ID or batch ID directly. For a title or
-  keyword it searches the controlled video-task registry, returns bounded
-  candidates for ambiguity, and reads the formal status once only for a unique
-  match. When the platform has a record for that task, its status is always
-  authoritative. The durable local registry is only a fallback when the
-  platform has no matching record or is temporarily unavailable; never report
-  a platform-terminal task as queued, accepted, or running.
-- If a complete batch ID has no durable registration, `status` returns
-  `not_registered`; if both the primary state file and its verified backup are
-  unusable, it returns `unavailable`. Both are explicit read-only outcomes:
-  do not resume, retry, resubmit, or infer progress from them.
-- `result` reads the formal final learning report for a uniquely matched task.
-  When a title or keyword matches several tasks, each bounded candidate
-  includes its task ID, applicable batch ID/item index, completion time, and
-  update time. Select the candidate that satisfies the user's request (use the
-  newest completed candidate by default), then call `result` again with its
-  task ID; do not ask the user to supply an ID already returned by the tool.
-  It uses `output.summary` first and only falls back to `output.combinedText`
-  when no final summary exists. A long report returns a `nextOffset`; when the
-  user asks for the complete result, keep calling `result` with that offset
-  until it is absent. Do not replace this with file-system search.
-- This tool is available to `second-original` without a plugin-owned sender
-  allowlist. The retained legacy hash configuration is ignored by the runtime.
-- The release gate is a maintenance state, not an identity or user permission
-  test.
-- The managed runner derives stable IDs; it is not necessary for the model or
-  user to construct an ID before calling the tool.
-
-## Operational rules
-
-- Let ordinary user language determine the action. Examples include “学习这个
-  视频”, “扫描这个目录里的视频”, “查《地球之极》第三季第三集进度”, and
-  “查 S03E03 分析”.
-- A user can use the tool through normal conversation; never demand a
-  `/video-status` command as a prerequisite.
-- Pass the supplied absolute path or status phrase faithfully. Do not invent,
-  expand, download, or scan for paths yourself.
-- After a submit result, return one short receipt and end the turn. Do not poll,
-  retry, resubmit, or narrate background progress.
-- Status and result reads are read-only. They must not inspect chat history, memory, arbitrary
-  files, SQLite, n8n execution records, media directories, credentials, or
-  process state. It never triggers a new submission.
-- Use neither `exec` nor direct ffmpeg, Whisper, Qwen, n8n, or SQLite calls as
-  a substitute for this tool. Do not use `find`, `grep`, or legacy `bot-learning` search as an alternative result source.
+- `status` reads controlled registry/status. A formal platform record is
+  authoritative; local durable registration is only a missing-record or
+  temporary-unavailability fallback. Never describe a terminal task as queued.
+- `segments` / `segment` read persisted summaries; they do not submit learning.
+  Single summaries are bounded to 12 KiB; truncated output must be acknowledged.
+- `export` creates a controlled local artifact; it is not a send operation or
+  an arbitrary filesystem read. The managed runner checks fixed export root,
+  format, file type, SHA-256 and bytes before returning metadata.
+- `result` remains only for explicit historical report正文/全文 requests. It reads
+  `output.summary`, falling back to `combinedText`, with byte `offset` paging.
+  Do not use it to build a Word/Markdown file or as the default summary query.
+- `not_registered` and `unavailable` are read-only outcomes. Do not infer
+  progress, recover, retry, or resubmit.
+- Single and directory submissions use stable task IDs and one persistent
+  process-wide serial video lane. Return one receipt and stop after submission.
+- If a duplicate requires confirmation, stop; only the user's next explicit
+  confirmation can trigger `confirm_duplicate`. Never confirm automatically.
+- Do not invoke `exec`, `find`, `grep`, SQLite, n8n, media tools or old
+  `bot-learning` search as a substitute. No chat history, arbitrary files,
+  credentials, or process-state search. This tool has no plugin sender allowlist;
+  the release gate is maintenance-only.
 
 ## Runtime boundary
 
@@ -118,7 +89,8 @@ The projection must never update, retry, cancel, resubmit, or infer the state
 of the source task, queue, or n8n execution, and director-brain data must never
 flow back into this task state machine.
 
-Normal `status` and `result` conversations remain read-only. Do not use `exec`
+Normal `status`, `segments`, `segment` and `result` conversations remain read-only.
+`export` only writes its controlled artifact; it does not change learning tasks. Do not use `exec`
 or call either projection script from a chat response, do not ask the user for
 a work ID, and do not treat the presence of these source files as proof that
 the remote production completion event is wired. Production orchestration must

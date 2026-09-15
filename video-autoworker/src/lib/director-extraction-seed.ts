@@ -4,6 +4,9 @@ import { redactSensitiveValues } from '../../scripts/lib/sensitive-value-scanner
 
 export const DIRECTOR_EXTRACTION_SEED_SCHEMA_VERSION = 2 as const
 export const DIRECTOR_EXTRACTION_MAX_SEED_BYTES = 256 * 1024
+// Storage may hold many independently bounded segments; model calls remain
+// governed by DIRECTOR_EXTRACTION_PHASE_INPUT_MAX_BYTES and the segment splitter.
+export const DIRECTOR_EXTRACTION_MAX_SEGMENTED_SEED_BYTES = 8 * 1024 * 1024
 
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,160}$/u
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
@@ -72,6 +75,8 @@ export interface DirectorExtractionSeedTimelineItem {
   visualSummary: string | null
   perception: DirectorExtractionVisualPerception | null
   confidence: number | null
+  segmentPerception?: DirectorExtractionDirectorPerception
+  segmentInputSha256?: string
 }
 
 export interface DirectorExtractionHistorySeed extends Record<string, unknown> {
@@ -281,9 +286,9 @@ function positiveIndex(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback
 }
 
-function chapterItems(output: UnknownObject): DirectorExtractionSeedChapter[] {
+function chapterItems(output: UnknownObject, segmented: boolean): DirectorExtractionSeedChapter[] {
   if (!Array.isArray(output.chapters)) return []
-  if (output.chapters.length > MAX_CHAPTERS) {
+  if (output.chapters.length > (segmented ? MAX_TIMELINE : MAX_CHAPTERS)) {
     throw new Error('director_extraction_chapters_too_many')
   }
   return output.chapters.map((raw, offset) => {
@@ -300,7 +305,41 @@ function chapterItems(output: UnknownObject): DirectorExtractionSeedChapter[] {
   })
 }
 
-function timelineItems(output: UnknownObject): DirectorExtractionSeedTimelineItem[] {
+interface SegmentPerceptionBinding {
+  timeRange: string
+  inputSha256: string
+  perception: DirectorExtractionDirectorPerception
+}
+
+function segmentPerceptionBindings(output: UnknownObject): Map<number, SegmentPerceptionBinding> | null {
+  const synthesis = output.synthesis as UnknownObject | undefined
+  if (synthesis?.mode !== 'segment-summaries') return null
+  if (!Array.isArray(output.segmentSummaries) || !Array.isArray(output.timeline)
+    || !output.segmentSummaries.length || output.segmentSummaries.length > MAX_TIMELINE
+    || output.segmentSummaries.length !== output.timeline.length) {
+    throw new Error('director_extraction_segment_summary_count_invalid')
+  }
+  const bindings = new Map<number, SegmentPerceptionBinding>()
+  output.segmentSummaries.forEach((raw, offset) => {
+    const item = objectValue(raw, 'director_extraction_segment_summary')
+    if (item.schema !== 'video-autoworker-segment-summary' || item.version !== 1
+      || item.index !== offset + 1) throw new Error('director_extraction_segment_summary_identity_invalid')
+    const summary = requiredGovernedText(item.summary, 'segment_summary', 4_000)
+    const perception = directorPerception(item.directorPerception, summary)
+    if (!perception) throw new Error('director_extraction_segment_perception_missing')
+    bindings.set(offset + 1, {
+      timeRange: requiredGovernedText(item.timeRange, 'segment_time_range', 64),
+      inputSha256: digest(item.inputSha256, 'segment_input_digest'),
+      perception,
+    })
+  })
+  return bindings
+}
+
+function timelineItems(
+  output: UnknownObject,
+  segments: Map<number, SegmentPerceptionBinding> | null,
+): DirectorExtractionSeedTimelineItem[] {
   if (!Array.isArray(output.timeline)) return []
   if (output.timeline.length > MAX_TIMELINE) {
     throw new Error('director_extraction_timeline_too_many')
@@ -321,6 +360,12 @@ function timelineItems(output: UnknownObject): DirectorExtractionSeedTimelineIte
     if (perception && perception.summary !== visualSummary) {
       throw new Error(`director_extraction_timeline_perception_${offset + 1}_summary_mismatch`)
     }
+    const segment = segments?.get(offset + 1)
+    if (segment && (item.timeRange !== segment.timeRange
+      || item.segmentSummaryIndex !== offset + 1
+      || item.segmentSummaryInputSha256 !== segment.inputSha256)) {
+      throw new Error('director_extraction_segment_summary_binding_mismatch')
+    }
     return {
       index: positiveIndex(item.index, offset + 1),
       timeRange: optionalBoundedText(item.timeRange, 64),
@@ -330,6 +375,9 @@ function timelineItems(output: UnknownObject): DirectorExtractionSeedTimelineIte
       confidence: item.confidence === undefined
         ? null
         : boundedNumber(item.confidence, 0, 1, `timeline_confidence_${offset + 1}`),
+      // Keep fused speech/visual findings separate from the original visual
+      // observation, so downstream stages do not misattribute speech to images.
+      ...(segment ? { segmentPerception: segment.perception, segmentInputSha256: segment.inputSha256 } : {}),
     }
   })
 }
@@ -360,6 +408,7 @@ export function buildDirectorExtractionHistorySeed(value: unknown): DirectorExtr
   // the full transcript and must never be used as a fallback.
   const summary = optionalBoundedText(output.summary, 16_000)
   if (!summary) throw new Error('director_extraction_summary_missing')
+  const segments = segmentPerceptionBindings(output)
 
   const seed: DirectorExtractionHistorySeed = {
     schemaVersion: DIRECTOR_EXTRACTION_SEED_SCHEMA_VERSION,
@@ -377,13 +426,14 @@ export function buildDirectorExtractionHistorySeed(value: unknown): DirectorExtr
     ),
     summary,
     directorPerception: directorPerception(output.directorPerception, summary),
-    chapters: chapterItems(output),
-    timeline: timelineItems(output),
+    chapters: chapterItems(output, segments !== null),
+    timeline: timelineItems(output, segments),
   }
   if (seed.chapters.length === 0 && seed.timeline.length === 0) {
     throw new Error('director_extraction_evidence_missing')
   }
-  if (Buffer.byteLength(JSON.stringify(seed), 'utf8') > DIRECTOR_EXTRACTION_MAX_SEED_BYTES) {
+  const maximumBytes = segments ? DIRECTOR_EXTRACTION_MAX_SEGMENTED_SEED_BYTES : DIRECTOR_EXTRACTION_MAX_SEED_BYTES
+  if (Buffer.byteLength(JSON.stringify(seed), 'utf8') > maximumBytes) {
     throw new Error('director_extraction_seed_too_large')
   }
   return seed

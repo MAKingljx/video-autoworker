@@ -28,7 +28,7 @@ describe('AI-worker direct task-chain tool', () => {
     expect(value.description).toContain('不要要求用户记 slash 命令')
     expect(value.description).toContain('用户只需说“查 S03E03 分析”')
     expect(value.description).toContain('首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待')
-    expect(value.description).toContain('下一次只用其精确任务编号调用 result')
+    expect(value.description).toContain('下一次只用其精确任务编号调用相同 action')
     expect(value.description).toContain('默认用中文恰好回复三行')
     expect(value.description).toContain('禁止添加解释、问句、建议或“如需全文”类引导')
     expect(value.description).toContain('必须立即停止本轮')
@@ -374,5 +374,42 @@ describe('AI-worker direct task-chain tool', () => {
     expect(normalizeRequest({ action: 'confirm_duplicate' })).toEqual({ action: 'confirm_duplicate' })
     expect(normalizeRequest({ action: 'confirm_duplicate', videoPath: '/data/a.mp4' })).toBeNull()
     expect(normalizeRequest({ action: 'status', query: '地球之极', taskId: 'other' })).toBeNull()
+  })
+})
+
+
+describe('bounded fragment and export actions', () => {
+  it.each([
+    [{ action: 'segments', query: 'S03E03' }, { query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 10 }],
+    [{ action: 'segment', query: 'S03E03', segmentIndex: 3 }, { query: 'S03E03', view: 'segment', segmentIndex: 3 }],
+    [{ action: 'export', query: 'S03E03', format: 'docx' }, { query: 'S03E03', view: 'export', exportFormat: 'docx' }],
+  ])('routes %j once to the shared reader', async (request, expected) => {
+    const runner = { taskResult: vi.fn(async () => ({ kind: 'matches', matches: [], total: 0, truncated: false })) }
+    await tool({ runner }).execute('read', request)
+    expect(runner.taskResult).toHaveBeenCalledOnce()
+    expect(runner.taskResult).toHaveBeenCalledWith(expected)
+  })
+
+  it.each([
+    { action: 'segments', query: 'x', limit: 21 },
+    { action: 'segments', query: 'x', offset: -1 },
+    { action: 'segment', query: 'x', segmentIndex: 0 },
+    { action: 'segment', query: 'x', segmentIndex: 1.5 },
+    { action: 'export', query: 'x', format: 'pdf' },
+    { action: 'export', query: 'x', format: 'docx', path: '/tmp/fake.docx' },
+    { action: 'export', query: 'x', format: 'docx', send: true },
+    { action: 'segments', query: 'x', materialId: 'untrusted' },
+  ])('rejects invalid fragment/export input %j', params => {
+    expect(normalizeRequest(params)).toBeNull()
+  })
+
+  it('does not loop or load report text when export returns metadata', async () => {
+    const artifact = { format: 'docx', path: '/controlled/file.docx', fileName: '摘要.docx', bytes: 25, sha256: 'a'.repeat(64) }
+    const runner = { taskResult: vi.fn(async () => ({ kind: 'artifact', status: 'succeeded', artifact })) }
+    const result = await tool({ runner }).execute('export', { action: 'export', query: 'S03E03', format: 'docx' })
+    expect(runner.taskResult).toHaveBeenCalledOnce()
+    expect(result.content[0].text).toContain('尚未发送')
+    expect(result.content[0].text).toContain('不读取文件全文')
+    expect(result.content[0].text).toContain(artifact.sha256)
   })
 })

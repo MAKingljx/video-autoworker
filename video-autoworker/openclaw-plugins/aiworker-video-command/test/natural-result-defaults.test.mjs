@@ -16,6 +16,11 @@ describe('short natural-language result defaults', () => {
 
     expect(text).toContain('查 S03E03 分析')
     expect(text).toContain('result')
+    expect(text).toContain('segments')
+    expect(text).toContain('segmentIndex')
+    expect(text).toContain('export')
+    expect(text).toContain('100/200')
+    expect(compact).toMatch(/(?:不读取|不把|不需要逐页)/u)
     expect(compact).toMatch(/(?:最小|smallest)/u)
     expect(compact).toMatch(/(?:标题|title|季集|season\/episode)/u)
     expect(compact).toMatch(/(?:completedAt|完成时间|completion)/u)

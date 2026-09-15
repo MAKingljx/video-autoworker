@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
 export const OPENCLAW_RUNTIME_VERSION = '2026.9.2'
+export const OPENCLAW_VIDEO_PLUGIN_VERSION = '0.5.16'
 export const OPENCLAW_PACKAGE_NAME = 'openclaw'
 export const OPENCLAW_GATEWAY_RUNTIME_EXPORT = 'openclaw/plugin-sdk/gateway-runtime'
 export const OPENCLAW_SOURCE_PLUGIN_PEER = '>=2026.9.2'
@@ -70,7 +71,7 @@ export function canonicalOpenClawRuntimeCompatibilityCore(value) {
     || !exactKeys(value.plugins, ['video', 'director'])
     || !exactKeys(value.plugins.video, ['id', 'version', 'peerPolicy'])
     || value.plugins.video.id !== 'aiworker-video-command'
-    || value.plugins.video.version !== '0.5.15'
+    || value.plugins.video.version !== OPENCLAW_VIDEO_PLUGIN_VERSION
     || !acceptedInstalledOpenClawPeer(value.plugins.video.id, value.plugins.video.peerPolicy)
     || !exactKeys(value.plugins.director, ['id', 'version', 'peerPolicy'])
     || value.plugins.director.id !== 'aiworker-director-brain'

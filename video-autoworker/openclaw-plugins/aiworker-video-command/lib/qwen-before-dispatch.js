@@ -470,7 +470,7 @@ function searchCandidatesReceipt(result) {
   return `${prefix}：${shown.join('；')}。请补充视频标题或关键词。`
 }
 
-function resultCandidatesReceipt(result) {
+function resultCandidatesReceipt(result, action = 'result') {
   const shown = result.matches.slice(0, 5)
     .map((match, offset) => {
       const identifiers = [`任务编号：${match.taskId}`]
@@ -481,12 +481,25 @@ function resultCandidatesReceipt(result) {
     })
   if (!shown.length) return '未找到匹配的视频学习结果。'
   const prefix = result.truncated ? '匹配结果较多' : `找到 ${result.total} 条匹配视频`
-  return `${prefix}：\n${shown.join('\n')}\n候选按匹配度和更新时间倒序排列；请选择完成时间最新的已完成候选，下一次只使用其任务编号调用 result。禁止继续改写名称、并行搜索或要求用户补充编号。`
+  return `${prefix}：\n${shown.join('\n')}\n候选按匹配度和更新时间倒序排列；请选择完成时间最新的已完成候选，下一次只使用其任务编号调用 ${action}。禁止继续改写名称、并行搜索或要求用户补充编号。`
 }
 
-export function resultReceipt(result) {
-  if (result.kind === 'matches') return resultCandidatesReceipt(result)
+export function resultReceipt(result, action = 'result') {
+  if (result.kind === 'matches') return resultCandidatesReceipt(result, action)
   if (result.status !== 'succeeded') return statusReceipt({ kind: 'task', status: result.status, summary: null })
+  if (result.kind === 'segments') {
+    const heading = `${result.name ? searchName(result.name) : '视频'}：共 ${result.totalSegments} 个片段。`
+    if (!result.items.length) return `${heading}当前没有可读取的片段摘要；不要重新提交学习或猜测片段内容。`
+    return `${heading}\n${result.items.map(item => `片段 ${item.index}（${item.timeRange}）：${item.preview}`).join('\n')}\n任务编号：${result.taskId}。按需用 segment 和 segmentIndex 读取指定片段。${result.nextSegmentOffset === null ? '' : `目录后续偏移：${result.nextSegmentOffset}。`}不要循环读取全部片段；用户明确要求文件时直接 export。目录只是局部预览，不代表全部内容的总结。`
+  }
+  if (result.kind === 'segment') {
+    if (!result.segment) return '该任务没有此编号的可读取片段摘要；不要猜测或重新提交学习。'
+    return `${result.name ? searchName(result.name) : '视频'} · 片段 ${result.segment.index}（${result.segment.timeRange}）\n${result.segment.summary}${result.segment.truncated ? '\n该片段显示内容已截断；需要完整文件时使用 export，不要继续拼接读取。' : ''}`
+  }
+  if (result.kind === 'artifact') {
+    if (!result.artifact) return '当前没有可导出的学习摘要文件。'
+    return `文件已生成并校验，尚未发送。只在用户明确要求发送时通过 OpenClaw 现有附件通道交付，不读取文件全文、不重新生成摘要。\n${JSON.stringify(result.artifact)}`
+  }
   if (!result.report) return '任务已完成，但尚未生成可读取的完整学习报告。'
   const title = result.name ? `${searchName(result.name)}完整学习结果：\n` : '完整学习结果：\n'
   const continuation = result.report.nextOffset === null
@@ -583,8 +596,14 @@ export function createQwenBeforeDispatchHandler({
     if (decision.action === 'result_task'
       || decision.action === 'result_batch'
       || decision.action === 'result_search') {
+      // File delivery and individual fragment selection belong to the structured
+      // tool and OpenClaw attachment channel, not this classifier's reply path.
+      if (/(?:word|docx|markdown|导出|发.{0,12}文件|片段)/iu.test(event.content)) return undefined
       try {
-        return handled(resultReceipt(await runner.taskResult({ query: decision.query, offset: 0 })))
+        if (/(?:全文|完整|详细)/u.test(event.content)) {
+          return handled(resultReceipt(await runner.taskResult({ query: decision.query, offset: 0 })))
+        }
+        return handled(resultReceipt(await runner.taskResult({ query: decision.query, view: 'segments', segmentOffset: 0, segmentLimit: 10 }), 'segments'))
       } catch {
         return handled('暂时无法读取完整学习结果，本次未重试。')
       }

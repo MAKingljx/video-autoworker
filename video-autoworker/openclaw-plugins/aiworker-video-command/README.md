@@ -1,6 +1,6 @@
 # AI-worker Video Command
 
-当前版本为 `0.5.15`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
+当前版本为 `0.5.16`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
 旧版运行模块、版本化升级脚本、影子链路或长期兼容分支。
 
 ## 单链路边界
@@ -10,7 +10,7 @@
 - Telegram 私聊的 `before_dispatch`：调用 Qwen 做一次无工具结构化意图分类，
   再由宿主校验身份、原消息证据、路径或查询值。
 - `aiworker_analyze_video`：为普通 Agent 会话提供结构化
-  `submit_video | submit_directory | confirm_duplicate | status | result` 动作。
+  `submit_video | submit_directory | confirm_duplicate | status | segments | segment | export | result` 动作。
 
 两个入口都调用 `scheduler-runner.js`，后者只执行已安装
 `aiworker-task-flow/scripts/submit-task.mjs`。任务创建、同名同路径确认、串行队列、
@@ -46,12 +46,11 @@ aiworker_analyze_video ┘
 - 提交只返回一次受理信息，不在同一轮轮询、重试、恢复、重新提交或完成回投。
 - 平台暂停新任务入口时返回统一维护提示；暂停竞态中已经形成的任务身份和耐久媒体
   交接继续由同一任务流恢复，不把维护窗口误判成永久拒绝。
-- `status` 和 `result` 只读受控任务登记与正式输出，不搜索聊天、任意文件、
+- `status`、`segments`、`segment` 和 `result` 只读受控任务登记与正式输出，不搜索聊天、任意文件、
   SQLite、n8n execution、媒体目录或旧工作区。
 - 名称查询命中多条结果时返回带任务编号、批次信息和完成时间的有界候选；
   默认选择最新完成记录，再按其精确任务编号读取。
-- 默认结果回复使用中文三行：视频标题、当前状态、一句分析摘要。用户明确要求正文时
-  才按偏移分页读取。
+- 默认结果回复使用中文三行：视频标题、当前状态、一句分析摘要。目录预览不能替代全视频结论；用户明确要片段时只读相应编号，要文件时直接 export。
 
 ## 发布
 
@@ -64,7 +63,7 @@ bash scripts/install-aiworker-video-command-plugin.sh --dry-run --target-sha "$t
 bash scripts/install-aiworker-video-command-plugin.sh --apply --target-sha "$target_sha"
 ```
 
-安装器允许受支持旧版本（包括现役前序版本 `0.5.14`）迁移到 `0.5.15`；已是当前版本时验证后无操作。
+安装器允许受支持旧版本（包括现役前序版本 `0.5.15`）迁移到 `0.5.16`；已是当前版本时验证后无操作。
 它使用 OpenClaw 官方命令移除已退役且运行时不再使用的 sender hash 配置，再安装
 当前插件并只重启 `qwen-current` Gateway。除该字段外配置语义必须完全不变；安装后
 还会核对运行载荷与当前源码字节一致，并验证工具目录和受保护监听端口。它不启动或
@@ -96,3 +95,18 @@ git diff --check
 本地测试只证明候选实现；生产完成还必须验证运行插件版本、唯一
 `before_dispatch`、唯一 `aiworker_analyze_video`、任务流 Skill 字节一致、
 调度器预期状态，以及部署前后没有新增任务执行。
+
+
+## 片段摘要与受控导出
+
+`aiworker_analyze_video` 默认用 `segments` 读取有界目录，再按需以 `segment`
+读取单段；`export` 仅在用户明确要求文件时直接组装 Word/Markdown。
+目录参数 `offset`（片段偏移）、`limit`（1..20，默认10）；单段参数
+`segmentIndex` 从1开始；导出参数 `format` 为 `docx|markdown`。
+三者均以原始文件名查询或使用已有候选返回的精确 taskId，不猜文件身份。
+底层统一走 `submit-task.mjs --result ... --result-view segments|segment|export`。
+
+导出元信息经过固定根、文件类型、格式、大小和 SHA-256 校验，模型不能输入输出
+路径；不会把文件全文传回模型。禁止循环读取所有片段后由模型重写一个文件。
+导出不是发送，只有用户明确要求发送时才用 OpenClaw 现有附件通道。
+旧 `result` 显式全文兼容保留，不再作为默认查询或导出办法。

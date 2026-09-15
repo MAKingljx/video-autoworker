@@ -137,14 +137,25 @@ status 一次，batchId 调正式 batch status 一次；标题搜索唯一命中
 
 正式下游固定为：
 
-`全局 video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen3.8 vision -> chapter checkpoints -> bounded final synthesis -> finalize -> SQLite`
+`全局 video lane -> Mission Control / SQLite -> n8n -> prepare -> Whisper audio + local Qwen3.8 vision -> independent segment summaries -> finalize -> SQLite`
 
 `prepare` 负责受控收件、校验、分段和阶段元数据；Whisper 处理语音，本地 Qwen3.8
-视觉服务处理画面；`finalize` 先合并音画时间线，再按章节 checkpoint 做有界文本
-汇总。视觉服务和汇总均使用 `memoryMode=none`，视频任务使用 `delivery=none`。
-Qwen 的 `<think>` 私有推理不会进入 checkpoint 或下一次汇总提示；SQLite 是任务与
-审计状态，不是智能体长期记忆。章节或最终汇总失败时，重试同一 task ID 只从已有
-checkpoint 继续，不重跑已成功阶段。
+视觉服务处理画面；`finalize` 按每个时间片段生成独立音画摘要，写入绑定输入内容、
+文件名、时间码、业务要求与模型配置摘要的 checkpoint。已有有效片段直接复用，
+新增、缺失或改变的片段单独处理；不再把所有章节交给模型生成全片报告。有效历史
+final checkpoint保持可读，不为升级格式重跑旧任务。
+
+`segmentSummaries`保存完整片段结果，`summary`只提供短索引概览，兼容的
+`directorPerception`是带覆盖计数的有界索引，不代表省略部分不存在。导演脑种子
+保留片段完整感知，并区分原始视觉观察与融合音画感知；模型阶段仍按128KiB拆批。
+视觉服务和片段汇总使用`memoryMode=none`，视频任务使用`delivery=none`，私有思考
+不进入保存的摘要。
+
+OpenClaw默认使用`segments`查看按文件名、片段编号和时间码组织的目录，再以
+`segment`读取单段。目录最多20项，单段正文最多12KiB，明确说明截断与历史来源。
+用户要求Word或Markdown文件时调用`export`，由程序按顺序排版已保存内容并只返回
+文件元信息，不能循环读取上百段后让模型重写。导出不自动发送、不重学，也不允许
+模型指定文件路径。旧`result`只作显式全文适配，同样复用已保存结果。
 
 ## 导演脑候选投影扩展
 

@@ -36,8 +36,8 @@ const TOOL_PARAMETERS = Object.freeze({
   properties: {
     action: {
       type: 'string',
-      enum: ['submit_video', 'submit_directory', 'confirm_duplicate', 'status', 'result'],
-      description: `submit_video 提交单个视频；submit_directory 扫描目录入队；confirm_duplicate 只能在工具已返回重复提示、且用户下一条消息精确回复“${DUPLICATE_CONFIRMATION_TEXT}”后调用；status 查询进度；result 读取完整学习报告。`,
+      enum: ['submit_video', 'submit_directory', 'confirm_duplicate', 'status', 'result', 'segments', 'segment', 'export'],
+      description: `submit_video 提交单个视频；submit_directory 扫描目录入队；confirm_duplicate 只能在工具已返回重复提示、且用户下一条消息精确回复“${DUPLICATE_CONFIRMATION_TEXT}”后调用；status 查询进度；segments 默认读取片段目录；segment 只读指定片段摘要；export 仅在用户明确要文件时导出；result 显式兼容历史全文。`,
     },
     videoPath: {
       type: 'string',
@@ -61,14 +61,17 @@ const TOOL_PARAMETERS = Object.freeze({
       type: 'string',
       minLength: 1,
       maxLength: MAX_QUERY_LENGTH,
-      description: '任务编号、批次编号、视频标题或关键词。首次按名称读取 result 时，只传当前消息里最小且明确的原始标题、文件名或季集号（如 S03E03），禁止追加旧上下文、改写名称或并行同义查询；多候选后只传选中记录的精确任务编号。',
+      description: '任务编号、批次编号、视频标题或关键词。首次按名称查询时，只传当前消息里最小且明确的原始标题、文件名或季集号（如 S03E03），禁止追加旧上下文、改写名称或并行同义查询；多候选后只传选中记录的精确任务编号。',
     },
     offset: {
       type: 'integer',
       minimum: 0,
       maximum: 16777216,
-      description: 'result 的下一页偏移；首次读取省略或传 0。',
+      description: 'segments 的片段偏移，或历史 result 的字节偏移；首次省略。',
     },
+    limit: { type: 'integer', minimum: 1, maximum: 20, description: 'segments 单次目录条目数，默认 10，最多 20。' },
+    segmentIndex: { type: 'integer', minimum: 1, description: 'segment 指定的片段编号；必须来自目录或用户明确指定，不猜测。' },
+    format: { type: 'string', enum: ['docx', 'markdown'], description: 'export 文件格式；仅用户明确要求文件时使用。' },
   },
 })
 
@@ -95,7 +98,7 @@ function normalizeRequest(params) {
   // a caller bypasses JSON Schema validation and invokes execute directly.
   if (Object.hasOwn(params, 'materialId')) return null
   const action = params.action
-  if (!['submit_video', 'submit_directory', 'confirm_duplicate', 'status', 'result'].includes(action)) return null
+  if (!['submit_video', 'submit_directory', 'confirm_duplicate', 'status', 'result', 'segments', 'segment', 'export'].includes(action)) return null
   const keys = Object.keys(params)
   if (action === 'confirm_duplicate') {
     return keys.length === 1 ? { action } : null
@@ -118,7 +121,18 @@ function normalizeRequest(params) {
     const videoDirectory = canonicalDirectory(params.videoDirectory)
     return videoDirectory ? { action, videoDirectory } : null
   }
-  if (action === 'result') {
+  if (action === 'segments') {
+    if (keys.some(key => !['action', 'query', 'offset', 'limit'].includes(key))
+      || !Number.isSafeInteger(params.offset ?? 0) || (params.offset ?? 0) < 0
+      || (params.offset ?? 0) > 16 * 1024 * 1024
+      || !Number.isInteger(params.limit ?? 10) || (params.limit ?? 10) < 1 || (params.limit ?? 10) > 20) return null
+  } else if (action === 'segment') {
+    if (keys.sort().join(',') !== 'action,query,segmentIndex'
+      || !Number.isSafeInteger(params.segmentIndex) || params.segmentIndex < 1) return null
+  } else if (action === 'export') {
+    if (keys.sort().join(',') !== 'action,format,query'
+      || !['docx', 'markdown'].includes(params.format)) return null
+  } else if (action === 'result') {
     const expected = keys.sort().join(',')
     if (expected !== 'action,query' && expected !== 'action,offset,query') return null
     if (!Number.isInteger(params.offset ?? 0) || (params.offset ?? 0) < 0 || (params.offset ?? 0) > 16 * 1024 * 1024) {
@@ -132,6 +146,9 @@ function normalizeRequest(params) {
     || params.query.length > MAX_QUERY_LENGTH
     || /[\u0000-\u001f\u007f]/u.test(params.query)
   ) return null
+  if (action === 'segments') return { action, query: params.query, offset: params.offset ?? 0, limit: params.limit ?? 10 }
+  if (action === 'segment') return { action, query: params.query, segmentIndex: params.segmentIndex }
+  if (action === 'export') return { action, query: params.query, format: params.format }
   return action === 'result'
     ? { action, query: params.query, offset: params.offset ?? 0 }
     : { action, query: params.query }
@@ -234,6 +251,19 @@ async function executeRequest(request, {
       return textResult(`提交状态未确认，${label}：${pending.id}。请稍后按编号查询，不要重复提交。`)
     }
   }
+  if (['segments', 'segment', 'export'].includes(request.action)) {
+    try {
+      const result = await runner.taskResult({
+        query: request.query, view: request.action,
+        ...(request.action === 'segments' ? { segmentOffset: request.offset, segmentLimit: request.limit } : {}),
+        ...(request.action === 'segment' ? { segmentIndex: request.segmentIndex } : {}),
+        ...(request.action === 'export' ? { exportFormat: request.format } : {}),
+      })
+      return textResult(resultReceipt(result, request.action))
+    } catch {
+      return textResult('暂时无法读取片段或生成已校验文件，本次未重试，未发送文件。')
+    }
+  }
   if (request.action === 'result') {
     try {
       const result = await runner.taskResult({
@@ -275,7 +305,7 @@ export function createTaskChainTool({
   return {
     name: TASK_CHAIN_TOOL_NAME,
     label: 'AI-worker 任务链',
-    description: `直接调用 AI-worker 视频任务链。用户只需说“查 S03E03 分析”等自然短句；不要要求用户记 slash 命令或复述长提示。submit_video 提交一个绝对视频路径，submit_directory 扫描一个绝对目录。若首次提交返回同名同路径重复提示，必须立即停止本轮，向用户显示原提示；只有用户后续新消息精确回复“${DUPLICATE_CONFIRMATION_TEXT}”时才能调用 confirm_duplicate，禁止模型在同一轮自行确认。status 查询进度，result 读取正式学习报告。提交或查询返回处理服务维护、不可用或启动状态未确认时，必须忠实转述，不得声称任务会自动开始或推算百分比。result 首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待，禁止追加旧上下文、改写或并行同义查询；多候选时选择完成时间最新的已完成记录，下一次只用其精确任务编号调用 result，不问用户要编号。默认用中文恰好回复三行：视频标题、当前状态和一句分析摘要，第三行后立即结束，禁止添加解释、问句、建议或“如需全文”类引导；用户明确要正文/全文时再分页读取。禁止 exec/find/grep 或旧 bot-learning 搜索。status 与 result 只读受控登记和最终输出，不搜索聊天记录、SQLite、n8n、媒体目录或其他用户数据。`,
+    description: `直接调用 AI-worker 视频任务链。用户只需说“查 S03E03 分析”等自然短句；不要要求用户记 slash 命令或复述长提示。submit_video 提交一个绝对视频路径，submit_directory 扫描一个绝对目录。若首次提交返回同名同路径重复提示，必须立即停止本轮，向用户显示原提示；只有用户后续新消息精确回复“${DUPLICATE_CONFIRMATION_TEXT}”时才能调用 confirm_duplicate，禁止模型在同一轮自行确认。status 查询进度；默认摘要查询先用 segments 获取按原始文件名、片段编号、时间码组织的有界目录，再按需用 segment 读取单段。export 仅在用户明确要求 Word/Markdown 文件时使用，程序直接按序组装；禁止循环读取 100/200 个片段或 result 全文再让模型重写一个文件。导出只返回已校验的路径、格式、大小和摘要哈希，不能从模型参数指定路径；不要读取导出全文。用户明确要求发送时才交给 OpenClaw 现有附件通道，生成文件不代表已发送。result 仅保留显式历史全文读取。提交或查询返回处理服务维护、不可用或启动状态未确认时，必须忠实转述，不得声称任务会自动开始或推算百分比。查询首次只传当前消息中最小且明确的原始标题/文件名/季集号并单次等待，禁止追加旧上下文、改写或并行同义查询；多候选时选择完成时间最新的已完成记录，下一次只用其精确任务编号调用相同 action，不问用户要编号。默认用中文恰好回复三行：视频标题、当前状态和一句分析摘要，第三行后立即结束，禁止添加解释、问句、建议或“如需全文”类引导；用户明确要某片段时调用 segment；没有片段摘要时如实说明，不重跑学习。禁止 exec/find/grep 或旧 bot-learning 搜索。status 与 result 只读受控登记和最终输出，不搜索聊天记录、SQLite、n8n、媒体目录或其他用户数据。`,
     parameters: TOOL_PARAMETERS,
     executionMode: 'sequential',
     async execute(_toolCallId, params) {

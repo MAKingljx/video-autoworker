@@ -732,3 +732,26 @@ describe('hook-owned Qwen video scheduler', () => {
     expect(isClassifierCandidate('今天天气如何')).toBe(false)
   })
 })
+
+
+describe('native fragment lookup routing', () => {
+  it('uses a bounded directory for an ordinary analysis-result lookup', async () => {
+    const taskId = `video-natural-${'d'.repeat(64)}`
+    const runner = { taskResult: vi.fn(async () => ({
+      kind: 'segments', taskId, name: 'S03E03.mp4', status: 'succeeded', totalSegments: 200,
+      items: [{ index: 1, timeRange: '00:00-01:00', preview: '开场片段' }], nextSegmentOffset: 1,
+    })) }
+    const value = await handler({ classifier: vi.fn(async () => ({ action: 'result_search', value: 'S03E03' })), runner })(event({ content: '读取 S03E03 的分析结果' }), context)
+    expect(runner.taskResult).toHaveBeenCalledOnce()
+    expect(runner.taskResult).toHaveBeenCalledWith({ query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 10 })
+    expect(value.text).toContain('共 200 个片段')
+    expect(value.text).toContain('不要循环读取全部片段')
+  })
+
+  it('leaves Word delivery to the structured tool and existing attachment channel', async () => {
+    const runner = { taskResult: vi.fn() }
+    const value = await handler({ classifier: vi.fn(async () => ({ action: 'result_search', value: 'S03E03' })), runner })(event({ content: '把 S03E03 完整学习报告导出 Word 发给我' }), context)
+    expect(value).toBeUndefined()
+    expect(runner.taskResult).not.toHaveBeenCalled()
+  })
+})

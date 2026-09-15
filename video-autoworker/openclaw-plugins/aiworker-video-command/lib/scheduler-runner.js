@@ -1040,6 +1040,108 @@ function normalizeTaskResult(value, expectedOffset) {
   }
 }
 
+const SEGMENT_SOURCES = new Set(['segment_summary', 'legacy_chapter', 'legacy_timeline', 'legacy_report', 'none'])
+const EXPORT_ROOT = join(homedir(), 'ai-worker/state/video-autoworker/exports')
+
+function segmentInteger(value, minimum = 0, maximum = MAX_RESULT_OFFSET) {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new Error('invalid_segment_result')
+  return value
+}
+
+function segmentText(value, maxBytes) {
+  if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > maxBytes) throw new Error('invalid_segment_result')
+  return value
+}
+
+function segmentSource(value) {
+  if (!SEGMENT_SOURCES.has(value)) throw new Error('invalid_segment_result')
+  return value
+}
+
+function segmentMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.startTime !== 'string' || typeof value.endTime !== 'string'
+    || ['legacy_report', 'none'].includes(value.source)) throw new Error('invalid_segment_result')
+  return {
+    index: segmentInteger(value.index, 1), startTime: segmentText(value.startTime, 128), endTime: segmentText(value.endTime, 128),
+    timeRange: segmentText(value.timeRange, 128), source: segmentSource(value.source),
+  }
+}
+
+async function verifiedExport(value, taskId, expectedFormat) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.format !== expectedFormat || !['docx', 'markdown'].includes(value.format)
+    || !/^[a-f0-9]{64}$/u.test(value.sha256 || '')) throw new Error('invalid_export_artifact')
+  const extension = value.format === 'docx' ? 'docx' : 'md'
+  const taskRoot = join(EXPORT_ROOT, createHash('sha256').update(taskId).digest('hex'))
+  // The runner alone supplies an artifact path. Never accept paths from model arguments.
+  if (typeof value.path !== 'string' || dirname(value.path) !== taskRoot
+    || basename(value.path) !== `${value.sha256}.${extension}`) throw new Error('unsafe_export_artifact')
+  const mimeType = value.format === 'docx'
+    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'text/markdown'
+  if (value.mimeType !== mimeType) throw new Error('invalid_export_artifact')
+  segmentInteger(value.bytes, 1, 64 * 1024 * 1024)
+  for (const directory of [EXPORT_ROOT, taskRoot]) {
+    const info = await lstat(directory)
+    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(directory) !== directory) throw new Error('unsafe_export_artifact')
+  }
+  const info = await lstat(value.path)
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size !== value.bytes) throw new Error('unsafe_export_artifact')
+  const handle = await open(value.path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = await handle.stat()
+    if (opened.dev !== info.dev || opened.ino !== info.ino || opened.size !== value.bytes) throw new Error('changed_export_artifact')
+    const bytes = await handle.readFile()
+    if (bytes.length !== value.bytes || createHash('sha256').update(bytes).digest('hex') !== value.sha256
+      || (value.format === 'docx' && !bytes.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 3, 4])))) throw new Error('invalid_export_artifact')
+    const after = await handle.stat()
+    if (after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs || after.size !== opened.size) throw new Error('changed_export_artifact')
+  } finally { await handle.close() }
+  return {
+    format: value.format, fileName: segmentText(value.fileName, 1024), path: value.path,
+    mimeType, bytes: value.bytes, sha256: value.sha256,
+    totalSegments: segmentInteger(value.totalSegments), source: segmentSource(value.source),
+  }
+}
+
+async function normalizeSegmentResult(value, request) {
+  if (value?.kind === 'matches') return normalizeTaskResult(value, 0)
+  const expectedKind = request.view === 'export' ? 'artifact' : request.view
+  if (!value || value.kind !== expectedKind || !isResultTaskId(value.taskId)
+    || !SEARCH_ITEM_STATUSES.has(value.status)) throw new Error('invalid_segment_result')
+  if (isResultTaskId(request.query) && value.taskId !== request.query) throw new Error('invalid_segment_result')
+  const base = { kind: value.kind, taskId: value.taskId, name: normalizeResultName(value.name), status: value.status }
+  if (value.kind === 'artifact') {
+    if (value.status !== 'succeeded' && value.artifact !== null) throw new Error('invalid_export_artifact')
+    return { ...base, artifact: value.artifact === null ? null : await verifiedExport(value.artifact, value.taskId, request.exportFormat) }
+  }
+  const source = segmentSource(value.source)
+  const totalSegments = segmentInteger(value.totalSegments)
+  if (value.kind === 'segments') {
+    if (value.segmentOffset !== request.segmentOffset || value.segmentLimit !== request.segmentLimit
+      || !Array.isArray(value.items) || value.items.length > request.segmentLimit
+      || value.items.length > totalSegments || (value.status !== 'succeeded' && value.items.length)) throw new Error('invalid_segment_result')
+    const next = value.nextSegmentOffset
+    if (next !== null && (!Number.isSafeInteger(next) || next !== request.segmentOffset + value.items.length
+      || next <= request.segmentOffset || next >= totalSegments)) throw new Error('invalid_segment_result')
+    const items = value.items.map(item => ({ ...segmentMetadata(item), preview: segmentText(item.preview, 1280) }))
+    if (new Set(items.map(item => item.index)).size !== items.length
+      || items.some(item => item.source !== source)) throw new Error('invalid_segment_result')
+    return { ...base, source, totalSegments, segmentOffset: value.segmentOffset, segmentLimit: value.segmentLimit, nextSegmentOffset: next, items }
+  }
+  if (value.segment === null) return { ...base, source, totalSegments, segment: null }
+  const item = value.segment
+  if (value.status !== 'succeeded' || item.index !== request.segmentIndex || item.source !== source || typeof item.truncated !== 'boolean') throw new Error('invalid_segment_result')
+  const summary = segmentText(item.summary, 12 * 1024)
+  const totalBytes = segmentInteger(item.totalBytes, Buffer.byteLength(summary, 'utf8'), 64 * 1024 * 1024)
+  if (item.truncated !== (totalBytes > Buffer.byteLength(summary, 'utf8'))
+    || (item.inputSha256 !== undefined && !/^[a-f0-9]{64}$/u.test(item.inputSha256))) throw new Error('invalid_segment_result')
+  return { ...base, source, totalSegments, segment: {
+    ...segmentMetadata(item), summary, truncated: item.truncated, totalBytes,
+    ...(item.inputSha256 === undefined ? {} : { inputSha256: item.inputSha256 }),
+  } }
+}
+
 export function createSchedulerRunner({
   execute = executeFile,
   scriptPath = INSTALLED_TASK_FLOW_SCRIPT,
@@ -1176,7 +1278,21 @@ export function createSchedulerRunner({
       )
     },
 
-    async taskResult({ query, offset = 0 }) {
+    async taskResult({ query, offset = 0, view = 'report', segmentOffset = 0, segmentLimit = 10, segmentIndex, exportFormat = 'docx' }) {
+      if (view !== 'report') {
+        const safeQuery = normalizeSearchQuery(query)
+        if (!['segments', 'segment', 'export'].includes(view)) throw new Error('invalid_result_view')
+        const args = ['--result', safeQuery, '--result-view', view]
+        if (view === 'segments') args.push('--segment-offset', String(segmentInteger(segmentOffset)), '--segment-limit', String(segmentInteger(segmentLimit, 1, 20)))
+        if (view === 'segment') args.push('--segment-index', String(segmentInteger(segmentIndex, 1)))
+        if (view === 'export') {
+          if (!['docx', 'markdown'].includes(exportFormat)) throw new Error('invalid_export_format')
+          args.push('--export-format', exportFormat)
+        }
+        return normalizeSegmentResult(await call(args, view === 'export' ? 60_000 : STATUS_TIMEOUT_MS), {
+          query: safeQuery, view, segmentOffset, segmentLimit, segmentIndex, exportFormat,
+        })
+      }
       const safeQuery = normalizeSearchQuery(query)
       const safeOffset = normalizeResultOffset(offset)
       return normalizeTaskResult(

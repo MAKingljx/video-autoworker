@@ -160,7 +160,6 @@ const finalSummaryCheckpointSchema = z.object({
   }
 })
 
-type FinalSummaryCheckpoint = z.infer<typeof finalSummaryCheckpointSchema>
 
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -196,9 +195,9 @@ const VIDEO_GENERATION_DEFAULTS: Record<N8nVideoModelPhase, {
   // reasoning. Skipping private reasoning preserves the visible evidence while
   // avoiding dozens of dense-model reasoning passes for one video.
   vision: { reasoningEffort: 'off', maxTokens: 1_536 },
-  // Chapter summaries reconcile five minutes of audio and visual evidence.
+  // Segment summaries reconcile one segment of audio and visual evidence.
   chapter: { reasoningEffort: 'low', maxTokens: 1_024 },
-  // The whole-video report keeps one deliberate reasoning pass for quality.
+  // Legacy final profile remains available to old callers; segment synthesis never invokes it.
   final: { reasoningEffort: 'medium', maxTokens: 1_536 },
 }
 
@@ -1041,6 +1040,77 @@ export function mergeN8nMediaResults(
   }
 }
 
+const segmentSummaryCheckpointSchema = z.object({
+  schema: z.literal('video-autoworker-segment-summary'),
+  version: z.literal(1),
+  index: z.number().int().positive(),
+  sourceName: z.string(),
+  timeRange: z.string(),
+  startTime: z.string(),
+  endTime: z.string(),
+  inputSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  summary: z.string().trim().min(1).max(4_000),
+  directorPerception: directorPerceptionSchema,
+  confidence: z.number().min(0).max(1),
+  routeId: z.string(),
+}).strict().refine(value => value.summary === value.directorPerception.summary)
+
+type SegmentSummary = z.infer<typeof segmentSummaryCheckpointSchema>
+
+// Hash semantic inputs in a stable order. Credentials never enter checkpoints.
+function stableSynthesisValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableSynthesisValue)
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, stableSynthesisValue(entry)]),
+  )
+  return value
+}
+
+function synthesisDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(stableSynthesisValue(value))).digest('hex')
+}
+
+/** The existing director contract is a bounded index, not the complete evidence.
+ * Preserve every verified fact in segmentSummaries and explicitly report index
+ * overflow instead of pretending a capped whole-video catalog is exhaustive. */
+function indexSegmentPerceptions(segments: SegmentSummary[], summary: string) {
+  const limits = {
+    people: 20, locations: 12, actions: 20, objects: 20, environment: 12,
+    ocr: 20, shotTypes: 12, cameraMovement: 12, composition: 12, emotion: 12,
+  } as const
+  const perception: Record<string, unknown> = { summary }
+  const coverage: Record<string, { total: number; indexed: number }> = {}
+  for (const [field, limit] of Object.entries(limits)) {
+    const key = field as keyof typeof limits
+    const facts = uniquePerceptionValues(segments.flatMap(segment => segment.directorPerception[key]))
+    perception[field] = facts.slice(0, limit)
+    coverage[field] = { total: facts.length, indexed: Math.min(facts.length, limit) }
+  }
+  const sound: Record<string, string | null> = {}
+  for (const key of ['speechSummary', 'ambientSound', 'music', 'emotion'] as const) {
+    const facts = uniquePerceptionValues(segments.flatMap(segment => {
+      const value = segment.directorPerception.sound[key]
+      return value ? [value] : []
+    }))
+    const indexed: string[] = []
+    for (const fact of facts) {
+      if ([...indexed, fact].join('；').length > 1_000) break
+      indexed.push(fact)
+    }
+    sound[key] = indexed.join('；') || null
+    coverage[`sound.${key}`] = { total: facts.length, indexed: indexed.length }
+  }
+  perception.sound = sound
+  return {
+    directorPerception: directorPerceptionSchema.parse(perception),
+    directorPerceptionCoverage: {
+      kind: 'bounded-index', complete: Object.values(coverage).every(value => value.total === value.indexed),
+      fullEvidence: 'segmentSummaries[].directorPerception', fields: coverage,
+    },
+  }
+}
+
 export async function synthesizeN8nMediaResults(
   taskId: string,
   routing: Record<string, unknown>,
@@ -1049,139 +1119,123 @@ export async function synthesizeN8nMediaResults(
 ): Promise<Record<string, unknown>> {
   const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
   if (!timeline.length) return merged
+  const workspace = mediaTaskWorkspace(taskId)
+  // A completed historical report is immutable evidence. Do not re-infer it
+  // merely to populate a newer shape, or require a still-available model route.
+  const storedFinal = await readCheckpoint(workspace, 'final-summary.json', value => (
+    finalSummaryCheckpointSchema.safeParse(value).success
+  ))
+  if (storedFinal) {
+    const historical = finalSummaryCheckpointSchema.parse(storedFinal)
+    const chapters: Record<string, unknown>[] = []
+    for (let index = 1; index <= Math.ceil(timeline.length / 5); index++) {
+      const chapter = await readCheckpoint(workspace, `chapter-${String(index).padStart(3, '0')}.json`, value => (
+        value.index === index && typeof value.summary === 'string'
+      ))
+      if (chapter) chapters.push(chapter)
+    }
+    return {
+      ...merged, chapters, summary: historical.summary,
+      directorPerception: historical.directorPerception,
+      synthesis: { mode: 'historical-final-checkpoint', version: 1 },
+      combinedText: historical.summary,
+    }
+  }
   const resolved = resolveN8nNodeRoute(routing, 'vision')
   const candidates = compatibleRouteCandidates(resolved)
-  if (!candidates.length) throw new Error('视频汇总没有可用的 OpenAI-compatible 路由')
+  if (!candidates.length) throw new Error('视频片段摘要没有可用的 OpenAI-compatible 路由')
   const route = assertVisionRoute(candidates[0])
-  const workspace = mediaTaskWorkspace(taskId)
-  const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim().slice(0, 4_000)
-  const chapterSize = 5
-  // Final synthesis is text-only but still runs through the local multimodal
-  // runtime. Keep the output bounded so a reasoning-heavy Qwen response cannot
-  // hold the n8n callback open until its HTTP retry window expires.
-  const chapterGeneration = videoModelGenerationProfile('chapter')
-  const finalGeneration = videoModelGenerationProfile('final')
-  const synthesisTimeoutSeconds = boundedIntegerEnv(
-    'AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS',
-    route.timeoutSeconds,
-    60,
-    600,
-  )
-  const chapters: Record<string, unknown>[] = []
+  const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
+  const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
+  // Retain the deployed generation knobs; the chapter phase now reconciles
+  // one segment. No final/global model request is made by this pipeline.
+  const generation = videoModelGenerationProfile('chapter')
+  const timeoutSeconds = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS', route.timeoutSeconds, 60, 600)
+  const modelIdentity = candidates.map(candidate => ({
+    id: candidate.id, model: candidate.model, baseUrl: candidate.baseUrl,
+    transport: candidate.transport, temperature: candidate.temperature,
+  }))
+  const segmentSummaries: SegmentSummary[] = []
   let activeRouteIndex = 0
-  for (let offset = 0; offset < timeline.length; offset += chapterSize) {
-    const group = timeline.slice(offset, offset + chapterSize)
-    const chapterIndex = Math.floor(offset / chapterSize) + 1
-    const checkpointName = `chapter-${String(chapterIndex).padStart(3, '0')}.json`
-    let chapter = await readCheckpoint(workspace, checkpointName, value => (
-      value.index === chapterIndex && typeof value.summary === 'string'
-    ))
-    if (!chapter) {
-      const source = group.map(segment => [
-        `[${String(segment.timeRange || '')}]`,
-        `语音：${String(segment.transcript || '').slice(0, 4_000) || '无'}`,
-        `画面：${visibleModelAnswer(segment.visualAnalysis).slice(0, 4_000) || '无'}`,
-      ].join('\n')).join('\n\n')
-      const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, [
-        '请把以下约 5 分钟的分段结果汇总为一个章节。',
-        `业务要求：${businessPrompt}`,
-        '语音与画面要相互校验；明确主要事件、人物/地点、关键信息与不确定项。不要虚构。只输出最终章节，不要输出思考过程。',
-        source,
-      ].join('\n\n'), `第 ${chapterIndex} 章汇总失败`, {
-        maxTokens: chapterGeneration.maxTokens,
-        timeoutSeconds: synthesisTimeoutSeconds,
-        reasoningEffort: chapterGeneration.reasoningEffort,
-        phase: chapterGeneration.phase,
-      }, payload => {
-        const summary = visibleModelAnswer(payload?.choices?.[0]?.message?.content)
-        if (!summary) throw new Error(`第 ${chapterIndex} 章汇总返回空结果`)
-        return summary
-      })
-      activeRouteIndex = attempt.routeIndex
-      const summary = attempt.validated as string
-      chapter = {
-        index: chapterIndex,
-        startTime: String(group[0]?.timeRange || '').split('-')[0],
-        endTime: String(group.at(-1)?.timeRange || '').split('-')[1],
-        summary: summary.slice(0, 8_000),
-        confidence: group.reduce((lowest, segment) => {
-          const value = Number(segment.confidence)
-          return Number.isFinite(value) && value >= 0 && value <= 1
-            ? Math.min(lowest, value)
-            : 0
-        }, 1),
-      }
-      await writeCheckpoint(workspace, checkpointName, chapter)
-    }
-    const storedConfidence = Number(chapter.confidence)
-    chapters.push({
-      ...chapter,
-      confidence: Number.isFinite(storedConfidence)
-        && storedConfidence >= 0
-        && storedConfidence <= 1
-        ? storedConfidence
-        : group.reduce((lowest, segment) => {
-          const value = Number(segment.confidence)
-          return Number.isFinite(value) && value >= 0 && value <= 1
-            ? Math.min(lowest, value)
-            : 0
-        }, 1),
+  for (const [offset, segment] of timeline.entries()) {
+    const index = offset + 1
+    const timeRange = String(segment.timeRange || '')
+    const transcript = String(segment.transcript || '')
+    const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
+    const inputSha256 = synthesisDigest({
+      contract: 'segment-audiovisual-summary-v1', sourceName, index, segment,
+      businessPrompt, generation, modelIdentity,
     })
-  }
-
-  const storedFinalSummary = await readCheckpoint(
-    workspace,
-    'final-summary.json',
-    value => finalSummaryCheckpointSchema.safeParse(value).success,
-  )
-  let finalSummary: FinalSummaryCheckpoint | null = storedFinalSummary
-    ? finalSummaryCheckpointSchema.parse(storedFinalSummary)
-    : null
-  if (!finalSummary) {
-    const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, [
-      '根据下面的章节汇总，生成整部视频的最终分析报告与结构化导演感知。',
+    const checkpointName = `segment-summary-${String(index).padStart(3, '0')}.json`
+    const cached = await readCheckpoint(workspace, checkpointName, value => (
+      value.index === index && value.inputSha256 === inputSha256
+      && segmentSummaryCheckpointSchema.safeParse(value).success
+    ))
+    if (cached) {
+      const segmentSummary = segmentSummaryCheckpointSchema.parse(cached)
+      segmentSummaries.push(segmentSummary)
+      const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === segmentSummary.routeId)
+      if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
+      continue
+    }
+    const prompt = [
+      '仅为下面这一个视频片段生成独立摘要与结构化导演感知，不汇总其他片段。',
+      `来源文件：${sourceName}；片段编号：${index}；时间：${timeRange}`,
       `业务要求：${businessPrompt}`,
-      '只输出一个 JSON 对象，不要代码围栏或额外文字。必须恰好包含：',
-      '{"summary":"含一句话结论、内容主线、按时间章节、音画证据和不确定项的最终报告","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}',
-      '数组只保留章节中能够确认的事实；无法确认时使用空数组或 null，不得虚构。',
-      chapters.map(chapter => `【${chapter.startTime}-${chapter.endTime}】\n${visibleModelAnswer(chapter.summary).slice(0, 8_000)}`).join('\n\n'),
-    ].join('\n\n'), '全片汇总失败', {
-      maxTokens: finalGeneration.maxTokens,
-      timeoutSeconds: synthesisTimeoutSeconds,
-      reasoningEffort: finalGeneration.reasoningEffort,
-      phase: finalGeneration.phase,
-    }, payload => parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content))
+      '语音和画面互相校验，说明事件、关键信息与不确定项；只记录有证据的事实，不推断未提供的音效或音乐。',
+      '只输出 JSON，不要思考过程或额外文字；恰好包含：',
+      '{"summary":"这个片段的独立摘要","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}',
+      '未知数组为空，未知声音字段为 null；各数组最多 12 项（人物、动作、物体和OCR最多20项），摘要不超过4000字，文字保持简练。',
+      `语音：${transcript || '无可用转写'}`,
+      `画面：${visualAnalysis || '无可用画面分析'}`,
+      ...(segment.perception ? [`已验证画面感知：${JSON.stringify(segment.perception)}`] : []),
+    ].join('\n\n')
+    // Fail visibly for an abnormal single source instead of silently dropping
+    // facts. Segment size, never video length, determines the request bound.
+    if (Buffer.byteLength(prompt, 'utf8') > 128 * 1024) throw new Error(`片段 ${index} 输入超出单段摘要边界，需重新分段`)
+    const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, prompt,
+      `片段 ${index} 摘要失败`, {
+        maxTokens: generation.maxTokens, timeoutSeconds,
+        reasoningEffort: generation.reasoningEffort, phase: generation.phase,
+      }, payload => {
+        if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error(`片段 ${index} 摘要输出被截断`)
+        const perception = parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content)
+        if (perception.summary.length > 4_000) throw new Error(`片段 ${index} 摘要超出长度边界`)
+        return perception
+      })
     activeRouteIndex = attempt.routeIndex
     const directorPerception = attempt.validated as N8nDirectorPerception
-    finalSummary = {
-      schema: FINAL_SUMMARY_CHECKPOINT_SCHEMA,
-      version: FINAL_SUMMARY_CHECKPOINT_VERSION,
-      summary: directorPerception.summary,
-      directorPerception,
-    }
-    await writeCheckpoint(workspace, 'final-summary.json', finalSummary)
+    const rawConfidence = Number(segment.confidence)
+    const result = segmentSummaryCheckpointSchema.parse({
+      schema: 'video-autoworker-segment-summary', version: 1,
+      index, sourceName, timeRange, startTime: timeRange.split('-')[0] || '', endTime: timeRange.split('-')[1] || '',
+      inputSha256, summary: directorPerception.summary, directorPerception,
+      confidence: Number.isFinite(rawConfidence) && rawConfidence >= 0 && rawConfidence <= 1 ? rawConfidence : 0,
+      routeId: attempt.route.id,
+    })
+    await writeCheckpoint(workspace, checkpointName, result)
+    segmentSummaries.push(result)
   }
+  const summary = `已完成 ${segmentSummaries.length} 个片段的独立音画摘要。按文件名、片段编号与时间码保存；此处为索引概览，完整事实和不确定项见逐片段摘要，不代表全片叙事总结。`
   return {
-    ...merged,
-    chapters,
-    summary: finalSummary.summary,
-    ...(finalSummary.directorPerception && typeof finalSummary.directorPerception === 'object'
-      ? { directorPerception: finalSummary.directorPerception }
-      : {}),
-    generation: {
-      chapter: {
-        reasoningEffort: chapterGeneration.reasoningEffort,
-        maxTokens: chapterGeneration.maxTokens,
-      },
-      final: {
-        reasoningEffort: finalGeneration.reasoningEffort,
-        maxTokens: finalGeneration.maxTokens,
-      },
-    },
+    ...merged, segmentSummaries,
+    timeline: timeline.map((segment, offset) => ({
+      ...segment, segmentSummaryIndex: offset + 1, segmentSummaryInputSha256: segmentSummaries[offset].inputSha256,
+    })),
+    // Legacy readers may still use chapters: each entry now maps exactly to
+    // one segment, not an inferred five-minute chapter.
+    chapters: segmentSummaries.map(({ index, startTime, endTime, summary, confidence, inputSha256 }) => ({
+      index, startTime, endTime, summary, confidence, inputSha256,
+    })),
+    summary, ...indexSegmentPerceptions(segmentSummaries, summary),
+    synthesis: { mode: 'segment-summaries', version: 1, finalModelCall: false, chapterUnit: 'segment' },
+    generation: { segment: { reasoningEffort: generation.reasoningEffort, maxTokens: generation.maxTokens } },
     routeId: candidates[activeRouteIndex]?.id || route.id,
     routeCandidates: candidates.map(candidate => candidate.id),
-    fallbackUsed: activeRouteIndex > 0,
-    combinedText: `${String(finalSummary.summary)}\n\n【逐分钟证据】\n${String(merged.combinedText || '')}`,
+    fallbackUsed: segmentSummaries.some(segment => segment.routeId !== route.id),
+    // Evidence stays in timeline/segmentSummaries for bounded reads and
+    // deterministic exports, never in a second giant implicit prompt field.
+    combinedText: summary,
   }
 }
 

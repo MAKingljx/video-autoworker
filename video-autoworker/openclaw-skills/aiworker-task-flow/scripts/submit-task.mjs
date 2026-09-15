@@ -20,8 +20,8 @@ import {
 import {
   paginateVideoReport,
   parseResultOffset,
-  selectFinalVideoReport,
 } from '../lib/video-result-page.mjs'
+import { compatibleVideoReport, exportVideoSegmentReport, parseSegmentInteger, selectVideoSegmentReport, segmentDirectory, singleSegment } from '../lib/video-segment-report.mjs'
 import {
   batchStatePath,
   clearMaterialHandoffJournal,
@@ -48,6 +48,7 @@ const VALUE_OPTIONS = new Set([
   '--account-id', '--base-url', '--batch-id', '--batch-status', '--binding-id', '--channel',
   '--delivery', '--director-work', '--executor-route', '--idempotency-key', '--planner-route', '--prompt',
   '--media-handoff', '--prompt-file', '--resume-batch', '--reviewer-route', '--session-key', '--status', '--target',
+  '--result-view', '--segment-offset', '--segment-limit', '--segment-index', '--export-format',
   '--result', '--result-offset', '--search-status', '--status-brief', '--task-id', '--video-dir', '--video-file', '--vision-route', '--wait-seconds',
 ])
 const FLAG_OPTIONS = new Set(['--confirm-duplicate', '--no-trigger-recovery', '--resume-pending'])
@@ -104,7 +105,7 @@ function validateCliArguments() {
     '--batch-status': new Set(['--batch-status']),
     '--resume-batch': new Set(['--resume-batch']),
     '--resume-pending': new Set(['--resume-pending']),
-    '--result': new Set(['--result', '--result-offset', '--base-url']),
+    '--result': new Set(['--result', '--result-offset', '--base-url', '--result-view', '--segment-offset', '--segment-limit', '--segment-index', '--export-format']),
     '--status': new Set(['--status', '--base-url']),
     '--status-brief': new Set(['--status-brief', '--base-url']),
     '--search-status': new Set(['--search-status']),
@@ -355,7 +356,7 @@ function publicResultMatch(match) {
 }
 
 async function resolveResultTarget(query) {
-  if (DIRECT_VIDEO_TASK_ID.test(query)) return { taskId: query, name: null, status: null }
+  if (DIRECT_VIDEO_TASK_ID.test(query) || BATCH_VIDEO_TASK_ID.test(query)) return { taskId: query, name: null, status: null }
   const search = await searchVideoTaskStates(query)
   if (search.total !== 1 || search.truncated || search.matches.length !== 1) {
     return {
@@ -375,35 +376,57 @@ async function resolveResultTarget(query) {
   }
 }
 
-async function handleResult(client, query, offset) {
+function resultOptions() {
+  const view = option('--result-view') || 'report'
+  if (!['report', 'segments', 'segment', 'export'].includes(view)) throw new Error('--result-view 无效')
+  const valid = {
+    report: ['--result-offset'], segments: ['--segment-offset', '--segment-limit'],
+    segment: ['--segment-index'], export: ['--export-format'],
+  }[view]
+  for (const key of ['--result-offset', '--segment-offset', '--segment-limit', '--segment-index', '--export-format']) {
+    if (option(key) !== null && !valid.includes(key)) throw new Error(`${view} 视图不支持 ${key}`)
+  }
+  const options = { view }
+  if (view === 'report') options.offset = parseResultOffset(option('--result-offset'))
+  if (view === 'segments') {
+    options.offset = parseSegmentInteger(option('--segment-offset'), '--segment-offset', 0, 0, 10_000)
+    options.limit = parseSegmentInteger(option('--segment-limit'), '--segment-limit', 10, 1, 20)
+  }
+  if (view === 'segment') options.index = parseSegmentInteger(option('--segment-index'), '--segment-index', null, 1, Number.MAX_SAFE_INTEGER)
+  if (view === 'export') {
+    options.format = option('--export-format') || 'docx'
+    if (!['docx', 'markdown'].includes(options.format)) throw new Error('--export-format 只能是 docx 或 markdown')
+  }
+  return options
+}
+
+async function handleResult(client, query, options) {
   const resolved = await resolveResultTarget(query)
   if ('matches' in resolved) {
     output({ kind: 'matches', ...resolved })
     return
   }
   const run = await client.getRun(resolved.taskId)
-  if (!run) {
-    output({
-      kind: 'report',
-      taskId: resolved.taskId,
-      name: resolved.name,
-      status: resolved.status || 'unknown',
-      report: null,
-    })
-    return
+  if (run?.taskId && run.taskId !== resolved.taskId) throw new Error('正式学习报告任务身份不匹配')
+  const status = String(run?.status || resolved.status || 'unknown')
+  const storedName = run?.output?.sourceName || run?.output?.segmentSummaries?.[0]?.sourceName
+    || run?.input?.displayName || run?.input?.originalFilename || run?.input?.fileName || run?.input?.videoName
+  const metadata = { taskId: resolved.taskId, name: resolved.name || (typeof storedName === 'string' ? resultDisplayName(basename(storedName)) : null), status }
+  const report = selectVideoSegmentReport(status === 'succeeded' ? run?.output : null)
+  if (options.view === 'segments') {
+    output({ kind: 'segments', ...metadata, ...segmentDirectory(report, options.offset, options.limit) })
+  } else if (options.view === 'segment') {
+    output({ kind: 'segment', ...metadata, ...(status === 'succeeded'
+      ? singleSegment(report, options.index) : { source: report.source, totalSegments: 0, segment: null }) })
+  } else if (options.view === 'export') {
+    output({ kind: 'artifact', ...metadata, artifact: status === 'succeeded'
+      ? await exportVideoSegmentReport(report, { ...metadata, format: options.format }) : null })
+  } else {
+    const finalReport = compatibleVideoReport(report, metadata)
+    output({ kind: 'report', ...metadata, report: finalReport ? {
+      source: finalReport.source, ...paginateVideoReport(finalReport.text, options.offset),
+    } : null })
   }
-  const status = String(run.status || 'unknown')
-  const finalReport = status === 'succeeded' ? selectFinalVideoReport(run.output) : null
-  output({
-    kind: 'report',
-    taskId: resolved.taskId,
-    name: resolved.name,
-    status,
-    report: finalReport ? {
-      source: finalReport.source,
-      ...paginateVideoReport(finalReport.text, offset),
-    } : null,
-  })
 }
 
 function rejectGenericVideoPrompt(prompt) {
@@ -639,7 +662,7 @@ async function main() {
 
   const client = createPlatformClient(option('--base-url') || process.env.AIWORKER_PLATFORM_URL || 'http://127.0.0.1:3017')
   const resultQuery = option('--result')
-  if (resultQuery) return handleResult(client, resultQuery, parseResultOffset(option('--result-offset')))
+  if (resultQuery) return handleResult(client, resultQuery, resultOptions())
   const statusTaskId = option('--status') || option('--status-brief')
   const briefStatus = Boolean(option('--status-brief'))
   if (statusTaskId) {

@@ -14,6 +14,7 @@ import {
   OPENCLAW_RUNTIME_COMPATIBILITY_SCHEMA,
   OPENCLAW_RUNTIME_RPC_METHODS,
   OPENCLAW_RUNTIME_VERSION,
+  OPENCLAW_VIDEO_PLUGIN_VERSION,
   OPENCLAW_SECRETREF_WRAPPER,
   openClawRuntimeCompatibilityDigest,
   validateOpenClawRuntimeCompatibility,
@@ -64,7 +65,7 @@ export async function verifyOpenClawRuntimeCompatibility(values) {
   if (typeof sdk.callGatewayFromCli !== 'function') fail('public Gateway SDK export')
   const plugins = {}
   for (const [key, id, expectedVersion, root] of [
-    ['video', 'aiworker-video-command', '0.5.15', values['--video-plugin-root']],
+    ['video', 'aiworker-video-command', OPENCLAW_VIDEO_PLUGIN_VERSION, values['--video-plugin-root']],
     ['director', 'aiworker-director-brain', '0.4.4', values['--director-plugin-root']],
   ]) {
     const packageManifest = json(join(root, 'package.json'), `${key} package`)

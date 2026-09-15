@@ -282,7 +282,7 @@ describe('n8n stateless media helpers', () => {
     )).toThrow('不符合结构化感知契约')
   })
 
-  it('recomputes a legacy final-summary checkpoint that has no director perception', async () => {
+  it('preserves a legacy text checkpoint while producing independent segment summaries', async () => {
     const taskId = 'video-legacy-final-summary'
     const checkpointRoot = await seedSynthesisCheckpoints(taskId, {
       summary: '旧版只有文本汇总。',
@@ -301,19 +301,14 @@ describe('n8n stateless media helpers', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(result).toMatchObject({
-      summary: replacement.summary,
-      directorPerception: replacement,
+      synthesis: { mode: 'segment-summaries', finalModelCall: false },
+      segmentSummaries: [{ summary: replacement.summary, directorPerception: replacement }],
     })
     const stored = JSON.parse(await readFile(join(checkpointRoot, 'final-summary.json'), 'utf8'))
-    expect(stored).toMatchObject({
-      schema: 'video-autoworker-final-summary-checkpoint',
-      version: 1,
-      summary: replacement.summary,
-      directorPerception: replacement,
-    })
+    expect(stored).toEqual({ summary: '旧版只有文本汇总。' })
   })
 
-  it('recomputes a versioned final-summary checkpoint with incomplete director perception', async () => {
+  it('replaces incomplete director perception through the segment chain', async () => {
     const taskId = 'video-incomplete-final-summary'
     await seedSynthesisCheckpoints(taskId, {
       schema: 'video-autoworker-final-summary-checkpoint',
@@ -334,7 +329,7 @@ describe('n8n stateless media helpers', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
-    expect(result.directorPerception).toEqual(replacement)
+    expect(result.directorPerception).toEqual({ ...replacement, summary: result.summary })
   })
 
   it('keeps the historical final-summary checkpoint intact when recomputation fails', async () => {
@@ -379,6 +374,85 @@ describe('n8n stateless media helpers', () => {
       summary: perception.summary,
       directorPerception: perception,
     })
+  })
+
+  it.each([100, 200])('summarizes %i segments without a whole-video model request and retains every fact', async count => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body))
+      const prompt = body.messages.find((message: { role: string }) => message.role === 'user').content
+      const index = Number(prompt.match(/片段编号：(\d+)/)?.[1])
+      expect(prompt).toContain(`unique-source-${index}.`)
+      for (const neighbor of [index - 1, index + 1].filter(value => value > 0 && value <= count)) {
+        expect(prompt).not.toContain(`unique-source-${neighbor}.`)
+      }
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        ...directorPerception(`片段 ${index} 摘要`), objects: [`物体 ${index}`],
+      }) }, finish_reason: 'stop' }] }), { status: 200 })
+    })
+    const timeline = Array.from({ length: count }, (_, offset) => ({
+      index: offset + 1, timeRange: `${offset}:00-${offset + 1}:00`,
+      transcript: `unique-source-${offset + 1}.`, visualAnalysis: `画面 ${offset + 1}`, confidence: 0,
+    }))
+    const result = await synthesizeN8nMediaResults(`bounded-${count}`, synthesisRouting(), { displayName: '项目第一课.mp4' }, { timeline })
+    expect(fetchMock).toHaveBeenCalledTimes(count)
+    const segments = result.segmentSummaries as Record<string, unknown>[]
+    expect(segments).toHaveLength(count)
+    expect(segments.at(-1)).toMatchObject({ index: count, sourceName: '项目第一课.mp4', summary: `片段 ${count} 摘要` })
+    expect(result.summary).toContain('索引概览')
+    expect(result.combinedText).toBe(result.summary)
+    expect(result).toMatchObject({
+      directorPerceptionCoverage: { complete: false, fields: { objects: { total: count, indexed: 20 } } },
+      synthesis: { finalModelCall: false, chapterUnit: 'segment' },
+    })
+    expect(parseDirectorSynthesisAnswer(JSON.stringify(result.directorPerception)).summary).toBe(result.summary)
+    expect(JSON.stringify(segments)).toContain(`物体 ${count}`)
+  })
+
+  it('reuses successful segment checkpoints after failure and only recomputes changed inputs', async () => {
+    const routing = synthesisRouting()
+    let fail = true
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const prompt = JSON.parse(String(init?.body)).messages.find((message: { role: string }) => message.role === 'user').content
+      if (prompt.includes('片段编号：2；') && fail) return new Response('{}', { status: 503 })
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(directorPerception('独立摘要')) } }] }), { status: 200 })
+    })
+    const input = { prompt: '分析业务事实' }
+    const merged = { timeline: [1, 2, 3].map(index => ({ index, timeRange: `${index}:00-${index + 1}:00`, transcript: `转写 ${index}`, visualAnalysis: `画面 ${index}` })) }
+    await expect(synthesizeN8nMediaResults('resume-segments', routing, input, merged)).rejects.toThrow()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    fail = false
+    await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    merged.timeline[1].transcript = '新增的事实'
+    await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(8)
+    process.env.AIWORKER_MODEL_ROUTES_JSON = String(process.env.AIWORKER_MODEL_ROUTES_JSON).replace('final-test-model', 'changed-model')
+    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(11)
+    await rm(join(mediaTaskWorkspace('resume-segments'), 'checkpoints', 'segment-summary-002.json'))
+    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(12)
+    merged.timeline.push({ index: 4, timeRange: '4:00-5:00', transcript: '新增片段', visualAnalysis: '新增画面' })
+    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(13)
+  })
+
+  it('does not checkpoint truncated or oversized segment responses', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(directorPerception('不完整')) }, finish_reason: 'length' }],
+    }), { status: 200 }))
+    const routing = synthesisRouting()
+    await expect(synthesizeN8nMediaResults('truncated-segment', routing, {}, synthesisInput())).rejects.toThrow()
+    await expect(stat(join(mediaTaskWorkspace('truncated-segment'), 'checkpoints', 'segment-summary-001.json'))).rejects.toThrow()
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: {
+      content: JSON.stringify(directorPerception('过长。'.repeat(1_500))),
+    } }] }), { status: 200 }))
+    await expect(synthesizeN8nMediaResults('oversized-segment', routing, {}, synthesisInput())).rejects.toThrow()
+    await expect(stat(join(mediaTaskWorkspace('oversized-segment'), 'checkpoints', 'segment-summary-001.json'))).rejects.toThrow()
   })
 
   it('uses stage-specific Qwen reasoning without spending deep reasoning on every frame', () => {

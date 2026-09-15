@@ -961,3 +961,47 @@ describe('0.5 scheduler runner', () => {
     await expect(runner.taskStatus({ taskId })).rejects.toThrow('invalid_output')
   })
 })
+
+
+describe('bounded segment response contract', () => {
+  const entry = { index: 1, startTime: '00:00:00', endTime: '00:01:00', timeRange: '00:00:00–00:01:00', source: 'segment_summary' }
+  const directory = { kind: 'segments', taskId, name: 'S03E03.mp4', status: 'succeeded', source: 'segment_summary', totalSegments: 200, segmentOffset: 0, segmentLimit: 10, nextSegmentOffset: 1, items: [{ ...entry, preview: '片段预览' }] }
+
+  it('routes exact bounded parameters and strips unsolicited whole-report fields', async () => {
+    const { runner, execute } = fixture({ ...directory, report: 'must not reach model', items: [{ ...directory.items[0], summary: 'unbounded text' }] })
+    const result = await runner.taskResult({ query: 'S03E03', view: 'segments' })
+    expect(execute).toHaveBeenCalledWith('/node', ['/installed/submit-task.mjs', '--result', 'S03E03', '--result-view', 'segments', '--segment-offset', '0', '--segment-limit', '10'], { timeout: 15000 })
+    expect(result).toEqual(directory)
+    expect(result).not.toHaveProperty('report')
+    expect(result.items[0]).not.toHaveProperty('summary')
+  })
+
+  it('returns only the exact selected fragment', async () => {
+    const summary = '单个摘要'
+    const response = { kind: 'segment', taskId, name: 'S03E03.mp4', status: 'succeeded', source: 'segment_summary', totalSegments: 200, segment: { ...entry, summary, totalBytes: Buffer.byteLength(summary), truncated: false } }
+    const { runner } = fixture(response)
+    expect(await runner.taskResult({ query: taskId, view: 'segment', segmentIndex: 1 })).toEqual(response)
+    await expect(runner.taskResult({ query: taskId, view: 'segment', segmentIndex: 2 })).rejects.toThrow('invalid_segment_result')
+  })
+
+  it.each([
+    { ...directory, segmentOffset: 1 },
+    { ...directory, nextSegmentOffset: 200 },
+    { ...directory, items: Array.from({ length: 11 }, () => directory.items[0]) },
+    { ...directory, status: 'running' },
+    { ...directory, taskId: `video-natural-${'c'.repeat(64)}` },
+  ])('rejects inconsistent or unbounded directory metadata', async response => {
+    await expect(fixture(response).runner.taskResult({ query: taskId, view: 'segments' })).rejects.toThrow('invalid_segment_result')
+  })
+
+  it('rejects output above the single-fragment UTF8 bound', async () => {
+    const summary = '中'.repeat(5000)
+    const response = { kind: 'segment', taskId, name: 'x', status: 'succeeded', source: 'segment_summary', totalSegments: 1, segment: { ...entry, summary, totalBytes: Buffer.byteLength(summary), truncated: false } }
+    await expect(fixture(response).runner.taskResult({ query: taskId, view: 'segment', segmentIndex: 1 })).rejects.toThrow('invalid_segment_result')
+  })
+
+  it('rejects an export path outside the fixed managed root before reading files', async () => {
+    const response = { kind: 'artifact', taskId, name: 'x', status: 'succeeded', artifact: { format: 'docx', path: '/tmp/fake.docx', fileName: 'x.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', bytes: 4, sha256: 'a'.repeat(64), totalSegments: 1, source: 'segment_summary' } }
+    await expect(fixture(response).runner.taskResult({ query: taskId, view: 'export', exportFormat: 'docx' })).rejects.toThrow('unsafe_export_artifact')
+  })
+})

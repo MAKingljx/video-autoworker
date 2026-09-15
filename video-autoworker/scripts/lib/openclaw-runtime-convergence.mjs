@@ -8,6 +8,7 @@ import { readOpenClawAgentEntries } from './openclaw-agent-config.mjs'
 import {
   isOpenClawConfigRevisionToken,
   OPENCLAW_RUNTIME_VERSION,
+  OPENCLAW_VIDEO_PLUGIN_VERSION,
 } from './openclaw-runtime-contract.mjs'
 import {
   fingerprintOpenClawToolInventory,
@@ -67,7 +68,7 @@ function validateManifest(pathname) {
     requiredPlugins: [
       {
         id: 'aiworker-video-command',
-        version: '0.5.15',
+        version: OPENCLAW_VIDEO_PLUGIN_VERSION,
         tool: 'aiworker_analyze_video',
         requiredConfig: { releaseReady: true },
       },

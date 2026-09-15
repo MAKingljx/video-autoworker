@@ -153,6 +153,7 @@ required_skill_files=(
   "$SOURCE_DIR/lib/video-task.mjs"
   "$SOURCE_DIR/lib/video-batch-state.mjs"
   "$SOURCE_DIR/lib/video-result-page.mjs"
+  "$SOURCE_DIR/lib/video-segment-report.mjs"
   "$RENDERER"
   "$TREE_MANIFEST_HELPER"
   "$SHARED_INSTALL_GATE"
