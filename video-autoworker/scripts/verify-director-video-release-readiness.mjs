@@ -43,7 +43,7 @@ import {
   loadDirectorProjectionContractCompatibility,
   validateDirectorProjectionContractCompatibility,
 } from './lib/director-projection-contract-compatibility.mjs'
-import { gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
+import { assertCanonicalMainlineGitSource, gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeRequire = createRequire(import.meta.url)
@@ -1323,21 +1323,17 @@ export function assertRepositoryRelease(repositoryRoot, releaseId, mode = 'head'
   }
   const head = gitOutput(gitRoot, ['rev-parse', '--verify', 'HEAD^{commit}'])
   const resolved = gitOutput(gitRoot, ['rev-parse', '--verify', `${match[1]}^{commit}`])
-  const branch = gitOutput(gitRoot, ['symbolic-ref', '--short', '-q', 'HEAD'])
-  const status = gitOutput(gitRoot, ['status', '--porcelain=v1', '--untracked-files=all'])
-  const remote = gitOutput(gitRoot, ['remote', 'get-url', 'origin'])
+  try { assertCanonicalMainlineGitSource(repositoryRoot, head) }
+  catch (error) {
+    if (error.message.includes('canonical_remote_mismatch')) fail('repository_remote_mismatch')
+    fail('repository_release_mismatch')
+  }
   const releaseAccepted = mode === 'head'
     ? resolved === head
     : gitSucceeds(gitRoot, ['merge-base', '--is-ancestor', resolved, head])
-  if (!GIT_COMMIT.test(head) || !GIT_COMMIT.test(resolved) || !releaseAccepted
-    || branch !== 'main' || status) {
+  if (!GIT_COMMIT.test(head) || !GIT_COMMIT.test(resolved) || !releaseAccepted) {
     fail('repository_release_mismatch')
   }
-  if (![
-    'https://github.com/MAKingljx/video-autoworker',
-    'https://github.com/MAKingljx/video-autoworker.git',
-    'git@github.com:MAKingljx/video-autoworker.git',
-  ].includes(remote)) fail('repository_remote_mismatch')
   return resolved
 }
 
