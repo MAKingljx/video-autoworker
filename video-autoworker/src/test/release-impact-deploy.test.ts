@@ -12,6 +12,8 @@ import {
   buildReleaseImpactPlan,
   installedControlComponentState,
   inspectReleasePayloadComponents,
+  inspectSharedRuntimeDatabase,
+  requireSharedRuntimeDatabase,
   isCommittedPlanRoute,
   isOriginalPlanRoute,
   parseBlueGreenStatus,
@@ -766,5 +768,24 @@ describe('local component evidence reuse', () => {
     const components = releaseComponentSummary(new Map(), new Map())
     expect(() => inspectReleasePayloadComponents(components, {}, () => { throw new Error('unsafe source') })).toThrow('unsafe source')
     expect(() => inspectReleasePayloadComponents(components, {}, () => ({ matches: true, fingerprint: "" }))).toThrow('inspection evidence is invalid')
+  })
+})
+
+
+describe('shared runtime environment admission', () => {
+  it('requires database identity before maintenance only when shared components change', () => {
+    expect(() => requireSharedRuntimeDatabase({ taskFlow: { changed: true } }, {})).toThrow('before maintenance')
+    expect(() => requireSharedRuntimeDatabase({ taskFlow: { changed: false } }, {})).not.toThrow()
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'release-database-')))
+    try {
+      const db = join(root, 'n8n.db')
+      writeFileSync(db, 'fixture', { mode: 0o600 })
+      const identity = inspectSharedRuntimeDatabase(db)
+      expect(identity.path).toBe(db)
+      expect(() => requireSharedRuntimeDatabase({ videoCommand: { changed: true } }, { n8nDatabase: identity })).not.toThrow()
+      expect(() => inspectSharedRuntimeDatabase('')).toThrow('AIWORKER_BG_N8N_DB_PATH')
+      chmodSync(db, 0o644)
+      expect(() => inspectSharedRuntimeDatabase(db)).toThrow('unsafe')
+    } finally { rmSync(root, { recursive: true, force: true }) }
   })
 })

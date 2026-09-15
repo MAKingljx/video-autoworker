@@ -842,6 +842,22 @@ function runtimeConfigSnapshotSha256(pathname = process.env.AIWORKER_PLATFORM_EN
   return sha256(readFileSync(pathname))
 }
 
+export function inspectSharedRuntimeDatabase(pathname) {
+  if (!isAbsolute(pathname || '') || resolve(pathname) !== pathname || /[\r\n\0]/u.test(pathname)) {
+    fail('AIWORKER_BG_N8N_DB_PATH is required and must be an absolute physical path')
+  }
+  const entry = lstatSync(pathname, { bigint: true })
+  if (realpathSync.native(pathname) !== pathname || !entry.isFile() || entry.isSymbolicLink()
+    || entry.size <= 0n || (entry.mode & 0o077n) !== 0n
+    || entry.uid !== BigInt(process.getuid())) fail('shared runtime database is unsafe')
+  return { path: pathname, dev: String(entry.dev), ino: String(entry.ino) }
+}
+
+export function requireSharedRuntimeDatabase(components, binding) {
+  if (['taskFlow', 'directorBrain', 'videoCommand'].some(name => components[name]?.changed)
+    && !binding?.n8nDatabase) fail('changed shared components require AIWORKER_BG_N8N_DB_PATH before maintenance')
+}
+
 function runtimeBindingSnapshot() {
   const runDirInput = process.env.AIWORKER_BG_RUN_DIR || join(productRoot, '.run/blue-green')
   const releasesDirInput = process.env.AIWORKER_BG_RELEASES_DIR
@@ -885,12 +901,17 @@ function runtimeBindingSnapshot() {
     configSha256: runtimeConfigSnapshotSha256(platformEnvPath),
     database: { dev: databaseEntry.dev.toString(), ino: databaseEntry.ino.toString() },
     ports,
+    ...(process.env.AIWORKER_BG_N8N_DB_PATH ? { n8nDatabase: inspectSharedRuntimeDatabase(process.env.AIWORKER_BG_N8N_DB_PATH) } : {}),
   })
 }
 
 function validateRuntimeBinding(value) {
   if (value === null || value === undefined) return null
   const paths = [value.runDir, value.releasesDir, value.platformEnvPath, value.liveDbPath]
+  if (value.n8nDatabase) {
+    paths.push(value.n8nDatabase.path)
+    if (!/^\d+$/u.test(value.n8nDatabase.dev || '') || !/^\d+$/u.test(value.n8nDatabase.ino || '')) fail('shared runtime database binding is invalid')
+  }
   if (value.schema !== 'video-autoworker-release-runtime-binding/v1'
     || paths.some(pathname => !isAbsolute(pathname || '') || resolve(pathname) !== pathname
       || /[\r\n\0]/u.test(pathname))
@@ -1196,6 +1217,7 @@ async function createPlan(values) {
     commitProductTree(layout.gitRoot, baseCommit), commitProductTree(layout.gitRoot, sourceCommit),
   )
   const components = await actualInstalledComponents(sourceComponents)
+  requireSharedRuntimeDatabase(components, runtimeBinding)
   const runtimeBinding = runtimeBindingSnapshot()
   const artifactRoot = values.get('--artifact') || null
   const artifactBinding = components.app.changed
@@ -1365,6 +1387,7 @@ async function executePlan(values, operation = null) {
       }
     },
     assertComponents: async currentPlan => {
+      requireSharedRuntimeDatabase(currentPlan.components, currentPlan.runtimeBinding)
       const sourceLayout = resolveGitSourceLayout(productRoot)
       const source = releaseComponentSummary(
         commitProductTree(sourceLayout.gitRoot, currentPlan.baseCommit),
@@ -1753,6 +1776,7 @@ async function applyPlan(values, { resume = false } = {}) {
     AIWORKER_BG_RELEASES_DIR: contract.plan.runtimeBinding.releasesDir,
     AIWORKER_BG_ROUTER_STATE: join(contract.plan.runtimeBinding.runDir, 'router-state.json'),
     AIWORKER_BG_LIVE_DB_PATH: contract.plan.runtimeBinding.liveDbPath,
+    ...(contract.plan.runtimeBinding.n8nDatabase ? { AIWORKER_BG_N8N_DB_PATH: contract.plan.runtimeBinding.n8nDatabase.path } : {}),
     AIWORKER_PLATFORM_ENV_FILE: contract.plan.runtimeBinding.platformEnvPath,
     AIWORKER_BG_ROUTER_PORT: String(contract.plan.runtimeBinding.ports.router),
     AIWORKER_BG_BLUE_PORT: String(contract.plan.runtimeBinding.ports.blue),

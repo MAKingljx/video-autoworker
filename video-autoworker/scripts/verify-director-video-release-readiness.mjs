@@ -237,9 +237,15 @@ function taskFlowMembers(repositoryRoot) {
   for (const directory of ['scripts', 'lib']) {
     const root = assertPhysicalDirectory(join(repositoryRoot, base, directory), `task_flow_${directory}`)
     for (const entry of readdirSync(root, { withFileTypes: true })) {
-      if (entry.isFile() && entry.name.endsWith('.mjs')) {
-        members.push({ source: `${base}/${directory}/${entry.name}`, target: `${directory}/${entry.name}` })
-      }
+      const pathname = join(root, entry.name)
+      const current = lstatSync(pathname)
+      // The installer uses *.mjs globs, which include symlinks and directories.
+      // Never silently omit an unsafe source entry and then declare it current.
+      if (entry.isSymbolicLink() || current.isSymbolicLink()) fail(`task_flow_source_symlink:${directory}/${entry.name}`)
+      if (!entry.name.endsWith('.mjs')) continue
+      if (!entry.isFile() || !current.isFile()) fail(`task_flow_source_unsupported_member:${directory}/${entry.name}`)
+      safeFile(pathname, `task_flow_source_${directory}_${entry.name}`)
+      members.push({ source: `${base}/${directory}/${entry.name}`, target: `${directory}/${entry.name}` })
     }
   }
   return members

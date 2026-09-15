@@ -129,3 +129,18 @@ test('video inspection checks exact payload, required config and only the manage
     }
   }
 }))
+
+
+test('source enumeration rejects new mjs symlinks and directories instead of skipping their deployment impact', async () => fixture(async ({ inspect, taskSource }) => {
+  assert.equal(inspect('taskFlow').matches, true)
+  for (const directory of ['scripts', 'lib']) {
+    const pathname = join(taskSource, directory, 'new-source-member.mjs')
+    await symlink(join(taskSource, 'SKILL.md'), pathname)
+    assert.throws(() => inspect('taskFlow'), /task_flow_source_symlink/u)
+    await rm(pathname)
+    await mkdir(pathname, { mode: 0o700 })
+    assert.throws(() => inspect('taskFlow'), /task_flow_source_unsupported_member/u)
+    await rm(pathname, { recursive: true })
+    assert.equal(inspect('taskFlow').matches, true)
+  }
+}))
