@@ -1217,8 +1217,8 @@ async function createPlan(values) {
     commitProductTree(layout.gitRoot, baseCommit), commitProductTree(layout.gitRoot, sourceCommit),
   )
   const components = await actualInstalledComponents(sourceComponents)
-  requireSharedRuntimeDatabase(components, runtimeBinding)
   const runtimeBinding = runtimeBindingSnapshot()
+  requireSharedRuntimeDatabase(components, runtimeBinding)
   const artifactRoot = values.get('--artifact') || null
   const artifactBinding = components.app.changed
     ? artifactPlanBinding(artifactRoot, sourceCommit) : null
