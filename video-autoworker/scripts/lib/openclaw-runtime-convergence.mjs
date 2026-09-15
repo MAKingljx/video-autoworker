@@ -330,7 +330,7 @@ function writeToolBaseline(
   readPhysicalFile(outputPath, 'pre-install tool baseline')
 }
 
-function assertNoToolRegression(
+async function assertNoToolRegression(
   baselinePath,
   manifest,
   catalogCapabilities,
@@ -338,6 +338,7 @@ function assertNoToolRegression(
   sessionKeySha256,
   catalogNotices,
   effectiveNotices,
+  inventories,
 ) {
   const baselineFile = readPhysicalFile(baselinePath, 'pre-install tool baseline')
   let baselineValue
@@ -353,7 +354,8 @@ function assertNoToolRegression(
   }
   const allowedAddition = manifest.requiredPlugins
     .find(plugin => plugin.id === 'aiworker-director-brain')?.tool
-  const compare = (before, after, label) => {
+  const compare = async (before, after, label, kind) => {
+    const definitionUpgrades = []
     const afterById = new Map(after.map(item => [item.id, item]))
     const beforeById = new Map(before.map(item => [item.id, item]))
     const removed = before.filter(item => !afterById.has(item.id)).map(item => item.id)
@@ -364,7 +366,16 @@ function assertNoToolRegression(
     for (const item of before) {
       if (item.id === allowedAddition || !afterById.has(item.id)) continue
       if (!same(item, afterById.get(item.id))) {
-        fail(`${label} descriptor surface changed for existing tool: ${item.id}`)
+        if (item.id !== 'aiworker_analyze_video') fail(`${label} descriptor surface changed for existing tool: ${item.id}`)
+        try {
+          const { verifyCanonicalVideoToolUpgrade } = await import('./openclaw-canonical-tool-upgrade.mjs')
+          definitionUpgrades.push(await verifyCanonicalVideoToolUpgrade({
+            before: item, after: afterById.get(item.id), inventory: inventories[kind],
+            kind, agentId: manifest.agent.id,
+          }))
+        } catch (error) {
+          fail(`${label} descriptor surface changed for existing tool: ${item.id}; ${error.message}`)
+        }
       }
     }
     return {
@@ -373,6 +384,7 @@ function assertNoToolRegression(
       added,
       removed,
       sha256: sha256(JSON.stringify(after)),
+      ...(definitionUpgrades.length ? { definitionUpgrades } : {}),
     }
   }
   return {
@@ -381,9 +393,9 @@ function assertNoToolRegression(
     sessionKeySha256,
     catalogNotices,
     effectiveNotices,
-    catalog: compare(baseline.catalogCapabilities, catalogCapabilities, 'tool catalog'),
-    effective: compare(
-      baseline.effectiveCapabilities, effectiveCapabilities, 'effective tools',
+    catalog: await compare(baseline.catalogCapabilities, catalogCapabilities, 'tool catalog', 'catalog'),
+    effective: await compare(
+      baseline.effectiveCapabilities, effectiveCapabilities, 'effective tools', 'effective',
     ),
   }
 }
@@ -818,7 +830,7 @@ function validateGatewayStatus(value, pid, port, expectedVersion) {
   }
 }
 
-function verifyRuntimeHooks(
+async function verifyRuntimeHooks(
   stateDir,
   manifestPath,
   pluginTreeSnapshotSource,
@@ -851,7 +863,7 @@ function verifyRuntimeHooks(
   validateRuntimeInspection(inspection.value, descriptor)
   const inventory = validateRuntimeCatalog(catalog.value, manifest, descriptor)
   const effectiveInventory = validateEffectiveInventory(effective.value, manifest)
-  const preInstallToolBaseline = assertNoToolRegression(
+  const preInstallToolBaseline = await assertNoToolRegression(
     toolBaselinePath,
     manifest,
     inventory.capabilities,
@@ -859,6 +871,7 @@ function verifyRuntimeHooks(
     sessionKeySha256,
     inventory.policyNotices,
     effectiveInventory.policyNotices,
+    { catalog: catalog.value, effective: effective.value },
   )
   const identity = gatewayProcessIdentity(pid)
   const trees = requiredPluginTreeEvidence(stateDir, manifest)
@@ -1828,7 +1841,7 @@ else if (command === 'verify-effective' && args.length === 2) verifyEffective(..
 else if (command === 'required-plugin-tree-snapshot' && args.length === 2) {
   requiredPluginTreeSnapshot(...args)
 }
-else if (command === 'verify-runtime-hooks' && args.length === 12) verifyRuntimeHooks(...args)
+else if (command === 'verify-runtime-hooks' && args.length === 12) await verifyRuntimeHooks(...args)
 else if (command === 'assert-backup' && args.length === 1) assertBackup(args[0])
 else if (command === 'assert-config-backup' && args.length === 2) assertConfigBackup(...args)
 else if (command === 'file-snapshot' && args.length === 1) {
