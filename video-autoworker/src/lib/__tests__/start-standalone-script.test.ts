@@ -241,6 +241,37 @@ function runLauncher(fixture: LauncherFixture, overrides: Partial<NodeJS.Process
 }
 
 describe('standalone runtime launcher', () => {
+  it('traces canonical control helpers and requires them only when an artifact imports them', async () => {
+    const fixture = createLauncherFixture()
+    try {
+      const checker = await import(pathToFileURL(artifactCheckerPath).href)
+      const helpers = [
+        'scripts/lib/openclaw-canonical-tool-upgrade.mjs',
+        'scripts/lib/canonical-release-source.mjs',
+      ]
+      // Older payloads do not reference these helpers and must remain valid.
+      for (const helper of helpers) expect(checker.REQUIRED_STANDALONE_FILES).not.toContain(helper)
+      await expect(checker.assertRequiredStandaloneMembers(fixture.standaloneRoot)).resolves.toBe(true)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+
+      copyFileSync(resolve('scripts/lib/openclaw-runtime-convergence.mjs'),
+        join(fixture.standaloneRoot, 'scripts/lib/openclaw-runtime-convergence.mjs'))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing:scripts/lib/openclaw-runtime-convergence.mjs:./openclaw-canonical-tool-upgrade.mjs')
+      copyFileSync(resolve(helpers[0]), join(fixture.standaloneRoot, helpers[0]))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+
+      copyFileSync(resolve('scripts/verify-director-video-release-readiness.mjs'),
+        join(fixture.standaloneRoot, 'scripts/verify-director-video-release-readiness.mjs'))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing:scripts/verify-director-video-release-readiness.mjs:./lib/canonical-release-source.mjs')
+      copyFileSync(resolve(helpers[1]), join(fixture.standaloneRoot, helpers[1]))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+      const forbidden = await checker.findForbiddenStandaloneMembers(fixture.standaloneRoot)
+      for (const helper of helpers) expect(forbidden).not.toContain(helper)
+    } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
+  })
+
   it('requires router retirement imports only for artifacts that include the new router or retirement controller', async () => {
     const fixture = createLauncherFixture()
     try {
@@ -375,6 +406,7 @@ describe('standalone runtime launcher', () => {
       `${pathToFileURL(artifactCheckerPath).href}?payload=${Date.now()}`
     ) as { REQUIRED_STANDALONE_FILES: string[] }
     const importClosureOnly = new Set([
+      'openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs',
       'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js',
       'scripts/lib/director-projection-contract-compatibility.mjs',
     ])
@@ -419,6 +451,8 @@ describe('standalone runtime launcher', () => {
       './scripts/install-aiworker-director-brain.sh',
       './scripts/apply-openclaw-runtime-convergence.sh',
       './scripts/lib/openclaw-private-gateway-rpc.mjs',
+      './scripts/lib/openclaw-canonical-tool-upgrade.mjs',
+      './scripts/lib/canonical-release-source.mjs',
       './scripts/lib/render-managed-markdown-section.mjs',
       './scripts/lib/runtime-tree-manifest.mjs',
       './scripts/lib/git-source-layout.mjs',
