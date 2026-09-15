@@ -1995,11 +1995,16 @@ async function main() {
   fail('expected plan, apply, resume, status, cancel, doctor, or prewarm')
 }
 
+export function releaseFailureSummary(error, sessionKey = '') {
+  return { currentState: error?.currentState || 'state_unknown',
+    errorCode: error?.errorCode || 'release_preflight_failed', nextAction: error?.nextAction || 'inspect_failed_preflight',
+    phase: error?.phase || 'preflight', effectState: error?.effectState || 'unknown',
+    diagnostic: sanitizeMaintenanceFailure({ stderr: error?.message || 'Unknown release failure' }, sessionKey).stderr.slice(-2000) }
+}
+
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   main().catch(error => {
-    process.stderr.write(`${JSON.stringify({ currentState: error.currentState || 'state_unknown',
-      errorCode: error.errorCode || 'release_preflight_failed', nextAction: error.nextAction || 'inspect_failed_preflight',
-      phase: error.phase || 'preflight', effectState: error.effectState || 'unknown' })}\n`)
+    process.stderr.write(`${JSON.stringify(releaseFailureSummary(error, process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''))}\n`)
     process.exitCode = 1
   })
 }

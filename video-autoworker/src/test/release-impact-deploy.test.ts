@@ -16,6 +16,7 @@ import {
   parseBlueGreenStatus,
   releaseCommandEnvironment,
   releaseComponentSummary,
+  releaseFailureSummary,
   releaseSourceRoles,
   recoveryTargetDisposition,
   restoreOwnedIntake,
@@ -23,6 +24,16 @@ import {
   validateResumeRuntimeProofOverride,
   waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
+
+describe('release failure diagnostics', () => {
+  it('keeps the actionable cause without exposing session identifiers or credentials', () => {
+    const failure = releaseFailureSummary(new Error(`release impact deploy failed: artifact source mismatch session-private-id token=${'a'.repeat(64)}`), 'session-private-id')
+    expect(failure.diagnostic).toContain('artifact source mismatch')
+    expect(failure.diagnostic).not.toContain('session-private-id')
+    expect(failure.diagnostic).not.toContain('a'.repeat(64))
+    expect(failure.currentState).toBe('state_unknown')
+  })
+})
 
 const baseCommit = '1'.repeat(40)
 const sourceCommit = '2'.repeat(40)
