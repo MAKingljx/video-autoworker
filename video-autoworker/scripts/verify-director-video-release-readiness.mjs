@@ -12,6 +12,7 @@ import {
 } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { assertCanonicalMainlineGitSource } from './lib/canonical-release-source.mjs'
 import { renderManagedMarkdownSection } from './lib/render-managed-markdown-section.mjs'
 import { readOpenClawAgentEntries } from './lib/openclaw-agent-config.mjs'
 import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
@@ -43,7 +44,7 @@ import {
   loadDirectorProjectionContractCompatibility,
   validateDirectorProjectionContractCompatibility,
 } from './lib/director-projection-contract-compatibility.mjs'
-import { assertCanonicalMainlineGitSource, gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
+import { gitSourceEnvironment, resolveGitSourceLayout, resolveGitCommitProductPrefix } from './lib/git-source-layout.mjs'
 
 const MODULE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runtimeRequire = createRequire(import.meta.url)

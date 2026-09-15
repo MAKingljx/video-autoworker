@@ -287,22 +287,6 @@ export function assertCleanGitSource(productRoot, expectedCommit = null) {
   return Object.freeze({ ...layout, headCommit })
 }
 
-/** Clean release source may be main or a pinned commit on canonical origin/main. */
-export function assertCanonicalMainlineGitSource(productRoot, expectedCommit = null) {
-  const layout = assertCleanGitSource(productRoot, expectedCommit)
-  const remote = git(layout.gitRoot, ['remote', 'get-url', 'origin']).trim()
-  if (!['https://github.com/MAKingljx/video-autoworker',
-    'https://github.com/MAKingljx/video-autoworker.git',
-    'git@github.com:MAKingljx/video-autoworker.git'].includes(remote)) fail('canonical_remote_mismatch')
-  const branch = git(layout.gitRoot, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()
-  if (branch === 'main') return layout
-  if (branch !== 'HEAD') fail('mainline_source_required')
-  git(layout.gitRoot, ['merge-base', '--is-ancestor', layout.headCommit, 'refs/remotes/origin/main'], {
-    errorCode: 'detached_source_not_on_mainline',
-  })
-  return layout
-}
-
 function usage() {
   return 'usage: git-source-layout.mjs <resolve|assert-clean|tree-path|verify-file|verify-files|show> ...'
 }
