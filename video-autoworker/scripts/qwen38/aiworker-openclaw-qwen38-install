@@ -7,6 +7,18 @@ STATE_DIR="$HOME/.openclaw-$PROFILE"
 CONFIG="$STATE_DIR/openclaw.json"
 MODELS_JSON="$STATE_DIR/agents/second-original/agent/models.json"
 BACKUP_ROOT="$HOME/ai-worker/backups/qwen38-openclaw"
+MODEL_CONFIG="${QWEN38_MODEL_DIR:-$HOME/models/Qwen3.8-27B-MLX-BF16}/config.json"
+
+# Do not advertise 1M in the gateway unless the model has matching YaRN settings.
+python3 - "$MODEL_CONFIG" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    text = json.load(f)["text_config"]
+rope = text.get("rope_parameters", {})
+assert text.get("max_position_embeddings", 0) >= 1000000, "Model must be configured for 1M first"
+assert (rope.get("type") or rope.get("rope_type")) == "yarn", "1M requires YaRN"
+assert rope.get("factor") == 4.0 and rope.get("original_max_position_embeddings") == 262144, "Unexpected YaRN settings"
+PY
 
 if [ ! -f "$CONFIG" ] || [ ! -f "$MODELS_JSON" ]; then
   echo "OpenClaw profile files are missing for $PROFILE" >&2
@@ -41,11 +53,11 @@ const provider = {
     api: "openai-completions",
     reasoning: true,
     input: ["text"],
-    contextWindow: 131072,
+    contextWindow: 1000000,
     maxTokens: 4096,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: { supportsTools: true, thinkingFormat: "qwen-chat-template" },
-    contextTokens: 98304
+    contextTokens: 1000000
   }],
   auth: "api-key",
   apiKey: "not-needed"
@@ -62,13 +74,15 @@ config.agents.defaults = config.agents.defaults || {};
 config.agents.defaults.models = config.agents.defaults.models || {};
 config.agents.defaults.models[target] = {
   ...(config.agents.defaults.models[target] || {}),
-  params: { chat_template_kwargs: { enable_thinking: true, thinking: true, preserve_thinking: true } }
+  params: { chat_template_kwargs: { enable_thinking: true, thinking: true, preserve_thinking: true, reasoning_effort: "medium" } }
 };
+config.agents.defaults.compaction = config.agents.defaults.compaction || {};
+config.agents.defaults.compaction.maxActiveTranscriptBytes = "16mb";
 
 const agents = Array.isArray(config.agents.list) ? config.agents.list : [];
 const secondOriginal = agents.find((entry) => entry && entry.id === "second-original");
-if (!secondOriginal) throw new Error("second-original agent is missing");
-secondOriginal.thinkingDefault = "high";
+if (secondOriginal) secondOriginal.thinkingDefault = "medium";
+else config.agents.defaults.thinkingDefault = "medium";
 
 const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
 models.providers = models.providers || {};

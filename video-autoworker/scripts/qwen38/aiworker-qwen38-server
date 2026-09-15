@@ -27,10 +27,12 @@ echo "$$" > "$PID_FILE"
 # mlx-lm is the verified Apple Silicon runtime for Qwen3.8's text/tool path.
 # The converted MLX implementation excludes the vision tower; video/image
 # work remains routed to Qwen3.6 on port 18091.
-CHAT_TEMPLATE_ARGS="${QWEN38_CHAT_TEMPLATE_ARGS:-{\"enable_thinking\":true,\"thinking\":true}}"
+CHAT_TEMPLATE_ARGS="${QWEN38_CHAT_TEMPLATE_ARGS:-{\"enable_thinking\":true,\"thinking\":true,\"reasoning_effort\":\"medium\"}}"
 exec "$PYTHON" -m mlx_lm server \
   --model "$MODEL_DIR" \
   --host 127.0.0.1 \
   --port "$PORT" \
   --max-tokens "${QWEN38_MAX_TOKENS:-4096}" \
+  --prompt-cache-size "${QWEN38_PROMPT_CACHE_SIZE:-2}" \
+  --prompt-cache-bytes "${QWEN38_PROMPT_CACHE_BYTES:-128GB}" \
   --chat-template-args "$CHAT_TEMPLATE_ARGS"
