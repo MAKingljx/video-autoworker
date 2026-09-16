@@ -60,6 +60,15 @@ restore() {
   "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null 2>&1 || true
 }
 
+gateway_ready() {
+  local body
+  body="$(curl -fsS --max-time 5 http://127.0.0.1:18889/healthz)" || return 1
+  node - "$body" <<'NODE'
+const value = JSON.parse(process.argv[2]);
+if (value?.ok !== true || value?.status !== "live") process.exit(1);
+NODE
+}
+
 if ! "$OPENCLAW" --profile "$PROFILE" models set "$target" >/dev/null; then
   restore
   echo "model switch failed; restored $backup" >&2
@@ -131,17 +140,25 @@ fi
 
 "$OPENCLAW" --profile "$PROFILE" gateway restart >/dev/null
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if "$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1; then
+  if gateway_ready; then
     break
   fi
   sleep 2
 done
-if ! "$OPENCLAW" --profile "$PROFILE" health >/dev/null 2>&1; then
+if ! gateway_ready; then
   restore
   echo "Gateway health failed; restored $backup" >&2
   exit 1
 fi
-if ! "$OPENCLAW" --profile "$PROFILE" infer model run --gateway --model "$target" --prompt "只输出一个字：好" >/dev/null; then
+probe_payload='{"model":"default_model","messages":[{"role":"user","content":"只输出一个字：好"}],"max_tokens":8}'
+if ! probe_response="$(curl -fsS --max-time 20 -H 'content-type: application/json' \
+  --data "$probe_payload" "http://127.0.0.1:$port/v1/chat/completions")" \
+  || ! node - "$probe_response" <<'NODE'
+const value = JSON.parse(process.argv[2]);
+if (!Array.isArray(value?.choices) || value.choices.length !== 1
+  || (!value.choices[0]?.message?.content && !Array.isArray(value.choices[0]?.message?.tool_calls))) process.exit(1);
+NODE
+then
   restore
   echo "model inference failed; restored $backup" >&2
   exit 1
