@@ -1,6 +1,6 @@
 # AI-worker Video Command
 
-当前版本为 `0.5.16`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
+当前版本为 `0.5.17`。本目录只维护一份可发布的 OpenClaw 视频入口实现，不保留
 旧版运行模块、版本化升级脚本、影子链路或长期兼容分支。
 
 ## 单链路边界
@@ -9,6 +9,8 @@
 
 - Telegram 私聊的 `before_dispatch`：调用 Qwen 做一次无工具结构化意图分类，
   再由宿主校验身份、原消息证据、路径或查询值。
+- Feishu 已保存摘要直读的 `reply_dispatch`：按实际片段数分页读取已保存摘要，
+  直接逐条投递，模型不参与转述、合并或补全。
 - `aiworker_analyze_video`：为普通 Agent 会话提供结构化
   `submit_video | submit_directory | confirm_duplicate | status | segments | segment | export | result` 动作。
 
@@ -18,6 +20,7 @@
 
 ```text
 before_dispatch ─┐
+reply_dispatch ──┤
                  ├─ scheduler-runner ─ aiworker-task-flow ─ Video AutoWorker / n8n
 aiworker_analyze_video ┘
 ```
@@ -51,6 +54,8 @@ aiworker_analyze_video ┘
 - 名称查询命中多条结果时返回带任务编号、批次信息和完成时间的有界候选；
   默认选择最新完成记录，再按其精确任务编号读取。
 - 默认结果回复使用中文三行：视频标题、当前状态、一句分析摘要。目录预览不能替代全视频结论；用户明确要片段时只读相应编号，要文件时直接 export。
+- Feishu 明确要求直读已保存摘要时，系统按实际片段总数自动分页（每页最多20条，仅为读取页大小），
+  再逐条发送独立消息；指定数量只限制发送上限，不改变实际总数。单条失败停止后续发送，重试时只重试该条。
 
 ## 发布
 
@@ -63,7 +68,7 @@ bash scripts/install-aiworker-video-command-plugin.sh --dry-run --target-sha "$t
 bash scripts/install-aiworker-video-command-plugin.sh --apply --target-sha "$target_sha"
 ```
 
-安装器允许受支持旧版本（包括现役前序版本 `0.5.15`）迁移到 `0.5.16`；已是当前版本时验证后无操作。
+安装器允许受支持旧版本（包括现役前序版本 `0.5.16`）迁移到 `0.5.17`；已是当前版本时验证后无操作。
 它使用 OpenClaw 官方命令移除已退役且运行时不再使用的 sender hash 配置，再安装
 当前插件并只重启 `qwen-current` Gateway。除该字段外配置语义必须完全不变；安装后
 还会核对运行载荷与当前源码字节一致，并验证工具目录和受保护监听端口。它不启动或
@@ -110,3 +115,8 @@ git diff --check
 路径；不会把文件全文传回模型。禁止循环读取所有片段后由模型重写一个文件。
 导出不是发送，只有用户明确要求发送时才用 OpenClaw 现有附件通道。
 旧 `result` 显式全文兼容保留，不再作为默认查询或导出办法。
+
+Feishu 直读使用同一 `segments`/`segment` 结果接口和同一任务身份，不生成新的项目摘要。
+直读请求必须带可解析的作品名称、文件名或已登记任务编号，并明确“原文/直读/逐条”等意图；
+无法唯一确定任务时直接提示补充名称，不交给模型猜测。发送队列只保存当前读取游标，
+不把20写成总量上限，也不重读已经成功投递的片段。

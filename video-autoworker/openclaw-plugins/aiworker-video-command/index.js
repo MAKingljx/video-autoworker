@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 import { createQwenClassifier } from './lib/qwen-video-classifier.js'
 import { createQwenBeforeDispatchHandler } from './lib/qwen-before-dispatch.js'
+import { createSavedSummaryDirectReplyHandler } from './lib/saved-summary-direct-dispatch.js'
 import { createTaskChainTool, TASK_CHAIN_TOOL_NAME } from './lib/task-chain-tool.js'
 import { createDuplicateConfirmationStore } from './lib/duplicate-confirmation-store.js'
 
@@ -30,6 +31,10 @@ export default definePluginEntry({
       // Keep the host timeout above the 90 s classifier deadline plus the
       // runner's bounded 25 s subprocess call so our fail-closed reply wins.
       timeoutMs: 140_000,
+    })
+    api.on('reply_dispatch', createSavedSummaryDirectReplyHandler(), {
+      priority: 120,
+      eligibleDispatchKinds: ['agent'],
     })
     api.registerTool(context => createTaskChainTool({
       context,

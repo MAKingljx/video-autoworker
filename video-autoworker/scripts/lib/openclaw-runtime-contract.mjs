@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
 export const OPENCLAW_RUNTIME_VERSION = '2026.9.2'
-export const OPENCLAW_VIDEO_PLUGIN_VERSION = '0.5.16'
+export const OPENCLAW_VIDEO_PLUGIN_VERSION = '0.5.17'
 export const OPENCLAW_PACKAGE_NAME = 'openclaw'
 export const OPENCLAW_GATEWAY_RUNTIME_EXPORT = 'openclaw/plugin-sdk/gateway-runtime'
 export const OPENCLAW_SOURCE_PLUGIN_PEER = '>=2026.9.2'

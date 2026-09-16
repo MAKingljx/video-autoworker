@@ -15,7 +15,7 @@ describe('OpenClaw plugin package contract', () => {
       'openclaw-plugins/aiworker-video-command/vitest.config.mjs',
     )
     expect(packageJson.type).toBe('module')
-    expect(packageJson.version).toBe('0.5.16')
+    expect(packageJson.version).toBe('0.5.17')
     expect(packageJson.openclaw.extensions).toEqual(['./index.js'])
     expect(packageJson.openclaw.compat.pluginApi).toBe('>=2026.7.1')
     expect(manifest.id).toBe('aiworker-video-command')
@@ -41,6 +41,7 @@ describe('OpenClaw plugin package contract', () => {
     const entry = await readFile(resolve(PLUGIN_ROOT, 'index.js'), 'utf8')
     expect(entry).toContain("from 'openclaw/plugin-sdk/plugin-entry'")
     expect(entry).toContain("api.on('before_dispatch'")
+    expect(entry).toContain("api.on('reply_dispatch'")
     expect(entry).toContain('api.registerTool')
     expect(entry).toContain('timeoutMs: 140_000')
     expect(entry).not.toContain("api.on('before_prompt_build'")

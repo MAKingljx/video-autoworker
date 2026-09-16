@@ -97,6 +97,13 @@ the remote production completion event is wired. Production orchestration must
 resolve and authorize the work binding outside the model before invoking this
 entry.
 
+When Feishu explicitly requests the original saved segment summaries (for example,
+“直读”“原文”“逐条发送”), the video plugin owns the reply dispatch before the
+model runs. It pages until the real `totalSegments` is reached, uses a requested
+count only as a send limit, and sends each saved summary as its own message. The
+model must not summarize, rewrite, merge, or refill these messages. If one segment
+fails, stop at that segment and retry only that segment on the next request.
+
 The native `before_dispatch` hook can still complete qualifying Telegram
 private-chat requests before the agent runs. The tool is the direct OpenClaw
 entry for calls that reach `second-original` itself. Both routes call the same

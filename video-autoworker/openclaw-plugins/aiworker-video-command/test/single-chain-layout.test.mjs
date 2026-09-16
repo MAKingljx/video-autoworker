@@ -13,6 +13,7 @@ const currentModules = [
   'json-command.js',
   'qwen-before-dispatch.js',
   'qwen-video-classifier.js',
+  'saved-summary-direct-dispatch.js',
   'scheduler-runner.js',
   'stable-message-key.js',
   'task-chain-tool.js',
