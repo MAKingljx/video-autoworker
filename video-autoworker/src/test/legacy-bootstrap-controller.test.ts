@@ -1457,6 +1457,11 @@ process.stdout.write('{"sha":"one","sha":"two"}')
         { taskId: 'durable-running', status: 'running' },
       ],
     })
+    writeFileSync(join(valid, '.global-video-worker.lock'), `${JSON.stringify({
+      pid: process.pid,
+      token: '00000000-0000-4000-8000-000000000000',
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 })
     const projection = projectOfflineQueue([], scanOfflineDurableBatchStates(valid), BASE_NOW)
     expect(projection).toMatchObject({ waiting: 2, running: 1 })
 

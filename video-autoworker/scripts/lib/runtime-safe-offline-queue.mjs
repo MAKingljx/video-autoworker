@@ -297,6 +297,29 @@ function validateRuntimeGuardianPair(root, names) {
   return second
 }
 
+function validateGlobalWorkerLock(root, names) {
+  const name = '.global-video-worker.lock'
+  if (!names.has(name)) return null
+  const pathname = join(root, name)
+  const record = readJsonRecord(pathname, 'global video worker lock', {
+    mode: 0o600,
+    maximumBytes: 16 * 1024,
+  })
+  exactKeys(record.value, ['createdAt', 'pid', 'token'], 'global video worker lock')
+  if (!Number.isSafeInteger(record.value.pid) || record.value.pid <= 0
+    || !livePid(record.value.pid)
+    || typeof record.value.createdAt !== 'string'
+    || !Number.isFinite(Date.parse(record.value.createdAt))
+    || typeof record.value.token !== 'string'
+    || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(record.value.token)) {
+    fail('global video worker lock is invalid or stale')
+  }
+  return {
+    identity: entryProjection(record.entry),
+    sourceSha256: sha256(record.source),
+  }
+}
+
 function finalGuardianProjection(root, expected) {
   const markerPath = join(root, '.worker-launch.lock')
   const ownerPath = join(root, '.worker-launch.lock.owner')
@@ -405,7 +428,9 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
         names.add(entry.name)
         const kind = entry.isFile() ? 'file' : entry.isDirectory() ? 'directory' : 'other'
         rootEntries.push({ name: entry.name, kind })
-        if (entry.name === '.worker-launch.lock' || entry.name === '.worker-launch.lock.owner') continue
+        if (entry.name === '.worker-launch.lock'
+          || entry.name === '.worker-launch.lock.owner'
+          || entry.name === '.global-video-worker.lock') continue
         if (entry.isFile() && primaryPattern.test(entry.name)) primary.push(join(root, entry.name))
         else if (entry.isFile() && backupPattern.test(entry.name)) backups.push(join(root, entry.name))
         else if (entry.isDirectory()) histories.push(join(root, entry.name))
@@ -415,6 +440,7 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
       directory.closeSync()
     }
     const guardian = validateRuntimeGuardianPair(root, names)
+    const globalWorkerLock = validateGlobalWorkerLock(root, names)
 
     const historyFiles = []
     const historyProjections = []
@@ -581,6 +607,7 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
             sourceSha256: sha256(guardian.owner.source),
           },
         } : null,
+        globalWorkerLock,
       },
     }
   }
