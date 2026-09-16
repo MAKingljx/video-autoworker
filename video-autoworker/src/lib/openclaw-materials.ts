@@ -1,4 +1,6 @@
 import { runCommand } from './command'
+import { MATERIAL_GRAPH_MAX_MATERIALS, MATERIAL_GRAPH_MAX_SCENES, type MaterialGraphSnapshot } from './material-graph'
+import { buildMaterialGraphSnapshot, type MaterialGraphSource } from './material-graph-source'
 
 export type MaterialSearchMode = 'keyword' | 'vector' | 'hybrid'
 
@@ -129,6 +131,13 @@ const DEFAULT_EMBED_MODEL = 'nomic-embed-text'
 
 export async function getMaterialsOverview(): Promise<MaterialsOverview> {
   return runMaterialsPython<MaterialsOverview>(LIST_MATERIALS_SCRIPT, [getMaterialsWorkspaceRoot()], 60000)
+}
+
+export async function getMaterialsGraph(options: { project?: string } = {}): Promise<MaterialGraphSnapshot> {
+  const source = await runMaterialsPython<MaterialGraphSource>(GRAPH_MATERIALS_SCRIPT, [
+    getMaterialsWorkspaceRoot(), options.project || '',
+  ], 60000)
+  return buildMaterialGraphSnapshot(source)
 }
 
 export async function searchMaterials(options: {
@@ -287,7 +296,7 @@ def pipeline_dirs(project):
     return sorted(rows, key=lambda p: (p.name != "pipeline", p.name))
 
 def connect_readonly(db_path):
-    uri = f"file:{db_path}?mode=ro"
+    uri = Path(db_path).absolute().as_uri() + "?mode=ro"
     return sqlite3.connect(uri, uri=True)
 
 def scalar(conn, sql, default=0):
@@ -399,14 +408,19 @@ def flatten_json_text(value):
             parts.append(text)
     return parts
 
-def scene_rows(project_filter=None):
+def scene_rows(project_filter=None, on_error=None, max_rows=None, allowed_projects=None, rooted_only=False):
     workspace, bot_root = material_roots(sys.argv[1])
+    emitted = 0
     for project in project_dirs(bot_root):
         if project_filter and project.name != project_filter:
+            continue
+        if allowed_projects is not None and project.name not in allowed_projects:
             continue
         for pipeline in pipeline_dirs(project):
             db_path = pipeline / "material_index.sqlite"
             try:
+                if rooted_only and not db_path.resolve().is_relative_to(bot_root.resolve()):
+                    raise ValueError("material_index_outside_root")
                 with connect_readonly(db_path) as conn:
                     sql = """
                     select s.id, s.label, s.start, s.end, s.keyframes_json, s.transcript, s.material_tags_json,
@@ -458,7 +472,12 @@ def scene_rows(project_filter=None):
                             "text": text,
                             "metadata": result if isinstance(result, dict) else {},
                         }
+                        emitted += 1
+                        if max_rows is not None and emitted >= max_rows:
+                            return
             except Exception:
+                if on_error is not None:
+                    on_error(str(pipeline))
                 continue
 
 def lexical_score(query, text):
@@ -561,6 +580,54 @@ def main():
         "totals": totals,
         "projects": projects,
     })
+main()
+`
+
+const GRAPH_MATERIALS_SCRIPT = `${PY_SHARED}
+def main():
+    workspace, bot_root = material_roots(sys.argv[1])
+    project_filter = sys.argv[2]
+    maximum_materials = ${MATERIAL_GRAPH_MAX_MATERIALS}
+    maximum_scenes = ${MATERIAL_GRAPH_MAX_SCENES}
+    total_materials = 0
+    included = 0
+    projects = []
+    errors = set()
+    for project in project_dirs(bot_root):
+        if project_filter and project.name != project_filter:
+            continue
+        if not project.resolve().is_relative_to(bot_root.resolve()):
+            continue
+        available = [video for video in list_videos(project)
+                     if Path(video['path']).resolve().is_relative_to(bot_root.resolve())]
+        total_materials += len(available)
+        videos = available[:max(0, maximum_materials - included)]
+        included += len(videos)
+        if videos:
+            projects.append({'id': project.name, 'path': str(project), 'videoCount': len(available), 'videos': videos})
+    metadata_fields = ('scene_tags', 'scene_types', 'scene_type', 'scene', '场景',
+                       'locations', 'location', 'environment', 'emotion', 'emotions', '情绪',
+                       'source_video', 'video_path', 'source_path', 'video_name', 'videoName', 'sourceVideo')
+    rows = []
+    for row in scene_rows(project_filter, errors.add, maximum_scenes + 1,
+                          {p['id'] for p in projects}, True):
+        metadata = {}
+        for key in metadata_fields:
+            value = row['metadata'].get(key)
+            if isinstance(value, str):
+                metadata[key] = value[:2000]
+            elif isinstance(value, list):
+                metadata[key] = [str(item)[:200] for item in value[:32]
+                                 if isinstance(item, (str, int, float))]
+            elif value is not None:
+                # An invalid explicit source must not silently become a single-video fallback.
+                metadata[key] = False
+        rows.append({'id': row['id'], 'project': row['project'], 'pipeline': row['pipeline'],
+                     'sceneId': row['sceneId'], 'start': row['start'], 'end': row['end'],
+                     'visualSummary': row['visualSummary'][:700], 'metadata': metadata})
+    emit({'generatedAt': now_iso(), 'projects': projects, 'scenes': rows[:maximum_scenes],
+          'totalMaterials': total_materials, 'unreadablePipelines': len(errors),
+          'truncated': total_materials > included or len(rows) > maximum_scenes})
 main()
 `
 

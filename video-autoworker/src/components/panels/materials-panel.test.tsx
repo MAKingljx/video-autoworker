@@ -36,9 +36,24 @@ function jsonResponse(body: unknown) {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  window.history.replaceState({}, '', '/')
 })
 
 describe('MaterialsPanel', () => {
+  it('opens the graph from a local preview link', async () => {
+    window.history.replaceState({}, '', '/materials?view=graph')
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).startsWith('/api/materials/graph')) return jsonResponse({
+        schemaVersion: 1, generatedAt: '2026-09-13', materials: [],
+        stats: { totalMaterials: 0, scannedScenes: 0, unmatchedScenes: 0, unreadablePipelines: 0, truncated: false },
+      })
+      return jsonResponse({ projects: [] })
+    }))
+    render(<MaterialsPanel />)
+    expect(await screen.findByRole('region', { name: '素材关系图谱' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '暂无可绘制的完整视频素材' })).toBeInTheDocument()
+  })
+
   it('opens learning review as a first-class media-library view', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input) === '/api/n8n/director-extraction/review') {

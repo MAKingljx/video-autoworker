@@ -9,10 +9,12 @@ import {
   type AnalysisMaterialVideo,
 } from '@/components/panels/video-analysis-results-panel'
 import { DirectorLearningReviewPanel } from '@/components/panels/director-learning-review-panel'
+import { MaterialGraphPanel } from '@/components/panels/material-graph-panel'
+import type { MaterialGraphEvidence, MaterialGraphMaterial } from '@/lib/material-graph'
 
 type SearchMode = 'keyword' | 'vector' | 'hybrid'
 type SearchScope = 'all' | 'selected'
-type WorkspaceView = 'materials' | 'recognition' | 'analysis' | 'review'
+type WorkspaceView = 'materials' | 'graph' | 'recognition' | 'analysis' | 'review'
 
 interface MaterialVideo {
   name: string
@@ -373,6 +375,10 @@ export function MaterialsPanel() {
     void loadOverview()
   }, [loadOverview])
 
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('view') === 'graph') setWorkspaceView('graph')
+  }, [])
+
   const orderedProjects = useMemo(
     () => [...(overview?.projects || [])].sort(compareProjects),
     [overview?.projects],
@@ -531,8 +537,20 @@ export function MaterialsPanel() {
       setFocusedResultId(null)
     }
     setSelectedProject(projectId)
-    setWorkspaceView('materials')
+    setWorkspaceView(current => current === 'graph' ? 'graph' : 'materials')
   }, [selectedProject])
+
+  const openGraphMaterial = useCallback((material: MaterialGraphMaterial, evidence?: MaterialGraphEvidence) => {
+    const project = projectMap.get(material.project)
+    const video = project?.videos.find(item => item.path === material.path)
+    if (!project || !video) return
+    setSelectedProject(project.id)
+    setSelectedVideoPath(video.path)
+    setWorkspaceView('materials')
+    if (evidence?.start !== null && evidence?.start !== undefined) {
+      setPendingCue({ projectId: project.id, videoPath: video.path, seconds: evidence.start })
+    }
+  }, [projectMap])
 
   return (
     <div className="p-3 md:p-4">
@@ -541,6 +559,7 @@ export function MaterialsPanel() {
         navigationLabel="媒体资源视图"
         items={[
           { id: 'materials', label: '素材预览', count: activeProject?.videos.length },
+          { id: 'graph', label: '素材图谱' },
           { id: 'recognition', label: '识别结果', count: searchData?.results.length },
           { id: 'analysis', label: '学习内容', count: analysisVideos.length },
           { id: 'review', label: '学习审核', count: pendingReviewCount },
@@ -575,7 +594,9 @@ export function MaterialsPanel() {
             </div>
           )}
 
-          {workspaceView === 'analysis' ? (
+          {workspaceView === 'graph' ? (
+            <MaterialGraphPanel projectId={activeProject?.id} onOpenMaterial={openGraphMaterial} />
+          ) : workspaceView === 'analysis' ? (
             <VideoAnalysisResultsPanel videos={analysisVideos} />
           ) : workspaceView === 'review' ? (
             <DirectorLearningReviewPanel onPendingCountChange={setPendingReviewCount} />

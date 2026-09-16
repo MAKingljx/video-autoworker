@@ -11429,6 +11429,22 @@
         }
       }
     },
+    "/api/materials/graph": {
+      "get": {
+        "tags": ["Materials"],
+        "summary": "读取素材图谱的只读视频与场景标签投影",
+        "operationId": "getMaterialsGraph",
+        "description": "每个视频一个素材记录。聚合已存在的场景与情绪标签，不调用模型、不更新索引。无法唯一绑定的场景计入 unmatchedScenes；最多返回300个视频和3000条场景的投影，超限以 truncated 标记。",
+        "parameters": [{ "name": "project", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 256 }, "description": "精确素材作品名称，省略时读取当前素材库的所有作品" }],
+        "responses": {
+          "200": { "description": "MaterialGraphSnapshot v1：materials及读取范围统计stats", "content": { "application/json": { "schema": { "type": "object", "required": ["schemaVersion", "generatedAt", "materials", "stats"], "properties": { "schemaVersion": { "const": 1 }, "generatedAt": { "type": "string" }, "materials": { "type": "array", "items": { "type": "object" } }, "stats": { "type": "object" } } } } } },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "502": { "description": "Material graph source unavailable" }
+        }
+      }
+    },
     "/api/materials/asset": {
       "get": {
         "tags": ["Materials"],
