@@ -6,6 +6,7 @@ OPENCLAW="${OPENCLAW_BIN:-$HOME/ai-worker/bin/openclaw}"
 CONFIG="$HOME/.openclaw-$PROFILE/openclaw.json"
 MODELS_JSON="$HOME/.openclaw-$PROFILE/agents/second-original/agent/models.json"
 BACKUP_ROOT="$HOME/ai-worker/backups/qwen-model-switch"
+AGENT_CONFIG_HELPER="${AIWORKER_OPENCLAW_AGENT_CONFIG_HELPER:-$HOME/ai-worker/services/video-autoworker-control/source/video-autoworker/scripts/lib/openclaw-agent-config.mjs}"
 
 if [ "$#" -ne 1 ]; then
   echo "usage: aiworker-openclaw-qwen-model-switch qwen36|qwen36-tools|qwen38" >&2
@@ -22,7 +23,7 @@ case "$1" in
   qwen38)
     target="qwen38-local/default_model"
     port=18092
-    thinking_default="high"
+    thinking_default="medium"
     thinking_enabled="true"
     ;;
   *)
@@ -33,6 +34,10 @@ esac
 
 if [ ! -f "$CONFIG" ] || [ ! -f "$MODELS_JSON" ]; then
   echo "OpenClaw profile files are missing for $PROFILE" >&2
+  exit 1
+fi
+if [ ! -f "$AGENT_CONFIG_HELPER" ] || [ -L "$AGENT_CONFIG_HELPER" ]; then
+  echo "OpenClaw agent layout helper is missing: $AGENT_CONFIG_HELPER" >&2
   exit 1
 fi
 if ! curl -fsS --max-time 5 "http://127.0.0.1:$port/v1/models" >/dev/null; then
@@ -60,12 +65,15 @@ if ! "$OPENCLAW" --profile "$PROFILE" models set "$target" >/dev/null; then
   echo "model switch failed; restored $backup" >&2
   exit 1
 fi
-if ! node - "$CONFIG" "$MODELS_JSON" "$target" "$thinking_default" "$thinking_enabled" <<'NODE'
+if ! node - "$CONFIG" "$MODELS_JSON" "$target" "$thinking_default" "$thinking_enabled" "$AGENT_CONFIG_HELPER" <<'NODE'
 const fs = require("fs");
-const [configPath, modelsPath, target, thinkingDefault, thinkingEnabled] = process.argv.slice(2);
+const { pathToFileURL } = require("url");
+const [configPath, modelsPath, target, thinkingDefault, thinkingEnabled, agentConfigHelper] = process.argv.slice(2);
+void (async () => {
 const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
 const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
-const agents = config.agents && Array.isArray(config.agents.list) ? config.agents.list : [];
+const { readOpenClawAgentEntries, writeOpenClawAgentEntries } = await import(pathToFileURL(agentConfigHelper).href);
+const agents = readOpenClawAgentEntries(config);
 const agent = agents.find((entry) => entry && entry.id === "second-original");
 if (!agent) throw new Error("second-original agent is missing");
 agent.model = target;
@@ -105,8 +113,10 @@ modelProviderModel.compat = {
   ...(modelProviderModel.compat || {}),
   ...(thinkingEnabled === "true" ? { thinkingFormat: "qwen-chat-template" } : {}),
 };
+writeOpenClawAgentEntries(config, agents);
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n");
 fs.writeFileSync(modelsPath, JSON.stringify(models, null, 2) + "\n");
+})().catch((error) => { console.error(error?.message || error); process.exitCode = 1; });
 NODE
 then
   restore
