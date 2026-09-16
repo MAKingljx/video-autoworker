@@ -145,15 +145,33 @@ function isFeishuDirect(event) {
     && ctx.InboundAccessAuthorized !== false
 }
 
-async function send(dispatcher, text) {
+async function send(dispatcher, text, sendText, sendContext) {
+  if (sendText) {
+    try {
+      await sendText({
+        cfg: sendContext.cfg,
+        to: sendContext.to,
+        text,
+        ...(sendContext.accountId === undefined ? {} : { accountId: sendContext.accountId }),
+        ...(sendContext.threadId === undefined ? {} : { threadId: sendContext.threadId }),
+        ...(sendContext.replyToId === undefined ? {} : { replyToId: sendContext.replyToId }),
+        ...(sendContext.gatewayClientScopes === undefined ? {} : {
+          gatewayClientScopes: sendContext.gatewayClientScopes,
+        }),
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
   if (!dispatcher || typeof dispatcher.sendFinalReply !== 'function') return false
   return dispatcher.sendFinalReply({ text }) === true
 }
 
-async function deliver(request, dispatcher, runner) {
+async function deliver(request, dispatcher, runner, sendText, sendContext) {
   const query = await resolveRequestQuery(request, runner)
   if (!query) {
-    await send(dispatcher, '没有找到唯一的最近已完成任务，请补充作品名称后再读取。')
+    await send(dispatcher, '没有找到唯一的最近已完成任务，请补充作品名称后再读取。', sendText, sendContext)
     return { sent: 0, failed: true }
   }
   let sent = 0
@@ -168,10 +186,10 @@ async function deliver(request, dispatcher, runner) {
       segmentIndex: request.segmentIndex,
     })
     if (result.kind !== 'segment' || result.status !== 'succeeded' || !result.segment) {
-      await send(dispatcher, `片段 ${request.segmentIndex} 读取失败，本次未重试其他片段。`)
+      await send(dispatcher, `片段 ${request.segmentIndex} 读取失败，本次未重试其他片段。`, sendText, sendContext)
       return { sent: 0, failed: true }
     }
-    if (!await send(dispatcher, summaryMessage(result.segment, result.segment.summary))) {
+    if (!await send(dispatcher, summaryMessage(result.segment, result.segment.summary), sendText, sendContext)) {
       return { sent: 0, failed: true }
     }
     return { sent: 1, failed: false }
@@ -185,16 +203,16 @@ async function deliver(request, dispatcher, runner) {
       segmentLimit: PAGE_SIZE,
     })
     if (page.kind === 'matches') {
-      await send(dispatcher, '匹配到多个视频结果，请补充明确的作品名称后再读取。')
+      await send(dispatcher, '匹配到多个视频结果，请补充明确的作品名称后再读取。', sendText, sendContext)
       return { sent, failed: true }
     }
     if (page.kind !== 'segments' || page.status !== 'succeeded') {
-      await send(dispatcher, '当前没有可读取的已保存片段摘要，本次未重新学习。')
+      await send(dispatcher, '当前没有可读取的已保存片段摘要，本次未重新学习。', sendText, sendContext)
       return { sent, failed: true }
     }
     total = page.totalSegments
     if (!Number.isSafeInteger(total) || total < 0 || total > MAX_SEGMENTS) {
-      await send(dispatcher, '片段数量超出受控读取范围，本次未发送。')
+      await send(dispatcher, '片段数量超出受控读取范围，本次未发送。', sendText, sendContext)
       return { sent, failed: true }
     }
     if (!page.items.length) break
@@ -206,26 +224,31 @@ async function deliver(request, dispatcher, runner) {
         segmentIndex: item.index,
       })
       if (detail.kind !== 'segment' || detail.status !== 'succeeded' || !detail.segment) {
-        await send(dispatcher, `片段 ${item.index}（${item.timeRange}）读取失败，已停止后续发送；重试时只重试这一条。`)
+        await send(dispatcher, `片段 ${item.index}（${item.timeRange}）读取失败，已停止后续发送；重试时只重试这一条。`, sendText, sendContext)
         return { sent, failed: true }
       }
-      if (!await send(dispatcher, summaryMessage(detail.segment, detail.segment.summary))) {
+      if (!await send(dispatcher, summaryMessage(detail.segment, detail.segment.summary), sendText, sendContext)) {
         return { sent, failed: true }
       }
       sent += 1
     }
     if (sent >= stopAfter || page.nextSegmentOffset === null) break
     if (!Number.isSafeInteger(page.nextSegmentOffset) || page.nextSegmentOffset <= offset) {
-      await send(dispatcher, '片段目录分页状态无效，已停止发送。')
+      await send(dispatcher, '片段目录分页状态无效，已停止发送。', sendText, sendContext)
       return { sent, failed: true }
     }
     offset = page.nextSegmentOffset
   }
-  if (sent === 0) await send(dispatcher, total === 0 ? '当前任务没有已保存片段摘要。' : '当前没有可读取的已保存片段摘要。')
+  if (sent === 0) await send(
+    dispatcher,
+    total === 0 ? '当前任务没有已保存片段摘要。' : '当前没有可读取的已保存片段摘要。',
+    sendText,
+    sendContext,
+  )
   return { sent, failed: false }
 }
 
-export function createSavedSummaryDirectReplyHandler({ runner = schedulerRunner } = {}) {
+export function createSavedSummaryDirectReplyHandler({ runner = schedulerRunner, sendText } = {}) {
   const active = new Map()
   return async function savedSummaryDirectReply(event, hookContext) {
     if (!isFeishuDirect(event)) return undefined
@@ -236,7 +259,22 @@ export function createSavedSummaryDirectReplyHandler({ runner = schedulerRunner 
     const existing = active.get(operationKey)
     if (existing) return existing
     const operation = (async () => {
-      const result = await deliver(request, hookContext?.dispatcher, runner)
+      const sendContext = {
+        cfg: hookContext?.cfg,
+        to: event.originatingTo || event.ctx?.OriginatingTo,
+        accountId: event.originatingAccountId,
+        threadId: event.originatingThreadId || event.ctx?.TransportThreadId,
+        replyToId: event.ctx?.ReplyToId || event.ctx?.MessageSid,
+        gatewayClientScopes: event.ctx?.GatewayClientScopes,
+      }
+      const directSendText = sendText && sendContext.cfg && sendContext.to ? sendText : undefined
+      const result = await deliver(
+        request,
+        hookContext?.dispatcher,
+        runner,
+        directSendText,
+        sendContext,
+      )
       const delivered = result.sent > 0
       hookContext?.recordProcessed?.(result.failed ? 'error' : 'completed', {
         reason: result.failed ? 'saved_summary_direct_delivery_failed' : 'saved_summary_direct_delivery',
@@ -245,13 +283,27 @@ export function createSavedSummaryDirectReplyHandler({ runner = schedulerRunner 
       return {
         handled: true,
         queuedFinal: delivered,
-        counts: counts(event.dispatcher),
+        counts: counts(hookContext?.dispatcher),
       }
     })().catch(async () => {
-      await send(hookContext?.dispatcher, '已保存摘要读取失败，本次未重新学习；重试时只重试当前请求。')
+      await send(
+        hookContext?.dispatcher,
+        '已保存摘要读取失败，本次未重新学习；重试时只重试当前请求。',
+        sendText && hookContext?.cfg && (event.originatingTo || event.ctx?.OriginatingTo)
+          ? sendText
+          : undefined,
+        {
+          cfg: hookContext?.cfg,
+          to: event.originatingTo || event.ctx?.OriginatingTo,
+          accountId: event.originatingAccountId,
+          threadId: event.originatingThreadId || event.ctx?.TransportThreadId,
+          replyToId: event.ctx?.ReplyToId || event.ctx?.MessageSid,
+          gatewayClientScopes: event.ctx?.GatewayClientScopes,
+        },
+      )
       hookContext?.recordProcessed?.('error', { reason: 'saved_summary_direct_delivery_error' })
       hookContext?.markIdle?.('message_completed')
-      return { handled: true, queuedFinal: true, counts: counts(event.dispatcher) }
+      return { handled: true, queuedFinal: true, counts: counts(hookContext?.dispatcher) }
     })
     active.set(operationKey, operation)
     try {

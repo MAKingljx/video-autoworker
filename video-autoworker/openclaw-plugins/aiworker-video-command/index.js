@@ -24,6 +24,13 @@ export default definePluginEntry({
       releaseReady: api.pluginConfig?.releaseReady === true,
       duplicateConfirmationStore,
     })
+    let feishuAdapterPromise
+    const sendFeishuText = async params => {
+      feishuAdapterPromise ??= api.runtime.channel.outbound.loadAdapter('feishu')
+      const adapter = await feishuAdapterPromise
+      if (!adapter?.sendText) throw new Error('Feishu outbound text adapter is unavailable')
+      return adapter.sendText(params)
+    }
 
     api.on('before_dispatch', handler, {
       priority: 100,
@@ -32,7 +39,7 @@ export default definePluginEntry({
       // runner's bounded 25 s subprocess call so our fail-closed reply wins.
       timeoutMs: 140_000,
     })
-    api.on('reply_dispatch', createSavedSummaryDirectReplyHandler(), {
+    api.on('reply_dispatch', createSavedSummaryDirectReplyHandler({ sendText: sendFeishuText }), {
       priority: 120,
       eligibleDispatchKinds: ['agent'],
     })

@@ -140,6 +140,26 @@ describe('saved summary direct delivery', () => {
     })
   })
 
+  it('uses the channel text adapter so Feishu sends independent messages instead of merging a stream card', async () => {
+    const runner = pagedRunner(2)
+    const send = dispatcher()
+    const sendText = vi.fn(async () => ({ ok: true }))
+    const handler = createSavedSummaryDirectReplyHandler({ runner, sendText })
+    const value = await handler({
+      ...event(`请直读${title}前2个已保存片段摘要，逐条发送`),
+      originatingTo: 'oc_test_conversation',
+      originatingAccountId: 'default',
+    }, { dispatcher: send, cfg: {} })
+
+    expect(value).toMatchObject({ handled: true, queuedFinal: true })
+    expect(sendText).toHaveBeenCalledTimes(2)
+    expect(sendText.mock.calls.map(call => call[0].text)).toEqual([
+      expect.stringContaining('已保存摘要1'),
+      expect.stringContaining('已保存摘要2'),
+    ])
+    expect(send.sendFinalReply).not.toHaveBeenCalled()
+  })
+
   it('chooses the newest succeeded task for a latest-task request', async () => {
     const runner = {
       taskResult: vi.fn(async ({ query, view, segmentOffset = 0, segmentIndex }) => {
