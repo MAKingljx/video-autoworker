@@ -201,7 +201,9 @@ if (command[0] === 'plugins' && command[1] === 'install') {
   const version = JSON.parse(fs.readFileSync(path.join(installed, 'package.json'), 'utf8')).version
   console.log(JSON.stringify({
     plugin: { id: 'aiworker-video-command', status: 'loaded', version },
-    typedHooks: [{ name: 'before_dispatch' }, { name: 'reply_dispatch' }],
+    typedHooks: version === '0.5.17'
+      ? [{ name: 'before_dispatch' }, { name: 'reply_dispatch' }]
+      : [{ name: 'before_dispatch' }],
     tools: [{ names: ['aiworker_analyze_video'] }],
     diagnostics: [],
   }))

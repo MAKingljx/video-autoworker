@@ -19,8 +19,11 @@ export function validateRuntimeInspection(report, pluginId, expectedVersion = '0
     throw new Error('Runtime inspection hooks must be an array.')
   }
   const hookNames = report.typedHooks.map(hook => hook?.name).filter(Boolean).toSorted()
-  if (JSON.stringify(hookNames) !== JSON.stringify(['before_dispatch', 'reply_dispatch'])) {
-    throw new Error('Runtime must expose exactly before_dispatch and reply_dispatch.')
+  const expectedHooks = expectedVersion === '0.5.16'
+    ? ['before_dispatch']
+    : ['before_dispatch', 'reply_dispatch']
+  if (JSON.stringify(hookNames) !== JSON.stringify(expectedHooks)) {
+    throw new Error(`Runtime must expose exactly ${expectedHooks.join(' and ')}.`)
   }
   if (!Array.isArray(report.tools) || report.tools.length !== 1) {
     throw new Error('Runtime must expose exactly one task-chain tool.')

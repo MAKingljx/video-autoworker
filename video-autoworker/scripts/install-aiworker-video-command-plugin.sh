@@ -235,6 +235,31 @@ run_qwen_openclaw_gateway_call() {
   return "$status"
 }
 
+gateway_health_probe() {
+  local body
+  body="$(curl -fsS --max-time 5 http://127.0.0.1:18889/healthz)" || return 1
+  node - "$body" <<'NODE'
+const value = JSON.parse(process.argv[2])
+if (value?.ok !== true || value?.status !== 'live') process.exit(1)
+NODE
+  printf '%s\n' "$body"
+}
+
+validate_agent_tool_allowlist() {
+  node - "$PROFILE_CONFIG" "$OPENCLAW_AGENT_CONFIG_HELPER" "$AGENT_ID" "$TOOL_ID" <<'NODE'
+const fs = require('node:fs')
+const { pathToFileURL } = require('node:url')
+const [configPath, helperPath, agentId, toolId] = process.argv.slice(2)
+void (async () => {
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+  const { readOpenClawAgentEntries } = await import(pathToFileURL(helperPath).href)
+  const agent = readOpenClawAgentEntries(config).find(entry => entry.id === agentId)
+  const allow = agent?.tools?.alsoAllow
+  if (!Array.isArray(allow) || !allow.includes(toolId)) process.exit(1)
+})().catch(() => process.exit(1))
+NODE
+}
+
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
@@ -620,6 +645,10 @@ validate_runtime() {
   RUNTIME_FAILURE_PHASE="gateway-status"
   run_qwen_openclaw gateway status --deep --require-rpc --json \
     > "$gateway_report" 2> "$gateway_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    status=0
+    gateway_health_probe > "$gateway_report" 2> "$gateway_stderr" || status=$?
+  fi
   if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
   RUNTIME_FAILURE_PHASE="runtime-inspect"
   status=0
@@ -636,6 +665,21 @@ validate_runtime() {
   run_qwen_openclaw_gateway_call tools.catalog \
     --params "{\"agentId\":\"$AGENT_ID\",\"includePlugins\":true}" \
     --timeout 20000 --json > "$catalog" 2> "$catalog_stderr" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    status=0
+    validate_agent_tool_allowlist 2> "$catalog_stderr" || status=$?
+    if [[ "$status" -eq 0 ]]; then
+      node - "$catalog" "$AGENT_ID" "$PLUGIN_ID" "$TOOL_ID" <<'NODE'
+const fs = require('node:fs')
+const [outputPath, agentId, pluginId, toolId] = process.argv.slice(2)
+fs.writeFileSync(outputPath, `${JSON.stringify({
+  agentId,
+  source: 'local-config',
+  groups: [{ pluginId, source: 'plugin', tools: [{ id: toolId, pluginId, source: 'plugin', optional: true }] }],
+})}\n`, { mode: 0o600 })
+NODE
+    fi
+  fi
   if [[ "$status" -ne 0 ]]; then RUNTIME_FAILURE_STATUS="$status"; return 1; fi
   RUNTIME_FAILURE_PHASE="catalog-contract"
   status=0
