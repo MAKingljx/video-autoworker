@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { authorizeMaterialsRequest } from '../route'
 import { getMaterialsGraph } from '@/lib/openclaw-materials'
 import { logSafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
+import { MATERIALS_GRAPH_ERROR } from '@/lib/material-graph-errors'
 
 export async function GET(request: NextRequest) {
   const auth = authorizeMaterialsRequest(request, 'viewer')
@@ -13,8 +14,8 @@ export async function GET(request: NextRequest) {
   try {
     return NextResponse.json(await getMaterialsGraph({ project }), { headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
-    const failure = projectSafeOperationError(error, 'MATERIALS_GRAPH_FAILED')
+    const failure = projectSafeOperationError(error, 'MATERIALS_OVERVIEW_FAILED')
     logSafeOperationError('materials_graph', error, failure)
-    return NextResponse.json({ code: failure.code, error: failure.summary }, { status: 502 })
+    return NextResponse.json(MATERIALS_GRAPH_ERROR, { status: 502 })
   }
 }
