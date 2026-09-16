@@ -4,7 +4,7 @@ import { validateRuntimeInspection } from '../scripts/validate-runtime-inspectio
 
 function report(overrides = {}) {
   return {
-    plugin: { id: 'aiworker-video-command', status: 'loaded', version: '0.5.17' },
+    plugin: { id: 'aiworker-video-command', status: 'loaded', version: '0.5.18' },
     shape: 'non-capability',
     typedHooks: [
       { name: 'before_dispatch', priority: 100 },
@@ -32,8 +32,8 @@ describe('runtime inspection validator', () => {
   })
 
   it.each([
-    ['wrong id', report({ plugin: { id: 'other', status: 'loaded', version: '0.5.17' } })],
-    ['not loaded', report({ plugin: { id: 'aiworker-video-command', status: 'disabled', version: '0.5.17' } })],
+    ['wrong id', report({ plugin: { id: 'other', status: 'loaded', version: '0.5.18' } })],
+    ['not loaded', report({ plugin: { id: 'aiworker-video-command', status: 'disabled', version: '0.5.18' } })],
     ['wrong version', report({ plugin: { id: 'aiworker-video-command', status: 'loaded', version: '0.2.0' } })],
     ['missing hook', report({ typedHooks: [] })],
     ['extra hook', report({ typedHooks: [

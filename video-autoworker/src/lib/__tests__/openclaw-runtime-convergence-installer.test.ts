@@ -262,7 +262,7 @@ async function createFixture() {
     'aiworker-video-command',
     'aiworker_analyze_video',
     false,
-    '0.5.17',
+    '0.5.18',
     openclawSdkRoot,
   )
   await installPluginManifest(
@@ -1153,7 +1153,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
       requiredPlugins: [
         {
           id: 'aiworker-video-command',
-          version: '0.5.17',
+          version: '0.5.18',
           tool: 'aiworker_analyze_video',
           requiredConfig: { releaseReady: true },
         },

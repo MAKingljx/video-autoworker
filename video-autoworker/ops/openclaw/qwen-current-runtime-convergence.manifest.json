@@ -24,7 +24,7 @@
   "requiredPlugins": [
     {
       "id": "aiworker-video-command",
-      "version": "0.5.17",
+      "version": "0.5.18",
       "tool": "aiworker_analyze_video",
       "requiredConfig": {
         "releaseReady": true

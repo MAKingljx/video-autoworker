@@ -43,7 +43,7 @@ describe('OpenClaw 9.2 stable runtime compatibility', () => {
       writeFileSync(join(target, 'openclaw.plugin.json'), `${JSON.stringify({ id: name, version })}\n`, { mode: 0o600 })
       return target
     }
-    const video = plugin('aiworker-video-command', '0.5.17', '>=2026.7.1-2')
+    const video = plugin('aiworker-video-command', '0.5.18', '>=2026.7.1-2')
     const director = plugin('aiworker-director-brain', '0.4.4', '2026.7.1-2')
     const previousHome = process.env.HOME
     process.env.HOME = join(root, 'home')

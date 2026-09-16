@@ -10,8 +10,8 @@ const toolPath = 'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js
 const pluginId = 'aiworker-video-command'
 const toolId = 'aiworker_analyze_video'
 const declaration = Object.freeze({
-  fromVersion: '0.5.16', toVersion: '0.5.17',
-  sourceCommit: '96f6dafce48a7ecc43ecc6d218fbbc1af3543fa6',
+  fromVersion: '0.5.17', toVersion: '0.5.18',
+  sourceCommit: '28433d5ca59cc4dbe849b8747ec86aeea7191c9e',
   sourceSha256: '450873716ecf72dcf943482648f5efbb394961da8f643ee9c62a1263a7354ddb',
 })
 const stable = value => Array.isArray(value) ? value.map(stable)
