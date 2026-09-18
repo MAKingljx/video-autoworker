@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { getDatabase, db_helpers } from './db'
 import { runOpenClaw } from './command'
 import { callOpenClawGateway } from './openclaw-gateway'
@@ -157,6 +158,30 @@ function parseAgentResponse(stdout: string): AgentResponseParsed {
     // Not valid JSON — return raw stdout if non-empty
     return { text: stdout.trim() || null, sessionId: null }
   }
+}
+
+const DISPATCH_REQUEST_KEY_PATTERN = /^task-dispatch-[1-9]\d*-[0-9a-f-]{36}$/u
+
+/**
+ * Persist the external request key before the first platform call. A timeout
+ * or lost response must reuse this key on the next scheduler tick; generating
+ * a new key would allow the platform to execute the same task twice.
+ */
+function ensureDispatchRequestKey(
+  db: ReturnType<typeof getDatabase>,
+  taskId: number,
+  metadata: Record<string, unknown>,
+): string {
+  const existing = typeof metadata.dispatch_request_key === 'string'
+    ? metadata.dispatch_request_key
+    : ''
+  if (DISPATCH_REQUEST_KEY_PATTERN.test(existing)) return existing
+
+  const requestKey = `task-dispatch-${taskId}-${randomUUID()}`
+  metadata.dispatch_request_key = requestKey
+  db.prepare('UPDATE tasks SET metadata = ?, updated_at = ? WHERE id = ? AND status = ?')
+    .run(JSON.stringify(metadata), Math.floor(Date.now() / 1000), taskId, 'in_progress')
+  return requestKey
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +718,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           return row?.metadata ? JSON.parse(row.metadata) : {}
         } catch { return {} }
       })()
+      const dispatchRequestKey = ensureDispatchRequestKey(db, task.id, taskMeta)
       const targetSession: string | null = typeof taskMeta?.target_session === 'string' && taskMeta.target_session
         ? taskMeta.target_session
         : null
@@ -711,7 +737,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
           {
             sessionKey: targetSession,
             message: prompt,
-            idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+            idempotencyKey: dispatchRequestKey,
             deliver: false,
           },
           125_000,
@@ -732,7 +758,7 @@ export async function dispatchAssignedTasks(): Promise<{ ok: boolean; message: s
         const invokeParams: Record<string, unknown> = {
           message: prompt,
           agentId: gatewayAgentId,
-          idempotencyKey: `task-dispatch-${task.id}-${Date.now()}`,
+          idempotencyKey: dispatchRequestKey,
           deliver: false,
         }
         // Route to appropriate model tier based on task complexity.

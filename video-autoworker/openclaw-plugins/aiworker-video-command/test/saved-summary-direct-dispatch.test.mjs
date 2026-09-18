@@ -140,6 +140,24 @@ describe('saved summary direct delivery', () => {
     })
   })
 
+  it('labels legacy summaries whose completeness is unknown', async () => {
+    const runner = {
+      taskResult: vi.fn(async () => ({
+        kind: 'segment', taskId: 'video-command-test', name: title, status: 'succeeded',
+        segment: {
+          index: 2, timeRange: '00:05:00-00:10:00', completeness: 'unknown', summary: '历史摘要',
+        },
+      })),
+    }
+    const send = dispatcher()
+    const handler = createSavedSummaryDirectReplyHandler({ runner })
+
+    await handler(event(`读取${title}片段2已保存原文`), { dispatcher: send })
+
+    expect(send.sent[0]).toContain('内容状态：历史摘要完整性未知。')
+    expect(send.sent[0]).toContain('历史摘要')
+  })
+
   it('uses the channel text adapter so Feishu sends independent messages instead of merging a stream card', async () => {
     const runner = pagedRunner(2)
     const send = dispatcher()

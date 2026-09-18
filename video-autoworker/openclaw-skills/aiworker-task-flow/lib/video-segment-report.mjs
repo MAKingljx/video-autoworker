@@ -7,6 +7,7 @@ import { MAX_RESULT_TOTAL_BYTES, selectFinalVideoReport } from './video-result-p
 
 export const MAX_SEGMENT_BYTES = 12 * 1024
 const MAX_SEGMENTS = 10_000
+const SUMMARY_COMPLETENESS = new Set(['complete', 'incomplete', 'unknown'])
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const text = value => typeof value === 'string' ? value.replace(/\r\n?/gu, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '').trim() : ''
 const label = value => [...text(String(value ?? '')).replace(/\s+/gu, ' ')].slice(0, 180).join('')
@@ -62,9 +63,16 @@ export function selectVideoSegmentReport(output) {
       ? ['历史音画观察（未生成融合摘要）', `语音：${text(row.transcript) || '无可用转写'}`, `画面：${text(row.visualAnalysis) || '无可用画面分析'}`].join('\n')
       : text(row.summary)
     if (!summary) throw new Error(`片段 ${index} 摘要为空`)
+    const completeness = SUMMARY_COMPLETENESS.has(row.completeness)
+      ? row.completeness
+      : source === 'segment_summary'
+        ? 'complete'
+        : source === 'legacy_timeline'
+          ? 'incomplete'
+          : 'unknown'
     return {
       index, startTime: truncateUtf8(label(row.startTime || timeRange.split('-')[0]), 128),
-      endTime: truncateUtf8(label(row.endTime || timeRange.split('-')[1]), 128), timeRange, source, summary,
+      endTime: truncateUtf8(label(row.endTime || timeRange.split('-')[1]), 128), timeRange, source, summary, completeness,
       ...(typeof row.inputSha256 === 'string' && /^[a-f0-9]{64}$/u.test(row.inputSha256) ? { inputSha256: row.inputSha256 } : {}),
     }
   }).sort((a, b) => a.index - b.index)

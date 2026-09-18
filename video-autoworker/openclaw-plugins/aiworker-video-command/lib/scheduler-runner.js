@@ -1041,6 +1041,7 @@ function normalizeTaskResult(value, expectedOffset) {
 }
 
 const SEGMENT_SOURCES = new Set(['segment_summary', 'legacy_chapter', 'legacy_timeline', 'legacy_report', 'none'])
+const SEGMENT_COMPLETENESS = new Set(['complete', 'incomplete', 'unknown'])
 const EXPORT_ROOT = join(homedir(), 'ai-worker/state/video-autoworker/exports')
 
 function segmentInteger(value, minimum = 0, maximum = MAX_RESULT_OFFSET) {
@@ -1058,13 +1059,21 @@ function segmentSource(value) {
   return value
 }
 
+function segmentCompleteness(value, source) {
+  if (value === undefined) return source === 'segment_summary' ? 'complete' : 'unknown'
+  if (!SEGMENT_COMPLETENESS.has(value)) throw new Error('invalid_segment_result')
+  return value
+}
+
 function segmentMetadata(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || typeof value.startTime !== 'string' || typeof value.endTime !== 'string'
     || ['legacy_report', 'none'].includes(value.source)) throw new Error('invalid_segment_result')
+  const completeness = segmentCompleteness(value.completeness, value.source)
   return {
     index: segmentInteger(value.index, 1), startTime: segmentText(value.startTime, 128), endTime: segmentText(value.endTime, 128),
     timeRange: segmentText(value.timeRange, 128), source: segmentSource(value.source),
+    ...(value.completeness === undefined ? {} : { completeness }),
   }
 }
 

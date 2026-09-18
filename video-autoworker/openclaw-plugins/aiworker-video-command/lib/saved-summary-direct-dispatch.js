@@ -122,7 +122,12 @@ function textHash(value) {
 
 function summaryMessage(item, summary) {
   const heading = `片段 ${item.index}（${item.timeRange}）`
-  return `${heading}\n${summary}`
+  const completeness = item.completeness === 'incomplete'
+    ? '\n内容状态：不完整，需要定向修复。'
+    : item.completeness === 'unknown'
+      ? '\n内容状态：历史摘要完整性未知。'
+      : ''
+  return `${heading}${completeness}\n${summary}`
 }
 
 function counts(dispatcher) {
