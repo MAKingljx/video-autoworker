@@ -2,8 +2,9 @@
 import { createHash } from 'node:crypto'
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync,
   readdirSync, readlinkSync, realpathSync } from 'node:fs'
+import Module from 'node:module'
 import { createRequire } from 'node:module'
-import { dirname, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseEnv } from 'node:util'
 
@@ -68,6 +69,21 @@ function loadPrivateEnvironment(pathname) {
   } finally { closeSync(descriptor) }
 }
 
+function addPnpmVirtualStorePaths(root) {
+  const store = join(root, 'node_modules', '.pnpm')
+  let entries
+  try { entries = readdirSync(store) } catch { return }
+  const paths = entries.flatMap(entry => {
+    const pathname = join(store, entry, 'node_modules')
+    try { return lstatSync(pathname).isDirectory() ? [pathname] : [] } catch { return [] }
+  })
+  if (paths.length === 0) return
+  process.env.NODE_PATH = [...paths, process.env.NODE_PATH || ''].filter(Boolean).join(delimiter)
+  // NODE_PATH is read during module initialization; refresh the resolver after
+  // the private artifact environment has been loaded.
+  Module._initPaths()
+}
+
 async function main(argv) {
   const values = new Map()
   for (let i = 0; i < argv.length; i += 2) {
@@ -89,6 +105,7 @@ async function main(argv) {
   process.env.AIWORKER_NODE_BIN = process.execPath
   process.env.PATH = `${dirname(process.execPath)}:${process.env.PATH || ''}`
   process.chdir(root)
+  addPnpmVirtualStorePaths(root)
   const require = createRequire(join(root, 'worker.cjs'))
   await require('./worker-runtime.cjs').startSchedulerWorker()
 }
