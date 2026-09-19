@@ -30,11 +30,36 @@ class FakeTimeline:
     def GetEndFrame(self):
         return 48
 
+    def GetSettings(self):
+        return {"timelineFrameRate": 25.0, "timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}
+
+
+class FakeMediaItem:
+    def __init__(self, name):
+        self.name = name
+
+    def GetName(self):
+        return self.name
+
+
+class FakeMediaPool:
+    def __init__(self, project):
+        self.project = project
+
+    def CreateEmptyTimeline(self, name):
+        timeline = FakeTimeline(name, "timeline-" + str(len(self.project.timelines)))
+        self.project.timelines.append(timeline)
+        return timeline
+
+    def ImportMedia(self, items):
+        return [FakeMediaItem(items[0]["FilePath"].rsplit("/", 1)[-1])]
+
 
 class FakeProject:
     def __init__(self):
         self.timelines = [FakeTimeline("Assembly", "timeline-base")]
         self.current = self.timelines[0]
+        self.media_pool = FakeMediaPool(self)
 
     def GetUniqueId(self):
         return "project-test"
@@ -55,6 +80,13 @@ class FakeProject:
         timeline = FakeTimeline(name, "timeline-" + str(len(self.timelines)))
         self.timelines.append(timeline)
         return timeline
+
+    def GetMediaPool(self):
+        return self.media_pool
+
+    def SetCurrentTimeline(self, timeline):
+        self.current = timeline
+        return True
 
 
 class FakeProjectManager:
@@ -112,6 +144,17 @@ class ResolveExecutorTests(unittest.TestCase):
     def test_protocol_error_is_json_serializable(self):
         payload = {"status": "failed", "errorCode": "resolve_not_connected"}
         self.assertEqual(json.loads(json.dumps(payload))["errorCode"], "resolve_not_connected")
+
+    def test_timeline_creation_and_source_path_import_are_idempotent_shapes(self):
+        first = executor.create_timeline({"timelineName": "AI-worker story test"})
+        second = executor.create_timeline({"timelineName": "AI-worker story test"})
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(first["timelineUniqueId"], second["timelineUniqueId"])
+        item = executor._media_item_for_clip(self.resolve.project.GetMediaPool(), {
+            "asset": {"assetId": "AA0701_01.mov", "sourcePathRef": "/media/AA0701_01.mov"},
+        })
+        self.assertEqual(item.GetName(), "AA0701_01.mov")
 
 
 if __name__ == "__main__":
