@@ -229,3 +229,9 @@ Resolve 与本地模型同机竞争 GPU、统一内存和磁盘带宽。首版�
 - **发布：** 已运行编辑任务在普通 Web 更新中可继续；Executor升级等待自身排空；同制品恢复后有真实回读，未验证不能在工具文案中宣称可用。
 
 本设计可以进入实现评审。下一步先完成批次 A，解除当前脚本连接未建立的问题，再在时间线副本上做最小闭环；其余批次不得因文档或上游 README 存在就标为生产完成。
+
+### 当前实现进度
+
+批次 A/B 已有本地代码合同：src/lib/editing/edit-plan.ts 定义计划、素材、证据、帧率、基线和摘要校验；src/lib/editing/resolve-executor.ts 定义能力预检、稳定 operationId、执行器快照和结果未知；src/lib/editing/resolve-executor-protocol.ts 定义 JSONL 边界；ops/resolve/resolve_executor.py 提供 Resolve 本地 GUI 会话的 inspect、时间线副本和按 Resolve MediaPool 唯一 ID 追加片段的受控适配器。
+
+这些模块已经通过本地定向测试和静态检查，但还没有接入 OpenClaw 工具、应用任务路由或生产运行；远端 SSH 下 Resolve 脚本探测仍返回未连接。批次 C/D 和生产启用必须在测试工程副本完成真实时间线回读、失败恢复与渲染验收后继续。
