@@ -213,21 +213,6 @@ const VIDEO_MAX_TOKENS_ENV: Record<N8nVideoModelPhase, string> = {
   final: 'AIWORKER_VIDEO_FINAL_MAX_TOKENS',
 }
 
-const AUDIO_MODEL_MIN_TIMEOUT_ENV = 'AIWORKER_WHISPER_MIN_TIMEOUT_MS'
-const AUDIO_MODEL_DEFAULT_MIN_TIMEOUT_MS = 180_000
-
-export function audioTranscriptionTimeoutMs(
-  durationSeconds: number,
-  environment: Record<string, string | undefined> = process.env,
-): number {
-  const configured = Number(environment[AUDIO_MODEL_MIN_TIMEOUT_ENV])
-  const minimum = Number.isFinite(configured) && configured >= 60_000
-    ? Math.min(15 * 60_000, Math.trunc(configured))
-    : AUDIO_MODEL_DEFAULT_MIN_TIMEOUT_MS
-  const durationBudget = Math.ceil(durationSeconds * 8_000)
-  return Math.min(15 * 60_000, Math.max(minimum, 60_000, durationBudget))
-}
-
 export function videoModelGenerationProfile(
   phase: N8nVideoModelPhase,
   environment: Record<string, string | undefined> = process.env,
@@ -287,11 +272,11 @@ export function mediaChildIdentity(prefix: 'task' | 'idem', taskId: string, stag
 function runCommand(
   command: string,
   args: string[],
-  options: { timeoutMs: number; maxBuffer?: number },
+  options: { timeoutMs?: number; maxBuffer?: number },
 ): Promise<CommandResult> {
   return new Promise((resolvePromise, reject) => {
     execFile(command, args, {
-      timeout: options.timeoutMs,
+      ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
       maxBuffer: options.maxBuffer || 2 * 1024 * 1024,
       encoding: 'utf8',
       windowsHide: true,
@@ -647,7 +632,6 @@ export async function transcribeN8nMedia(
           '--max-chars', String(settings.maxTranscriptCharsPerSegment),
           audioPath,
         ], {
-          timeoutMs: audioTranscriptionTimeoutMs(segment.durationSeconds),
           maxBuffer: 2 * 1024 * 1024,
         })
       } catch (error) {
