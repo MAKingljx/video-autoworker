@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   analyzeN8nVideoFrames,
+  audioTranscriptionTimeoutMs,
   buildMediaSegmentWindows,
   cleanupN8nMediaTask,
   compatibleReasoningPayload,
@@ -50,6 +51,13 @@ describe('n8n stateless media helpers', () => {
       emotion: ['谨慎'],
     })
   }
+
+  it('keeps enough startup budget for short Whisper segments', () => {
+    expect(audioTranscriptionTimeoutMs(2.88)).toBe(180_000)
+    expect(audioTranscriptionTimeoutMs(60)).toBe(480_000)
+    expect(audioTranscriptionTimeoutMs(2.88, { AIWORKER_WHISPER_MIN_TIMEOUT_MS: '240000' })).toBe(240_000)
+    expect(audioTranscriptionTimeoutMs(2.88, { AIWORKER_WHISPER_MIN_TIMEOUT_MS: '999999999' })).toBe(900_000)
+  })
 
   function directorPerception(summary: string) {
     return {
