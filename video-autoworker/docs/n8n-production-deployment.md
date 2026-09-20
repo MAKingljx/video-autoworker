@@ -644,9 +644,9 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
 
 ### 视频分析任务链
 
-第二个固定工作流 ID 为 `aiworker-video-analysis-v1`，生产 Webhook 路径为 `/webhook/aiworker-video-analysis`。OpenClaw 技能收到 `--video-file` 后不会把任意本机路径写进任务，而是以 0600 权限复制到 0700 的受控收件箱，只把随机 `videoKey` 交给平台。`prepare` 阶段验证容器、大小、时长和视频流，使用参数数组调用 ffmpeg，提取 16 kHz 单声道音轨和有限数量的 JPEG 抽帧；不拼接 shell 命令，也不接受远程 URL。
+第二个固定工作流 ID 为 `aiworker-video-analysis-v1`，生产 Webhook 路径为 `/webhook/aiworker-video-analysis`。OpenClaw 技能收到 `--video-file` 后不会把任意本机路径写进任务，而是以 0600 权限复制到 0700 的受控收件箱，只把随机 `videoKey` 交给平台。`prepare` 阶段验证容器、大小、时长和视频流，使用参数数组调用 ffmpeg，提取一份 16 kHz 单声道音轨，并按固定 5 秒窗口保存有限数量的 JPEG 抽帧；不拼接 shell 命令，也不接受远程 URL。
 
-准备完成后，n8n 分出两个独立分支：音频分支从模型注册表解析 `Whisper large-v3-turbo` CLI 资源，画面分支从任务链 `vision` 节点解析具备 `vision` 能力的 `openai-compatible` 直连路由。两个分支都固定 `memoryMode=none`，不接收 OpenClaw profile、agent、session key 或记忆目录。n8n v1 在同一次执行中按节点顺序调度分支，Merge 节点等待两侧都完成；这里保证的是模型职责隔离，不把顺序分支误报为计算并发。最终接口从 SQLite 中读取两个已成功的子任务结果并做确定性合并，不再调用第三个带会话模型。SQLite 只保存任务状态和本次输出，属于运维审计记录，不属于智能体长期记忆；抽帧、音轨和当前任务工作目录在成功合并后按当前任务范围删除。正常 `prepare` 不再执行跨任务 TTL 扫描；异常残留与未消费收件箱文件只能通过下文的独立只读审计入口盘点，任何恢复、隔离或删除都需要另立任务并取得明确授权。
+准备完成后，n8n 分出两个独立分支：音频分支从模型注册表解析 `Whisper large-v3-turbo` CLI 资源，整条音轨只加载模型一次，再按词级时间戳投影为固定 5 秒转写；画面分支从任务链 `vision` 节点解析具备 `vision` 能力的 `openai-compatible` 直连路由。连续 12 个 5 秒段共用一次无状态视觉请求和一次音画摘要请求，但响应必须逐段返回，随后按独立片段 ID 写检查点；批量合同失败时才回退逐段调用，已成功检查点继续复用。两个分支都固定 `memoryMode=none`，不接收 OpenClaw profile、agent、session key 或记忆目录。n8n v1 在同一次执行中按节点顺序调度分支，Merge 节点等待两侧都完成；这里保证的是模型职责隔离，不把顺序分支误报为计算并发。最终接口从 SQLite 中读取两个已成功的子任务结果并做确定性合并，不调用带会话模型，也不把 12 段合并成一个摘要。SQLite 只保存任务状态和本次输出，属于运维审计记录，不属于智能体长期记忆；抽帧、音轨和当前任务工作目录在成功合并后按当前任务范围删除。正常 `prepare` 不执行跨任务 TTL 扫描；异常残留与未消费收件箱文件只能通过下文的独立只读审计入口盘点，任何恢复、隔离或删除都需要另立任务并取得明确授权。
 
 建议绑定配置如下；路由 ID 仍可替换成其他本地或云端直连视觉模型，不能换成 OpenClaw Agent 路由：
 
@@ -656,6 +656,8 @@ ssh -L 5678:127.0.0.1:5678 heisenbergs-1
     "audioResourceId": "whisper-large-v3-turbo",
     "language": "zh",
     "maxDurationSeconds": 1800,
+    "segmentSeconds": 5,
+    "segmentOverlapSeconds": 0,
     "maxFrames": 4,
     "frameWidth": 960
   },

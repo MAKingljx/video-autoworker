@@ -10,9 +10,14 @@ import {
   mediaChildIdentity,
   mediaTaskWorkspace,
   mergeN8nMediaResults,
+  parseDirectorPerceptionBatchAnswer,
   parseDirectorSynthesisAnswer,
+  parseVisualPerceptionBatchAnswer,
   parseVisualPerceptionAnswer,
+  projectTimedTranscriptToWindows,
   synthesizeN8nMediaResults,
+  VIDEO_LEARNING_MODEL_BATCH_SEGMENTS,
+  VIDEO_LEARNING_SEGMENT_SECONDS,
   videoModelGenerationProfile,
   visibleModelAnswer,
 } from '@/lib/n8n-media-execution'
@@ -61,6 +66,23 @@ describe('n8n stateless media helpers', () => {
         emotion: '紧张克制',
       },
     }
+  }
+
+  function requestedBatchIndexes(prompt: string): number[] {
+    const match = prompt.match(/必须按顺序完整返回这些片段编号：([0-9、]+)/)
+    return match ? match[1].split('、').map(Number) : []
+  }
+
+  function visualBatch(indexes: number[]) {
+    return JSON.stringify({
+      segments: indexes.map(index => ({ index, ...JSON.parse(perceptionJson(`片段 ${index} 画面`)) })),
+    })
+  }
+
+  function directorBatch(indexes: number[]) {
+    return JSON.stringify({
+      segments: indexes.map(index => ({ index, ...directorPerception(`片段 ${index} 摘要`) })),
+    })
   }
 
   function synthesisRouting() {
@@ -122,6 +144,34 @@ describe('n8n stateless media helpers', () => {
     ])
   })
 
+  it('uses fixed five-second learning windows with a bounded final remainder', () => {
+    expect(VIDEO_LEARNING_SEGMENT_SECONDS).toBe(5)
+    expect(VIDEO_LEARNING_MODEL_BATCH_SEGMENTS).toBe(12)
+    expect(buildMediaSegmentWindows(12.5, VIDEO_LEARNING_SEGMENT_SECONDS)).toEqual([
+      { index: 1, startSeconds: 0, durationSeconds: 5 },
+      { index: 2, startSeconds: 5, durationSeconds: 5 },
+      { index: 3, startSeconds: 10, durationSeconds: 2.5 },
+    ])
+  })
+
+  it('projects one timestamped Whisper pass into exact five-second transcript windows', () => {
+    const windows = buildMediaSegmentWindows(12.5, 5)
+    expect(projectTimedTranscriptToWindows({
+      text: '第一句跨越边界，第二句结束。',
+      segments: [{
+        start: 3.8,
+        end: 11.5,
+        text: '第一句跨越边界，第二句结束。',
+        words: [
+          { start: 3.8, end: 4.6, word: '第一句' },
+          { start: 4.7, end: 5.4, word: '跨越' },
+          { start: 5.5, end: 6.2, word: '边界，' },
+          { start: 10.2, end: 11.5, word: '第二句结束。' },
+        ],
+      }],
+    }, windows)).toEqual(['第一句', '跨越边界，', '第二句结束。'])
+  })
+
   it('preserves a sub-second final window through director evidence projection', async () => {
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       version: 1,
@@ -160,9 +210,14 @@ describe('n8n stateless media helpers', () => {
       preparedAt: new Date().toISOString(),
       segments,
     }))
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
-      choices: [{ message: { content: perceptionJson('可复核画面事实') } }],
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = JSON.parse(String(init?.body))
+      const prompt = body.messages.find((message: { role: string }) => message.role === 'user').content
+      const text = Array.isArray(prompt) ? prompt.map(item => item.text || '').join('\n') : String(prompt)
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: visualBatch(requestedBatchIndexes(text)) } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    })
 
     const vision = await analyzeN8nVideoFrames(taskId, {
       config: { modelRouting: { nodes: { vision: { routeId: 'vision-tail-test' } } } },
@@ -244,6 +299,17 @@ describe('n8n stateless media helpers', () => {
     expect(() => parseVisualPerceptionAnswer(JSON.stringify({
       summary: '缺少必需数组', people: [],
     }))).toThrow('不符合结构化感知契约')
+  })
+
+  it('parses ordered batched visual and audiovisual results without mixing segment identities', () => {
+    expect(parseVisualPerceptionBatchAnswer(visualBatch([4, 5]), [4, 5]).map(item => item.index))
+      .toEqual([4, 5])
+    expect(parseDirectorPerceptionBatchAnswer(directorBatch([4, 5]), [4, 5]).map(item => item.index))
+      .toEqual([4, 5])
+    expect(() => parseVisualPerceptionBatchAnswer(visualBatch([5, 4]), [4, 5]))
+      .toThrow('片段编号不匹配')
+    expect(() => parseDirectorPerceptionBatchAnswer(directorBatch([4]), [4, 5]))
+      .toThrow('片段编号不匹配')
   })
 
   it('parses a bounded whole-video director perception with governed sound summaries', () => {
@@ -380,13 +446,16 @@ describe('n8n stateless media helpers', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const body = JSON.parse(String(init?.body))
       const prompt = body.messages.find((message: { role: string }) => message.role === 'user').content
-      const index = Number(prompt.match(/片段编号：(\d+)/)?.[1])
-      expect(prompt).toContain(`unique-source-${index}.`)
-      for (const neighbor of [index - 1, index + 1].filter(value => value > 0 && value <= count)) {
-        expect(prompt).not.toContain(`unique-source-${neighbor}.`)
+      const indexes = requestedBatchIndexes(prompt)
+      expect(indexes.length).toBeGreaterThan(0)
+      for (const index of indexes) expect(prompt).toContain(`unique-source-${index}.`)
+      for (const outside of [indexes[0] - 1, indexes.at(-1)! + 1].filter(value => value > 0 && value <= count)) {
+        expect(prompt).not.toContain(`unique-source-${outside}.`)
       }
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
-        ...directorPerception(`片段 ${index} 摘要`), objects: [`物体 ${index}`],
+        segments: indexes.map(index => ({
+          index, ...directorPerception(`片段 ${index} 摘要`), objects: [`物体 ${index}`],
+        })),
       }) }, finish_reason: 'stop' }] }), { status: 200 })
     })
     const timeline = Array.from({ length: count }, (_, offset) => ({
@@ -394,7 +463,7 @@ describe('n8n stateless media helpers', () => {
       transcript: `unique-source-${offset + 1}.`, visualAnalysis: `画面 ${offset + 1}`, confidence: 0,
     }))
     const result = await synthesizeN8nMediaResults(`bounded-${count}`, synthesisRouting(), { displayName: '项目第一课.mp4' }, { timeline })
-    expect(fetchMock).toHaveBeenCalledTimes(count)
+    expect(fetchMock).toHaveBeenCalledTimes(Math.ceil(count / VIDEO_LEARNING_MODEL_BATCH_SEGMENTS))
     const segments = result.segmentSummaries as Record<string, unknown>[]
     expect(segments).toHaveLength(count)
     expect(segments.at(-1)).toMatchObject({ index: count, sourceName: '项目第一课.mp4', summary: `片段 ${count} 摘要` })
@@ -403,6 +472,7 @@ describe('n8n stateless media helpers', () => {
     expect(result).toMatchObject({
       directorPerceptionCoverage: { complete: false, fields: { objects: { total: count, indexed: 20 } } },
       synthesis: { finalModelCall: false, chapterUnit: 'segment' },
+      generation: { segment: { modelBatches: Math.ceil(count / VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) } },
     })
     expect(parseDirectorSynthesisAnswer(JSON.stringify(result.directorPerception)).summary).toBe(result.summary)
     expect(JSON.stringify(segments)).toContain(`物体 ${count}`)
@@ -413,13 +483,20 @@ describe('n8n stateless media helpers', () => {
     let fail = true
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const prompt = JSON.parse(String(init?.body)).messages.find((message: { role: string }) => message.role === 'user').content
-      if (prompt.includes('片段编号：2；') && fail) return new Response('{}', { status: 503 })
+      const indexes = requestedBatchIndexes(prompt)
+      const individual = Number(prompt.match(/片段编号：(\d+)/)?.[1])
+      if ((indexes.includes(2) || individual === 2) && fail) return new Response('{}', { status: 503 })
+      if (indexes.length) return new Response(JSON.stringify({ choices: [{ message: {
+        content: JSON.stringify({
+          segments: indexes.map(index => ({ index, ...directorPerception('独立摘要') })),
+        }),
+      } }] }), { status: 200 })
       return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(directorPerception('独立摘要')) } }] }), { status: 200 })
     })
     const input = { prompt: '分析业务事实' }
     const merged = { timeline: [1, 2, 3].map(index => ({ index, timeRange: `${index}:00-${index + 1}:00`, transcript: `转写 ${index}`, visualAnalysis: `画面 ${index}` })) }
     await expect(synthesizeN8nMediaResults('resume-segments', routing, input, merged)).rejects.toThrow()
-    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledTimes(3)
     fail = false
     await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
     expect(fetchMock).toHaveBeenCalledTimes(4)
@@ -429,16 +506,16 @@ describe('n8n stateless media helpers', () => {
     await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
     expect(fetchMock).toHaveBeenCalledTimes(5)
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(8)
+    expect(fetchMock).toHaveBeenCalledTimes(6)
     process.env.AIWORKER_MODEL_ROUTES_JSON = String(process.env.AIWORKER_MODEL_ROUTES_JSON).replace('final-test-model', 'changed-model')
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(11)
+    expect(fetchMock).toHaveBeenCalledTimes(7)
     await rm(join(mediaTaskWorkspace('resume-segments'), 'checkpoints', 'segment-summary-002.json'))
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(12)
+    expect(fetchMock).toHaveBeenCalledTimes(8)
     merged.timeline.push({ index: 4, timeRange: '4:00-5:00', transcript: '新增片段', visualAnalysis: '新增画面' })
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(13)
+    expect(fetchMock).toHaveBeenCalledTimes(9)
   })
 
   it('does not checkpoint truncated or oversized segment responses', async () => {
@@ -521,13 +598,19 @@ describe('n8n stateless media helpers', () => {
         { index: 2, startSeconds: 60, durationSeconds: 60, audioFile: null, frameFiles: ['frame-002.jpg'] },
       ],
     }))
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
       if (url.includes(':18094/')) {
         return new Response(JSON.stringify({ error: { message: '主视觉服务不可用' } }), { status: 503 })
       }
+      const body = JSON.parse(String(init?.body))
+      const content = body.messages.find((message: { role: string }) => message.role === 'user').content
+      const prompt = Array.isArray(content) ? content.map((item: { text?: string }) => item.text || '').join('\n') : String(content)
+      const indexes = requestedBatchIndexes(prompt)
       return new Response(JSON.stringify({
-        choices: [{ message: { content: `<think>内部推理</think>${perceptionJson('备用路由画面结果')}` } }],
+        choices: [{ message: { content: `<think>内部推理</think>${JSON.stringify({
+          segments: indexes.map(index => ({ index, ...JSON.parse(perceptionJson('备用路由画面结果')) })),
+        })}` } }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     })
 
@@ -541,9 +624,9 @@ describe('n8n stateless media helpers', () => {
       },
     }, { prompt: '测试视频画面' })
 
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(':18094/'))).toHaveLength(1)
-    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(':18091/'))).toHaveLength(2)
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes(':18091/'))).toHaveLength(1)
     expect(result).toMatchObject({
       routeId: 'vision-fallback',
       routeCandidates: ['vision-primary', 'vision-fallback'],

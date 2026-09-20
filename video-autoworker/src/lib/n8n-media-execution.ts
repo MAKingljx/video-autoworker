@@ -26,12 +26,15 @@ const videoKeySchema = z.string().trim().regex(
   'videoKey 必须是受控收件箱生成的视频标识',
 )
 
+export const VIDEO_LEARNING_SEGMENT_SECONDS = 5
+export const VIDEO_LEARNING_MODEL_BATCH_SEGMENTS = 12
+
 const mediaConfigSchema = z.object({
   audioResourceId: z.string().trim().min(1).max(80).default('whisper-large-v3-turbo'),
   language: z.string().trim().min(2).max(20).default('zh'),
   maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(7_200),
-  segmentSeconds: z.coerce.number().int().min(30).max(300).default(60),
-  segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(1),
+  segmentSeconds: z.coerce.number().int().min(5).max(300).default(VIDEO_LEARNING_SEGMENT_SECONDS),
+  segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(0),
   maxKeyframesPerSegment: z.coerce.number().int().min(1).max(6).default(3),
   maxFrames: z.coerce.number().int().min(1).max(12).default(4),
   frameWidth: z.coerce.number().int().min(320).max(2_048).default(960),
@@ -109,6 +112,7 @@ interface CommandResult {
 interface MediaMetadata extends PreparedMedia {
   taskId: string
   preparedAt: string
+  audioSourceFile?: string | null
   segments: MediaSegment[]
 }
 
@@ -130,6 +134,12 @@ const visualPerceptionSchema = z.object({
   emotion: z.array(z.string().trim().min(1).max(160)).max(12),
 }).strict()
 
+const visualPerceptionBatchSchema = z.object({
+  segments: z.array(visualPerceptionSchema.extend({
+    index: z.number().int().positive(),
+  }).strict()).min(1).max(VIDEO_LEARNING_MODEL_BATCH_SEGMENTS),
+}).strict()
+
 const directorPerceptionSchema = visualPerceptionSchema.extend({
   // The final report carries the whole-video narrative, while a per-segment
   // visual observation stays capped at 4,000 characters.
@@ -140,6 +150,12 @@ const directorPerceptionSchema = visualPerceptionSchema.extend({
     music: z.string().trim().min(1).max(1_000).nullable(),
     emotion: z.string().trim().min(1).max(1_000).nullable(),
   }).strict(),
+}).strict()
+
+const directorPerceptionBatchSchema = z.object({
+  segments: z.array(directorPerceptionSchema.extend({
+    index: z.number().int().positive(),
+  }).strict()).min(1).max(VIDEO_LEARNING_MODEL_BATCH_SEGMENTS),
 }).strict()
 
 const FINAL_SUMMARY_CHECKPOINT_SCHEMA = 'video-autoworker-final-summary-checkpoint'
@@ -421,6 +437,87 @@ export function buildMediaSegmentWindows(durationSeconds: number, segmentSeconds
   }))
 }
 
+interface TimedTranscriptWord {
+  start: number
+  end: number
+  word: string
+}
+
+interface TimedTranscriptSegment {
+  start: number
+  end: number
+  text: string
+  words?: TimedTranscriptWord[]
+}
+
+interface TimedTranscriptPayload {
+  text: string
+  segments: TimedTranscriptSegment[]
+}
+
+function normalizeTranscriptText(value: string): string {
+  return value
+    .replace(/\s+([，。！？；：、,.!?])/gu, '$1')
+    .replace(/\s+/gu, ' ')
+    .trim()
+}
+
+function parseTimedTranscriptPayload(value: string): TimedTranscriptPayload {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new Error('音频模型返回无法解析的时间戳结果')
+  }
+  const root = objectValue(parsed)
+  if (typeof root.text !== 'string' || !Array.isArray(root.segments)) {
+    throw new Error('音频模型返回缺少时间戳片段')
+  }
+  const segments = root.segments.map((raw, offset) => {
+    const item = objectValue(raw)
+    const start = Number(item.start)
+    const end = Number(item.end)
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+      throw new Error(`音频模型第 ${offset + 1} 个时间戳片段无效`)
+    }
+    const words = Array.isArray(item.words) ? item.words.map((rawWord, wordOffset) => {
+      const word = objectValue(rawWord)
+      const wordStart = Number(word.start)
+      const wordEnd = Number(word.end)
+      const text = String(word.word || '')
+      if (!Number.isFinite(wordStart) || !Number.isFinite(wordEnd) || wordEnd < wordStart || !text.trim()) {
+        throw new Error(`音频模型第 ${offset + 1} 段第 ${wordOffset + 1} 个词时间戳无效`)
+      }
+      return { start: wordStart, end: wordEnd, word: text }
+    }) : undefined
+    return { start, end, text: normalizeTranscriptText(String(item.text || '')), words }
+  })
+  return { text: normalizeTranscriptText(root.text), segments }
+}
+
+export function projectTimedTranscriptToWindows(
+  transcript: TimedTranscriptPayload,
+  windows: MediaSegmentWindow[],
+): string[] {
+  const buckets = windows.map(() => [] as string[])
+  const locate = (start: number, end: number) => {
+    const midpoint = Math.max(0, (start + end) / 2)
+    const index = windows.findIndex(window => (
+      midpoint >= window.startSeconds
+      && midpoint < window.startSeconds + window.durationSeconds
+    ))
+    return index >= 0 ? index : Math.max(0, windows.length - 1)
+  }
+  for (const segment of transcript.segments) {
+    if (segment.words?.length) {
+      for (const word of segment.words) buckets[locate(word.start, word.end)].push(word.word)
+      continue
+    }
+    if (segment.text) buckets[locate(segment.start, segment.end)].push(segment.text)
+  }
+  return buckets.map(parts => normalizeTranscriptText(parts.join('')))
+}
+
 async function writeCheckpoint(workspace: string, name: string, value: Record<string, unknown>) {
   const checkpointDir = join(workspace, 'checkpoints')
   await mkdir(checkpointDir, { recursive: true, mode: 0o700 })
@@ -497,23 +594,10 @@ export async function prepareN8nMedia(
     const prefix = `segment-${String(index + 1).padStart(3, '0')}`
     const segmentDir = join(workspace, prefix)
     await mkdir(segmentDir, { recursive: true, mode: 0o700 })
-    let audioFile: string | null = null
-    if (probe.hasAudio) {
-      audioFile = join(prefix, 'audio.wav')
-      const extendedDuration = Math.min(
-        durationSeconds + settings.segmentOverlapSeconds,
-        probe.durationSeconds - startSeconds,
-      )
-      try {
-        await runCommand(ffmpeg, [
-          '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
-          '-ss', String(startSeconds), '-t', String(extendedDuration), '-i', audioSourcePath,
-          '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', join(workspace, audioFile),
-        ], { timeoutMs: Math.max(60_000, Math.ceil(extendedDuration * 2_000)) })
-      } catch (error) {
-        throw commandFailure(error, `第 ${index + 1} 段音频切分失败`)
-      }
-    }
+    // Keep one full mono track and project Whisper word timestamps into exact
+    // five-second windows. Loading Whisper once per five-second WAV would
+    // multiply model startup cost without improving the stored time contract.
+    const audioFile: string | null = null
 
     const frameFiles: string[] = []
     const scenePattern = join(segmentDir, 'scene-%02d.jpg')
@@ -560,7 +644,6 @@ export async function prepareN8nMedia(
     })
   }
 
-  await unlink(audioSourcePath).catch(() => undefined)
   const metadata: MediaMetadata = {
     taskId,
     kind: 'prepared-video',
@@ -570,6 +653,7 @@ export async function prepareN8nMedia(
     frameCount,
     segmentCount,
     segmentSeconds: settings.segmentSeconds,
+    audioSourceFile: probe.hasAudio ? basename(audioSourcePath) : null,
     segments,
     memoryMode: 'none',
     preparedAt: new Date().toISOString(),
@@ -614,6 +698,79 @@ export async function transcribeN8nMedia(
   const command = expandHome(resource.runtime.command)
   await access(command, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)
+  if (metadata.audioSourceFile) {
+    const audioPath = join(workspace, metadata.audioSourceFile)
+    await access(audioPath, constants.R_OK)
+    const inputSha256 = synthesisDigest({
+      contract: 'whole-audio-word-timestamps-v1',
+      resourceId: resource.id,
+      model: resource.model,
+      language: settings.language,
+      durationSeconds: metadata.durationSeconds,
+      segmentSeconds: metadata.segmentSeconds,
+    })
+    const checkpointName = 'audio-full.json'
+    let checkpoint = await readCheckpoint(workspace, checkpointName, value => (
+      value.schema === 'video-autoworker-audio-projection'
+      && value.version === 1
+      && value.inputSha256 === inputSha256
+      && Array.isArray(value.projected)
+      && value.projected.length === metadata.segments.length
+    ))
+    if (!checkpoint) {
+      let result: CommandResult
+      try {
+        result = await runCommand(command, [
+          '--model', resource.model,
+          '--language', settings.language,
+          '--max-chars', String(settings.maxTranscriptChars),
+          '--json-segments',
+          '--word-timestamps',
+          audioPath,
+        ], { maxBuffer: 16 * 1024 * 1024 })
+      } catch (error) {
+        throw commandFailure(error, '整段音频模型转写失败')
+      }
+      const timed = parseTimedTranscriptPayload(result.stdout.trim())
+      if (!timed.text) throw new Error('音频模型返回空转写')
+      const projected = projectTimedTranscriptToWindows(timed, metadata.segments)
+      checkpoint = {
+        schema: 'video-autoworker-audio-projection',
+        version: 1,
+        inputSha256,
+        transcript: timed.text.slice(0, settings.maxTranscriptChars),
+        projected,
+      }
+      await writeCheckpoint(workspace, checkpointName, checkpoint)
+    }
+    const projected = checkpoint.projected as string[]
+    const segments = metadata.segments.map((segment, offset) => ({
+      index: segment.index,
+      startSeconds: segment.startSeconds,
+      durationSeconds: segment.durationSeconds,
+      timeRange: segmentTimeLabel(segment),
+      transcript: String(projected[offset] || '').slice(0, settings.maxTranscriptCharsPerSegment),
+    }))
+    for (const segment of segments) {
+      await writeCheckpoint(
+        workspace,
+        `audio-${String(segment.index).padStart(3, '0')}.json`,
+        segment,
+      )
+    }
+    return {
+      transcript: String(checkpoint.transcript || '').slice(0, settings.maxTranscriptChars),
+      segments,
+      segmentCount: segments.length,
+      skipped: false,
+      resourceId: resource.id,
+      model: resource.model,
+      transport: 'cli',
+      projection: 'whole-audio-word-timestamps-v1',
+      modelCalls: 1,
+      memoryMode: 'none',
+    }
+  }
   const segments: Record<string, unknown>[] = []
   for (const segment of metadata.segments) {
     if (!segment.audioFile) continue
@@ -838,19 +995,68 @@ export function parseVisualPerceptionAnswer(value: unknown): N8nVisualPerception
   }
   const result = visualPerceptionSchema.safeParse(parsed)
   if (!result.success) throw new Error('视频画面模型返回不符合结构化感知契约')
+  return normalizeVisualPerception(result.data)
+}
+
+function normalizeVisualPerception(result: z.infer<typeof visualPerceptionSchema>): N8nVisualPerception {
   return {
-    ...result.data,
-    people: uniquePerceptionValues(result.data.people),
-    locations: uniquePerceptionValues(result.data.locations),
-    actions: uniquePerceptionValues(result.data.actions),
-    objects: uniquePerceptionValues(result.data.objects),
-    environment: uniquePerceptionValues(result.data.environment),
-    ocr: uniquePerceptionValues(result.data.ocr),
-    shotTypes: uniquePerceptionValues(result.data.shotTypes),
-    cameraMovement: uniquePerceptionValues(result.data.cameraMovement),
-    composition: uniquePerceptionValues(result.data.composition),
-    emotion: uniquePerceptionValues(result.data.emotion),
+    ...result,
+    people: uniquePerceptionValues(result.people),
+    locations: uniquePerceptionValues(result.locations),
+    actions: uniquePerceptionValues(result.actions),
+    objects: uniquePerceptionValues(result.objects),
+    environment: uniquePerceptionValues(result.environment),
+    ocr: uniquePerceptionValues(result.ocr),
+    shotTypes: uniquePerceptionValues(result.shotTypes),
+    cameraMovement: uniquePerceptionValues(result.cameraMovement),
+    composition: uniquePerceptionValues(result.composition),
+    emotion: uniquePerceptionValues(result.emotion),
   }
+}
+
+function unfencedJson(value: unknown, failure: string): unknown {
+  const visible = visibleModelAnswer(value)
+  const unfenced = visible
+    .replace(/^```(?:json)?\s*/iu, '')
+    .replace(/\s*```$/u, '')
+    .trim()
+  try {
+    return JSON.parse(unfenced)
+  } catch {
+    throw new Error(failure)
+  }
+}
+
+function assertExactBatchIndexes(actual: number[], expected: number[], failure: string) {
+  if (actual.length !== expected.length || actual.some((value, offset) => value !== expected[offset])) {
+    throw new Error(failure)
+  }
+}
+
+export function parseVisualPerceptionBatchAnswer(
+  value: unknown,
+  expectedIndexes: number[],
+): Array<{ index: number; perception: N8nVisualPerception }> {
+  if (expectedIndexes.length === 1) {
+    try {
+      return [{ index: expectedIndexes[0], perception: parseVisualPerceptionAnswer(value) }]
+    } catch {
+      // Continue with the batch contract.
+    }
+  }
+  const result = visualPerceptionBatchSchema.safeParse(
+    unfencedJson(value, '视频画面模型返回无法解析的批量结构化结果'),
+  )
+  if (!result.success) throw new Error('视频画面模型返回不符合批量结构化感知契约')
+  assertExactBatchIndexes(
+    result.data.segments.map(segment => segment.index),
+    expectedIndexes,
+    '视频画面模型返回的批量片段编号不匹配',
+  )
+  return result.data.segments.map(({ index, ...perception }) => ({
+    index,
+    perception: normalizeVisualPerception(perception),
+  }))
 }
 
 export function parseDirectorSynthesisAnswer(value: unknown): N8nDirectorPerception {
@@ -867,19 +1073,49 @@ export function parseDirectorSynthesisAnswer(value: unknown): N8nDirectorPercept
   }
   const result = directorPerceptionSchema.safeParse(parsed)
   if (!result.success) throw new Error('视频汇总模型返回不符合导演感知契约')
+  return normalizeDirectorPerception(result.data)
+}
+
+function normalizeDirectorPerception(result: z.infer<typeof directorPerceptionSchema>): N8nDirectorPerception {
   return {
-    ...result.data,
-    people: uniquePerceptionValues(result.data.people),
-    locations: uniquePerceptionValues(result.data.locations),
-    actions: uniquePerceptionValues(result.data.actions),
-    objects: uniquePerceptionValues(result.data.objects),
-    environment: uniquePerceptionValues(result.data.environment),
-    ocr: uniquePerceptionValues(result.data.ocr),
-    shotTypes: uniquePerceptionValues(result.data.shotTypes),
-    cameraMovement: uniquePerceptionValues(result.data.cameraMovement),
-    composition: uniquePerceptionValues(result.data.composition),
-    emotion: uniquePerceptionValues(result.data.emotion),
+    ...result,
+    people: uniquePerceptionValues(result.people),
+    locations: uniquePerceptionValues(result.locations),
+    actions: uniquePerceptionValues(result.actions),
+    objects: uniquePerceptionValues(result.objects),
+    environment: uniquePerceptionValues(result.environment),
+    ocr: uniquePerceptionValues(result.ocr),
+    shotTypes: uniquePerceptionValues(result.shotTypes),
+    cameraMovement: uniquePerceptionValues(result.cameraMovement),
+    composition: uniquePerceptionValues(result.composition),
+    emotion: uniquePerceptionValues(result.emotion),
   }
+}
+
+export function parseDirectorPerceptionBatchAnswer(
+  value: unknown,
+  expectedIndexes: number[],
+): Array<{ index: number; perception: N8nDirectorPerception }> {
+  if (expectedIndexes.length === 1) {
+    try {
+      return [{ index: expectedIndexes[0], perception: parseDirectorSynthesisAnswer(value) }]
+    } catch {
+      // Continue with the batch contract.
+    }
+  }
+  const result = directorPerceptionBatchSchema.safeParse(
+    unfencedJson(value, '视频片段摘要模型返回无法解析的批量结构化结果'),
+  )
+  if (!result.success) throw new Error('视频片段摘要模型返回不符合批量结构化感知契约')
+  assertExactBatchIndexes(
+    result.data.segments.map(segment => segment.index),
+    expectedIndexes,
+    '视频片段摘要模型返回的批量片段编号不匹配',
+  )
+  return result.data.segments.map(({ index, ...perception }) => ({
+    index,
+    perception: normalizeDirectorPerception(perception),
+  }))
 }
 
 export async function analyzeN8nVideoFrames(
@@ -895,66 +1131,146 @@ export async function analyzeN8nVideoFrames(
   const workspace = mediaTaskWorkspace(taskId)
   const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
   const generation = videoModelGenerationProfile('vision')
-  const segments: Record<string, unknown>[] = []
-  let totalFrames = 0
+  const segmentResults = new Map<number, Record<string, unknown>>()
   let activeRouteIndex = 0
-  for (const segment of metadata.segments) {
-    const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
-    let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
-      value.index === segment.index && typeof value.analysis === 'string'
-    ))
-    if (!segmentResult) {
-      const images = await Promise.all(segment.frameFiles.map(async name => {
-        const buffer = await readFile(join(workspace, name))
-        if (buffer.byteLength > 4 * 1024 * 1024) throw new Error(`抽帧文件过大：${name}`)
-        return `data:image/jpeg;base64,${buffer.toString('base64')}`
-      }))
-      if (!images.length) throw new Error(`第 ${segment.index} 段没有可供画面模型分析的抽帧`)
-      const content = [
-        {
-          type: 'text',
-          text: [
-            resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
-            `当前片段时间为 ${segmentTimeLabel(segment)}，提供 ${images.length} 张按时间排序的关键帧。`,
-            `业务要求：${prompt.slice(0, 4_000)}`,
-            '只记录画面能够确认的事实，不要分析音频，不要引用历史会话或长期记忆。',
-            '只输出一个 JSON 对象，不要代码围栏或额外文字。对象必须恰好包含这些字段：',
-            '{"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}',
-            '无法确认的数组保持为空；不得用猜测补齐。',
-          ].join('\n'),
-        },
-        ...images.map(url => ({ type: 'image_url', image_url: { url } })),
-      ]
-      const attempt = await callCompatibleModelWithFallback(
-        resolved,
-        candidates,
-        activeRouteIndex,
-        content,
-        '视频画面模型调用失败',
-        {
-          maxTokens: generation.maxTokens,
-          reasoningEffort: generation.reasoningEffort,
-          phase: generation.phase,
-        },
-        payload => parseVisualPerceptionAnswer(payload?.choices?.[0]?.message?.content),
-      )
-      activeRouteIndex = attempt.routeIndex
-      const perception = attempt.validated as N8nVisualPerception
-      segmentResult = {
-        index: segment.index,
-        startSeconds: segment.startSeconds,
-        durationSeconds: segment.durationSeconds,
-        timeRange: segmentTimeLabel(segment),
-        analysis: perception.summary,
-        perception,
-        frameCount: images.length,
-        routeId: attempt.route.id,
-      }
-      await writeCheckpoint(workspace, checkpointName, segmentResult)
+  let modelBatches = 0
+  let individualFallbackCalls = 0
+  for (let batchOffset = 0; batchOffset < metadata.segments.length; batchOffset += VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) {
+    const batch = metadata.segments.slice(batchOffset, batchOffset + VIDEO_LEARNING_MODEL_BATCH_SEGMENTS)
+    const missing: MediaSegment[] = []
+    for (const segment of batch) {
+      const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
+      const cached = await readCheckpoint(workspace, checkpointName, value => (
+        value.index === segment.index && typeof value.analysis === 'string'
+      ))
+      if (cached) {
+        segmentResults.set(segment.index, cached)
+        const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === cached.routeId)
+        if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
+      } else missing.push(segment)
     }
-    totalFrames += Number(segmentResult.frameCount || segment.frameFiles.length)
-    segments.push(segmentResult)
+    if (missing.length) {
+      const content: Array<Record<string, unknown>> = [{
+        type: 'text',
+        text: [
+          resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
+          `业务要求：${prompt.slice(0, 4_000)}`,
+          '下面每个片段都是独立的5秒学习单位。只记录对应片段画面能够确认的事实，不分析音频，不引用其他片段补全。',
+          '只输出一个JSON对象，不要代码围栏或额外文字，格式为：',
+          '{"segments":[{"index":1,"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}]}',
+          `必须按顺序完整返回这些片段编号：${missing.map(segment => segment.index).join('、')}。未知数组保持为空，不得猜测。`,
+        ].join('\n'),
+      }]
+      const frameCounts = new Map<number, number>()
+      const imagesByIndex = new Map<number, string[]>()
+      for (const segment of missing) {
+        const images = await Promise.all(segment.frameFiles.map(async name => {
+          const buffer = await readFile(join(workspace, name))
+          if (buffer.byteLength > 4 * 1024 * 1024) throw new Error(`抽帧文件过大：${name}`)
+          return `data:image/jpeg;base64,${buffer.toString('base64')}`
+        }))
+        if (!images.length) throw new Error(`第 ${segment.index} 段没有可供画面模型分析的抽帧`)
+        frameCounts.set(segment.index, images.length)
+        imagesByIndex.set(segment.index, images)
+        content.push({
+          type: 'text',
+          text: `片段编号：${segment.index}；时间：${segmentTimeLabel(segment)}；以下 ${images.length} 张图只属于该片段。`,
+        })
+        content.push(...images.map(url => ({ type: 'image_url', image_url: { url } })))
+      }
+      const expectedIndexes = missing.map(segment => segment.index)
+      const persist = async (segment: MediaSegment, perception: N8nVisualPerception, routeId: string) => {
+        const segmentResult = {
+          index: segment.index,
+          startSeconds: segment.startSeconds,
+          durationSeconds: segment.durationSeconds,
+          timeRange: segmentTimeLabel(segment),
+          analysis: perception.summary,
+          perception,
+          frameCount: frameCounts.get(segment.index) || segment.frameFiles.length,
+          routeId,
+        }
+        await writeCheckpoint(
+          workspace,
+          `vision-${String(segment.index).padStart(3, '0')}.json`,
+          segmentResult,
+        )
+        segmentResults.set(segment.index, segmentResult)
+      }
+      try {
+        const attempt = await callCompatibleModelWithFallback(
+          resolved,
+          candidates,
+          activeRouteIndex,
+          content,
+          `视频画面批次 ${expectedIndexes[0]}-${expectedIndexes.at(-1)} 调用失败`,
+          {
+            maxTokens: Math.min(4_096, generation.maxTokens * missing.length),
+            reasoningEffort: generation.reasoningEffort,
+            phase: generation.phase,
+          },
+          payload => parseVisualPerceptionBatchAnswer(
+            payload?.choices?.[0]?.message?.content,
+            expectedIndexes,
+          ),
+        )
+        activeRouteIndex = attempt.routeIndex
+        modelBatches += 1
+        const perceptions = attempt.validated as Array<{ index: number; perception: N8nVisualPerception }>
+        for (const { index, perception } of perceptions) {
+          const segment = missing.find(item => item.index === index)
+          if (!segment) throw new Error(`视频画面批次返回未知片段：${index}`)
+          await persist(segment, perception, attempt.route.id)
+        }
+        continue
+      } catch (error) {
+        const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
+        logSafeOperationError('media_visual_batch_fallback', error, projection)
+      }
+      for (const segment of missing) {
+        const images = imagesByIndex.get(segment.index) || []
+        const individualContent = [
+          {
+            type: 'text',
+            text: [
+              resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
+              `当前片段时间为 ${segmentTimeLabel(segment)}，提供 ${images.length} 张按时间排序的关键帧。`,
+              `业务要求：${prompt.slice(0, 4_000)}`,
+              '只记录画面能够确认的事实，不要分析音频，不要引用历史会话或长期记忆。',
+              '只输出一个JSON对象，不要代码围栏或额外文字：',
+              '{"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}',
+            ].join('\n'),
+          },
+          ...images.map(url => ({ type: 'image_url', image_url: { url } })),
+        ]
+        const attempt = await callCompatibleModelWithFallback(
+          resolved,
+          candidates,
+          activeRouteIndex,
+          individualContent,
+          `第 ${segment.index} 段视频画面模型调用失败`,
+          {
+            maxTokens: generation.maxTokens,
+            reasoningEffort: generation.reasoningEffort,
+            phase: generation.phase,
+          },
+          payload => parseVisualPerceptionAnswer(payload?.choices?.[0]?.message?.content),
+        )
+        activeRouteIndex = attempt.routeIndex
+        individualFallbackCalls += 1
+        await persist(segment, attempt.validated as N8nVisualPerception, attempt.route.id)
+      }
+    }
   }
+  const segments = metadata.segments.map(segment => {
+    const result = segmentResults.get(segment.index)
+    if (!result) throw new Error(`第 ${segment.index} 段画面结果缺失`)
+    return result
+  })
+  const totalFrames = segments.reduce(
+    (total, segment) => total + Number(segment.frameCount || 0),
+    0,
+  )
   const analysis = segments.map(segment => (
     `[${segment.timeRange}]\n${String(segment.analysis || '').trim()}`
   )).join('\n\n').slice(0, 100_000)
@@ -972,6 +1288,9 @@ export async function analyzeN8nVideoFrames(
     generation: {
       reasoningEffort: generation.reasoningEffort,
       maxTokens: generation.maxTokens,
+      batchSegments: VIDEO_LEARNING_MODEL_BATCH_SEGMENTS,
+      modelBatches,
+      individualFallbackCalls,
     },
     memoryMode: 'none',
   }
@@ -1146,75 +1465,185 @@ export async function synthesizeN8nMediaResults(
   const route = assertVisionRoute(candidates[0])
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
   const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
-  // Retain the deployed generation knobs; the chapter phase now reconciles
-  // one segment. No final/global model request is made by this pipeline.
+  // Retain the deployed generation knobs. One request reconciles at most
+  // twelve independent five-second segments; no final/global model request is
+  // made and every result is checkpointed under its own segment identity.
   const generation = videoModelGenerationProfile('chapter')
   const timeoutSeconds = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS', route.timeoutSeconds, 60, 600)
   const modelIdentity = candidates.map(candidate => ({
     id: candidate.id, model: candidate.model, baseUrl: candidate.baseUrl,
     transport: candidate.transport, temperature: candidate.temperature,
   }))
-  const segmentSummaries: SegmentSummary[] = []
+  const segmentResults = new Map<number, SegmentSummary>()
   let activeRouteIndex = 0
-  for (const [offset, segment] of timeline.entries()) {
-    const index = offset + 1
-    const timeRange = String(segment.timeRange || '')
-    const transcript = String(segment.transcript || '')
-    const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
-    const inputSha256 = synthesisDigest({
-      contract: 'segment-audiovisual-summary-v1', sourceName, index, segment,
-      businessPrompt, generation, modelIdentity,
-    })
-    const checkpointName = `segment-summary-${String(index).padStart(3, '0')}.json`
-    const cached = await readCheckpoint(workspace, checkpointName, value => (
-      value.index === index && value.inputSha256 === inputSha256
-      && segmentSummaryCheckpointSchema.safeParse(value).success
-    ))
-    if (cached) {
-      const segmentSummary = segmentSummaryCheckpointSchema.parse(cached)
-      segmentSummaries.push(segmentSummary)
-      const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === segmentSummary.routeId)
-      if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
-      continue
-    }
-    const prompt = [
-      '仅为下面这一个视频片段生成独立摘要与结构化导演感知，不汇总其他片段。',
-      `来源文件：${sourceName}；片段编号：${index}；时间：${timeRange}`,
-      `业务要求：${businessPrompt}`,
-      '语音和画面互相校验，说明事件、关键信息与不确定项；只记录有证据的事实，不推断未提供的音效或音乐。',
-      '只输出 JSON，不要思考过程或额外文字；恰好包含：',
-      '{"summary":"这个片段的独立摘要","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}',
-      '未知数组为空，未知声音字段为 null；各数组最多 12 项（人物、动作、物体和OCR最多20项），摘要不超过4000字，文字保持简练。',
-      `语音：${transcript || '无可用转写'}`,
-      `画面：${visualAnalysis || '无可用画面分析'}`,
-      ...(segment.perception ? [`已验证画面感知：${JSON.stringify(segment.perception)}`] : []),
-    ].join('\n\n')
-    // Fail visibly for an abnormal single source instead of silently dropping
-    // facts. Segment size, never video length, determines the request bound.
-    if (Buffer.byteLength(prompt, 'utf8') > 128 * 1024) throw new Error(`片段 ${index} 输入超出单段摘要边界，需重新分段`)
-    const attempt = await callCompatibleModelWithFallback(resolved, candidates, activeRouteIndex, prompt,
-      `片段 ${index} 摘要失败`, {
-        maxTokens: generation.maxTokens, timeoutSeconds,
-        reasoningEffort: generation.reasoningEffort, phase: generation.phase,
-      }, payload => {
-        if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error(`片段 ${index} 摘要输出被截断`)
-        const perception = parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content)
-        if (perception.summary.length > 4_000) throw new Error(`片段 ${index} 摘要超出长度边界`)
-        return perception
+  let modelBatches = 0
+  let individualFallbackCalls = 0
+  for (let batchOffset = 0; batchOffset < timeline.length; batchOffset += VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) {
+    const batch = timeline.slice(batchOffset, batchOffset + VIDEO_LEARNING_MODEL_BATCH_SEGMENTS)
+    const pending: Array<{
+      index: number
+      segment: Record<string, unknown>
+      timeRange: string
+      transcript: string
+      visualAnalysis: string
+      inputSha256: string
+    }> = []
+    for (const [localOffset, segment] of batch.entries()) {
+      const index = batchOffset + localOffset + 1
+      const timeRange = String(segment.timeRange || '')
+      const transcript = String(segment.transcript || '')
+      const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
+      const inputSha256 = synthesisDigest({
+        contract: 'segment-audiovisual-summary-v1', sourceName, index, segment,
+        businessPrompt, generation, modelIdentity,
       })
-    activeRouteIndex = attempt.routeIndex
-    const directorPerception = attempt.validated as N8nDirectorPerception
-    const rawConfidence = Number(segment.confidence)
-    const result = segmentSummaryCheckpointSchema.parse({
-      schema: 'video-autoworker-segment-summary', version: 1,
-      index, sourceName, timeRange, startTime: timeRange.split('-')[0] || '', endTime: timeRange.split('-')[1] || '',
-      inputSha256, summary: directorPerception.summary, directorPerception,
-      confidence: Number.isFinite(rawConfidence) && rawConfidence >= 0 && rawConfidence <= 1 ? rawConfidence : 0,
-      routeId: attempt.route.id,
-    })
-    await writeCheckpoint(workspace, checkpointName, result)
-    segmentSummaries.push(result)
+      const cached = await readCheckpoint(
+        workspace,
+        `segment-summary-${String(index).padStart(3, '0')}.json`,
+        value => (
+          value.index === index && value.inputSha256 === inputSha256
+          && segmentSummaryCheckpointSchema.safeParse(value).success
+        ),
+      )
+      if (cached) {
+        const segmentSummary = segmentSummaryCheckpointSchema.parse(cached)
+        segmentResults.set(index, segmentSummary)
+        const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === segmentSummary.routeId)
+        if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
+      } else {
+        pending.push({ index, segment, timeRange, transcript, visualAnalysis, inputSha256 })
+      }
+    }
+    if (!pending.length) continue
+
+    const persist = async (
+      item: typeof pending[number],
+      directorPerception: N8nDirectorPerception,
+      routeId: string,
+    ) => {
+      if (directorPerception.summary.length > 4_000) throw new Error(`片段 ${item.index} 摘要超出长度边界`)
+      const rawConfidence = Number(item.segment.confidence)
+      const result = segmentSummaryCheckpointSchema.parse({
+        schema: 'video-autoworker-segment-summary', version: 1,
+        index: item.index,
+        sourceName,
+        timeRange: item.timeRange,
+        startTime: item.timeRange.split('-')[0] || '',
+        endTime: item.timeRange.split('-')[1] || '',
+        inputSha256: item.inputSha256,
+        summary: directorPerception.summary,
+        directorPerception,
+        confidence: Number.isFinite(rawConfidence) && rawConfidence >= 0 && rawConfidence <= 1 ? rawConfidence : 0,
+        routeId,
+      })
+      await writeCheckpoint(
+        workspace,
+        `segment-summary-${String(item.index).padStart(3, '0')}.json`,
+        result,
+      )
+      segmentResults.set(item.index, result)
+    }
+
+    const batchPrompt = [
+      '为下面每个5秒视频片段分别生成独立摘要与结构化导演感知；不得跨片段合并、补全或推断。',
+      `来源文件：${sourceName}`,
+      `业务要求：${businessPrompt}`,
+      '语音和画面只在同一片段内互相校验。只记录有证据的事实，不推断未提供的音效或音乐。',
+      '只输出JSON，不要思考过程或额外文字，格式为：',
+      '{"segments":[{"index":1,"summary":"独立摘要","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}]}',
+      `必须按顺序完整返回这些片段编号：${pending.map(item => item.index).join('、')}。未知数组为空，未知声音字段为null。`,
+      JSON.stringify(pending.map(item => ({
+        index: item.index,
+        timeRange: item.timeRange,
+        transcript: item.transcript || '无可用转写',
+        visualAnalysis: item.visualAnalysis || '无可用画面分析',
+        perception: item.segment.perception || null,
+      }))),
+    ].join('\n\n')
+    if (Buffer.byteLength(batchPrompt, 'utf8') > 512 * 1024) {
+      throw new Error(`片段批次 ${pending[0].index}-${pending.at(-1)?.index} 输入超出边界，需减少批次`)
+    }
+    try {
+      const expectedIndexes = pending.map(item => item.index)
+      const attempt = await callCompatibleModelWithFallback(
+        resolved,
+        candidates,
+        activeRouteIndex,
+        batchPrompt,
+        `片段批次 ${expectedIndexes[0]}-${expectedIndexes.at(-1)} 摘要失败`,
+        {
+          maxTokens: Math.min(4_096, generation.maxTokens * pending.length),
+          timeoutSeconds,
+          reasoningEffort: generation.reasoningEffort,
+          phase: generation.phase,
+        },
+        payload => {
+          if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error('片段批次摘要输出被截断')
+          return parseDirectorPerceptionBatchAnswer(
+            payload?.choices?.[0]?.message?.content,
+            expectedIndexes,
+          )
+        },
+      )
+      activeRouteIndex = attempt.routeIndex
+      modelBatches += 1
+      const perceptions = attempt.validated as Array<{ index: number; perception: N8nDirectorPerception }>
+      for (const { index, perception } of perceptions) {
+        const item = pending.find(candidate => candidate.index === index)
+        if (!item) throw new Error(`片段摘要批次返回未知片段：${index}`)
+        await persist(item, perception, attempt.route.id)
+      }
+      continue
+    } catch (error) {
+      const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
+      logSafeOperationError('media_segment_summary_batch_fallback', error, projection)
+    }
+
+    // A malformed or provider-rejected batch falls back to the historical
+    // one-segment contract. Successful per-segment checkpoints remain reusable
+    // if a later segment fails, preserving the existing recovery boundary.
+    for (const item of pending) {
+      const individualPrompt = [
+        '仅为下面这一个视频片段生成独立摘要与结构化导演感知，不汇总其他片段。',
+        `来源文件：${sourceName}；片段编号：${item.index}；时间：${item.timeRange}`,
+        `业务要求：${businessPrompt}`,
+        '语音和画面互相校验，说明事件、关键信息与不确定项；只记录有证据的事实，不推断未提供的音效或音乐。',
+        '只输出 JSON，不要思考过程或额外文字；恰好包含：',
+        '{"summary":"这个片段的独立摘要","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[],"sound":{"speechSummary":null,"ambientSound":null,"music":null,"emotion":null}}',
+        `语音：${item.transcript || '无可用转写'}`,
+        `画面：${item.visualAnalysis || '无可用画面分析'}`,
+        ...(item.segment.perception ? [`已验证画面感知：${JSON.stringify(item.segment.perception)}`] : []),
+      ].join('\n\n')
+      if (Buffer.byteLength(individualPrompt, 'utf8') > 128 * 1024) {
+        throw new Error(`片段 ${item.index} 输入超出单段摘要边界，需重新分段`)
+      }
+      const attempt = await callCompatibleModelWithFallback(
+        resolved,
+        candidates,
+        activeRouteIndex,
+        individualPrompt,
+        `片段 ${item.index} 摘要失败`,
+        {
+          maxTokens: generation.maxTokens,
+          timeoutSeconds,
+          reasoningEffort: generation.reasoningEffort,
+          phase: generation.phase,
+        },
+        payload => {
+          if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error(`片段 ${item.index} 摘要输出被截断`)
+          return parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content)
+        },
+      )
+      activeRouteIndex = attempt.routeIndex
+      individualFallbackCalls += 1
+      await persist(item, attempt.validated as N8nDirectorPerception, attempt.route.id)
+    }
   }
+  const segmentSummaries = timeline.map((_, offset) => {
+    const result = segmentResults.get(offset + 1)
+    if (!result) throw new Error(`片段 ${offset + 1} 摘要结果缺失`)
+    return result
+  })
   const summary = `已完成 ${segmentSummaries.length} 个片段的独立音画摘要。按文件名、片段编号与时间码保存；此处为索引概览，完整事实和不确定项见逐片段摘要，不代表全片叙事总结。`
   return {
     ...merged, segmentSummaries,
@@ -1228,7 +1657,13 @@ export async function synthesizeN8nMediaResults(
     })),
     summary, ...indexSegmentPerceptions(segmentSummaries, summary),
     synthesis: { mode: 'segment-summaries', version: 1, finalModelCall: false, chapterUnit: 'segment' },
-    generation: { segment: { reasoningEffort: generation.reasoningEffort, maxTokens: generation.maxTokens } },
+    generation: { segment: {
+      reasoningEffort: generation.reasoningEffort,
+      maxTokens: generation.maxTokens,
+      batchSegments: VIDEO_LEARNING_MODEL_BATCH_SEGMENTS,
+      modelBatches,
+      individualFallbackCalls,
+    } },
     routeId: candidates[activeRouteIndex]?.id || route.id,
     routeCandidates: candidates.map(candidate => candidate.id),
     fallbackUsed: segmentSummaries.some(segment => segment.routeId !== route.id),

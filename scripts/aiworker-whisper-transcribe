@@ -4,6 +4,7 @@ set -eu
 exec /usr/bin/python3 - "$@" <<'PY'
 import argparse
 import contextlib
+import json
 import os
 import sys
 
@@ -13,6 +14,8 @@ parser = argparse.ArgumentParser(description="Fast local Whisper transcription f
 parser.add_argument("--model", default=os.environ.get("AIWORKER_WHISPER_MODEL", "large-v3-turbo"))
 parser.add_argument("--language", default=os.environ.get("AIWORKER_WHISPER_LANGUAGE", "zh"))
 parser.add_argument("--max-chars", type=int, default=int(os.environ.get("AIWORKER_WHISPER_MAX_CHARS", "6000")))
+parser.add_argument("--json-segments", action="store_true")
+parser.add_argument("--word-timestamps", action="store_true")
 parser.add_argument("media_path")
 args = parser.parse_args()
 
@@ -25,10 +28,38 @@ os.environ["PATH"] = os.path.expanduser("~/ai-worker/bin") + os.pathsep + os.env
 
 model = whisper.load_model(args.model)
 with contextlib.redirect_stdout(sys.stderr):
-    result = model.transcribe(args.media_path, language=args.language or None, fp16=False, verbose=False)
+    result = model.transcribe(
+        args.media_path,
+        language=args.language or None,
+        fp16=False,
+        verbose=False,
+        word_timestamps=args.word_timestamps,
+    )
 
 text = " ".join((result.get("text") or "").split())
 if args.max_chars and len(text) > args.max_chars:
     text = text[: args.max_chars].rstrip() + "..."
-print(text)
+if not args.json_segments:
+    print(text)
+    raise SystemExit(0)
+
+segments = []
+for raw in result.get("segments") or []:
+    item = {
+        "start": float(raw.get("start") or 0),
+        "end": float(raw.get("end") or 0),
+        "text": " ".join((raw.get("text") or "").split()),
+    }
+    if args.word_timestamps:
+        item["words"] = [
+            {
+                "start": float(word.get("start") or 0),
+                "end": float(word.get("end") or 0),
+                "word": str(word.get("word") or ""),
+            }
+            for word in raw.get("words") or []
+            if str(word.get("word") or "").strip()
+        ]
+    segments.append(item)
+print(json.dumps({"text": text, "segments": segments}, ensure_ascii=False, separators=(",", ":")))
 PY

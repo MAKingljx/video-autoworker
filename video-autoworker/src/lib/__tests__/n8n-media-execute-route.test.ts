@@ -185,7 +185,7 @@ describe('n8n media node execution route', () => {
       output: input.output,
     }))
     mocks.prepareN8nMedia.mockResolvedValue({
-      kind: 'prepared-video', durationSeconds: 4, sourceBytes: 100, audioAvailable: true, frameCount: 4, segmentCount: 1, segmentSeconds: 60, memoryMode: 'none',
+      kind: 'prepared-video', durationSeconds: 4, sourceBytes: 100, audioAvailable: true, frameCount: 4, segmentCount: 1, segmentSeconds: 5, memoryMode: 'none',
     })
     mocks.mergeN8nMediaResults.mockReturnValue({ combinedText: '合并结果', memoryMode: 'none' })
     mocks.synthesizeN8nMediaResults.mockResolvedValue({ combinedText: '最终汇总', memoryMode: 'none' })
@@ -382,7 +382,7 @@ describe('n8n media node execution route', () => {
     const persistedOutput = {
       kind: 'prepared-video', durationSeconds: 4, sourceBytes: 100,
       audioAvailable: true, frameCount: 4, segmentCount: 1,
-      segmentSeconds: 60, memoryMode: 'none',
+      segmentSeconds: 5, memoryMode: 'none',
     }
     mocks.createN8nMediaChildRunFromParent.mockReturnValue({
       outcome: 'existing',
