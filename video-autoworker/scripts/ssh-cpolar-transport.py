@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 def resolve_cpolar(host):
-    if not re.fullmatch(r'[0-9]+\.tcp\.cpolar\.(top|cn)', host):
+    if not re.fullmatch(r'[0-9]+\.tcp\.(?:cpolar\.(?:top|cn)|vip\.cpolar\.cn)', host):
         raise ValueError('unsupported_cpolar_hostname')
     query = urllib.parse.urlencode({'name': host, 'type': 'A'})
     # A transport error may use one alternate HTTPS resolver. TLS/host-key
