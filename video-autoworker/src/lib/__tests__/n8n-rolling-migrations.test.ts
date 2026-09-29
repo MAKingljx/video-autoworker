@@ -11,7 +11,7 @@ import {
 } from '@/lib/n8n-runtime-affinity'
 
 describe('n8n rolling database compatibility epoch', () => {
-  it('keeps published migration 057 byte-stable while appending 058 and 059', () => {
+  it('keeps published migration 057 byte-stable while appending 058 through 060', () => {
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
     const start = source.indexOf("  {\n    id: '057_n8n_director_evidence_outbox'")
     const end = source.indexOf("  {\n    id: '058_director_extraction_task_runs'", start)
@@ -23,11 +23,11 @@ describe('n8n rolling database compatibility epoch', () => {
     )
   })
 
-  it('keeps the declared rolling epoch additive-only through migration 059', () => {
+  it('keeps the declared rolling epoch additive-only through migration 060', () => {
     expect(N8N_ROLLING_DATABASE_COMPATIBILITY).toEqual({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '059_director_evidence_projection_receipts',
+      latestMigration: '060_video_edit_task_receipts',
     })
 
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
@@ -47,7 +47,7 @@ describe('n8n rolling database compatibility epoch', () => {
     expect(start).toBeGreaterThanOrEqual(0)
     const epoch = array.elements.slice(start).map(element => element.getText(syntax)).join('\n')
     const ids = [...epoch.matchAll(/\bid:\s*'(\d{3}_[^']+)'/gu)].map(match => match[1])
-    expect(ids.at(-1)).toBe('059_director_evidence_projection_receipts')
+    expect(ids.at(-1)).toBe('060_video_edit_task_receipts')
     expect(epoch).not.toMatch(/\bdb\.(?:prepare|pragma|transaction)\s*\(/gu)
     const templates = [...epoch.matchAll(/\bdb\.exec\(\s*`([\s\S]*?)`\s*\)/gu)]
       .map(match => match[1])
@@ -76,6 +76,8 @@ describe('n8n rolling database compatibility epoch', () => {
       expect(tables.has('director_extraction_checkpoints')).toBe(true)
       expect(tables.has('director_extraction_projection_receipts')).toBe(true)
       expect(tables.has('director_extraction_review_receipts')).toBe(true)
+      expect(tables.has('video_edit_plans')).toBe(true)
+      expect(tables.has('video_edit_operations')).toBe(true)
 
       const outboxColumns = (db.prepare(`
         PRAGMA table_info(n8n_director_evidence_outbox)
@@ -120,16 +122,65 @@ describe('n8n rolling database compatibility epoch', () => {
     }
   })
 
+  it('adds 060 without changing tables and indexes read by the previous release', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      db.exec(`
+        DROP TABLE video_edit_operations;
+        DROP TABLE video_edit_plans;
+        DELETE FROM schema_migrations WHERE id = '060_video_edit_task_receipts';
+      `)
+      const previousSchema = db.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_master
+        WHERE name NOT LIKE 'sqlite_autoindex_video_edit_%'
+        ORDER BY type, name
+      `).all()
+      const previousMarkers = db.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all()
+      expect(previousMarkers.at(-1)).toBe('059_director_evidence_projection_receipts')
+      runMigrations(db)
+      const afterSchema = db.prepare(`
+        SELECT type, name, tbl_name, sql FROM sqlite_master
+        WHERE name NOT LIKE 'video_edit_%'
+          AND name NOT LIKE 'idx_video_edit_%'
+          AND name NOT LIKE 'sqlite_autoindex_video_edit_%'
+        ORDER BY type, name
+      `).all()
+      expect(afterSchema).toEqual(previousSchema)
+      expect(db.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all())
+        .toEqual([...previousMarkers, '060_video_edit_task_receipts'])
+      expect(getN8nRollingDatabaseCompatibility(db).latestMigration)
+        .toBe('060_video_edit_task_receipts')
+    } finally { db.close() }
+  })
+
   it('fails closed when a required migration row is missing', () => {
     const db = new Database(':memory:')
     try {
       runMigrations(db)
       db.prepare('DELETE FROM schema_migrations WHERE id = ?')
-        .run('058_director_extraction_task_runs')
+        .run('060_video_edit_task_receipts')
       expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(/migration is missing/u)
     } finally {
       db.close()
     }
+  })
+
+  it('rejects a forged 060 marker without its edit tables or active-node guard', () => {
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      db.exec('DROP TABLE video_edit_operations')
+      expect(() => getN8nRollingDatabaseCompatibility(db))
+        .toThrow('n8n rolling table is missing: video_edit_operations')
+    } finally { db.close() }
+    const indexDb = new Database(':memory:')
+    try {
+      runMigrations(indexDb)
+      indexDb.exec('DROP INDEX idx_video_edit_one_active_per_node')
+      expect(() => getN8nRollingDatabaseCompatibility(indexDb))
+        .toThrow('n8n rolling index is missing or incompatible: idx_video_edit_one_active_per_node')
+    } finally { indexDb.close() }
   })
 
   it('fails closed when a required immutable checkpoint column is counterfeit', () => {

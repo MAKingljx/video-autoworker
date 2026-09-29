@@ -11,6 +11,7 @@ export interface MaterialGraphSource {
   scenes: {
     id: string; project: string; pipeline: string; sceneId: number
     start: number | null; end: number | null; visualSummary: string; metadata: Record<string, unknown>
+    pipelineSource?: unknown
   }[]
   totalMaterials: number
   unreadablePipelines: number
@@ -26,9 +27,10 @@ function resolveVideo(
   project: MaterialGraphSource['projects'][number],
   scene: MaterialGraphSource['scenes'][number],
 ) {
-  const hints = ['source_video', 'video_path', 'source_path', 'video_name', 'videoName', 'sourceVideo']
+  const hints: unknown[] = ['source_video', 'video_path', 'source_path', 'video_name', 'videoName', 'sourceVideo']
     .filter(key => scene.metadata[key] !== undefined && scene.metadata[key] !== null)
     .map(key => scene.metadata[key])
+  if (scene.pipelineSource !== undefined && scene.pipelineSource !== null) hints.push(scene.pipelineSource)
   if (hints.length) {
     const resolved = hints.map(hint => {
       if (typeof hint !== 'string' || !hint.trim()) return null

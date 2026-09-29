@@ -215,7 +215,7 @@ describe('n8n blue/green runtime affinity', () => {
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '059_director_evidence_projection_receipts',
+        latestMigration: '060_video_edit_task_receipts',
       },
       projection,
       retirement,

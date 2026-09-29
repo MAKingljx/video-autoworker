@@ -3495,6 +3495,52 @@
         }
       }
     },
+    "/api/editing/plans": {
+      "get": {
+        "tags": ["Tasks"],
+        "summary": "Read one scoped video edit plan and its existing task status",
+        "operationId": "getVideoEditPlanStatus",
+        "parameters": [
+          { "name": "planId", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "revision", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 1 } }
+        ],
+        "responses": {
+          "200": { "description": "Compact plan and task receipt" },
+          "404": { "description": "Plan not found in current scope" }
+        }
+      },
+      "post": {
+        "tags": ["Tasks"],
+        "summary": "Store a validated edit plan or approve it into the existing task chain",
+        "description": "Unavailable until the verified editing scheduler and Resolve transport are enabled explicitly.",
+        "operationId": "mutateVideoEditPlan",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  { "type": "object", "required": ["action", "plan"], "properties": {
+                    "action": { "const": "propose" }, "plan": { "type": "object" }
+                  } },
+                  { "type": "object", "required": ["action", "planId", "revision", "expectedPlanSha256", "taskId", "bindingId"], "properties": {
+                    "action": { "const": "approve" }, "planId": { "type": "string" },
+                    "revision": { "type": "integer", "minimum": 1 },
+                    "expectedPlanSha256": { "type": "string" }, "taskId": { "type": "string" },
+                    "bindingId": { "type": "integer", "minimum": 1 }
+                  } }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "Plan saved or approved task created" },
+          "409": { "description": "Plan, binding or approval conflict" },
+          "423": { "description": "Task intake paused" }
+        }
+      }
+    },
     "/api/events": {
       "get": {
         "tags": [
@@ -12296,7 +12342,7 @@
             "properties": {
               "schemaEpoch": { "type": "integer", "enum": [1] },
               "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
-              "latestMigration": { "type": "string", "enum": ["059_director_evidence_projection_receipts"] }
+              "latestMigration": { "type": "string", "enum": ["060_video_edit_task_receipts"] }
             }
           },
           "projection": {

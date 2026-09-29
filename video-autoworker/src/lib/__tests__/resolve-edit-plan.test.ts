@@ -20,7 +20,7 @@ function plan() {
     schemaVersion: 1,
     planId: 'plan-test-001',
     revision: 1,
-    status: 'validated',
+    status: 'approved',
     scope: { tenantId: 1, workspaceId: 1 },
     sourceTaskIds: ['video-task-001'],
     objective: '生成测试粗剪',
@@ -98,13 +98,13 @@ describe('Resolve edit plan contract', () => {
   it('returns unknown when the transport fails after the call boundary', async () => {
     const value = plan()
     const operation = {
-      operationId: resolveOperationId(value, 'video-task-001', 'edit', 'item-001'),
+      operationId: resolveOperationId(value, 'video-task-001', 'duplicate_timeline', 'copy-001'),
       taskId: 'video-task-001',
       planId: value.planId,
       planRevision: value.revision,
-      phase: 'edit' as const,
-      stepId: 'item-001',
-      payloadSha256: operationPayloadSha256(value.clips[0]),
+      phase: 'duplicate_timeline' as const,
+      stepId: 'copy-001',
+      payloadSha256: operationPayloadSha256(value.base),
       status: 'pending' as const,
       executorNodeId: value.base.editorNodeId,
       resolveVersion: value.base.resolveVersion,
@@ -122,11 +122,101 @@ describe('Resolve edit plan contract', () => {
         processIdentity: value.base.editorNodeId + ':resolve:' + value.base.resolveVersion,
       }),
       apply: async () => { throw new Error('resolve_transport_connection_lost') },
+      reconcile: async () => ({ status: 'unknown' as const, operationId: operation.operationId }),
       cancel: async () => undefined,
     }
     await expect(executeResolveOperation(value, operation, transport)).resolves.toMatchObject({
       status: 'unknown',
       errorCode: 'resolve_transport_connection_lost',
+    })
+  })
+
+  it('does not replay a possibly written operation after losing its response', async () => {
+    const value = plan()
+    const operation = {
+      operationId: resolveOperationId(value, 'edit-task-001', 'duplicate_timeline', 'copy-001'),
+      taskId: 'edit-task-001',
+      planId: value.planId,
+      planRevision: value.revision,
+      phase: 'duplicate_timeline' as const,
+      stepId: 'copy-001',
+      payloadSha256: operationPayloadSha256(value.base),
+      status: 'unknown' as const,
+      executorNodeId: value.base.editorNodeId,
+      resolveVersion: value.base.resolveVersion,
+    }
+    let writes = 0
+    let reads = 0
+    const transport = {
+      inspect: async () => { throw new Error('must not inspect before reconciliation') },
+      apply: async () => { writes++; return { result: {} } },
+      reconcile: async () => {
+        reads++
+        return { status: 'succeeded' as const, operationId: operation.operationId, result: { timelineUniqueId: 'copy-1' } }
+      },
+      cancel: async () => undefined,
+    }
+    await expect(executeResolveOperation(value, operation, transport)).resolves.toMatchObject({
+      status: 'succeeded', result: { timelineUniqueId: 'copy-1' },
+    })
+    expect(reads).toBe(1)
+    expect(writes).toBe(0)
+  })
+
+  it('rejects unapproved plans and changed operation payloads before a Resolve write', async () => {
+    const value = plan()
+    const operation = {
+      operationId: resolveOperationId(value, 'edit-task-001', 'duplicate_timeline', 'copy-001'),
+      taskId: 'edit-task-001',
+      planId: value.planId,
+      planRevision: value.revision,
+      phase: 'duplicate_timeline' as const,
+      stepId: 'copy-001',
+      payloadSha256: 'b'.repeat(64),
+      status: 'pending' as const,
+      executorNodeId: value.base.editorNodeId,
+      resolveVersion: value.base.resolveVersion,
+    }
+    let writes = 0
+    const transport = {
+      inspect: async () => { throw new Error('must not inspect before validation') },
+      apply: async () => { writes++; return { result: {} } },
+      reconcile: async () => ({ status: 'unknown' as const, operationId: operation.operationId }),
+      cancel: async () => undefined,
+    }
+    await expect(executeResolveOperation(value, operation, transport)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'resolve_operation_payload_mismatch',
+    })
+    const unapproved = createEditPlan({ ...value, status: 'validated' })
+    await expect(executeResolveOperation(unapproved, operation, transport)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'edit_plan_not_approved',
+    })
+    expect(writes).toBe(0)
+  })
+
+  it('keeps source-timeline edit disabled until a copy binding can be checked', async () => {
+    const value = plan()
+    const operation = {
+      operationId: resolveOperationId(value, 'edit-task-001', 'edit', 'item-001'),
+      taskId: 'edit-task-001',
+      planId: value.planId,
+      planRevision: value.revision,
+      phase: 'edit' as const,
+      stepId: 'item-001',
+      payloadSha256: operationPayloadSha256(value.clips[0]),
+      status: 'pending' as const,
+      executorNodeId: value.base.editorNodeId,
+      resolveVersion: value.base.resolveVersion,
+      timelineUniqueId: value.base.timelineUniqueId,
+    }
+    const transport = {
+      inspect: async () => { throw new Error('must not inspect') },
+      apply: async () => { throw new Error('must not write') },
+      reconcile: async () => { throw new Error('must not reconcile') },
+      cancel: async () => undefined,
+    }
+    await expect(executeResolveOperation(value, operation, transport)).resolves.toMatchObject({
+      status: 'failed', errorCode: 'resolve_operation_unsupported',
     })
   })
 })

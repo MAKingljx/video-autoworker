@@ -1324,6 +1324,37 @@ describe('managed stale parent pre-media reconciliation', () => {
     } finally { fixture.mission.close(); fixture.n8n.close() }
   })
 
+  it('accepts only a complete additive 060 edit-receipt schema', () => {
+    const fixture = createParentFixture()
+    try {
+      const insert = fixture.mission.prepare('INSERT INTO schema_migrations (id) VALUES (?)')
+      for (const id of [
+        '058_director_extraction_task_runs',
+        '059_director_evidence_projection_receipts',
+        '060_video_edit_task_receipts',
+      ]) insert.run(id)
+      const missing = fixture.runParent()
+      expect(missing.status).not.toBe(0)
+      expect(missing.stderr).toContain('schema epoch is incomplete or inconsistent')
+      fixture.mission.exec(`
+        CREATE TABLE video_edit_plans (
+          plan_id TEXT, revision INTEGER, tenant_id INTEGER, workspace_id INTEGER,
+          plan_sha256 TEXT, plan_json TEXT, status TEXT, approved_by TEXT,
+          approval_source_sha256 TEXT, task_id TEXT, created_at INTEGER, updated_at INTEGER
+        );
+        CREATE TABLE video_edit_operations (
+          operation_id TEXT, task_id TEXT, plan_sha256 TEXT, phase TEXT, step_id TEXT,
+          payload_sha256 TEXT, status TEXT, executor_node_id TEXT, execution_owner TEXT,
+          result_json TEXT, evidence_sha256 TEXT, error_code TEXT,
+          created_at INTEGER, updated_at INTEGER
+        );
+      `)
+      const accepted = fixture.runParent()
+      expect(accepted.status, accepted.stderr).toBe(0)
+      expect(JSON.parse(accepted.stdout)).toMatchObject({ mode: 'dry-run', eligible: true })
+    } finally { fixture.mission.close(); fixture.n8n.close() }
+  })
+
   it('rejects a through-050 legacy epoch with an orphaned 052 event table', () => {
     const fixture = createParentFixture()
     try {

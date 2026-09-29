@@ -103,7 +103,7 @@ describe('n8n release readiness route', () => {
     mocks.getRollingDatabaseCompatibility.mockReturnValue({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '059_director_evidence_projection_receipts',
+      latestMigration: '060_video_edit_task_receipts',
     })
     mocks.getSchedulerLeadershipStatus.mockReturnValue(scheduler)
     mocks.getDirectorEvidenceOutboxCounts.mockReturnValue({
@@ -143,7 +143,7 @@ describe('n8n release readiness route', () => {
         database: {
           schemaEpoch: 1,
           rollingSafeFrom: '052_n8n_intake_controls',
-          latestMigration: '059_director_evidence_projection_receipts',
+          latestMigration: '060_video_edit_task_receipts',
         },
         projection: {
           schema: 'video-autoworker-director-evidence-outbox-readiness/v1',

@@ -175,6 +175,7 @@
       "timeoutSeconds": 600,
       "temperature": 0,
       "maxTokens": 16384,
+      "maxImagesPerRequest": 8,
       "capabilities": ["text", "vision", "video", "structured-output"],
       "enabled": true
     },

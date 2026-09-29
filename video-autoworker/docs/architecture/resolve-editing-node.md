@@ -234,4 +234,6 @@ Resolve 与本地模型同机竞争 GPU、统一内存和磁盘带宽。首版�
 
 批次 A/B 已有本地代码合同：src/lib/editing/edit-plan.ts 定义计划、素材、证据、帧率、基线和摘要校验；src/lib/editing/resolve-executor.ts 定义能力预检、稳定 operationId、执行器快照和结果未知；src/lib/editing/resolve-executor-protocol.ts 定义 JSONL 边界；ops/resolve/resolve_executor.py 提供 Resolve 本地 GUI 会话的 inspect、时间线副本和按 Resolve MediaPool 唯一 ID 追加片段的受控适配器。
 
-这些模块已经通过本地定向测试和静态检查，但还没有接入 OpenClaw 工具、应用任务路由或生产运行；远端 SSH 下 Resolve 脚本探测仍返回未连接。批次 C/D 和生产启用必须在测试工程副本完成真实时间线回读、失败恢复与渲染验收后继续。
+2026-09-29 本地增量：`060_video_edit_task_receipts` 在既有 Mission Control 数据库中保存剪辑计划批准和操作收据；应用服务事务性批准后才建立既有 `n8n_task_runs` 任务，并复用其 scoped claim。`/api/editing/plans` 提供受控计划登记、批准和只读状态，但写入口默认关闭。结果未知的操作不得盲目重放，Python 适配器可按计划摘要只读核对时间线副本。060 是只新增表与索引的迁移；旧 release 可忽略新增结构，新 release 必须核验真实 schema。
+
+生产 GPT-6 曾在独立 Resolve 项目内通过内置 Lua 完成真实剪辑，但这不等于上述统一任务链已上线。正式启用还缺 OpenClaw 薄入口、受管 scheduler/传输、实机官方接口与时间线副本验收、预览/渲染 QC 及生产数据库准备和部署验收。

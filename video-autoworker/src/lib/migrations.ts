@@ -1836,6 +1836,55 @@ const migrations: Migration[] = [
           );
       `)
     }
+  },
+  {
+    id: '060_video_edit_task_receipts',
+    up(db: Database.Database) {
+      // The existing n8n_task_runs row remains the only business task state.
+      // These rows only bind approval and Resolve side effects to that task.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS video_edit_plans (
+          plan_id TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK(revision > 0),
+          tenant_id INTEGER NOT NULL,
+          workspace_id INTEGER NOT NULL,
+          plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+          plan_json TEXT NOT NULL CHECK(json_valid(plan_json)),
+          status TEXT NOT NULL CHECK(status IN ('validated', 'approved')),
+          approved_by TEXT,
+          approval_source_sha256 TEXT CHECK(approval_source_sha256 IS NULL OR length(approval_source_sha256) = 64),
+          task_id TEXT UNIQUE REFERENCES n8n_task_runs(task_id),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (plan_id, revision, tenant_id, workspace_id),
+          CHECK((status = 'approved' AND approved_by IS NOT NULL
+            AND approval_source_sha256 IS NOT NULL AND task_id IS NOT NULL)
+             OR (status = 'validated' AND approved_by IS NULL
+               AND approval_source_sha256 IS NULL AND task_id IS NULL))
+        );
+        CREATE TABLE IF NOT EXISTS video_edit_operations (
+          operation_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES n8n_task_runs(task_id),
+          plan_sha256 TEXT NOT NULL CHECK(length(plan_sha256) = 64),
+          phase TEXT NOT NULL,
+          step_id TEXT NOT NULL,
+          payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256) = 64),
+          status TEXT NOT NULL CHECK(status IN ('running', 'unknown', 'succeeded', 'failed')),
+          executor_node_id TEXT NOT NULL,
+          execution_owner TEXT NOT NULL,
+          result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+          evidence_sha256 TEXT CHECK(evidence_sha256 IS NULL OR length(evidence_sha256) = 64),
+          error_code TEXT,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+        );
+        CREATE INDEX IF NOT EXISTS idx_video_edit_operations_task
+          ON video_edit_operations(task_id, status, created_at);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_video_edit_one_active_per_node
+          ON video_edit_operations(executor_node_id)
+          WHERE status IN ('running', 'unknown');
+      `)
+    }
   }
 ]
 

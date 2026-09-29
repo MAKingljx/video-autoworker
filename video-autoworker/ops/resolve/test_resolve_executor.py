@@ -17,6 +17,7 @@ class FakeTimeline:
     def __init__(self, name, unique_id):
         self.name = name
         self.unique_id = unique_id
+        self.end = 48
 
     def GetName(self):
         return self.name
@@ -28,31 +29,36 @@ class FakeTimeline:
         return 0
 
     def GetEndFrame(self):
-        return 48
+        return self.end
 
     def GetSettings(self):
         return {"timelineFrameRate": 25.0, "timelineResolutionWidth": "1920", "timelineResolutionHeight": "1080"}
 
 
 class FakeMediaItem:
-    def __init__(self, name):
+    def __init__(self, name, unique_id):
         self.name = name
+        self.unique_id = unique_id
 
     def GetName(self):
         return self.name
+
+    def GetUniqueId(self):
+        return self.unique_id
 
 
 class FakeMediaPool:
     def __init__(self, project):
         self.project = project
+        self.items = {"media-001": FakeMediaItem("AA0701_01.mov", "media-001")}
 
     def CreateEmptyTimeline(self, name):
         timeline = FakeTimeline(name, "timeline-" + str(len(self.project.timelines)))
         self.project.timelines.append(timeline)
         return timeline
 
-    def ImportMedia(self, items):
-        return [FakeMediaItem(items[0]["FilePath"].rsplit("/", 1)[-1])]
+    def GetItemById(self, unique_id):
+        return self.items.get(unique_id)
 
 
 class FakeProject:
@@ -133,28 +139,52 @@ class ResolveExecutorTests(unittest.TestCase):
         plan = {
             "planId": "plan-test",
             "revision": 1,
-            "base": {"projectUniqueId": "project-test", "timelineName": "Assembly"},
+            "planSha256": "a" * 64,
+            "base": {"projectUniqueId": "project-test", "timelineUniqueId": "timeline-base",
+                     "timelineName": "Assembly"},
         }
+        self.assertEqual(executor.status_duplicate_timeline(plan)["status"], "unknown")
         first = executor.duplicate_timeline(plan)
         second = executor.duplicate_timeline(plan)
         self.assertTrue(first["created"])
         self.assertFalse(second["created"])
         self.assertEqual(first["timelineUniqueId"], second["timelineUniqueId"])
+        readback = executor.status_duplicate_timeline(plan)
+        self.assertEqual(readback["status"], "succeeded")
+        self.assertEqual(readback["result"]["timelineUniqueId"], first["timelineUniqueId"])
+        self.assertEqual(len(readback["evidenceSha256"]), 64)
+        self.resolve.project.timelines[-1].end = 50
+        self.assertEqual(executor.status_duplicate_timeline(plan)["status"], "unknown")
+        with self.assertRaisesRegex(RuntimeError, "resolve_copy_reconcile_required"):
+            executor.duplicate_timeline(plan)
 
     def test_protocol_error_is_json_serializable(self):
         payload = {"status": "failed", "errorCode": "resolve_not_connected"}
         self.assertEqual(json.loads(json.dumps(payload))["errorCode"], "resolve_not_connected")
 
-    def test_timeline_creation_and_source_path_import_are_idempotent_shapes(self):
+    def test_timeline_creation_requires_registered_media_identity(self):
         first = executor.create_timeline({"timelineName": "AI-worker story test"})
         second = executor.create_timeline({"timelineName": "AI-worker story test"})
         self.assertTrue(first["created"])
         self.assertFalse(second["created"])
         self.assertEqual(first["timelineUniqueId"], second["timelineUniqueId"])
         item = executor._media_item_for_clip(self.resolve.project.GetMediaPool(), {
-            "asset": {"assetId": "AA0701_01.mov", "sourcePathRef": "/media/AA0701_01.mov"},
+            "asset": {"assetId": "AA0701_01.mov", "resolveMediaPoolItemUniqueId": "media-001"},
         })
         self.assertEqual(item.GetName(), "AA0701_01.mov")
+        with self.assertRaisesRegex(RuntimeError, "resolve_media_pool_item_identity_required"):
+            executor._media_item_for_clip(self.resolve.project.GetMediaPool(), {
+                "asset": {"assetId": "AA0701_01.mov", "sourcePathRef": "/media/AA0701_01.mov"},
+            })
+        with self.assertRaisesRegex(RuntimeError, "resolve_media_pool_item_identity_mismatch"):
+            executor._media_item_for_clip(self.resolve.project.GetMediaPool(), {
+                "asset": {"assetId": "AA0701_01.mov", "resolveMediaPoolItemUniqueId": "wrong-id"},
+            })
+
+    def test_mutation_error_is_unknown_until_resolve_readback(self):
+        self.assertEqual(executor._failure_status("inspect"), "failed")
+        self.assertEqual(executor._failure_status("append_clips"), "unknown")
+        self.assertEqual(executor._failure_status("render"), "unknown")
 
 
 if __name__ == "__main__":

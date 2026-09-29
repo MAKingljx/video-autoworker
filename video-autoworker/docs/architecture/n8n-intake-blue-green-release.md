@@ -149,14 +149,17 @@ scheduler和数据库均已排空，再通过共享发布锁所有者绑定的�
 
 `release-readiness` 不相信代码里的迁移常量，而是回读当前进程实际打开的 SQLite：
 
-- `schema_migrations` 中必须存在 052 至 059；
-- 十一张新增表的关键列、类型、主键、非空约束和默认值必须匹配；导演证据 outbox
+- `schema_migrations` 中必须存在 052 至 060；
+- 十三张新增表的关键列、类型、主键、非空约束和默认值必须匹配；导演证据 outbox
   还必须精确保留幂等键唯一性、父任务级联外键，以及作品查询、结果和投影契约摘要的
   字段 CHECK 约束；
-- 必需索引的列顺序和升降序必须匹配；
+- 必需索引的列顺序和升降序必须匹配；060 剪辑操作的同节点活动唯一索引还须核对
+  唯一性和部分索引条件；
 - source/target 的 schema epoch、闸门 revision 和 router generation 必须一致。
 
-所有迁移均为 additive side table，旧 release 在排空期间仍可读取原任务表。生产数据库路径
+所有迁移均为 additive side table，060 不改写旧表和索引；旧 059 release 在排空期间仍可读取
+原任务表并忽略新增表。当前 release 必须先经授权执行 060 schema prepare 才能启动；剪辑接单入口
+仍默认关闭，不能把数据库兼容验收当作剪辑执行能力已上线。生产数据库路径
 必须从运行进程的真实 open-file 和 runtime attestation 绑定，不能从 checkout 的默认 `.data`
 路径推断。
 

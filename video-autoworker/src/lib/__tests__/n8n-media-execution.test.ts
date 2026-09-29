@@ -640,6 +640,180 @@ describe('n8n stateless media helpers', () => {
     expect(result.analysis).not.toContain('<think>')
   })
 
+  it('keeps five-second visual batches within the primary model image limit', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1,
+      resources: [],
+      routes: [
+        {
+          id: 'vision-eight-images', label: '八图主路由', description: '',
+          location: 'local', transport: 'openai-compatible', model: 'qwen38-27b-vl',
+          baseUrl: 'http://127.0.0.1:18094/v1', enabled: true,
+          capabilities: ['text', 'vision'], maxImagesPerRequest: 8,
+        },
+        {
+          id: 'vision-invalid-fallback', label: '无效备用路由', description: '',
+          location: 'local', transport: 'openai-compatible', model: 'default_model',
+          baseUrl: 'http://127.0.0.1:18091/v1', enabled: true,
+          capabilities: ['text', 'vision'],
+        },
+      ],
+    })
+    const taskId = 'video-five-second-image-limit'
+    const workspace = mediaTaskWorkspace(taskId)
+    await mkdir(workspace, { recursive: true })
+    const segments = []
+    for (let index = 1; index <= 5; index += 1) {
+      const frameFiles = []
+      for (let frameIndex = 1; frameIndex <= 3; frameIndex += 1) {
+        const filename = `frame-${index}-${frameIndex}.jpg`
+        await writeFile(join(workspace, filename), `frame-${index}-${frameIndex}`)
+        frameFiles.push(filename)
+      }
+      segments.push({ index, startSeconds: (index - 1) * 5, durationSeconds: 5, audioFile: null, frameFiles })
+    }
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId, kind: 'prepared-video', durationSeconds: 25, sourceBytes: 100,
+      audioAvailable: false, frameCount: 15, segmentCount: 5, segmentSeconds: 5,
+      memoryMode: 'none', preparedAt: new Date().toISOString(), segments,
+    }))
+    const imageCounts: number[] = []
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (String(input).includes(':18091/')) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '不是 JSON' } }] }), { status: 200 })
+      }
+      const body = JSON.parse(String(init?.body))
+      const content = body.messages.find((message: { role: string }) => message.role === 'user').content
+      const images = content.filter((item: { type: string }) => item.type === 'image_url')
+      imageCounts.push(images.length)
+      if (images.length > 8) {
+        return new Response(JSON.stringify({ error: { message: '单次请求图片数量不能超过 8' } }), { status: 400 })
+      }
+      const text = content.map((item: { text?: string }) => item.text || '').join('\n')
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: visualBatch(requestedBatchIndexes(text)) } }],
+      }), { status: 200 })
+    })
+
+    const result = await analyzeN8nVideoFrames(taskId, {
+      config: { modelRouting: { nodes: { vision: {
+        routeId: 'vision-eight-images', fallbackRouteIds: ['vision-invalid-fallback'],
+      } } } },
+    }, { prompt: '只分析画面' })
+
+    expect(imageCounts).toEqual([6, 6, 3])
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(result).toMatchObject({
+      segmentCount: 5, frameCount: 15, fallbackUsed: false,
+      generation: { maxImagesPerRequest: 8, modelBatches: 3, individualFallbackCalls: 0 },
+    })
+  })
+
+  it('reuses only vision checkpoints with matching source, frames, prompt, model revision and result digest', async () => {
+    const sourceSha256 = 'a'.repeat(64)
+    const taskId = 'video-vision-proof'
+    const workspace = mediaTaskWorkspace(taskId)
+    const checkpointPath = join(workspace, 'checkpoints', 'vision-001.json')
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'frame-001.jpg'), 'original frame')
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId, kind: 'prepared-video', durationSeconds: 5, sourceBytes: 100,
+      sourceSha256, audioAvailable: false, frameCount: 1, segmentCount: 1,
+      segmentSeconds: 5, memoryMode: 'none', preparedAt: new Date().toISOString(),
+      segments: [{ index: 1, startSeconds: 0, durationSeconds: 5,
+        audioFile: null, frameFiles: ['frame-001.jpg'] }],
+    }))
+    const setRevision = (revision: string | null) => {
+      process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+        version: 1, resources: [], routes: [{
+          id: 'vision-proof-route', label: '视觉凭据路由', description: '',
+          location: 'local', transport: 'openai-compatible', model: 'qwen38-27b-vl',
+          ...(revision ? { modelRevisionSha256: revision } : {}),
+          baseUrl: 'http://127.0.0.1:18094/v1',
+          enabled: true, capabilities: ['text', 'vision'],
+        }],
+      })
+    }
+    setRevision('b'.repeat(64))
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const body = JSON.parse(String(init?.body))
+      const content = body.messages.find((message: { role: string }) => message.role === 'user').content
+      const text = content.map((item: { text?: string }) => item.text || '').join('\n')
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: visualBatch(requestedBatchIndexes(text)) } }],
+      }), { status: 200 })
+    })
+    const analyze = (prompt: string, materialHash = sourceSha256) => analyzeN8nVideoFrames(taskId, {
+      config: { modelRouting: { nodes: { vision: { routeId: 'vision-proof-route' } } } },
+    }, { prompt, materialId: `MATERIAL-SHA256-${materialHash}` })
+
+    await analyze('相同提示词')
+    const proof = JSON.parse(await readFile(checkpointPath, 'utf8')).proof
+    expect(proof).toMatchObject({
+      schema: 'aiworker-vision-checkpoint-v2', sourceSha256, sourceBytes: 100,
+      segmentSeconds: 5, modelRevisionSha256: 'b'.repeat(64),
+      outputSchema: 'visual-perception-v1',
+    })
+    expect(proof.frameSha256s).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    await analyze('相同提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await writeFile(join(workspace, 'frame-001.jpg'), 'changed frame')
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    setRevision('c'.repeat(64))
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+
+    const tampered = JSON.parse(await readFile(checkpointPath, 'utf8'))
+    tampered.analysis = '被改动的摘要'
+    await writeFile(checkpointPath, JSON.stringify(tampered), { mode: 0o600 })
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    const legacy = JSON.parse(await readFile(checkpointPath, 'utf8'))
+    delete legacy.proof
+    await writeFile(checkpointPath, JSON.stringify(legacy), { mode: 0o600 })
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(6)
+    await expect(analyze('改变提示词', 'd'.repeat(64))).rejects.toThrow('来源素材哈希不一致')
+    expect(fetchMock).toHaveBeenCalledTimes(6)
+    setRevision(null)
+    await analyze('改变提示词')
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(8)
+    expect(JSON.parse(await readFile(checkpointPath, 'utf8'))).not.toHaveProperty('proof')
+  })
+
+  it('classifies malformed visual output separately from an HTTP failure', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
+      version: 1, resources: [], routes: [{
+        id: 'vision-malformed', label: '格式错误路由', description: '',
+        location: 'local', transport: 'openai-compatible', model: 'default_model',
+        baseUrl: 'http://127.0.0.1:18091/v1', enabled: true, capabilities: ['text', 'vision'],
+      }],
+    })
+    const taskId = 'video-malformed-visual-output'
+    const workspace = mediaTaskWorkspace(taskId)
+    await mkdir(workspace, { recursive: true })
+    await writeFile(join(workspace, 'frame-001.jpg'), 'frame-one')
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
+      taskId, kind: 'prepared-video', durationSeconds: 5, sourceBytes: 100,
+      audioAvailable: false, frameCount: 1, segmentCount: 1, segmentSeconds: 5,
+      memoryMode: 'none', preparedAt: new Date().toISOString(),
+      segments: [{ index: 1, startSeconds: 0, durationSeconds: 5, audioFile: null, frameFiles: ['frame-001.jpg'] }],
+    }))
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '不是 JSON' } }],
+    }), { status: 200 }))
+
+    await expect(analyzeN8nVideoFrames(taskId, {
+      config: { modelRouting: { nodes: { vision: { routeId: 'vision-malformed' } } } },
+    }, { prompt: '只分析画面' })).rejects.toThrow('N8N_MEDIA_MODEL_OUTPUT_INVALID')
+  })
+
   it('uses the fallback when the primary returns HTTP 200 with invalid structured output', async () => {
     process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({
       version: 1,

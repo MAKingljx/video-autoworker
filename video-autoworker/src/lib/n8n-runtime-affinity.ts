@@ -14,7 +14,7 @@ export const N8N_RELEASE_READINESS_SCHEMA = 'video-autoworker-release-readiness/
 export const N8N_ROLLING_DATABASE_COMPATIBILITY = {
   schemaEpoch: 1,
   rollingSafeFrom: '052_n8n_intake_controls',
-  latestMigration: '059_director_evidence_projection_receipts',
+  latestMigration: '060_video_edit_task_receipts',
 } as const
 
 export type N8nRollingDatabaseCompatibility = typeof N8N_ROLLING_DATABASE_COMPATIBILITY
@@ -32,6 +32,9 @@ type RequiredIndex = {
   name: string
   columns: string[]
   descending?: boolean[]
+  unique?: boolean
+  partial?: boolean
+  whereSql?: string
 }
 
 const REQUIRED_ROLLING_MIGRATIONS = [
@@ -43,6 +46,7 @@ const REQUIRED_ROLLING_MIGRATIONS = [
   '057_n8n_director_evidence_outbox',
   '058_director_extraction_task_runs',
   '059_director_evidence_projection_receipts',
+  '060_video_edit_task_receipts',
 ] as const
 
 const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
@@ -157,6 +161,36 @@ const REQUIRED_ROLLING_TABLES: Record<string, RequiredColumn[]> = {
     { name: 'receipt_sha256', type: 'TEXT', notNull: true },
     { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
   ],
+  video_edit_plans: [
+    { name: 'plan_id', type: 'TEXT', notNull: true, primaryKey: 1 },
+    { name: 'revision', type: 'INTEGER', notNull: true, primaryKey: 2 },
+    { name: 'tenant_id', type: 'INTEGER', notNull: true, primaryKey: 3 },
+    { name: 'workspace_id', type: 'INTEGER', notNull: true, primaryKey: 4 },
+    { name: 'plan_sha256', type: 'TEXT', notNull: true },
+    { name: 'plan_json', type: 'TEXT', notNull: true },
+    { name: 'status', type: 'TEXT', notNull: true },
+    { name: 'approved_by', type: 'TEXT' },
+    { name: 'approval_source_sha256', type: 'TEXT' },
+    { name: 'task_id', type: 'TEXT' },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+    { name: 'updated_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
+  video_edit_operations: [
+    { name: 'operation_id', type: 'TEXT', primaryKey: 1 },
+    { name: 'task_id', type: 'TEXT', notNull: true },
+    { name: 'plan_sha256', type: 'TEXT', notNull: true },
+    { name: 'phase', type: 'TEXT', notNull: true },
+    { name: 'step_id', type: 'TEXT', notNull: true },
+    { name: 'payload_sha256', type: 'TEXT', notNull: true },
+    { name: 'status', type: 'TEXT', notNull: true },
+    { name: 'executor_node_id', type: 'TEXT', notNull: true },
+    { name: 'execution_owner', type: 'TEXT', notNull: true },
+    { name: 'result_json', type: 'TEXT' },
+    { name: 'evidence_sha256', type: 'TEXT' },
+    { name: 'error_code', type: 'TEXT' },
+    { name: 'created_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+    { name: 'updated_at', type: 'INTEGER', notNull: true, defaultValue: 'unixepoch()' },
+  ],
 }
 
 const DIRECTOR_EVIDENCE_OUTBOX_SQL_CONSTRAINTS = [
@@ -195,6 +229,25 @@ const DIRECTOR_EXTRACTION_SQL_CONSTRAINTS: Record<string, readonly string[]> = {
     "CHECK(json_valid(reviewed_references) AND json_type(reviewed_references) = 'object')",
     "CHECK(error_code IS NULL OR ( length(error_code) BETWEEN 1 AND 200 AND error_code NOT GLOB '*[^A-Za-z0-9_:-]*' ))",
     "CHECK(length(receipt_sha256) = 64 AND receipt_sha256 NOT GLOB '*[^0-9a-f]*')",
+  ],
+}
+
+const VIDEO_EDIT_SQL_CONSTRAINTS: Record<string, readonly string[]> = {
+  video_edit_plans: [
+    'CHECK(revision > 0)',
+    'CHECK(length(plan_sha256) = 64)',
+    'CHECK(json_valid(plan_json))',
+    "CHECK(status IN ('validated', 'approved'))",
+    'CHECK(approval_source_sha256 IS NULL OR length(approval_source_sha256) = 64)',
+    "CHECK((status = 'approved' AND approved_by IS NOT NULL",
+    "OR (status = 'validated' AND approved_by IS NULL",
+  ],
+  video_edit_operations: [
+    'CHECK(length(plan_sha256) = 64)',
+    'CHECK(length(payload_sha256) = 64)',
+    "CHECK(status IN ('running', 'unknown', 'succeeded', 'failed'))",
+    'CHECK(result_json IS NULL OR json_valid(result_json))',
+    'CHECK(evidence_sha256 IS NULL OR length(evidence_sha256) = 64)',
   ],
 }
 
@@ -252,6 +305,19 @@ const REQUIRED_ROLLING_INDEXES: RequiredIndex[] = [
     table: 'n8n_director_evidence_projection_receipts',
     name: 'idx_n8n_director_evidence_projection_receipts_contract',
     columns: ['projection_contract_digest', 'origin', 'created_at', 'task_id'],
+  },
+  {
+    table: 'video_edit_operations',
+    name: 'idx_video_edit_operations_task',
+    columns: ['task_id', 'status', 'created_at'],
+  },
+  {
+    table: 'video_edit_operations',
+    name: 'idx_video_edit_one_active_per_node',
+    columns: ['executor_node_id'],
+    unique: true,
+    partial: true,
+    whereSql: "WHERE status IN ('running', 'unknown')",
   },
 ]
 
@@ -484,7 +550,19 @@ export function getN8nRollingDatabaseCompatibility(
       }
     }
 
-    const expectedParent = table === 'director_extraction_checkpoints'
+    const editConstraints = VIDEO_EDIT_SQL_CONSTRAINTS[table]
+    if (editConstraints) {
+      const compactSql = String(tableRecord.sql || '').replace(/\s+/gu, ' ').trim()
+      for (const constraint of editConstraints) {
+        if (!compactSql.includes(constraint)) {
+          throw new Error(`n8n rolling video edit constraint is incompatible: ${table}`)
+        }
+      }
+    }
+
+    const expectedParent = table === 'video_edit_plans' || table === 'video_edit_operations'
+      ? { table: 'n8n_task_runs', from: 'task_id', to: 'task_id', onDelete: 'NO ACTION' }
+      : table === 'director_extraction_checkpoints'
       ? { table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }
       : table === 'director_extraction_projection_receipts'
         ? { table: 'n8n_task_runs', from: 'phase_task_id', to: 'task_id' }
@@ -502,12 +580,24 @@ export function getN8nRollingDatabaseCompatibility(
         && foreignKey.from === expectedParent.from
         && foreignKey.to === expectedParent.to
         && foreignKey.on_update === 'NO ACTION'
-        && foreignKey.on_delete === 'CASCADE'
+        && foreignKey.on_delete === ('onDelete' in expectedParent ? expectedParent.onDelete : 'CASCADE')
         && foreignKey.match === 'NONE'
       ))
       if (!parentReference) {
-        throw new Error(`n8n rolling director extraction parent reference is incompatible: ${table}`)
+        throw new Error(`n8n rolling parent reference is incompatible: ${table}`)
       }
+    }
+
+    if (table === 'video_edit_plans') {
+      const indexes = db.prepare(`PRAGMA index_list(${quotedSqliteIdentifier(table)})`)
+        .all() as SqliteIndexListRow[]
+      const uniqueTask = indexes.some(index => {
+        if (index.unique !== 1 || index.partial !== 0 || index.origin !== 'u') return false
+        const columns = (db.prepare(`PRAGMA index_xinfo(${quotedSqliteIdentifier(index.name)})`)
+          .all() as SqliteIndexInfoRow[]).filter(column => column.key === 1)
+        return columns.length === 1 && columns[0]?.name === 'task_id'
+      })
+      if (!uniqueTask) throw new Error('n8n rolling video edit task identity is not unique')
     }
   }
 
@@ -527,8 +617,16 @@ export function getN8nRollingDatabaseCompatibility(
       `PRAGMA index_list(${quotedSqliteIdentifier(required.table)})`,
     ).all() as SqliteIndexListRow[]
     const actual = indexes.find(index => index.name === required.name)
-    if (!actual || actual.unique !== 0 || actual.partial !== 0) {
+    if (!actual || actual.unique !== Number(Boolean(required.unique))
+      || actual.partial !== Number(Boolean(required.partial))) {
       throw new Error(`n8n rolling index is missing or incompatible: ${required.name}`)
+    }
+    if (required.whereSql) {
+      const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+        .get(required.name) as { sql: string | null } | undefined
+      if (!String(row?.sql || '').replace(/\s+/gu, ' ').includes(required.whereSql)) {
+        throw new Error(`n8n rolling index predicate is incompatible: ${required.name}`)
+      }
     }
     const columns = (db.prepare(
       `PRAGMA index_xinfo(${quotedSqliteIdentifier(required.name)})`,

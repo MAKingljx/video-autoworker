@@ -104,18 +104,63 @@ def _find_timeline(project, name: str):
     return None
 
 
+def _copy_timeline_name(plan: dict[str, Any]) -> str:
+    plan_id = str(plan.get("planId", ""))
+    revision = plan.get("revision")
+    digest = str(plan.get("planSha256", ""))
+    if not plan_id or not isinstance(revision, int) or revision < 1 or len(digest) != 64:
+        raise RuntimeError("resolve_plan_identity_invalid")
+    if any(character not in "0123456789abcdef" for character in digest):
+        raise RuntimeError("resolve_plan_identity_invalid")
+    return f"AIW {plan_id[:48]} r{revision} {digest[:16]}"
+
+
+def _timeline_matches(project, name: str) -> list[Any]:
+    matches = []
+    for index in range(1, int(project.GetTimelineCount()) + 1):
+        candidate = project.GetTimelineByIndex(index)
+        if candidate is not None and str(candidate.GetName()) == name:
+            matches.append(candidate)
+    return matches
+
+
+def status_duplicate_timeline(plan: dict[str, Any]) -> dict[str, Any]:
+    resolve = _load_resolve()
+    project, _ = _current(resolve)
+    base = plan["base"]
+    if str(project.GetUniqueId()) != str(base["projectUniqueId"]):
+        return {"status": "unknown", "errorCode": "resolve_project_identity_mismatch"}
+    source = _timeline_by_id(project, str(base.get("timelineUniqueId", "")))
+    if source is None or str(source.GetName()) != str(base.get("timelineName", "")):
+        return {"status": "unknown", "errorCode": "resolve_source_timeline_missing"}
+    matches = _timeline_matches(project, _copy_timeline_name(plan))
+    if len(matches) != 1:
+        return {"status": "unknown", "errorCode": "resolve_copy_not_unique"}
+    target = matches[0]
+    if (int(target.GetStartFrame()) != int(source.GetStartFrame())
+            or int(target.GetEndFrame()) != int(source.GetEndFrame())):
+        return {"status": "unknown", "errorCode": "resolve_copy_changed"}
+    result = {"timelineUniqueId": str(target.GetUniqueId()), "timelineName": str(target.GetName())}
+    return {"status": "succeeded", "result": result,
+            "evidenceSha256": _fingerprint({"sourceTimelineUniqueId": str(source.GetUniqueId()), **result})}
+
+
 def duplicate_timeline(plan: dict[str, Any]) -> dict[str, Any]:
     resolve = _load_resolve()
     project, current = _current(resolve)
     base = plan["base"]
     if str(project.GetUniqueId()) != base["projectUniqueId"]:
         raise RuntimeError("resolve_project_identity_mismatch")
-    source_name = base["timelineName"]
-    target_name = f"{source_name} · {plan['planId']} r{plan['revision']}"
-    existing = _find_timeline(project, target_name)
-    if existing is not None:
-        return {"timelineUniqueId": str(existing.GetUniqueId()), "timelineName": target_name, "created": False}
-    if current is None or str(current.GetName()) != source_name:
+    target_name = _copy_timeline_name(plan)
+    existing = _timeline_matches(project, target_name)
+    if existing:
+        readback = status_duplicate_timeline(plan)
+        if readback["status"] != "succeeded":
+            raise RuntimeError("resolve_copy_reconcile_required")
+        return {**readback["result"], "created": False}
+    if (current is None
+            or str(current.GetUniqueId()) != str(base.get("timelineUniqueId", ""))
+            or str(current.GetName()) != str(base.get("timelineName", ""))):
         raise RuntimeError("resolve_timeline_identity_mismatch")
     created = project.DuplicateTimeline(target_name)
     if created is None:
@@ -157,21 +202,12 @@ def create_timeline(request: dict[str, Any]) -> dict[str, Any]:
 def _media_item_for_clip(media_pool, clip: dict[str, Any]):
     asset = clip.get("asset", {})
     unique_id = asset.get("resolveMediaPoolItemUniqueId")
-    if unique_id and hasattr(media_pool, "GetItemById"):
-        item = media_pool.GetItemById(unique_id)
-        if item is not None:
-            return item
-    source_path = asset.get("sourcePathRef")
-    if not source_path:
+    if not unique_id or not hasattr(media_pool, "GetItemById"):
         raise RuntimeError("resolve_media_pool_item_identity_required")
-    imported = media_pool.ImportMedia([{"FilePath": source_path}])
-    if not imported:
-        raise RuntimeError("resolve_media_pool_import_failed")
-    wanted_name = str(asset.get("assetId", ""))
-    for item in imported:
-        if wanted_name and hasattr(item, "GetName") and str(item.GetName()) == wanted_name:
-            return item
-    return imported[0]
+    item = media_pool.GetItemById(unique_id)
+    if item is None or str(item.GetUniqueId()) != str(unique_id):
+        raise RuntimeError("resolve_media_pool_item_identity_mismatch")
+    return item
 
 
 def append_clips(plan: dict[str, Any], timeline_unique_id: str) -> dict[str, Any]:
@@ -238,6 +274,8 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         return {"status": "succeeded", "result": inspect()}
     if action == "duplicate_timeline":
         return {"status": "succeeded", "result": duplicate_timeline(request["plan"])}
+    if action == "status" and request.get("phase") == "duplicate_timeline":
+        return status_duplicate_timeline(request["plan"])
     if action == "create_project":
         return {"status": "succeeded", "result": create_project(request)}
     if action == "create_timeline":
@@ -247,6 +285,12 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
     if action == "render":
         return {"status": "succeeded", "result": render(request)}
     raise RuntimeError("resolve_action_unsupported")
+
+
+def _failure_status(action: Any) -> str:
+    # Resolve and the application database cannot commit atomically. After a
+    # write API call, an exception alone cannot prove that nothing changed.
+    return "failed" if action == "inspect" else "unknown"
 
 
 def main() -> int:
@@ -261,7 +305,7 @@ def main() -> int:
             response = {
                 "requestId": request.get("requestId") if isinstance(request, dict) else None,
                 "operationId": request.get("operationId") if isinstance(request, dict) else None,
-                "status": "failed",
+                "status": _failure_status(request.get("action") if isinstance(request, dict) else None),
                 "errorCode": str(exc) or "resolve_executor_failed",
             }
         print(json.dumps(response, ensure_ascii=False), flush=True)

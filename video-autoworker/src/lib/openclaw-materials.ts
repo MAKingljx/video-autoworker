@@ -291,9 +291,38 @@ def project_dirs(bot_root):
 def pipeline_dirs(project):
     rows = []
     for path in project.iterdir():
-        if path.is_dir() and path.name.startswith("pipeline") and (path / "material_index.sqlite").exists():
+        if not path.is_dir() or not path.name.startswith("pipeline"):
+            continue
+        # Episodic runs keep the current index one level below the episode
+        # directory. Prefer it over a stale legacy index at the episode root.
+        nested = path / "pipeline"
+        if (nested / "material_index.sqlite").exists():
+            rows.append(nested)
+        elif (path / "material_index.sqlite").exists():
             rows.append(path)
-    return sorted(rows, key=lambda p: (p.name != "pipeline", p.name))
+    return sorted(rows, key=lambda p: (p.relative_to(project).as_posix() != "pipeline", p.relative_to(project).as_posix()))
+
+def pipeline_name(project, pipeline):
+    return pipeline.relative_to(project).as_posix()
+
+def graph_source_map(project, on_error):
+    manifest = project / "material_sources.json"
+    if not manifest.exists() and not manifest.is_symlink():
+        return None
+    try:
+        if (not manifest.is_file() or manifest.is_symlink()
+                or not manifest.resolve().is_relative_to(project.resolve())
+                or manifest.stat().st_size > 65536):
+            raise ValueError("invalid material source manifest")
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        if (not isinstance(payload, dict) or type(payload.get("schemaVersion")) is not int
+                or payload["schemaVersion"] != 1 or not isinstance(payload.get("pipelines"), dict)):
+            raise ValueError("invalid material source manifest")
+        return payload["pipelines"]
+    except Exception:
+        if on_error is not None:
+            on_error(str(manifest))
+        return False
 
 def connect_readonly(db_path):
     uri = Path(db_path).absolute().as_uri() + "?mode=ro"
@@ -319,11 +348,11 @@ def visual_counts(conn):
         "failed": counts.get("failed_vl", 0) + counts.get("failed", 0),
     }
 
-def read_pipeline(path):
+def read_pipeline(path, project):
     db_path = path / "material_index.sqlite"
     modified = db_path.stat().st_mtime if db_path.exists() else path.stat().st_mtime
     item = {
-        "name": path.name,
+        "name": pipeline_name(project, path),
         "path": str(path),
         "indexPath": str(db_path),
         "modifiedAt": iso_from_ts(modified),
@@ -416,10 +445,11 @@ def scene_rows(project_filter=None, on_error=None, max_rows=None, allowed_projec
             continue
         if allowed_projects is not None and project.name not in allowed_projects:
             continue
+        sources = graph_source_map(project, on_error) if rooted_only else None
         for pipeline in pipeline_dirs(project):
             db_path = pipeline / "material_index.sqlite"
             try:
-                if rooted_only and not db_path.resolve().is_relative_to(bot_root.resolve()):
+                if rooted_only and not db_path.resolve().is_relative_to(project.resolve()):
                     raise ValueError("material_index_outside_root")
                 with connect_readonly(db_path) as conn:
                     sql = """
@@ -457,10 +487,13 @@ def scene_rows(project_filter=None, on_error=None, max_rows=None, allowed_projec
                         text_parts = [str(row[1] or ""), str(row[5] or "")]
                         text_parts.extend(flatten_json_text(result))
                         text = "\n".join(part for part in text_parts if part)
+                        name = pipeline_name(project, pipeline)
+                        pipeline_source = False if sources is False else sources.get(name) if isinstance(sources, dict) else None
                         yield {
-                            "id": f"{project.name}:{pipeline.name}:{row[0]}",
+                            "id": f"{project.name}:{name}:{row[0]}",
                             "project": project.name,
-                            "pipeline": pipeline.name,
+                            "pipeline": name,
+                            "pipelineSource": pipeline_source,
                             "sceneId": int(row[0]),
                             "label": str(row[1] or f"scene-{int(row[0]):03d}"),
                             "start": row[2],
@@ -540,7 +573,7 @@ def main():
     for project in project_dirs(bot_root):
         videos = list_videos(project)
         notes = list_notes(project)
-        pipelines = [read_pipeline(path) for path in pipeline_dirs(project)]
+        pipelines = [read_pipeline(path, project) for path in pipeline_dirs(project)]
         project_vector = vector_status(bot_root, project.name)
         modified = project.stat().st_mtime
         for item in videos + notes:
@@ -599,7 +632,7 @@ def main():
         if not project.resolve().is_relative_to(bot_root.resolve()):
             continue
         available = [video for video in list_videos(project)
-                     if Path(video['path']).resolve().is_relative_to(bot_root.resolve())]
+                     if Path(video['path']).resolve().is_relative_to(project.resolve())]
         total_materials += len(available)
         videos = available[:max(0, maximum_materials - included)]
         included += len(videos)
@@ -624,7 +657,8 @@ def main():
                 metadata[key] = False
         rows.append({'id': row['id'], 'project': row['project'], 'pipeline': row['pipeline'],
                      'sceneId': row['sceneId'], 'start': row['start'], 'end': row['end'],
-                     'visualSummary': row['visualSummary'][:700], 'metadata': metadata})
+                     'visualSummary': row['visualSummary'][:700], 'metadata': metadata,
+                     'pipelineSource': row['pipelineSource']})
     emit({'generatedAt': now_iso(), 'projects': projects, 'scenes': rows[:maximum_scenes],
           'totalMaterials': total_materials, 'unreadablePipelines': len(errors),
           'truncated': total_materials > included or len(rows) > maximum_scenes})

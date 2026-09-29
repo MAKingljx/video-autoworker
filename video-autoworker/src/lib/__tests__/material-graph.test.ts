@@ -50,6 +50,18 @@ describe('material graph projection', () => {
     expect(result.stats.unmatchedScenes).toBe(1)
   })
 
+  it('uses an explicit pipeline source only when it uniquely agrees with scene metadata', () => {
+    const data = source()
+    data.scenes[0].metadata = { location: '雪山' }
+    data.scenes[0].pipelineSource = 'raw-data/b.mp4'
+    data.scenes[1].pipelineSource = 'raw-data/b.mp4'
+    const result = buildMaterialGraphSnapshot(data)
+    expect(result.materials[1].evidenceCount).toBe(1)
+    expect(result.stats.unmatchedScenes).toBe(1)
+    data.scenes[0].pipelineSource = '../outside.mp4'
+    expect(buildMaterialGraphSnapshot(data).stats.unmatchedScenes).toBe(2)
+  })
+
   it('never falls back to a single video when an explicit source is invalid', () => {
     const data = source()
     data.projects[0].videos = data.projects[0].videos.slice(0, 1)

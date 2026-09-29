@@ -76,10 +76,10 @@ describe('director maintainability contracts', () => {
 
   it('installs optional tables without advancing the authoritative migration marker', () => {
     const migrationIds = db.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all()
-    expect(migrationIds.at(-1)).toBe('059_director_evidence_projection_receipts')
+    expect(migrationIds.at(-1)).toBe('060_video_edit_task_receipts')
     expect(migrationIds).not.toContain('060_director_review_batches_and_extraction_segments')
     expect(getN8nRollingDatabaseCompatibility(db).latestMigration)
-      .toBe('059_director_evidence_projection_receipts')
+      .toBe('060_video_edit_task_receipts')
     for (const table of ['director_review_batches', 'director_review_batch_items',
       'director_extraction_segments']) {
       expect(db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`)

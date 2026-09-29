@@ -76,6 +76,7 @@ const PARENT_KNOWN_MIGRATIONS = [
   '057_n8n_director_evidence_outbox',
   '058_director_extraction_task_runs',
   '059_director_evidence_projection_receipts',
+  '060_video_edit_task_receipts',
 ]
 const PARENT_CORE_MIGRATIONS = PARENT_KNOWN_MIGRATIONS.slice(0, 2)
 const PARENT_MODERN_MIGRATIONS = PARENT_KNOWN_MIGRATIONS.slice(2, 9)
@@ -120,6 +121,15 @@ const PARENT_SCHEMA_TABLES = [
     'task_id', 'binding_id', 'tenant_id', 'workspace_id', 'work_id', 'query_digest',
     'projection_contract_digest', 'idempotency_key', 'result_sha256', 'status', 'attempt_count',
     'next_attempt_at', 'last_error_code', 'delivered_at', 'created_at', 'updated_at',
+  ]],
+  ['video_edit_plans', [
+    'plan_id', 'revision', 'tenant_id', 'workspace_id', 'plan_sha256', 'plan_json',
+    'status', 'approved_by', 'approval_source_sha256', 'task_id', 'created_at', 'updated_at',
+  ]],
+  ['video_edit_operations', [
+    'operation_id', 'task_id', 'plan_sha256', 'phase', 'step_id', 'payload_sha256',
+    'status', 'executor_node_id', 'execution_owner', 'result_json', 'evidence_sha256',
+    'error_code', 'created_at', 'updated_at',
   ]],
 ]
 const PARENT_ANCILLARY_TABLES = [
@@ -1162,7 +1172,7 @@ function parentSchemaEpoch(db) {
   }
   const versions = migrationIds.map(id => Number(id.slice(0, 3)))
   const latestMigrationVersion = Math.max(...versions)
-  if (!Number.isSafeInteger(latestMigrationVersion) || latestMigrationVersion > 59) {
+  if (!Number.isSafeInteger(latestMigrationVersion) || latestMigrationVersion > 60) {
     fail('parent reconciliation migration history is unsupported')
   }
   const knownByVersion = new Map(PARENT_KNOWN_MIGRATIONS.map(id => [Number(id.slice(0, 3)), id]))
@@ -1181,9 +1191,13 @@ function parentSchemaEpoch(db) {
   const legacy = latestMigrationVersion === 50
     && PARENT_MODERN_MIGRATIONS.every(id => !migrationSet.has(id))
     && laterTables.every(table => tables[table].present === false)
+    && !tables.video_edit_plans.present && !tables.video_edit_operations.present
   const modern = latestMigrationVersion >= 57
     && PARENT_MODERN_MIGRATIONS.every(id => migrationSet.has(id))
     && laterTables.every(table => tables[table].present === true)
+    && (latestMigrationVersion < 60
+      ? !tables.video_edit_plans.present && !tables.video_edit_operations.present
+      : tables.video_edit_plans.present && tables.video_edit_operations.present)
   if (!legacy && !modern) {
     fail('parent reconciliation schema epoch is incomplete or inconsistent')
   }
@@ -1194,6 +1208,7 @@ function parentSchemaEpoch(db) {
     migrationMarkers: Object.fromEntries([
       ...PARENT_CORE_MIGRATIONS,
       ...PARENT_MODERN_MIGRATIONS,
+      ...PARENT_KNOWN_MIGRATIONS.slice(9),
     ].map(id => [id, migrationSet.has(id)])),
     tables,
   }

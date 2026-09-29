@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getMaterialsGraph, searchMaterials } from '../openclaw-materials'
+import { getMaterialsGraph, getMaterialsOverview, searchMaterials } from '../openclaw-materials'
 
 let root: string, outside: string, index: string
 beforeEach(async () => {
@@ -57,5 +57,42 @@ describe('material graph real read-only reader', () => {
     expect(graph.materials).toHaveLength(1)
     expect(graph.stats.unreadablePipelines).toBe(2)
     expect(graph.materials[0].evidenceCount).toBe(1)
+  })
+
+  it('reads canonical nested episode indexes and requires an exact source manifest to attach scenes', async () => {
+    const project = path.dirname(path.dirname(index))
+    await writeFile(path.join(project, 'raw-data', '冰川.mp4'), 'second-video')
+    const episode = path.join(project, 'pipeline-ep2')
+    await mkdir(path.join(episode, 'pipeline'), { recursive: true })
+    const nestedIndex = path.join(episode, 'pipeline', 'material_index.sqlite')
+    const nested = new Database(nestedIndex)
+    nested.exec(`CREATE TABLE scene_segments(id INTEGER PRIMARY KEY,label TEXT,start REAL,end REAL,keyframes_json TEXT,transcript TEXT,material_tags_json TEXT);
+      CREATE TABLE visual_labels(scene_id INTEGER,status TEXT,result_json TEXT,raw_response TEXT);`)
+    nested.prepare('INSERT INTO scene_segments VALUES(?,?,?,?,?,?,?)').run(2, '冰川远景', 4, 6, '[]', '', '[]')
+    nested.prepare('INSERT INTO visual_labels VALUES(?,?,?,?)').run(2, 'done', JSON.stringify({ location: ['冰川'], emotion: ['敬畏'] }), '')
+    nested.close()
+    // A stale root index must not be selected when the episode has a nested index.
+    await writeFile(path.join(episode, 'material_index.sqlite'), 'stale')
+    const before = await digest(nestedIndex)
+
+    const unbound = await getMaterialsGraph({ project: '雪山示例' })
+    expect(unbound.stats).toMatchObject({ scannedScenes: 2, unmatchedScenes: 2, unreadablePipelines: 0 })
+    expect(unbound.materials.every(item => item.evidenceCount === 0)).toBe(true)
+    const overview = await getMaterialsOverview()
+    expect(overview.projects[0].pipelines.map(item => item.name)).toEqual(['pipeline', 'pipeline-ep2/pipeline'])
+    const search = await searchMaterials({ project: '雪山示例', query: '冰川', mode: 'keyword' })
+    expect(search.results[0].pipeline).toBe('pipeline-ep2/pipeline')
+
+    const manifest = path.join(project, 'material_sources.json')
+    await writeFile(manifest, JSON.stringify({ schemaVersion: 1, pipelines: { 'pipeline-ep2/pipeline': 'raw-data/冰川.mp4' } }))
+    const bound = await getMaterialsGraph({ project: '雪山示例' })
+    expect(bound.stats).toMatchObject({ scannedScenes: 2, unmatchedScenes: 1, unreadablePipelines: 0 })
+    expect(bound.materials.find(item => item.name === '冰川.mp4')?.labels).toEqual({ scene: ['冰川'], emotion: ['敬畏'] })
+    expect(await digest(nestedIndex)).toBe(before)
+
+    await writeFile(manifest, JSON.stringify({ schemaVersion: 1, pipelines: { 'pipeline-ep2/pipeline': 'raw-data/不存在.mp4' } }))
+    expect((await getMaterialsGraph({ project: '雪山示例' })).stats.unmatchedScenes).toBe(2)
+    await writeFile(manifest, '{invalid')
+    expect((await getMaterialsGraph({ project: '雪山示例' })).stats).toMatchObject({ unmatchedScenes: 2, unreadablePipelines: 1 })
   })
 })
