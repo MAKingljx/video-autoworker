@@ -2,6 +2,8 @@
 """Verify and run the isolated, pinned Qwen cover quality candidate."""
 
 import argparse
+from datetime import datetime, timezone
+import fcntl
 import hashlib
 from importlib.metadata import version
 import json
@@ -63,6 +65,48 @@ def member_path(name):
     if not p.is_file() or not p.is_relative_to(MODEL_ROOT.resolve(strict=True)):
         raise ValueError('qwen_asset_escaped_model_root')
     return p
+
+
+def download():
+    """Resume the pinned assets in the same cache, with one writer per model."""
+    spec = specification()
+    with (MODEL_ROOT / 'download.lock').open('a') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        status_path = MODEL_ROOT / 'download-status.json'
+        base = {'repository': REPOSITORY, 'revision': REVISION,
+                'totalBytes': EXPECTED_BYTES, 'pid': os.getpid(),
+                'startedAt': datetime.now(timezone.utc).isoformat()}
+        private_json(status_path, {**base, 'currentState': 'DOWNLOADING',
+                                   'nextAction': 'wait_for_cached_asset_resume'})
+        started = time.monotonic()
+        try:
+            os.environ.update({'HF_HOME': str(MODEL_ROOT / 'hf-home'),
+                               'HF_HUB_DISABLE_XET': '1', 'HF_HUB_OFFLINE': '0'})
+            from huggingface_hub import snapshot_download
+
+            # Hugging Face reuses complete blobs and resumes incomplete files.
+            path = snapshot_download(
+                repo_id=REPOSITORY, revision=REVISION,
+                cache_dir=str(MODEL_ROOT / 'hf-home/hub'),
+                allow_patterns=[item['path'] for item in spec['files']],
+                max_workers=2)
+            if Path(path).resolve() != SNAPSHOT.resolve(strict=True):
+                raise ValueError('qwen_download_snapshot_mismatch')
+            for item in spec['files']:
+                if member_path(item['path']).stat().st_size != item['bytes']:
+                    raise ValueError('qwen_download_size_mismatch:' + item['path'])
+            result = {**base, 'currentState': 'DOWNLOADED_PENDING_VERIFICATION',
+                      'errorCode': None, 'nextAction': 'verify_assets',
+                      'elapsedSeconds': round(time.monotonic() - started, 3)}
+            private_json(status_path, result)
+            return result
+        except BaseException as error:
+            private_json(status_path, {**base, 'currentState': 'DOWNLOAD_FAILED',
+                                      'errorCode': type(error).__name__,
+                                      'nextAction': 'inspect_network_and_resume_same_cache',
+                                      'elapsedSeconds': round(time.monotonic() - started, 3)})
+            raise
 
 
 def verify():
@@ -215,6 +259,7 @@ def generate(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='action', required=True)
+    sub.add_parser('download')
     sub.add_parser('verify-assets')
     sub.add_parser('status')
     p = sub.add_parser('generate')
@@ -228,7 +273,9 @@ def main():
     p.add_argument('--seed', type=int, default=111)
     args = parser.parse_args()
     try:
-        result = verify() if args.action == 'verify-assets' else readiness() if args.action == 'status' else generate(args)
+        result = (download() if args.action == 'download' else
+                  verify() if args.action == 'verify-assets' else
+                  readiness() if args.action == 'status' else generate(args))
     except (OSError, ValueError, RuntimeError) as error:
         print(json.dumps({'currentState': 'FAILED', 'errorCode': str(error),
                           'nextAction': 'inspect_candidate_inputs_and_runtime'}), file=sys.stderr)
