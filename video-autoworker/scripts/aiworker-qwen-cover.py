@@ -13,6 +13,7 @@ import struct
 import sys
 import time
 import uuid
+import unicodedata
 
 
 MODEL_ROOT = Path('/Users/heisenbergs-1/models/qwen-image-edit-2511')
@@ -21,6 +22,66 @@ REPOSITORY = 'Qwen/Qwen-Image-Edit-2511'
 REVISION = '6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9'
 EXPECTED_BYTES = 57_720_454_694
 SNAPSHOT = MODEL_ROOT / 'hf-home/hub/models--Qwen--Qwen-Image-Edit-2511/snapshots' / REVISION
+DESIGN_PROFILES = Path(__file__).with_name('cover-design-profiles.json')
+TEXT_FIELDS = ('kicker', 'title', 'subtitle', 'caption')
+
+
+def cover_design_prompt(design, profiles):
+    """Compile a reusable design specification; this never renders pixels."""
+    if (not isinstance(design, dict)
+            or design.get('schema') != 'aiworker-qwen-cover-design/v1'
+            or set(design) - {'schema', 'profile', 'text', 'scene'}):
+        raise ValueError('qwen_cover_design_invalid')
+    if (not isinstance(profiles, dict)
+            or profiles.get('schema') != 'aiworker-qwen-cover-profiles/v1'):
+        raise ValueError('qwen_cover_profiles_invalid')
+    profile_name = design.get('profile')
+    definitions = profiles.get('profiles')
+    if not isinstance(profile_name, str) or not isinstance(definitions, dict):
+        raise ValueError('qwen_cover_profile_unknown')
+    profile = definitions.get(profile_name)
+    if not isinstance(profile, dict):
+        raise ValueError('qwen_cover_profile_unknown')
+    text_fields = design.get('text')
+    if not isinstance(text_fields, dict) or set(text_fields) != set(TEXT_FIELDS):
+        raise ValueError('qwen_cover_text_fields_invalid')
+    for key, maximum in zip(TEXT_FIELDS, (16, 24, 40, 64)):
+        value = text_fields[key]
+        if (not isinstance(value, str) or not 0 < len(value) <= maximum
+                or value != value.strip()
+                or any(unicodedata.category(c).startswith('C') for c in value)):
+            raise ValueError('qwen_cover_text_invalid:' + key)
+    if len(set(text_fields.values())) != len(TEXT_FIELDS):
+        raise ValueError('qwen_cover_text_duplicate')
+    scene = design.get('scene', '')
+    if (not isinstance(scene, str) or len(scene) > 1000
+            or any(unicodedata.category(c).startswith('C') for c in scene)):
+        raise ValueError('qwen_cover_scene_invalid')
+    instructions = profile.get('instructions')
+    styles = profile.get('text_styles')
+    acceptance = profile.get('acceptance')
+    if (not isinstance(instructions, list) or not instructions
+            or not isinstance(styles, dict) or set(styles) != set(TEXT_FIELDS)
+            or not isinstance(acceptance, list) or not acceptance
+            or any(not isinstance(v, str) or not v
+                   for v in [*instructions, *styles.values(), *acceptance])):
+        raise ValueError('qwen_cover_profile_contract_invalid')
+    lines = ['生成完整的视频封面，画面与所有文字都由模型直接输出。',
+             '图1只提供人物和场景。若提供图2，它只指导字体材质、层次和设计风格；',
+             '不复制图2的人物身份或任何文字，只绘制下面给定的四组文字。',
+             *instructions]
+    if scene:
+        lines.append('本次场景要求：' + scene)
+    lines.append('四组文字必须逐字正确、各出现一次；引号只是说明，不画到封面里：')
+    labels = ('栏目标签', '主标题', '副标题', '底部说明')
+    for key, label in zip(TEXT_FIELDS, labels):
+        lines.append(label + '：' + json.dumps(text_fields[key], ensure_ascii=False)
+                     + '；' + styles[key])
+    lines.extend(['最终画面验收要求：', *acceptance])
+    prompt = '\n'.join(lines) + '\n'
+    if len(prompt.encode('utf-8')) > 16 * 1024:
+        raise ValueError('qwen_cover_compiled_prompt_too_large')
+    return prompt
 
 
 def digest(path):
@@ -158,7 +219,23 @@ def checked_input(path, maximum):
 
 def generate(args):
     ready = readiness()
-    prompt = checked_input(args.prompt_file, 16 * 1024)
+    design_file = getattr(args, 'design_file', None)
+    if design_file:
+        design_path = checked_input(design_file, 16 * 1024)
+        profiles_path = checked_input(getattr(args, 'profiles_file', None) or DESIGN_PROFILES, 16 * 1024)
+        design = json.loads(design_path.read_text(encoding='utf-8'))
+        profiles = json.loads(profiles_path.read_text(encoding='utf-8'))
+        prompt_text = cover_design_prompt(design, profiles)
+        prompt_inputs = [design_path, profiles_path]
+        design_metadata = {'designProfile': design['profile'], 'expectedText': design['text'],
+                           'designAcceptance': profiles['profiles'][design['profile']]['acceptance']}
+    else:
+        if getattr(args, 'profiles_file', None):
+            raise ValueError('qwen_profiles_require_design_file')
+        prompt = checked_input(args.prompt_file, 16 * 1024)
+        prompt_text = prompt.read_text(encoding='utf-8')
+        prompt_inputs = [prompt]
+        design_metadata = {}
     images = [checked_input(p, 20 * 1024 * 1024) for p in args.images]
     if not 1 <= len(images) <= 3:
         raise ValueError('qwen_reference_count_invalid')
@@ -180,7 +257,7 @@ def generate(args):
     intent = output.with_suffix('.intent.json')
     if any(p.exists() for p in (output, receipt_path, intent)):
         raise FileExistsError('qwen_output_or_intent_already_exists')
-    inputs = [{'path': str(p), 'sha256': digest(p)} for p in [prompt, *images]]
+    inputs = [{'path': str(p), 'sha256': digest(p)} for p in [*prompt_inputs, *images]]
     private_json(intent, {'currentState': 'RUNNING', 'pid': os.getpid(),
                           'repository': REPOSITORY, 'revision': REVISION,
                           'seed': args.seed, 'output': str(output)})
@@ -214,7 +291,7 @@ def generate(args):
 
         references = [Image.open(p) for p in images]
         try:
-            image = pipeline(image=references, prompt=prompt.read_text(encoding='utf-8'),
+            image = pipeline(image=references, prompt=prompt_text,
                              generator=torch.Generator(device='cpu').manual_seed(args.seed),
                              num_inference_steps=args.steps, true_cfg_scale=args.guidance,
                              negative_prompt=' ', guidance_scale=1.0,
@@ -234,13 +311,14 @@ def generate(args):
         temporary_output.chmod(0o600)
         os.link(temporary_output, output)
         temporary_output.unlink()
-        result = {**ready, 'schema': 'aiworker-qwen-cover-result/v1',
+        result = {**ready, **design_metadata, 'schema': 'aiworker-qwen-cover-result/v1',
                   'currentState': 'GENERATED_PENDING_REVIEW', 'errorCode': None,
                   'nextAction': 'review_raw_image_and_exact_chinese_text', 'inputs': inputs,
                   'output': str(output), 'outputBytes': output.stat().st_size,
                   'outputSha256': digest(output), 'postProcessing': False,
                   'width': args.width, 'height': args.height, 'steps': args.steps,
                   'guidance': args.guidance, 'seed': args.seed,
+                  'promptSha256': hashlib.sha256(prompt_text.encode('utf-8')).hexdigest(),
                   'elapsedSeconds': round(time.monotonic() - started, 3),
                   'componentDtypes': dtypes,
                   'mpsAllocatedBytes': torch.mps.current_allocated_memory(),
@@ -263,7 +341,10 @@ def main():
     sub.add_parser('verify-assets')
     sub.add_parser('status')
     p = sub.add_parser('generate')
-    p.add_argument('--prompt-file', required=True)
+    prompt_source = p.add_mutually_exclusive_group(required=True)
+    prompt_source.add_argument('--prompt-file')
+    prompt_source.add_argument('--design-file')
+    p.add_argument('--profiles-file', help='Defaults to the installed design profiles next to this script')
     p.add_argument('--images', nargs='+', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--width', type=int, default=1280)
