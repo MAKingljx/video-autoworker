@@ -2,7 +2,10 @@
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 PRODUCT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('qwen_cover_design', PRODUCT / 'scripts/aiworker-qwen-cover.py')
@@ -55,6 +58,30 @@ class CoverDesignTest(unittest.TestCase):
         self.profiles['profiles'] = []
         with self.assertRaisesRegex(ValueError, 'qwen_cover_profile_unknown'):
             module.cover_design_prompt(self.design, self.profiles)
+
+    def test_profile_reference_policy_rejects_non_integer_limit(self):
+        self.profiles['profiles']['ice-documentary']['maximum_reference_images'] = True
+        with self.assertRaisesRegex(ValueError, 'qwen_cover_reference_policy_invalid'):
+            module.cover_design_prompt(self.design, self.profiles)
+
+    def test_complete_cover_reference_rejected_before_model_or_output(self):
+        # Regression for a style image overriding the requested new title.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            design = root / 'design.json'
+            profiles = root / 'profiles.json'
+            design.write_text(json.dumps(self.design))
+            profiles.write_text(json.dumps(self.profiles))
+            images = [root / 'subject.png', root / 'old-cover.png']
+            for p in images:
+                p.write_bytes(b'not-loaded-by-model')
+            output = root / 'uncreated' / 'output.png'
+            args = SimpleNamespace(design_file=str(design), profiles_file=str(profiles),
+                                   images=[str(p) for p in images], output=str(output))
+            with patch.object(module, 'readiness', return_value={}):
+                with self.assertRaisesRegex(ValueError, 'qwen_cover_profile_reference_limit'):
+                    module.generate(args)
+            self.assertFalse(output.parent.exists())
 
 
 if __name__ == '__main__':

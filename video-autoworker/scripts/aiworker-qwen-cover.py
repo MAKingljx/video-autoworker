@@ -42,6 +42,9 @@ def cover_design_prompt(design, profiles):
     profile = definitions.get(profile_name)
     if not isinstance(profile, dict):
         raise ValueError('qwen_cover_profile_unknown')
+    reference_limit = profile.get('maximum_reference_images', 1)
+    if type(reference_limit) is not int or not 1 <= reference_limit <= 3:
+        raise ValueError('qwen_cover_reference_policy_invalid')
     text_fields = design.get('text')
     if not isinstance(text_fields, dict) or set(text_fields) != set(TEXT_FIELDS):
         raise ValueError('qwen_cover_text_fields_invalid')
@@ -229,6 +232,8 @@ def generate(args):
         prompt_inputs = [design_path, profiles_path]
         design_metadata = {'designProfile': design['profile'], 'expectedText': design['text'],
                            'designAcceptance': profiles['profiles'][design['profile']]['acceptance']}
+        reference_limit = profiles['profiles'][design['profile']].get('maximum_reference_images', 1)
+        design_metadata['maximumReferenceImages'] = reference_limit
     else:
         if getattr(args, 'profiles_file', None):
             raise ValueError('qwen_profiles_require_design_file')
@@ -236,9 +241,12 @@ def generate(args):
         prompt_text = prompt.read_text(encoding='utf-8')
         prompt_inputs = [prompt]
         design_metadata = {}
+        reference_limit = 3
     images = [checked_input(p, 20 * 1024 * 1024) for p in args.images]
     if not 1 <= len(images) <= 3:
         raise ValueError('qwen_reference_count_invalid')
+    if len(images) > reference_limit:
+        raise ValueError('qwen_cover_profile_reference_limit')
     if any(p.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.webp') for p in images):
         raise ValueError('qwen_reference_format_invalid')
     if not 1 <= args.steps <= 60 or not 1 <= args.guidance <= 8 or not 0 <= args.seed < 2**31:

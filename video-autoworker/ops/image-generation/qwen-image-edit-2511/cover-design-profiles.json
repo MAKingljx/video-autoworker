@@ -2,6 +2,7 @@
   "schema": "aiworker-qwen-cover-profiles/v1",
   "profiles": {
     "ice-documentary": {
+      "maximum_reference_images": 1,
       "instructions": [
         "横版纪实封面，人物居右，设施和金属反光自然，左侧为主副标题区，不增加其他人。保留原人物身份、表情与主要设施。",
         "人物照明必须重新设计：镜头方向的中性柔光照亮额头、双颊、眼窝和嘴部；自然肤色，脸部明显比原帧蓝色阴影更亮；蓝光只作轮廓光，不能铺满脸。白衬衫保留褶皱和高光层次，不用整体增亮代替脸部补光。",
