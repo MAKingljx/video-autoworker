@@ -1,0 +1,14 @@
+{
+  "name": "@aiworker/openclaw-aiworker-image-command",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Session-scoped image commands for the shared H1 image application service",
+  "type": "module",
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "peerDependencies": { "openclaw": ">=2026.9.2" },
+  "peerDependenciesMeta": { "openclaw": { "optional": true } },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "compat": { "pluginApi": ">=2026.7.1" }
+  }
+}

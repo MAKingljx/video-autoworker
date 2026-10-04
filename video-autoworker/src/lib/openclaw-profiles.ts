@@ -3,7 +3,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { runCommand, runOpenClaw } from './command'
 
-export type OpenClawProfileId = 'gpt-main' | 'qwen-current' | 'qwen-weixin-new'
+export type OpenClawProfileId = 'gpt-main' | 'qwen-current' | 'qwen-weixin-new' | 'image-studio'
 export type OpenClawProfileAction = 'restart' | 'model-test' | 'agent-test'
 export type OpenClawProfileConfigFileId =
   | 'openclaw-json'
@@ -157,6 +157,17 @@ export const DEFAULT_OPENCLAW_PROFILES: OpenClawProfileDefinition[] = [
     model: 'qwen36-tools-local/default_model',
     channel: '微信 / WhatsApp',
     configPath: '/Users/heisenbergs-1/.openclaw-qwen-weixin-new/openclaw.json',
+  },
+  {
+    id: 'image-studio',
+    label: '图片创作入口',
+    gatewayPort: 19289,
+    launchAgent: 'ai.openclaw.image-studio',
+    agent: 'image-studio',
+    workspace: '/Users/heisenbergs-1/ai-worker/workspaces/image-studio',
+    model: 'qwen36-tools-local/default_model',
+    channel: '待配置',
+    configPath: '/Users/heisenbergs-1/.openclaw-image-studio/openclaw.json',
   },
 ]
 

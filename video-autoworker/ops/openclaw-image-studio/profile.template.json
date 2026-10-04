@@ -1,0 +1,35 @@
+{
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {"mode": "token"}
+  },
+  "channels": {},
+  "session": {"dmScope": "per-account-channel-peer"},
+  "browser": {"enabled": false},
+  "cron": {"enabled": false},
+  "agents": {
+    "defaults": {
+      "model": {"primary": "qwen36-tools-local/default_model"},
+      "maxConcurrent": 1
+    },
+    "entries": {"image-studio": {
+      "name": "图片工作室",
+      "tools": {
+        "profile": "minimal",
+        "alsoAllow": ["aiworker_generate_image"],
+        "deny": ["exec", "process", "browser", "nodes", "message", "sessions_spawn", "sessions_send", "cron", "gateway"]
+      }
+    }}
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": ["aiworker-image-command"],
+    "entries": {
+      "aiworker-image-command": {
+        "enabled": true,
+        "config": {"releaseReady": true}
+      }
+    }
+  }
+}

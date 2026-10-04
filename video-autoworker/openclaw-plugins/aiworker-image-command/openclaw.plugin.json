@@ -1,0 +1,14 @@
+{
+  "id": "aiworker-image-command",
+  "name": "AI-worker Image Command",
+  "version": "0.1.0",
+  "description": "Thin image submit, status, result and cancellation tools for image-studio.",
+  "activation": { "onStartup": true, "onCapabilities": ["tool"] },
+  "contracts": { "tools": ["aiworker_generate_image"] },
+  "toolMetadata": { "aiworker_generate_image": { "optional": true } },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": { "releaseReady": { "type": "boolean" } }
+  }
+}

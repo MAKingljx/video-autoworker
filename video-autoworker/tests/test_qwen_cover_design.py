@@ -1,5 +1,6 @@
 """Regression checks for the reusable design-input adapter, without model calls."""
 import importlib.util
+import fcntl
 import json
 from pathlib import Path
 import tempfile
@@ -82,6 +83,25 @@ class CoverDesignTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'qwen_cover_profile_reference_limit'):
                     module.generate(args)
             self.assertFalse(output.parent.exists())
+
+    def test_second_cli_cannot_load_model_or_create_intent_while_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            prompt = root / 'prompt.txt'
+            prompt.write_text('完整中文封面')
+            reference = root / 'source.png'
+            reference.write_bytes(b'input-only')
+            output = root / 'candidate.png'
+            args = SimpleNamespace(prompt_file=str(prompt), images=[str(reference)], output=str(output),
+                                   width=1280, height=720, steps=40, guidance=4, seed=301)
+            with (root / 'generation.lock').open('a') as held:
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with patch.object(module, 'readiness', return_value={}), patch.object(module, 'MODEL_ROOT', root), \
+                        patch.object(module, 'OUTPUT_ROOT', root), patch.object(module, 'generate_locked') as execute:
+                    with self.assertRaisesRegex(RuntimeError, 'qwen_generation_busy'):
+                        module.generate(args)
+                    execute.assert_not_called()
+                    self.assertFalse(output.with_suffix('.intent.json').exists())
 
 
 if __name__ == '__main__':

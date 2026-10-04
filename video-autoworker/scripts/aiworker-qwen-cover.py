@@ -266,6 +266,20 @@ def generate(args):
     if any(p.exists() for p in (output, receipt_path, intent)):
         raise FileExistsError('qwen_output_or_intent_already_exists')
     inputs = [{'path': str(p), 'sha256': digest(p)} for p in [*prompt_inputs, *images]]
+    # CLI and application worker share one model execution lock. A second
+    # caller gets a stable busy outcome rather than loading another BF16 copy.
+    with (MODEL_ROOT / 'generation.lock').open('a') as lock:
+        os.fchmod(lock.fileno(), 0o600)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if getattr(args, 'wait_for_model', False) else fcntl.LOCK_NB))
+        except BlockingIOError as error:
+            raise RuntimeError('qwen_generation_busy') from error
+        return generate_locked(args, ready, design_metadata, prompt_text, images,
+                               inputs, output, intent, receipt_path)
+
+
+def generate_locked(args, ready, design_metadata, prompt_text, images,
+                    inputs, output, intent, receipt_path):
     private_json(intent, {'currentState': 'RUNNING', 'pid': os.getpid(),
                           'repository': REPOSITORY, 'revision': REVISION,
                           'seed': args.seed, 'output': str(output)})
@@ -360,6 +374,7 @@ def main():
     p.add_argument('--steps', type=int, default=40)
     p.add_argument('--guidance', type=float, default=4.0)
     p.add_argument('--seed', type=int, default=111)
+    p.add_argument('--wait-for-model', action='store_true', help='Wait for the shared model lock; cancellation remains available')
     args = parser.parse_args()
     try:
         result = (download() if args.action == 'download' else

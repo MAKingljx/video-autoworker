@@ -46,6 +46,7 @@ Listening: 127.0.0.1:18889, [::1]:18889
 
   it('rejects unknown profiles and unsupported actions', () => {
     expect(() => assertProfileId('qwen-current')).not.toThrow()
+    expect(() => assertProfileId('image-studio')).not.toThrow()
     expect(() => assertProfileId('bad-profile')).toThrow('未知 OpenClaw 配置档')
 
     expect(() => assertProfileAction('model-test')).not.toThrow()
