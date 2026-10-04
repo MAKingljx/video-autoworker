@@ -268,6 +268,12 @@ def live_ports(port: int) -> set[int]:
             if (match := re.search(r":(\d+)$", line))}
 
 
+def security_interactive_input(arguments: list[str]) -> str:
+    # EOF ends security -i. A trailing 'quit' is an unknown command and can
+    # report failure even after the preceding credential write succeeded.
+    return ' '.join(shlex.quote(value) for value in arguments) + '\n'
+
+
 def keychain_token(home: Path, *, create: bool) -> str | None:
     """Use one fixed trusted actor; a new password travels only through stdin.
 
@@ -311,8 +317,8 @@ def keychain_token(home: Path, *, create: bool) -> str | None:
     token = secrets.token_hex(32)
     # No -U/update option, no unlock command, no old item/ACL mutation. security
     # -i may echo the command; all output is captured and never forwarded.
-    command = " ".join(shlex.quote(value) for value in ["add-generic-password", "-a", TOKEN_ACCOUNT,
-        "-s", TOKEN_SERVICE, "-w", token, "-T", "/usr/bin/security", keychain_path]) + "\nquit\n"
+    command = security_interactive_input(["add-generic-password", "-a", TOKEN_ACCOUNT,
+        "-s", TOKEN_SERVICE, "-w", token, "-T", "/usr/bin/security", keychain_path])
     result = subprocess.run(["/usr/bin/security", "-i"], input=command, env=env,
                             capture_output=True, text=True, timeout=30)
     require(result.returncode == 0, f"keychain_create_failed_osstatus_{-25308 if result.returncode == 36 else result.returncode}")

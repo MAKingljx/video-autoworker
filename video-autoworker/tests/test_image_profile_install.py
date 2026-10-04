@@ -30,6 +30,14 @@ def public_model():
 
 
 class ProfileInstallTests(unittest.TestCase):
+    @unittest.skipUnless(os.path.exists('/usr/bin/security'), 'Requires macOS security CLI')
+    def test_real_interactive_cli_ends_at_eof_without_false_failure(self):
+        # Read-only help exercises the actual transport without creating items.
+        result = subprocess.run(['/usr/bin/security', '-i'],
+                                input=install.security_interactive_input(['help']),
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+
     def test_profile_isolated_secretref_channels_closed_and_tools_narrow(self):
         config = install.profile_config(Path("/Users/h1"), 19289,
             Path("/Users/h1/ai-worker/services/image/plugin"), "http://127.0.0.1:18095",
