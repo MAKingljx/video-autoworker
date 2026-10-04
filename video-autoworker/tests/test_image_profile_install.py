@@ -356,6 +356,69 @@ class ProfileInstallTests(unittest.TestCase):
             self.assertEqual(fixture.keychain_creates, 1)
             self.assertEqual(len([command for command in fixture.commands if "install" in command]), 1)
 
+    def test_plugin_only_update_changes_only_path_and_preserves_install_source_and_keychain(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture, new_plugin = plugin_update_fixture(Path(task_dir).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time, "sleep"):
+                install.main(fixture.arguments("--apply"))
+                state = fixture.home / ".openclaw-image-studio"
+                before = json.loads((state / "openclaw.json").read_bytes())
+                workspace = {name: (fixture.home / "ai-worker/workspaces/image-studio" / name).read_bytes() for name in ("AGENTS.md", "IDENTITY.md")}
+                self.assertEqual(install.main(fixture.plugin_arguments("--apply", new_plugin)), 0)
+            after = json.loads((state / "openclaw.json").read_bytes())
+            self.assertEqual(after["plugins"]["load"]["paths"], [str(new_plugin)])
+            after["plugins"]["load"]["paths"] = before["plugins"]["load"]["paths"]
+            self.assertEqual(after, before)
+            receipt = json.loads((fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json").read_bytes())
+            self.assertEqual(receipt["sourceCommit"], "b" * 40)
+            self.assertEqual(receipt["originalInstallSourceCommit"], "b" * 40)
+            self.assertEqual(receipt["pluginSourceCommit"], "d" * 40)
+            self.assertEqual(receipt["pluginArtifact"]["pluginRoot"], str(new_plugin))
+            self.assertEqual(receipt["currentState"], "SERVICE_HEALTHY_FEISHU_DISABLED")
+            self.assertEqual(fixture.keychain_creates, 1)
+            restarts = [command for command in fixture.commands if "restart" in command]
+            self.assertEqual(restarts, [[str(fixture.home / "ai-worker/bin/openclaw"), "--profile", "image-studio", "gateway", "restart", "--json"]])
+            self.assertTrue(all((fixture.home / "ai-worker/workspaces/image-studio" / name).read_bytes() == raw for name, raw in workspace.items()))
+
+    def test_plugin_update_reuses_fresh_official_watcher_restart_without_second_restart(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture, new_plugin = plugin_update_fixture(Path(task_dir).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time, "sleep"):
+                install.main(fixture.arguments("--apply"))
+                fixture.watcher_restart = True
+                install.main(fixture.plugin_arguments("--apply", new_plugin))
+            self.assertFalse(any("restart" in command for command in fixture.commands))
+            receipt = json.loads((fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json").read_bytes())
+            self.assertEqual(receipt["pluginUpdateEvidence"]["restartMethod"], "official_config_watcher")
+
+    def test_plugin_update_rejects_config_old_package_drift_and_busy_profile(self):
+        for scenario, error in [("config", "image_profile_payload_drift"), ("package", "plugin_artifact_members_or_digest_drift"),
+                                ("busy", "image_profile_idle_unproven")]:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as task_dir:
+                fixture, new_plugin = plugin_update_fixture(Path(task_dir).resolve())
+                with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time, "sleep"):
+                    install.main(fixture.arguments("--apply"))
+                    if scenario == "config":
+                        config = fixture.home / ".openclaw-image-studio/openclaw.json"
+                        config.write_bytes(config.read_bytes() + b" ")
+                    elif scenario == "package":
+                        (fixture.plugin / "openclaw.plugin.json").write_text('{"id":"aiworker-image-command","changed":true}')
+                    else:
+                        fixture.active_tasks = 1
+                    with self.assertRaisesRegex(install.InstallError, error):
+                        install.main(fixture.plugin_arguments("--apply", new_plugin))
+                self.assertFalse(any("restart" in command for command in fixture.commands))
+
+    def test_plugin_update_dry_run_never_changes_configuration_or_creates_backup(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture, new_plugin = plugin_update_fixture(Path(task_dir).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                install.main(fixture.arguments("--apply"))
+                before = fixture.managed_bytes()
+                install.main(fixture.plugin_arguments("--dry-run", new_plugin))
+            self.assertEqual(fixture.managed_bytes(), before)
+            self.assertFalse((fixture.home / "ai-worker/backups/openclaw-image-studio").exists())
+
 
 class FakeFunction:
     def __init__(self, callback):
@@ -416,6 +479,7 @@ class InstallFixture:
         self.secret = None
         self.fail_validation = False
         self.fail_health = False
+        self.gateway_pid, self.active_tasks, self.watcher_restart = None, 0, False
         self.plugin = home / "ai-worker/services/image/plugin"
         for directory in [self.plugin, home / "ai-worker/bin", home / "ai-worker/node/current/bin",
                           home / "Library/LaunchAgents", home / "ai-worker/state"]:
@@ -435,6 +499,10 @@ class InstallFixture:
         return [mode, "--plugin-root", str(self.plugin), "--model-provider-file", str(self.provider),
                 "--source-commit", commit, "--expected-openclaw-version", "2026.9.2"]
 
+    def plugin_arguments(self, mode, plugin):
+        return [mode, "--update-plugin-only", "--plugin-root", str(plugin), "--source-commit", "d" * 40,
+                "--expected-openclaw-version", "2026.9.2"]
+
     @contextlib.contextmanager
     def patches(self):
         with patch.object(install.Path, "home", return_value=self.home), \
@@ -442,8 +510,9 @@ class InstallFixture:
              patch.object(install, "run", side_effect=self.run), \
              patch.object(install, "keychain_token", side_effect=self.keychain), \
              patch.object(install, "live_ports", return_value=set()), \
-             patch.object(install, "source_identity", side_effect=lambda source, plugin, commit, *args: {"mode": "canonical_git", "sourceCommit": commit,
-                 "payloadInventorySha256": "c" * 64, "pluginInventorySha256": install.sha(install.encoded(install.bounded_files(plugin)))}):
+             patch.object(install, "source_identity", side_effect=lambda source, plugin, commit, *args, **kwargs: {"mode": "canonical_git", "sourceCommit": commit,
+                 "payloadInventorySha256": "c" * 64, "pluginInventorySha256": install.sha(install.encoded({name: digest for name, digest in install.bounded_files(plugin).items()
+                 if not (kwargs.get("exclude_plugin_manifest") and name == "manifest.json")}))}):
             yield
 
     def keychain(self, home, *, create):
@@ -455,8 +524,13 @@ class InstallFixture:
     def run(self, command, env, *, check=True, timeout=120):
         self.commands.append(command)
         if command[:2] == ["/bin/launchctl", "print"]:
-            return subprocess.CompletedProcess(command, 113, "", "Could not find service")
+            return subprocess.CompletedProcess(command, 113, "", "Could not find service") if self.gateway_pid is None else subprocess.CompletedProcess(command, 0, f"\tpid = {self.gateway_pid}\n", "")
+        if command[0] == "/usr/sbin/lsof":
+            return subprocess.CompletedProcess(command, 0, str(self.gateway_pid) + "\n", "")
         stdout, code = "{}", 0
+        if "status" in command:
+            stdout = json.dumps({"tasks": {"active": self.active_tasks, "byStatus": {"queued": 0, "running": 0}},
+                                 "degradedPlugins": [], "degradedSecretOwners": []})
         if "--version" in command:
             stdout = "OpenClaw 2026.9.2"
         if command[1:] == ["--version"] and command[0].endswith("/node"):
@@ -465,9 +539,14 @@ class InstallFixture:
             if check:
                 raise install.InstallError("component_command_failed")
             code = 1
+        if "validate" in command and self.watcher_restart and self.gateway_pid is not None:
+            self.gateway_pid += 1
+        if "restart" in command:
+            self.gateway_pid += 1
         if "health" in command and self.fail_health:
             code = 1
         if "install" in command:
+            self.gateway_pid = 123
             installed = {"Label": install.LABEL, "EnvironmentVariables": {
                 "OPENCLAW_PROFILE": install.PROFILE,
                 "OPENCLAW_GATEWAY_PORT": "19289",
@@ -498,6 +577,26 @@ def artifact_fixture(base):
         "artifactRoot": str(source), "files": install.bounded_files(source)}))
     manifest.chmod(0o600)
     return source, plugin, manifest
+
+
+def plugin_update_fixture(home):
+    fixture = InstallFixture(home)
+    old_release = home / ("ai-worker/services/image-generation/releases/" + "b" * 40)
+    old_plugin = old_release / "openclaw-plugins/aiworker-image-command"
+    old_plugin.mkdir(parents=True, mode=0o700)
+    (old_plugin / "openclaw.plugin.json").write_bytes((fixture.plugin / "openclaw.plugin.json").read_bytes())
+    old_manifest = {"schema": "aiworker-image-service-artifact/v1", "sourceCommit": "b" * 40,
+        "sourceRepository": install.SOURCE_REPOSITORY, "files": install.bounded_files(old_release)}
+    install.create_file(old_release / "manifest.json", install.encoded(old_manifest))
+    fixture.plugin = old_plugin
+    new_plugin = home / ("ai-worker/services/openclaw-image-command/releases/" + "d" * 40)
+    new_plugin.mkdir(parents=True, mode=0o700)
+    (new_plugin / "openclaw.plugin.json").write_bytes((old_plugin / "openclaw.plugin.json").read_bytes())
+    (new_plugin / "index.js").write_text("export default api => {}")
+    new_manifest = {"schema": "aiworker-openclaw-image-command-artifact/v1", "sourceCommit": "d" * 40,
+        "repository": install.SOURCE_REPOSITORY, "files": install.bounded_files(new_plugin)}
+    install.create_file(new_plugin / "manifest.json", install.encoded(new_manifest))
+    return fixture, new_plugin
 
 
 if __name__ == "__main__":

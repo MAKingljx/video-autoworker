@@ -97,11 +97,15 @@ def bounded_files(directory: Path) -> dict[str, str]:
 
 
 def source_identity(source: Path, plugin: Path, commit: str, manifest_path: Path | None = None,
-                    manifest_sha: str | None = None, extra_sources: tuple[Path, ...] = ()) -> dict:
+                    manifest_sha: str | None = None, extra_sources: tuple[Path, ...] = (),
+                    exclude_plugin_manifest: bool = False) -> dict:
     required = [source / "scripts/install-openclaw-image-studio.py", source / "scripts/openclaw-keychain-secretref.sh",
                 *sorted((source / "ops/openclaw-image-studio").glob("*"))]
     required.extend(extra_sources)
     plugin_members = bounded_files(plugin)
+    if exclude_plugin_manifest:
+        require("manifest.json" in plugin_members, "plugin_artifact_manifest_required")
+        plugin_members.pop("manifest.json")
     required.extend(source / "openclaw-plugins/aiworker-image-command" / name for name in plugin_members)
     if manifest_path is not None:
         require(manifest_sha is not None and re.fullmatch(r"[a-f0-9]{64}", manifest_sha) is not None,
@@ -438,14 +442,12 @@ def verify_prepared_adoption(home: Path, previous: str, receipt: dict, payload: 
     return before
 
 
-def adopt_prepared(home: Path, receipt_file: Path, receipt: dict, before: dict, payload: dict,
-                   state: Path, workspace: Path, commit: str, source: dict) -> dict:
+def verified_profile_backup(home: Path, files: dict[str, bytes]) -> Path:
     backup_root = home / "ai-worker/backups/openclaw-image-studio"
     safe_path(backup_root)
     backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     backup = backup_root / f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{time.time_ns()}"
     backup.mkdir(mode=0o700)
-    files = dict(before, **{"install-receipt.json": encoded(receipt)})
     for name, raw in files.items():
         create_file(backup / name, raw)
     manifest = {"schema": "aiworker-image-studio-recovery/v1", "files": {name: sha(raw) for name, raw in files.items()}}
@@ -458,6 +460,12 @@ def adopt_prepared(home: Path, receipt_file: Path, receipt: dict, before: dict, 
             "prepared_recovery_integrity_failed")
     for directory in histories[:-2]:
         shutil.rmtree(directory)
+    return backup
+
+
+def adopt_prepared(home: Path, receipt_file: Path, receipt: dict, before: dict, payload: dict,
+                   state: Path, workspace: Path, commit: str, source: dict) -> dict:
+    backup = verified_profile_backup(home, dict(before, **{"install-receipt.json": encoded(receipt)}))
     for name, replacement in payload.items():
         path = state / name if name == "openclaw.json" else workspace / name
         require(private_file(path) == before[name], "prepared_adoption_cas_failed")
@@ -473,6 +481,184 @@ def adopt_prepared(home: Path, receipt_file: Path, receipt: dict, before: dict, 
         "recoveryBackup": str(backup), "errorCode": None, "nextAction": "validate_config_then_install_service"})
 
 
+def plugin_artifact(home: Path, plugin: Path, *, standalone_commit: str | None = None) -> dict:
+    if standalone_commit is not None:
+        require(plugin == home / "ai-worker/services/openclaw-image-command/releases" / standalone_commit,
+                "immutable_plugin_release_path_required")
+        manifest_path, artifact_root = plugin / "manifest.json", plugin
+        raw = owned_public_file(manifest_path)
+        manifest = json.loads(raw)
+        require(set(manifest) == {"schema", "sourceCommit", "repository", "files"}
+            and manifest["schema"] == "aiworker-openclaw-image-command-artifact/v1"
+            and manifest["sourceCommit"] == standalone_commit and manifest["repository"] == SOURCE_REPOSITORY,
+            "plugin_artifact_identity_invalid")
+        members = bounded_files(plugin)
+        package_members = dict(members)
+        package_members.pop("manifest.json")
+    elif plugin.parent.name == "openclaw-plugins" and plugin.name == "aiworker-image-command":
+        artifact_root = plugin.parent.parent
+        require(artifact_root.parent == home / "ai-worker/services/image-generation/releases"
+            and re.fullmatch(r"[a-f0-9]{40}", artifact_root.name) is not None, "previous_plugin_release_path_invalid")
+        manifest_path = artifact_root / "manifest.json"
+        raw = owned_public_file(manifest_path)
+        manifest = json.loads(raw)
+        require(manifest.get("schema") == "aiworker-image-service-artifact/v1"
+            and manifest.get("sourceCommit") == artifact_root.name
+            and manifest.get("sourceRepository") == SOURCE_REPOSITORY, "previous_plugin_manifest_identity_invalid")
+        members, package_members = bounded_files(artifact_root), bounded_files(plugin)
+    else:
+        require(plugin.parent == home / "ai-worker/services/openclaw-image-command/releases"
+            and re.fullmatch(r"[a-f0-9]{40}", plugin.name) is not None, "previous_plugin_release_path_invalid")
+        return plugin_artifact(home, plugin, standalone_commit=plugin.name)
+    require(isinstance(manifest.get("files"), dict) and members == {**manifest["files"], "manifest.json": sha(raw)},
+            "plugin_artifact_members_or_digest_drift")
+    require(json.loads(owned_public_file(plugin / "openclaw.plugin.json")).get("id") == "aiworker-image-command",
+            "plugin_identity_invalid")
+    return {"sourceCommit": manifest["sourceCommit"], "manifestSha256": sha(raw),
+        "artifactTreeSha256": sha(encoded(members)), "pluginTreeSha256": sha(encoded(package_members)),
+        "pluginRoot": str(plugin)}
+
+
+def profile_process_identity(home: Path, port: int) -> int:
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    job = run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], env)
+    match = re.search(r"^\s*pid = ([0-9]+)\s*$", job.stdout, re.MULTILINE)
+    require(match is not None, "image_profile_launchagent_pid_unknown")
+    pid = int(match.group(1))
+    listeners = run(["/usr/sbin/lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"], env).stdout.split()
+    require(listeners == [str(pid)], "image_profile_listener_not_owned_launchagent")
+    return pid
+
+
+def profile_idle(binary: Path, env: dict) -> dict:
+    result = run([str(binary), "--profile", PROFILE, "gateway", "call", "status", "--json"], env)
+    value = json.loads(result.stdout)
+    require(isinstance(value, dict), "image_profile_status_shape_invalid")
+    # 2026.9.2's real status counters; absent activeSessionCount is not zero.
+    counters = value.get("tasks", {})
+    status = counters.get("byStatus", {}) if isinstance(counters, dict) else {}
+    require(isinstance(counters, dict) and type(counters.get("active")) is int and counters["active"] == 0
+        and isinstance(status, dict) and all(type(status.get(key)) is int and status[key] == 0 for key in ("queued", "running")),
+        "image_profile_idle_unproven")
+    require(value.get("degradedPlugins") == [] and value.get("degradedSecretOwners") == [], "image_profile_runtime_degraded")
+    health = run([str(binary), "--profile", PROFILE, "health", "--json"], env)
+    return {"healthSha256": sha(health.stdout.encode()), "statusSha256": sha(result.stdout.encode()),
+        "activity": {"active": 0, "queued": 0, "running": 0}}
+
+
+def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path, env: dict,
+                       node_version: str) -> int:
+    state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
+    receipt_path = home / "ai-worker/state/openclaw-image-studio/install-receipt.json"
+    config_path, plist = state / "openclaw.json", home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    receipt = json.loads(private_file(receipt_path))
+    require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
+        and receipt.get("currentState") == "SERVICE_HEALTHY_FEISHU_DISABLED" and receipt.get("feishuEnabled") is False,
+        "healthy_owned_image_profile_required")
+    require(receipt.get("runtime") == {"openclaw": args.expected_openclaw_version, "node": node_version}, "image_profile_runtime_drift")
+    before = {"openclaw.json": private_file(config_path), "AGENTS.md": private_file(workspace / "AGENTS.md"),
+              "IDENTITY.md": private_file(workspace / "IDENTITY.md")}
+    require({name: sha(raw) for name, raw in before.items()} == receipt.get("payloadSha256"), "image_profile_payload_drift")
+    config = json.loads(before["openclaw.json"])
+    require(config.get("channels") == {} and config.get("agents", {}).get("entries", {}).keys() == {PROFILE}
+        and config.get("gateway", {}).get("port") == args.gateway_port, "image_profile_boundary_drift")
+    require(verify_installed_service(plist, state, before["openclaw.json"]) == receipt.get("serviceEvidence"), "image_profile_service_drift")
+    paths = config.get("plugins", {}).get("load", {}).get("paths")
+    require(isinstance(paths, list) and len(paths) == 1, "one_owned_image_plugin_required")
+    old_plugin = safe_path(Path(paths[0]), file=False)
+    old_artifact = plugin_artifact(home, old_plugin)
+    recorded_old = receipt.get("pluginArtifact")
+    if recorded_old is not None:
+        require(old_artifact == recorded_old, "installed_plugin_artifact_drift")
+    else:
+        require(old_artifact["pluginTreeSha256"] == receipt.get("sourceEvidence", {}).get("pluginInventorySha256"),
+                "installed_plugin_source_drift")
+    new_artifact = plugin_artifact(home, plugin, standalone_commit=args.source_commit)
+    source = source_identity(ROOT, plugin, args.source_commit, exclude_plugin_manifest=True)
+    pid = profile_process_identity(home, args.gateway_port)
+    token = keychain_token(home, create=False)
+    require(token is not None, "gateway_secret_missing")
+    health_env = dict(env, OPENCLAW_GATEWAY_TOKEN=token)
+    idle = profile_idle(binary, health_env)
+    if str(plugin) == paths[0]:
+        require(recorded_old == new_artifact and receipt.get("pluginSourceEvidence") == source, "plugin_update_source_drift")
+        print(json.dumps({"currentState": "UNCHANGED_HEALTHY_FEISHU_DISABLED", "profile": PROFILE}))
+        return 0
+    config["plugins"]["load"]["paths"] = [str(plugin)]
+    replacement = encoded(config)
+    original = json.loads(before["openclaw.json"])
+    config["plugins"]["load"]["paths"] = original["plugins"]["load"]["paths"]
+    require(config == original, "plugin_update_changes_outside_load_path")
+    print(json.dumps({"currentState": "PLUGIN_UPDATE_READY", "profile": PROFILE, "gatewayPort": args.gateway_port,
+        "pluginSourceCommit": args.source_commit, "pluginTreeSha256": new_artifact["pluginTreeSha256"], "feishuEnabled": False}))
+    if args.dry_run:
+        return 0
+    with installation_lock(receipt_path.parent.parent / ".openclaw-image-studio-install.lock"):
+        require(private_file(receipt_path) == encoded(receipt) and private_file(config_path) == before["openclaw.json"],
+                "plugin_update_cas_changed")
+        require(profile_process_identity(home, args.gateway_port) == pid, "plugin_update_gateway_pid_changed")
+        profile_idle(binary, health_env)
+        require(plugin_artifact(home, old_plugin) == old_artifact
+            and plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact,
+            "plugin_update_artifact_changed")
+        # Reuse the verified profile recovery object (config/workspace/receipt)
+        # without adopting another install commit or writing unchanged workspace.
+        backup = verified_profile_backup(home, {**before, "install-receipt.json": encoded(receipt)})
+        temporary = config_path.parent / f".openclaw.plugin-update-{os.getpid()}.json"
+        create_file(temporary, replacement)
+        require(private_file(config_path) == before["openclaw.json"], "plugin_update_config_cas_changed")
+        os.replace(temporary, config_path)
+        require(private_file(config_path) == replacement, "plugin_update_config_readback_failed")
+        try:
+            run([str(binary), "--profile", PROFILE, "config", "validate"], env)
+            try:
+                after_validate_pid = profile_process_identity(home, args.gateway_port)
+            except InstallError:
+                after_validate_pid = None  # Official config watcher may be restarting.
+            for _ in range(3):
+                if after_validate_pid != pid:
+                    break
+                time.sleep(0.2)
+                try:
+                    after_validate_pid = profile_process_identity(home, args.gateway_port)
+                except InstallError:
+                    after_validate_pid = None
+            restart_method = "official_config_watcher"
+            if after_validate_pid == pid:
+                profile_idle(binary, health_env)
+                run([str(binary), "--profile", PROFILE, "gateway", "restart", "--json"], env)
+                restart_method = "official_gateway_restart"
+            deadline = time.monotonic() + args.startup_timeout
+            while True:
+                try:
+                    health = profile_idle(binary, health_env)
+                    new_pid = profile_process_identity(home, args.gateway_port)
+                    require(new_pid != pid, "plugin_update_fresh_restart_unproven")
+                    break
+                except (InstallError, OSError, ValueError, subprocess.SubprocessError):
+                    require(time.monotonic() < deadline, "plugin_update_health_failed")
+                    time.sleep(1)
+            service = verify_installed_service(plist, state, replacement)
+            require(plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact
+                and private_file(config_path) == replacement, "plugin_update_postrestart_drift")
+            require(all(private_file(workspace / name) == before[name] for name in ("AGENTS.md", "IDENTITY.md")), "plugin_update_workspace_drift")
+            receipt = advance_receipt(receipt_path, receipt, {"originalInstallSourceCommit": receipt.get("originalInstallSourceCommit", receipt["sourceCommit"]),
+                "pluginSourceCommit": args.source_commit, "pluginSourceEvidence": source, "pluginArtifact": new_artifact,
+                "payloadSha256": {**receipt["payloadSha256"], "openclaw.json": sha(replacement)}, "serviceEvidence": service,
+                "healthEvidenceSha256": health["healthSha256"], "recoveryBackup": str(backup), "errorCode": None,
+                "pluginUpdateEvidence": {"previousGatewayPid": pid, "gatewayPid": new_pid, "restartMethod": restart_method,
+                    "statusSha256": health["statusSha256"]},
+                "nextAction": "configure_dedicated_feishu_app_when_user_ready"})
+        except (InstallError, OSError, ValueError, subprocess.SubprocessError) as error:
+            code = str(error) if isinstance(error, InstallError) else "plugin_update_probe_or_io_failed"
+            advance_receipt(receipt_path, receipt, {"currentState": "PLUGIN_UPDATE_NEEDS_INSPECTION", "errorCode": code,
+                "recoveryBackup": str(backup), "nextAction": "inspect_only_image_studio_update_and_verified_recovery"})
+            raise
+    print(json.dumps({"currentState": receipt["currentState"], "profile": PROFILE, "pluginSourceCommit": args.source_commit,
+        "gatewayPid": new_pid, "feishuEnabled": False}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -480,11 +666,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Continue one matching, owned incomplete installation.")
     parser.add_argument("--adopt-prepared", action="store_true", help="Move a known inactive prepared profile to identical new plugin source.")
+    parser.add_argument("--update-plugin-only", action="store_true", help="Update only one owned healthy image profile's immutable image plugin.")
     parser.add_argument("--previous-source-commit")
     parser.add_argument("--gateway-port", type=int, default=19289)
     parser.add_argument("--image-endpoint", default="http://127.0.0.1:18095")
     parser.add_argument("--plugin-root", required=True, type=Path)
-    parser.add_argument("--model-provider-file", required=True, type=Path)
+    parser.add_argument("--model-provider-file", type=Path)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--expected-openclaw-version", required=True)
     parser.add_argument("--artifact-manifest", type=Path,
@@ -492,6 +679,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact-sha256", help="Expected SHA-256 supplied by the verified release controller.")
     parser.add_argument("--startup-timeout", type=int, default=90)
     args = parser.parse_args(argv)
+    require(not args.update_plugin_only or not any((args.resume, args.adopt_prepared, args.previous_source_commit,
+        args.artifact_manifest, args.artifact_sha256, args.model_provider_file)), "plugin_update_mode_options_invalid")
+    require(args.update_plugin_only or args.model_provider_file is not None, "model_provider_file_required")
     require(not args.resume or args.apply, "resume_requires_apply")
     require(not args.adopt_prepared or not args.resume, "prepared_adoption_mode_invalid")
     require(bool(args.previous_source_commit) == args.adopt_prepared, "prepared_adoption_previous_commit_required")
@@ -506,9 +696,10 @@ def main(argv: list[str] | None = None) -> int:
     require(plugin.is_relative_to(home / "ai-worker/services"), "managed_plugin_path_required")
     manifest = json.loads((plugin / "openclaw.plugin.json").read_bytes())
     require(manifest.get("id") == "aiworker-image-command", "plugin_identity_invalid")
-    source = source_identity(ROOT, plugin, args.source_commit, args.artifact_manifest, args.artifact_sha256)
-    model = provider_config(json.loads(private_file(args.model_provider_file)))
-    config = profile_config(home, args.gateway_port, plugin, args.image_endpoint, model)
+    if not args.update_plugin_only:
+        source = source_identity(ROOT, plugin, args.source_commit, args.artifact_manifest, args.artifact_sha256)
+        model = provider_config(json.loads(private_file(args.model_provider_file)))
+        config = profile_config(home, args.gateway_port, plugin, args.image_endpoint, model)
     binary, node = home / "ai-worker/bin/openclaw", home / "ai-worker/node/current/bin/node"
     require(binary.is_file() and os.access(binary, os.X_OK) and node.is_file() and os.access(node, os.X_OK),
             "managed_openclaw_runtime_missing")
@@ -522,6 +713,8 @@ def main(argv: list[str] | None = None) -> int:
     require(re.search(rf"\b{re.escape(args.expected_openclaw_version)}\b", version) is not None,
             "openclaw_version_mismatch")
     node_version = run([str(node), "--version"], env).stdout.strip()
+    if args.update_plugin_only:
+        return update_plugin_only(args, home, plugin, binary, node, env, node_version)
     state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
     receipt_dir = home / "ai-worker/state/openclaw-image-studio"
     receipt_path = receipt_dir / "install-receipt.json"

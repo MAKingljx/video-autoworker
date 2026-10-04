@@ -1,6 +1,6 @@
 {
   "name": "@aiworker/openclaw-aiworker-image-command",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Session-scoped image commands for the shared H1 image application service",
   "type": "module",
