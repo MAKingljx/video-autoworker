@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -128,22 +129,47 @@ class ProfileInstallTests(unittest.TestCase):
 
     def test_keychain_existing_secret_never_written_or_replaced(self):
         framework = FakeSecurity("a" * 64)
-        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework):
+        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework), \
+             patch.object(install.subprocess, "run", side_effect=framework.security_actor):
             self.assertEqual(install.keychain_token(Path("/Users/h1"), create=True), "a" * 64)
         self.assertEqual(framework.add_count, 0)
 
     def test_keychain_only_item_not_found_can_create_and_create_is_read_back(self):
         framework = FakeSecurity(None)
-        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework):
+        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework), \
+             patch.object(install.subprocess, "run", side_effect=framework.security_actor):
             token = install.keychain_token(Path("/Users/h1"), create=True)
         self.assertRegex(token, "^[a-f0-9]{64}$")
         self.assertEqual(framework.value, token)
         self.assertEqual(framework.add_count, 1)
         framework = FakeSecurity(None, status=-25293)
-        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework):
-            with self.assertRaisesRegex(install.InstallError, "keychain_read_failed"):
+        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework), \
+             patch.object(install.subprocess, "run", side_effect=framework.security_actor):
+            with self.assertRaisesRegex(install.InstallError, "keychain_read_failed_osstatus"):
                 install.keychain_token(Path("/Users/h1"), create=True)
         self.assertEqual(framework.add_count, 0)
+
+    def test_inaccessible_session_keychain_stops_before_read_or_creation_without_retry(self):
+        framework = FakeSecurity(None)
+        framework.bits = 2
+        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework), \
+             patch.object(install.subprocess, "run") as actor:
+            with self.assertRaisesRegex(install.InstallError, "keychain_unavailable_in_current_session_use_authenticated_gui_context"):
+                install.keychain_token(Path("/Users/h1"), create=True)
+        actor.assert_not_called()
+
+    def test_new_token_only_stdin_and_fixed_security_actor_acl(self):
+        framework = FakeSecurity(None)
+        with patch.object(install.platform, "system", return_value="Darwin"), patch.object(install.ctypes, "CDLL", return_value=framework), \
+             patch.object(install.subprocess, "run", side_effect=framework.security_actor):
+            token = install.keychain_token(Path("/Users/h1"), create=True)
+        create_call = [call for call in framework.calls if call[0] == ["/usr/bin/security", "-i"]][0]
+        self.assertNotIn(token, " ".join(create_call[0]))
+        words = shlex.split(create_call[1]["input"].splitlines()[0])
+        self.assertEqual(words[words.index("-T") + 1], "/usr/bin/security")
+        self.assertNotIn("-U", words)
+        self.assertEqual(words[words.index("-w") + 1], token)
+        self.assertTrue(create_call[1]["capture_output"])
 
     def test_complete_install_and_repeated_apply_preserve_existing_files_and_token(self):
         with tempfile.TemporaryDirectory() as task_dir:
@@ -294,6 +320,34 @@ class ProfileInstallTests(unittest.TestCase):
             with self.assertRaisesRegex(install.InstallError, "service_embedded_secret_rejected"):
                 install.verify_installed_service(plist, state, config)
 
+    def test_known_inactive_prepared_profile_adopts_same_plugin_without_replacing_state(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture = InstallFixture(Path(task_dir).resolve())
+            old_plugin = fixture.home / ("ai-worker/services/image-generation/releases/" + "b" * 40) / "openclaw-plugins/aiworker-image-command"
+            old_plugin.mkdir(parents=True, mode=0o700)
+            (old_plugin / "openclaw.plugin.json").write_bytes((fixture.plugin / "openclaw.plugin.json").read_bytes())
+            fixture.plugin = old_plugin
+            fixture.fail_validation = True
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaises(install.InstallError):
+                    install.main(fixture.arguments("--apply"))
+                state = fixture.home / ".openclaw-image-studio"
+                identity = (state.stat().st_dev, state.stat().st_ino)
+                new_plugin = fixture.home / ("ai-worker/services/image-generation/releases/" + "d" * 40) / "openclaw-plugins/aiworker-image-command"
+                new_plugin.mkdir(parents=True, mode=0o700)
+                (new_plugin / "openclaw.plugin.json").write_bytes((old_plugin / "openclaw.plugin.json").read_bytes())
+                fixture.plugin = new_plugin
+                fixture.fail_validation = False
+                args = fixture.arguments("--apply", commit="d" * 40) + ["--adopt-prepared", "--previous-source-commit", "b" * 40]
+                self.assertEqual(install.main(args), 0)
+            self.assertEqual((state.stat().st_dev, state.stat().st_ino), identity)
+            receipt = json.loads((fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json").read_bytes())
+            self.assertEqual(receipt["sourceCommit"], "d" * 40)
+            self.assertEqual(receipt["previousSourceCommit"], "b" * 40)
+            self.assertTrue(Path(receipt["recoveryBackup"]).exists())
+            self.assertEqual(fixture.keychain_creates, 1)
+            self.assertEqual(len([command for command in fixture.commands if "install" in command]), 1)
+
 
 class FakeFunction:
     def __init__(self, callback):
@@ -306,7 +360,9 @@ class FakeFunction:
 class FakeSecurity:
     def __init__(self, value, status=-25300):
         self.value, self.status, self.add_count, self.buffers = value, status, 0, []
+        self.bits, self.calls = 7, []
         self.SecKeychainOpen = FakeFunction(self.open)
+        self.SecKeychainGetStatus = FakeFunction(self.get_status)
         self.SecKeychainFindGenericPassword = FakeFunction(self.find)
         self.SecKeychainAddGenericPassword = FakeFunction(self.add)
         self.SecKeychainItemFreeContent = FakeFunction(lambda *args: 0)
@@ -314,6 +370,21 @@ class FakeSecurity:
     def open(self, path, output):
         ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p))[0] = 123
         return 0
+
+    def get_status(self, keychain, output):
+        ctypes.cast(output, ctypes.POINTER(ctypes.c_uint32))[0] = self.bits
+        return 0
+
+    def security_actor(self, command, **kwargs):
+        self.calls.append((command, kwargs))
+        if command == ["/usr/bin/security", "-i"]:
+            words = shlex.split(kwargs["input"].splitlines()[0])
+            self.value = words[words.index("-w") + 1]
+            self.add_count += 1
+            return subprocess.CompletedProcess(command, 0, kwargs["input"], "")
+        if self.value is None:
+            return subprocess.CompletedProcess(command, 44 if self.status == -25300 else 51, "", "not found or inaccessible")
+        return subprocess.CompletedProcess(command, 0, self.value + "\n", "")
 
     def find(self, keychain, slen, service, alen, account, length, data, item):
         if self.value is None:
@@ -352,9 +423,9 @@ class InstallFixture:
         self.provider.write_text(json.dumps(public_model()))
         self.provider.chmod(0o600)
 
-    def arguments(self, mode):
+    def arguments(self, mode, *, commit="b" * 40):
         return [mode, "--plugin-root", str(self.plugin), "--model-provider-file", str(self.provider),
-                "--source-commit", "b" * 40, "--expected-openclaw-version", "2026.9.2"]
+                "--source-commit", commit, "--expected-openclaw-version", "2026.9.2"]
 
     @contextlib.contextmanager
     def patches(self):
@@ -363,8 +434,8 @@ class InstallFixture:
              patch.object(install, "run", side_effect=self.run), \
              patch.object(install, "keychain_token", side_effect=self.keychain), \
              patch.object(install, "live_ports", return_value=set()), \
-             patch.object(install, "source_identity", return_value={"mode": "canonical_git", "sourceCommit": "b" * 40,
-                 "payloadInventorySha256": "c" * 64, "pluginInventorySha256": "d" * 64}):
+             patch.object(install, "source_identity", side_effect=lambda source, plugin, commit, *args: {"mode": "canonical_git", "sourceCommit": commit,
+                 "payloadInventorySha256": "c" * 64, "pluginInventorySha256": install.sha(install.encoded(install.bounded_files(plugin)))}):
             yield
 
     def keychain(self, home, *, create):
@@ -375,6 +446,8 @@ class InstallFixture:
 
     def run(self, command, env, *, check=True, timeout=120):
         self.commands.append(command)
+        if command[:2] == ["/bin/launchctl", "print"]:
+            return subprocess.CompletedProcess(command, 113, "", "Could not find service")
         stdout, code = "{}", 0
         if "--version" in command:
             stdout = "OpenClaw 2026.9.2"

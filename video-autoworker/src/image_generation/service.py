@@ -408,8 +408,13 @@ class ImageJobs:
         healthy = bool(self.thread and self.thread.is_alive())
         with self.db() as db:
             counts = {row[0]: row[1] for row in db.execute('SELECT state,count(*) FROM image_jobs GROUP BY state')}
-        return {'currentState': 'READY' if healthy else 'WORKER_UNAVAILABLE',
-                'errorCode': None if healthy else 'image_worker_unavailable',
+            # Health is read through the application's own SQLite connection.
+            # External cold read-only WAL opens need not create journal files.
+            integrity = db.execute('PRAGMA quick_check').fetchone()[0]
+        ready = healthy and integrity == 'ok'
+        return {'currentState': 'READY' if ready else 'WORKER_UNAVAILABLE',
+                'errorCode': None if ready else 'image_worker_unavailable' if not healthy else 'image_database_integrity_failed',
                 'nextAction': 'none' if healthy else 'inspect_worker',
                 'sourceCommit': self.config.source_commit, 'concurrency': 1,
-                'counts': counts, 'databaseIdentity': {'device': self.db_path.stat().st_dev, 'inode': self.db_path.stat().st_ino}}
+                'counts': counts, 'databaseIntegrity': integrity,
+                'databaseIdentity': {'device': self.db_path.stat().st_dev, 'inode': self.db_path.stat().st_ino}}

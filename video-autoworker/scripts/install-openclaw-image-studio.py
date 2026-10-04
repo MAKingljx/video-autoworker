@@ -19,6 +19,7 @@ import plistlib
 import re
 import secrets
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -268,41 +269,54 @@ def live_ports(port: int) -> set[int]:
 
 
 def keychain_token(home: Path, *, create: bool) -> str | None:
-    """Use Security.framework so the secret never appears in argv or files."""
+    """Use one fixed trusted actor; a new password travels only through stdin.
+
+    H1's default SecKeychainAddGenericPassword ACL asked for unavailable GUI
+    interaction (-25308). The approved security actor has an explicit new-item
+    ACL and also performs readback; Python is not granted additional trust.
+    """
     require(platform.system() == "Darwin", "macos_keychain_required")
     security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
     security.SecKeychainOpen.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
     security.SecKeychainOpen.restype = ctypes.c_int32
-    security.SecKeychainFindGenericPassword.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
-        ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
-    security.SecKeychainFindGenericPassword.restype = ctypes.c_int32
-    security.SecKeychainAddGenericPassword.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
-        ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p]
-    security.SecKeychainAddGenericPassword.restype = ctypes.c_int32
-    security.SecKeychainItemFreeContent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    security.SecKeychainGetStatus.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    security.SecKeychainGetStatus.restype = ctypes.c_int32
     keychain = ctypes.c_void_p()
     status = security.SecKeychainOpen(str(home / "Library/Keychains/login.keychain-db").encode(), ctypes.byref(keychain))
-    require(status == 0, "keychain_open_failed")
-    account, service = TOKEN_ACCOUNT.encode(), TOKEN_SERVICE.encode()
-    length, data = ctypes.c_uint32(), ctypes.c_void_p()
-    status = security.SecKeychainFindGenericPassword(keychain, len(service), service, len(account), account,
-                                                    ctypes.byref(length), ctypes.byref(data), None)
-    if status == 0:
-        try:
-            token = ctypes.string_at(data, length.value).decode()
-        finally:
-            security.SecKeychainItemFreeContent(None, data)
+    require(status == 0, f"keychain_open_failed_osstatus_{status}")
+    bits = ctypes.c_uint32()
+    status = security.SecKeychainGetStatus(keychain, ctypes.byref(bits))
+    require(status == 0, f"keychain_status_failed_osstatus_{status}")
+    # GetStatus reflects this process's audit/login session. On H1 the same
+    # keychain is unavailable over SSH (2) but unlocked in the authenticated GUI
+    # LaunchAgent context (7); do not label that as a global user-lock failure.
+    require(bits.value & 1 != 0, "keychain_unavailable_in_current_session_use_authenticated_gui_context")
+    keychain_path = str(home / "Library/Keychains/login.keychain-db")
+    env = {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    def read_actor():
+        result = subprocess.run(["/usr/bin/security", "find-generic-password", "-a", TOKEN_ACCOUNT,
+            "-s", TOKEN_SERVICE, "-w", keychain_path], env=env, capture_output=True, text=True, timeout=30)
+        if result.returncode == 44:  # errSecItemNotFound (-25300) as security(1)'s exit status.
+            return None
+        require(result.returncode == 0, f"keychain_read_failed_osstatus_{-25308 if result.returncode == 36 else result.returncode}")
+        token = result.stdout.strip()
         require(re.fullmatch(r"[a-f0-9]{64}", token) is not None, "existing_gateway_token_invalid")
         return token
-    require(status == -25300, "keychain_read_failed")  # errSecItemNotFound only.
+    existing = read_actor()
+    if existing is not None:
+        return existing
     if not create:
         return None
+    require(bits.value & 4 != 0, "keychain_not_writable_in_current_session_use_authenticated_gui_context")
     token = secrets.token_hex(32)
-    raw = token.encode()
-    status = security.SecKeychainAddGenericPassword(keychain, len(service), service, len(account), account,
-                                                   len(raw), raw, None)
-    require(status == 0, "keychain_create_failed")  # No update/replace API exists here.
-    require(keychain_token(home, create=False) == token, "keychain_readback_failed")
+    # No -U/update option, no unlock command, no old item/ACL mutation. security
+    # -i may echo the command; all output is captured and never forwarded.
+    command = " ".join(shlex.quote(value) for value in ["add-generic-password", "-a", TOKEN_ACCOUNT,
+        "-s", TOKEN_SERVICE, "-w", token, "-T", "/usr/bin/security", keychain_path]) + "\nquit\n"
+    result = subprocess.run(["/usr/bin/security", "-i"], input=command, env=env,
+                            capture_output=True, text=True, timeout=30)
+    require(result.returncode == 0, f"keychain_create_failed_osstatus_{-25308 if result.returncode == 36 else result.returncode}")
+    require(read_actor() == token, "keychain_create_readback_failed")
     return token
 
 
@@ -391,12 +405,76 @@ def verify_installed_service(plist: Path, state: Path, config: bytes) -> dict:
     return {"launchAgentSha256": sha(owned_public_file(plist)), **native_hashes}
 
 
+def verify_prepared_adoption(home: Path, previous: str, receipt: dict, payload: dict,
+                             state: Path, workspace: Path, plist: Path, source: dict) -> dict:
+    require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
+        and receipt.get("sourceCommit") == previous and receipt.get("currentState") == "PAYLOAD_PREPARED"
+        and receipt.get("sourceEvidence", {}).get("sourceCommit") == previous
+        and receipt.get("sourceEvidence", {}).get("mode") == "canonical_git" and receipt.get("feishuEnabled") is False,
+        "known_prepared_profile_required")
+    before = {"openclaw.json": private_file(state / "openclaw.json"),
+        "AGENTS.md": private_file(workspace / "AGENTS.md"), "IDENTITY.md": private_file(workspace / "IDENTITY.md")}
+    require({name: sha(raw) for name, raw in before.items()} == receipt.get("payloadSha256"), "prepared_profile_payload_drift")
+    require(not plist.exists() and not live_ports(receipt["gatewayPort"]), "prepared_profile_already_active")
+    status = run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{LABEL}"],
+        {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}, check=False)
+    require(status.returncode != 0 and ("Could not find service" in status.stderr or "Could not find specified service" in status.stderr),
+        "prepared_profile_launchagent_absence_unproven")
+    previous_config = json.loads(before["openclaw.json"])
+    paths = previous_config.get("plugins", {}).get("load", {}).get("paths")
+    expected_previous_plugin = home / "ai-worker/services/image-generation/releases" / previous / "openclaw-plugins/aiworker-image-command"
+    require(paths == [str(expected_previous_plugin)] and sha(encoded(bounded_files(expected_previous_plugin)))
+        == receipt["sourceEvidence"].get("pluginInventorySha256") == source.get("pluginInventorySha256"), "prepared_plugin_source_drift")
+    previous_config["plugins"]["load"]["paths"] = json.loads(payload["openclaw.json"])["plugins"]["load"]["paths"]
+    require(encoded(previous_config) == payload["openclaw.json"]
+        and before["AGENTS.md"] == payload["AGENTS.md"] and before["IDENTITY.md"] == payload["IDENTITY.md"],
+        "prepared_adoption_changes_outside_plugin_location")
+    return before
+
+
+def adopt_prepared(home: Path, receipt_file: Path, receipt: dict, before: dict, payload: dict,
+                   state: Path, workspace: Path, commit: str, source: dict) -> dict:
+    backup_root = home / "ai-worker/backups/openclaw-image-studio"
+    safe_path(backup_root)
+    backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    backup = backup_root / f"{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{time.time_ns()}"
+    backup.mkdir(mode=0o700)
+    files = dict(before, **{"install-receipt.json": encoded(receipt)})
+    for name, raw in files.items():
+        create_file(backup / name, raw)
+    manifest = {"schema": "aiworker-image-studio-recovery/v1", "files": {name: sha(raw) for name, raw in files.items()}}
+    create_file(backup / "manifest.json", encoded(manifest))
+    histories = sorted(backup_root.iterdir(), key=lambda entry: entry.name)
+    for directory in histories:
+        saved = json.loads(private_file(directory / "manifest.json"))
+        require(saved.get("schema") == manifest["schema"] and set(saved["files"]) == set(files)
+            and bounded_files(directory) == {**saved["files"], "manifest.json": sha(private_file(directory / "manifest.json"))},
+            "prepared_recovery_integrity_failed")
+    for directory in histories[:-2]:
+        shutil.rmtree(directory)
+    for name, replacement in payload.items():
+        path = state / name if name == "openclaw.json" else workspace / name
+        require(private_file(path) == before[name], "prepared_adoption_cas_failed")
+        if replacement == before[name]:
+            continue
+        temporary = path.parent / f".{path.name}.adopt-{os.getpid()}"
+        create_file(temporary, replacement)
+        require(private_file(path) == before[name], "prepared_adoption_cas_failed")
+        os.replace(temporary, path)
+        require(private_file(path) == replacement, "prepared_adoption_readback_failed")
+    return advance_receipt(receipt_file, receipt, {"sourceCommit": commit, "sourceEvidence": source,
+        "payloadSha256": {name: sha(raw) for name, raw in payload.items()}, "previousSourceCommit": receipt["sourceCommit"],
+        "recoveryBackup": str(backup), "errorCode": None, "nextAction": "validate_config_then_install_service"})
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Continue one matching, owned incomplete installation.")
+    parser.add_argument("--adopt-prepared", action="store_true", help="Move a known inactive prepared profile to identical new plugin source.")
+    parser.add_argument("--previous-source-commit")
     parser.add_argument("--gateway-port", type=int, default=19289)
     parser.add_argument("--image-endpoint", default="http://127.0.0.1:18095")
     parser.add_argument("--plugin-root", required=True, type=Path)
@@ -409,6 +487,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--startup-timeout", type=int, default=90)
     args = parser.parse_args(argv)
     require(not args.resume or args.apply, "resume_requires_apply")
+    require(not args.adopt_prepared or not args.resume, "prepared_adoption_mode_invalid")
+    require(bool(args.previous_source_commit) == args.adopt_prepared, "prepared_adoption_previous_commit_required")
+    if args.previous_source_commit:
+        require(re.fullmatch(r"[a-f0-9]{40}", args.previous_source_commit) is not None
+            and args.previous_source_commit != args.source_commit, "prepared_adoption_previous_commit_invalid")
     home = safe_path(Path.home(), file=False)
     require(platform.system() == "Darwin", "macos_required")
     require(re.fullmatch(r"[a-f0-9]{40}", args.source_commit) is not None, "source_commit_invalid")
@@ -447,6 +530,15 @@ def main(argv: list[str] | None = None) -> int:
     receipt = None
     if existing:
         receipt = json.loads(private_file(receipt_path))
+        if args.adopt_prepared:
+            before = verify_prepared_adoption(home, args.previous_source_commit, receipt, payload, state, workspace, plist, source)
+            if args.dry_run:
+                print(json.dumps({"currentState": "PREPARED_ADOPTION_READY", "profile": PROFILE, "feishuEnabled": False}))
+                return 0
+            with installation_lock(receipt_dir.parent / ".openclaw-image-studio-install.lock"):
+                require(private_file(receipt_path) == encoded(receipt), "prepared_receipt_changed")
+                verify_prepared_adoption(home, args.previous_source_commit, receipt, payload, state, workspace, plist, source)
+                receipt = adopt_prepared(home, receipt_path, receipt, before, payload, state, workspace, args.source_commit, source)
         require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
                 and receipt.get("sourceCommit") == args.source_commit and receipt.get("payloadSha256") == hashes
                 and receipt.get("sourceEvidence") == source
@@ -466,8 +558,9 @@ def main(argv: list[str] | None = None) -> int:
             run([str(binary), "--profile", PROFILE, "health", "--json"], health_env)
             print(json.dumps({"currentState": "UNCHANGED_HEALTHY_FEISHU_DISABLED", "profile": PROFILE}))
             return 0
-        require(args.resume, "owned_incomplete_install_requires_resume")
+        require(args.resume or args.adopt_prepared, "owned_incomplete_install_requires_resume")
     else:
+        require(not args.adopt_prepared, "prepared_adoption_requires_existing_receipt")
         require(not any(target.exists() for target in (state, workspace, receipt_dir, plist)), "new_target_must_be_absent")
         require(not live_ports(args.gateway_port), "gateway_or_derived_port_busy")
     print(json.dumps({"currentState": "PREFLIGHT_READY", "profile": PROFILE, "gatewayPort": args.gateway_port,

@@ -116,6 +116,7 @@ class ImageJobTest(unittest.TestCase):
     def test_running_cancel_and_single_service(self):
         receipt = self.jobs.submit({**self.request, 'prompt': 'slow'})
         self.jobs.start()
+        self.assertEqual(self.jobs.health()['databaseIntegrity'], 'ok')
         deadline = time.monotonic() + 5
         while self.jobs.get(receipt['jobId'], self.request['scope'])['currentState'] == 'QUEUED' and time.monotonic() < deadline:
             time.sleep(0.01)

@@ -7,7 +7,6 @@ rewritten here. Only this new service's paths and LaunchAgent may be created.
 from __future__ import annotations
 
 import argparse
-from contextlib import closing
 import importlib.util
 import json
 import os
@@ -15,7 +14,7 @@ from pathlib import Path
 import platform
 import plistlib
 import re
-import sqlite3
+import shutil
 import subprocess
 import sys
 import time
@@ -114,7 +113,7 @@ def create_private_tree(path: Path) -> None:
         member.mkdir(mode=0o700)
 
 
-def health(commit: str, database: Path) -> dict:
+def health(commit: str, database: Path, *, require_integrity: bool = True) -> dict:
     opener = build_opener(ProxyHandler({}))
     with opener.open("http://127.0.0.1:18095/healthz", timeout=5) as result:
         contract.require(result.status == 200, "image_health_unavailable")
@@ -126,11 +125,112 @@ def health(commit: str, database: Path) -> dict:
                      "private_database_required")
     identity = {"device": database.stat().st_dev, "inode": database.stat().st_ino}
     contract.require(value.get("databaseIdentity") == identity, "image_database_identity_mismatch")
-    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
-        contract.require(connection.execute("PRAGMA quick_check").fetchone()[0] == "ok", "image_database_integrity_failed")
+    # SQLite integrity belongs to the application's own shared connection. A
+    # second mode=ro connection can fail on a cold WAL without -wal/-shm files.
+    if require_integrity:
+        contract.require(value.get("databaseIntegrity") == "ok", "image_database_integrity_failed")
     value["listenerPids"] = listener_pids()
     contract.require(len(value["listenerPids"]) == 1 and value["listenerPids"][0] == launch_pid(), "image_listener_not_owned_launchagent")
     return value
+
+
+def check_zero_jobs(value: dict) -> None:
+    counts = value.get("counts")
+    contract.require(isinstance(counts, dict) and all(type(count) is int and count == 0 for count in counts.values()),
+                     "owned_unvalidated_service_has_jobs")
+
+
+def verify_previous_installation(home: Path, previous: str, receipt: dict, config_file: Path,
+                                plist: Path, runtime: dict, database: Path) -> dict:
+    contract.require(receipt.get("schema") == SCHEMA and receipt.get("sourceCommit") == previous
+        and receipt.get("currentState") in {"PAYLOAD_PREPARED", "SERVICE_STARTED"}
+        and receipt.get("sourceEvidence", {}).get("sourceCommit") == previous
+        and receipt.get("sourceEvidence", {}).get("mode") == "canonical_git"
+        and receipt.get("runtime") == runtime and receipt.get("modelGenerationValidated") is False,
+        "previous_owned_unvalidated_receipt_required")
+    release = home / "ai-worker/services/image-generation/releases" / previous
+    manifest_raw = contract.private_file(release / "manifest.json")
+    manifest = json.loads(manifest_raw)
+    contract.require(manifest.get("schema") == "aiworker-image-service-artifact/v1"
+        and manifest.get("sourceCommit") == previous and manifest.get("sourceRepository") == contract.SOURCE_REPOSITORY
+        and contract.sha(manifest_raw) == receipt.get("artifactSha256") and isinstance(manifest.get("files"), dict),
+        "previous_artifact_manifest_invalid")
+    inventory = contract.bounded_files(release)
+    contract.require(inventory == {**manifest["files"], "manifest.json": contract.sha(manifest_raw)}, "previous_artifact_drift")
+    expected_config = contract.encoded(configuration(home, previous))
+    expected_plist = service_plist(home, release, config_file, config_file.parent / "logs")
+    contract.require(contract.private_file(config_file) == expected_config
+        and contract.sha(expected_config) == receipt.get("configSha256")
+        and contract.private_file(plist) == expected_plist and contract.sha(expected_plist) == receipt.get("launchAgentSha256"),
+        "previous_owned_config_or_plist_drift")
+    pid = launch_pid()
+    if pid is None:
+        contract.require(receipt["currentState"] == "PAYLOAD_PREPARED" and not listener_pids()
+            and not database.exists(), "previous_service_state_unknown")
+        current = {"counts": {}, "databaseIdentity": None, "listenerPids": []}
+    else:
+        contract.require(pid > 0, "previous_service_pid_unknown")
+        current = health(previous, database, require_integrity=False)
+        contract.require(current["listenerPids"] == [pid], "previous_service_listener_drift")
+    check_zero_jobs(current)
+    return {"pid": pid, "health": current, "config": expected_config, "plist": expected_plist,
+            "receipt": contract.encoded(receipt)}
+
+
+def backup_owned_installation(home: Path, previous: str, current: str, before: dict) -> Path:
+    root = home / "ai-worker/backups/image-service-install"
+    create_private_tree(root)
+    stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+    backup = root / f"{stamp}-{time.time_ns()}-{previous[:12]}"
+    backup.mkdir(mode=0o700)
+    files = {"service.json": before["config"], "install-receipt.json": before["receipt"], "launch-agent.plist": before["plist"]}
+    for name, raw in files.items():
+        contract.create_file(backup / name, raw)
+    manifest = {"schema": "aiworker-image-service-recovery/v1", "previousSourceCommit": previous,
+        "replacementSourceCommit": current, "files": {name: contract.sha(raw) for name, raw in files.items()}}
+    contract.create_file(backup / "manifest.json", contract.encoded(manifest))
+    def verify(directory):
+        contract.safe_path(directory, file=False)
+        saved = json.loads(contract.private_file(directory / "manifest.json"))
+        contract.require(saved.get("schema") == "aiworker-image-service-recovery/v1" and set(saved["files"]) == set(files),
+                         "owned_recovery_manifest_invalid")
+        actual = contract.bounded_files(directory)
+        contract.require(actual == {**saved["files"], "manifest.json": contract.sha(contract.private_file(directory / "manifest.json"))},
+                         "owned_recovery_drift")
+    verify(backup)
+    histories = sorted(root.iterdir(), key=lambda member: member.name)
+    for directory in histories:
+        verify(directory)
+    # Keep the two newest fully verified recovery objects. Original release/DB
+    # and all output remain untouched and are never included in these copies.
+    for directory in histories[:-2]:
+        shutil.rmtree(directory)
+    return backup
+
+
+def replace_owned_file(path: Path, expected: bytes, replacement: bytes) -> None:
+    contract.require(contract.private_file(path) == expected, "owned_replace_cas_failed")
+    temporary = path.parent / f".{path.name}.image-replace-{os.getpid()}"
+    contract.create_file(temporary, replacement)
+    contract.require(contract.private_file(path) == expected, "owned_replace_cas_failed")
+    os.replace(temporary, path)
+    contract.require(contract.private_file(path) == replacement, "owned_replace_readback_failed")
+
+
+def wait_owned_stopped(pid: int | None, timeout: int) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        alive = False
+        if pid:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except ProcessLookupError:
+                pass
+        if launch_pid() is None and not listener_pids() and not alive:
+            return
+        contract.require(time.monotonic() < deadline, "owned_service_stop_not_confirmed")
+        time.sleep(0.2)
 
 
 def main(argv=None):
@@ -139,6 +239,8 @@ def main(argv=None):
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--replace-owned-unvalidated", action="store_true")
+    parser.add_argument("--previous-source-commit")
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--backend-script-sha256", required=True)
     parser.add_argument("--profiles-sha256", required=True)
@@ -146,6 +248,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     contract.require(platform.system() == "Darwin", "image_service_macos_required")
     contract.require(not args.resume or args.apply, "resume_requires_apply")
+    contract.require(not args.replace_owned_unvalidated or (args.apply or args.dry_run) and not args.resume,
+                     "owned_replacement_mode_invalid")
+    contract.require(bool(args.previous_source_commit) == args.replace_owned_unvalidated,
+                     "previous_commit_requires_owned_replacement")
+    if args.previous_source_commit:
+        contract.require(re.fullmatch(r"[a-f0-9]{40}", args.previous_source_commit) is not None
+            and args.previous_source_commit != args.source_commit, "previous_source_commit_invalid")
     contract.require(re.fullmatch(r"[a-f0-9]{40}", args.source_commit) is not None
                      and all(re.fullmatch(r"[a-f0-9]{64}", v) for v in (args.backend_script_sha256, args.profiles_sha256)), "source_identity_argument_invalid")
     contract.require(10 <= args.startup_timeout <= 3600, "startup_timeout_invalid")
@@ -178,17 +287,24 @@ def main(argv=None):
     receipt = None
     if exists:
         receipt = json.loads(contract.private_file(receipt_file))
-        contract.require(all(receipt.get(k) == v for k, v in expected.items()), "existing_image_installation_mismatch")
-        contract.require(contract.private_file(config_file) == config_bytes and contract.private_file(plist) == plist_bytes
-                         and contract.private_file(release / "manifest.json") == manifest_bytes, "image_installation_drift")
-        inventory = contract.bounded_files(release)
-        contract.require(inventory == {**manifest["files"], "manifest.json": contract.sha(manifest_bytes)}, "installed_image_artifact_drift")
-        if receipt["currentState"] == "SERVICE_HEALTHY":
-            health(args.source_commit, jobs / "jobs.sqlite")
-            print(json.dumps({"currentState": "UNCHANGED_HEALTHY", "sourceCommit": args.source_commit}))
-            return 0
-        contract.require(args.resume and receipt["currentState"] in {"PAYLOAD_PREPARED", "SERVICE_STARTED"}, "owned_image_install_requires_resume")
+        if args.replace_owned_unvalidated:
+            verify_previous_installation(home, args.previous_source_commit, receipt, config_file, plist, runtime, jobs / "jobs.sqlite")
+            if release.exists():
+                contract.require(contract.bounded_files(release) == {**manifest["files"], "manifest.json": contract.sha(manifest_bytes)},
+                                 "replacement_candidate_artifact_drift")
+        else:
+            contract.require(all(receipt.get(k) == v for k, v in expected.items()), "existing_image_installation_mismatch")
+            contract.require(contract.private_file(config_file) == config_bytes and contract.private_file(plist) == plist_bytes
+                             and contract.private_file(release / "manifest.json") == manifest_bytes, "image_installation_drift")
+            inventory = contract.bounded_files(release)
+            contract.require(inventory == {**manifest["files"], "manifest.json": contract.sha(manifest_bytes)}, "installed_image_artifact_drift")
+            if receipt["currentState"] == "SERVICE_HEALTHY":
+                health(args.source_commit, jobs / "jobs.sqlite")
+                print(json.dumps({"currentState": "UNCHANGED_HEALTHY", "sourceCommit": args.source_commit}))
+                return 0
+            contract.require(args.resume and receipt["currentState"] in {"PAYLOAD_PREPARED", "SERVICE_STARTED"}, "owned_image_install_requires_resume")
     else:
+        contract.require(not args.replace_owned_unvalidated, "owned_replacement_requires_receipt")
         contract.require(not any(path.exists() for path in (root, state, jobs, output, plist)), "new_image_target_must_be_absent")
         contract.require(not listener_pids() and launch_pid() is None, "image_port_or_launchagent_busy")
     print(json.dumps({"currentState": "PREFLIGHT_READY", "component": LABEL, "sourceCommit": args.source_commit,
@@ -196,6 +312,48 @@ def main(argv=None):
     if args.dry_run:
         return 0
     with contract.installation_lock(home / "ai-worker/state/.image-service-install.lock"):
+        if args.replace_owned_unvalidated:
+            contract.require(contract.private_file(receipt_file) == contract.encoded(receipt), "previous_receipt_changed")
+            before = verify_previous_installation(home, args.previous_source_commit, receipt, config_file, plist, runtime, jobs / "jobs.sqlite")
+            if not release.exists():
+                create_private_tree(release)
+                for name, data in payload.items():
+                    target = release / name
+                    create_private_tree(target.parent)
+                    contract.create_file(target, data)
+                contract.create_file(release / "manifest.json", manifest_bytes)
+            contract.require(contract.bounded_files(release) == {**manifest["files"], "manifest.json": contract.sha(manifest_bytes)},
+                             "replacement_candidate_artifact_drift")
+            backup = backup_owned_installation(home, args.previous_source_commit, args.source_commit, before)
+            operation_file = state / f"replacement-{args.source_commit}.json"
+            operation = {"schema": "aiworker-image-service-replacement/v1", "previousSourceCommit": args.previous_source_commit,
+                "sourceCommit": args.source_commit, "backup": str(backup), "previousReceiptSha256": contract.sha(before["receipt"]),
+                "candidateArtifactSha256": expected["artifactSha256"], "currentState": "REPLACEMENT_PREPARED",
+                "errorCode": None, "nextAction": "stop_only_owned_image_service"}
+            contract.create_file(operation_file, contract.encoded(operation))
+            try:
+                latest = verify_previous_installation(home, args.previous_source_commit, receipt, config_file, plist, runtime, jobs / "jobs.sqlite")
+                contract.require(latest["pid"] == before["pid"] and latest["receipt"] == before["receipt"], "previous_service_changed_before_stop")
+                if before["pid"] is not None:
+                    contract.run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"],
+                                 {"HOME": str(home), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+                wait_owned_stopped(before["pid"], args.startup_timeout)
+                operation = contract.advance_receipt(operation_file, operation, {"currentState": "OWNED_SERVICE_STOPPED",
+                    "nextAction": "replace_owned_config_plist_and_receipt"})
+                replace_owned_file(config_file, before["config"], config_bytes)
+                replace_owned_file(plist, before["plist"], plist_bytes)
+                updated = dict(expected, currentState="PAYLOAD_PREPARED", errorCode=None, nextAction="start_owned_image_service",
+                    databaseIdentity=before["health"].get("databaseIdentity"), modelGenerationValidated=False,
+                    previousSourceCommit=args.previous_source_commit, recoveryBackup=str(backup))
+                replace_owned_file(receipt_file, before["receipt"], contract.encoded(updated))
+                receipt = updated
+                operation = contract.advance_receipt(operation_file, operation, {"currentState": "OWNED_PAYLOAD_REPLACED",
+                    "nextAction": "start_and_verify_replacement"})
+            except (OSError, ValueError, subprocess.SubprocessError, contract.InstallError) as error:
+                code = str(error) if isinstance(error, contract.InstallError) else "owned_replacement_io_failed"
+                contract.advance_receipt(operation_file, operation, {"errorCode": code,
+                    "nextAction": "inspect_exact_owned_replacement_and_verified_backup_before_resuming"})
+                raise
         if not exists:
             contract.require(not any(path.exists() for path in (root, state, jobs, output, plist)), "new_image_target_changed")
             for directory in (release, state / "logs", jobs, output):
@@ -232,6 +390,10 @@ def main(argv=None):
             receipt = contract.advance_receipt(receipt_file, receipt, {"currentState": "SERVICE_HEALTHY", "errorCode": None,
                 "nextAction": "verify_image_studio_tool_then_real_model_trial", "databaseIdentity": current["databaseIdentity"],
                 "healthEvidenceSha256": contract.sha(contract.encoded(current)), "modelGenerationValidated": False})
+            if args.replace_owned_unvalidated:
+                contract.advance_receipt(operation_file, operation, {"currentState": "REPLACEMENT_HEALTHY", "errorCode": None,
+                    "nextAction": "verify_image_studio_tool_then_real_model_trial",
+                    "currentReceiptSha256": contract.sha(contract.encoded(receipt))})
         except (OSError, ValueError, subprocess.SubprocessError, contract.InstallError) as error:
             code = str(error) if isinstance(error, contract.InstallError) else "image_service_installation_io_failed"
             contract.advance_receipt(receipt_file, receipt, {"errorCode": code, "nextAction": "inspect_owned_image_service_then_resume"})

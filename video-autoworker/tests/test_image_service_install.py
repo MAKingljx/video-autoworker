@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import sqlite3
@@ -91,46 +92,109 @@ class ServiceInstallTests(unittest.TestCase):
                 self.assertEqual(install.main(fixture.arguments("--apply") + ["--resume"]), 0)
             self.assertEqual(len(fixture.bootstraps), 1)
 
+    def test_health_uses_application_integrity_and_real_identity_without_opening_sqlite(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            database = Path(task_dir).resolve() / "jobs.sqlite"
+            database.write_bytes(b"inspection must not open this as sqlite")
+            database.chmod(0o600)
+            value = {"currentState": "READY", "sourceCommit": "b" * 40, "concurrency": 1,
+                "databaseIntegrity": "ok", "databaseIdentity": {"device": database.stat().st_dev, "inode": database.stat().st_ino}, "counts": {}}
+            class Response:
+                status = 200
+                def __enter__(self): return self
+                def __exit__(self, *args): pass
+                def read(self, *args): return json.dumps(value).encode()
+            with patch.object(install, "build_opener") as opener, patch.object(install, "listener_pids", return_value=[123]), \
+                 patch.object(install, "launch_pid", return_value=123):
+                opener.return_value.open.return_value = Response()
+                self.assertEqual(install.health("b" * 40, database)["databaseIntegrity"], "ok")
+                value["databaseIntegrity"] = "failed"
+                with self.assertRaisesRegex(install.contract.InstallError, "image_database_integrity_failed"):
+                    install.health("b" * 40, database)
+
+    def test_owned_unvalidated_replacement_preserves_database_output_and_old_release(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture = Fixture(Path(task_dir).resolve())
+            fixture.fail_health = True
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(install.time, "monotonic", side_effect=[0, 11]):
+                    with self.assertRaises(install.contract.InstallError):
+                        install.main(fixture.arguments("--apply") + ["--startup-timeout", "10"])
+                fixture.fail_health = False
+                database = fixture.home / "ai-worker/state/image-generation/jobs/jobs.sqlite"
+                identity = (database.stat().st_dev, database.stat().st_ino)
+                new_args = fixture.arguments("--apply", commit="d" * 40) + ["--replace-owned-unvalidated", "--previous-source-commit", "b" * 40]
+                self.assertEqual(install.main(new_args), 0)
+            self.assertEqual((database.stat().st_dev, database.stat().st_ino), identity)
+            self.assertTrue((fixture.home / ("ai-worker/services/image-generation/releases/" + "b" * 40)).exists())
+            self.assertTrue((fixture.home / ("ai-worker/services/image-generation/releases/" + "d" * 40)).exists())
+            self.assertEqual(len(fixture.bootouts), 1)
+            receipt = json.loads((fixture.home / "ai-worker/state/image-generation/image-service/install-receipt.json").read_bytes())
+            self.assertEqual(receipt["sourceCommit"], "d" * 40)
+            self.assertEqual(receipt["currentState"], "SERVICE_HEALTHY")
+            self.assertFalse(receipt["modelGenerationValidated"])
+            self.assertTrue(Path(receipt["recoveryBackup"]).is_dir())
+
+    def test_healthy_or_nonempty_application_cannot_use_unvalidated_replacement(self):
+        for state, counts, expected in [("SERVICE_HEALTHY", {}, "previous_owned_unvalidated_receipt_required"),
+                                        ("SERVICE_STARTED", {"SUCCEEDED": 1}, "owned_unvalidated_service_has_jobs")]:
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as task_dir:
+                fixture = Fixture(Path(task_dir).resolve())
+                with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                    install.main(fixture.arguments("--apply"))
+                    receipt_path = fixture.home / "ai-worker/state/image-generation/image-service/install-receipt.json"
+                    receipt = json.loads(receipt_path.read_bytes())
+                    receipt["currentState"] = state
+                    receipt_path.write_bytes(install.contract.encoded(receipt))
+                    fixture.counts = counts
+                    with self.assertRaisesRegex(install.contract.InstallError, expected):
+                        install.main(fixture.arguments("--apply", commit="d" * 40) + ["--replace-owned-unvalidated", "--previous-source-commit", "b" * 40])
+                self.assertFalse(fixture.bootouts)
+
 
 class Fixture:
     def __init__(self, home):
-        self.home, self.bootstraps, self.pid, self.fail_health = home, [], None, False
+        self.home, self.bootstraps, self.bootouts, self.pid, self.fail_health, self.counts = home, [], [], None, False, {}
         for directory in [home / "ai-worker/services", home / "ai-worker/state/image-generation",
                           home / "ai-worker/output/covers", home / "Library/LaunchAgents"]:
             directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         self.backend_sha = install.contract.sha((install.ROOT / "scripts/aiworker-qwen-cover.py").read_bytes())
 
-    def arguments(self, mode):
-        return [mode, "--source-commit", "b" * 40, "--backend-script-sha256", self.backend_sha,
+    def arguments(self, mode, *, commit="b" * 40):
+        return [mode, "--source-commit", commit, "--backend-script-sha256", self.backend_sha,
                 "--profiles-sha256", "c" * 64]
 
     @contextlib.contextmanager
     def patches(self):
         with patch.object(install.Path, "home", return_value=self.home), \
              patch.object(install.platform, "system", return_value="Darwin"), \
-             patch.object(install.contract, "source_identity", return_value={"mode": "canonical_git", "sourceCommit": "b" * 40}), \
+             patch.object(install.contract, "source_identity", side_effect=lambda source, plugin, commit, **kwargs: {"mode": "canonical_git", "sourceCommit": commit}), \
              patch.object(install, "validate_backend", return_value={"python": "3.12.13", "pillow": "12.2.0"}), \
              patch.object(install, "listener_pids", side_effect=lambda: [] if self.pid is None else [self.pid]), \
              patch.object(install, "launch_pid", side_effect=lambda: self.pid), \
              patch.object(install.contract, "run", side_effect=self.run), \
-             patch.object(install, "health", side_effect=self.health):
+             patch.object(install, "health", side_effect=self.health), patch.object(install.os, "kill", side_effect=ProcessLookupError):
             yield
 
     def run(self, command, env, **kwargs):
+        if "bootout" in command:
+            self.bootouts.append(command)
+            self.pid = None
+            return subprocess.CompletedProcess(command, 0, "", "")
         self.bootstraps.append(command)
         self.pid = 123
         database = self.home / "ai-worker/state/image-generation/jobs/jobs.sqlite"
         with contextlib.closing(sqlite3.connect(database)) as connection:
-            connection.execute("CREATE TABLE test_identity(value TEXT)")
+            connection.execute("CREATE TABLE IF NOT EXISTS test_identity(value TEXT)")
             connection.commit()
         database.chmod(0o600)
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    def health(self, commit, database):
+    def health(self, commit, database, **kwargs):
         if self.fail_health:
             raise OSError("unavailable")
-        return {"currentState": "READY", "sourceCommit": commit, "databaseIdentity": {
-            "device": database.stat().st_dev, "inode": database.stat().st_ino}, "listenerPids": [self.pid]}
+        return {"currentState": "READY", "sourceCommit": commit, "databaseIntegrity": "ok", "counts": self.counts,
+            "databaseIdentity": {"device": database.stat().st_dev, "inode": database.stat().st_ino}, "listenerPids": [self.pid]}
 
 
 if __name__ == "__main__":
