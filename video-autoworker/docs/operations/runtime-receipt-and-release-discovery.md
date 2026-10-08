@@ -24,6 +24,8 @@ Worker manifest以真实 LaunchAgent 的 `--artifact` 和进程状态为依据�
 
 先执行 `node scripts/release-impact-deploy.mjs retention-plan --output /absolute/task/retention-plan.json`。计划只读取，给出具体路径、预计字节数、保护原因和 `planSha256`。受控 operations namespace来自当前验收收据；缺失、过深或超出读取上限时阻断清理。默认单次最多64个release对象，最多256个；每个制品清单最多20000文件、2GiB。
 
+操作引用盘点发现旧格式、未知计划、链接或读取边界时，在原预算内停止扫描，返回 `currentState=blocked`、`inventoryComplete=false` 和具体 `blockers`；仍列出当前实际release的保护清单，删除列表固定为空。报告不导出计划正文、不兼容执行旧业务链，也不跳过未知引用推断可删除。blocked或不完整计划即使提供匹配摘要也不能apply；ready计划执行前再次遇到未知引用，同样零删除退出。
+
 历史候选必须具有该release目录下的 `recovery-receipt.json`，满足同一运行收据结构、匹配制品摘要，并明确 `evidence.recoveryVerified=true`。该标记只应在实际恢复条件和兼容性验证后生成，不能把“过去启动过”当作当前可恢复证明。历史未知对象继续保留并报告，不自动补造证明。
 
 用户核对对象和摘要并明确确认后，才可执行 `node scripts/release-impact-deploy.mjs retention-apply --plan /absolute/task/retention-plan.json --confirmed-plan-sha256 <confirmed-sha256>`。工具获取共享部署锁，再次核对路由、当前收据、根目录身份、进程及待续发布引用，并完整审计全部待删制品；任一变化在首个删除前阻断。删除按历史时间从旧到新，只处理本次确认的可再生成制品。预计字节数与实际文件系统可用空间增量分开报告。本轮开发和部署不自动执行该删除命令。

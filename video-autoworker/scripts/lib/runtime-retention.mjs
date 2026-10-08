@@ -20,12 +20,12 @@ export function readProcessReleaseReferences(releasesDir) {
 }
 
 function readPendingOperationReferences(operationsRoot, runDir, releasesDir) {
-  if (!operationsRoot) throw new Error('retention_operation_inventory_missing')
-  safeRuntimeEntry(operationsRoot, 'directory')
-  const references = []; let visited = 0
+  const references = [], blockers = []; let visited = 0, inspectedPath = operationsRoot || null
   const visit = (directory, depth) => {
+    inspectedPath = directory
     if (depth > 3) throw new Error('retention_operation_depth_limit')
     for (const name of readdirSync(directory)) {
+      inspectedPath = join(directory, name)
       if (++visited > 1024) throw new Error('retention_operation_member_limit')
       const pathname = join(directory, name), entry = lstatSync(pathname)
       if (entry.isSymbolicLink()) throw new Error('retention_operation_symlink')
@@ -46,8 +46,19 @@ function readPendingOperationReferences(operationsRoot, runDir, releasesDir) {
       }
     }
   }
-  visit(operationsRoot, 0)
-  return references
+  try {
+    if (!operationsRoot) throw new Error('retention_operation_inventory_missing')
+    safeRuntimeEntry(operationsRoot, 'directory')
+    visit(operationsRoot, 0)
+  } catch (error) {
+    // Stop at the same existing boundary. Do not inspect legacy plan bodies or
+    // continue into more directories merely to produce a diagnostic inventory.
+    const code = typeof error.message === 'string' && /^(?:retention|runtime)_[a-z0-9_]{1,100}$/u.test(error.message)
+      ? error.message : 'retention_operation_inventory_unverifiable'
+    blockers.push({ code, path: inspectedPath,
+      ...(typeof error.code === 'string' && /^[A-Z0-9_]{1,64}$/u.test(error.code) ? { systemCode: error.code } : {}) })
+  }
+  return { references, blockers, complete: blockers.length === 0, visited }
 }
 
 function assertSingleDeviceReleaseTree(root, expectedDevice, readEntry = lstatSync) {
@@ -142,8 +153,9 @@ export async function planRuntimeRetention({ runDir, releasesDir, databasePath, 
   const members = readdirSync(releasesDir).sort()
   if (members.length > maxObjects) throw new Error('retention_inventory_limit')
   const operationsRoot = current.evidence.operationsRoot
+  const operationInventory = readPendingOperationReferences(operationsRoot, runDir, releasesDir)
   const references = [...referencedPaths, ...readProcesses(releasesDir),
-    ...readPendingOperationReferences(operationsRoot, runDir, releasesDir)]
+    ...operationInventory.references]
   const protectedReleases = new Set([router.slots?.[router.active]?.releaseId,
     router.slots?.[router.previous]?.releaseId].filter(Boolean))
   const protectedObjects = [], candidates = []
@@ -153,6 +165,7 @@ export async function planRuntimeRetention({ runDir, releasesDir, databasePath, 
     if (!RELEASE.test(name)) reason = 'unknown_object'
     else if (protectedReleases.has(name)) reason = 'current_or_previous'
     else if (references.some(path => path === pathname || path.startsWith(`${pathname}/`))) reason = 'runtime_reference'
+    else if (!operationInventory.complete) reason = 'operation_inventory_incomplete'
     if (reason) { protectedObjects.push({ path: pathname, reason }); continue }
     try { candidates.push(await releaseCandidate(pathname, auditArtifact, readEntry, releasesIdentity.dev, current.database.schemaSha256)) }
     catch (error) { protectedObjects.push({ path: pathname, reason: error.message === 'recovery_schema_incompatible'
@@ -162,23 +175,31 @@ export async function planRuntimeRetention({ runDir, releasesDir, databasePath, 
   // The immediately previous release counts as one historical version; current does not.
   const protectedHistory = []
   const previous = router.slots?.[router.previous]?.releaseId
-  if (previous && previous !== current.releaseId && RELEASE.test(previous)) {
+  if (operationInventory.complete && previous && previous !== current.releaseId && RELEASE.test(previous)) {
     try { protectedHistory.push(await releaseCandidate(join(releasesDir, previous), auditArtifact, readEntry, releasesIdentity.dev, current.database.schemaSha256)) }
     catch { /* An unverified protected previous object is reported, not counted as a verified recovery point. */ }
   }
   const keep = candidates.slice(0, Math.max(0, 2 - protectedHistory.length))
-  const remove = candidates.slice(keep.length)
-  const plan = { schema: SCHEMA, kind: 'application-release-artifacts', runDir, releasesDir, releasesIdentity,
+  const remove = operationInventory.complete ? candidates.slice(keep.length) : []
+  const currentState = operationInventory.complete ? 'ready' : 'blocked'
+  const plan = { schema: SCHEMA, kind: 'application-release-artifacts', currentState,
+    inventoryComplete: operationInventory.complete, blockers: operationInventory.blockers,
+    errorCode: operationInventory.complete ? null : 'retention_operation_inventory_incomplete',
+    nextAction: operationInventory.complete ? 'review_retention_plan' : 'inspect_operation_reference_blockers',
+    runDir, releasesDir, releasesIdentity,
     databasePath, databasePathSha256: current.database.pathSha256, databaseSchemaSha256: current.database.schemaSha256,
     routerSha256: runtimeDigest(routerBytes), currentReceiptSha256,
     referencedPaths, operationsRoot, keep, protectedHistory, remove, protectedObjects,
-    summary: { retainedVerifiedHistory: keep.length + protectedHistory.length, removalCount: remove.length,
+    summary: { currentState, inventoryComplete: operationInventory.complete, blockers: operationInventory.blockers,
+      retainedVerifiedHistory: keep.length + protectedHistory.length, removalCount: remove.length,
       removalBytes: remove.reduce((sum, item) => sum + item.bytes, 0), protectedCount: protectedObjects.length } }
   return { ...plan, planSha256: runtimeDigest(plan) }
 }
 
 /** A human-confirmed digest authorizes only the exact regenerable artifacts in that plan. */
 export async function applyRuntimeRetention(plan, confirmedPlanSha256, dependencies = {}) {
+  if (plan?.currentState !== 'ready' || plan.inventoryComplete !== true
+    || !Array.isArray(plan.blockers) || plan.blockers.length) throw new Error('retention_inventory_incomplete')
   const { planSha256, ...body } = plan
   if (plan.schema !== SCHEMA || plan.kind !== 'application-release-artifacts'
     || typeof plan.databasePath !== 'string' || plan.databasePathSha256 !== runtimeDigest(plan.databasePath)
@@ -202,8 +223,10 @@ export async function applyRuntimeRetention(plan, confirmedPlanSha256, dependenc
     if (current.database.pathSha256 !== plan.databasePathSha256
       || current.database.schemaSha256 !== plan.databaseSchemaSha256) throw new Error('retention_database_binding_unverified')
     const readProcesses = dependencies.readProcesses || readProcessReleaseReferences
+    const operationInventory = readPendingOperationReferences(plan.operationsRoot, plan.runDir, plan.releasesDir)
+    if (!operationInventory.complete) throw new Error('retention_operation_inventory_incomplete')
     const references = [...plan.referencedPaths, ...readProcesses(plan.releasesDir),
-      ...readPendingOperationReferences(plan.operationsRoot, plan.runDir, plan.releasesDir)]
+      ...operationInventory.references]
     const router = JSON.parse(readRuntimeFile(join(plan.runDir, 'router-state.json')))
     const protectedReleases = new Set([router.slots?.[router.active]?.releaseId,
       router.slots?.[router.previous]?.releaseId, ...plan.keep.map(item => item.releaseId)].filter(Boolean))

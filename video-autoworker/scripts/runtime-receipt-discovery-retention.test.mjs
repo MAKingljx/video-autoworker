@@ -297,6 +297,56 @@ async function oldRelease(char, date, current) {
 }
 const planOptions = () => ({ runDir, releasesDir, databasePath, inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit })
 
+test('unknown legacy operation plans return a blocked real release inventory and can never be applied', async () => {
+  const current = await receipt()
+  await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const pathname = join(root, 'operations/legacy/plan.json')
+  write(pathname, { schema: 'video-autoworker-release-impact-plan/v1', privateBody: 'must-not-be-exported' })
+  let artifactAudits = 0
+  const plan = await planRuntimeRetention({ ...planOptions(), auditArtifact: async () => { artifactAudits++; throw new Error('unexpected audit') } })
+  assert.equal(plan.currentState, 'blocked'); assert.equal(plan.inventoryComplete, false)
+  assert.equal(plan.summary.currentState, 'blocked'); assert.deepEqual(plan.remove, [])
+  assert.equal(plan.summary.removalCount, 0); assert.equal(plan.summary.removalBytes, 0)
+  assert.deepEqual(plan.blockers, [{ code: 'retention_operation_plan_unknown', path: pathname }])
+  assert.equal(plan.protectedObjects.length, 4)
+  assert.ok(plan.protectedObjects.some(item => item.path === oldest && item.reason === 'operation_inventory_incomplete'))
+  assert.ok(plan.protectedObjects.some(item => item.path === join(releasesDir, releaseId) && item.reason === 'current_or_previous'))
+  assert.equal(JSON.stringify(plan).includes('must-not-be-exported'), false); assert.equal(artifactAudits, 0)
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256), /retention_inventory_incomplete/u)
+  assert.equal(existsSync(oldest), true); assert.equal(existsSync(join(runDir, '.deployment.lock')), false)
+})
+
+for (const boundary of ['depth', 'members', 'symlink']) {
+  test(`operation ${boundary} boundary produces a blocked inventory without a deletion list`, async () => {
+    await receipt()
+    const operations = join(root, 'operations')
+    if (boundary === 'depth') directory(join(operations, 'a/b/c/d'))
+    else if (boundary === 'members') {
+      for (let index = 0; index < 1025; index++) writeFileSync(join(operations, `entry-${index}.log`), '', { mode: 0o600 })
+    } else symlinkSync(join(root, 'absent'), join(operations, 'unknown-link'))
+    const plan = await planRuntimeRetention(planOptions())
+    assert.equal(plan.currentState, 'blocked'); assert.equal(plan.inventoryComplete, false); assert.deepEqual(plan.remove, [])
+    assert.equal(plan.blockers[0].code, boundary === 'depth' ? 'retention_operation_depth_limit'
+      : boundary === 'members' ? 'retention_operation_member_limit' : 'retention_operation_symlink')
+    assert.equal(plan.protectedObjects.length, 1)
+    await assert.rejects(applyRuntimeRetention(plan, plan.planSha256), /retention_inventory_incomplete/u)
+  })
+}
+
+test('a legacy operation appearing after a ready plan still prevents any apply deletion', async () => {
+  const current = await receipt()
+  await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const plan = await planRuntimeRetention(planOptions())
+  assert.equal(plan.currentState, 'ready'); assert.equal(plan.inventoryComplete, true); assert.equal(plan.remove.length, 1)
+  write(join(root, 'operations/legacy/plan.json'), { schema: 'unknown' })
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, {
+    inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification,
+  }), /retention_operation_inventory_incomplete/u)
+  assert.equal(existsSync(oldest), true)
+})
+
 test('retention accepts an internal 0777 symlink but protects an escaping symlink', async () => {
   const current = await receipt()
   const valid = await oldRelease('b', '2026-10-07T00:00:00Z', current)
