@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync,
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, readlinkSync,
   realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import { readIndependentWorkerStatus } from './independent-worker-release.mjs'
@@ -49,7 +49,9 @@ export function fingerprintRuntimeReference(pathname, kind = 'file') {
         // by release readiness. Record the target and package identity; never walk it.
         if (member !== 'node_modules/openclaw') throw new Error('runtime_tree_symlink')
         const packagePath = join(realpathSync(current), 'package.json')
-        members.push([member, 'sdk-link', readlinkSync(current), runtimeDigest(readRuntimeFile(packagePath, 128 * 1024))])
+        const packageBytes = readRuntimeFile(packagePath, 1024 * 1024)
+        if ((bytes += packageBytes.length) > 64 * 1024 * 1024) throw new Error('runtime_tree_byte_limit')
+        members.push([member, 'sdk-link', readlinkSync(current), runtimeDigest(packageBytes)])
       } else if (entry.isDirectory()) {
         safeRuntimeEntry(current, 'directory'); members.push([member, 'directory', entry.mode & 0o777]); visit(current)
       } else {
@@ -66,28 +68,48 @@ export function fingerprintRuntimeReference(pathname, kind = 'file') {
 
 export function runtimeReceiptPath(runDir) { return join(runDir, 'current-runtime.json') }
 
-function artifactMetadataDigest(root, manifest) {
+function assertDeclaredArtifactEntry(value, kind, member) {
+  if (value.uid !== BigInt(process.getuid())) throw new Error('runtime_artifact_member_unsafe')
+  if (kind === 'symlink' ? !value.isSymbolicLink()
+    : kind === 'file' ? !value.isFile() : !value.isDirectory()) throw new Error('runtime_artifact_member_type_invalid')
+  if ((value.mode & 0o7000n) || (kind !== 'symlink' && (value.mode & 0o002n))) throw new Error('runtime_artifact_member_unsafe')
+  if ((kind === 'file' || kind === 'symlink') && value.nlink !== 1n) throw new Error('runtime_artifact_member_unsafe')
+  if (typeof member.mode !== 'string' || !/^[0-7]{4}$/u.test(member.mode)
+    || (value.mode & 0o7777n).toString(8).padStart(4, '0') !== member.mode) throw new Error('runtime_artifact_mode_mismatch')
+  return value
+}
+
+export function artifactMetadataDigest(root, manifest) {
   const rows = []
   const members = [['file', manifest.files || []], ['directory', manifest.directories || []], ['symlink', manifest.symlinks || []]]
     .flatMap(([kind, entries]) => entries.map(member => ({ kind, member })))
   if (members.length > 20000) throw new Error('runtime_artifact_member_limit')
-  for (const { kind, member } of members) {
-    const name = typeof member === 'string' ? member : member.path
+  const declared = new Map()
+  for (const item of members) {
+    const name = item.member?.path
     if (typeof name !== 'string' || isAbsolute(name) || name.includes('\\')
-      || name.split('/').some(part => ['', '.', '..'].includes(part))) throw new Error('runtime_artifact_member_invalid')
-    const pathname = join(root, name), entry = lstatSync(pathname, { bigint: true })
-    if (entry.uid !== BigInt(process.getuid())) throw new Error('runtime_artifact_member_unsafe')
+      || name.split('/').some(part => ['', '.', '..'].includes(part)) || declared.has(name)) {
+      throw new Error('runtime_artifact_member_invalid')
+    }
+    declared.set(name, item)
+  }
+  const assertMember = (pathname, kind, member) => {
+    const value = lstatSync(pathname, { bigint: true })
+    // Symlink permission bits are metadata, not write authority. Ordinary
+    // members follow the exact mode sealed by the existing artifact auditor.
+    return assertDeclaredArtifactEntry(value, kind, member)
+  }
+  for (const { kind, member } of members) {
+    const name = member.path
+    const pathname = join(root, name), entry = assertMember(pathname, kind, member)
     if (kind === 'symlink') {
-      if (!entry.isSymbolicLink() || typeof member.target !== 'string'
+      if (typeof member.target !== 'string'
         || isAbsolute(member.target) || readlinkSync(pathname) !== member.target) throw new Error('runtime_artifact_link_invalid')
       const target = realpathSync(pathname)
       if (!target.startsWith(`${root}/`)) throw new Error('runtime_artifact_link_escape')
-      const resolved = lstatSync(target, { bigint: true })
-      if (resolved.uid !== BigInt(process.getuid()) || (!resolved.isFile() && !resolved.isDirectory())
-        || (resolved.mode & 0o022n)) throw new Error('runtime_artifact_link_unsafe')
-    } else {
-      if ((kind === 'file' ? !entry.isFile() : !entry.isDirectory())) throw new Error('runtime_artifact_member_type_invalid')
-      if (entry.mode & 0o022n) throw new Error('runtime_artifact_member_unsafe')
+      const targetDeclaration = declared.get(relative(root, target))
+      if (!targetDeclaration || targetDeclaration.kind === 'symlink') throw new Error('runtime_artifact_link_unsafe')
+      assertMember(target, targetDeclaration.kind, targetDeclaration.member)
     }
     rows.push([name, String(entry.dev), String(entry.ino), String(entry.size), String(entry.mode),
       String(entry.mtimeNs), String(entry.ctimeNs), entry.isSymbolicLink() ? readlinkSync(pathname) : null])
@@ -163,7 +185,19 @@ export async function observeRuntime({ runDir, databasePath, workerBinding = nul
       runtime: workerManifest.runtime, pid: status.worker.pid }
   }
   let version = null
-  try { version = JSON.parse(readRuntimeFile(join(slot.releaseRoot, 'package.json'), 128 * 1024)).version || null } catch { /* Provenance remains authoritative. */ }
+  const packageDeclaration = manifest.files?.find(member => member.path === 'package.json')
+  if (packageDeclaration) {
+    const handle = openSync(join(slot.releaseRoot, 'package.json'), constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const before = assertDeclaredArtifactEntry(fstatSync(handle, { bigint: true }), 'file', packageDeclaration)
+      if (before.size > 1024n * 1024n) throw new Error('runtime_file_limit')
+      const content = readFileSync(handle), after = fstatSync(handle, { bigint: true })
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+        || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error('runtime_file_changed')
+      const declaredVersion = JSON.parse(content.toString('utf8')).version
+      if (typeof declaredVersion === 'string' && declaredVersion.length <= 160) version = declaredVersion
+    } finally { closeSync(handle) }
+  }
   return { sourceCommit, releaseId: slot.releaseId,
     route: { active: router.active, previous: router.previous, generation: router.generation,
       slots: Object.fromEntries(Object.entries(router.slots).map(([key, value]) => [key, value.releaseId])) },

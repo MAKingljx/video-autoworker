@@ -2062,7 +2062,8 @@ async function main() {
     if (command === 'retention-plan') {
       if (!values.get('--output')) fail('retention plan output is required')
       const plan = await planRuntimeRetention({ runDir: process.env.AIWORKER_BG_RUN_DIR,
-        releasesDir: process.env.AIWORKER_BG_RELEASES_DIR })
+        releasesDir: process.env.AIWORKER_BG_RELEASES_DIR,
+        databasePath: process.env.AIWORKER_BG_LIVE_DB_PATH })
       privateWrite(values.get('--output'), plan)
       process.stdout.write(`${JSON.stringify({ planSha256: plan.planSha256, summary: plan.summary,
         protectedObjects: plan.protectedObjects, remove: plan.remove.map(item => item.path) })}\n`); return plan

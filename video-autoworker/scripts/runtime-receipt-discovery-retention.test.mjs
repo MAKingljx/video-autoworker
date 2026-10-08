@@ -6,7 +6,7 @@ import { dirname, join, relative } from 'node:path'
 import { afterEach, beforeEach, test } from 'node:test'
 import Database from 'better-sqlite3'
 import { discoverDeploymentEnvironment, parseDeploymentEnvironment } from './lib/deployment-discovery.mjs'
-import { observeRuntime, publicRuntimeReceiptStatus, readCurrentRuntimeReceipt,
+import { fingerprintRuntimeReference, observeRuntime, publicRuntimeReceiptStatus, readCurrentRuntimeReceipt,
   runtimeDigest, writeCurrentRuntimeReceipt } from './lib/runtime-receipt.mjs'
 import { applyRuntimeRetention, planRuntimeRetention } from './lib/runtime-retention.mjs'
 import { releaseComponentSummary } from './release-impact-deploy.mjs'
@@ -32,7 +32,7 @@ beforeEach(() => {
   const releaseRoot = directory(join(releasesDir, releaseId, 'standalone'))
   write(join(releaseRoot, 'server.js'), 'server')
   const manifest = { schemaVersion: 2, artifactContent: { digest: sha },
-    files: [{ path: 'server.js', bytes: 6 }], directories: [], symlinks: [] }
+    files: [{ path: 'server.js', bytes: 6, mode: '0600' }], directories: [], symlinks: [] }
   write(join(releaseRoot, 'release-manifest.json'), manifest)
   write(join(releaseRoot, 'release-provenance.json'), { gitCommit: commit })
   write(join(releaseRoot, 'package.json'), { version: '2.0.1' })
@@ -171,9 +171,10 @@ test('artifact symlink escapes and mismatched declared targets or types remain r
   await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /link_escape/u)
   rmSync(link)
   symlinkSync('../server.js', link)
+  if (process.platform === 'darwin') lchmodSync(link, 0o777)
   await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /link_invalid/u)
   const manifestPath = join(releaseRoot, 'release-manifest.json'), manifest = json(manifestPath)
-  manifest.files.push({ path: 'node_modules/server-link.js', bytes: 6 }); manifest.symlinks = []
+  manifest.files.push({ path: 'node_modules/server-link.js', bytes: 6, mode: '0600' }); manifest.symlinks = []
   write(manifestPath, manifest); refreshActiveManifest()
   await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /member_type_invalid/u)
 })
@@ -181,6 +182,49 @@ test('artifact symlink escapes and mismatched declared targets or types remain r
 test('ordinary writable artifact members are still rejected', async () => {
   chmodSync(join(releasesDir, releaseId, 'standalone/server.js'), 0o666)
   await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /member_unsafe/u)
+})
+
+test('sealed group-writable 0664 files and their internal symlinks follow the artifact manifest', async () => {
+  const releaseRoot = join(releasesDir, releaseId, 'standalone'), manifestPath = join(releaseRoot, 'release-manifest.json')
+  const manifest = json(manifestPath); manifest.files[0].mode = '0664'
+  chmodSync(join(releaseRoot, 'package.json'), 0o664)
+  manifest.files.push({ path: 'package.json', mode: '0664', bytes: readFileSync(join(releaseRoot, 'package.json')).length })
+  write(manifestPath, manifest)
+  chmodSync(join(releaseRoot, 'server.js'), 0o664)
+  artifactLink(releaseRoot, '../server.js'); refreshActiveManifest()
+  const value = await receipt(); assert.equal(value.artifact.version, '2.0.1')
+  assert.equal((await readCurrentRuntimeReceipt({ runDir, databasePath, inspectProcess })).currentState, 'ready')
+})
+
+test('changing a declared 0644 member to 0664 causes drift rather than silently accepting new permissions', async () => {
+  const releaseRoot = join(releasesDir, releaseId, 'standalone'), manifestPath = join(releaseRoot, 'release-manifest.json')
+  const manifest = json(manifestPath); manifest.files[0].mode = '0644'; write(manifestPath, manifest)
+  chmodSync(join(releaseRoot, 'server.js'), 0o644); refreshActiveManifest(); await receipt()
+  chmodSync(join(releaseRoot, 'server.js'), 0o664)
+  const status = await readCurrentRuntimeReceipt({ runDir, databasePath, inspectProcess })
+  assert.equal(status.currentState, 'drift')
+  await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /mode_mismatch/u)
+})
+
+test('world-write and special permission bits remain rejected even when declared', async () => {
+  const releaseRoot = join(releasesDir, releaseId, 'standalone'), manifestPath = join(releaseRoot, 'release-manifest.json')
+  for (const mode of [0o666, 0o4664]) {
+    const manifest = json(manifestPath); manifest.files[0].mode = mode.toString(8).padStart(4, '0'); write(manifestPath, manifest)
+    chmodSync(join(releaseRoot, 'server.js'), mode); refreshActiveManifest()
+    await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /member_unsafe/u)
+  }
+})
+
+test('official SDK metadata of 132851 bytes is bounded at 1MiB and included in the tree byte budget', () => {
+  const plugin = directory(join(root, 'video-plugin')), sdk = directory(join(root, 'official-sdk'))
+  directory(join(plugin, 'node_modules')); symlinkSync(sdk, join(plugin, 'node_modules/openclaw'))
+  const base = JSON.stringify({ name: 'openclaw', version: '2026.9.2', padding: '' })
+  const body = JSON.stringify({ name: 'openclaw', version: '2026.9.2', padding: 'x'.repeat(132851 - Buffer.byteLength(base)) })
+  assert.equal(Buffer.byteLength(body), 132851); write(join(sdk, 'package.json'), body)
+  const reference = fingerprintRuntimeReference(plugin, 'tree')
+  assert.equal(reference.bytes, 132851)
+  write(join(sdk, 'package.json'), JSON.stringify({ padding: 'x'.repeat(1024 * 1024) }))
+  assert.throws(() => fingerprintRuntimeReference(plugin, 'tree'), /runtime_file_limit/u)
 })
 
 test('deployment environment parser does not evaluate shell or disclose credentials', () => {
@@ -244,14 +288,14 @@ async function oldRelease(char, date, current) {
   const id = `${char.repeat(40)}-runtime`, pathname = directory(join(releasesDir, id))
   const standalone = directory(join(pathname, 'standalone'))
   write(join(standalone, 'server.js'), 'server')
-  write(join(standalone, 'release-manifest.json'), { files: [{ path: 'server.js', bytes: 6 }] })
+  write(join(standalone, 'release-manifest.json'), { files: [{ path: 'server.js', bytes: 6, mode: '0600' }], directories: [], symlinks: [] })
   const evidence = { ...current.evidence, recoveryVerified: true }; delete evidence.sha256
   write(join(pathname, 'recovery-receipt.json'), { ...current, sourceCommit: char.repeat(40), releaseId: id,
     verifiedAt: date, artifact: { ...current.artifact, manifestSha256: runtimeDigest(readFileSync(join(standalone, 'release-manifest.json'))) },
     evidence: { ...evidence, sha256: runtimeDigest(evidence) } })
   return pathname
 }
-const planOptions = () => ({ runDir, releasesDir, readProcesses: () => [], auditArtifact: fakeAudit })
+const planOptions = () => ({ runDir, releasesDir, databasePath, inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit })
 
 test('retention accepts an internal 0777 symlink but protects an escaping symlink', async () => {
   const current = await receipt()
@@ -269,6 +313,23 @@ test('retention accepts an internal 0777 symlink but protects an escaping symlin
   assert.equal(dirname(plan.keep[0].path), releasesDir)
 })
 
+test('retention accepts sealed 0664 members and protects unsealed permission changes or world-write', async () => {
+  const current = await receipt()
+  const allowed = await oldRelease('b', '2026-10-07T00:00:00Z', current)
+  const changed = await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const world = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const manifestPath = join(allowed, 'standalone/release-manifest.json'), manifest = json(manifestPath)
+  manifest.files[0].mode = '0664'; write(manifestPath, manifest); chmodSync(join(allowed, 'standalone/server.js'), 0o664)
+  artifactLink(join(allowed, 'standalone'), '../server.js')
+  const recoveryPath = join(allowed, 'recovery-receipt.json'), recovery = json(recoveryPath)
+  recovery.artifact.manifestSha256 = runtimeDigest(readFileSync(manifestPath)); write(recoveryPath, recovery)
+  chmodSync(join(changed, 'standalone/server.js'), 0o664); chmodSync(join(world, 'standalone/server.js'), 0o666)
+  const plan = await planRuntimeRetention(planOptions())
+  assert.ok(plan.keep.some(item => item.path === allowed))
+  assert.ok(plan.protectedObjects.some(item => item.path === changed && item.reason === 'unverified_or_unsafe'))
+  assert.ok(plan.protectedObjects.some(item => item.path === world && item.reason === 'unverified_or_unsafe'))
+})
+
 test('retention retains current and two verified history objects and protects unknown/source/reference objects', async () => {
   const current = await receipt()
   await oldRelease('b', '2026-10-07T00:00:00Z', current)
@@ -283,6 +344,89 @@ test('retention retains current and two verified history objects and protects un
   assert.equal(existsSync(oldest), true)
 })
 
+test('retention plans bind the database path and reject a live schema change before planning or deleting', async () => {
+  const current = await receipt()
+  await oldRelease('b', '2026-10-07T00:00:00Z', current)
+  await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const plan = await planRuntimeRetention(planOptions())
+  assert.equal(plan.databasePath, databasePath)
+  assert.equal(plan.databasePathSha256, runtimeDigest(databasePath))
+  assert.equal(plan.databaseSchemaSha256, current.database.schemaSha256)
+  const db = new Database(databasePath)
+  db.exec('CREATE TABLE changed_schema (id INTEGER PRIMARY KEY)'); db.close()
+  await assert.rejects(planRuntimeRetention(planOptions()), /current_runtime_unverified/u)
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, {
+    inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification,
+  }), /current_runtime_unverified/u)
+  assert.equal(existsSync(oldest), true)
+  assert.equal(existsSync(join(runDir, '.deployment.lock')), false)
+})
+
+test('old-schema history and previous releases stay protected and cannot count as recovery points', async () => {
+  const olderSchema = await receipt()
+  const old = await oldRelease('b', '2026-10-07T00:00:00Z', olderSchema)
+  const previous = await oldRelease('e', '2026-10-04T00:00:00Z', olderSchema)
+  const router = json(join(runDir, 'router-state.json'))
+  router.previous = 'green'; router.slots.green.releaseId = previous.split('/').at(-1)
+  write(join(runDir, 'router-state.json'), router)
+  const db = new Database(databasePath)
+  db.exec('CREATE TABLE new_schema (id INTEGER PRIMARY KEY)'); db.close()
+  const current = await receipt()
+  assert.notEqual(current.database.schemaSha256, olderSchema.database.schemaSha256)
+  const first = await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const second = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const plan = await planRuntimeRetention(planOptions())
+  assert.equal(plan.protectedHistory.length, 0)
+  assert.equal(plan.summary.retainedVerifiedHistory, 2)
+  assert.deepEqual(plan.keep.map(item => item.path), [first, second])
+  assert.equal(plan.remove.length, 0)
+  assert.ok(plan.protectedObjects.some(item => item.path === old && item.reason === 'recovery_schema_incompatible'))
+  assert.ok(plan.protectedObjects.some(item => item.path === previous))
+})
+
+test('a schema change while candidate audits run is detected at the first-deletion boundary', async () => {
+  const current = await receipt()
+  await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const plan = await planRuntimeRetention(planOptions())
+  const auditArtifact = async path => {
+    const result = await fakeAudit(path)
+    if (path === join(oldest, 'standalone')) {
+      const db = new Database(databasePath)
+      db.exec('CREATE TABLE schema_changed_during_audit (id INTEGER PRIMARY KEY)'); db.close()
+    }
+    return result
+  }
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, {
+    inspectProcess, readProcesses: () => [], auditArtifact, verifyArtifactSnapshot: fakeSnapshotVerification,
+  }), /current_runtime_unverified/u)
+  assert.equal(existsSync(oldest), true)
+})
+
+test('Worker drift during audits prevents deletion even when the router and receipt files are unchanged', async () => {
+  const stateDir = directory(join(root, 'worker-state')), manifestPath = join(root, 'worker-manifest.json')
+  write(manifestPath, { schema: 'video-autoworker-scheduler-artifact/v1', contentSha256: sha, runtime: { node: '22' } })
+  let healthy = true
+  const database = lstatSync(databasePath)
+  const readWorker = async () => ({ executionMode: 'external-worker', currentState: healthy ? 'ready' : 'drift',
+    healthy, leaseVerified: healthy, leadership: { state: 'leader' }, observedAt: Date.now(),
+    worker: { contentSha256: sha, pid: process.pid, database: { dev: String(database.dev), ino: String(database.ino),
+      pathSha256: runtimeDigest(databasePath) } } })
+  const observation = await observeRuntime({ runDir, databasePath, references, inspectProcess,
+    workerBinding: { stateDir, manifestPath }, readWorker })
+  const current = writeCurrentRuntimeReceipt({ runDir, databasePath, observation, components: {},
+    evidence: { acceptance: 'verified', settlement: 'verified', operationsRoot: directory(join(root, 'operations')) } })
+  await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  const plan = await planRuntimeRetention({ ...planOptions(), readWorker })
+  const auditArtifact = async path => { const result = await fakeAudit(path); healthy = false; return result }
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, {
+    inspectProcess, readWorker, readProcesses: () => [], auditArtifact, verifyArtifactSnapshot: fakeSnapshotVerification,
+  }), /current_runtime_unverified/u)
+  assert.equal(existsSync(oldest), true)
+})
+
 test('retention requires exact confirmation and refuses changed candidates before deleting anything', async () => {
   const current = await receipt()
   await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
@@ -291,7 +435,7 @@ test('retention requires exact confirmation and refuses changed candidates befor
   await assert.rejects(applyRuntimeRetention(plan, 'incorrect'), /confirmation_required/u)
   write(join(oldest, 'standalone/server.js'), 'modified')
   await assert.rejects(applyRuntimeRetention(plan, plan.planSha256,
-    { readProcesses: () => [], auditArtifact: fakeAudit }), /candidate_changed/u)
+    { inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit }), /candidate_changed/u)
   assert.equal(existsSync(oldest), true)
 })
 
@@ -330,7 +474,7 @@ for (const mutation of ['deleted', 'damaged']) {
     if (mutation === 'deleted') rmSync(kept, { recursive: true })
     else write(join(kept, 'standalone/server.js'), 'damaged-history')
     await assert.rejects(applyRuntimeRetention(plan, plan.planSha256,
-      { readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
+      { inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
     assert.equal(existsSync(oldest), true)
     assert.equal(existsSync(join(runDir, '.deployment.lock')), false)
   })
@@ -346,7 +490,7 @@ test('a damaged previous point that counted as recovery prevents deleting anothe
   const plan = await planRuntimeRetention(planOptions())
   write(join(previous, 'standalone/server.js'), 'previous-point-damaged')
   await assert.rejects(applyRuntimeRetention(plan, plan.planSha256,
-    { readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
+    { inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
   assert.equal(existsSync(disposable), true)
 })
 
@@ -362,7 +506,7 @@ test('a history point changed while remove audits run fails the final evidence f
     return result
   }
   await assert.rejects(applyRuntimeRetention(plan, plan.planSha256,
-    { readProcesses: () => [], auditArtifact: mutatingAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
+    { inspectProcess, readProcesses: () => [], auditArtifact: mutatingAudit, verifyArtifactSnapshot: fakeSnapshotVerification }), /recovery_changed/u)
   assert.equal(existsSync(oldest), true)
 })
 
@@ -397,7 +541,7 @@ test('cross-device deletion subtrees detected after artifact audits cause zero r
     if (mountChanged && pathname === join(second, 'standalone/server.js')) Object.defineProperty(value, 'dev', { value: value.dev + 1 })
     return value
   }
-  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, { readProcesses: () => [], auditArtifact,
+  await assert.rejects(applyRuntimeRetention(plan, plan.planSha256, { inspectProcess, readProcesses: () => [], auditArtifact,
     readEntry, verifyArtifactSnapshot: fakeSnapshotVerification }), /cross_device/u)
   assert.equal(existsSync(first), true); assert.equal(existsSync(second), true)
 })
@@ -410,7 +554,7 @@ test('even a recomputed confirmed plan cannot delete current or previous', async
     identity: { dev: String(lstatSync(releasesDir).dev) } }]
   const forged = { ...body, planSha256: runtimeDigest(body) }
   await assert.rejects(applyRuntimeRetention(forged, forged.planSha256,
-    { readProcesses: () => [], auditArtifact: fakeAudit }), /target_protected/u)
+    { inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit }), /target_protected/u)
   assert.equal(existsSync(join(releasesDir, releaseId)), true)
 })
 
@@ -419,7 +563,7 @@ test('confirmed retention removes only the sandbox regenerable object and releas
   await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
   const oldest = await oldRelease('d', '2026-10-05T00:00:00Z', current)
   const plan = await planRuntimeRetention(planOptions())
-  const result = await applyRuntimeRetention(plan, plan.planSha256, { readProcesses: () => [], auditArtifact: fakeAudit,
+  const result = await applyRuntimeRetention(plan, plan.planSha256, { inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit,
     verifyArtifactSnapshot: fakeSnapshotVerification })
   assert.equal(result.currentState, 'completed'); assert.equal(existsSync(oldest), false)
   assert.equal(existsSync(join(releasesDir, releaseId)), true)
