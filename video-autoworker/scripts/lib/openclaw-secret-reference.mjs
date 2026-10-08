@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, normalize, relative, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { OPENCLAW_SECRETREF_WRAPPER } from './openclaw-runtime-contract.mjs'
 
-const TOKEN_PATTERN = /^[a-f0-9]{64}$/u
+const TOKEN_PATTERN = /^(?:[a-f0-9]{48}|[a-f0-9]{64})$/u
 const MAX_OUTPUT_BYTES = 4_096
 const DEFAULT_TIMEOUT_MS = 10_000
 const MAX_TIMEOUT_MS = 120_000
@@ -157,6 +157,9 @@ export function resolveExecSecretReference(reference, providers, {
 }
 
 export function resolveOpenClawGatewaySecret(reference, providers) {
+  // Preserve OpenClaw's already configured native token without consulting a
+  // provider or the environment. Do not normalize invalid credential input.
+  if (typeof reference === 'string') return TOKEN_PATTERN.test(reference) ? reference : ''
   return resolveExecSecretReference(reference, providers, { valuePattern: TOKEN_PATTERN })
 }
 

@@ -28,6 +28,7 @@ import {
   resolveOpenClawGatewaySecret,
   type ExecSecretProvider,
 } from '@/lib/secret-reference'
+import { resolveGatewayTokenFromConfig } from '../../../scripts/lib/openclaw-secret-reference.mjs'
 
 const reference = {
   source: 'exec' as const,
@@ -77,6 +78,49 @@ describe('OpenClaw exec SecretRef compatibility', () => {
   afterEach(() => {
     rmSync(fixtureDir, { recursive: true, force: true })
     process.env.HOME = originalHome
+  })
+
+  it.each([48, 64])('uses an already configured %i-character native token without a provider process', length => {
+    const token = 'a'.repeat(length)
+    const unusedProviders = new Proxy(providers(), {
+      get() { throw new Error('native token must not consult providers') },
+    })
+
+    expect(resolveOpenClawGatewaySecret(token, unusedProviders)).toBe(token)
+    expect(resolveGatewayTokenFromConfig({
+      gateway: { auth: { token } },
+      secrets: { providers: unusedProviders },
+    })).toBe(token)
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an empty token', ''],
+    ['whitespace', ' '],
+    ['leading whitespace', ` ${'a'.repeat(48)}`],
+    ['trailing whitespace', `${'a'.repeat(64)} `],
+    ['a trailing newline', `${'a'.repeat(48)}\n`],
+    ['an embedded newline', `${'a'.repeat(24)}\n${'a'.repeat(24)}`],
+    ['47 characters', 'a'.repeat(47)],
+    ['49 characters', 'a'.repeat(49)],
+    ['63 characters', 'a'.repeat(63)],
+    ['65 characters', 'a'.repeat(65)],
+    ['non-hexadecimal characters', 'g'.repeat(48)],
+    ['uppercase hexadecimal', 'A'.repeat(64)],
+  ])('rejects a native token with %s without normalization or provider fallback', (_label, token) => {
+    expect(resolveOpenClawGatewaySecret(token, providers())).toBe('')
+    expect(resolveGatewayTokenFromConfig({ gateway: { auth: { token } } })).toBe('')
+    expect(spawnSyncMock).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an unknown provider', { ...reference, provider: 'untrusted-provider' }],
+    ['an environment reference', { ...reference, source: 'env' }],
+    ['a file reference', { ...reference, source: 'file' }],
+    ['an extra reference field', { ...reference, token: 'a'.repeat(48) }],
+  ])('rejects %s without starting a provider', (_label, untrustedReference) => {
+    expect(resolveOpenClawGatewaySecret(untrustedReference, providers())).toBe('')
+    expect(spawnSyncMock).not.toHaveBeenCalled()
   })
 
   it('resolves a lowercase gateway token with the production OpenClaw provider fields', () => {
