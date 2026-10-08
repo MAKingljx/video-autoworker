@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
+import { snapshotN8nMediaRouting } from '@/lib/n8n-media-config'
 import { enqueueDirectorEvidenceOutbox } from '@/lib/director-evidence-outbox'
 
 export const n8nTaskIdentitySchema = z.string()
@@ -675,7 +676,7 @@ export function createN8nTaskRun(
       input.bindingId,
       input.source,
       input.requestedBy,
-      JSON.stringify(input.routing),
+      JSON.stringify(snapshotN8nMediaRouting(input.routing)),
       JSON.stringify(input.taskInput),
       JSON.stringify(input.delivery),
       Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
@@ -959,7 +960,7 @@ export function ensureN8nChildRunFromParent(
       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
     `).run(
       input.childTaskId, input.childIdempotencyKey, input.bindingId, input.source,
-      parent.requestedBy, JSON.stringify(input.routing), JSON.stringify(input.taskInput),
+      parent.requestedBy, JSON.stringify(snapshotN8nMediaRouting(input.routing)), JSON.stringify(input.taskInput),
       JSON.stringify(input.delivery), Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
       scope.workspaceId, scope.tenantId, now, now,
     )
@@ -1031,7 +1032,7 @@ export function createAndClaimN8nChildRunFromParent(
         input.bindingId,
         input.source,
         parent.requestedBy,
-        JSON.stringify(input.routing),
+        JSON.stringify(snapshotN8nMediaRouting(input.routing)),
         JSON.stringify(input.taskInput),
         JSON.stringify(input.delivery),
         Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),

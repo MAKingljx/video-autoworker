@@ -7,6 +7,8 @@ export const SAFE_OPERATION_ERROR_SUMMARIES = {
   N8N_MODEL_EXECUTION_FAILED: '模型节点执行失败',
   N8N_MEDIA_COMMAND_FAILED: '媒体处理命令执行失败',
   N8N_MEDIA_MODEL_HTTP_FAILED: '媒体分析模型调用失败',
+  N8N_MEDIA_MODEL_OUTPUT_INVALID: '媒体分析模型输出格式无效',
+  N8N_MEDIA_IMAGE_LIMIT_EXCEEDED: '视频片段抽帧数量超过模型单次请求上限',
   N8N_MEDIA_DEPENDENCY_FAILED: '媒体节点依赖未就绪',
   N8N_MEDIA_STAGE_FAILED: '媒体节点执行失败',
   N8N_CHILD_LEASE_LOST: '子任务执行租约已失效',

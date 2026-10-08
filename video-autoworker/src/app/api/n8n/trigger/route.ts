@@ -380,7 +380,7 @@ export async function POST(request: NextRequest) {
       delivery: deliveryResult.data,
       maxAttempts: binding.retryCount + 1,
     }, scope)
-    return { ok: true, trustedTaskInput, routing, admission }
+    return { ok: true, trustedTaskInput, routing: admission.outcome === 'blocked' ? routing : admission.run.routing, admission }
   }
 
   let prepared: AdmissionPreparation | null = null

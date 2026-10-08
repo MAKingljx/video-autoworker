@@ -11700,6 +11700,90 @@
         }
       }
     },
+    "/api/n8n/workflows/learning-window": {
+      "put": {
+        "tags": [
+          "n8n"
+        ],
+        "summary": "Update only the video learning window",
+        "operationId": "updateN8nWorkflowLearningWindow",
+        "description": "Controlled loopback setting operation; validates the current scoped window before saving. The default remains 5 seconds. Identical values are read-only no-ops. General workflow CRUD is not granted.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "bindingId",
+                  "segmentSeconds",
+                  "expectedSegmentSeconds"
+                ],
+                "properties": {
+                  "bindingId": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "segmentSeconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300
+                  },
+                  "expectedSegmentSeconds": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Scoped workflow binding and changed boolean",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "binding",
+                    "changed"
+                  ],
+                  "properties": {
+                    "binding": {
+                      "$ref": "#/components/schemas/N8nWorkflowBinding"
+                    },
+                    "changed": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Learning window changed; refresh before saving"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
     "/api/n8n/workflows": {
       "get": {
         "tags": ["n8n"], "summary": "List n8n workflow bindings", "operationId": "listN8nWorkflowBindings",

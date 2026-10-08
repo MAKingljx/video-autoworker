@@ -40,6 +40,10 @@ const compatibleApiRouteSchema = commonRouteSchema.extend({
   apiKeyEnv: envReferenceSchema.optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.coerce.number().int().min(1).max(131_072).optional(),
+  maxImagesPerRequest: z.coerce.number().int().min(1).max(128).optional(),
+  // An operator-verified digest of the deployed model artifact. Required for
+  // portable media checkpoints; a stable model alias is not a revision.
+  modelRevisionSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
 }).superRefine((route, ctx) => {
   let url: URL
   try {

@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { resolveN8nEditorTarget, type N8nEditorTarget } from '@/lib/n8n-editor-url'
+import {
+  parseN8nMediaConfig,
+  setN8nLearningWindow,
+  VIDEO_LEARNING_SEGMENT_SECONDS,
+  VIDEO_LEARNING_SEGMENT_MIN_SECONDS,
+  VIDEO_LEARNING_SEGMENT_MAX_SECONDS,
+} from '@/lib/n8n-media-config'
 
 interface N8nHealth {
   ok: boolean
@@ -161,6 +168,29 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {}
 }
 
+function configFromText(value: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(value || '{}')
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('高级配置必须是 JSON 对象')
+  }
+  return parsed as Record<string, unknown>
+}
+
+function learningConfigError(error: unknown): string {
+  if (error instanceof SyntaxError) return '高级配置不是有效 JSON'
+  const issues = objectValue(error).issues
+  if (Array.isArray(issues)) {
+    const issue = objectValue(issues[0])
+    if (Array.isArray(issue.path) && (issue.path.includes('segmentSeconds')
+      || (issue.path.length === 0 && (issue.expected === 'number' || issue.expected === 'int' || issue.origin === 'number')))) {
+      return `学习窗口必须是 ${VIDEO_LEARNING_SEGMENT_MIN_SECONDS} 到 ${VIDEO_LEARNING_SEGMENT_MAX_SECONDS} 秒之间的整数`
+    }
+    if (issue.code === 'custom' && typeof issue.message === 'string') return issue.message
+    return '视频学习配置无效，请检查高级配置'
+  }
+  return messageFrom(error, '视频学习配置无效，请检查高级配置')
+}
+
 function routeIdFromConfig(config: Record<string, unknown>, nodeKey: string): string {
   const modelRouting = objectValue(config.modelRouting)
   const nodes = objectValue(modelRouting.nodes)
@@ -195,6 +225,7 @@ export function N8nWorkflowsPanel() {
   const [modelRegistryError, setModelRegistryError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [form, setForm] = useState<BindingForm>(EMPTY_FORM)
+  const [learningWindowInput, setLearningWindowInput] = useState(String(VIDEO_LEARNING_SEGMENT_SECONDS))
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -209,6 +240,11 @@ export function N8nWorkflowsPanel() {
   const [editorFrameLoaded, setEditorFrameLoaded] = useState(false)
   const [editorFrameSlow, setEditorFrameSlow] = useState(false)
   const editorFrameTimerRef = useRef<number | null>(null)
+  const selectedIdRef = useRef<number | null>(selectedId)
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+  }, [selectedId])
 
   const selectedBinding = useMemo(
     () => bindings.find(binding => binding.id === selectedId) || null,
@@ -223,6 +259,22 @@ export function N8nWorkflowsPanel() {
   useEffect(() => {
     setPageUrl(window.location.href)
   }, [])
+
+  useEffect(() => {
+    if (form.taskType.trim() !== 'video-analysis') {
+      setLearningWindowInput(String(VIDEO_LEARNING_SEGMENT_SECONDS))
+      return
+    }
+    // The JSON draft owns the configuration. The number input is its view;
+    // incomplete/invalid drafts stay visible and cannot be silently replaced.
+    try {
+      setLearningWindowInput(String(parseN8nMediaConfig(configFromText(form.configText)).segmentSeconds))
+      setError(null)
+    } catch (configError) {
+      setLearningWindowInput('')
+      setError(learningConfigError(configError))
+    }
+  }, [form.taskType, form.configText])
 
   useEffect(() => {
     if (!editorTarget.canEmbed) setEditorExpanded(false)
@@ -314,6 +366,7 @@ export function N8nWorkflowsPanel() {
   }, [loadData])
 
   const beginCreate = () => {
+    selectedIdRef.current = null
     setSelectedId(null)
     setForm({
       ...EMPTY_FORM,
@@ -324,6 +377,7 @@ export function N8nWorkflowsPanel() {
   }
 
   const beginEdit = (binding: WorkflowBinding) => {
+    selectedIdRef.current = binding.id
     setSelectedId(binding.id)
     setForm(formFromBinding(binding))
     setTestResult(null)
@@ -334,34 +388,104 @@ export function N8nWorkflowsPanel() {
     setForm(current => ({ ...current, [key]: value }))
   }
 
+  const updateLearningWindow = (value: string) => {
+    setLearningWindowInput(value)
+    try {
+      const config = setN8nLearningWindow(configFromText(form.configText), value)
+      updateForm('configText', JSON.stringify(config, null, 2))
+      setError(null)
+    } catch (configError) {
+      setError(learningConfigError(configError))
+    }
+  }
+
+  const saveLearningWindow = async () => {
+    if (!selectedBinding || selectedBinding.taskType !== 'video-analysis') return
+    setError(null)
+    setNotice(null)
+    let segmentSeconds: number
+    let expectedSegmentSeconds: number
+    try {
+      const draft = setN8nLearningWindow(configFromText(form.configText), learningWindowInput)
+      segmentSeconds = parseN8nMediaConfig(draft).segmentSeconds
+      expectedSegmentSeconds = parseN8nMediaConfig(selectedBinding.config).segmentSeconds
+    } catch (configError) {
+      setError(learningConfigError(configError))
+      return
+    }
+    const bindingId = selectedBinding.id
+    setSaving(true)
+    try {
+      const response = await fetch('/api/n8n/workflows/learning-window', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bindingId, segmentSeconds, expectedSegmentSeconds }),
+      })
+      const body = await readJson<{ binding?: WorkflowBinding; changed?: boolean; error?: string }>(response)
+        .catch((): { binding?: WorkflowBinding; changed?: boolean; error?: string } => ({}))
+      if (!response.ok || !body.binding) {
+        throw new Error(body.error || `保存学习窗口失败（HTTP ${response.status}）`)
+      }
+      const savedBinding = body.binding
+      if (savedBinding.id !== bindingId) throw new Error('保存返回的任务链不一致，请刷新后重试')
+      const savedSeconds = parseN8nMediaConfig(savedBinding.config).segmentSeconds
+      setBindings(current => current.map(binding => binding.id === bindingId ? savedBinding : binding))
+      if (selectedIdRef.current === bindingId) {
+        // Commit only the window view. Preserve other unsaved form fields and
+        // JSON draft settings instead of replacing them with the server row.
+        setForm(current => {
+          try {
+            return { ...current,
+              configText: JSON.stringify(setN8nLearningWindow(configFromText(current.configText), savedSeconds), null, 2),
+            }
+          } catch {
+            // Keep an intervening invalid draft; do not crash or erase it.
+            return current
+          }
+        })
+        setLearningWindowInput(String(savedSeconds))
+        setNotice(body.changed ? '学习窗口已更新' : '学习窗口未变')
+      }
+    } catch (saveError) {
+      setError(messageFrom(saveError, '保存学习窗口失败'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const saveBinding = async () => {
     setError(null)
     setNotice(null)
 
     let config: Record<string, unknown>
     try {
-      const parsed: unknown = JSON.parse(form.configText || '{}')
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('高级配置必须是 JSON 对象')
+      config = configFromText(form.configText)
+      if (form.taskType.trim() === 'video-analysis') {
+        config = setN8nLearningWindow(config, learningWindowInput)
       }
-      config = parsed as Record<string, unknown>
     } catch (configError) {
-      setError(messageFrom(configError, '高级配置不是有效 JSON'))
+      setError(form.taskType.trim() === 'video-analysis'
+        ? learningConfigError(configError) : messageFrom(configError, '高级配置不是有效 JSON'))
       return
     }
 
     const existingModelRouting = objectValue(config.modelRouting)
     const existingNodeRoutes = objectValue(existingModelRouting.nodes)
-    const nodeRoutes = Object.fromEntries([
+    const nodeRoutes = { ...existingNodeRoutes }
+    for (const [nodeKey, routeId] of [
       ['planner', form.plannerRouteId],
       ['executor', form.executorRouteId],
       ['reviewer', form.reviewerRouteId],
-    ].filter((entry): entry is [string, string] => Boolean(entry[1])).map(([nodeKey, routeId]) => [
-      nodeKey,
-      { ...objectValue(existingNodeRoutes[nodeKey]), routeId },
-    ]))
-    if (Object.keys(nodeRoutes).length) {
+    ]) {
+      const node = { ...objectValue(existingNodeRoutes[nodeKey]) }
+      if (routeId) node.routeId = routeId
+      else delete node.routeId
+      if (Object.keys(node).length) nodeRoutes[nodeKey] = node
+      else delete nodeRoutes[nodeKey]
+    }
+    if (Object.keys(nodeRoutes).length || Object.keys(existingModelRouting).length || !form.allowTaskOverride) {
       config.modelRouting = {
+        ...existingModelRouting,
         allowTaskOverride: form.allowTaskOverride,
         nodes: nodeRoutes,
       }
@@ -677,12 +801,28 @@ export function N8nWorkflowsPanel() {
                 </div>
               </Field>
               <Field label="任务类型">
-                <input className={inputClass} value={form.taskType} maxLength={80} list="n8n-task-types" placeholder="general" onChange={event => updateForm('taskType', event.target.value)} />
+                <input className={inputClass} value={form.taskType} maxLength={80} list="n8n-task-types" placeholder="general" onChange={event => updateForm('taskType', event.target.value)} aria-label="任务类型" />
                 <datalist id="n8n-task-types">
                   <option value="general" /><option value="video-analysis" /><option value="transcription" /><option value="vision-ocr" /><option value="knowledge-search" />
                 </datalist>
               </Field>
             </div>
+
+            {form.taskType.trim() === 'video-analysis' && (
+              <Field label="学习窗口（秒）" hint="仅影响新任务">
+                <div className="flex items-center gap-2">
+                  <input type="number" className={inputClass}
+                    min={VIDEO_LEARNING_SEGMENT_MIN_SECONDS} max={VIDEO_LEARNING_SEGMENT_MAX_SECONDS} step={1}
+                    value={learningWindowInput} onChange={event => updateLearningWindow(event.target.value)}
+                    disabled={saving} aria-label="学习窗口（秒）" />
+                  {selectedBinding?.taskType === 'video-analysis' && (
+                    <Button size="sm" className="shrink-0" onClick={() => void saveLearningWindow()} disabled={saving}>
+                      {saving ? '保存中…' : '保存窗口'}
+                    </Button>
+                  )}
+                </div>
+              </Field>
+            )}
 
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="Agent 角色">
@@ -748,7 +888,7 @@ export function N8nWorkflowsPanel() {
             </div>
 
             <Field label="高级配置（JSON 对象）" hint="传递给任务链的固定配置，不要填写密码或 API Key">
-              <textarea className={`${inputClass} min-h-32 resize-y font-mono text-xs leading-5`} value={form.configText} spellCheck={false} onChange={event => updateForm('configText', event.target.value)} />
+              <textarea className={`${inputClass} min-h-32 resize-y font-mono text-xs leading-5`} value={form.configText} spellCheck={false} onChange={event => updateForm('configText', event.target.value)} disabled={saving} aria-label="高级配置（JSON 对象）" />
             </Field>
 
             <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">

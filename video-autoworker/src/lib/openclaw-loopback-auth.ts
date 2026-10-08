@@ -96,6 +96,10 @@ export function requestPathname(request: Request): string {
 }
 
 export function isOpenClawN8nOperatorRequest(request: Request): boolean {
+  if (request.method.toUpperCase() === 'PUT'
+    && requestPathname(request) === '/api/n8n/workflows/learning-window') {
+    return isOpenClawLoopbackAuthMode() && isLoopbackHttpRequest(request)
+  }
   return isOpenClawLoopbackAuthMode()
     && isLoopbackHttpRequest(request)
     && request.method.toUpperCase() === 'POST'

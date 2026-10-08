@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { access, chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -18,6 +18,7 @@ import {
   projectSafeOperationError,
   SafeOperationError,
   sanitizeOperationalDiagnostic,
+  type SafeOperationErrorCode,
 } from '@/lib/operational-errors'
 import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/lib/media-policy.mjs'
 
@@ -26,25 +27,16 @@ const videoKeySchema = z.string().trim().regex(
   'videoKey 必须是受控收件箱生成的视频标识',
 )
 
-export const VIDEO_LEARNING_SEGMENT_SECONDS = 5
+export { VIDEO_LEARNING_SEGMENT_SECONDS } from '@/lib/n8n-media-config'
+import { parseN8nMediaConfig } from '@/lib/n8n-media-config'
 export const VIDEO_LEARNING_MODEL_BATCH_SEGMENTS = 12
-
-const mediaConfigSchema = z.object({
-  audioResourceId: z.string().trim().min(1).max(80).default('whisper-large-v3-turbo'),
-  language: z.string().trim().min(2).max(20).default('zh'),
-  maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(7_200),
-  segmentSeconds: z.coerce.number().int().min(5).max(300).default(VIDEO_LEARNING_SEGMENT_SECONDS),
-  segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(0),
-  maxKeyframesPerSegment: z.coerce.number().int().min(1).max(6).default(3),
-  maxFrames: z.coerce.number().int().min(1).max(12).default(4),
-  frameWidth: z.coerce.number().int().min(320).max(2_048).default(960),
-  maxTranscriptCharsPerSegment: z.coerce.number().int().min(500).max(12_000).default(6_000),
-  maxTranscriptChars: z.coerce.number().int().min(500).max(100_000).default(100_000),
-}).strict().superRefine((settings, ctx) => {
-  if (settings.segmentOverlapSeconds >= settings.segmentSeconds) {
-    ctx.addIssue({ code: 'custom', path: ['segmentOverlapSeconds'], message: '分段重叠必须小于分段时长' })
-  }
-})
+// The current local visual runtime accepts eight images per request. Routes
+// may declare a lower limit; use the strictest candidate so failover does not
+// receive a batch that it cannot process either.
+const DEFAULT_VIDEO_VISION_MAX_IMAGES = 8
+const VISION_CHECKPOINT_SCHEMA = 'aiworker-vision-checkpoint-v2'
+const VISION_OUTPUT_SCHEMA = 'visual-perception-v1'
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 
 export type N8nMediaStage = 'prepare' | 'audio' | 'vision' | 'finalize'
 export type N8nVideoModelPhase = 'vision' | 'chapter' | 'final'
@@ -113,6 +105,7 @@ interface MediaMetadata extends PreparedMedia {
   taskId: string
   preparedAt: string
   audioSourceFile?: string | null
+  sourceSha256?: string
   segments: MediaSegment[]
 }
 
@@ -133,6 +126,9 @@ const visualPerceptionSchema = z.object({
   composition: z.array(z.string().trim().min(1).max(160)).max(12),
   emotion: z.array(z.string().trim().min(1).max(160)).max(12),
 }).strict()
+const VISION_OUTPUT_SCHEMA_SHA256 = createHash('sha256')
+  .update(JSON.stringify(z.toJSONSchema(visualPerceptionSchema, { io: 'output' })))
+  .digest('hex')
 
 const visualPerceptionBatchSchema = z.object({
   segments: z.array(visualPerceptionSchema.extend({
@@ -189,12 +185,7 @@ function expandHome(value: string): string {
 
 function mediaConfig(routing: Record<string, unknown>) {
   const configValue = objectValue(routing.config)
-  const mediaValue = objectValue(configValue.media)
-  // File admission is a host capability, not a per-binding policy. Ignore the
-  // old field so existing n8n bindings cannot reintroduce a second 10 GiB cap.
-  const currentMediaValue = { ...mediaValue }
-  delete currentMediaValue.maxFileBytes
-  return mediaConfigSchema.parse(currentMediaValue)
+  return parseN8nMediaConfig(configValue)
 }
 
 function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -207,7 +198,7 @@ const VIDEO_GENERATION_DEFAULTS: Record<N8nVideoModelPhase, {
   reasoningEffort: N8nVideoReasoningEffort
   maxTokens: number
 }> = {
-  // Per-minute visual extraction is factual perception, not final editorial
+  // Per-segment visual extraction is factual perception, not final editorial
   // reasoning. Skipping private reasoning preserves the visible evidence while
   // avoiding dozens of dense-model reasoning passes for one video.
   vision: { reasoningEffort: 'off', maxTokens: 1_536 },
@@ -364,6 +355,32 @@ async function assertControlledSource(videoKey: string) {
   if (!sourceStat.isFile() || sourceStat.size <= 0) throw new Error('视频文件无效')
   await assertMediaCapacity({ sourcePath, destinationRoot: inbox })
   return { sourcePath, sourceBytes: sourceStat.size }
+}
+
+async function verifiedSourceSha256(sourcePath: string, expectedBytes: number, materialId: unknown): Promise<string> {
+  if (materialId !== undefined && !materialSourceSha256(materialId)) {
+    throw new Error('已登记素材哈希无效')
+  }
+  const handle = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await handle.stat()
+    if (!before.isFile() || before.size !== expectedBytes) throw new Error('视频源文件身份已变化')
+    const hash = createHash('sha256')
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk)
+    const after = await handle.stat()
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new Error('视频源文件在哈希读取期间变化')
+    }
+    const digest = hash.digest('hex')
+    if (typeof materialId === 'string' && materialId.startsWith('MATERIAL-SHA256-')
+      && materialId.slice('MATERIAL-SHA256-'.length) !== digest) {
+      throw new Error('视频源文件与已登记素材哈希不一致')
+    }
+    return digest
+  } finally {
+    await handle.close()
+  }
 }
 
 async function writeMetadata(workspace: string, metadata: MediaMetadata) {
@@ -543,6 +560,92 @@ async function readCheckpoint(
   }
 }
 
+function jsonSha256(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function materialSourceSha256(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const match = /^MATERIAL-SHA256-([a-f0-9]{64})$/u.exec(value)
+  return match?.[1] || null
+}
+
+async function visionFrameSha256(workspace: string, name: string): Promise<string> {
+  const pathname = resolve(workspace, name)
+  const resolvedWorkspace = await realpath(workspace)
+  if (!pathname.startsWith(`${workspace}/`)
+    || await realpath(pathname) !== resolve(resolvedWorkspace, name)) {
+    throw new Error('视觉检查点输入帧不在当前媒体工作区')
+  }
+  const entry = await lstat(pathname)
+  if (!entry.isFile() || entry.isSymbolicLink() || entry.size <= 0 || entry.size > 4 * 1024 * 1024) {
+    throw new Error('视觉检查点输入帧身份无效')
+  }
+  const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const before = await handle.stat()
+    if (before.dev !== entry.dev || before.ino !== entry.ino || before.size !== entry.size) {
+      throw new Error('视觉检查点输入帧读取前变化')
+    }
+    const digest = createHash('sha256').update(await handle.readFile()).digest('hex')
+    const after = await handle.stat()
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      throw new Error('视觉检查点输入帧读取时变化')
+    }
+    return digest
+  } finally {
+    await handle.close()
+  }
+}
+
+async function readTrustedVisionCheckpoint(
+  workspace: string,
+  name: string,
+  expected: Record<string, unknown>,
+  candidates: Array<Extract<N8nModelRoute, { transport: 'openai-compatible' }>>,
+): Promise<Record<string, unknown> | null> {
+  const pathname = join(workspace, 'checkpoints', name)
+  let handle: Awaited<ReturnType<typeof open>> | null = null
+  try {
+    const entry = await lstat(pathname)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.nlink !== 1
+      || (entry.mode & 0o777) !== 0o600 || entry.size < 2 || entry.size > 256 * 1024
+      || (typeof process.getuid === 'function' && entry.uid !== process.getuid())) return null
+    handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const before = await handle.stat()
+    if (before.dev !== entry.dev || before.ino !== entry.ino || before.size !== entry.size) return null
+    const value = JSON.parse(await handle.readFile({ encoding: 'utf8' }))
+    const after = await handle.stat()
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) return null
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const { proof, ...result } = value as Record<string, unknown>
+    if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return null
+    const receipt = proof as Record<string, unknown>
+    const route = candidates.find(candidate => candidate.id === result.routeId)
+    if (!route?.modelRevisionSha256) return null
+    const expectedProof = {
+      ...expected,
+      routeId: route.id,
+      model: route.model,
+      modelRevisionSha256: route.modelRevisionSha256,
+      resultSha256: jsonSha256(result),
+    }
+    if (JSON.stringify(receipt) !== JSON.stringify(expectedProof)) return null
+    if (!visualPerceptionSchema.safeParse(result.perception).success
+      || result.analysis !== (result.perception as N8nVisualPerception).summary
+      || result.index !== expected.segmentIndex
+      || result.frameCount !== (expected.frameSha256s as string[]).length
+      || result.timeRange !== expected.timeRange) return null
+    return result
+  } catch {
+    return null
+  } finally {
+    await handle?.close()
+  }
+}
+
 export async function prepareN8nMedia(
   taskId: string,
   routing: Record<string, unknown>,
@@ -558,6 +661,7 @@ export async function prepareN8nMedia(
   }
 
   const { sourcePath, sourceBytes } = await assertControlledSource(videoKey)
+  const sourceSha256 = await verifiedSourceSha256(sourcePath, sourceBytes, input.materialId)
   const ffmpeg = ffmpegCommand()
   await access(ffmpeg, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)
@@ -595,7 +699,7 @@ export async function prepareN8nMedia(
     const segmentDir = join(workspace, prefix)
     await mkdir(segmentDir, { recursive: true, mode: 0o700 })
     // Keep one full mono track and project Whisper word timestamps into exact
-    // five-second windows. Loading Whisper once per five-second WAV would
+    // configured windows. Loading Whisper once per window WAV would
     // multiply model startup cost without improving the stored time contract.
     const audioFile: string | null = null
 
@@ -609,7 +713,7 @@ export async function prepareN8nMedia(
         '-fps_mode', 'vfr', '-frames:v', String(settings.maxKeyframesPerSegment), '-q:v', '3', scenePattern,
       ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
     } catch {
-      // Some videos have no scene boundary in a minute; uniform fallback below is authoritative.
+      // Some videos have no scene boundary in a window; uniform fallback below is authoritative.
     }
     const sceneFrames = (await readdir(segmentDir))
       .filter(name => /^scene-\d{2}\.jpg$/.test(name)).sort()
@@ -649,6 +753,7 @@ export async function prepareN8nMedia(
     kind: 'prepared-video',
     durationSeconds: Math.round(probe.durationSeconds * 1000) / 1000,
     sourceBytes,
+    sourceSha256,
     audioAvailable: probe.hasAudio,
     frameCount,
     segmentCount,
@@ -932,6 +1037,7 @@ async function callCompatibleModelWithFallback(
   validatePayload?: (payload: any) => unknown,
 ): Promise<CompatibleRouteAttempt> {
   const errors: string[] = []
+  let lastFailureCode: SafeOperationErrorCode = 'N8N_MEDIA_MODEL_HTTP_FAILED'
   const start = Math.max(0, Math.min(startRouteIndex, Math.max(0, candidates.length - 1)))
   for (let routeIndex = start; routeIndex < candidates.length; routeIndex += 1) {
     const route = candidates[routeIndex]
@@ -940,20 +1046,55 @@ async function callCompatibleModelWithFallback(
       const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
       if (route.apiKeyEnv && !apiKey) throw new Error(`缺少外部凭据引用 ${route.apiKeyEnv}`)
       const payload = await callCompatibleModel(route, apiKey, content, failurePrefix, options)
-      const validated = validatePayload ? validatePayload(payload) : undefined
+      let validated: unknown
+      try {
+        validated = validatePayload ? validatePayload(payload) : undefined
+      } catch (error) {
+        throw new SafeOperationError('N8N_MEDIA_MODEL_OUTPUT_INVALID', {
+          operation: failurePrefix,
+          routeId: route.id,
+          reason: sanitizeOperationalDiagnostic(error, 300),
+        })
+      }
       return { payload, validated, route, routeIndex }
     } catch (error) {
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
+      lastFailureCode = projection.code
       logSafeOperationError('media_model_route_attempt', error, projection)
       errors.push(`${route.id}: ${sanitizeOperationalDiagnostic(error, 600)}`)
     }
   }
   const configured = resolved.candidates.length ? resolved.candidates.join('、') : resolved.route.id
-  throw new SafeOperationError('N8N_MEDIA_MODEL_HTTP_FAILED', {
+  throw new SafeOperationError(lastFailureCode, {
     operation: failurePrefix,
     configuredRoutes: configured,
     attempts: errors,
   })
+}
+
+function visualSegmentBatches(segments: MediaSegment[], maxImages: number): MediaSegment[][] {
+  const batches: MediaSegment[][] = []
+  let batch: MediaSegment[] = []
+  let imageCount = 0
+  for (const segment of segments) {
+    const frames = segment.frameFiles.length
+    if (frames < 1 || frames > maxImages) {
+      throw new SafeOperationError('N8N_MEDIA_IMAGE_LIMIT_EXCEEDED', {
+        segmentIndex: segment.index,
+        frameCount: frames,
+        maxImages,
+      })
+    }
+    if (batch.length >= VIDEO_LEARNING_MODEL_BATCH_SEGMENTS || imageCount + frames > maxImages) {
+      batches.push(batch)
+      batch = []
+      imageCount = 0
+    }
+    batch.push(segment)
+    imageCount += frames
+  }
+  if (batch.length) batches.push(batch)
+  return batches
 }
 
 /**
@@ -1130,19 +1271,52 @@ export async function analyzeN8nVideoFrames(
   const route = assertVisionRoute(candidates[0])
   const workspace = mediaTaskWorkspace(taskId)
   const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
+  const materialSha256 = materialSourceSha256(taskInput.materialId)
+  if (taskInput.materialId !== undefined && !materialSha256) {
+    throw new Error('视觉检查点来源素材哈希无效')
+  }
+  if (metadata.sourceSha256 && (!SHA256_PATTERN.test(metadata.sourceSha256)
+    || (materialSha256 && metadata.sourceSha256 !== materialSha256))) {
+    throw new Error('视觉检查点来源素材哈希不一致')
+  }
+  const sourceSha256 = metadata.sourceSha256 || materialSha256
   const generation = videoModelGenerationProfile('vision')
+  const promptSha256 = jsonSha256({
+    contract: 'video-vision-configured-window-v1',
+    prompt, instruction: resolved.instruction || '', generation,
+  })
+  const maxImagesPerRequest = Math.min(...candidates.map(candidate => (
+    candidate.maxImagesPerRequest || DEFAULT_VIDEO_VISION_MAX_IMAGES
+  )))
   const segmentResults = new Map<number, Record<string, unknown>>()
   let activeRouteIndex = 0
   let modelBatches = 0
   let individualFallbackCalls = 0
-  for (let batchOffset = 0; batchOffset < metadata.segments.length; batchOffset += VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) {
-    const batch = metadata.segments.slice(batchOffset, batchOffset + VIDEO_LEARNING_MODEL_BATCH_SEGMENTS)
+  for (const batch of visualSegmentBatches(metadata.segments, maxImagesPerRequest)) {
     const missing: MediaSegment[] = []
+    const proofByIndex = new Map<number, Record<string, unknown>>()
     for (const segment of batch) {
       const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
-      const cached = await readCheckpoint(workspace, checkpointName, value => (
-        value.index === segment.index && typeof value.analysis === 'string'
-      ))
+      let cached: Record<string, unknown> | null = null
+      if (sourceSha256 && candidates.some(candidate => candidate.modelRevisionSha256)) {
+        const frameSha256s = await Promise.all(segment.frameFiles.map(name => visionFrameSha256(workspace, name)))
+        const expected = {
+          schema: VISION_CHECKPOINT_SCHEMA,
+          sourceSha256,
+          sourceBytes: metadata.sourceBytes,
+          segmentSeconds: metadata.segmentSeconds,
+          promptSha256,
+          outputSchema: VISION_OUTPUT_SCHEMA,
+          outputSchemaSha256: VISION_OUTPUT_SCHEMA_SHA256,
+          segmentIndex: segment.index,
+          startSeconds: segment.startSeconds,
+          durationSeconds: segment.durationSeconds,
+          timeRange: segmentTimeLabel(segment),
+          frameSha256s,
+        }
+        proofByIndex.set(segment.index, expected)
+        cached = await readTrustedVisionCheckpoint(workspace, checkpointName, expected, candidates)
+      }
       if (cached) {
         segmentResults.set(segment.index, cached)
         const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === cached.routeId)
@@ -1155,7 +1329,7 @@ export async function analyzeN8nVideoFrames(
         text: [
           resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
           `业务要求：${prompt.slice(0, 4_000)}`,
-          '下面每个片段都是独立的5秒学习单位。只记录对应片段画面能够确认的事实，不分析音频，不引用其他片段补全。',
+          `学习窗口为${metadata.segmentSeconds}秒，按下面标注的实际时间范围逐段分析（尾段可能更短）。只记录对应片段画面能够确认的事实，不分析音频，不引用其他片段补全。`,
           '只输出一个JSON对象，不要代码围栏或额外文字，格式为：',
           '{"segments":[{"index":1,"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}]}',
           `必须按顺序完整返回这些片段编号：${missing.map(segment => segment.index).join('、')}。未知数组保持为空，不得猜测。`,
@@ -1179,7 +1353,11 @@ export async function analyzeN8nVideoFrames(
         content.push(...images.map(url => ({ type: 'image_url', image_url: { url } })))
       }
       const expectedIndexes = missing.map(segment => segment.index)
-      const persist = async (segment: MediaSegment, perception: N8nVisualPerception, routeId: string) => {
+      const persist = async (
+        segment: MediaSegment,
+        perception: N8nVisualPerception,
+        usedRoute: Extract<N8nModelRoute, { transport: 'openai-compatible' }>,
+      ) => {
         const segmentResult = {
           index: segment.index,
           startSeconds: segment.startSeconds,
@@ -1188,12 +1366,22 @@ export async function analyzeN8nVideoFrames(
           analysis: perception.summary,
           perception,
           frameCount: frameCounts.get(segment.index) || segment.frameFiles.length,
-          routeId,
+          routeId: usedRoute.id,
         }
+        const expected = proofByIndex.get(segment.index)
+        const proof = expected && usedRoute.modelRevisionSha256
+          ? {
+              ...expected,
+              routeId: usedRoute.id,
+              model: usedRoute.model,
+              modelRevisionSha256: usedRoute.modelRevisionSha256,
+              resultSha256: jsonSha256(segmentResult),
+            }
+          : null
         await writeCheckpoint(
           workspace,
           `vision-${String(segment.index).padStart(3, '0')}.json`,
-          segmentResult,
+          proof ? { ...segmentResult, proof } : segmentResult,
         )
         segmentResults.set(segment.index, segmentResult)
       }
@@ -1220,7 +1408,7 @@ export async function analyzeN8nVideoFrames(
         for (const { index, perception } of perceptions) {
           const segment = missing.find(item => item.index === index)
           if (!segment) throw new Error(`视频画面批次返回未知片段：${index}`)
-          await persist(segment, perception, attempt.route.id)
+          await persist(segment, perception, attempt.route)
         }
         continue
       } catch (error) {
@@ -1258,7 +1446,7 @@ export async function analyzeN8nVideoFrames(
         )
         activeRouteIndex = attempt.routeIndex
         individualFallbackCalls += 1
-        await persist(segment, attempt.validated as N8nVisualPerception, attempt.route.id)
+        await persist(segment, attempt.validated as N8nVisualPerception, attempt.route)
       }
     }
   }
@@ -1289,6 +1477,7 @@ export async function analyzeN8nVideoFrames(
       reasoningEffort: generation.reasoningEffort,
       maxTokens: generation.maxTokens,
       batchSegments: VIDEO_LEARNING_MODEL_BATCH_SEGMENTS,
+      maxImagesPerRequest,
       modelBatches,
       individualFallbackCalls,
     },
@@ -1466,7 +1655,7 @@ export async function synthesizeN8nMediaResults(
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
   const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
   // Retain the deployed generation knobs. One request reconciles at most
-  // twelve independent five-second segments; no final/global model request is
+  // twelve independent configured windows; no final/global model request is
   // made and every result is checkpointed under its own segment identity.
   const generation = videoModelGenerationProfile('chapter')
   const timeoutSeconds = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS', route.timeoutSeconds, 60, 600)
@@ -1494,7 +1683,7 @@ export async function synthesizeN8nMediaResults(
       const transcript = String(segment.transcript || '')
       const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
       const inputSha256 = synthesisDigest({
-        contract: 'segment-audiovisual-summary-v1', sourceName, index, segment,
+        contract: 'segment-audiovisual-summary-window-v1', sourceName, index, segment,
         businessPrompt, generation, modelIdentity,
       })
       const cached = await readCheckpoint(
@@ -1545,7 +1734,7 @@ export async function synthesizeN8nMediaResults(
     }
 
     const batchPrompt = [
-      '为下面每个5秒视频片段分别生成独立摘要与结构化导演感知；不得跨片段合并、补全或推断。',
+      '按下面标注的实际时间范围，为每个视频片段分别生成独立摘要与结构化导演感知（尾段可能更短）；不得跨片段合并、补全或推断。',
       `来源文件：${sourceName}`,
       `业务要求：${businessPrompt}`,
       '语音和画面只在同一片段内互相校验。只记录有证据的事实，不推断未提供的音效或音乐。',
