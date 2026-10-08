@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TaskRunsPanel } from './task-runs-panel'
 import { useMissionControl } from '@/store'
@@ -36,6 +37,7 @@ afterEach(() => {
 
 describe('TaskRunsPanel', () => {
   it('shows bounded learning evidence and requires inspection plus human confirmation for recovery', async () => {
+    const inspectionToken = randomUUID()
     const failed = { ...baseRun, taskId: 'recover-me', title: '恢复学习任务', status: 'failed', error: 'vision: interrupted',
       progress: { schema: 'aiworker-learning-progress/v1', taskId: 'recover-me', state: 'failed', activeStages: [], generatedAt: 1,
         stages: [{ stage: 'vision', state: 'failed', totalSegments: 10, completedSegments: 4, model: 'Qwen local', cacheHits: 2, remainingSeconds: null }] } }
@@ -44,7 +46,7 @@ describe('TaskRunsPanel', () => {
       if (url.includes('/runs/recovery') && init?.method === 'POST') return jsonResponse({ taskId: 'recover-me', currentState: 'accepted' })
       if (url.includes('/runs/recovery')) return jsonResponse({ canRecover: true, inspection: { taskId: 'recover-me', eligible: true,
         currentState: 'failed', errorCode: null, nextAction: 'confirm', missingResources: [], preservedStages: ['prepare'],
-        expectedRevision: 'revision', inspectionToken: 'server-confirmation' } })
+        expectedRevision: 'revision', inspectionToken } })
       if (url.includes('view=queue')) return jsonResponse({ queue: [], total: 0, counts: { waiting: 0, running: 0, attention: 0 }, generatedAt: 1 })
       return jsonResponse({ runs: [failed], total: 1, limit: 50, offset: 0 })
     })
@@ -64,7 +66,7 @@ describe('TaskRunsPanel', () => {
     expect(confirm).toHaveBeenCalledOnce()
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
     expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.body)))
-      .toEqual({ taskId: 'recover-me', inspectionToken: 'server-confirmation', confirm: true })
+      .toEqual({ taskId: 'recover-me', inspectionToken, confirm: true })
     confirm.mockRestore()
   })
 
