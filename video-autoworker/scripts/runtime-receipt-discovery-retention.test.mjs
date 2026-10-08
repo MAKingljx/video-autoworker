@@ -10,6 +10,8 @@ import { fingerprintRuntimeReference, observeRuntime, publicRuntimeReceiptStatus
   runtimeDigest, writeCurrentRuntimeReceipt } from './lib/runtime-receipt.mjs'
 import { applyRuntimeRetention, planRuntimeRetention } from './lib/runtime-retention.mjs'
 import { releaseComponentSummary } from './release-impact-deploy.mjs'
+import { appendReleaseOperationEvent, createReleaseOperationScope, releaseOperationPaths,
+  RELEASE_OPERATION_OWNER_SCHEMA, RELEASE_OPERATION_CANCEL_SCHEMA } from './lib/release-operation.mjs'
 
 let root, runDir, releasesDir, databasePath, platformPath, references
 const commit = 'a'.repeat(40), releaseId = `${commit}-runtime`
@@ -296,6 +298,82 @@ async function oldRelease(char, date, current) {
   return pathname
 }
 const planOptions = () => ({ runDir, releasesDir, databasePath, inspectProcess, readProcesses: () => [], auditArtifact: fakeAudit })
+
+function operationWithSidecars(artifact) {
+  const pathname = join(root, 'operations/2026-09-14-fast-release/release-plan-3.json')
+  const plan = { schema: 'video-autoworker-release-impact-plan/v2', sourceCommit: 'd'.repeat(40),
+    planSha256: sha, actions: ['stage-app'], components: { app: { changed: true } },
+    router: { target: 'green', releaseId: `${'d'.repeat(40)}-runtime` }, artifactRoot: artifact }
+  write(pathname, plan)
+  const scope = createReleaseOperationScope(plan), paths = releaseOperationPaths(pathname, runDir)
+  const attemptId = '12345678-1234-4234-8234-123456789abc'
+  appendReleaseOperationEvent(paths.journal, scope, { step: 'operation', status: 'started', attemptId })
+  write(paths.owner, { schema: RELEASE_OPERATION_OWNER_SCHEMA, operationId: scope.operationId,
+    attemptId, status: 'failed', pid: null, startToken: null, startedAt: '2026-09-14T00:00:00Z', finishedAt: '2026-09-14T00:01:00Z' })
+  write(paths.cancel, { schema: RELEASE_OPERATION_CANCEL_SCHEMA, operationId: scope.operationId,
+    targetAttemptId: attemptId, requestedAt: '2026-09-14T00:00:30Z' })
+  const proofPath = join(root, 'historical-runtime-proof.json'); write(proofPath, { schema: 'proof-fixture', verified: true })
+  for (const kind of ['runtime-proof', 'runtime-proof-override']) write(join(dirname(pathname),
+    `.release-plan-3.json.${kind}.${attemptId}.json`), { schema: 'video-autoworker-runtime-proof-reference/v1',
+    attemptId, proofPath, proofSha256: runtimeDigest(readFileSync(proofPath)) })
+  return { pathname, scope, paths, attemptId, proofPath }
+}
+
+test('real owner/cancel/proof sidecars bind to their v2 main plan and preserve unfinished references', async () => {
+  const current = await receipt()
+  await oldRelease('b', '2026-10-07T00:00:00Z', current); await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  const referenced = await oldRelease('d', '2026-10-05T00:00:00Z', current)
+  operationWithSidecars(join(referenced, 'standalone'))
+  const plan = await planRuntimeRetention(planOptions())
+  assert.equal(plan.currentState, 'ready'); assert.equal(plan.inventoryComplete, true)
+  assert.deepEqual(plan.blockers, []); assert.deepEqual(plan.remove, [])
+  assert.ok(plan.protectedObjects.some(item => item.path === referenced && item.reason === 'runtime_reference'))
+})
+
+for (const kind of ['owner', 'cancel', 'runtime-proof']) {
+  test(`an orphan ${kind} sidecar stays blocked without a v2 main plan`, async () => {
+    await receipt()
+    const operation = operationWithSidecars('/artifact-reference')
+    rmSync(operation.pathname)
+    if (kind !== 'owner') rmSync(operation.paths.owner)
+    if (kind === 'runtime-proof') rmSync(operation.paths.cancel)
+    const plan = await planRuntimeRetention(planOptions())
+    assert.equal(plan.currentState, 'blocked'); assert.deepEqual(plan.remove, [])
+    assert.equal(plan.blockers[0].code, 'retention_operation_sidecar_orphan')
+  })
+}
+
+for (const kind of ['owner', 'cancel', 'runtime-proof']) {
+  test(`a misbound ${kind} sidecar never gets ignored as known metadata`, async () => {
+    await receipt()
+    const operation = operationWithSidecars('/artifact-reference')
+    const pathname = kind === 'runtime-proof' ? join(dirname(operation.pathname),
+      `.release-plan-3.json.runtime-proof.${operation.attemptId}.json`) : operation.paths[kind]
+    const value = json(pathname)
+    if (kind === 'runtime-proof') value.attemptId = '00000000-0000-4000-8000-000000000000'
+    else value.operationId = 'f'.repeat(64)
+    write(pathname, value)
+    const plan = await planRuntimeRetention(planOptions())
+    assert.equal(plan.currentState, 'blocked'); assert.deepEqual(plan.remove, [])
+    assert.equal(plan.blockers[0].code, 'retention_operation_sidecar_binding_invalid')
+  })
+}
+
+test('a malformed proof digest or sidecar pointing at a legacy main plan remains blocked', async () => {
+  await receipt()
+  const operation = operationWithSidecars('/artifact-reference')
+  write(operation.proofPath, { changed: true })
+  assert.equal((await planRuntimeRetention(planOptions())).blockers[0].code, 'retention_operation_sidecar_binding_invalid')
+  write(operation.pathname, { schema: 'video-autoworker-release-impact-plan/v1' })
+  assert.equal((await planRuntimeRetention(planOptions())).blockers[0].code, 'retention_operation_plan_unknown')
+})
+
+test('an unknown dot JSON file is not blanket-exempted from operation planning checks', async () => {
+  await receipt()
+  write(join(root, 'operations/.unknown-plan-metadata.json'), { schema: 'unknown' })
+  const plan = await planRuntimeRetention(planOptions())
+  assert.equal(plan.currentState, 'blocked'); assert.equal(plan.blockers[0].code, 'retention_operation_plan_unknown')
+})
 
 test('unknown legacy operation plans return a blocked real release inventory and can never be applied', async () => {
   const current = await receipt()

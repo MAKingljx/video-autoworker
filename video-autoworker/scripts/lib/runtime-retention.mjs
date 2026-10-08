@@ -1,11 +1,11 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readdirSync, realpathSync, rmSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { auditStandaloneArtifact, verifyStandaloneVerificationBundle } from '../check-standalone-artifact.mjs'
 import { acquireSharedDeploymentLockSync, assertSharedDeploymentLockAvailableSync } from './shared-deployment-lock.mjs'
 import { artifactMetadataDigest, readCurrentRuntimeReceipt, readRuntimeFile, runtimeDigest, safeRuntimeEntry, validateRuntimeReceipt } from './runtime-receipt.mjs'
 import { createReleaseOperationScope, readReleaseOperationJournal, releaseOperationPaths,
-  releaseOperationStatus } from './release-operation.mjs'
+  releaseOperationStatus, RELEASE_OPERATION_OWNER_SCHEMA, RELEASE_OPERATION_CANCEL_SCHEMA } from './release-operation.mjs'
 
 const SCHEMA = 'video-autoworker-runtime-retention-plan/v1'
 const RELEASE = /^[a-f0-9]{40}-runtime$/u
@@ -21,6 +21,67 @@ export function readProcessReleaseReferences(releasesDir) {
 
 function readPendingOperationReferences(operationsRoot, runDir, releasesDir) {
   const references = [], blockers = []; let visited = 0, inspectedPath = operationsRoot || null
+  const operations = new Map(), attemptPattern = /^[a-f0-9-]{36}$/u
+  const readOperation = pathname => {
+    if (operations.has(pathname)) return operations.get(pathname)
+    if (!existsSync(pathname)) throw new Error('retention_operation_sidecar_orphan')
+    const plan = JSON.parse(readRuntimeFile(pathname, 4 * 1024 * 1024))
+    if (plan.schema !== 'video-autoworker-release-impact-plan/v2') throw new Error('retention_operation_plan_unknown')
+    const scope = createReleaseOperationScope(plan), paths = releaseOperationPaths(pathname, runDir)
+    const events = readReleaseOperationJournal(paths.journal, scope.operationId)
+    const state = releaseOperationStatus(scope, events)
+    if (state.state !== 'completed') {
+      if (plan.artifactRoot) references.push(plan.artifactRoot)
+      if (plan.router?.releaseId) references.push(join(releasesDir, plan.router.releaseId))
+    }
+    const operation = { scope, paths, events, state }
+    operations.set(pathname, operation)
+    return operation
+  }
+  const readSidecar = pathname => {
+    if (!existsSync(pathname)) throw new Error('retention_operation_sidecar_orphan')
+    if ((safeRuntimeEntry(pathname).mode & 0o777) !== 0o600) throw new Error('retention_operation_sidecar_unsafe')
+    return JSON.parse(readRuntimeFile(pathname, 128 * 1024))
+  }
+  const verifyOwner = (value, operation) => {
+    if (value?.schema !== RELEASE_OPERATION_OWNER_SCHEMA || value.operationId !== operation.scope.operationId
+      || !attemptPattern.test(value.attemptId || '') || !['running', 'completed', 'failed', 'cancelled'].includes(value.status)
+      || (operation.state.attemptId && value.attemptId !== operation.state.attemptId)
+      || (value.status === 'running' ? !Number.isSafeInteger(value.pid) || value.pid <= 0
+        || typeof value.startToken !== 'string' || !value.startToken : value.pid !== null || value.startToken !== null)) {
+      throw new Error('retention_operation_sidecar_binding_invalid')
+    }
+    return value
+  }
+  const classifySidecar = (directory, name, pathname) => {
+    const ownerOrCancel = /^\.(.+\.json)\.release-operation\.(owner|cancel)\.json$/u.exec(name)
+    const proof = /^\.(.+\.json)\.(runtime-proof(?:-override)?)\.([a-f0-9-]{36})\.json$/u.exec(name)
+    if (!ownerOrCancel && !proof) return false
+    const operation = readOperation(join(directory, (ownerOrCancel || proof)[1]))
+    const value = readSidecar(pathname)
+    if (ownerOrCancel) {
+      const kind = ownerOrCancel[2]
+      if (operation.paths[kind] !== pathname) throw new Error('retention_operation_sidecar_binding_invalid')
+      if (kind === 'owner') verifyOwner(value, operation)
+      else {
+        const owner = verifyOwner(readSidecar(operation.paths.owner), operation)
+        if (value?.schema !== RELEASE_OPERATION_CANCEL_SCHEMA || value.operationId !== operation.scope.operationId
+          || !attemptPattern.test(value.targetAttemptId || '')
+          || (value.targetAttemptId !== owner.attemptId && !operation.events.some(event => event.attemptId === value.targetAttemptId))
+          || !Number.isFinite(Date.parse(value.requestedAt))) throw new Error('retention_operation_sidecar_binding_invalid')
+      }
+    } else {
+      const attemptId = proof[3]
+      if (value?.schema !== 'video-autoworker-runtime-proof-reference/v1' || value.attemptId !== attemptId
+        || !operation.events.some(event => event.attemptId === attemptId)
+        || !isAbsolute(value.proofPath || '') || resolve(value.proofPath) !== value.proofPath
+        || !SHA.test(value.proofSha256 || '')
+        || runtimeDigest(readRuntimeFile(value.proofPath, 4 * 1024 * 1024)) !== value.proofSha256) {
+        throw new Error('retention_operation_sidecar_binding_invalid')
+      }
+    }
+    return true
+  }
   const visit = (directory, depth) => {
     inspectedPath = directory
     if (depth > 3) throw new Error('retention_operation_depth_limit')
@@ -34,16 +95,9 @@ function readPendingOperationReferences(operationsRoot, runDir, releasesDir) {
         if (!['node_modules', '.next', '.git', 'standalone', 'worker-artifact', 'runtime-artifact'].includes(name)) visit(pathname, depth + 1)
         continue
       }
+      if (classifySidecar(directory, name, pathname)) continue
       if (!/plan[^/]*\.json$/iu.test(name)) continue
-      const plan = JSON.parse(readRuntimeFile(pathname, 4 * 1024 * 1024))
-      if (plan.schema !== 'video-autoworker-release-impact-plan/v2') throw new Error('retention_operation_plan_unknown')
-      const scope = createReleaseOperationScope(plan)
-      const paths = releaseOperationPaths(pathname, runDir)
-      const state = releaseOperationStatus(scope, readReleaseOperationJournal(paths.journal, scope.operationId))
-      if (state.state !== 'completed') {
-        if (plan.artifactRoot) references.push(plan.artifactRoot)
-        if (plan.router?.releaseId) references.push(join(releasesDir, plan.router.releaseId))
-      }
+      readOperation(pathname)
     }
   }
   try {
