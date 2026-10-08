@@ -144,7 +144,15 @@ describe('n8n stateless media helpers', () => {
     ])
   })
 
-  it('uses fixed five-second learning windows with a bounded final remainder', () => {
+  it('supports configured three-second windows and a short final remainder', () => {
+    expect(buildMediaSegmentWindows(7.5, 3)).toEqual([
+      { index: 1, startSeconds: 0, durationSeconds: 3 },
+      { index: 2, startSeconds: 3, durationSeconds: 3 },
+      { index: 3, startSeconds: 6, durationSeconds: 1.5 },
+    ])
+  })
+
+  it('defaults to five-second learning windows with a bounded final remainder', () => {
     expect(VIDEO_LEARNING_SEGMENT_SECONDS).toBe(5)
     expect(VIDEO_LEARNING_MODEL_BATCH_SEGMENTS).toBe(12)
     expect(buildMediaSegmentWindows(12.5, VIDEO_LEARNING_SEGMENT_SECONDS)).toEqual([
@@ -690,6 +698,7 @@ describe('n8n stateless media helpers', () => {
         return new Response(JSON.stringify({ error: { message: '单次请求图片数量不能超过 8' } }), { status: 400 })
       }
       const text = content.map((item: { text?: string }) => item.text || '').join('\n')
+      expect(text).toContain('按下面标注的实际时间范围逐段分析')
       return new Response(JSON.stringify({
         choices: [{ message: { content: visualBatch(requestedBatchIndexes(text)) } }],
       }), { status: 200 })
@@ -709,18 +718,18 @@ describe('n8n stateless media helpers', () => {
     })
   })
 
-  it('reuses only vision checkpoints with matching source, frames, prompt, model revision and result digest', async () => {
+  it.each([3, 5, 10])('reuses trusted %i-second checkpoints and rejects changed windows, source, frames, prompts and models', async (windowSeconds) => {
     const sourceSha256 = 'a'.repeat(64)
-    const taskId = 'video-vision-proof'
+    const taskId = `video-vision-proof-${windowSeconds}`
     const workspace = mediaTaskWorkspace(taskId)
     const checkpointPath = join(workspace, 'checkpoints', 'vision-001.json')
     await mkdir(workspace, { recursive: true })
     await writeFile(join(workspace, 'frame-001.jpg'), 'original frame')
     await writeFile(join(workspace, 'metadata.json'), JSON.stringify({
-      taskId, kind: 'prepared-video', durationSeconds: 5, sourceBytes: 100,
+      taskId, kind: 'prepared-video', durationSeconds: windowSeconds, sourceBytes: 100,
       sourceSha256, audioAvailable: false, frameCount: 1, segmentCount: 1,
-      segmentSeconds: 5, memoryMode: 'none', preparedAt: new Date().toISOString(),
-      segments: [{ index: 1, startSeconds: 0, durationSeconds: 5,
+      segmentSeconds: windowSeconds, memoryMode: 'none', preparedAt: new Date().toISOString(),
+      segments: [{ index: 1, startSeconds: 0, durationSeconds: windowSeconds,
         audioFile: null, frameFiles: ['frame-001.jpg'] }],
     }))
     const setRevision = (revision: string | null) => {
@@ -739,6 +748,7 @@ describe('n8n stateless media helpers', () => {
       const body = JSON.parse(String(init?.body))
       const content = body.messages.find((message: { role: string }) => message.role === 'user').content
       const text = content.map((item: { text?: string }) => item.text || '').join('\n')
+      expect(text).toContain('按下面标注的实际时间范围逐段分析')
       return new Response(JSON.stringify({
         choices: [{ message: { content: visualBatch(requestedBatchIndexes(text)) } }],
       }), { status: 200 })
@@ -751,7 +761,7 @@ describe('n8n stateless media helpers', () => {
     const proof = JSON.parse(await readFile(checkpointPath, 'utf8')).proof
     expect(proof).toMatchObject({
       schema: 'aiworker-vision-checkpoint-v2', sourceSha256, sourceBytes: 100,
-      segmentSeconds: 5, modelRevisionSha256: 'b'.repeat(64),
+      segmentSeconds: windowSeconds, modelRevisionSha256: 'b'.repeat(64),
       outputSchema: 'visual-perception-v1',
     })
     expect(proof.frameSha256s).toHaveLength(1)
@@ -785,6 +795,13 @@ describe('n8n stateless media helpers', () => {
     await analyze('改变提示词')
     expect(fetchMock).toHaveBeenCalledTimes(8)
     expect(JSON.parse(await readFile(checkpointPath, 'utf8'))).not.toHaveProperty('proof')
+    setRevision('b'.repeat(64))
+    await analyze('改变提示词')
+    const metadata = JSON.parse(await readFile(join(workspace, 'metadata.json'), 'utf8'))
+    metadata.segmentSeconds = windowSeconds + 1
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify(metadata))
+    await analyze('改变提示词')
+    expect(fetchMock).toHaveBeenCalledTimes(10)
   })
 
   it('classifies malformed visual output separately from an HTTP failure', async () => {

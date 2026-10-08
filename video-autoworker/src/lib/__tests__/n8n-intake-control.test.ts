@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createN8nMediaChildRunFromParent } from '@/lib/n8n-task-runs'
 import { runMigrations } from '@/lib/migrations'
 import {
   createN8nTaskRunWithIntakeGate,
@@ -36,6 +37,21 @@ describe('n8n intake control', () => {
   })
 
   afterEach(() => db.close())
+
+  it('freezes the accepted window across binding changes and idempotent replay', () => {
+    const input = task('window-original', 'window-key')
+    input.routing.config = { media: { segmentSeconds: 5 } }
+    const original = createN8nTaskRunWithIntakeGate(db, input, scope)
+    expect(original.run?.routing.config).toMatchObject({ media: { segmentSeconds: 5 } })
+    input.routing.config = { media: { segmentSeconds: 3 } }
+    const replay = createN8nTaskRunWithIntakeGate(db, input, scope)
+    expect(replay.outcome).toBe('existing')
+    expect(replay.run?.routing.config).toMatchObject({ media: { segmentSeconds: 5 } })
+    const child = createN8nMediaChildRunFromParent(db, { parentTaskId: input.taskId, parentIdempotencyKey: input.idempotencyKey, stage: 'vision', taskInput: {} })
+    expect(child.child?.routing.config).toMatchObject({ media: { segmentSeconds: 5 } })
+    const next = createN8nTaskRunWithIntakeGate(db, { ...input, taskId: 'window-next', idempotencyKey: 'window-next' }, scope)
+    expect(next.run?.routing.config).toMatchObject({ media: { segmentSeconds: 3 } })
+  })
 
   it('defaults the global gate to active revision zero', () => {
     expect(getN8nIntakeControl(db)).toEqual({

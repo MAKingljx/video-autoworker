@@ -27,7 +27,8 @@ const videoKeySchema = z.string().trim().regex(
   'videoKey 必须是受控收件箱生成的视频标识',
 )
 
-export const VIDEO_LEARNING_SEGMENT_SECONDS = 5
+export { VIDEO_LEARNING_SEGMENT_SECONDS } from '@/lib/n8n-media-config'
+import { parseN8nMediaConfig } from '@/lib/n8n-media-config'
 export const VIDEO_LEARNING_MODEL_BATCH_SEGMENTS = 12
 // The current local visual runtime accepts eight images per request. Routes
 // may declare a lower limit; use the strictest candidate so failover does not
@@ -36,23 +37,6 @@ const DEFAULT_VIDEO_VISION_MAX_IMAGES = 8
 const VISION_CHECKPOINT_SCHEMA = 'aiworker-vision-checkpoint-v2'
 const VISION_OUTPUT_SCHEMA = 'visual-perception-v1'
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
-
-const mediaConfigSchema = z.object({
-  audioResourceId: z.string().trim().min(1).max(80).default('whisper-large-v3-turbo'),
-  language: z.string().trim().min(2).max(20).default('zh'),
-  maxDurationSeconds: z.coerce.number().int().min(1).max(7_200).default(7_200),
-  segmentSeconds: z.coerce.number().int().min(5).max(300).default(VIDEO_LEARNING_SEGMENT_SECONDS),
-  segmentOverlapSeconds: z.coerce.number().int().min(0).max(5).default(0),
-  maxKeyframesPerSegment: z.coerce.number().int().min(1).max(6).default(3),
-  maxFrames: z.coerce.number().int().min(1).max(12).default(4),
-  frameWidth: z.coerce.number().int().min(320).max(2_048).default(960),
-  maxTranscriptCharsPerSegment: z.coerce.number().int().min(500).max(12_000).default(6_000),
-  maxTranscriptChars: z.coerce.number().int().min(500).max(100_000).default(100_000),
-}).strict().superRefine((settings, ctx) => {
-  if (settings.segmentOverlapSeconds >= settings.segmentSeconds) {
-    ctx.addIssue({ code: 'custom', path: ['segmentOverlapSeconds'], message: '分段重叠必须小于分段时长' })
-  }
-})
 
 export type N8nMediaStage = 'prepare' | 'audio' | 'vision' | 'finalize'
 export type N8nVideoModelPhase = 'vision' | 'chapter' | 'final'
@@ -201,12 +185,7 @@ function expandHome(value: string): string {
 
 function mediaConfig(routing: Record<string, unknown>) {
   const configValue = objectValue(routing.config)
-  const mediaValue = objectValue(configValue.media)
-  // File admission is a host capability, not a per-binding policy. Ignore the
-  // old field so existing n8n bindings cannot reintroduce a second 10 GiB cap.
-  const currentMediaValue = { ...mediaValue }
-  delete currentMediaValue.maxFileBytes
-  return mediaConfigSchema.parse(currentMediaValue)
+  return parseN8nMediaConfig(configValue)
 }
 
 function boundedIntegerEnv(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -219,7 +198,7 @@ const VIDEO_GENERATION_DEFAULTS: Record<N8nVideoModelPhase, {
   reasoningEffort: N8nVideoReasoningEffort
   maxTokens: number
 }> = {
-  // Per-minute visual extraction is factual perception, not final editorial
+  // Per-segment visual extraction is factual perception, not final editorial
   // reasoning. Skipping private reasoning preserves the visible evidence while
   // avoiding dozens of dense-model reasoning passes for one video.
   vision: { reasoningEffort: 'off', maxTokens: 1_536 },
@@ -720,7 +699,7 @@ export async function prepareN8nMedia(
     const segmentDir = join(workspace, prefix)
     await mkdir(segmentDir, { recursive: true, mode: 0o700 })
     // Keep one full mono track and project Whisper word timestamps into exact
-    // five-second windows. Loading Whisper once per five-second WAV would
+    // configured windows. Loading Whisper once per window WAV would
     // multiply model startup cost without improving the stored time contract.
     const audioFile: string | null = null
 
@@ -734,7 +713,7 @@ export async function prepareN8nMedia(
         '-fps_mode', 'vfr', '-frames:v', String(settings.maxKeyframesPerSegment), '-q:v', '3', scenePattern,
       ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
     } catch {
-      // Some videos have no scene boundary in a minute; uniform fallback below is authoritative.
+      // Some videos have no scene boundary in a window; uniform fallback below is authoritative.
     }
     const sceneFrames = (await readdir(segmentDir))
       .filter(name => /^scene-\d{2}\.jpg$/.test(name)).sort()
@@ -1301,8 +1280,11 @@ export async function analyzeN8nVideoFrames(
     throw new Error('视觉检查点来源素材哈希不一致')
   }
   const sourceSha256 = metadata.sourceSha256 || materialSha256
-  const promptSha256 = createHash('sha256').update(prompt).digest('hex')
   const generation = videoModelGenerationProfile('vision')
+  const promptSha256 = jsonSha256({
+    contract: 'video-vision-configured-window-v1',
+    prompt, instruction: resolved.instruction || '', generation,
+  })
   const maxImagesPerRequest = Math.min(...candidates.map(candidate => (
     candidate.maxImagesPerRequest || DEFAULT_VIDEO_VISION_MAX_IMAGES
   )))
@@ -1316,8 +1298,7 @@ export async function analyzeN8nVideoFrames(
     for (const segment of batch) {
       const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
       let cached: Record<string, unknown> | null = null
-      if (sourceSha256 && metadata.segmentSeconds === VIDEO_LEARNING_SEGMENT_SECONDS
-        && candidates.some(candidate => candidate.modelRevisionSha256)) {
+      if (sourceSha256 && candidates.some(candidate => candidate.modelRevisionSha256)) {
         const frameSha256s = await Promise.all(segment.frameFiles.map(name => visionFrameSha256(workspace, name)))
         const expected = {
           schema: VISION_CHECKPOINT_SCHEMA,
@@ -1348,7 +1329,7 @@ export async function analyzeN8nVideoFrames(
         text: [
           resolved.instruction || '你是无状态的视频画面分析节点，只根据本次提供的抽帧作答。',
           `业务要求：${prompt.slice(0, 4_000)}`,
-          '下面每个片段都是独立的5秒学习单位。只记录对应片段画面能够确认的事实，不分析音频，不引用其他片段补全。',
+          `学习窗口为${metadata.segmentSeconds}秒，按下面标注的实际时间范围逐段分析（尾段可能更短）。只记录对应片段画面能够确认的事实，不分析音频，不引用其他片段补全。`,
           '只输出一个JSON对象，不要代码围栏或额外文字，格式为：',
           '{"segments":[{"index":1,"summary":"简短画面事实","people":[],"locations":[],"actions":[],"objects":[],"environment":[],"ocr":[],"shotTypes":[],"cameraMovement":[],"composition":[],"emotion":[]}]}',
           `必须按顺序完整返回这些片段编号：${missing.map(segment => segment.index).join('、')}。未知数组保持为空，不得猜测。`,
@@ -1674,7 +1655,7 @@ export async function synthesizeN8nMediaResults(
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
   const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
   // Retain the deployed generation knobs. One request reconciles at most
-  // twelve independent five-second segments; no final/global model request is
+  // twelve independent configured windows; no final/global model request is
   // made and every result is checkpointed under its own segment identity.
   const generation = videoModelGenerationProfile('chapter')
   const timeoutSeconds = boundedIntegerEnv('AIWORKER_VIDEO_SYNTHESIS_TIMEOUT_SECONDS', route.timeoutSeconds, 60, 600)
@@ -1702,7 +1683,7 @@ export async function synthesizeN8nMediaResults(
       const transcript = String(segment.transcript || '')
       const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
       const inputSha256 = synthesisDigest({
-        contract: 'segment-audiovisual-summary-v1', sourceName, index, segment,
+        contract: 'segment-audiovisual-summary-window-v1', sourceName, index, segment,
         businessPrompt, generation, modelIdentity,
       })
       const cached = await readCheckpoint(
@@ -1753,7 +1734,7 @@ export async function synthesizeN8nMediaResults(
     }
 
     const batchPrompt = [
-      '为下面每个5秒视频片段分别生成独立摘要与结构化导演感知；不得跨片段合并、补全或推断。',
+      '按下面标注的实际时间范围，为每个视频片段分别生成独立摘要与结构化导演感知（尾段可能更短）；不得跨片段合并、补全或推断。',
       `来源文件：${sourceName}`,
       `业务要求：${businessPrompt}`,
       '语音和画面只在同一片段内互相校验。只记录有证据的事实，不推断未提供的音效或音乐。',

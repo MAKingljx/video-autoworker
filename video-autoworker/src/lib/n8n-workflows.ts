@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { z } from 'zod'
 import { normalizeN8nWebhookPath } from '@/lib/n8n'
+import { normalizeN8nMediaConfig, parseN8nMediaConfig, setN8nLearningWindow } from '@/lib/n8n-media-config'
 import { validateN8nModelRoutingConfig } from '@/lib/n8n-model-routing'
 
 export interface N8nWorkflowBinding {
@@ -87,6 +88,15 @@ export const n8nWorkflowBindingInputSchema = z.object({
   enabled: z.boolean().default(true),
   config: z.record(z.string(), z.unknown()).default({}),
 }).superRefine((value, ctx) => {
+  if (value.taskType === 'video-analysis') {
+    try {
+      normalizeN8nMediaConfig(value.config)
+    } catch (error) {
+      if (error instanceof z.ZodError) for (const issue of error.issues) {
+        ctx.addIssue({ code: 'custom', path: ['config', 'media', ...issue.path], message: issue.message })
+      } else throw error
+    }
+  }
   const sensitivePath = findSensitiveConfigPath(value.config)
   if (sensitivePath) {
     ctx.addIssue({
@@ -143,6 +153,7 @@ function normalizeInput(input: N8nWorkflowBindingInput): N8nWorkflowBindingInput
   return {
     ...input,
     webhookPath: normalizeN8nWebhookPath(input.webhookPath),
+    config: input.taskType === 'video-analysis' ? normalizeN8nMediaConfig(input.config) : input.config,
   }
 }
 
@@ -258,4 +269,27 @@ export function updateN8nWorkflowRunStatus(
     SET last_run_at = unixepoch(), last_status = ?, updated_at = unixepoch()
     WHERE id = ? AND tenant_id = ? AND workspace_id = ?
   `).run(status.slice(0, 120), id, scope.tenantId, scope.workspaceId)
+}
+
+/** Update one setting from the latest binding, without granting workflow CRUD
+ * or overwriting unrelated edits. A no-op is read-only, including updated_at. */
+export function updateN8nWorkflowLearningWindow(
+  db: Database.Database,
+  id: number,
+  seconds: number,
+  expectedSeconds: number,
+  scope: N8nWorkflowScope,
+): { outcome: 'updated' | 'unchanged'; binding: N8nWorkflowBinding } | { outcome: 'not_found' } | { outcome: 'conflict' } | { outcome: 'unsupported' } {
+  return db.transaction(() => {
+    const binding = getN8nWorkflowBinding(db, id, scope)
+    if (!binding) return { outcome: 'not_found' as const }
+    if (binding.taskType !== 'video-analysis') return { outcome: 'unsupported' as const }
+    const current = parseN8nMediaConfig(binding.config).segmentSeconds
+    if (current !== expectedSeconds) return { outcome: 'conflict' as const }
+    if (current === seconds) return { outcome: 'unchanged' as const, binding }
+    const next = setN8nLearningWindow(binding.config, seconds)
+    db.prepare(`UPDATE n8n_workflow_bindings SET config = ?, updated_at = unixepoch()
+      WHERE id = ? AND workspace_id = ? AND tenant_id = ?`).run(JSON.stringify(next), id, scope.workspaceId, scope.tenantId)
+    return { outcome: 'updated' as const, binding: getN8nWorkflowBinding(db, id, scope)! }
+  }).immediate()
 }

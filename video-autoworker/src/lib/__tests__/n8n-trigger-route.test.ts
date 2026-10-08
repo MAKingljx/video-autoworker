@@ -81,6 +81,7 @@ vi.mock('@/lib/director-evidence-outbox', () => ({
 }))
 
 import { POST } from '@/app/api/n8n/trigger/route'
+import { snapshotN8nMediaRouting } from '@/lib/n8n-media-config'
 
 const binding = {
   id: 7,
@@ -166,11 +167,11 @@ describe('n8n trigger route', () => {
       data: { accepted: true },
       latencyMs: 12,
     })
-    mocks.createN8nTaskRun.mockReturnValue({
+    mocks.createN8nTaskRun.mockImplementation((_db, input) => ({
       outcome: 'created',
-      run: { taskId: 'task-7', status: 'queued', output: null },
+      run: { taskId: input.taskId, status: 'queued', output: null, routing: snapshotN8nMediaRouting(input.routing) },
       control: { accepting: true },
-    })
+    }))
     mocks.acquireDispatchOwnership.mockReturnValue({
       outcome: 'acquired',
       token: 'a'.repeat(64),
@@ -261,7 +262,7 @@ describe('n8n trigger route', () => {
           mediaCallbackUrl: 'http://127.0.0.1:3017/api/n8n/media-execute',
           claimCallbackUrl: 'http://127.0.0.1:3017/api/n8n/claim',
           claimScope: { workspaceId: 2, tenantId: 3 },
-          config: { queue: 'heavy-model' },
+          config: expect.objectContaining({ queue: 'heavy-model', media: expect.objectContaining({ segmentSeconds: 5 }) }),
           memoryMode: 'none',
         },
         input: { prompt: '分析视频', materialId: 'MATERIAL-EXISTING-001' },
