@@ -2032,7 +2032,9 @@ async function publishCurrentRuntimeReceipt(plan, operationId) {
       contracts: Object.fromEntries(Object.entries(plan.components).map(([name, component]) => [name, component.after])) },
     evidence: { acceptance: 'verified', settlement: 'verified', operationId,
       planSha256: plan.planSha256, intakeRevision: intake.revision,
-      operationsRoot: plan.receiptDir ? dirname(plan.receiptDir) : null,
+      // Inventory all operations for this runtime, not only this release's
+      // receipt folder: an older unfinished operation may still own a release.
+      operationsRoot: join(dirname(binding.runDir), 'operations'),
       requestedCommit: plan.sourceCommit, routeSha256: runtimeDigest(route) } })
 }
 

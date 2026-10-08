@@ -55,14 +55,18 @@ function assertSingleDeviceReleaseTree(root, expectedDevice, readEntry = lstatSy
     if (++count > 40000 || depth > 128) throw new Error('retention_tree_limit')
     const value = readEntry(pathname)
     if (String(value.dev) !== expectedDevice) throw new Error('retention_cross_device')
-    if (value.uid !== process.getuid() || (value.mode & 0o022)) throw new Error('retention_tree_unsafe')
+    if (value.uid !== process.getuid()) throw new Error('retention_tree_unsafe')
     if (value.isSymbolicLink()) {
       const target = realpathSync(pathname)
-      if (!target.startsWith(`${root}/`) || String(readEntry(target).dev) !== expectedDevice
-        || value.nlink !== 1) throw new Error('retention_link_unsafe')
+      const resolved = readEntry(target)
+      if (!target.startsWith(`${root}/`) || String(resolved.dev) !== expectedDevice
+        || resolved.uid !== process.getuid() || (!resolved.isFile() && !resolved.isDirectory())
+        || (resolved.mode & 0o022) || value.nlink !== 1) throw new Error('retention_link_unsafe')
     } else if (value.isDirectory()) {
+      if (value.mode & 0o022) throw new Error('retention_tree_unsafe')
       for (const name of readdirSync(pathname)) visit(join(pathname, name), depth + 1)
     } else if (value.isFile()) {
+      if (value.mode & 0o022) throw new Error('retention_tree_unsafe')
       if (value.nlink !== 1 || (bytes += value.size) > 2 * 1024 ** 3 + 5 * 1024 ** 2) throw new Error('retention_file_unsafe')
     } else throw new Error('retention_special_member')
   }

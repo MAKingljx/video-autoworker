@@ -72,7 +72,7 @@ function installApi(config = configFixture(), taskType = 'video-analysis', windo
 
 async function beginEdit() {
   await screen.findByRole('heading', { name: '学习窗口测试' })
-  fireEvent.click(screen.getByRole('button', { name: /^编辑$/ }))
+  fireEvent.click(screen.getByRole('button', { name: /^(编辑|设置窗口|查看)$/ }))
   await screen.findByRole('combobox', { name: '任务类型' })
 }
 

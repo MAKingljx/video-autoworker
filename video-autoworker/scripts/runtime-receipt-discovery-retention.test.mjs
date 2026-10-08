@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+import { chmodSync, existsSync, lchmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { afterEach, beforeEach, test } from 'node:test'
 import Database from 'better-sqlite3'
 import { discoverDeploymentEnvironment, parseDeploymentEnvironment } from './lib/deployment-discovery.mjs'
@@ -133,6 +133,56 @@ test('symlink receipts are rejected without following them', async () => {
   assert.equal((await readCurrentRuntimeReceipt({ runDir, databasePath, inspectProcess })).currentState, 'drift')
 })
 
+function artifactLink(releaseRoot, target, declaredTarget = target, declaredKind = 'symlinks') {
+  const pathname = join(directory(join(releaseRoot, 'node_modules')), 'server-link.js')
+  symlinkSync(target, pathname)
+  if (process.platform === 'darwin') lchmodSync(pathname, 0o777)
+  assert.equal(lstatSync(pathname).mode & 0o777, 0o777)
+  const manifestPath = join(releaseRoot, 'release-manifest.json'), manifest = json(manifestPath)
+  manifest.directories = [{ path: 'node_modules', mode: '0700' }]
+  manifest[declaredKind] ??= []
+  manifest[declaredKind].push({ path: 'node_modules/server-link.js', mode: '0777', target: declaredTarget })
+  write(manifestPath, manifest)
+  return pathname
+}
+function refreshActiveManifest() {
+  const pathname = join(runDir, 'slots/blue.json'), binding = json(pathname)
+  binding.manifestSha256 = runtimeDigest(readFileSync(join(binding.releaseRoot, 'release-manifest.json')))
+  write(pathname, binding)
+}
+
+test('a real internal artifact symlink with mode 0777 is valid and remains fingerprinted', async () => {
+  const releaseRoot = join(releasesDir, releaseId, 'standalone')
+  const link = artifactLink(releaseRoot, '../server.js'); refreshActiveManifest()
+  const value = await receipt()
+  assert.equal((await readCurrentRuntimeReceipt({ runDir, databasePath, inspectProcess })).currentState, 'ready')
+  assert.match(value.artifact.treeMetadataSha256, /^[a-f0-9]{64}$/u)
+  if (process.platform === 'darwin') {
+    lchmodSync(link, 0o755)
+    assert.equal((await readCurrentRuntimeReceipt({ runDir, databasePath, inspectProcess })).currentState, 'drift')
+  }
+})
+
+test('artifact symlink escapes and mismatched declared targets or types remain rejected', async () => {
+  const releaseRoot = join(releasesDir, releaseId, 'standalone'), outside = join(root, 'outside.js')
+  write(outside, 'outside')
+  const target = relative(join(releaseRoot, 'node_modules'), outside)
+  const link = artifactLink(releaseRoot, target); refreshActiveManifest()
+  await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /link_escape/u)
+  rmSync(link)
+  symlinkSync('../server.js', link)
+  await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /link_invalid/u)
+  const manifestPath = join(releaseRoot, 'release-manifest.json'), manifest = json(manifestPath)
+  manifest.files.push({ path: 'node_modules/server-link.js', bytes: 6 }); manifest.symlinks = []
+  write(manifestPath, manifest); refreshActiveManifest()
+  await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /member_type_invalid/u)
+})
+
+test('ordinary writable artifact members are still rejected', async () => {
+  chmodSync(join(releasesDir, releaseId, 'standalone/server.js'), 0o666)
+  await assert.rejects(observeRuntime({ runDir, databasePath, references, inspectProcess }), /member_unsafe/u)
+})
+
 test('deployment environment parser does not evaluate shell or disclose credentials', () => {
   assert.deepEqual(parseDeploymentEnvironment('TOKEN=secret\nMC_AUTH_MODE="openclaw-loopback"\n'), { MC_AUTH_MODE: 'openclaw-loopback' })
   assert.throws(() => parseDeploymentEnvironment('MISSION_CONTROL_DB_PATH=$(anything)\n'), /expression_rejected/u)
@@ -202,6 +252,22 @@ async function oldRelease(char, date, current) {
   return pathname
 }
 const planOptions = () => ({ runDir, releasesDir, readProcesses: () => [], auditArtifact: fakeAudit })
+
+test('retention accepts an internal 0777 symlink but protects an escaping symlink', async () => {
+  const current = await receipt()
+  const valid = await oldRelease('b', '2026-10-07T00:00:00Z', current)
+  const escaping = await oldRelease('c', '2026-10-06T00:00:00Z', current)
+  for (const [pathname, target] of [[valid, '../server.js'], [escaping, relative(join(escaping, 'standalone/node_modules'), platformPath)]]) {
+    artifactLink(join(pathname, 'standalone'), target)
+    const recoveryPath = join(pathname, 'recovery-receipt.json'), recovery = json(recoveryPath)
+    recovery.artifact.manifestSha256 = runtimeDigest(readFileSync(join(pathname, 'standalone/release-manifest.json')))
+    write(recoveryPath, recovery)
+  }
+  const plan = await planRuntimeRetention(planOptions())
+  assert.ok(plan.keep.some(item => item.path === valid))
+  assert.ok(plan.protectedObjects.some(item => item.path === escaping && item.reason === 'unverified_or_unsafe'))
+  assert.equal(dirname(plan.keep[0].path), releasesDir)
+})
 
 test('retention retains current and two verified history objects and protects unknown/source/reference objects', async () => {
   const current = await receipt()

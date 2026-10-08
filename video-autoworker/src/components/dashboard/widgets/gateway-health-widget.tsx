@@ -1,6 +1,7 @@
 'use client'
 
 import { HealthRow, type DashboardData } from '../widget-primitives'
+import { RuntimeVersionStatus } from './runtime-version-status'
 
 export function GatewayHealthWidget({ data }: { data: DashboardData }) {
   const { sessions, errorCount, backlogCount, memPct, systemStats, gatewayHealthStatus } = data
@@ -16,6 +17,7 @@ export function GatewayHealthWidget({ data }: { data: DashboardData }) {
         <HealthRow label="饱和度（队列）" value={`${backlogCount}`} status={backlogCount > 16 ? 'bad' : backlogCount > 8 ? 'warn' : 'good'} />
         {memPct != null && <HealthRow label="内存" value={`${memPct}%`} status={memPct > 90 ? 'bad' : memPct > 70 ? 'warn' : 'good'} bar={memPct} />}
         {systemStats?.disk && <HealthRow label="磁盘" value={systemStats.disk.usage || '无数据'} status={parseInt(systemStats.disk.usage) > 90 ? 'bad' : 'good'} />}
+        <RuntimeVersionStatus />
       </div>
     </div>
   )

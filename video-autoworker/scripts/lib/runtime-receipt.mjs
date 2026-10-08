@@ -68,14 +68,27 @@ export function runtimeReceiptPath(runDir) { return join(runDir, 'current-runtim
 
 function artifactMetadataDigest(root, manifest) {
   const rows = []
-  const members = [...(manifest.files || []), ...(manifest.directories || []), ...(manifest.symlinks || [])]
+  const members = [['file', manifest.files || []], ['directory', manifest.directories || []], ['symlink', manifest.symlinks || []]]
+    .flatMap(([kind, entries]) => entries.map(member => ({ kind, member })))
   if (members.length > 20000) throw new Error('runtime_artifact_member_limit')
-  for (const member of members) {
+  for (const { kind, member } of members) {
     const name = typeof member === 'string' ? member : member.path
     if (typeof name !== 'string' || isAbsolute(name) || name.includes('\\')
       || name.split('/').some(part => ['', '.', '..'].includes(part))) throw new Error('runtime_artifact_member_invalid')
     const pathname = join(root, name), entry = lstatSync(pathname, { bigint: true })
-    if (entry.uid !== BigInt(process.getuid()) || (entry.mode & 0o022n)) throw new Error('runtime_artifact_member_unsafe')
+    if (entry.uid !== BigInt(process.getuid())) throw new Error('runtime_artifact_member_unsafe')
+    if (kind === 'symlink') {
+      if (!entry.isSymbolicLink() || typeof member.target !== 'string'
+        || isAbsolute(member.target) || readlinkSync(pathname) !== member.target) throw new Error('runtime_artifact_link_invalid')
+      const target = realpathSync(pathname)
+      if (!target.startsWith(`${root}/`)) throw new Error('runtime_artifact_link_escape')
+      const resolved = lstatSync(target, { bigint: true })
+      if (resolved.uid !== BigInt(process.getuid()) || (!resolved.isFile() && !resolved.isDirectory())
+        || (resolved.mode & 0o022n)) throw new Error('runtime_artifact_link_unsafe')
+    } else {
+      if ((kind === 'file' ? !entry.isFile() : !entry.isDirectory())) throw new Error('runtime_artifact_member_type_invalid')
+      if (entry.mode & 0o022n) throw new Error('runtime_artifact_member_unsafe')
+    }
     rows.push([name, String(entry.dev), String(entry.ino), String(entry.size), String(entry.mode),
       String(entry.mtimeNs), String(entry.ctimeNs), entry.isSymbolicLink() ? readlinkSync(pathname) : null])
   }

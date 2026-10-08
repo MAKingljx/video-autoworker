@@ -732,7 +732,7 @@ export function N8nWorkflowsPanel() {
               <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-border px-6 text-center">
                 <p className="text-sm font-medium text-foreground">还没有任务链绑定</p>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">先在 n8n 创建 Webhook 工作流，再在这里配置任务类型、Agent 和模型。</p>
-                <Button className="mt-4" size="sm" onClick={beginCreate}>创建第一条任务链</Button>
+                <Button className="mt-4" size="sm" onClick={beginCreate} disabled={!capabilities.create}>创建第一条任务链</Button>
               </div>
             ) : bindings.map(binding => (
               <article
@@ -760,7 +760,9 @@ export function N8nWorkflowsPanel() {
                   <p className="mt-2 text-[10px] text-muted-foreground/70">上次运行：{formatTimestamp(binding.lastRunAt)}</p>
                 </button>
                 <div className="mt-3 flex gap-2 border-t border-border/60 pt-3">
-                  <Button variant="outline" size="xs" className="flex-1" onClick={() => beginEdit(binding)}>编辑</Button>
+                  <Button variant="outline" size="xs" className="flex-1" onClick={() => beginEdit(binding)}>
+                    {capabilities.update ? '编辑' : binding.taskType === 'video-analysis' && capabilities.saveLearningWindow ? '设置窗口' : '查看'}
+                  </Button>
                   <Button
                     variant="secondary"
                     size="xs"
@@ -782,7 +784,7 @@ export function N8nWorkflowsPanel() {
         <section className="overflow-hidden rounded-xl border border-border bg-card">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div>
-              <h2 className="text-sm font-semibold text-foreground">{selectedBinding ? `编辑：${selectedBinding.name}` : '新建任务链'}</h2>
+              <h2 className="text-sm font-semibold text-foreground">{selectedBinding ? selectedBinding.name : '新建任务链'}</h2>
               <p className="mt-0.5 text-2xs text-muted-foreground">设置路由、执行角色和运行限制</p>
             </div>
             {selectedBinding && <span className="font-mono text-2xs text-muted-foreground">ID {selectedBinding.id}</span>}
