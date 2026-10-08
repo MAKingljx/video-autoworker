@@ -24,6 +24,10 @@ import { readRouterState } from './standalone-router.mjs'
 import { inspectInstalledReleaseComponent } from './verify-director-video-release-readiness.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
 import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
+import { discoverDeploymentEnvironment } from './lib/deployment-discovery.mjs'
+import { observeRuntime, publicRuntimeReceiptStatus, readCurrentRuntimeReceipt,
+  runtimeDigest, writeCurrentRuntimeReceipt } from './lib/runtime-receipt.mjs'
+import { applyRuntimeRetention, planRuntimeRetention } from './lib/runtime-retention.mjs'
 import { releaseFailureAssessment, releaseFailurePolicy } from './lib/release-failure-policy.mjs'
 import { operationsRecoveryBoundaryDeclaration } from './lib/operations-governance.mjs'
 import {
@@ -112,6 +116,12 @@ function isTestOrDoc(pathname) {
 
 function componentsFor(pathname) {
   if (isTestOrDoc(pathname)) return []
+  // This reader and its local dependency closure are bundled by the Web API
+  // and used by the release CLI. Changes must update both consumers.
+  if (pathname === 'scripts/lib/runtime-receipt.mjs'
+    || pathname === 'scripts/runtime-identity-doctor.mjs'
+    || pathname === 'scripts/lib/independent-worker-release.mjs'
+    || pathname === 'scripts/lib/operations-governance.mjs') return ['app', 'control']
   if (pathname.startsWith('openclaw-plugins/aiworker-video-command/')
     || pathname === 'scripts/install-aiworker-video-command-plugin.sh') return ['videoCommand']
   if (pathname.startsWith('openclaw-skills/aiworker-task-flow/')
@@ -965,6 +975,9 @@ export function assertAllowedArguments(command, values) {
   const allowed = command === 'plan'
     ? new Set(['--source-commit', '--artifact', '--runtime-convergence-proof',
       '--tool-baseline', '--receipt-dir', '--intake-url', '--output', '--worker-manifest', '--failure-policy'])
+    : ['discover', 'current'].includes(command) ? new Set()
+    : command === 'retention-plan' ? new Set(['--output'])
+    : command === 'retention-apply' ? new Set(['--plan', '--confirmed-plan-sha256'])
     : command === 'resume'
       ? new Set(['--plan', '--runtime-convergence-proof', '--failure-policy'])
       : ['apply', 'status', 'cancel', 'doctor', 'prewarm'].includes(command)
@@ -1206,7 +1219,8 @@ async function createPlan(values) {
   const layout = resolveGitSourceLayout(productRoot)
   const sourceCommit = resolveCommit(layout.gitRoot, values.get('--source-commit') || 'HEAD')
   assertCleanGitSource(productRoot, sourceCommit)
-  const url = values.get('--intake-url') || 'http://127.0.0.1:3017/api/n8n/intake-control'
+  const url = values.get('--intake-url')
+    || `http://127.0.0.1:${process.env.AIWORKER_BG_ROUTER_PORT || 3017}/api/n8n/intake-control`
   const intakeUrl = validateIntakeUrl(url)
   const router = await plannedRouterState(intakeUrl)
   const activeRelease = router.slots[router.active]
@@ -1609,7 +1623,6 @@ async function executePlan(values, operation = null) {
     throw error
   }
   const result = await applyReleaseImpactPlan(plan, services)
-  process.stdout.write(`${JSON.stringify(result)}\n`)
   return result
 }
 
@@ -1737,7 +1750,6 @@ export async function resumeCommittedPlan(contract, previousStatus, operation, o
     effectState: 'owned_resources_restored' })
   const result = { ok: true, resumed: true, sourceCommit: contract.plan.sourceCommit,
     actions: contract.plan.actions, intake: restored, router }
-  process.stdout.write(`${JSON.stringify(result)}\n`)
   return result
 }
 
@@ -1751,8 +1763,11 @@ async function applyPlan(values, { resume = false } = {}) {
   const previous = readReleaseOperationJournal(contract.paths.journal, contract.scope.operationId)
   const previousStatus = releaseOperationStatus(contract.scope, previous)
   if (resume && previousStatus.state === 'completed') {
+    const receipt = await readCurrentRuntimeReceipt({ runDir: contract.plan.runtimeBinding.runDir,
+      databasePath: contract.plan.runtimeBinding.liveDbPath })
+    if (receipt.currentState !== 'ready') fail('completed operation current-runtime receipt is missing or drifted')
     process.stdout.write(`${JSON.stringify({ ...previousStatus, resumed: false,
-      reason: 'already_verified' })}\n`)
+      reason: 'already_verified', currentRuntime: publicRuntimeReceiptStatus(receipt) })}\n`)
     return previousStatus
   }
   const owner = beginReleaseOperation(contract.paths, contract.scope)
@@ -1823,11 +1838,15 @@ async function applyPlan(values, { resume = false } = {}) {
     } else {
       result = await executePlan(values, operation)
     }
+    await publishCurrentRuntimeReceipt(contract.plan, contract.scope.operationId)
+    record({ step: 'runtime-receipt', status: 'completed', phase: resume ? 'resume' : 'apply',
+      effectState: 'current-runtime-published' })
     record({ step: 'operation', status: 'completed', phase: resume ? 'resume' : 'apply',
       effectState: 'acceptance_complete' })
     try { finishReleaseOperation(contract.paths, owner, 'completed') } catch {
       process.stderr.write('{"step":"release-owner","errorCode":"owner_finalize_failed"}\n')
     }
+    process.stdout.write(`${JSON.stringify({ ...result, currentRuntimeReceipt: 'verified' })}\n`)
     return result
   } catch (error) {
     const structured = classifyReleaseOperationError(error, {
@@ -1977,9 +1996,82 @@ async function prewarmPlan(values) {
   return result
 }
 
+async function publishCurrentRuntimeReceipt(plan, operationId) {
+  const binding = plan.runtimeBinding
+  const intake = await intakeClient(plan.intakeUrl).read()
+  if (plan.intake.accepting ? !intake.accepting : !sameIntake(intake, plan.intake)) {
+    fail('current-runtime receipt requires settled intake')
+  }
+  const route = await plannedRouterState(plan.intakeUrl, binding)
+  if (plan.components.app.changed && !isCommittedPlanRoute(plan, route)) fail('current-runtime receipt route is not accepted')
+  const profile = process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR || join(homedir(), '.openclaw-qwen-current')
+  const workspace = process.env.AIWORKER_QWEN_WORKSPACE || join(homedir(), 'AI-worker-second-original-workspace')
+  const installationPath = join(binding.runDir, 'supervisor/installation.json')
+  const installation = privateRead(installationPath)
+  const installed = resolveInstalledBlueGreenManager({ deploymentProjectRoot: sourceRoles.control,
+    runDir: binding.runDir, releasesDir: binding.releasesDir,
+    launchAgentsDir: process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR || join(homedir(), 'Library/LaunchAgents') })
+  const references = [
+    { name: 'platform', kind: 'file', path: binding.platformEnvPath },
+    { name: 'control-installation', kind: 'file', path: installationPath },
+    { name: 'control-manager', kind: 'file', path: installed.manager.path },
+    { name: 'control-router', kind: 'file', path: installation.executables.routerScript.path },
+    { name: 'control-slot-start', kind: 'file', path: installation.executables.slotStartScript.path },
+    ...['router', 'blue', 'green'].map(name => ({ name: `control-${name}-launch-agent`,
+      kind: 'file', path: installation.services[name].plist })),
+    { name: 'taskFlow', kind: 'tree', path: join(workspace, 'skills/aiworker-task-flow') },
+    { name: 'videoCommand', kind: 'tree', path: join(profile, 'extensions/aiworker-video-command') },
+    { name: 'directorBrain', kind: 'tree', path: join(profile, 'extensions/aiworker-director-brain') },
+    { name: 'directorSkill', kind: 'tree', path: join(workspace, 'skills/aiworker-director-brain') },
+  ]
+  const observation = await observeRuntime({ runDir: binding.runDir, databasePath: binding.liveDbPath,
+    workerBinding: plan.workerBinding, references })
+  return writeCurrentRuntimeReceipt({ runDir: binding.runDir, databasePath: binding.liveDbPath, observation,
+    components: { control: { sourceCommit: installed.manager.sourceCommit,
+      releaseCoordinatorCommit: plan.controlSourceCommit || plan.sourceCommit },
+      contracts: Object.fromEntries(Object.entries(plan.components).map(([name, component]) => [name, component.after])) },
+    evidence: { acceptance: 'verified', settlement: 'verified', operationId,
+      planSha256: plan.planSha256, intakeRevision: intake.revision,
+      operationsRoot: plan.receiptDir ? dirname(plan.receiptDir) : null,
+      requestedCommit: plan.sourceCommit, routeSha256: runtimeDigest(route) } })
+}
+
 async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   assertAllowedArguments(command, values)
+  if (['plan', 'apply', 'resume', 'discover', 'current', 'retention-plan', 'retention-apply'].includes(command)) {
+    const discovery = await discoverDeploymentEnvironment({ verifyWorker: command !== 'current', env: {
+      ...process.env, ...(values.has('--worker-manifest')
+        ? { AIWORKER_SCHEDULER_MANIFEST: values.get('--worker-manifest') } : {}),
+    } })
+    if (command === 'discover') { process.stdout.write(`${JSON.stringify(discovery)}\n`); return discovery }
+    if (command === 'current') {
+      const status = await readCurrentRuntimeReceipt({ runDir: discovery.environment.AIWORKER_BG_RUN_DIR,
+        databasePath: discovery.environment.AIWORKER_BG_LIVE_DB_PATH })
+      process.stdout.write(`${JSON.stringify(publicRuntimeReceiptStatus(status))}\n`); return status
+    }
+    if (discovery.currentState !== 'ready') {
+      process.stderr.write(`${JSON.stringify({ ...discovery, environment: undefined })}\n`)
+      fail('deployment bindings are incomplete; inspect the single discovery report')
+    }
+    for (const [key, value] of Object.entries(discovery.environment)) {
+      if (!Object.hasOwn(process.env, key)) process.env[key] = value
+    }
+    if (command === 'retention-plan') {
+      if (!values.get('--output')) fail('retention plan output is required')
+      const plan = await planRuntimeRetention({ runDir: process.env.AIWORKER_BG_RUN_DIR,
+        releasesDir: process.env.AIWORKER_BG_RELEASES_DIR })
+      privateWrite(values.get('--output'), plan)
+      process.stdout.write(`${JSON.stringify({ planSha256: plan.planSha256, summary: plan.summary,
+        protectedObjects: plan.protectedObjects, remove: plan.remove.map(item => item.path) })}\n`); return plan
+    }
+    if (command === 'retention-apply') {
+      if (!values.get('--plan')) fail('retention plan is required')
+      const result = await applyRuntimeRetention(privateRead(values.get('--plan')),
+        values.get('--confirmed-plan-sha256'))
+      process.stdout.write(`${JSON.stringify(result)}\n`); return result
+    }
+  }
   if (command === 'status') return statusPlan(values)
   if (command === 'cancel') return cancelPlan(values)
   if (command === 'doctor') return doctorPlan(values)

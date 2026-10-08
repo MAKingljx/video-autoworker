@@ -114,6 +114,142 @@
     }
   ],
   "paths": {
+    "/api/runtime/current": {
+      "get": {
+        "summary": "Read the current production receipt and live drift status",
+        "tags": [
+          "Runtime"
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only status: ready, drift, uninitialized or unverifiable. Versions come from verified running artifacts, not the local checkout."
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "Insufficient scope"
+          }
+        }
+      }
+    },
+    "/api/n8n/runs/progress": {
+      "get": {
+        "summary": "Read scoped video learning progress",
+        "tags": [
+          "n8n"
+        ],
+        "responses": {
+          "200": {
+            "description": "Progress derived from authoritative task and controlled checkpoints; ETA is absent without sufficient completed samples."
+          },
+          "400": {
+            "description": "Invalid task identity"
+          },
+          "404": {
+            "description": "Task not found in scope"
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          }
+        ]
+      }
+    },
+    "/api/n8n/runs/recovery": {
+      "get": {
+        "summary": "Inspect whether an existing failed video task can safely resume",
+        "tags": [
+          "n8n"
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only inspection with bounded confirmation token for an authorized operator; missing historical evidence is not recoverable."
+          },
+          "400": {
+            "description": "Invalid task identity"
+          },
+          "404": {
+            "description": "Task not found in scope"
+          }
+        },
+        "parameters": [
+          {
+            "in": "query",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "Confirm recovery of the same inspected video task",
+        "tags": [
+          "n8n"
+        ],
+        "responses": {
+          "202": {
+            "description": "Recovery committed or dispatch result under reconciliation. Original task, input snapshot, completed checkpoints and retry budget are preserved."
+          },
+          "400": {
+            "description": "Explicit confirmation and inspection token required"
+          },
+          "403": {
+            "description": "Operator required"
+          },
+          "409": {
+            "description": "Task state, ownership or evidence changed; inspect again"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "taskId",
+                  "inspectionToken",
+                  "confirm"
+                ],
+                "properties": {
+                  "taskId": {
+                    "type": "string"
+                  },
+                  "inspectionToken": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "confirm": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/activities": {
       "get": {
         "tags": [
@@ -12426,7 +12562,7 @@
             "properties": {
               "schemaEpoch": { "type": "integer", "enum": [1] },
               "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
-              "latestMigration": { "type": "string", "enum": ["060_video_edit_task_receipts"] }
+              "latestMigration": { "type": "string", "enum": ["059_director_evidence_projection_receipts", "060_video_edit_task_receipts"] }
             }
           },
           "projection": {

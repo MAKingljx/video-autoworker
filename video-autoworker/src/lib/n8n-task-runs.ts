@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 import { z } from 'zod'
 import { snapshotN8nMediaRouting } from '@/lib/n8n-media-config'
 import { enqueueDirectorEvidenceOutbox } from '@/lib/director-evidence-outbox'
+import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
 
 export const n8nTaskIdentitySchema = z.string()
   .trim()
@@ -791,6 +792,10 @@ export function claimScopedN8nTaskRun(
     if (!run) return { outcome: 'not_found', run: null }
     if (run.idempotencyKey !== input.idempotencyKey || run.bindingId !== input.bindingId
       || !TOP_LEVEL_TASK_SOURCES.includes(run.source as typeof TOP_LEVEL_TASK_SOURCES[number])) {
+      return { outcome: 'rejected', run }
+    }
+    if (Array.isArray(run.routing.recoveryRetiredOwners)
+      && run.routing.recoveryRetiredOwners.includes(executionOwner)) {
       return { outcome: 'rejected', run }
     }
     const binding = db.prepare(`
@@ -1797,15 +1802,6 @@ export function listN8nTaskRuns(
   return rows.map(rowToTaskRun)
 }
 
-function mediaChildIdentity(
-  prefix: 'task' | 'idem',
-  taskId: string,
-  stage: typeof MEDIA_STAGES[number],
-): string {
-  const digest = createHash('sha256').update(`${taskId}:${stage}`).digest('hex').slice(0, 24)
-  return `media-${prefix}:${taskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
-}
-
 function mediaChildTaskId(taskId: string, stage: typeof MEDIA_STAGES[number]): string {
   return mediaChildIdentity('task', taskId, stage)
 }
@@ -2428,4 +2424,126 @@ export function searchN8nVideoResults(
     limit,
     truncated: allHits.length > limit || rows.length >= candidateLimit,
   }
+}
+
+export interface N8nVideoRecoveryAuthority {
+  outcome: 'eligible' | 'not_found' | 'ineligible'
+  errorCode: string | null
+  revisionSha256: string | null
+  run: N8nTaskRun | null
+  successfulStages: string[]
+}
+
+/** Read the sole task authority; file/resource evidence is checked by its service. */
+export function inspectScopedN8nVideoRecoveryState(
+  db: Database.Database, taskId: string, scope: N8nTaskScope,
+  nowSeconds = Math.floor(Date.now() / 1000),
+): N8nVideoRecoveryAuthority {
+  const run = getScopedN8nTaskRunByTaskId(db, n8nTaskIdentitySchema.parse(taskId), scope)
+  const blocked = (code: string): N8nVideoRecoveryAuthority => ({ outcome: run ? 'ineligible' : 'not_found',
+    errorCode: code, revisionSha256: null, run, successfulStages: [] })
+  if (!run) return blocked('recovery_task_not_found')
+  if (run.routing.taskType !== 'video-analysis' || !TOP_LEVEL_TASK_SOURCES.includes(run.source as typeof TOP_LEVEL_TASK_SOURCES[number])) {
+    return blocked('recovery_task_unsupported')
+  }
+  if (run.status !== 'failed') return blocked('recovery_task_not_failed')
+  if (run.attemptCount >= run.maxAttempts) return blocked('recovery_attempt_budget_exhausted')
+  const binding = db.prepare(`SELECT id, enabled, task_type, workflow_id, webhook_path FROM n8n_workflow_bindings
+    WHERE id=? AND tenant_id=? AND workspace_id=?`).get(run.bindingId, scope.tenantId, scope.workspaceId) as {
+      id: number; enabled: number; task_type: string; workflow_id: string | null; webhook_path: string
+    } | undefined
+  if (!binding?.enabled || binding.task_type !== 'video-analysis') return blocked('recovery_binding_unavailable')
+  const dispatch = run.routing.dispatchIdentity as { workflowId?: string; webhookPath?: string } | undefined
+  if (!dispatch?.webhookPath || typeof dispatch.workflowId !== 'string') return blocked('recovery_dispatch_evidence_missing')
+  if (dispatch.webhookPath !== binding.webhook_path || dispatch.workflowId !== (binding.workflow_id || '')) {
+    return blocked('recovery_dispatch_identity_changed')
+  }
+  const stages = MEDIA_STAGES
+  const generation = run.routing.recoveryGeneration ?? 0
+  if (!Number.isSafeInteger(generation) || Number(generation) < 0
+    || Number(generation) >= Math.max(0, run.maxAttempts - 1)) return blocked('recovery_attempt_budget_exhausted')
+  const children = stages.map(stage => db.prepare(`SELECT task_id, idempotency_key, binding_id, source, status,
+    output, attempt_count, max_attempts, updated_at FROM n8n_task_runs
+    WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(mediaChildIdentity('task', taskId, stage),
+    scope.tenantId, scope.workspaceId) as { task_id: string; idempotency_key: string; binding_id: number; source: string;
+      status: string; output: string | null; attempt_count: number; max_attempts: number; updated_at: number } | undefined)
+  const successfulStages: string[] = []
+  for (const [index, child] of children.entries()) {
+    if (!child) continue
+    if (child.binding_id !== run.bindingId || child.source !== 'n8n-media-node'
+      || child.idempotency_key !== mediaChildIdentity('idem', run.idempotencyKey, stages[index])) {
+      return blocked('recovery_child_identity_changed')
+    }
+    if (child.status === 'running') return blocked('recovery_child_execution_unsettled')
+    if (child.status === 'cancelled') return blocked('recovery_child_cancelled')
+    if (child.status === 'succeeded') {
+      if (!child.output) return blocked('recovery_successful_output_missing')
+      successfulStages.push(stages[index])
+    } else if (child.attempt_count >= child.max_attempts) return blocked('recovery_stage_budget_exhausted')
+  }
+  const dispatchLease = db.prepare(`SELECT * FROM n8n_task_dispatch_leases WHERE task_id=? AND tenant_id=? AND workspace_id=?`)
+    .get(taskId, scope.tenantId, scope.workspaceId) as { lease_expires_at: number } | undefined
+  if (dispatchLease && dispatchLease.lease_expires_at > nowSeconds) return blocked('recovery_dispatch_in_progress')
+  const childLeases = stages.flatMap(stage => {
+    const lease = db.prepare(`SELECT * FROM n8n_child_execution_leases WHERE task_id=? AND tenant_id=? AND workspace_id=?`)
+      .get(mediaChildIdentity('task', taskId, stage), scope.tenantId, scope.workspaceId)
+    return lease ? [lease] : []
+  })
+  // Lease expiry alone is not evidence that an old model process stopped.
+  if (childLeases.length) return blocked('recovery_child_lease_unsettled')
+  const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
+    WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(taskId, scope.tenantId, scope.workspaceId) as {
+      execution_owner: string
+    } | undefined
+  if (!claim) return blocked('recovery_parent_owner_missing')
+  if (!n8nExecutionOwnerSchema.safeParse(claim.execution_owner).success) return blocked('recovery_parent_owner_invalid')
+  const revisionSha256 = createHash('sha256').update(JSON.stringify({
+    task: { taskId: run.taskId, idempotencyKey: run.idempotencyKey, bindingId: run.bindingId, status: run.status,
+      input: run.input, routing: run.routing, updatedAt: run.updatedAt, attemptCount: run.attemptCount,
+      maxAttempts: run.maxAttempts, completedAt: run.completedAt }, binding, claim: claim || null,
+    dispatchLease: dispatchLease || null, children: children.map(child => child ? {
+      ...child, output: child.output ? createHash('sha256').update(child.output).digest('hex') : null,
+    } : null),
+  })).digest('hex')
+  return { outcome: 'eligible', errorCode: null, revisionSha256, run, successfulStages }
+}
+
+/** Restore the original task through CAS without clearing successful stages or budgets. */
+export function requeueScopedN8nVideoTaskRun(db: Database.Database,
+  input: { taskId: string; expectedRevisionSha256: string }, scope: N8nTaskScope,
+): { outcome: 'queued' | 'not_found' | 'ineligible' | 'conflict'; run: N8nTaskRun | null; errorCode: string | null } {
+  if (!/^[a-f0-9]{64}$/u.test(input.expectedRevisionSha256)) throw new TypeError('recovery_revision_invalid')
+  return db.transaction(() => {
+    const inspection = inspectScopedN8nVideoRecoveryState(db, input.taskId, scope)
+    if (inspection.outcome !== 'eligible' || !inspection.run) {
+      return { outcome: inspection.outcome === 'not_found' ? 'not_found' as const : 'ineligible' as const,
+        run: inspection.run, errorCode: inspection.errorCode }
+    }
+    if (inspection.revisionSha256 !== input.expectedRevisionSha256) {
+      return { outcome: 'conflict' as const, run: inspection.run, errorCode: 'recovery_revision_changed' }
+    }
+    const run = inspection.run
+    const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
+      WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(run.taskId, scope.tenantId, scope.workspaceId) as {
+        execution_owner: string
+      } | undefined
+    const retired = Array.isArray(run.routing.recoveryRetiredOwners) ? run.routing.recoveryRetiredOwners as string[] : []
+    if (retired.length > run.maxAttempts) return { outcome: 'ineligible' as const, run, errorCode: 'recovery_owner_history_invalid' }
+    const routing = { ...run.routing,
+      recoveryGeneration: Number(run.routing.recoveryGeneration || 0) + 1,
+      recoveryRevisionSha256: input.expectedRevisionSha256,
+      recoveryRetiredOwners: [...new Set([...retired, ...(claim ? [claim.execution_owner] : [])])],
+    }
+    const changed = db.prepare(`UPDATE n8n_task_runs SET status='queued', routing=?, error=NULL,
+      accepted_at=NULL, started_at=NULL, completed_at=NULL, updated_at=MAX(unixepoch(),updated_at+1)
+      WHERE task_id=? AND tenant_id=? AND workspace_id=? AND status='failed' AND updated_at=? AND attempt_count=?
+    `).run(JSON.stringify(routing), run.taskId, scope.tenantId, scope.workspaceId, run.updatedAt, run.attemptCount)
+    if (changed.changes !== 1) return { outcome: 'conflict' as const, run, errorCode: 'recovery_revision_changed' }
+    if (claim) db.prepare(`DELETE FROM n8n_parent_execution_claims
+      WHERE task_id=? AND tenant_id=? AND workspace_id=? AND execution_owner=?`)
+      .run(run.taskId, scope.tenantId, scope.workspaceId, claim.execution_owner)
+    db.prepare(`DELETE FROM n8n_task_dispatch_leases WHERE task_id=? AND tenant_id=? AND workspace_id=? AND lease_expires_at<=unixepoch()`)
+      .run(run.taskId, scope.tenantId, scope.workspaceId)
+    return { outcome: 'queued' as const, run: getScopedN8nTaskRunByTaskId(db, run.taskId, scope), errorCode: null }
+  }).immediate()
 }

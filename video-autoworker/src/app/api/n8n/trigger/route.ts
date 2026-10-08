@@ -1,3 +1,4 @@
+import { n8nTaskWebhookPayload } from '@/lib/n8n-task-webhook-payload'
 import { randomUUID } from 'node:crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { getDatabase, logAuditEvent } from '@/lib/db'
@@ -319,6 +320,10 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  if (binding.taskType === 'video-edit') {
+    return NextResponse.json({ code: 'VIDEO_EDIT_APPROVAL_REQUIRED', error: '剪辑任务请从已确认的剪辑计划执行' }, { status: 409 })
+  }
+
   const taskId = taskIdResult.data
   const idempotencyKey = idempotencyResult.data
   type AdmissionPreparation = {
@@ -365,6 +370,7 @@ export async function POST(request: NextRequest) {
       claimCallbackUrl,
       claimScope: scope,
       config: binding.config,
+      dispatchIdentity: { workflowId: binding.workflowId, webhookPath: binding.webhookPath },
       ...(runtimeAffinity || {}),
       ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
       ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
@@ -527,25 +533,7 @@ export async function POST(request: NextRequest) {
     return existingDispatchResponse(ownership.run)
   }
   const dispatchToken = ownership.token
-  const payload = created.created
-    ? {
-        taskId,
-        idempotencyKey,
-        source,
-        requestedBy: auth.user.username,
-        routing,
-        input: trustedTaskInput,
-        delivery: deliveryResult.data,
-      }
-    : {
-        taskId: dispatchRun.taskId,
-        idempotencyKey: dispatchRun.idempotencyKey,
-        source: dispatchRun.source,
-        requestedBy: dispatchRun.requestedBy,
-        routing: dispatchRun.routing,
-        input: dispatchRun.input,
-        delivery: dispatchRun.delivery,
-      }
+  const payload = n8nTaskWebhookPayload(dispatchRun)
 
   let webhookAccepted = false
   try {

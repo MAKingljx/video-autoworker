@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { constants as fsConstants, closeSync, fstatSync, openSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, normalize } from 'node:path'
 import type Database from 'better-sqlite3'
+import { CORE_DATABASE_MIGRATION, inspectVideoEditingSchema, VIDEO_EDIT_MIGRATION, VIDEO_EDIT_TABLES, videoEditingEnabled } from '@/lib/database-capabilities'
 import type { N8nIntakeControl } from '@/lib/n8n-intake-control'
 import type { SchedulerLeadershipStatus } from '@/lib/scheduler'
 
@@ -17,7 +18,7 @@ export const N8N_ROLLING_DATABASE_COMPATIBILITY = {
   latestMigration: '060_video_edit_task_receipts',
 } as const
 
-export type N8nRollingDatabaseCompatibility = typeof N8N_ROLLING_DATABASE_COMPATIBILITY
+export type N8nRollingDatabaseCompatibility = Omit<typeof N8N_ROLLING_DATABASE_COMPATIBILITY, 'latestMigration'> & { latestMigration: string }
 
 type RequiredColumn = {
   name: string
@@ -473,7 +474,11 @@ function quotedSqliteIdentifier(identifier: string): string {
 export function getN8nRollingDatabaseCompatibility(
   db: Database.Database,
 ): N8nRollingDatabaseCompatibility {
+  const editingInstalled = inspectVideoEditingSchema(db)
+  const isEditingTable = (name: string) => (VIDEO_EDIT_TABLES as readonly string[]).includes(name)
+  const requiredMigrations = REQUIRED_ROLLING_MIGRATIONS.filter(id => id !== VIDEO_EDIT_MIGRATION || editingInstalled)
   for (const [table, requiredColumns] of Object.entries(REQUIRED_ROLLING_TABLES)) {
+    if (isEditingTable(table) && !editingInstalled) continue
     const tableRecord = db.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name = ?",
     ).get(table) as { name?: string; sql?: string } | undefined
@@ -605,14 +610,15 @@ export function getN8nRollingDatabaseCompatibility(
     (db.prepare(`
       SELECT id
       FROM schema_migrations
-      WHERE id IN (${REQUIRED_ROLLING_MIGRATIONS.map(() => '?').join(', ')})
-    `).all(...REQUIRED_ROLLING_MIGRATIONS) as Array<{ id: string }>).map(row => row.id),
+      WHERE id IN (${requiredMigrations.map(() => '?').join(', ')})
+    `).all(...requiredMigrations) as Array<{ id: string }>).map(row => row.id),
   )
-  for (const migration of REQUIRED_ROLLING_MIGRATIONS) {
+  for (const migration of requiredMigrations) {
     if (!applied.has(migration)) throw new Error(`n8n rolling migration is missing: ${migration}`)
   }
 
   for (const required of REQUIRED_ROLLING_INDEXES) {
+    if (isEditingTable(required.table) && !editingInstalled) continue
     const indexes = db.prepare(
       `PRAGMA index_list(${quotedSqliteIdentifier(required.table)})`,
     ).all() as SqliteIndexListRow[]
@@ -641,7 +647,8 @@ export function getN8nRollingDatabaseCompatibility(
     }
   }
 
-  return { ...N8N_ROLLING_DATABASE_COMPATIBILITY }
+  return { ...N8N_ROLLING_DATABASE_COMPATIBILITY,
+    latestMigration: editingInstalled ? VIDEO_EDIT_MIGRATION : CORE_DATABASE_MIGRATION }
 }
 
 interface DrainAggregateRow {
@@ -874,9 +881,13 @@ export function buildN8nReleaseReadiness(
     || retirement.runtime.port !== runtime.port
     || retirement.runtime.startedAt !== runtime.startedAt
   ) throw new TypeError('n8n release retirement identity does not match the current runtime')
+  // The schema inspector already validates all required tables/indexes. Core
+  // 059 is a supported result while the optional editing capability is off.
+  const supportedMigration = database.latestMigration === VIDEO_EDIT_MIGRATION
+    || (database.latestMigration === CORE_DATABASE_MIGRATION && !videoEditingEnabled())
   if (database.schemaEpoch !== N8N_ROLLING_DATABASE_COMPATIBILITY.schemaEpoch
     || database.rollingSafeFrom !== N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom
-    || database.latestMigration !== N8N_ROLLING_DATABASE_COMPATIBILITY.latestMigration) {
+    || !supportedMigration) {
     throw new TypeError('n8n rolling database compatibility was not verified')
   }
   if (projection.schema !== 'video-autoworker-director-evidence-outbox-readiness/v1'

@@ -9,6 +9,7 @@ import {
   updateN8nWorkflowBinding,
 } from '@/lib/n8n-workflows'
 import { mutationLimiter } from '@/lib/rate-limit'
+import { n8nWorkflowCapabilities } from '@/lib/n8n-workflow-capabilities'
 
 function parseId(value: unknown): number | null {
   const id = Number(value)
@@ -19,7 +20,8 @@ export async function GET(request: NextRequest) {
   const auth = requireN8nRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
   const scope = { workspaceId: auth.user.workspace_id, tenantId: auth.user.tenant_id }
-  return NextResponse.json({ bindings: listN8nWorkflowBindings(getDatabase(), scope) }, {
+  return NextResponse.json({ bindings: listN8nWorkflowBindings(getDatabase(), scope),
+    ...n8nWorkflowCapabilities(request, scope) }, {
     headers: { 'Cache-Control': 'no-store' },
   })
 }

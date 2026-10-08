@@ -12,6 +12,19 @@ import {
 } from '@/lib/n8n-task-runs'
 import { getN8nVideoSource } from '@/lib/n8n-video-sources'
 import { listN8nTaskQueue } from '@/lib/n8n-task-queue'
+import { getScopedLearningProgress } from '@/lib/n8n-learning-progress'
+
+async function withProgress<T extends { taskId: string }>(db: ReturnType<typeof getDatabase>,
+  scope: { workspaceId: number; tenantId: number }, rows: T[]) {
+  const projected: Array<T & { progress?: Awaited<ReturnType<typeof getScopedLearningProgress>> }> = []
+  for (let offset = 0; offset < rows.length; offset += 4) {
+    projected.push(...await Promise.all(rows.slice(offset, offset + 4).map(async row => {
+      const progress = await getScopedLearningProgress(db, row.taskId, scope)
+      return progress ? { ...row, progress } : row
+    })))
+  }
+  return projected
+}
 
 export async function GET(request: NextRequest) {
   const auth = requireN8nRole(request, 'viewer')
@@ -21,7 +34,8 @@ export async function GET(request: NextRequest) {
   const rawTaskId = request.nextUrl.searchParams.get('taskId')
   const view = request.nextUrl.searchParams.get('view')
   if (view === 'queue') {
-    return NextResponse.json(await listN8nTaskQueue(db, scope), {
+    const result = await listN8nTaskQueue(db, scope)
+    return NextResponse.json({ ...result, queue: await withProgress(db, scope, result.queue) }, {
       headers: { 'Cache-Control': 'no-store' },
     })
   }
@@ -64,7 +78,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'taskId 无效' }, { status: 400 })
     }
     const run = getScopedN8nTaskRunByTaskId(db, taskId.data, scope)
-    return NextResponse.json({ runs: run ? [run] : [] }, {
+    return NextResponse.json({ runs: run ? await withProgress(db, scope, [run]) : [] }, {
       headers: { 'Cache-Control': 'no-store' },
     })
   }
@@ -87,13 +101,13 @@ export async function GET(request: NextRequest) {
       ...(status?.success ? { status: status.data } : {}),
       ...(query ? { query } : {}),
     })
-    return NextResponse.json(result, {
+    return NextResponse.json({ ...result, runs: await withProgress(db, scope, result.runs) }, {
       headers: { 'Cache-Control': 'no-store' },
     })
   }
 
   const limit = Number(request.nextUrl.searchParams.get('limit') || 50)
-  return NextResponse.json({ runs: listN8nTaskRuns(db, scope, limit) }, {
+  return NextResponse.json({ runs: await withProgress(db, scope, listN8nTaskRuns(db, scope, limit)) }, {
     headers: { 'Cache-Control': 'no-store' },
   })
 }

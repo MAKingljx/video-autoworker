@@ -120,7 +120,7 @@ describe('n8n rolling and callback OpenAPI contract', () => {
   it('uses a strict scheduler schema only for release readiness', () => {
     const readiness = document.components.schemas.N8nReleaseReadiness
     expect(readiness.properties.database.properties.latestMigration.enum)
-      .toEqual(['060_video_edit_task_receipts'])
+      .toEqual(['059_director_evidence_projection_receipts', '060_video_edit_task_receipts'])
     expect(readiness.properties.scheduler.$ref)
       .toBe('#/components/schemas/N8nReleaseSchedulerLeadershipStatus')
     expect(readiness.properties.projection.required).toEqual(expect.arrayContaining([

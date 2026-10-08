@@ -113,6 +113,29 @@ const STAGE_LABELS: Record<string, string> = {
   finalize: '结果合并',
 }
 
+export function learningStageLabel(stage: string): string {
+  return STAGE_LABELS[stage] || '阶段未知'
+}
+
+export function learningProgressBrief(progress: LearningProgressProjection | null | undefined): string {
+  if (!progress) return '学习进度未知'
+  if (progress.state === 'succeeded') return '学习已完成'
+  const active = progress.stages.filter(stage => progress.activeStages.includes(stage.stage))
+  if (active.length) return active.map(stage => `${learningStageLabel(stage.stage)} ${learningSegmentCount(stage)}`).join('；')
+  const failed = progress.stages.find(stage => stage.state === 'failed')
+  if (failed) return `${learningStageLabel(failed.stage)} ${learningSegmentCount(failed)}`
+  return ['queued', 'accepted'].includes(progress.state) ? '等待执行' : '阶段进度未知'
+}
+
+export function learningSegmentCount(stage: LearningStageProgress): string {
+  return `${stage.completedSegments ?? '未知'} / ${stage.totalSegments ?? '未知'} 段`
+}
+
+export function learningRemainingLabel(stage: LearningStageProgress): string {
+  const estimate = stage.remainingSeconds
+  return estimate ? `${formatDurationSeconds(estimate.lower)} – ${formatDurationSeconds(estimate.upper)}` : '未知'
+}
+
 export function taskRunFailureInsight(error: string | null): TaskRunFailureInsight | null {
   const value = String(error || '').trim()
   if (!value) return null
@@ -161,3 +184,4 @@ export function taskRunFailureInsight(error: string | null): TaskRunFailureInsig
     suggestion: '查看失败阶段与原始错误，确认输入和依赖状态后再决定处理方式。',
   }
 }
+import type { LearningProgressProjection, LearningStageProgress } from '@/lib/n8n-learning-progress'

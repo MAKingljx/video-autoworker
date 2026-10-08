@@ -35,6 +35,39 @@ afterEach(() => {
 })
 
 describe('TaskRunsPanel', () => {
+  it('shows bounded learning evidence and requires inspection plus human confirmation for recovery', async () => {
+    const failed = { ...baseRun, taskId: 'recover-me', title: '恢复学习任务', status: 'failed', error: 'vision: interrupted',
+      progress: { schema: 'aiworker-learning-progress/v1', taskId: 'recover-me', state: 'failed', activeStages: [], generatedAt: 1,
+        stages: [{ stage: 'vision', state: 'failed', totalSegments: 10, completedSegments: 4, model: 'Qwen local', cacheHits: 2, remainingSeconds: null }] } }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/runs/recovery') && init?.method === 'POST') return jsonResponse({ taskId: 'recover-me', currentState: 'accepted' })
+      if (url.includes('/runs/recovery')) return jsonResponse({ canRecover: true, inspection: { taskId: 'recover-me', eligible: true,
+        currentState: 'failed', errorCode: null, nextAction: 'confirm', missingResources: [], preservedStages: ['prepare'],
+        expectedRevision: 'revision', inspectionToken: 'server-confirmation' } })
+      if (url.includes('view=queue')) return jsonResponse({ queue: [], total: 0, counts: { waiting: 0, running: 0, attention: 0 }, generatedAt: 1 })
+      return jsonResponse({ runs: [failed], total: 1, limit: 50, offset: 0 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<TaskRunsPanel />)
+    fireEvent.click(await screen.findByRole('tab', { name: '运行记录 1' }))
+    fireEvent.click(screen.getByRole('button', { name: /恢复学习任务/ }))
+    const detail = screen.getByRole('complementary', { name: '任务链详情' })
+    expect(within(detail).getByText('4 / 10 段')).toBeInTheDocument()
+    expect(within(detail).getByText(/Qwen local.*缓存复用：2 段/)).toBeInTheDocument()
+    fireEvent.click(within(detail).getByRole('button', { name: '检查恢复条件' }))
+    const restore = await screen.findByRole('button', { name: '确认恢复原任务' })
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0)
+    fireEvent.click(restore)
+    await screen.findByText('原任务已恢复，请刷新查看进度')
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+    expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.body)))
+      .toEqual({ taskId: 'recover-me', inspectionToken: 'server-confirmation', confirm: true })
+    confirm.mockRestore()
+  })
+
   it('keeps queue and history selections scoped to the active list', async () => {
     const queueItem = {
       ...baseRun,

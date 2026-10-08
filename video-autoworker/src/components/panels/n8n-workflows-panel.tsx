@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { resolveN8nEditorTarget, type N8nEditorTarget } from '@/lib/n8n-editor-url'
+import type { N8nWorkflowCapabilities } from '@/lib/n8n-workflow-capabilities'
 import {
   parseN8nMediaConfig,
   setN8nLearningWindow,
@@ -132,6 +133,10 @@ const EMPTY_FORM: BindingForm = {
   allowTaskOverride: true,
 }
 
+const READ_ONLY_CAPABILITIES: N8nWorkflowCapabilities = {
+  create: false, update: false, delete: false, trigger: false, saveLearningWindow: false,
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   return await response.json() as T
 }
@@ -220,6 +225,7 @@ function formFromBinding(binding: WorkflowBinding): BindingForm {
 export function N8nWorkflowsPanel() {
   const [status, setStatus] = useState<N8nStatusResponse | null>(null)
   const [bindings, setBindings] = useState<WorkflowBinding[]>([])
+  const [capabilities, setCapabilities] = useState<N8nWorkflowCapabilities>(READ_ONLY_CAPABILITIES)
   const [executions, setExecutions] = useState<ExecutionSummary[]>([])
   const [modelRoutes, setModelRoutes] = useState<ModelRoute[]>([])
   const [modelRegistryError, setModelRegistryError] = useState<string | null>(null)
@@ -250,6 +256,11 @@ export function N8nWorkflowsPanel() {
     () => bindings.find(binding => binding.id === selectedId) || null,
     [bindings, selectedId],
   )
+  const canEditForm = selectedBinding ? capabilities.update : capabilities.create
+  const currentLearningWindow = useMemo(() => {
+    if (!selectedBinding || selectedBinding.taskType !== 'video-analysis') return null
+    try { return parseN8nMediaConfig(selectedBinding.config).segmentSeconds } catch { return null }
+  }, [selectedBinding])
 
   const editorTarget = useMemo(() => {
     if (!pageUrl || !status?.config.baseUrl) return UNAVAILABLE_EDITOR_TARGET
@@ -322,11 +333,14 @@ export function N8nWorkflowsPanel() {
 
       const [nextStatus, bindingsBody] = await Promise.all([
         readJson<N8nStatusResponse>(statusResponse),
-        readJson<{ bindings?: WorkflowBinding[] }>(bindingsResponse),
+        readJson<{ bindings?: WorkflowBinding[]; capabilities?: N8nWorkflowCapabilities }>(bindingsResponse),
       ])
       const nextBindings = Array.isArray(bindingsBody.bindings) ? bindingsBody.bindings : []
       setStatus(nextStatus)
       setBindings(nextBindings)
+      setCapabilities(Object.fromEntries(Object.keys(READ_ONLY_CAPABILITIES).map(key => [
+        key, bindingsBody.capabilities?.[key as keyof N8nWorkflowCapabilities] === true,
+      ])) as unknown as N8nWorkflowCapabilities)
       if (modelsResponse.ok) {
         const modelBody = await readJson<{ routes?: ModelRoute[]; errors?: string[] }>(modelsResponse)
         setModelRoutes(Array.isArray(modelBody.routes) ? modelBody.routes : [])
@@ -385,14 +399,16 @@ export function N8nWorkflowsPanel() {
   }
 
   const updateForm = <K extends keyof BindingForm>(key: K, value: BindingForm[K]) => {
+    if (!canEditForm) return
     setForm(current => ({ ...current, [key]: value }))
   }
 
   const updateLearningWindow = (value: string) => {
+    if (!capabilities.saveLearningWindow && !canEditForm) return
     setLearningWindowInput(value)
     try {
       const config = setN8nLearningWindow(configFromText(form.configText), value)
-      updateForm('configText', JSON.stringify(config, null, 2))
+      setForm(current => ({ ...current, configText: JSON.stringify(config, null, 2) }))
       setError(null)
     } catch (configError) {
       setError(learningConfigError(configError))
@@ -400,7 +416,7 @@ export function N8nWorkflowsPanel() {
   }
 
   const saveLearningWindow = async () => {
-    if (!selectedBinding || selectedBinding.taskType !== 'video-analysis') return
+    if (!capabilities.saveLearningWindow || !selectedBinding || selectedBinding.taskType !== 'video-analysis') return
     setError(null)
     setNotice(null)
     let segmentSeconds: number
@@ -454,6 +470,7 @@ export function N8nWorkflowsPanel() {
   }
 
   const saveBinding = async () => {
+    if (!canEditForm) return
     setError(null)
     setNotice(null)
 
@@ -647,7 +664,7 @@ export function N8nWorkflowsPanel() {
             <Button variant="outline" size="sm" onClick={() => void loadData(true)} disabled={refreshing}>
               {refreshing ? '刷新中…' : '刷新状态'}
             </Button>
-            <Button size="sm" onClick={beginCreate}>新建任务链</Button>
+            <Button size="sm" onClick={beginCreate} disabled={!capabilities.create}>新建任务链</Button>
           </div>
         </div>
 
@@ -748,12 +765,12 @@ export function N8nWorkflowsPanel() {
                     variant="secondary"
                     size="xs"
                     className="flex-1"
-                    disabled={!binding.enabled || triggeringId === binding.id}
+                    disabled={!capabilities.trigger || !binding.enabled || triggeringId === binding.id}
                     onClick={() => { beginEdit(binding); void triggerWorkflow(binding) }}
                   >
                     {triggeringId === binding.id ? '执行中…' : '测试'}
                   </Button>
-                  <Button variant="destructive" size="xs" disabled={deletingId === binding.id} onClick={() => void deleteBinding(binding)}>
+                  <Button variant="destructive" size="xs" disabled={!capabilities.delete || deletingId === binding.id} onClick={() => void deleteBinding(binding)}>
                     删除
                   </Button>
                 </div>
@@ -774,34 +791,34 @@ export function N8nWorkflowsPanel() {
           <div className="space-y-5 p-4 md:p-5">
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="任务链名称">
-                <input className={inputClass} value={form.name} maxLength={120} placeholder="例如：视频素材分析" onChange={event => updateForm('name', event.target.value)} />
+                <input className={inputClass} value={form.name} maxLength={120} placeholder="例如：视频素材分析" disabled={saving || !canEditForm} onChange={event => updateForm('name', event.target.value)} />
               </Field>
               <Field label="n8n 工作流">
-                <select className={inputClass} value={form.workflowId} onChange={event => updateForm('workflowId', event.target.value)}>
+                <select className={inputClass} value={form.workflowId} disabled={saving || !canEditForm} onChange={event => updateForm('workflowId', event.target.value)}>
                   <option value="">手动填写或暂不绑定工作流 ID</option>
                   {status?.remoteWorkflows.map(workflow => (
                     <option key={workflow.id} value={workflow.id}>{workflow.name}{workflow.active ? '（已激活）' : '（未激活）'}</option>
                   ))}
                 </select>
                 {status?.remoteWorkflows.length === 0 && (
-                  <input className={`${inputClass} mt-2 font-mono`} value={form.workflowId} maxLength={120} placeholder="n8n workflow ID（可选）" onChange={event => updateForm('workflowId', event.target.value)} />
+                  <input className={`${inputClass} mt-2 font-mono`} value={form.workflowId} maxLength={120} placeholder="n8n workflow ID（可选）" disabled={saving || !canEditForm} onChange={event => updateForm('workflowId', event.target.value)} />
                 )}
               </Field>
             </div>
 
             <Field label="说明">
-              <textarea className={`${inputClass} min-h-20 resize-y`} value={form.description} maxLength={1000} placeholder="说明这个任务链负责什么，以及预期输入输出。" onChange={event => updateForm('description', event.target.value)} />
+              <textarea className={`${inputClass} min-h-20 resize-y`} value={form.description} maxLength={1000} placeholder="说明这个任务链负责什么，以及预期输入输出。" disabled={saving || !canEditForm} onChange={event => updateForm('description', event.target.value)} />
             </Field>
 
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="Webhook 路径" hint="必须以 webhook/ 或 webhook-test/ 开头">
                 <div className="relative">
                   <span className="pointer-events-none absolute left-3 top-2 text-sm text-muted-foreground">/</span>
-                  <input className={`${inputClass} pl-6 font-mono`} value={form.webhookPath} maxLength={240} placeholder="webhook/aiworker-task" onChange={event => updateForm('webhookPath', event.target.value.replace(/^\/+/, ''))} />
+                  <input className={`${inputClass} pl-6 font-mono`} value={form.webhookPath} maxLength={240} placeholder="webhook/aiworker-task" disabled={saving || !canEditForm} onChange={event => updateForm('webhookPath', event.target.value.replace(/^\/+/, ''))} />
                 </div>
               </Field>
               <Field label="任务类型">
-                <input className={inputClass} value={form.taskType} maxLength={80} list="n8n-task-types" placeholder="general" onChange={event => updateForm('taskType', event.target.value)} aria-label="任务类型" />
+                <input className={inputClass} value={form.taskType} maxLength={80} list="n8n-task-types" placeholder="general" disabled={saving || !canEditForm} onChange={event => updateForm('taskType', event.target.value)} aria-label="任务类型" />
                 <datalist id="n8n-task-types">
                   <option value="general" /><option value="video-analysis" /><option value="transcription" /><option value="vision-ocr" /><option value="knowledge-search" />
                 </datalist>
@@ -810,13 +827,16 @@ export function N8nWorkflowsPanel() {
 
             {form.taskType.trim() === 'video-analysis' && (
               <Field label="学习窗口（秒）" hint="仅影响新任务">
+                {selectedBinding?.taskType === 'video-analysis' && (
+                  <p className="mb-2 text-xs text-muted-foreground">当前已生效：{currentLearningWindow === null ? '待核对' : `${currentLearningWindow} 秒`}</p>
+                )}
                 <div className="flex items-center gap-2">
                   <input type="number" className={inputClass}
                     min={VIDEO_LEARNING_SEGMENT_MIN_SECONDS} max={VIDEO_LEARNING_SEGMENT_MAX_SECONDS} step={1}
                     value={learningWindowInput} onChange={event => updateLearningWindow(event.target.value)}
-                    disabled={saving} aria-label="学习窗口（秒）" />
+                    disabled={saving || (!capabilities.saveLearningWindow && !canEditForm)} aria-label="学习窗口（秒）" />
                   {selectedBinding?.taskType === 'video-analysis' && (
-                    <Button size="sm" className="shrink-0" onClick={() => void saveLearningWindow()} disabled={saving}>
+                    <Button size="sm" className="shrink-0" onClick={() => void saveLearningWindow()} disabled={saving || !capabilities.saveLearningWindow}>
                       {saving ? '保存中…' : '保存窗口'}
                     </Button>
                   )}
@@ -826,13 +846,13 @@ export function N8nWorkflowsPanel() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="Agent 角色">
-                <input className={inputClass} value={form.agentRole} maxLength={80} list="n8n-agent-roles" placeholder="executor" onChange={event => updateForm('agentRole', event.target.value)} />
+                <input className={inputClass} value={form.agentRole} maxLength={80} list="n8n-agent-roles" placeholder="executor" disabled={saving || !canEditForm} onChange={event => updateForm('agentRole', event.target.value)} />
                 <datalist id="n8n-agent-roles">
                   <option value="coordinator" /><option value="executor" /><option value="reviewer" /><option value="researcher" /><option value="video-specialist" />
                 </datalist>
               </Field>
               <Field label="兼容默认模型" hint="没有单独选择节点模型时使用">
-                <input className={`${inputClass} font-mono`} value={form.model} maxLength={180} list="n8n-models" placeholder="qwen36-tools-local/default_model" onChange={event => updateForm('model', event.target.value)} />
+                <input className={`${inputClass} font-mono`} value={form.model} maxLength={180} list="n8n-models" placeholder="qwen36-tools-local/default_model" disabled={saving || !canEditForm} onChange={event => updateForm('model', event.target.value)} />
                 <datalist id="n8n-models">
                   {modelRoutes.map(route => <option key={route.id} value={route.model} />)}
                 </datalist>
@@ -846,7 +866,7 @@ export function N8nWorkflowsPanel() {
                   <p className="mt-1 text-xs text-muted-foreground">每个节点可独立选择本地模型或云端模型。</p>
                 </div>
                 <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={form.allowTaskOverride} onChange={event => updateForm('allowTaskOverride', event.target.checked)} />
+                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={form.allowTaskOverride} disabled={saving || !canEditForm} onChange={event => updateForm('allowTaskOverride', event.target.checked)} />
                   允许 OpenClaw 临时指定
                 </label>
               </div>
@@ -859,7 +879,7 @@ export function N8nWorkflowsPanel() {
                   ['reviewerRouteId', '审核节点'],
                 ] as const).map(([field, label]) => (
                   <Field key={field} label={label}>
-                    <select className={inputClass} value={form[field]} onChange={event => updateForm(field, event.target.value)}>
+                    <select className={inputClass} value={form[field]} disabled={saving || !canEditForm} onChange={event => updateForm(field, event.target.value)}>
                       <option value="">兼容默认模型</option>
                       {modelRoutes.map(route => (
                         <option key={route.id} value={route.id} disabled={!route.available}>
@@ -874,26 +894,27 @@ export function N8nWorkflowsPanel() {
 
             <div className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
               <Field label="Webhook 接收超时（秒）" hint="5–120；长任务应先返回 accepted">
-                <input type="number" className={inputClass} min={5} max={120} step={1} value={form.timeoutSeconds} onChange={event => updateForm('timeoutSeconds', event.target.value)} />
+                <input type="number" className={inputClass} min={5} max={120} step={1} value={form.timeoutSeconds} disabled={saving || !canEditForm} onChange={event => updateForm('timeoutSeconds', event.target.value)} />
               </Field>
               <Field label="工作流重试预算" hint="0–10；由 n8n 工作流节点执行">
-                <input type="number" className={inputClass} min={0} max={10} step={1} value={form.retryCount} onChange={event => updateForm('retryCount', event.target.value)} />
+                <input type="number" className={inputClass} min={0} max={10} step={1} value={form.retryCount} disabled={saving || !canEditForm} onChange={event => updateForm('retryCount', event.target.value)} />
               </Field>
               <Field label="运行状态">
                 <label className="flex h-[38px] cursor-pointer items-center justify-between rounded-md border border-border bg-background px-3 text-sm">
                   <span className={form.enabled ? 'text-emerald-400' : 'text-muted-foreground'}>{form.enabled ? '已启用' : '已停用'}</span>
-                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={form.enabled} onChange={event => updateForm('enabled', event.target.checked)} />
+                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={form.enabled} disabled={saving || !canEditForm} onChange={event => updateForm('enabled', event.target.checked)} />
                 </label>
               </Field>
             </div>
 
-            <Field label="高级配置（JSON 对象）" hint="传递给任务链的固定配置，不要填写密码或 API Key">
-              <textarea className={`${inputClass} min-h-32 resize-y font-mono text-xs leading-5`} value={form.configText} spellCheck={false} onChange={event => updateForm('configText', event.target.value)} disabled={saving} aria-label="高级配置（JSON 对象）" />
-            </Field>
+            <details className="rounded-md border border-border p-3">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground">高级配置（JSON 对象）</summary>
+              <textarea className={`${inputClass} mt-3 min-h-32 resize-y font-mono text-xs leading-5`} value={form.configText} spellCheck={false} onChange={event => updateForm('configText', event.target.value)} disabled={saving || !canEditForm} aria-label="高级配置（JSON 对象）" />
+            </details>
 
             <div className="flex flex-wrap justify-end gap-2 border-t border-border pt-4">
               {selectedBinding && <Button variant="ghost" size="sm" onClick={beginCreate}>取消编辑</Button>}
-              <Button size="sm" onClick={() => void saveBinding()} disabled={saving}>{saving ? '保存中…' : selectedBinding ? '保存修改' : '创建任务链'}</Button>
+              <Button size="sm" onClick={() => void saveBinding()} disabled={saving || !canEditForm}>{saving ? '保存中…' : selectedBinding ? '保存修改' : '创建任务链'}</Button>
             </div>
 
             {selectedBinding && (

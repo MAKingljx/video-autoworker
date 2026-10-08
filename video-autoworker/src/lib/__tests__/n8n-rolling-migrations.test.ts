@@ -160,7 +160,7 @@ describe('n8n rolling database compatibility epoch', () => {
       runMigrations(db)
       db.prepare('DELETE FROM schema_migrations WHERE id = ?')
         .run('060_video_edit_task_receipts')
-      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow(/migration is missing/u)
+      expect(() => getN8nRollingDatabaseCompatibility(db)).toThrow('database_optional_schema_incomplete:video-edit')
     } finally {
       db.close()
     }
@@ -172,7 +172,7 @@ describe('n8n rolling database compatibility epoch', () => {
       runMigrations(db)
       db.exec('DROP TABLE video_edit_operations')
       expect(() => getN8nRollingDatabaseCompatibility(db))
-        .toThrow('n8n rolling table is missing: video_edit_operations')
+        .toThrow('database_optional_schema_incomplete:video-edit')
     } finally { db.close() }
     const indexDb = new Database(':memory:')
     try {

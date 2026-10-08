@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import { lstatSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
+import { inspectVideoEditingSchema, VIDEO_EDIT_MIGRATION, videoEditingEnabled } from '@/lib/database-capabilities'
 import { ensureDirectorMaintainabilitySchema, assertDirectorMaintainabilitySchema } from '@/lib/director-maintainability-schema'
 
 type MigrationContext = {
@@ -1892,13 +1893,16 @@ const migrations: Migration[] = [
 export function assertDatabaseSchemaCurrent(db: Database.Database): void {
   const applied = new Set(db.prepare('SELECT id FROM schema_migrations').all()
     .map((row: any) => row.id))
-  if ([...migrations, ...extraMigrations].some(migration => !applied.has(migration.id))) {
+  if ([...migrations, ...extraMigrations].some(migration => !applied.has(migration.id)
+    && (migration.id !== VIDEO_EDIT_MIGRATION || videoEditingEnabled()))) {
     throw new Error('database_schema_prepare_required')
   }
+  inspectVideoEditingSchema(db)
   assertDirectorMaintainabilitySchema(db)
 }
 
-export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
+export function runMigrations(db: Database.Database, rootPath = process.cwd(),
+  options: { includeVideoEditing?: boolean } = {}) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id TEXT PRIMARY KEY,
@@ -1911,6 +1915,7 @@ export function runMigrations(db: Database.Database, rootPath = process.cwd()) {
   )
 
   for (const migration of [...migrations, ...extraMigrations]) {
+    if (migration.id === VIDEO_EDIT_MIGRATION && options.includeVideoEditing === false) continue
     if (applied.has(migration.id)) continue
     db.transaction(() => {
       migration.up(db, { rootPath })

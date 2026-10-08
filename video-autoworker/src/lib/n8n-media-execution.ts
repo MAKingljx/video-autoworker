@@ -5,7 +5,6 @@ import { constants } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
-import { config } from '@/lib/config'
 import {
   loadN8nModelRegistry,
   publicN8nModelRoute,
@@ -21,6 +20,10 @@ import {
   type SafeOperationErrorCode,
 } from '@/lib/operational-errors'
 import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/lib/media-policy.mjs'
+import { mediaInboxRoot, mediaTaskWorkspace, mediaWorkRoot } from '@/lib/n8n-media-workspace'
+import { createLearningProgressReporter, readControlledMediaJson } from '@/lib/n8n-learning-progress'
+import { writePreparedMediaProof } from '@/lib/n8n-prepared-evidence'
+export { mediaInboxRoot, mediaTaskWorkspace, mediaWorkRoot, mediaChildIdentity } from '@/lib/n8n-media-workspace'
 
 const videoKeySchema = z.string().trim().regex(
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:mp4|mov|mkv|webm|m4v)$/i,
@@ -254,26 +257,6 @@ export function compatibleReasoningPayload(
 ): { enable_thinking: boolean; reasoning_effort?: Exclude<N8nVideoReasoningEffort, 'off'> } {
   if (reasoningEffort === 'off') return { enable_thinking: false }
   return { enable_thinking: true, reasoning_effort: reasoningEffort }
-}
-
-export function mediaInboxRoot(): string {
-  return resolve(String(process.env.AIWORKER_MEDIA_INGEST_DIR || '').trim()
-    || join(homedir(), 'ai-worker/state/video-autoworker/media-inbox'))
-}
-
-export function mediaWorkRoot(): string {
-  return resolve(String(process.env.AIWORKER_MEDIA_WORK_DIR || '').trim()
-    || join(config.dataDir, 'media-tasks'))
-}
-
-export function mediaTaskWorkspace(taskId: string): string {
-  const digest = createHash('sha256').update(taskId).digest('hex')
-  return join(mediaWorkRoot(), digest)
-}
-
-export function mediaChildIdentity(prefix: 'task' | 'idem', taskId: string, stage: N8nMediaStage): string {
-  const digest = createHash('sha256').update(`${taskId}:${stage}`).digest('hex').slice(0, 24)
-  return `media-${prefix}:${taskId.slice(0, 70)}:${stage}:${digest}`.slice(0, 120)
 }
 
 function runCommand(
@@ -646,6 +629,15 @@ async function readTrustedVisionCheckpoint(
   }
 }
 
+function visionCheckpointExpected(metadata: MediaMetadata, segment: MediaSegment, sourceSha256: string,
+  promptSha256: string, frameSha256s: string[]) {
+  return { schema: VISION_CHECKPOINT_SCHEMA, sourceSha256, sourceBytes: metadata.sourceBytes,
+    segmentSeconds: metadata.segmentSeconds, promptSha256, outputSchema: VISION_OUTPUT_SCHEMA,
+    outputSchemaSha256: VISION_OUTPUT_SCHEMA_SHA256, segmentIndex: segment.index,
+    startSeconds: segment.startSeconds, durationSeconds: segment.durationSeconds,
+    timeRange: segmentTimeLabel(segment), frameSha256s }
+}
+
 export async function prepareN8nMedia(
   taskId: string,
   routing: Record<string, unknown>,
@@ -690,6 +682,8 @@ export async function prepareN8nMedia(
 
   const segmentWindows = buildMediaSegmentWindows(probe.durationSeconds, settings.segmentSeconds)
   const segmentCount = segmentWindows.length
+  const reportProgress = createLearningProgressReporter(taskId, 'prepare', segmentCount, null)
+  await reportProgress(0, 0)
   const segments: MediaSegment[] = []
   let frameCount = 0
   for (const window of segmentWindows) {
@@ -746,6 +740,7 @@ export async function prepareN8nMedia(
       audioFile,
       frameFiles,
     })
+    await reportProgress(segments.length, 0)
   }
 
   const metadata: MediaMetadata = {
@@ -764,6 +759,7 @@ export async function prepareN8nMedia(
     preparedAt: new Date().toISOString(),
   }
   await writeMetadata(workspace, metadata)
+  await writePreparedMediaProof(taskId, routing, input, metadata)
   await unlink(sourcePath).catch(() => undefined)
   return preparedOutput(metadata)
 }
@@ -803,6 +799,8 @@ export async function transcribeN8nMedia(
   const command = expandHome(resource.runtime.command)
   await access(command, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)
+  const reportProgress = createLearningProgressReporter(taskId, 'audio', metadata.segmentCount, resource.model)
+  await reportProgress(0, 0)
   if (metadata.audioSourceFile) {
     const audioPath = join(workspace, metadata.audioSourceFile)
     await access(audioPath, constants.R_OK)
@@ -822,6 +820,8 @@ export async function transcribeN8nMedia(
       && Array.isArray(value.projected)
       && value.projected.length === metadata.segments.length
     ))
+    const reused = Boolean(checkpoint)
+    const startedAt = Date.now()
     if (!checkpoint) {
       let result: CommandResult
       try {
@@ -863,6 +863,8 @@ export async function transcribeN8nMedia(
         segment,
       )
     }
+    await reportProgress(segments.length, reused ? segments.length : 0,
+      reused ? undefined : { elapsedSeconds: (Date.now() - startedAt) / 1000, units: segments.length, model: resource.model })
     return {
       transcript: String(checkpoint.transcript || '').slice(0, settings.maxTranscriptChars),
       segments,
@@ -877,12 +879,15 @@ export async function transcribeN8nMedia(
     }
   }
   const segments: Record<string, unknown>[] = []
+  let cacheHits = 0
   for (const segment of metadata.segments) {
     if (!segment.audioFile) continue
     const checkpointName = `audio-${String(segment.index).padStart(3, '0')}.json`
     let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
       value.index === segment.index && typeof value.transcript === 'string'
     ))
+    const reused = Boolean(segmentResult)
+    const startedAt = Date.now()
     if (!segmentResult) {
       const audioPath = join(workspace, segment.audioFile)
       await access(audioPath, constants.R_OK)
@@ -911,6 +916,9 @@ export async function transcribeN8nMedia(
       await writeCheckpoint(workspace, checkpointName, segmentResult)
     }
     segments.push(segmentResult)
+    if (reused) cacheHits += 1
+    await reportProgress(segments.length, cacheHits, reused ? undefined
+      : { elapsedSeconds: (Date.now() - startedAt) / 1000, units: 1, model: resource.model })
   }
   const transcript = segments.map(segment => (
     `[${segment.timeRange}]\n${String(segment.transcript || '').trim()}`
@@ -1292,6 +1300,10 @@ export async function analyzeN8nVideoFrames(
   let activeRouteIndex = 0
   let modelBatches = 0
   let individualFallbackCalls = 0
+  let cacheHits = 0
+  const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
+  const reportProgress = createLearningProgressReporter(taskId, 'vision', metadata.segmentCount, modelLabel(route))
+  await reportProgress(0, 0)
   for (const batch of visualSegmentBatches(metadata.segments, maxImagesPerRequest)) {
     const missing: MediaSegment[] = []
     const proofByIndex = new Map<number, Record<string, unknown>>()
@@ -1300,27 +1312,17 @@ export async function analyzeN8nVideoFrames(
       let cached: Record<string, unknown> | null = null
       if (sourceSha256 && candidates.some(candidate => candidate.modelRevisionSha256)) {
         const frameSha256s = await Promise.all(segment.frameFiles.map(name => visionFrameSha256(workspace, name)))
-        const expected = {
-          schema: VISION_CHECKPOINT_SCHEMA,
-          sourceSha256,
-          sourceBytes: metadata.sourceBytes,
-          segmentSeconds: metadata.segmentSeconds,
-          promptSha256,
-          outputSchema: VISION_OUTPUT_SCHEMA,
-          outputSchemaSha256: VISION_OUTPUT_SCHEMA_SHA256,
-          segmentIndex: segment.index,
-          startSeconds: segment.startSeconds,
-          durationSeconds: segment.durationSeconds,
-          timeRange: segmentTimeLabel(segment),
-          frameSha256s,
-        }
+        const expected = visionCheckpointExpected(metadata, segment, sourceSha256, promptSha256, frameSha256s)
         proofByIndex.set(segment.index, expected)
         cached = await readTrustedVisionCheckpoint(workspace, checkpointName, expected, candidates)
       }
       if (cached) {
         segmentResults.set(segment.index, cached)
+        cacheHits += 1
         const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === cached.routeId)
         if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
+        await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0,
+          model: modelLabel(candidates[activeRouteIndex]) })
       } else missing.push(segment)
     }
     if (missing.length) {
@@ -1384,7 +1386,9 @@ export async function analyzeN8nVideoFrames(
           proof ? { ...segmentResult, proof } : segmentResult,
         )
         segmentResults.set(segment.index, segmentResult)
+        await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0, model: modelLabel(usedRoute) })
       }
+      const batchStartedAt = Date.now()
       try {
         const attempt = await callCompatibleModelWithFallback(
           resolved,
@@ -1410,12 +1414,15 @@ export async function analyzeN8nVideoFrames(
           if (!segment) throw new Error(`视频画面批次返回未知片段：${index}`)
           await persist(segment, perception, attempt.route)
         }
+        await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - batchStartedAt) / 1000,
+          units: missing.length, model: modelLabel(attempt.route) })
         continue
       } catch (error) {
         const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
         logSafeOperationError('media_visual_batch_fallback', error, projection)
       }
       for (const segment of missing) {
+        const individualStartedAt = Date.now()
         const images = imagesByIndex.get(segment.index) || []
         const individualContent = [
           {
@@ -1447,6 +1454,8 @@ export async function analyzeN8nVideoFrames(
         activeRouteIndex = attempt.routeIndex
         individualFallbackCalls += 1
         await persist(segment, attempt.validated as N8nVisualPerception, attempt.route)
+        await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
+          units: 1, model: modelLabel(attempt.route) })
       }
     }
   }
@@ -1653,6 +1662,10 @@ export async function synthesizeN8nMediaResults(
   if (!candidates.length) throw new Error('视频片段摘要没有可用的 OpenAI-compatible 路由')
   const route = assertVisionRoute(candidates[0])
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
+  const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
+  const reportProgress = createLearningProgressReporter(taskId, 'finalize', timeline.length, modelLabel(route))
+  let cacheHits = 0
+  await reportProgress(0, 0)
   const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
   // Retain the deployed generation knobs. One request reconciles at most
   // twelve independent configured windows; no final/global model request is
@@ -1697,8 +1710,11 @@ export async function synthesizeN8nMediaResults(
       if (cached) {
         const segmentSummary = segmentSummaryCheckpointSchema.parse(cached)
         segmentResults.set(index, segmentSummary)
+        cacheHits += 1
         const cachedRouteIndex = candidates.findIndex(candidate => candidate.id === segmentSummary.routeId)
         if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
+        await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0,
+          model: modelLabel(candidates[activeRouteIndex]) })
       } else {
         pending.push({ index, segment, timeRange, transcript, visualAnalysis, inputSha256 })
       }
@@ -1731,6 +1747,7 @@ export async function synthesizeN8nMediaResults(
         result,
       )
       segmentResults.set(item.index, result)
+      await reportProgress(segmentResults.size, cacheHits)
     }
 
     const batchPrompt = [
@@ -1752,6 +1769,7 @@ export async function synthesizeN8nMediaResults(
     if (Buffer.byteLength(batchPrompt, 'utf8') > 512 * 1024) {
       throw new Error(`片段批次 ${pending[0].index}-${pending.at(-1)?.index} 输入超出边界，需减少批次`)
     }
+    const batchStartedAt = Date.now()
     try {
       const expectedIndexes = pending.map(item => item.index)
       const attempt = await callCompatibleModelWithFallback(
@@ -1782,6 +1800,8 @@ export async function synthesizeN8nMediaResults(
         if (!item) throw new Error(`片段摘要批次返回未知片段：${index}`)
         await persist(item, perception, attempt.route.id)
       }
+      await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - batchStartedAt) / 1000,
+        units: pending.length, model: modelLabel(attempt.route) })
       continue
     } catch (error) {
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
@@ -1792,6 +1812,7 @@ export async function synthesizeN8nMediaResults(
     // one-segment contract. Successful per-segment checkpoints remain reusable
     // if a later segment fails, preserving the existing recovery boundary.
     for (const item of pending) {
+      const individualStartedAt = Date.now()
       const individualPrompt = [
         '仅为下面这一个视频片段生成独立摘要与结构化导演感知，不汇总其他片段。',
         `来源文件：${sourceName}；片段编号：${item.index}；时间：${item.timeRange}`,
@@ -1826,6 +1847,8 @@ export async function synthesizeN8nMediaResults(
       activeRouteIndex = attempt.routeIndex
       individualFallbackCalls += 1
       await persist(item, attempt.validated as N8nDirectorPerception, attempt.route.id)
+      await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
+        units: 1, model: modelLabel(attempt.route) })
     }
   }
   const segmentSummaries = timeline.map((_, offset) => {
@@ -1860,6 +1883,81 @@ export async function synthesizeN8nMediaResults(
     // deterministic exports, never in a second giant implicit prompt field.
     combinedText: summary,
   }
+}
+
+/** Reuse the executor's exact checkpoint validators before permitting recovery. */
+export async function inspectN8nMediaCheckpointReuse(taskId: string, routing: Record<string, unknown>,
+  taskInput: Record<string, unknown>, outputs: { audio: Record<string, unknown> | null; vision: Record<string, unknown> | null },
+): Promise<{ eligible: boolean; errorCode: string | null }> {
+  const blocked = (errorCode: string) => ({ eligible: false, errorCode })
+  try {
+    const workspace = mediaTaskWorkspace(taskId)
+    let names: string[]
+    try { names = await readdir(join(workspace, 'checkpoints')) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { eligible: true, errorCode: null }; throw error }
+    if (names.length > 300_000) return blocked('recovery_checkpoint_set_invalid')
+    const checkpointDir = join(workspace, 'checkpoints')
+    if ((await lstat(checkpointDir)).isSymbolicLink()
+      || await realpath(checkpointDir) !== join(await realpath(workspace), 'checkpoints')) {
+      return blocked('recovery_checkpoint_path_invalid')
+    }
+    const metadata = await readMetadata(taskId)
+    const resolved = resolveN8nNodeRoute(routing, 'vision')
+    const candidates = compatibleRouteCandidates(resolved)
+    if (!candidates.length || !metadata.sourceSha256) return blocked('recovery_checkpoint_identity_missing')
+    if (!outputs.audio && metadata.audioAvailable) {
+      const settings = mediaConfig(routing)
+      const resource = resolveAudioResource(routing)
+      if (names.includes('audio-full.json')) {
+        const expected = synthesisDigest({ contract: 'whole-audio-word-timestamps-v1', resourceId: resource.id,
+          model: resource.model, language: settings.language, durationSeconds: metadata.durationSeconds,
+          segmentSeconds: metadata.segmentSeconds })
+        const cached = await readControlledMediaJson(workspace, 'checkpoints/audio-full.json', 32 * 1024 * 1024)
+        if (!cached || cached.schema !== 'video-autoworker-audio-projection' || cached.version !== 1
+          || cached.inputSha256 !== expected || !Array.isArray(cached.projected)
+          || cached.projected.length !== metadata.segments.length || typeof cached.transcript !== 'string') {
+          return blocked('recovery_audio_checkpoint_identity_changed')
+        }
+      } else if (names.some(name => /^audio-\d+\.json$/u.test(name))) return blocked('recovery_audio_checkpoint_incomplete')
+    }
+    if (!outputs.vision) {
+      const generation = videoModelGenerationProfile('vision')
+      const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
+      const promptSha256 = jsonSha256({ contract: 'video-vision-configured-window-v1', prompt,
+        instruction: resolved.instruction || '', generation })
+      for (const segment of metadata.segments) {
+        const name = `vision-${String(segment.index).padStart(3, '0')}.json`
+        if (!names.includes(name)) continue
+        const frames = await Promise.all(segment.frameFiles.map(frame => visionFrameSha256(workspace, frame)))
+        const expected = visionCheckpointExpected(metadata, segment, metadata.sourceSha256, promptSha256, frames)
+        if (!await readTrustedVisionCheckpoint(workspace, name, expected, candidates)) return blocked('recovery_checkpoint_identity_changed')
+      }
+    }
+    const summaries = names.filter(name => /^segment-summary-\d{3,6}\.json$/u.test(name))
+    if (summaries.length) {
+      if (!outputs.audio || !outputs.vision) return blocked('recovery_summary_dependencies_missing')
+      const merged = mergeN8nMediaResults(outputs.audio, outputs.vision)
+      const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
+      const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
+      const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
+      const generation = videoModelGenerationProfile('chapter')
+      const modelIdentity = candidates.map(candidate => ({ id: candidate.id, model: candidate.model,
+        baseUrl: candidate.baseUrl, transport: candidate.transport, temperature: candidate.temperature }))
+      for (const name of summaries) {
+        const index = Number(name.match(/\d+/u)?.[0])
+        const segment = timeline[index - 1]
+        if (!segment) return blocked('recovery_summary_identity_changed')
+        const expected = synthesisDigest({ contract: 'segment-audiovisual-summary-window-v1', sourceName,
+          index, segment, businessPrompt, generation, modelIdentity })
+        const cached = await readControlledMediaJson(workspace, `checkpoints/${name}`, 256 * 1024)
+        const parsed = segmentSummaryCheckpointSchema.safeParse(cached)
+        if (!parsed.success || parsed.data.index !== index || parsed.data.inputSha256 !== expected) {
+          return blocked('recovery_summary_identity_changed')
+        }
+      }
+    }
+    return { eligible: true, errorCode: null }
+  } catch { return blocked('recovery_checkpoint_unreadable') }
 }
 
 export async function cleanupN8nMediaTask(taskId: string): Promise<void> {

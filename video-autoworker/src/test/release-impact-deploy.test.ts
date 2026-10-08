@@ -367,6 +367,22 @@ describe('release impact deployment', () => {
     expect(summary.control.changed).toBe(false)
   })
 
+  it.each([
+    'scripts/lib/runtime-receipt.mjs',
+    'scripts/runtime-identity-doctor.mjs',
+    'scripts/lib/independent-worker-release.mjs',
+    'scripts/lib/operations-governance.mjs',
+  ])('updates Web and CLI when their shared runtime reader dependency changes: %s', pathname => {
+    const base = new Map([[pathname, '100644:blob:a']])
+    const target = new Map([[pathname, '100644:blob:b']])
+    const summary = releaseComponentSummary(base, target) as ComponentSummary
+    expect(summary.app.changed).toBe(true)
+    expect(summary.control.changed).toBe(true)
+    expect(summary.taskFlow.changed).toBe(false)
+    expect(summary.videoCommand.changed).toBe(false)
+    expect(summary.directorBrain.changed).toBe(false)
+  })
+
   it('classifies migrated Feishu business service as app-only', () => {
     const base = new Map([['scripts/lib/feishu-director-brain.mjs', '100644:blob:a']])
     const target = new Map([['scripts/lib/feishu-director-brain.mjs', '100644:blob:b']])

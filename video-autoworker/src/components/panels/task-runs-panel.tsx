@@ -10,7 +10,10 @@ import {
   formatTaskRunQueueDuration,
   taskRunDurationBasis,
   taskRunFailureInsight,
+  learningProgressBrief, learningStageLabel, learningSegmentCount, learningRemainingLabel,
 } from '@/lib/task-run-presentation'
+import type { LearningProgressProjection } from '@/lib/n8n-learning-progress'
+import type { VideoRecoveryInspection } from '@/lib/n8n-video-recovery'
 
 interface TaskRunListItem {
   taskId: string
@@ -31,6 +34,7 @@ interface TaskRunListItem {
   resultAvailable: boolean
   batchId: string | null
   batchIndex: number | null
+  progress?: LearningProgressProjection | null
 }
 
 interface TaskQueueItem extends TaskRunListItem {
@@ -600,6 +604,9 @@ function TaskRunRailItem({
           {failure.stage} · {failure.title}
         </div>
       )}
+      {run.taskType === 'video-analysis' && (
+        <div className="mt-2 text-[11px] text-muted-foreground">{learningProgressBrief(run.progress)}</div>
+      )}
     </button>
   )
 }
@@ -674,6 +681,7 @@ function TaskRunDetailPane({
           <TimeCard label="实际处理" value={formatTaskRunProcessingDuration(run, nowSeconds)} />
         </div>
         <DetailRow label="结果状态"><span>{run.resultAvailable ? '分析结果已保存' : '暂无可用结果'}</span></DetailRow>
+        {run.taskType === 'video-analysis' && <LearningRunDetails run={run} />}
         {failure && (
           <div className="rounded-md border border-destructive/25 bg-destructive/10 p-3 text-sm text-destructive">
             <div className="text-xs font-medium">{failure.stage}</div>
@@ -687,6 +695,88 @@ function TaskRunDetailPane({
       </div>
     </aside>
   )
+}
+
+function LearningRunDetails({ run }: { run: TaskRunListItem }) {
+  const [inspection, setInspection] = useState<VideoRecoveryInspection | null>(null)
+  const [canRecover, setCanRecover] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const identity = useRef(run.taskId)
+  useEffect(() => {
+    identity.current = run.taskId
+    setInspection(null)
+    setMessage(null)
+  }, [run.taskId, run.updatedAt])
+
+  const inspect = async () => {
+    const taskId = run.taskId
+    setBusy(true)
+    setMessage(null)
+    try {
+      const response = await fetch(`/api/n8n/runs/recovery?taskId=${encodeURIComponent(taskId)}`, { cache: 'no-store' })
+      const body = await response.json() as { inspection?: VideoRecoveryInspection; canRecover?: boolean; error?: string }
+      if (!response.ok || !body.inspection) throw new Error(body.error || '无法读取恢复条件')
+      if (identity.current !== taskId) return
+      setInspection(body.inspection)
+      setCanRecover(body.canRecover === true)
+    } catch (error) {
+      if (identity.current === taskId) setMessage(error instanceof Error ? error.message : '无法读取恢复条件')
+    } finally { if (identity.current === taskId) setBusy(false) }
+  }
+
+  const recover = async () => {
+    if (!inspection?.eligible || !inspection.inspectionToken || !canRecover
+      || !window.confirm('将继续原任务并复用已验证的结果。确认恢复？')) return
+    const taskId = run.taskId
+    setBusy(true)
+    try {
+      const response = await fetch('/api/n8n/runs/recovery', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId, inspectionToken: inspection.inspectionToken, confirm: true }),
+      })
+      const body = await response.json() as { currentState?: string; error?: string; errorCode?: string }
+      if (!response.ok) throw new Error(body.error || '恢复条件已变化，请重新检查')
+      if (identity.current !== taskId) return
+      setInspection(null)
+      setMessage(body.errorCode ? '派发结果待核对，请查询原任务；不要重复提交' : '原任务已恢复，请刷新查看进度')
+    } catch (error) {
+      if (identity.current === taskId) setMessage(error instanceof Error ? error.message : '恢复失败，请重新检查')
+    } finally { if (identity.current === taskId) setBusy(false) }
+  }
+
+  return (
+    <section className="space-y-3 rounded-md border border-border p-3" aria-label="视频学习进度">
+      <h4 className="text-sm font-medium">{learningProgressBrief(run.progress)}</h4>
+      {run.progress?.stages.map(stage => (
+        <div key={stage.stage} className="space-y-1 text-xs">
+          <div className="flex flex-wrap justify-between gap-1"><span>{learningStageLabel(stage.stage)}</span><span>{learningSegmentCount(stage)}</span></div>
+          <p className="break-words text-muted-foreground">模型：{stage.model || '未知'}；缓存复用：{stage.cacheHits ?? '未知'} 段</p>
+          {stage.state === 'running' && <p className="text-muted-foreground">本阶段预计剩余：{learningRemainingLabel(stage)}</p>}
+        </div>
+      ))}
+      {run.status === 'failed' && <Button size="xs" variant="outline" disabled={busy} onClick={() => void inspect()}>检查恢复条件</Button>}
+      {inspection && (
+        <div className="space-y-2 text-xs">
+          <p>{inspection.eligible ? '可继续原任务，已验证的成功阶段将保留' : recoveryReason(inspection.errorCode)}</p>
+          {inspection.missingResources.length > 0 && <p>待核对：{inspection.missingResources.join('、')}</p>}
+          {inspection.eligible && canRecover && <Button size="xs" disabled={busy} onClick={() => void recover()}>确认恢复原任务</Button>}
+          {inspection.eligible && !canRecover && <p>当前权限只能查看恢复条件</p>}
+        </div>
+      )}
+      {message && <p role="status" className="text-xs text-muted-foreground">{message}</p>}
+    </section>
+  )
+}
+
+function recoveryReason(code: string | null): string {
+  if (code?.includes('budget')) return '原任务重试预算已用尽，不能直接续作'
+  if (code?.includes('resources')) return '所需模型或执行资源不可用'
+  if (code?.includes('prepared') || code?.includes('checkpoint')) return '已有结果缺少可验证的恢复证据，不能直接续作'
+  if (code?.includes('lease') || code?.includes('execution') || code?.includes('progress')) return '旧执行状态尚未收敛，请先核对'
+  if (code?.includes('dispatch')) return '原工作流派发身份不可验证，不能直接续作'
+  if (code?.includes('affinity')) return '原任务的运行版本需要先核对'
+  return '当前任务不满足安全恢复条件'
 }
 
 function DetailRow({ label, children }: { label: string; children: React.ReactNode }) {

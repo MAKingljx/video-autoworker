@@ -2,6 +2,7 @@
 
 import { HealthRow, formatUptime, type DashboardData } from '../widget-primitives'
 import { selectGatewayConnection } from '@/lib/gateway-connection-state'
+import { RuntimeVersionStatus } from './runtime-version-status'
 
 export function RuntimeHealthWidget({ data }: { data: DashboardData }) {
   const { localOsStatus, connection, sessions, isSessionsLoading, mcHealth, memPct, systemStats } = data
@@ -31,6 +32,7 @@ export function RuntimeHealthWidget({ data }: { data: DashboardData }) {
         {memPct != null && <HealthRow label="内存" value={`${memPct}%`} status={memPct > 90 ? 'bad' : memPct > 70 ? 'warn' : 'good'} bar={memPct} />}
         {systemStats?.disk && <HealthRow label="磁盘" value={systemStats.disk.usage || '无数据'} status={parseInt(systemStats.disk.usage) > 90 ? 'bad' : 'good'} />}
         {systemStats?.uptime != null && <HealthRow label="运行时间" value={formatUptime(systemStats.uptime)} status="good" />}
+        <RuntimeVersionStatus />
       </div>
     </div>
   )

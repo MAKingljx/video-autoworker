@@ -2,7 +2,7 @@ import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
 import { createN8nMediaChildRunFromParent, createN8nTaskRun } from '@/lib/n8n-task-runs'
 import {
@@ -48,12 +48,14 @@ describe('n8n blue/green runtime affinity', () => {
   let temporaryRoot: string
 
   beforeEach(() => {
+    vi.stubEnv("AIWORKER_VIDEO_EDIT_ADMISSION_ENABLED", "0")
     db = new Database(':memory:')
     runMigrations(db)
     temporaryRoot = mkdtempSync(join(tmpdir(), 'n8n-runtime-affinity-'))
   })
 
   afterEach(() => {
+    vi.unstubAllEnvs()
     db.close()
     rmSync(temporaryRoot, { recursive: true, force: true })
   })
@@ -138,7 +140,13 @@ describe('n8n blue/green runtime affinity', () => {
       .toMatchObject({ allowed: false, code: 'callback_frozen' })
   })
 
-  it('allows a release switch with active work only after the global intake gate closes', () => {
+  it.each([false, true])('allows a verified core or optional schema through the release gate (editing installed=%s)', editingInstalled => {
+    if (!editingInstalled) {
+      db.close()
+      db = new Database(':memory:')
+      runMigrations(db, process.cwd(), { includeVideoEditing: false })
+    }
+    const compatibility = getN8nRollingDatabaseCompatibility(db)
     const control = {
       schema: 'video-autoworker-intake-control/v1' as const,
       globalScope: true as const,
@@ -215,12 +223,20 @@ describe('n8n blue/green runtime affinity', () => {
       database: {
         schemaEpoch: 1,
         rollingSafeFrom: '052_n8n_intake_controls',
-        latestMigration: '060_video_edit_task_receipts',
+        latestMigration: editingInstalled ? '060_video_edit_task_receipts' : '059_director_evidence_projection_receipts',
       },
       projection,
       retirement,
       scheduler,
     })
+    expect(() => buildN8nReleaseReadiness(control, runtime, retirement, scheduler,
+      { ...compatibility, latestMigration: '061_unknown_future_schema' }, projection)).toThrow(/compatibility was not verified/)
+    if (!editingInstalled) {
+      vi.stubEnv('AIWORKER_VIDEO_EDIT_ADMISSION_ENABLED', '1')
+      expect(() => buildN8nReleaseReadiness(control, runtime, retirement, scheduler,
+        compatibility, projection)).toThrow(/compatibility was not verified/)
+      vi.stubEnv('AIWORKER_VIDEO_EDIT_ADMISSION_ENABLED', '0')
+    }
     expect(() => buildN8nReleaseReadiness({
       ...control,
       mode: 'active',

@@ -87,6 +87,7 @@ const binding = {
   id: 7,
   name: '视频分析任务链',
   webhookPath: 'webhook/aiworker-task',
+  workflowId: 'workflow-7',
   taskType: 'video-analysis',
   agentRole: 'video-specialist',
   model: 'qwen36-tools-local/default_model',
@@ -169,7 +170,7 @@ describe('n8n trigger route', () => {
     })
     mocks.createN8nTaskRun.mockImplementation((_db, input) => ({
       outcome: 'created',
-      run: { taskId: input.taskId, status: 'queued', output: null, routing: snapshotN8nMediaRouting(input.routing) },
+      run: { ...input, input: input.taskInput, status: 'queued', output: null, routing: snapshotN8nMediaRouting(input.routing) },
       control: { accepting: true },
     }))
     mocks.acquireDispatchOwnership.mockReturnValue({
@@ -251,6 +252,7 @@ describe('n8n trigger route', () => {
         source: 'video-autoworker',
         requestedBy: 'local-desktop',
         routing: {
+          dispatchIdentity: { workflowId: 'workflow-7', webhookPath: 'webhook/aiworker-task' },
           id: 7,
           name: '视频分析任务链',
           taskType: 'video-analysis',

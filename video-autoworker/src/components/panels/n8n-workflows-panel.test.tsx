@@ -23,7 +23,8 @@ function configFixture(): Record<string, unknown> {
   }
 }
 
-function installApi(config = configFixture(), taskType = 'video-analysis', windowError?: string) {
+function installApi(config = configFixture(), taskType = 'video-analysis', windowError?: string,
+  capabilities = { create: true, update: true, delete: true, trigger: true, saveLearningWindow: true }) {
   let binding = {
     id: 4, name: '学习窗口测试', description: '', workflowId: 'workflow-4',
     webhookPath: 'webhook/video-learning', taskType, agentRole: 'executor',
@@ -61,7 +62,8 @@ function installApi(config = configFixture(), taskType = 'video-analysis', windo
         config: payload.config as Record<string, unknown> }
       return response({ binding })
     }
-    if (url === '/api/n8n/workflows') return response({ bindings: [binding] })
+    if (url === '/api/n8n/workflows') return response({ bindings: [binding], capabilities,
+      allowedActions: Object.entries(capabilities).filter(([, allowed]) => allowed).map(([key]) => key) })
     throw new Error(`Unexpected API call: ${url}`)
   })
   vi.stubGlobal('fetch', fetchMock)
@@ -71,10 +73,13 @@ function installApi(config = configFixture(), taskType = 'video-analysis', windo
 async function beginEdit() {
   await screen.findByRole('heading', { name: '学习窗口测试' })
   fireEvent.click(screen.getByRole('button', { name: /^编辑$/ }))
-  await screen.findByRole('textbox', { name: '高级配置（JSON 对象）' })
+  await screen.findByRole('combobox', { name: '任务类型' })
 }
 
 function advancedConfig(): HTMLTextAreaElement {
+  const summary = screen.getByText('高级配置（JSON 对象）')
+  const details = summary.closest('details')
+  if (details && !details.open) fireEvent.click(summary)
   return screen.getByRole('textbox', { name: '高级配置（JSON 对象）' })
 }
 
@@ -288,6 +293,25 @@ describe('N8nWorkflowsPanel learning window', () => {
     fireEvent.click(screen.getByRole('button', { name: '保存窗口' }))
     expect(screen.getByRole('status')).toHaveTextContent('高级配置不是有效 JSON')
     expect(api.windowWrites).toHaveLength(0)
+    expect(api.writes).toHaveLength(0)
+  })
+
+  it('uses declared permissions for CRUD while permitting the independent window action', async () => {
+    const api = installApi(configFixture(), 'video-analysis', undefined,
+      { create: false, update: false, delete: false, trigger: false, saveLearningWindow: true })
+    render(<N8nWorkflowsPanel />)
+    await beginEdit()
+    expect(screen.getByRole('button', { name: '新建任务链' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '删除' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '保存窗口' })).toBeEnabled()
+    expect(screen.getByText('当前已生效：5 秒')).toBeInTheDocument()
+    expect(advancedConfig()).toBeDisabled()
+    fireEvent.change(screen.getByRole('spinbutton', { name: '学习窗口（秒）' }), { target: { value: '3' } })
+    expect(screen.getByText('当前已生效：5 秒')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '保存窗口' }))
+    await screen.findByText('学习窗口已更新')
+    expect(screen.getByText('当前已生效：3 秒')).toBeInTheDocument()
     expect(api.writes).toHaveLength(0)
   })
 })
