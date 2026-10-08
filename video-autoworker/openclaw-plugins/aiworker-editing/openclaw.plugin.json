@@ -1,0 +1,11 @@
+{
+  "id": "aiworker-editing",
+  "name": "AI-worker Editing",
+  "version": "0.1.0",
+  "description": "Inspect evidence and propose editing plans; human approval remains in the application UI.",
+  "activation": { "onStartup": true, "onCapabilities": ["tool"] },
+  "contracts": { "tools": ["aiworker_edit_video"] },
+  "toolMetadata": { "aiworker_edit_video": { "optional": true } },
+  "configSchema": { "type": "object", "additionalProperties": false,
+    "properties": { "releaseReady": { "type": "boolean" } } }
+}

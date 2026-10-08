@@ -44,6 +44,7 @@ export const editClipSchema = z.object({
   timelineStartFrame: z.number().int().nonnegative(),
   trackIndex: z.number().int().min(1).max(999),
   mediaType: z.enum(['video', 'audio', 'av']).default('av'),
+  audioGainDb: z.number().min(-100).max(30).optional(),
   rationale: z.string().trim().min(1).max(2_000),
 }).strict()
 
@@ -72,6 +73,7 @@ export const editPlanSchema = z.object({
   clips: z.array(editClipSchema).max(2_000),
   output: z.object({
     preview: z.boolean().default(true),
+    autoSubtitles: z.boolean().optional(),
     renderPreset: z.string().trim().min(1).max(240).optional(),
     outputPathRef: safeIdentifier.optional(),
   }).strict(),

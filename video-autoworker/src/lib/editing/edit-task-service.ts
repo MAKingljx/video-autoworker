@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { createEditPlan, assertEditPlanIntegrity, type EditPlan } from './edit-plan'
-import { operationPayloadSha256, resolveOperationId, type ResolveExecutorOperation } from './resolve-executor'
+import { operationPayloadSha256, resolveOperationId, resolveOperationPayload, type ResolveExecutorOperation } from './resolve-executor'
 import {
   claimScopedN8nTaskRun,
   getScopedN8nTaskRunByTaskId,
@@ -82,7 +82,7 @@ export function getEditPlanStatus(
   }
 }
 
-function requireApprovedTask(db: Database.Database, taskId: string, scope: N8nTaskScope) {
+export function requireApprovedTask(db: Database.Database, taskId: string, scope: N8nTaskScope) {
   const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
   if (!run || run.routing.taskType !== 'video-edit') throw new Error('video_edit_task_not_found')
   const row = db.prepare(`
@@ -207,8 +207,7 @@ export function beginEditOperation(
       || operation.executorNodeId !== plan.base.editorNodeId
       || operation.resolveVersion !== plan.base.resolveVersion
       || operation.operationId !== resolveOperationId(plan, run.taskId, operation.phase, operation.stepId)
-      || operation.phase !== 'duplicate_timeline'
-      || operation.payloadSha256 !== operationPayloadSha256(plan.base)) {
+      || operation.payloadSha256 !== operationPayloadSha256(resolveOperationPayload(plan, operation))) {
       throw new Error('video_edit_operation_binding_mismatch')
     }
     const existing = db.prepare(`SELECT * FROM video_edit_operations WHERE operation_id = ?`)
@@ -252,13 +251,13 @@ export function settleEditOperation(
   db: Database.Database,
   input: {
     operationId: string; taskId: string; executionOwner: string
-    status: 'unknown' | 'succeeded' | 'failed'
+    status: 'running' | 'unknown' | 'succeeded' | 'failed'
     evidenceSha256?: string; result?: Record<string, unknown>; errorCode?: string
   },
   scope: N8nTaskScope,
 ): { status: OperationRow['status']; changed: boolean } {
   const owner = n8nExecutionOwnerSchema.parse(input.executionOwner)
-  if (input.status !== 'unknown' && !/^[0-9a-f]{64}$/u.test(input.evidenceSha256 || '')) {
+  if (['succeeded', 'failed'].includes(input.status) && !/^[0-9a-f]{64}$/u.test(input.evidenceSha256 || '')) {
     throw new Error('video_edit_readback_evidence_required')
   }
   const settle = db.transaction(() => {
@@ -290,4 +289,34 @@ export function settleEditOperation(
     return { status: input.status, changed: true }
   })
   return settle.immediate()
+}
+
+export function getEditPlanDetail(db: Database.Database, planId: string, revision: number, scope: N8nTaskScope) {
+  const row = readPlan(db, planId, revision, scope)
+  return row ? { ...getEditPlanStatus(db, planId, revision, scope), plan: parseStoredPlan(row) } : null
+}
+
+export function listEditPlans(db: Database.Database, scope: N8nTaskScope) {
+  return (db.prepare(`SELECT plan_id,revision FROM video_edit_plans WHERE tenant_id=? AND workspace_id=?
+    ORDER BY updated_at DESC,plan_id LIMIT 100`).all(scope.tenantId, scope.workspaceId) as Array<{ plan_id: string; revision: number }>)
+    .map(row => {
+      const detail = getEditPlanDetail(db, row.plan_id, row.revision, scope)!
+      return { ...getEditPlanStatus(db, row.plan_id, row.revision, scope), objective: detail.plan.objective, clipCount: detail.plan.clips.length }
+    })
+}
+
+export function cancelApprovedEditTask(db: Database.Database, taskId: string, expectedPlanSha256: string, scope: N8nTaskScope) {
+  return db.transaction(() => {
+    const { run, plan } = requireApprovedTask(db, taskId, scope)
+    if (plan.planSha256 !== expectedPlanSha256) throw new Error('video_edit_plan_version_conflict')
+    if (run.status === 'cancelled') return { status: 'cancelled', changed: false }
+    if (['succeeded','failed'].includes(run.status)) throw new Error('video_edit_task_terminal')
+    if (db.prepare("SELECT 1 FROM video_edit_operations WHERE task_id=? AND status IN ('running','unknown')").get(taskId)) {
+      throw new Error('video_edit_inflight_cancel_requires_review')
+    }
+    const result = db.prepare(`UPDATE n8n_task_runs SET status='cancelled',completed_at=unixepoch(),updated_at=unixepoch()
+      WHERE task_id=? AND tenant_id=? AND workspace_id=? AND status=?`).run(taskId, scope.tenantId, scope.workspaceId, run.status)
+    if (result.changes !== 1) throw new Error('video_edit_task_state_conflict')
+    return { status: 'cancelled', changed: true }
+  }).immediate()
 }

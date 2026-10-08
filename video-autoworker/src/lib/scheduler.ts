@@ -15,6 +15,7 @@ import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInb
 import { spawnRecurringTasks } from './recurring-tasks'
 import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
 import { drainDirectorEvidenceOutbox } from './director-evidence-outbox'
+import { drainVideoEditTasks } from './editing/edit-task-runner'
 import { drainDirectorExtractionJobs } from './director-extraction-service'
 import {
   acquireOrRenewSchedulerLeadership,
@@ -438,6 +439,8 @@ async function runDirectorEvidenceAndExtractionDrain(): Promise<{ ok: boolean; m
   let extraction: Awaited<ReturnType<typeof drainDirectorExtractionJobs>> | null = null
   let evidenceFailed = false
   let extractionFailed = false
+  let editing: Awaited<ReturnType<typeof drainVideoEditTasks>> | null = null
+  try { editing = await drainVideoEditTasks(db) } catch { editing = { scanned: 0, state: 'unavailable' } }
   try {
     evidence = await drainDirectorEvidenceOutbox(db, { limit: 20, nowSeconds })
     if (evidence.scanned > 0) {
@@ -479,7 +482,7 @@ async function runDirectorEvidenceAndExtractionDrain(): Promise<{ ok: boolean; m
   return {
     ok: !evidenceFailed && !extractionFailed
       && evidence?.conflict === 0 && extraction?.failed === 0,
-    message: `Director evidence: ${evidenceMessage} | extraction: ${extractionMessage}`,
+    message: `Director evidence: ${evidenceMessage} | extraction: ${extractionMessage} | editing: ${editing?.scanned || 0}`,
   }
 }
 

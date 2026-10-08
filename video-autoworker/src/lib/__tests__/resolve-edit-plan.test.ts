@@ -11,6 +11,7 @@ import {
   operationPayloadSha256,
   preflightResolveExecutor,
   resolveOperationId,
+  resolveOperationPayload,
 } from '@/lib/editing/resolve-executor'
 
 const hash = 'a'.repeat(64)
@@ -76,6 +77,18 @@ describe('Resolve edit plan contract', () => {
     expect(operationPayloadSha256({ z: 1, a: 2 })).toMatch(/^[0-9a-f]{64}$/u)
   })
 
+  it('shares one payload contract for import, queue and start', () => {
+    const value = plan()
+    expect(resolveOperationPayload(value, { phase: 'import_media', stepId: 'asset-001' })).toEqual(value.clips[0].asset)
+    expect(resolveOperationPayload(value, { phase: 'queue_render', stepId: 'queue' })).toEqual(value.output)
+    expect(resolveOperationPayload(value, { phase: 'start_render', stepId: 'start' })).toEqual(value.output)
+    expect(operationPayloadSha256({ a: 2, z: 1 })).toBe(operationPayloadSha256({ z: 1, a: 2 }))
+    const ambiguous = createEditPlan({ ...value, clips: [...value.clips, {
+      ...value.clips[0], itemId: 'second-clip', asset: { ...value.clips[0].asset, revision: 'changed' },
+    }] })
+    expect(() => resolveOperationPayload(ambiguous, { phase: 'import_media', stepId: 'asset-001' })).toThrow('resolve_asset_reference_ambiguous')
+  })
+
   it('blocks mismatched node, project or capability before writing', () => {
     const value = plan()
     const snapshot = {
@@ -119,7 +132,7 @@ describe('Resolve edit plan contract', () => {
         capabilities: value.capabilitiesRequired,
         projectUniqueId: value.base.projectUniqueId,
         timelineUniqueId: value.base.timelineUniqueId,
-        processIdentity: value.base.editorNodeId + ':resolve:' + value.base.resolveVersion,
+        processIdentity: value.base.editorNodeId + ':resolve:' + 'f'.repeat(64),
       }),
       apply: async () => { throw new Error('resolve_transport_connection_lost') },
       reconcile: async () => ({ status: 'unknown' as const, operationId: operation.operationId }),
@@ -216,7 +229,7 @@ describe('Resolve edit plan contract', () => {
       cancel: async () => undefined,
     }
     await expect(executeResolveOperation(value, operation, transport)).resolves.toMatchObject({
-      status: 'failed', errorCode: 'resolve_operation_unsupported',
+      status: 'failed', errorCode: 'resolve_copy_binding_required',
     })
   })
 })
