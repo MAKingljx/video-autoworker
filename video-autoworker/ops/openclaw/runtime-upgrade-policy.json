@@ -1,0 +1,12 @@
+{
+  "schema": "aiworker-openclaw-upgrade-policy/v1",
+  "profiles": ["gpt-main", "qwen-current", "qwen-weixin-new", "image-studio"],
+  "configPatch": {
+    "skills": {
+      "workshop": {
+        "autonomous": { "mode": "off" },
+        "approvalPolicy": "pending"
+      }
+    }
+  }
+}

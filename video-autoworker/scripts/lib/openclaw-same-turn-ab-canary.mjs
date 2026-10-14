@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
+import { OPENCLAW_RUNTIME_VERSION } from './openclaw-runtime-contract.mjs'
 
-export const DEFAULT_EXPECTED_OPENCLAW_VERSION = '2026.9.2'
+export const DEFAULT_EXPECTED_OPENCLAW_VERSION = OPENCLAW_RUNTIME_VERSION
 export const DEFAULT_TOOL_CALLS = 10
 export const DEFAULT_TOOL_RESULT_BYTES = 24 * 1024
 export const MIN_TOOL_CALLS = 8

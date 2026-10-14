@@ -1,6 +1,6 @@
 {
   "schema": "video-autoworker-openclaw-runtime-convergence/v1",
-  "openclawVersion": "2026.9.2",
+  "openclawVersion": "2026.9.9",
   "profile": "qwen-current",
   "compaction": {
     "set": {

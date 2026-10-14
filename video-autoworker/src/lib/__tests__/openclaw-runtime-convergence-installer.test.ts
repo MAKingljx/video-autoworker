@@ -247,7 +247,7 @@ async function createFixture() {
     mkdir(openclawSdkRoot, { recursive: true, mode: 0o755 }),
   ])
   await writeFile(openclawSdkPackage, `${JSON.stringify({
-    name: 'openclaw', version: '2026.9.2', type: 'module',
+    name: 'openclaw', version: '2026.9.9', type: 'module',
   })}\n`, { mode: 0o644 })
   await writeFile(config, `${JSON.stringify(initial, null, 2)}\n`, { mode: 0o600 })
   await writeFile(`${config}.last-good`, await readFile(config), { mode: 0o600 })
@@ -262,7 +262,7 @@ async function createFixture() {
     'aiworker-video-command',
     'aiworker_analyze_video',
     false,
-    '0.5.18',
+    '0.5.19',
     openclawSdkRoot,
   )
   await installPluginManifest(
@@ -284,7 +284,7 @@ if (args[0] === '--version') {
     process.env.GATEWAY_PASSWORD,
   ].some(Boolean)) process.exit(99)
   fs.appendFileSync(process.env.FAKE_OPENCLAW_AUTH_LOG, 'version=absent\\n')
-  process.stdout.write('OpenClaw ' + (process.env.FAKE_OPENCLAW_VERSION || '2026.9.2') + ' (fixture)\\n')
+  process.stdout.write('OpenClaw ' + (process.env.FAKE_OPENCLAW_VERSION || '2026.9.9') + ' (fixture)\\n')
   process.exit(0)
 }
 if (args[0] !== '--profile' || args[1] !== 'qwen-current') process.exit(90)
@@ -392,7 +392,7 @@ if (args[0] === 'config' && args[1] === 'patch') {
     const current = read(configPath)
     const updated = mergePatch(current, patch)
     updated.meta ??= {}
-    updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.2'
+    updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.9'
     updated.meta.lastTouchedAt = new Date().toISOString()
     if (process.env.FAKE_EXTRA_CONFIG_ON_APPLY === '1') updated.gateway.port = 19993
     if (process.env.FAKE_EXTRA_META_ON_APPLY === '1') updated.meta.owner = 'unexpected'
@@ -405,10 +405,10 @@ if (args[0] === 'config' && args[1] === 'patch') {
 }
 if (args[0] === 'gateway' && args[1] === 'status') {
   const pid = Number(process.env.FAKE_STATUS_GATEWAY_PID || process.env.FAKE_GATEWAY_PID)
-  const version = process.env.FAKE_STATUS_GATEWAY_VERSION || '2026.9.2'
+  const version = process.env.FAKE_STATUS_GATEWAY_VERSION || '2026.9.9'
   process.stdout.write(JSON.stringify({
     service: { runtime: { pid, status: 'running', state: 'active' } },
-    cli: { version: '2026.9.2', entrypoint: process.argv[1] },
+    cli: { version: '2026.9.9', entrypoint: process.argv[1] },
     gateway: {
       bindMode: 'loopback',
       bindHost: '127.0.0.1',
@@ -670,7 +670,7 @@ if (operation === 'config-patch') {
   const patch = read(process.env.AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE)
   const updated = mergePatch(JSON.parse(source), patch)
   updated.meta ??= {}
-  updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.2'
+  updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.9'
   updated.meta.lastTouchedAt = new Date().toISOString()
     if (process.env.FAKE_EXTRA_CONFIG_ON_APPLY === '1') updated.gateway.port = 19993
     if (process.env.FAKE_EXTRA_META_ON_APPLY === '1') updated.meta.owner = 'unexpected'
@@ -1101,7 +1101,7 @@ describe('qwen-current unified runtime convergence installer', () => {
     await mkdir(dist, { recursive: true, mode: 0o700 })
     await mkdir(bin, { mode: 0o700 })
     await writeFile(join(packageRoot, 'package.json'), `${JSON.stringify({
-      name: 'openclaw', version: '2026.9.2', type: 'module',
+      name: 'openclaw', version: '2026.9.9', type: 'module',
       exports: { './plugin-sdk/gateway-runtime': './dist/gateway-runtime.js' },
     })}\n`, { mode: 0o600 })
     await writeFile(openclaw, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
@@ -1136,7 +1136,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
   it('pins one exact manifest and contains no Gateway lifecycle action', async () => {
     expect(JSON.parse(await readFile(manifestFile, 'utf8'))).toEqual({
       schema: 'video-autoworker-openclaw-runtime-convergence/v1',
-      openclawVersion: '2026.9.2',
+      openclawVersion: '2026.9.9',
       profile: 'qwen-current',
       compaction: {
         set: {
@@ -1153,7 +1153,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
       requiredPlugins: [
         {
           id: 'aiworker-video-command',
-          version: '0.5.18',
+          version: '0.5.19',
           tool: 'aiworker_analyze_video',
           requiredConfig: { releaseReady: true },
         },
@@ -1719,7 +1719,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     }, 'video-command OpenClaw SDK link target is invalid'],
     ['an SDK package name drift', async (entry: Fixture) => {
       await writeFile(entry.openclawSdkPackage,
-        '{"name":"not-openclaw","version":"2026.9.2"}\n', { mode: 0o644 })
+        '{"name":"not-openclaw","version":"2026.9.9"}\n', { mode: 0o644 })
     }, 'video-command OpenClaw SDK package identity is invalid'],
     ['an SDK package version drift', async (entry: Fixture) => {
       await writeFile(entry.openclawSdkPackage,
