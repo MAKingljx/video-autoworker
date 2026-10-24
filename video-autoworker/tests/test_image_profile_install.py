@@ -834,11 +834,12 @@ class CurrentRuntimeAdoptionTests(unittest.TestCase):
 
 class AppliedPluginResumeTests(unittest.TestCase):
     @contextlib.contextmanager
-    def applied_failure(self, directory):
+    def applied_failure(self, directory, *, native_binding=False):
         fixture,plugin=plugin_update_fixture(Path(directory).resolve())
         with fixture.patches(),contextlib.redirect_stdout(io.StringIO()),patch.object(install.time,'sleep'), \
                 patch.object(install,'current_gateway_operation',side_effect=fixture.gateway_operation):
             install.main(fixture.arguments('--apply'));fixture.migrate_current_runtime()
+            if native_binding:prepare_native_service(fixture)
             fixture.fail_validation=True
             with self.assertRaisesRegex(install.InstallError,'component_command_failed'):
                 install.main(fixture.adoption_arguments('--apply',plugin))
@@ -924,6 +925,86 @@ class AppliedPluginResumeTests(unittest.TestCase):
             fixture,plugin=plugin_update_fixture(Path(directory).resolve())
             with fixture.patches(),self.assertRaisesRegex(install.InstallError,'plugin_resume_controller_option_invalid'):
                 install.main(fixture.plugin_arguments('--dry-run',plugin)+['--controller-source-commit','e'*40])
+
+    def test_resume_accepts_only_verified_official_plist_and_wrapper_migration(self):
+        with tempfile.TemporaryDirectory() as directory,self.applied_failure(directory,native_binding=True) as (fixture,plugin,verify):
+            path=fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json'
+            failed=json.loads(path.read_bytes());plan=copy.deepcopy(failed['pluginUpdatePlan'])
+            backup=install.bounded_files(Path(failed['recoveryBackup']))
+            migrate_official_service(fixture)
+            plist=fixture.home/'Library/LaunchAgents/ai.openclaw.image-studio.plist'
+            actual=plist.read_bytes()
+            self.assertEqual(install.main(self.resume_args(fixture,plugin)),0)
+            saved=json.loads(path.read_bytes());migration=saved['pluginResumeEvidence']['officialServiceMigration']
+            self.assertEqual(saved['pluginUpdatePlan'],plan)
+            self.assertEqual(install.bounded_files(Path(failed['recoveryBackup'])),backup)
+            self.assertEqual(plist.read_bytes(),actual)
+            self.assertEqual(saved['serviceEvidence']['launchAgentSha256'],install.sha(actual))
+            self.assertTrue(migration['environmentUnchanged']);self.assertFalse(migration['serviceFilesRewrittenByController'])
+            self.assertEqual(set(migration['changes']),{'official_environment_wrapper_header_validation',
+                'official_stderr_merged_into_supervisor_log'})
+
+    def test_restore_keeps_current_official_service_files_while_restoring_payload_cohort(self):
+        with tempfile.TemporaryDirectory() as directory,self.applied_failure(directory,native_binding=True) as (fixture,plugin,verify):
+            path=fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json'
+            failed=json.loads(path.read_bytes());migrate_official_service(fixture)
+            plist=fixture.home/'Library/LaunchAgents/ai.openclaw.image-studio.plist';raw=plist.read_bytes()
+            self.assertEqual(install.main(fixture.adoption_arguments('--apply',plugin,instructions=False,restore=True)),0)
+            saved=json.loads(path.read_bytes());self.assertEqual(plist.read_bytes(),raw)
+            self.assertEqual(saved['serviceEvidence']['launchAgentSha256'],install.sha(raw))
+            self.assertIn('officialServiceMigration',saved['lastPluginRestore'])
+            for name,pathpart in [('openclaw.json',fixture.home/'.openclaw-image-studio/openclaw.json'),
+                                  ('AGENTS.md',fixture.home/'ai-worker/workspaces/image-studio/AGENTS.md')]:
+                self.assertEqual(pathpart.read_bytes(),(Path(failed['recoveryBackup'])/name).read_bytes())
+
+
+def prepare_native_service(fixture):
+    state=fixture.home/'.openclaw-image-studio';folder=state/'service-env';folder.mkdir(mode=0o700)
+    plist=fixture.home/'Library/LaunchAgents/ai.openclaw.image-studio.plist';value=plistlib.loads(plist.read_bytes())
+    wrapper=folder/'ai.openclaw.image-studio-env-wrapper.sh';wrapper.write_bytes(install.LEGACY_ENV_WRAPPER);wrapper.chmod(0o700)
+    envfile=folder/'ai.openclaw.image-studio.env'
+    quote=lambda text:"'"+text.replace("'","'\\''")+"'"
+    envfile.write_text(install.ENV_FILE_HEADER+'\n'+''.join('export '+k+'='+quote(v)+'\n'for k,v in value['EnvironmentVariables'].items()))
+    envfile.chmod(0o600);value['EnvironmentVariables']={}
+    value['ProgramArguments']=['/bin/sh',str(wrapper),str(envfile),*value['ProgramArguments']]
+    value['StandardOutPath']=str(fixture.home/'Library/Logs/openclaw/gateway-image-studio.log')
+    value['StandardErrorPath']='/dev/null';value['WorkingDirectory']=str(state)
+    value.update(RunAtLoad=True,KeepAlive=True,ExitTimeOut=20,ProcessType='Interactive',ThrottleInterval=10,Umask=63,StandardInPath='/dev/null')
+    plist.write_bytes(plistlib.dumps(value))
+
+
+def migrate_official_service(fixture):
+    plist=fixture.home/'Library/LaunchAgents/ai.openclaw.image-studio.plist';value=plistlib.loads(plist.read_bytes())
+    value['StandardErrorPath']=value['StandardOutPath'];plist.write_bytes(plistlib.dumps(value))
+    (fixture.home/'.openclaw-image-studio/service-env/ai.openclaw.image-studio-env-wrapper.sh').write_bytes(install.CURRENT_ENV_WRAPPER)
+
+
+class NativeServiceTransitionTests(unittest.TestCase):
+    def test_known_wrapper_bytes_and_only_the_official_transition_are_accepted(self):
+        self.assertEqual(install.sha(install.LEGACY_ENV_WRAPPER),'08abc38cdc39727ed8580697adac8004bbac7ee7647c9d3d3c96a7fe403cf75a')
+        self.assertEqual(install.sha(install.CURRENT_ENV_WRAPPER),'67d5fd3def731eb5f63bc67ddce5ea45fcb1e06d3266ad1a2cfefa8031dda8fd')
+        cases=[('wrapper','native_service_wrapper_mismatch'),('env','image_profile_service_drift'),
+            ('stderr','image_profile_service_log_transition_invalid'),('policy','image_profile_service_transition_not_owned'),
+            ('header','native_service_env_header_invalid')]
+        for scenario,error in cases:
+            with self.subTest(scenario=scenario),tempfile.TemporaryDirectory() as directory:
+                fixture,_=plugin_update_fixture(Path(directory).resolve())
+                with fixture.patches(),contextlib.redirect_stdout(io.StringIO()):
+                    install.main(fixture.arguments('--apply'));fixture.migrate_current_runtime();prepare_native_service(fixture)
+                    state=fixture.home/'.openclaw-image-studio';plist=fixture.home/'Library/LaunchAgents/ai.openclaw.image-studio.plist'
+                    config=(state/'openclaw.json').read_bytes();before=install.verify_installed_service(plist,state,config)
+                    migrate_official_service(fixture)
+                    if scenario=='wrapper':(state/'service-env/ai.openclaw.image-studio-env-wrapper.sh').write_bytes(install.CURRENT_ENV_WRAPPER+b'echo custom\n')
+                    elif scenario in {'env','header'}:
+                        envfile=state/'service-env/ai.openclaw.image-studio.env';raw=envfile.read_text()
+                        envfile.write_text(raw+"export EXTRA='value'\n" if scenario=='env'else raw.replace(install.ENV_FILE_HEADER,'# custom header'))
+                    elif scenario in {'stderr','policy'}:
+                        value=plistlib.loads(plist.read_bytes())
+                        if scenario=='stderr':value['StandardErrorPath']='/outside/log'
+                        else:value['Umask']=0
+                        plist.write_bytes(plistlib.dumps(value))
+                    with self.assertRaisesRegex(install.InstallError,error):
+                        install.verify_owned_service_transition(fixture.home,plist,state,config,before,{'openclaw':'2026.9.9'})
 
 
 class ResumeSourceEvidenceTests(unittest.TestCase):
