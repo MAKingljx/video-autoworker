@@ -244,7 +244,12 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             crop, context = erase_context(source, region)
             local = {'x': region['x'] - context['x'], 'y': region['y'] - context['y'],
                      'width': region['width'], 'height': region['height']}
-            _verify_asset_reference(asset, crop, erasure_prompt(local))
+            if asset.get('selectionMode') == 'erasure-material':
+                if cached[asset['path']].get('referenceRegion') != local:
+                    raise ValueError('protected_cached_erasure_region_changed')
+                _verify_asset_reference(asset, crop, None, reference_region=local)
+            else:
+                _verify_asset_reference(asset, crop, erasure_prompt(local))
             paste_erasure(rebuilt, decoded[asset['path']], region, context)
     if lettering:
         selected = receipt.get('selectedLetteringAssets')
@@ -354,12 +359,17 @@ def checked_native_file(path, job, cached):
     return path
 
 
-def _verify_asset_reference(asset, expected_image, expected_prompt):
+def _verify_asset_reference(asset, expected_image, expected_prompt, *, reference_region=None):
     parent = Path(asset['path']).parent
     if expected_prompt is not None and (parent / 'prompt.txt').read_text() != expected_prompt:
         raise ValueError('protected_asset_prompt_changed')
     with Image.open(parent / 'reference.png') as reference:
-        if reference.convert('RGB').tobytes() != expected_image.convert('RGB').tobytes() or reference.size != expected_image.size:
+        if reference_region is not None:
+            from .stage_cache import erasure_reference_matches
+            equal = erasure_reference_matches(reference, expected_image, reference_region)
+        else:
+            equal = reference.convert('RGB').tobytes() == expected_image.convert('RGB').tobytes() and reference.size == expected_image.size
+        if not equal:
             raise ValueError('protected_asset_reference_changed')
 
 

@@ -17,7 +17,7 @@ from .protected_cover import (RESULT_SCHEMA, digest_bytes, erase_context, font_p
     paste_letters, protection_summary, source_image, split_letter_rows,
     validate_ocr, verify_protected_result, text_roi, lettering_row, white_preview)
 from .ocr import recognize
-from .stage_cache import HEX, read_cached_asset, validate_stage_cache
+from .stage_cache import HEX, read_cached_asset, validate_stage_cache, erasure_reference_matches
 
 
 def atomic_json(path, value):
@@ -66,6 +66,7 @@ class NativeRunner:
         if entry is None:return None
         native,receipt=read_cached_asset(entry,self.job_folder)
         sheet=entry.get('selectionMode')=='complete-line'
+        material=entry.get('selectionMode')=='erasure-material'
         if (receipt.get('repository')!=self.repository or receipt.get('revision')!=self.revision
                 or receipt.get('precision')!='BF16'or receipt.get('offline')is not True
                 or not isinstance(receipt.get('componentDtypes'),dict)
@@ -75,16 +76,19 @@ class NativeRunner:
                 or receipt.get('seed')!=self.seed):
             return None
         path=Path(receipt['output']);parent=path.parent
-        if not sheet and (parent/'prompt.txt').read_text()!=prompt:return None
+        if not (sheet or material)and (parent/'prompt.txt').read_text()!=prompt:return None
         with Image.open(parent/'reference.png')as old:
             if sheet:
                 if (old.size!=native.size or old.convert('RGB').getextrema()!=((255,255),(0,0),(255,255))
                         or reference.convert('RGB').getextrema()!=((255,255),(0,0),(255,255))):return None
+            elif material:
+                if old.size!=native.size or not erasure_reference_matches(old,reference,entry['referenceRegion']):return None
             elif old.size!=reference.size or old.convert('RGB').tobytes()!=reference.convert('RGB').tobytes():return None
         return native,{'path':str(path),'sha256':receipt['outputSha256'],
             'receiptSha256':entry['receiptSha256'],'repository':self.repository,
             'revision':self.revision,'precision':'BF16','offline':True,
-            'cacheSourceJobId':entry['sourceJobId'],**({'selectionMode':'complete-line'}if sheet else{})}
+            'cacheSourceJobId':entry['sourceJobId'],
+            **({'selectionMode':entry['selectionMode']}if sheet or material else{})}
 
     def __call__(self, folder, reference, prompt, width, height, progress):
         output = folder / 'model.png';receipt_file = output.with_suffix('.receipt.json')

@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
+import { readFileSync } from 'node:fs'
 
 import { createImageCommandTool, imageReceipt, imageSessionScope, normalizeImageRequest } from '../lib/image-command-tool.js'
 import { createImageJobClient, IMAGE_BYTES_LIMIT, IMAGE_SERVICE_ORIGIN, INSPECTION_JSON_BYTES_LIMIT,
@@ -55,6 +56,19 @@ const completed = { jobId, currentState: 'GENERATED_PENDING_REVIEW', mode: 'prot
   photoProtection: { outsideChangedPixels: 0, protectedPixels: 1_800_000, changedPixels: 10_000,
     sourceWidth: 1920, sourceHeight: 1080 },
   textValidation: { matched: true, engine: 'apple-vision', mode: 'normalized_text_sequence', expectedCount: 1, observedCount: 1 } }
+
+test('native image tool stays directly visible without changing optional activation or profile isolation', () => {
+  const tool = createImageCommandTool({ context })
+  assert.equal(tool.catalogMode, 'direct-only')
+  assert.equal(tool.name, 'aiworker_generate_image')
+  assert.equal(createImageCommandTool({ context: { ...context, agentId: 'gpt-main' } }), null)
+  const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(manifest.version, '0.2.1')
+  assert.equal(pkg.version, manifest.version)
+  assert.deepEqual(manifest.toolMetadata, { aiworker_generate_image: { optional: true } })
+  assert.deepEqual(manifest.contracts.tools, ['aiworker_generate_image'])
+})
 
 test('protected requests preserve one native source, normalize optional lists and reject ambiguous modes', () => {
   assert.deepEqual(normalizeImageRequest(request), { ...request, protected: { ...plan, eraseRegions: [] } })
@@ -117,6 +131,7 @@ test('inspection yields labeled native image blocks and never reads an arbitrary
     inspection: async (...value) => { args = value; return inspection({ source: '/ignored/private.png' }) },
   }, onReceiptRead: () => { acknowledged = true } })
   const result = await tool.execute('inspect-current', { action: 'inspect', jobId })
+  assert.equal(tool.catalogMode, 'direct-only')
   assert.deepEqual(args.slice(0, 2), [jobId, scope])
   assert.deepEqual(result.content.filter(item => item.type === 'image'), [
     { type: 'image', data: image.toString('base64'), mimeType: 'image/png' },

@@ -18,6 +18,7 @@ JOB=re.compile(r'[a-f0-9]{32}')
 SOURCE_STAGE=re.compile(r'(?:erase_[1-4]|text_layer_[0-3]_attempt_[12])')
 TARGET_STAGE=re.compile(r'(?:erase_[1-4]|text_layer_[0-3]_attempt_1)')
 ENTRY_KEYS={'stage','sourceJobId','sourceStage','sourcePayloadSha256','sha256','receiptSha256'}
+REGION_KEYS={'x','y','width','height'}
 
 
 def _sha(data):
@@ -25,8 +26,8 @@ def _sha(data):
 
 
 def _entry(value):
-    if (not isinstance(value,dict) or not ENTRY_KEYS <= set(value) or set(value)-ENTRY_KEYS-{'selectionMode'}
-            or any(not isinstance(v,str)for v in value.values())
+    if (not isinstance(value,dict) or not ENTRY_KEYS <= set(value) or set(value)-ENTRY_KEYS-{'selectionMode','referenceRegion'}
+            or any(not isinstance(value[k],str)for k in ENTRY_KEYS)
             or not TARGET_STAGE.fullmatch(value['stage'])
             or not SOURCE_STAGE.fullmatch(value['sourceStage'])
             or not JOB.fullmatch(value['sourceJobId'])
@@ -34,11 +35,43 @@ def _entry(value):
         raise ValueError('protected_stage_cache_entry_invalid')
     if value['stage'].startswith('erase_')!=value['sourceStage'].startswith('erase_'):
         raise ValueError('protected_stage_cache_entry_invalid')
-    if 'selectionMode' in value and (value['selectionMode']!='complete-line'
-            or not value['stage'].startswith('text_layer_')
+    mode=value.get('selectionMode')
+    if 'selectionMode'in value and mode not in ('complete-line','erasure-material'):
+        raise ValueError('protected_stage_cache_entry_invalid')
+    if mode=='complete-line'and (not value['stage'].startswith('text_layer_')
             or value['stage'].split('_')[2]!=value['sourceStage'].split('_')[2]):
         raise ValueError('protected_stage_cache_entry_invalid')
+    if mode=='erasure-material':
+        if not value['stage'].startswith('erase_')or'referenceRegion'not in value:
+            raise ValueError('protected_stage_cache_entry_invalid')
+        return {**value,'referenceRegion':_reference_region(value['referenceRegion'])}
+    if 'referenceRegion'in value:raise ValueError('protected_stage_cache_entry_invalid')
     return dict(value)
+
+
+def _reference_region(value,size=None):
+    if (not isinstance(value,dict)or set(value)!=REGION_KEYS
+            or any(type(value[k])is not int for k in REGION_KEYS)
+            or min(value['x'],value['y'])<0 or min(value['width'],value['height'])<1
+            or size is not None and (value['x']+value['width']>size[0]or value['y']+value['height']>size[1])):
+        raise ValueError('protected_stage_cache_reference_region_invalid')
+    return dict(value)
+
+
+def erasure_reference_matches(old_reference,current_reference,reference_region):
+    """Compare the complete photographic context outside an explicit ROI.
+
+    Region values are source-reference pixel coordinates, never caller paths.
+    Prompt changes and pixels inside that same erasure ROI do not affect this
+    equivalence; the application separately binds original-photo lineage.
+    """
+    region=_reference_region(reference_region,old_reference.size)
+    if old_reference.size!=current_reference.size:return False
+    old,current=old_reference.convert('RGB'),current_reference.convert('RGB')
+    x,y,w,h=(region[k]for k in ('x','y','width','height'))
+    width,height=old.size
+    strips=((0,0,width,y),(0,y+h,width,height),(0,y,x,y+h),(x+w,y,width,y+h))
+    return all(old.crop(box).tobytes()==current.crop(box).tobytes()for box in strips)
 
 
 def _paths(entry,job_folder):
@@ -117,6 +150,9 @@ def read_cached_asset(entry,job_folder):
         with Image.open(reference_file)as reference:
             if reference.format!='PNG':raise ValueError('protected_stage_cache_reference_invalid')
             reference.load()
+            if entry.get('selectionMode')=='erasure-material':
+                _reference_region(entry['referenceRegion'],image.size)
+                _reference_region(entry['referenceRegion'],reference.size)
     except (OSError,SyntaxError,Image.DecompressionBombError)as error:
         raise ValueError('protected_stage_cache_image_invalid')from error
     return image,proof

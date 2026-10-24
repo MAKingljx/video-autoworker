@@ -232,16 +232,96 @@ class ImageJobs:
         self.wake.set()
         return self.get(job_id, request['scope'])
 
-    def compatible_cache_source(self, row, payload):
+    def reference_lineage(self, payload, scope, *, db=None):
+        """Follow only sealed protected application outputs, never cache links."""
+        if db is None:
+            with self.db() as connection:
+                return self.reference_lineage(payload, scope, db=connection)
+        self.check_scope(scope)
+        reference = payload['references'][0]
+        visited = set()
+        output_root = self.config.output_root.resolve(strict=True)
+        while True:
+            if (not isinstance(reference, dict) or not isinstance(reference.get('source'), str)
+                    or not isinstance(reference.get('sha256'), str)):
+                raise ValueError('image_stage_cache_lineage_reference_invalid')
+            path = Path(reference['source'])
+            if (not path.is_absolute() or '..' in path.parts or not HEX.fullmatch(reference['sha256'])):
+                raise ValueError('image_stage_cache_lineage_reference_invalid')
+            try:relative = path.relative_to(output_root)
+            except ValueError:
+                # Accepted references are canonical filesystem paths, while a
+                # configured root may use an OS alias such as /var -> /private/var.
+                try:relative = path.relative_to(self.config.output_root)
+                except ValueError:return reference['sha256']
+            if (len(relative.parts) != 2 or not JOB.fullmatch(relative.parts[0])
+                    or relative.parts[1] != 'image.png'):
+                raise ValueError('image_stage_cache_lineage_reference_invalid')
+            job_id = relative.parts[0]
+            if job_id in visited:raise ValueError('image_stage_cache_lineage_cycle')
+            if len(visited) >= 8:raise ValueError('image_stage_cache_lineage_too_deep')
+            visited.add(job_id)
+            parent = db.execute('SELECT * FROM image_jobs WHERE job_id=? AND scope=?', (job_id, scope)).fetchone()
+            if not parent or parent['state'] != 'GENERATED_PENDING_REVIEW' or not parent['result_json']:
+                raise ValueError('image_stage_cache_lineage_parent_invalid')
+            previous = json.loads(parent['payload_json']);saved = json.loads(parent['result_json'])
+            folder = self.folder(job_id);owned_output = folder / 'image.png'
+            if (not isinstance(previous.get('protected'), dict) or sha(canonical(previous).encode()) != parent['payload_sha']
+                    or saved.get('currentState') != 'GENERATED_PENDING_REVIEW'
+                    or saved.get('postProcessing') is not True or saved.get('output') != str(owned_output)
+                    or saved.get('outputSha256') != reference['sha256']
+                    or saved.get('sourceFileSha256') != previous['references'][0]['sha256']):
+                raise ValueError('image_stage_cache_lineage_parent_invalid')
+            receipt = folder / 'image.receipt.json'
+            snapshot = folder / ('reference-0' + previous['references'][0]['suffix'])
+            if (any(member.is_symlink() or not member.is_file() for member in (owned_output, receipt, snapshot))
+                    or not 0 < owned_output.stat().st_size <= MAX_OUTPUT
+                    or not 0 < receipt.stat().st_size <= 1024 * 1024
+                    or not 0 < snapshot.stat().st_size <= MAX_PROTECTED_INPUT
+                    or canonical(json.loads(receipt.read_bytes())) != parent['result_json']):
+                raise ValueError('image_stage_cache_lineage_parent_changed')
+            data = owned_output.read_bytes()
+            if (sha(data) != reference['sha256'] or saved.get('outputBytes') != len(data)
+                    or sha(snapshot.read_bytes()) != previous['references'][0]['sha256']):
+                raise ValueError('image_stage_cache_lineage_parent_changed')
+            reference = previous['references'][0]
+
+    def compatible_cache_source(self, row, payload, *, allow_lineage=False, db=None):
         """Reuse execution inputs, never another session's task or payload."""
         previous = json.loads(row['payload_json'])
         if (row['state'] not in TERMINAL or 'protected' not in previous
                 or sha(canonical(previous).encode()) != row['payload_sha']
-                or previous['references'][0]['sha256'] != payload['references'][0]['sha256']
                 or any(previous[key] != payload[key] for key in ('steps', 'guidance', 'seed'))
                 or any(previous['execution'][key] != payload['execution'][key]
                        for key in ('backendSha256', 'profilesSha256'))):
             raise ValueError('image_stage_cache_source_incompatible')
+        if allow_lineage:
+            if ((previous['width'], previous['height']) != (payload['width'], payload['height'])
+                    or self.reference_lineage(previous, row['scope'], db=db) != self.reference_lineage(payload, row['scope'], db=db)):
+                raise ValueError('image_stage_cache_source_incompatible')
+        elif previous['references'][0]['sha256'] != payload['references'][0]['sha256']:
+            raise ValueError('image_stage_cache_source_incompatible')
+        return previous
+
+    def erasure_material_source(self, row, payload, entry, *, db=None):
+        previous = self.compatible_cache_source(row, payload, allow_lineage=True, db=db)
+        target = re.fullmatch(r'erase_([1-4])', entry['stage'])
+        source = re.fullmatch(r'erase_([1-4])', entry['sourceStage'])
+        if (entry.get('selectionMode') != 'erasure-material' or not target or not source
+                or int(target[1]) > len(payload['protected']['eraseRegions'])
+                or int(source[1]) > len(previous['protected']['eraseRegions'])):
+            raise ValueError('image_stage_cache_erasure_material_source_invalid')
+        region = payload['protected']['eraseRegions'][int(target[1]) - 1]
+        if previous['protected']['eraseRegions'][int(source[1]) - 1] != region:
+            raise ValueError('image_stage_cache_erasure_material_source_invalid')
+        from .protected_cover import erase_context
+        from PIL import Image
+        # Only shared crop geometry is needed here; real reference pixels are
+        # independently checked by the material selector, worker and verifier.
+        _, context = erase_context(Image.new('RGB', (payload['width'], payload['height'])), region)
+        local = {**region, 'x': region['x'] - context['x'], 'y': region['y'] - context['y']}
+        if entry.get('referenceRegion') != local:
+            raise ValueError('image_stage_cache_erasure_material_region_invalid')
         return previous
 
     @staticmethod
@@ -290,30 +370,38 @@ class ImageJobs:
             source = self.row(entry['sourceJobId'], row['scope'])
             if source['payload_sha'] != entry['sourcePayloadSha256']:
                 raise ValueError('image_stage_cache_source_payload_changed')
-            self.compatible_cache_source(source, payload)
-            if entry.get('selectionMode') == 'complete-line':
+            if entry.get('selectionMode') == 'erasure-material':
+                self.erasure_material_source(source, payload, entry)
+            elif entry.get('selectionMode') == 'complete-line':
                 self.complete_line_source(source, payload, entry)
-            elif entry['stage'].startswith('text_layer_') and (
-                    source['state'] != 'GENERATED_PENDING_REVIEW' or not source['result_json']):
-                raise ValueError('image_stage_cache_text_not_sealed')
+            else:
+                self.compatible_cache_source(source, payload)
+                if entry['stage'].startswith('text_layer_') and (
+                        source['state'] != 'GENERATED_PENDING_REVIEW' or not source['result_json']):
+                    raise ValueError('image_stage_cache_text_not_sealed')
         return manifest, digest
 
     def select_stage_cache(self, db, scope, payload, source_bytes, folder):
         """Bounded, read-only discovery of already completed native stages."""
         from .protected_cover import (source_image, erase_context, erasure_prompt,
                                       font_prompt, _verify_asset_reference)
-        from .stage_cache import cached_asset_paths, read_cached_asset
+        from .stage_cache import cached_asset_paths, erasure_reference_matches, read_cached_asset
         manifest = {'schema': 'aiworker-protected-stage-cache/v1', 'assets': []}
         candidates = db.execute(
             "SELECT * FROM image_jobs WHERE scope=? AND state IN ('GENERATED_PENDING_REVIEW','FAILED','CANCELLED','RECONCILE_REQUIRED') AND json_type(payload_json,'$.protected')='object' ORDER BY created_at DESC,job_id DESC LIMIT 12",
             (scope,)).fetchall()
-        compatible = []
+        compatible = [];erasure_compatible = []
         for row in candidates:
-            try:compatible.append((row, self.compatible_cache_source(row, payload)))
+            try:
+                previous = self.compatible_cache_source(row, payload)
+                compatible.append((row, previous));erasure_compatible.append((row, previous))
             except (ValueError, KeyError, IndexError):pass
+            if not any(item[0]['job_id'] == row['job_id'] for item in erasure_compatible):
+                try:erasure_compatible.append((row, self.compatible_cache_source(row, payload, allow_lineage=True, db=db)))
+                except (OSError, ValueError, KeyError, IndexError):pass
         original = source_image(source_bytes)
 
-        def native_entry(path, target, *, text=False, selection_mode=None):
+        def native_entry(path, target, *, text=False, selection_mode=None, reference_region=None, allow_lineage=False):
             path = Path(path)
             relative = path.relative_to(self.config.output_root)
             if (len(relative.parts) != 4 or not JOB.fullmatch(relative.parts[0])
@@ -322,7 +410,7 @@ class ImageJobs:
             owner = db.execute('SELECT * FROM image_jobs WHERE job_id=? AND scope=?',
                                (relative.parts[0], scope)).fetchone()
             if not owner:raise ValueError('image_stage_cache_scope_invalid')
-            self.compatible_cache_source(owner, payload)
+            self.compatible_cache_source(owner, payload, allow_lineage=allow_lineage, db=db)
             if text and selection_mode is None and (
                     owner['state'] != 'GENERATED_PENDING_REVIEW' or not owner['result_json']):
                 raise ValueError('image_stage_cache_text_not_sealed')
@@ -338,7 +426,10 @@ class ImageJobs:
                      'receiptSha256': sha(proof_path.read_bytes())}
             if selection_mode is not None:
                 entry['selectionMode'] = selection_mode
-                self.complete_line_source(owner, payload, entry)
+                if selection_mode == 'erasure-material':
+                    entry['referenceRegion'] = reference_region
+                    self.erasure_material_source(owner, payload, entry, db=db)
+                else:self.complete_line_source(owner, payload, entry)
             image, proof = read_cached_asset(entry, folder)
             if (proof.get('repository') != self.backend.REPOSITORY or proof.get('revision') != self.backend.REVISION
                     or proof.get('precision') != 'BF16' or proof.get('offline') is not True
@@ -362,14 +453,26 @@ class ImageJobs:
         for index, region in enumerate(payload['protected']['eraseRegions']):
             crop, context = erase_context(original, region)
             local = {**region, 'x': region['x'] - context['x'], 'y': region['y'] - context['y']}
-            for row, old in compatible:
+            choices = []
+            for row, old in erasure_compatible:
                 try:
                     old_index = old['protected']['eraseRegions'].index(region)
                     path = erasure_path(row, 'erase_' + str(old_index + 1))
-                    entry, _ = native_entry(path, 'erase_' + str(index + 1))
-                    _verify_asset_reference({'path': str(path)}, crop, erasure_prompt(local))
-                    manifest['assets'].append(entry);break
+                    try:
+                        entry, _ = native_entry(path, 'erase_' + str(index + 1))
+                        _verify_asset_reference({'path': str(path)}, crop, erasure_prompt(local))
+                    except (ValueError, KeyError, IndexError):
+                        entry, _ = native_entry(path, 'erase_' + str(index + 1),
+                            selection_mode='erasure-material', reference_region=local, allow_lineage=True)
+                        from PIL import Image
+                        with Image.open(path.with_name('reference.png')) as native_reference:
+                            if not erasure_reference_matches(native_reference, crop, local):
+                                raise ValueError('image_stage_cache_erasure_reference_changed')
+                    owner = db.execute('SELECT created_at FROM image_jobs WHERE job_id=? AND scope=?',
+                                       (entry['sourceJobId'], scope)).fetchone()
+                    choices.append((owner['created_at'], entry['sourceJobId'], entry))
                 except (OSError, ValueError, KeyError, IndexError):pass
+            if choices:manifest['assets'].append(max(choices, key=lambda value: value[:2])[2])
 
         for index, layer in enumerate(payload['protected']['textLayers']):
             target = 'text_layer_' + str(index) + '_attempt_1'
@@ -456,6 +559,10 @@ class ImageJobs:
                 for key, expected in (('engine', 'apple-vision'), ('mode', 'normalized_text_sequence')):
                     if proof.get(key) == expected:
                         summary[key] = expected
+                if (proof.get('engine') == 'not-applicable' and proof.get('matched') is True
+                        and type(proof.get('expectedCount')) is int and proof['expectedCount'] == 0
+                        and type(proof.get('observedCount')) is int and proof['observedCount'] == 0):
+                    summary['engine'] = 'not-applicable'
                 for key in ('expectedCount', 'observedCount'):
                     if type(proof.get(key)) is int and 0 <= proof[key] <= 32:
                         summary[key] = proof[key]

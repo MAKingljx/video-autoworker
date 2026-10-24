@@ -69,7 +69,7 @@ class ImageJobTest(unittest.TestCase):
         self.backend.write_text(FAKE)
         self.profiles = self.root / 'profiles.json'
         self.profiles.write_text((ROOT / 'ops/image-generation/qwen-image-edit-2511/cover-design-profiles.json').read_text())
-        self.config = Configuration(self.root / 'state', self.root / 'output', (self.refs,),
+        self.config = Configuration(self.root / 'state', self.root / 'output', (self.refs, self.root / 'output'),
                                     self.backend, Path(sys.executable), self.profiles, 'a' * 40)
         self.jobs = ImageJobs(self.config)
         self.request = {'scope': 'a' * 64, 'requestKey': 'b' * 64,
@@ -239,6 +239,156 @@ class ImageJobTest(unittest.TestCase):
                          None if completed else 'protected_generated_text_mismatch',
                          result if completed else None)
         return request, accepted, result, output
+
+    def complete_protected_request(self, request):
+        accepted = self.jobs.submit(request)
+        receipt, output = self.protected_candidate(accepted)
+        with self.jobs.db() as db:
+            db.execute("UPDATE image_jobs SET state='RUNNING' WHERE job_id=?", (accepted['jobId'],))
+        self.jobs.settle(self.jobs.row(accepted['jobId'], request['scope']), 'GENERATED_PENDING_REVIEW', result=receipt)
+        return accepted, receipt, output
+
+    def erasure_material_chain(self):
+        original = {**self.protected_request(), 'steps': 30}
+        original['protected']['eraseRegions'].append({'x': 1000, 'y': 700, 'width': 24, 'height': 24})
+        parent = self.complete_protected_request(original)
+        repair = {**original, 'images': [str(parent[2])], 'requestKey': 'c' * 64,
+                  'protected': {'schema': 'aiworker-protected-cover/v1',
+                                'eraseRegions': [original['protected']['eraseRegions'][1]]}}
+        child = self.complete_protected_request(repair)
+        return original, parent, child
+
+    def test_erasure_material_reuses_latest_native_owner_across_protected_lineage_and_indexes(self):
+        request, parent, child = self.erasure_material_chain()
+        root_sha = hashlib.sha256(self.reference.read_bytes()).hexdigest()
+        child_payload = json.loads(self.jobs.row(child[0]['jobId'], request['scope'])['payload_json'])
+        self.assertEqual(self.jobs.reference_lineage(child_payload, request['scope']), root_sha)
+        # A newer cancelled job referencing an old patch must not outrank the
+        # genuinely newer native repair made by the child job.
+        referrer = self.jobs.submit({**request, 'requestKey': 'd' * 64})
+        path = self.jobs.folder(referrer['jobId']) / 'stage-cache.json'
+        cache = json.loads(path.read_text())
+        original_asset = parent[1]['assets'][1]
+        parent_row = self.jobs.row(parent[0]['jobId'], request['scope'])
+        cache['assets'][1] = {'stage': 'erase_2', 'sourceJobId': parent[0]['jobId'], 'sourceStage': 'erase_2',
+            'sourcePayloadSha256': parent_row['payload_sha'], 'sha256': original_asset['sha256'],
+            'receiptSha256': original_asset['receiptSha256']}
+        path.write_text(canonical(cache));self.jobs.cancel(referrer['jobId'], request['scope'])
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        row = self.jobs.row(accepted['jobId'], request['scope']);cache, _ = self.jobs.stage_cache(row)
+        first, second = cache['assets']
+        self.assertEqual(first['sourceJobId'], parent[0]['jobId'])
+        self.assertEqual((second['stage'], second['sourceStage'], second['sourceJobId']),
+                         ('erase_2', 'erase_1', child[0]['jobId']))
+        self.assertEqual(second['selectionMode'], 'erasure-material')
+        self.assertEqual(second['referenceRegion'], {'x': 244, 'y': 244, 'width': 24, 'height': 24})
+        self.assertEqual(second['sha256'], child[1]['assets'][0]['sha256'])
+
+    def test_erasure_material_allows_prompt_changes_but_checks_outside_reference_pixels(self):
+        request, parent, child = self.erasure_material_chain()
+        from image_generation.protected_cover import erasure_prompt
+        old_prompt = erasure_prompt
+        with patch('image_generation.protected_cover.erasure_prompt', side_effect=lambda region: old_prompt(region) + ' New implementation wording.'):
+            accepted = self.jobs.submit({**request, 'requestKey': 'd' * 64})
+        cache, _ = self.jobs.stage_cache(self.jobs.row(accepted['jobId'], request['scope']))
+        self.assertTrue(all(entry['selectionMode'] == 'erasure-material' for entry in cache['assets']))
+        self.assertEqual(cache['assets'][1]['sourceJobId'], child[0]['jobId'])
+        # Keep the synthetic native proof internally consistent while changing
+        # one context pixel outside the permitted ROI: selection must reject it.
+        folder = child[2].parent / 'stages' / 'erase_1'
+        with Image.open(folder / 'reference.png') as image:changed = image.copy()
+        changed.putpixel((0, 0), (255, 0, 0));changed.save(folder / 'reference.png')
+        proof_path = folder / 'model.receipt.json';proof = json.loads(proof_path.read_text())
+        proof['inputs'][1]['sha256'] = hashlib.sha256((folder / 'reference.png').read_bytes()).hexdigest()
+        proof_path.write_text(json.dumps(proof))
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        cache, _ = self.jobs.stage_cache(self.jobs.row(accepted['jobId'], request['scope']))
+        self.assertEqual(cache['assets'][1]['sourceJobId'], parent[0]['jobId'])
+
+    def test_erasure_material_readback_rejects_wrong_rectangle_region_or_lineage(self):
+        request, parent, child = self.erasure_material_chain()
+        accepted = self.jobs.submit({**request, 'requestKey': 'd' * 64})
+        row = self.jobs.row(accepted['jobId'], request['scope']);path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json'
+        raw = path.read_bytes();cache = json.loads(raw)
+        cache['assets'][1]['referenceRegion']['x'] += 1
+        path.write_text(canonical(cache))
+        with self.assertRaisesRegex(ValueError, 'material_region_invalid'):
+            self.jobs.stage_cache(row)
+        path.write_bytes(raw);cache = json.loads(raw);cache['assets'][1]['stage'] = 'erase_1';cache['assets'] = cache['assets'][1:]
+        path.write_text(canonical(cache))
+        with self.assertRaisesRegex(ValueError, 'material_source_invalid'):
+            self.jobs.stage_cache(row)
+        path.write_bytes(raw)
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET scope=? WHERE job_id=?', ('f' * 64, parent[0]['jobId']))
+        with self.assertRaisesRegex(ValueError, '(job_not_found|lineage_parent_invalid)'):
+            self.jobs.stage_cache(row)
+        with self.assertRaisesRegex(ValueError, 'lineage_parent_invalid'):
+            self.jobs.reference_lineage(json.loads(self.jobs.row(child[0]['jobId'], request['scope'])['payload_json']), request['scope'])
+
+    def test_erasure_material_cannot_cross_distinct_original_photos_with_identical_crop_context(self):
+        request, _, child = self.erasure_material_chain()
+        other = self.refs / 'other-original.png'
+        with Image.open(self.reference) as image:different = image.copy()
+        different.putpixel((0, 0), (255, 0, 0));different.save(other)
+        foreign = self.complete_protected_request({**request, 'requestKey': 'd' * 64, 'images': [str(other)],
+            'protected': {'schema': 'aiworker-protected-cover/v1',
+                          'eraseRegions': [request['protected']['eraseRegions'][1]]}})
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        row = self.jobs.row(accepted['jobId'], request['scope']);path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json'
+        cache = json.loads(path.read_bytes())
+        self.assertEqual(cache['assets'][1]['sourceJobId'], child[0]['jobId'])
+        foreign_row = self.jobs.row(foreign[0]['jobId'], request['scope'])
+        cache['assets'][1].update(sourceJobId=foreign[0]['jobId'], sourceStage='erase_1',
+            sourcePayloadSha256=foreign_row['payload_sha'], sha256=foreign[1]['assets'][0]['sha256'],
+            receiptSha256=foreign[1]['assets'][0]['receiptSha256'])
+        path.write_text(canonical(cache))
+        with self.assertRaisesRegex(ValueError, 'source_incompatible'):
+            self.jobs.stage_cache(row)
+
+    def test_material_lineage_rejects_raw_parents_wrong_hash_and_changed_sealed_output(self):
+        request, parent, child = self.erasure_material_chain()
+        payload = json.loads(self.jobs.row(child[0]['jobId'], request['scope'])['payload_json'])
+        wrong = json.loads(json.dumps(payload));wrong['references'][0]['sha256'] = '0' * 64
+        with self.assertRaisesRegex(ValueError, 'lineage_parent_invalid'):
+            self.jobs.reference_lineage(wrong, request['scope'])
+        parent[2].write_bytes(parent[2].read_bytes() + b'changed')
+        with self.assertRaisesRegex(ValueError, 'lineage_parent_changed'):
+            self.jobs.reference_lineage(payload, request['scope'])
+        # A successful creative/raw image is still not a protected-photo parent.
+        raw = self.jobs.submit({**self.request, 'requestKey': 'd' * 64});self.jobs.run_one()
+        raw_result = self.jobs.get(raw['jobId'], request['scope'])
+        protected = {**request, 'requestKey': 'e' * 64, 'images': [raw_result['output']],
+            'protected': {'schema': 'aiworker-protected-cover/v1',
+                          'eraseRegions': [request['protected']['eraseRegions'][0]]}}
+        raw_parent_payload, _ = self.jobs.normalize(protected)
+        with self.assertRaisesRegex(ValueError, 'lineage_parent_invalid'):
+            self.jobs.reference_lineage(raw_parent_payload, request['scope'])
+
+    def test_material_lineage_stops_cycles_and_more_than_eight_protected_hops(self):
+        request = {**self.protected_request(), 'steps': 30}
+        Image.new('RGB', (1920, 1080), (77, 110, 25)).save(self.reference)
+        original_sha = hashlib.sha256(self.reference.read_bytes()).hexdigest()
+        first = self.complete_protected_request(request)
+        self.assertEqual(first[1]['outputSha256'], original_sha)
+        source = self.jobs.row(first[0]['jobId'], request['scope']);cyclic = json.loads(source['payload_json'])
+        cyclic['references'][0]['source'] = str(first[2])
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET payload_json=?,payload_sha=? WHERE job_id=?',
+                (canonical(cyclic), hashlib.sha256(canonical(cyclic).encode()).hexdigest(), first[0]['jobId']))
+        with self.assertRaisesRegex(ValueError, 'lineage_cycle'):
+            self.jobs.reference_lineage(cyclic, request['scope'])
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET payload_json=?,payload_sha=? WHERE job_id=?',
+                       (source['payload_json'], source['payload_sha'], first[0]['jobId']))
+        current = first
+        for index in range(2, 10):
+            current = self.complete_protected_request({**request, 'requestKey': format(index, '064x'), 'images': [str(current[2])]})
+            probe = {**json.loads(self.jobs.row(current[0]['jobId'], request['scope'])['payload_json']),
+                     'references': [{'source': str(current[2]), 'sha256': current[1]['outputSha256'], 'suffix': '.png'}]}
+            if index == 8:self.assertEqual(self.jobs.reference_lineage(probe, request['scope']), original_sha)
+        with self.assertRaisesRegex(ValueError, 'lineage_too_deep'):
+            self.jobs.reference_lineage(probe, request['scope'])
 
     def native_text_attempt(self, accepted, layer_index, attempt):
         fixture_spec = importlib.util.spec_from_file_location('image_cache_sheet_fixtures', ROOT / 'tests/test_protected_cover.py')
@@ -515,6 +665,19 @@ class ImageJobTest(unittest.TestCase):
             self.jobs.submit({**request, 'width': 1280})
         with self.assertRaisesRegex(ValueError, 'prompt_or_design_required'):
             self.jobs.submit({**request, 'prompt': 'ambiguous'})
+
+    def test_erasure_only_projection_preserves_strict_not_applicable_text_validation(self):
+        request, accepted, result, _ = self.cache_source(completed=True)
+        row = self.jobs.row(accepted['jobId'], request['scope'])
+        self.assertEqual(self.jobs.present(row)['textValidation'], {
+            'matched': True, 'engine': 'not-applicable', 'mode': 'normalized_text_sequence',
+            'expectedCount': 0, 'observedCount': 0})
+        for change in ({'matched': False}, {'expectedCount': 1}, {'observedCount': 1},
+                       {'expectedCount': False}, {'observedCount': False}, {'engine': 'unknown'}):
+            with self.subTest(change=change):
+                altered = json.loads(json.dumps(result));altered['textValidation'].update(change)
+                projected = self.jobs.present({**dict(row), 'result_json': canonical(altered)})['textValidation']
+                self.assertNotEqual(projected.get('engine'), 'not-applicable')
 
     def test_invalid_protected_region_fails_before_creating_job(self):
         request = self.protected_request()

@@ -265,6 +265,9 @@ export function createImageCommandTool({ context, client = createImageJobClient(
   function isErrorNotice(r) { return ['FAILED', 'CANCELLED', 'RECONCILE_REQUIRED'].includes(r.currentState) }
   return {
     name: IMAGE_COMMAND_TOOL_NAME, label: 'H1 图片生成',
+    // Tool Search's generic JSON bridge cannot preserve native image blocks.
+    // This public SDK contract changes presentation, not the tool allowlist.
+    catalogMode: 'direct-only',
     description: '调用H1唯一图片应用。照片封面优先protected：保留原图原生分辨率，H1模型生成字形及修补素材，应用保护原片并自动合成；原创整图用prompt/design。只有工具实际返回32位hex任务编号和受理状态才可声称已受理，不得自造编号；submit成功后立即结束回复，等待完成提醒，不反复轮询。status查实际进度；result读回原生尺寸候选附件，原样使用MEDIA引用，不公布物理路径；inspect仅对当前会话已完成任务返回源图和成品的原生image图块，供对照文字、主体、字效与清晰度。看不到图块就明确未完成视觉审核，不能依据收据冒称看图通过。cancel只在用户明确要求取消时用。不得直接运行模型、人工绘字/修图、改其他profile或创建第二队列。生成、保护区校验或OCR匹配不等于最终视觉通过，不自动采用发布。飞书送达以实际渠道和媒体路由验收为准。',
     parameters: PARAMETERS, executionMode: 'sequential',
     async execute(toolCallId, params, signal) {

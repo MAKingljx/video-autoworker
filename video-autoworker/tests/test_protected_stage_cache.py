@@ -16,7 +16,7 @@ import test_protected_cover as fixtures
 from image_generation.protected_cover import verify_protected_result
 from image_generation.protected_worker import NativeRunner,build_protected
 from image_generation.stage_cache import (SCHEMA,cached_asset_paths,
-    read_cached_asset,validate_stage_cache)
+    read_cached_asset,validate_stage_cache,erasure_reference_matches)
 
 FAKE='''import argparse,hashlib,json
 from pathlib import Path
@@ -161,6 +161,84 @@ class ProtectedStageCacheTest(unittest.TestCase):
         self.assertEqual(proofpath.read_bytes(),before)
         self.assertTrue((folder/'prompt.txt').is_file());self.assertTrue((folder/'reference.png').is_file())
         self.assertFalse((folder/'model.png').exists())
+
+    def test_erasure_material_prompt_and_inside_roi_change_reuse_complete_native_without_model(self):
+        reference,entry=self.source_stage();region={'x':20,'y':30,'width':50,'height':60}
+        entry={**entry,'stage':'erase_2','selectionMode':'erasure-material','referenceRegion':region}
+        current=reference.copy();ImageDraw.Draw(current).rectangle((20,30,69,89),fill='purple')
+        self.assertTrue(erasure_reference_matches(reference,current,region))
+        checked=validate_stage_cache(self.manifest(entry),self.job)
+        self.assertIsNot(checked['assets'][0]['referenceRegion'],region)
+        native=self.old/'stages'/'erase_1'/'model.png';proof=native.with_suffix('.receipt.json')
+        before=native.read_bytes(),proof.read_bytes();folder=self.target('erase_2');runner=self.runner(entry)
+        with patch('image_generation.protected_worker.subprocess.Popen',side_effect=AssertionError('no model replay')):
+            image,record=runner(folder,current,'新的中文擦除指令',512,512,lambda *_:None)
+        self.assertEqual(record['path'],str(native));self.assertEqual(record['selectionMode'],'erasure-material')
+        self.assertEqual(record['cacheSourceJobId'],self.old.name);self.assertNotIn('referenceRegion',record)
+        self.assertEqual((native.read_bytes(),proof.read_bytes()),before)
+        self.assertEqual(image.tobytes(),Image.open(native).convert('RGB').tobytes())
+        self.assertEqual((folder/'prompt.txt').read_text(),'新的中文擦除指令')
+        with Image.open(folder/'reference.png')as saved:self.assertEqual(saved.tobytes(),current.tobytes())
+        self.assertFalse((folder/'model.png').exists())
+
+    def test_erasure_material_outside_pixels_and_size_miss_generate_new_stage(self):
+        reference,entry=self.source_stage();region={'x':20,'y':30,'width':50,'height':60}
+        entry={**entry,'selectionMode':'erasure-material','referenceRegion':region}
+        cases=[]
+        for name,point in [('left',(19,50)),('right',(70,50)),('top',(30,29)),('bottom',(30,90))]:
+            changed=reference.copy();changed.putpixel(point,(1,2,3));cases.append((name,changed,512,512))
+        cases.extend([('native-size',Image.new('RGB',(768,512),'green'),768,512),
+                      ('reference-size',Image.new('RGB',(768,512),'green'),512,512)])
+        for name,current,width,height in cases:
+            with self.subTest(name=name):
+                self.job=self.root/hashlib.md5(('erasure-material-'+name).encode()).hexdigest();self.job.mkdir()
+                folder=self.target();runner=self.runner(entry)
+                self.assertFalse(erasure_reference_matches(reference,current,region))
+                _,record=runner(folder,current,'new erasure prompt',width,height,lambda *_:None)
+                self.assertEqual(record['path'],str(folder/'model.png'))
+                self.assertNotIn('cacheSourceJobId',record);self.assertNotIn('selectionMode',record)
+
+    def test_erasure_material_region_types_modes_and_paths_are_closed(self):
+        _,base=self.source_stage();region={'x':20,'y':30,'width':50,'height':60}
+        entry={**base,'selectionMode':'erasure-material','referenceRegion':region}
+        invalid_regions=[None,{},[20,30,50,60],{**region,'x':True},{**region,'width':50.0},
+                         {**region,'width':0},{**region,'y':-1},{**region,'extra':1}]
+        invalid=[{**entry,'referenceRegion':value}for value in invalid_regions]
+        invalid.extend([{**base,'selectionMode':'erasure-material'},
+                        {**base,'referenceRegion':region},
+                        {**entry,'selectionMode':'complete-line'},
+                        {**entry,'stage':'text_layer_0_attempt_1','sourceStage':'text_layer_0_attempt_1'},
+                        {**entry,'stage':'text_layer_0_attempt_1'},
+                        {**entry,'sourceJobId':self.job.name},
+                        {**entry,'sourceJobId':'d'*32},
+                        {**entry,'sourceStage':'erase_1/../../secret'},
+                        {**entry,'path':'/untrusted.png'}])
+        for value in invalid:
+            with self.subTest(value=value),self.assertRaises(ValueError):validate_stage_cache(self.manifest(value),self.job)
+        for oversized in ({**region,'x':511,'width':2},{**region,'y':511,'height':2}):
+            with self.subTest(region=oversized),self.assertRaisesRegex(ValueError,'reference_region_invalid'):
+                read_cached_asset({**entry,'referenceRegion':oversized},self.job)
+
+    def test_erasure_material_region_must_fit_both_native_and_reference(self):
+        _,entry=self.source_stage();folder=self.old/'stages'/'erase_1'
+        reference=folder/'reference.png';proofpath=folder/'model.receipt.json'
+        original=json.loads(proofpath.read_text())
+        for size,region in [((1024,512),{'x':600,'y':20,'width':30,'height':40}),
+                            ((256,512),{'x':300,'y':20,'width':30,'height':40})]:
+            with self.subTest(size=size):
+                Image.new('RGB',size,'green').save(reference)
+                updated={**original,'inputs':[dict(member)for member in original['inputs']]}
+                updated['inputs'][1]['sha256']=sha(reference);proofpath.write_text(json.dumps(updated))
+                material={**entry,'receiptSha256':sha(proofpath),'selectionMode':'erasure-material','referenceRegion':region}
+                with self.assertRaisesRegex(ValueError,'reference_region_invalid'):read_cached_asset(material,self.job)
+
+    def test_erasure_material_runtime_fingerprint_remains_strict(self):
+        reference,entry=self.source_stage();entry={**entry,'selectionMode':'erasure-material',
+            'referenceRegion':{'x':20,'y':30,'width':50,'height':60}}
+        folder=self.target()
+        for kwargs in ({'steps':31},{'guidance':5},{'seed':302}):
+            with self.subTest(kwargs=kwargs),patch('image_generation.protected_worker.subprocess.Popen',side_effect=AssertionError('no model call')):
+                self.assertIsNone(self.runner(entry,**kwargs).cached(folder,reference,'any new prompt',512,512))
 
     def test_changed_native_png_receipt_and_input_fail_before_generation(self):
         reference,entry=self.source_stage();folder=self.target();native=self.old/'stages'/'erase_1'/'model.png'
