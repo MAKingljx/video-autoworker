@@ -108,8 +108,13 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True):
     if sum(r['width'] * r['height'] for r in all_boxes) > image.width * image.height * .4:
         raise ValueError('protected_edit_area_too_large')
     canonical = {'schema': SCHEMA, 'eraseRegions': regions, 'textLayers': texts}
-    if compile_prompt and len(font_prompt(texts).encode('utf-8')) > 16 * 1024:
-        raise ValueError('protected_font_prompt_too_large')
+    if compile_prompt:
+        # Each model stage renders one layer. Budget the actual first/retry
+        # prompts rather than compiling a multi-line font sample sheet.
+        for layer in texts:
+            if any(len(font_prompt(layer, retry).encode('utf-8')) > 16 * 1024
+                   for retry in (False, True)):
+                raise ValueError('protected_font_prompt_too_large')
     return canonical, image.size
 
 
@@ -239,7 +244,7 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             if strict_live:
                 native = decoded[chosen['path']]
                 _verify_asset_reference(chosen, Image.new('RGB', native.size, (255, 0, 255)),
-                                        font_prompt([layer], chosen.get('attempt', 1) > 1))
+                                        font_prompt(layer, chosen.get('attempt', 1) > 1))
                 rows = split_letter_rows(keyed_letters(native), 1)
                 placements.extend(paste_letters(rebuilt, rows, [layer]))
             validate_ocr([layer], binding.get('assetObserved', {}))
@@ -319,23 +324,22 @@ def erasure_prompt(local):
             'animals, ropes and wooden structure. Do not color grade, beautify or smooth the photo.')
 
 
-def font_prompt(layers, retry=False):
-    if not layers:
-        return ''
-    strings = '\n'.join(json.dumps(t['text'], ensure_ascii=False) for t in layers)
-    styles = '\n'.join('Line ' + str(i + 1) + ' lettering style: ' + t.get('style',
-                       'Elegant readable documentary display lettering, subtle material and crisp edges.')
-                       for i, t in enumerate(layers))
-    return ('Create lettering assets only on a perfectly uniform solid magenta RGB(255,0,255) background. '
-            'No photograph, scene, border, watermark or objects. Render exactly these strings, '
-            'one string per separate horizontal row, top to bottom. Quote marks are instructions only.\n'
-            + strings + '\n\n' + styles + '\n'
-            'Every row must have generous empty magenta space above and below. '
-            'Make all rows large, sharp and fully inside the canvas, with no clipped strokes. '
-            'Use no magenta in the letters, outlines or shadows. The canvas has no labels or explanations. '
-            'Only the quoted strings are visible. Preserve every Chinese character accurately.'
-            + (' The previous attempt failed verification. Use simpler, clean accurate glyphs with the same material.'
-               if retry else ''))
+def font_prompt(layer, retry=False):
+    """Compile one text asset, never a typography comparison/sample sheet."""
+    if not isinstance(layer, dict) or not isinstance(layer.get('text'), str) or not layer['text']:
+        raise ValueError('protected_font_layer_invalid')
+    text = layer['text']
+    style = layer.get('style', 'Readable documentary display lettering with subtle material and crisp edges.')
+    if retry:
+        style += ' Prioritize accurate, clear strokes; simplify decoration if needed while retaining the requested colors.'
+    # Styling prose is not a second copy of the target inscription.
+    style = style.replace(text, '').strip()
+    return (text + '\n'
+            'Write the text above exactly once in one horizontal line. Preserve every character accurately.\n'
+            'Style: ' + style + '\n'
+            'Use a perfectly uniform solid magenta RGB(255,0,255) background; no magenta in lettering or shadows. '
+            'Keep the complete lettering large and sharp with generous empty margins. '
+            'No duplicate text, stacked lines, style variants, extra quotation marks, labels, objects or scene.')
 
 
 def keyed_letters(image):

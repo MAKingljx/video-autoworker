@@ -10,7 +10,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image, ImageDraw
 
-from image_generation.protected_cover import (keyed_letters, normalize_protected,
+from image_generation.protected_cover import (font_prompt, keyed_letters, normalize_protected,
     paste_letters, normalized_text, protection_summary, source_image,
     split_letter_rows, validate_ocr, verify_protected_result)
 from image_generation.protected_worker import build_protected
@@ -68,6 +68,36 @@ class ProtectedCoverTest(unittest.TestCase):
         spec,size=normalize_protected({'schema':'aiworker-protected-cover/v1',
             'textLayers':[{'text':'标题','box':{'x':40,'y':30,'width':600,'height':140}}]},raw)
         self.assertEqual(size,(1920,1080));self.assertEqual(spec['eraseRegions'],[])
+
+    def test_one_layer_prompt_has_one_bare_inscription_and_no_sample_sheet(self):
+        layer={'text':'北极驯鹿人','style':'北极驯鹿人 Warm gold with a dark brown outline.'}
+        prompt=font_prompt(layer)
+        self.assertEqual(prompt.splitlines()[0],layer['text'])
+        self.assertEqual(prompt.count(layer['text']),1)
+        self.assertIn('exactly once in one horizontal line',prompt)
+        self.assertIn('Warm gold with a dark brown outline.',prompt)
+        self.assertNotIn('"'+layer['text']+'"',prompt)
+        self.assertNotIn('Line 1',prompt)
+        self.assertNotIn('top to bottom',prompt)
+        retry=font_prompt(layer,True)
+        self.assertEqual(retry.splitlines()[0],layer['text'])
+        self.assertEqual(retry.count(layer['text']),1)
+        self.assertIn('accurate, clear strokes',retry)
+        self.assertIn('Warm gold with a dark brown outline.',retry)
+        self.assertIn('retaining the requested colors',retry)
+        with self.assertRaisesRegex(ValueError,'font_layer_invalid'):
+            font_prompt([layer,{'text':'逐鹿而生'}])
+
+    def test_prompt_budget_checks_each_real_first_and_retry_layer(self):
+        with patch('image_generation.protected_cover.font_prompt',return_value='short')as compile:
+            spec,_=normalize_protected(self.spec(),png(self.source()))
+        self.assertEqual([(call.args[0]['text'],call.args[1])for call in compile.call_args_list],
+            [('北极驯鹿人',False),('北极驯鹿人',True),('逐鹿而生',False),('逐鹿而生',True)])
+        def oversized_retry(layer,retry):
+            return '字'*6000 if layer['text']=='逐鹿而生'and retry else 'short'
+        with patch('image_generation.protected_cover.font_prompt',side_effect=oversized_retry):
+            with self.assertRaisesRegex(ValueError,'font_prompt_too_large'):
+                normalize_protected(spec,png(self.source()))
 
     def test_transparent_and_non_rgb_sources_are_not_silently_color_converted(self):
         with self.assertRaisesRegex(ValueError,'opaque_photo'):
@@ -214,6 +244,40 @@ class ProtectedCoverTest(unittest.TestCase):
             self.assertTrue(all(name.startswith('text_layer_0_attempt_')for name in runner.calls[1:]))
             self.assertFalse(output.exists())
             self.assertEqual(json.loads(output.with_suffix('.intent.json').read_text())['currentState'],'FAILED')
+
+    def test_wrong_later_layer_retries_at_native_size_without_regenerating_successful_layer(self):
+        with tempfile.TemporaryDirectory()as temp:
+            root=Path(temp);source=root/'reference-0.png';specpath=root/'input.json';output=root/'image.png'
+            source.write_bytes(png(self.source()));specpath.write_text(json.dumps(self.spec()))
+            def first_subtitle_wrong(path):
+                if 'text_layer_1_attempt_1'in str(path):return {'lines':[{'text':'错误'}]}
+                return self.fixture_ocr(path)
+            runner=FixtureRunner()
+            result=build_protected(specpath,source,output,runner,ocr=first_subtitle_wrong)
+            self.assertEqual(runner.calls,['erase_1','text_layer_0_attempt_1',
+                                          'text_layer_1_attempt_1','text_layer_1_attempt_2'])
+            sizes=[]
+            for name in runner.calls[1:]:
+                with Image.open(root/'stages'/name/'reference.png')as image:sizes.append(image.size)
+            self.assertEqual(sizes,[(1536,512),(1024,512),(1024,512)])
+            self.assertEqual(result['textValidation']['assetAttempts'],3)
+            self.assertEqual(result['photoProtection']['outsideChangedPixels'],0)
+
+    def test_only_insufficient_native_resolution_enlarges_the_bounded_retry(self):
+        with tempfile.TemporaryDirectory()as temp:
+            root=Path(temp);source=root/'reference-0.png';specpath=root/'input.json';output=root/'image.png'
+            source.write_bytes(png(Image.new('RGB',(1920,1080),'navy')))
+            spec={'schema':'aiworker-protected-cover/v1','textLayers':[{
+                'text':'北极驯鹿人','box':{'x':40,'y':30,'width':1600,'height':400}}]}
+            specpath.write_text(json.dumps(spec));runner=FixtureRunner()
+            result=build_protected(specpath,source,output,runner,ocr=self.fixture_ocr)
+            self.assertEqual(runner.calls,['text_layer_0_attempt_1','text_layer_0_attempt_2'])
+            self.assertEqual(json.loads((root/'stages'/runner.calls[0]/'validation.json').read_text())['errorCode'],
+                             'protected_text_native_resolution_too_low')
+            with Image.open(root/'stages'/runner.calls[1]/'reference.png')as image:
+                self.assertEqual(image.size,(2048,768))
+            self.assertEqual(result['textValidation']['assetAttempts'],2)
+            self.assertEqual(result['photoProtection']['outsideChangedPixels'],0)
 
 
 if __name__=='__main__':unittest.main()

@@ -160,12 +160,16 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
             for index,layer in enumerate(spec['textLayers']):
                 # Each exact string gets its own native asset. A later layer's
                 # retry does not regenerate earlier accepted model stages.
+                previous_error=None
+                native_size=(1024 if len(layer['text'])<=4 else 1536),512
                 for attempt in range(2):
                     stage='text_layer_'+str(index)+'_attempt_'+str(attempt+1);progress(stage)
-                    width,height=(((1024 if len(layer['text'])<=4 else 1536),512)
-                                  if attempt==0 else (2048,768))
+                    # More pixels address insufficient native glyph size, not
+                    # spelling, repeated lines or an unsuitable background.
+                    width,height=((2048,768) if previous_error=='protected_text_native_resolution_too_low'
+                                  else native_size)
                     canvas=Image.new('RGB',(width,height),(255,0,255))
-                    raw,record=runner(stage_folder(stage),canvas,font_prompt([layer],attempt>0),
+                    raw,record=runner(stage_folder(stage),canvas,font_prompt(layer,attempt>0),
                         width,height,lambda count,total:progress(stage,count,total))
                     completed+=steps;asset_attempts+=1
                     assets.append({'role':'lettering','layerIndex':index,'attempt':attempt+1,**record})
@@ -207,6 +211,7 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                     except ValueError as error:
                         atomic_json(stage_folder(stage)/'validation.json',{'matched':False,'errorCode':str(error)})
                         if attempt==1 or str(error) not in quality_errors:raise
+                        previous_error=str(error)
         progress('verify')
         proof=protection_summary(original,composed,spec)
         if proof['outsideChangedPixels']!=0:raise ValueError('protected_photo_pixels_changed')
