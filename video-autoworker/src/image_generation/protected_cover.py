@@ -121,7 +121,8 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True):
 def implementation_digest():
     root = Path(__file__).resolve().parents[2]
     names = ('src/image_generation/protected_cover.py', 'src/image_generation/protected_worker.py',
-             'src/image_generation/stage_cache.py', 'src/image_generation/ocr.py', 'scripts/aiworker-image-ocr.swift')
+             'src/image_generation/stage_cache.py', 'src/image_generation/font_selection.py',
+             'src/image_generation/ocr.py', 'scripts/aiworker-image-ocr.swift')
     records = []
     for name in names:
         path = root / name
@@ -196,9 +197,10 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             raise ValueError('protected_native_asset_changed')
         if entry:
             if (asset.get('cacheSourceJobId') != entry['sourceJobId'] or asset.get('sha256') != entry['sha256']
-                    or asset.get('receiptSha256') != entry['receiptSha256']):
+                    or asset.get('receiptSha256') != entry['receiptSha256']
+                    or asset.get('selectionMode') != entry.get('selectionMode')):
                 raise ValueError('protected_cached_asset_binding_changed')
-        elif asset.get('cacheSourceJobId') is not None:
+        elif asset.get('cacheSourceJobId') is not None or asset.get('selectionMode') is not None:
             raise ValueError('protected_cached_asset_binding_changed')
         proof_path = checked_native_file(p.with_suffix('.receipt.json'), job, cached)
         raw_proof = proof_path.read_bytes()
@@ -265,9 +267,19 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             if strict_live:
                 native = decoded[chosen['path']]
                 _verify_asset_reference(chosen, Image.new('RGB', native.size, (255, 0, 255)),
-                                        font_prompt(layer, chosen.get('attempt', 1) > 1))
-                rows = split_letter_rows(keyed_letters(native), 1)
-                placements.extend(paste_letters(rebuilt, rows, [layer]))
+                    None if chosen.get('selectionMode') == 'complete-line' else font_prompt(layer, chosen.get('attempt', 1) > 1))
+                matte = keyed_letters(native)
+                row, selection = lettering_row(matte, binding.get('nativeObserved', {}), layer)
+                if selection != binding.get('assetSelection'):
+                    raise ValueError('protected_native_line_selection_changed')
+                native_preview = white_preview(matte)
+                asset_preview = white_preview(row)
+                placements.extend(paste_letters(rebuilt, [row], [layer]))
+            expected_stage = job / 'stages' / ('text_layer_' + str(i) + '_attempt_' + str(chosen['attempt']))
+            for prefix in ('native', 'asset'):
+                if strict_live or prefix + 'PreviewPath' in binding:
+                    expected = (native_preview if prefix == 'native' else asset_preview) if strict_live else None
+                    verify_lettering_preview(binding, prefix, expected_stage, job, expected)
             validate_ocr([layer], binding.get('assetObserved', {}))
             crop = text_roi(final_image, layer)
             if binding.get('layerIndex') != i or binding.get('pixelSha256') != digest_bytes(crop.tobytes()):
@@ -344,11 +356,44 @@ def checked_native_file(path, job, cached):
 
 def _verify_asset_reference(asset, expected_image, expected_prompt):
     parent = Path(asset['path']).parent
-    if (parent / 'prompt.txt').read_text() != expected_prompt:
+    if expected_prompt is not None and (parent / 'prompt.txt').read_text() != expected_prompt:
         raise ValueError('protected_asset_prompt_changed')
     with Image.open(parent / 'reference.png') as reference:
         if reference.convert('RGB').tobytes() != expected_image.convert('RGB').tobytes() or reference.size != expected_image.size:
             raise ValueError('protected_asset_reference_changed')
+
+
+def white_preview(rgba):
+    preview = Image.new('RGB', rgba.size, 'white')
+    preview.paste(rgba, (0, 0), rgba.getchannel('A'))
+    return preview
+
+
+def lettering_row(matte, observed, layer):
+    """Retain all ink or select an audited complete line; never repair glyphs."""
+    if not isinstance(observed, dict) or not isinstance(observed.get('lines'), list):
+        raise ValueError('protected_ocr_response_invalid')
+    try:
+        validate_ocr([layer], observed)
+    except ValueError:
+        if any(not isinstance(line, dict) or 'box' not in line or 'confidence' not in line
+               for line in observed.get('lines', [])):
+            raise ValueError('protected_generated_text_mismatch')
+        from .font_selection import select_lettering_line
+        return select_lettering_line(matte, observed, layer['text'])
+    return split_letter_rows(matte, 1)[0], None
+
+
+def verify_lettering_preview(binding, prefix, stage, job, expected=None):
+    path = checked_stage_file(Path(binding.get(prefix + 'PreviewPath', '')), job)
+    if path.parent != stage or digest_bytes(path.read_bytes()) != binding.get(prefix + 'PreviewSha256'):
+        raise ValueError('protected_lettering_preview_changed')
+    with Image.open(path) as view:
+        view.load()
+        if (view.format != 'PNG' or view.mode != 'RGB' or max(view.size) > 2048
+                or digest_bytes(view.tobytes()) != binding.get(prefix + 'PreviewPixelSha256')
+                or expected is not None and (view.size != expected.size or view.tobytes() != expected.tobytes())):
+            raise ValueError('protected_lettering_preview_changed')
 
 
 def text_roi(image, layer):
@@ -370,15 +415,14 @@ def font_prompt(layer, retry=False):
     text = layer['text']
     style = layer.get('style', 'Readable documentary display lettering with subtle material and crisp edges.')
     if retry:
-        style += ' Prioritize accurate, clear strokes; simplify decoration if needed while retaining the requested colors.'
+        style += ' 优先保证笔画准确清楚，可以简化装饰，但保留指定文字颜色。'
     # Styling prose is not a second copy of the target inscription.
     style = style.replace(text, '').strip()
-    return (text + '\n'
-            'Write the text above exactly once in one horizontal line. Preserve every character accurately.\n'
-            'Style: ' + style + '\n'
-            'Use a perfectly uniform solid magenta RGB(255,0,255) background; no magenta in lettering or shadows. '
-            'Keep the complete lettering large and sharp with generous empty margins. '
-            'No duplicate text, stacked lines, style variants, extra quotation marks, labels, objects or scene.')
+    return ('标题文字内容：' + text + '\n'
+            '在纯品红色背景上设计这行艺术字，文字完整只写一次，水平单行，四周留足背景。\n'
+            '字体样式：' + style + '\n'
+            '字形准确，边缘清晰，不要引号、标签、其他文字或多排对照，不要照片或场景。'
+            '文字、描边和阴影不用品红色。')
 
 
 def keyed_letters(image):

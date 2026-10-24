@@ -240,7 +240,18 @@ class ImageJobTest(unittest.TestCase):
                          result if completed else None)
         return request, accepted, result, output
 
-    def test_failed_task_reuses_completed_erasure_but_never_failed_text_or_payload_identity(self):
+    def native_text_attempt(self, accepted, layer_index, attempt):
+        fixture_spec = importlib.util.spec_from_file_location('image_cache_sheet_fixtures', ROOT / 'tests/test_protected_cover.py')
+        fixtures = importlib.util.module_from_spec(fixture_spec);fixture_spec.loader.exec_module(fixtures)
+        runner = fixtures.FixtureRunner()
+        runner.repository, runner.revision = self.jobs.backend.REPOSITORY, self.jobs.backend.REVISION
+        folder = self.jobs.folder(accepted['jobId']) / 'stages' / ('text_layer_' + str(layer_index) + '_attempt_' + str(attempt))
+        folder.mkdir(parents=True)
+        runner(folder, Image.new('RGB', (2048, 768), (255, 0, 255)),
+               'A historical native lettering sample sheet.', 2048, 768, lambda *_: None)
+        return folder / 'model.png'
+
+    def test_failed_task_reuses_erasure_and_explicit_sheet_without_changing_payload_identity(self):
         request, old, _, _ = self.cache_source(text=True)
         before = self.jobs.row(old['jobId'], request['scope'])
         next_request = {**request, 'requestKey': 'c' * 64}
@@ -249,7 +260,10 @@ class ImageJobTest(unittest.TestCase):
         manifest = json.loads(path.read_text())
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual([(entry['stage'], entry['sourceJobId'], entry['sourceStage']) for entry in manifest['assets']],
-                         [('erase_1', old['jobId'], 'erase_1')])
+                         [('erase_1', old['jobId'], 'erase_1'),
+                          ('text_layer_0_attempt_1', old['jobId'], 'text_layer_0_attempt_1')])
+        self.assertNotIn('selectionMode', manifest['assets'][0])
+        self.assertEqual(manifest['assets'][1]['selectionMode'], 'complete-line')
         self.assertEqual(manifest['assets'][0]['sourcePayloadSha256'], before['payload_sha'])
         after = self.jobs.row(accepted['jobId'], request['scope'])
         self.assertEqual((before['payload_json'], before['payload_sha']), (after['payload_json'], after['payload_sha']))
@@ -260,6 +274,96 @@ class ImageJobTest(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         with self.assertRaisesRegex(ValueError, 'request_invalid'):
             self.jobs.submit({**next_request, 'cache': manifest})
+
+    def test_failed_sheet_prefers_latest_complete_native_attempt_with_original_proof(self):
+        request, old, _, _ = self.cache_source(text=True)
+        latest = self.native_text_attempt(old, 0, 2)
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        sheet = cache['assets'][1]
+        self.assertEqual((sheet['selectionMode'], sheet['sourceStage']), ('complete-line', 'text_layer_0_attempt_2'))
+        self.assertEqual(sheet['sha256'], hashlib.sha256(latest.read_bytes()).hexdigest())
+        self.assertEqual(sheet['receiptSha256'], hashlib.sha256(latest.with_suffix('.receipt.json').read_bytes()).hexdigest())
+        # A missing native receipt is not a completed attempt; fall back to the
+        # earlier complete source without changing the failed source job.
+        latest.with_suffix('.receipt.json').unlink()
+        accepted = self.jobs.submit({**request, 'requestKey': 'd' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual(cache['assets'][1]['sourceStage'], 'text_layer_0_attempt_1')
+        self.assertEqual(self.jobs.get(old['jobId'], request['scope'])['currentState'], 'FAILED')
+
+    def test_failed_sheet_can_reuse_glyphs_for_new_position_and_alignment(self):
+        request, old, _, _ = self.cache_source(text=True)
+        changed = json.loads(json.dumps(request));changed['requestKey'] = 'c' * 64
+        changed['protected']['textLayers'][0].update(align='center', box={'x': 820, 'y': 20, 'width': 720, 'height': 150})
+        accepted = self.jobs.submit(changed)
+        row = self.jobs.row(accepted['jobId'], request['scope'])
+        cache, _ = self.jobs.stage_cache(row)
+        self.assertEqual(cache['assets'][1]['sourceJobId'], old['jobId'])
+        self.assertEqual(cache['assets'][1]['selectionMode'], 'complete-line')
+        current = json.loads(row['payload_json'])['protected']['textLayers'][0]
+        self.assertEqual((current['box'], current['align']), (changed['protected']['textLayers'][0]['box'], 'center'))
+
+    def test_failed_sheet_rejects_changed_generation_semantics(self):
+        request, _, _, _ = self.cache_source(text=True)
+        for index, kind in enumerate(('text', 'style', 'erasure', 'layer_count')):
+            changed = json.loads(json.dumps(request));changed['requestKey'] = format(index + 1, '064x')
+            if kind == 'text':changed['protected']['textLayers'][0]['text'] = '北极驯鹿故事'
+            elif kind == 'style':changed['protected']['textLayers'][0]['style'] = 'New ivory lettering.'
+            elif kind == 'erasure':changed['protected']['eraseRegions'][0]['x'] = 101
+            else:changed['protected']['textLayers'].append({'text': '逐鹿而生',
+                'box': {'x': 900, 'y': 260, 'width': 600, 'height': 100}})
+            with self.subTest(kind=kind):
+                accepted = self.jobs.submit(changed)
+                path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json'
+                entries = json.loads(path.read_text())['assets'] if path.exists() else []
+                self.assertFalse(any(entry['stage'].startswith('text_layer_') for entry in entries))
+
+    def test_failed_sheet_rejects_other_failure_reason_and_other_scope(self):
+        request, old, _, _ = self.cache_source(text=True)
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET error_code=? WHERE job_id=?', ('protected_text_row_count_invalid', old['jobId']))
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1'])
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET error_code=? WHERE job_id=?', ('protected_generated_text_mismatch', old['jobId']))
+        accepted = self.jobs.submit({**request, 'scope': 'e' * 64, 'requestKey': 'd' * 64})
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+
+    def test_failed_sheet_readback_rechecks_mode_layer_failure_and_generation_semantics(self):
+        request, old, _, _ = self.cache_source(text=True)
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        row = self.jobs.row(accepted['jobId'], request['scope']);path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json'
+        original = path.read_bytes();manifest = json.loads(original)
+        self.assertEqual(self.jobs.stage_cache(row)[0], manifest)
+        manifest['assets'][1].pop('selectionMode');path.write_text(canonical(manifest))
+        with self.assertRaisesRegex(ValueError, 'text_not_sealed'):
+            self.jobs.stage_cache(row)
+        path.write_bytes(original)
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET error_code=? WHERE job_id=?', ('protected_text_row_count_invalid', old['jobId']))
+        with self.assertRaisesRegex(ValueError, 'complete_line_source_invalid'):
+            self.jobs.stage_cache(row)
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET error_code=? WHERE job_id=?', ('protected_generated_text_mismatch', old['jobId']))
+        self.native_text_attempt(old, 1, 1)
+        manifest = json.loads(original);manifest['assets'][1]['sourceStage'] = 'text_layer_1_attempt_1'
+        path.write_text(canonical(manifest))
+        with self.assertRaisesRegex(ValueError, '(entry_invalid|source_invalid)'):
+            self.jobs.stage_cache(row)
+        path.write_bytes(original)
+        source = self.jobs.row(old['jobId'], request['scope']);changed = json.loads(source['payload_json'])
+        changed['protected']['textLayers'][0]['style'] = 'A different material.'
+        changed_sha = hashlib.sha256(canonical(changed).encode()).hexdigest()
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET payload_json=?,payload_sha=? WHERE job_id=?',
+                       (canonical(changed), changed_sha, old['jobId']))
+        manifest = json.loads(original)
+        for entry in manifest['assets']:entry['sourcePayloadSha256'] = changed_sha
+        path.write_text(canonical(manifest))
+        with self.assertRaisesRegex(ValueError, 'complete_line_source_invalid'):
+            self.jobs.stage_cache(row)
 
     def test_stage_cache_is_scope_parameter_and_native_proof_isolated(self):
         request, old, _, output = self.cache_source()
@@ -327,6 +431,15 @@ class ImageJobTest(unittest.TestCase):
         accepted = self.jobs.submit(changed)
         cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
         self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1'])
+
+    def test_completed_exact_text_cache_ignores_placement_but_still_requires_sealed_success(self):
+        request, old, _, _ = self.cache_source(completed=True, text=True)
+        changed = json.loads(json.dumps(request));changed['requestKey'] = 'c' * 64
+        changed['protected']['textLayers'][0].update(align='center', box={'x': 820, 'y': 20, 'width': 720, 'height': 150})
+        accepted = self.jobs.submit(changed)
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual(cache['assets'][1]['sourceJobId'], old['jobId'])
+        self.assertNotIn('selectionMode', cache['assets'][1])
 
     def test_retry_lettering_prompt_is_not_reused_as_a_new_first_attempt(self):
         request, _, result, _ = self.cache_source(completed=True, text=True, retry_text=True)

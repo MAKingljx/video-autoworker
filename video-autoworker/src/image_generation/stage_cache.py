@@ -25,7 +25,7 @@ def _sha(data):
 
 
 def _entry(value):
-    if (not isinstance(value,dict) or set(value)!=ENTRY_KEYS
+    if (not isinstance(value,dict) or not ENTRY_KEYS <= set(value) or set(value)-ENTRY_KEYS-{'selectionMode'}
             or any(not isinstance(v,str)for v in value.values())
             or not TARGET_STAGE.fullmatch(value['stage'])
             or not SOURCE_STAGE.fullmatch(value['sourceStage'])
@@ -33,6 +33,10 @@ def _entry(value):
             or any(not HEX.fullmatch(value[k])for k in ('sourcePayloadSha256','sha256','receiptSha256'))):
         raise ValueError('protected_stage_cache_entry_invalid')
     if value['stage'].startswith('erase_')!=value['sourceStage'].startswith('erase_'):
+        raise ValueError('protected_stage_cache_entry_invalid')
+    if 'selectionMode' in value and (value['selectionMode']!='complete-line'
+            or not value['stage'].startswith('text_layer_')
+            or value['stage'].split('_')[2]!=value['sourceStage'].split('_')[2]):
         raise ValueError('protected_stage_cache_entry_invalid')
     return dict(value)
 

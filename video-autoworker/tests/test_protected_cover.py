@@ -69,22 +69,22 @@ class ProtectedCoverTest(unittest.TestCase):
             'textLayers':[{'text':'标题','box':{'x':40,'y':30,'width':600,'height':140}}]},raw)
         self.assertEqual(size,(1920,1080));self.assertEqual(spec['eraseRegions'],[])
 
-    def test_one_layer_prompt_has_one_bare_inscription_and_no_sample_sheet(self):
+    def test_one_layer_prompt_separates_inscription_from_concise_instructions(self):
         layer={'text':'北极驯鹿人','style':'北极驯鹿人 Warm gold with a dark brown outline.'}
         prompt=font_prompt(layer)
-        self.assertEqual(prompt.splitlines()[0],layer['text'])
+        self.assertEqual(prompt.splitlines()[0],'标题文字内容：'+layer['text'])
         self.assertEqual(prompt.count(layer['text']),1)
-        self.assertIn('exactly once in one horizontal line',prompt)
+        self.assertIn('文字完整只写一次，水平单行',prompt)
         self.assertIn('Warm gold with a dark brown outline.',prompt)
         self.assertNotIn('"'+layer['text']+'"',prompt)
         self.assertNotIn('Line 1',prompt)
         self.assertNotIn('top to bottom',prompt)
         retry=font_prompt(layer,True)
-        self.assertEqual(retry.splitlines()[0],layer['text'])
+        self.assertEqual(retry.splitlines()[0],'标题文字内容：'+layer['text'])
         self.assertEqual(retry.count(layer['text']),1)
-        self.assertIn('accurate, clear strokes',retry)
+        self.assertIn('笔画准确清楚',retry)
         self.assertIn('Warm gold with a dark brown outline.',retry)
-        self.assertIn('retaining the requested colors',retry)
+        self.assertIn('保留指定文字颜色',retry)
         with self.assertRaisesRegex(ValueError,'font_layer_invalid'):
             font_prompt([layer,{'text':'逐鹿而生'}])
 

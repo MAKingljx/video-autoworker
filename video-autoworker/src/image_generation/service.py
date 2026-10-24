@@ -244,6 +244,32 @@ class ImageJobs:
             raise ValueError('image_stage_cache_source_incompatible')
         return previous
 
+    @staticmethod
+    def lettering_identity(layer):
+        # Placement is applied after native glyph generation and is verified
+        # against the current photo/ROI. It is not a model-input fingerprint.
+        return {'text': layer['text'], 'style': layer.get('style')}
+
+    @classmethod
+    def protected_generation_identity(cls, spec):
+        return {'schema': spec['schema'], 'eraseRegions': spec['eraseRegions'],
+                'textLayers': [cls.lettering_identity(layer) for layer in spec['textLayers']]}
+
+    def complete_line_source(self, row, payload, entry):
+        """A failed native sheet is material for fresh verification, not a pass."""
+        previous = self.compatible_cache_source(row, payload)
+        target = re.fullmatch(r'text_layer_([0-3])_attempt_1', entry['stage'])
+        source = re.fullmatch(r'text_layer_([0-3])_attempt_[12]', entry['sourceStage'])
+        if (entry.get('selectionMode') != 'complete-line' or not target or not source
+                or target[1] != source[1]
+                or int(target[1]) >= len(payload['protected']['textLayers'])
+                or row['state'] != 'FAILED'
+                or row['error_code'] != 'protected_generated_text_mismatch'
+                or self.protected_generation_identity(previous['protected']) !=
+                   self.protected_generation_identity(payload['protected'])):
+            raise ValueError('image_stage_cache_complete_line_source_invalid')
+        return previous
+
     def stage_cache(self, row, *, result=None):
         """Bind private execution references back to same-scope SQLite rows."""
         from .stage_cache import validate_stage_cache
@@ -265,7 +291,9 @@ class ImageJobs:
             if source['payload_sha'] != entry['sourcePayloadSha256']:
                 raise ValueError('image_stage_cache_source_payload_changed')
             self.compatible_cache_source(source, payload)
-            if entry['stage'].startswith('text_layer_') and (
+            if entry.get('selectionMode') == 'complete-line':
+                self.complete_line_source(source, payload, entry)
+            elif entry['stage'].startswith('text_layer_') and (
                     source['state'] != 'GENERATED_PENDING_REVIEW' or not source['result_json']):
                 raise ValueError('image_stage_cache_text_not_sealed')
         return manifest, digest
@@ -285,7 +313,7 @@ class ImageJobs:
             except (ValueError, KeyError, IndexError):pass
         original = source_image(source_bytes)
 
-        def native_entry(path, target, *, text=False):
+        def native_entry(path, target, *, text=False, selection_mode=None):
             path = Path(path)
             relative = path.relative_to(self.config.output_root)
             if (len(relative.parts) != 4 or not JOB.fullmatch(relative.parts[0])
@@ -295,7 +323,8 @@ class ImageJobs:
                                (relative.parts[0], scope)).fetchone()
             if not owner:raise ValueError('image_stage_cache_scope_invalid')
             self.compatible_cache_source(owner, payload)
-            if text and (owner['state'] != 'GENERATED_PENDING_REVIEW' or not owner['result_json']):
+            if text and selection_mode is None and (
+                    owner['state'] != 'GENERATED_PENDING_REVIEW' or not owner['result_json']):
                 raise ValueError('image_stage_cache_text_not_sealed')
             for member in (path, path.with_suffix('.receipt.json'), *path.parents):
                 if member.is_symlink():raise ValueError('image_stage_cache_native_path_invalid')
@@ -307,6 +336,9 @@ class ImageJobs:
             entry = {'stage': target, 'sourceJobId': owner['job_id'], 'sourceStage': relative.parts[2],
                      'sourcePayloadSha256': owner['payload_sha'], 'sha256': sha(path.read_bytes()),
                      'receiptSha256': sha(proof_path.read_bytes())}
+            if selection_mode is not None:
+                entry['selectionMode'] = selection_mode
+                self.complete_line_source(owner, payload, entry)
             image, proof = read_cached_asset(entry, folder)
             if (proof.get('repository') != self.backend.REPOSITORY or proof.get('revision') != self.backend.REVISION
                     or proof.get('precision') != 'BF16' or proof.get('offline') is not True
@@ -340,16 +372,18 @@ class ImageJobs:
                 except (OSError, ValueError, KeyError, IndexError):pass
 
         for index, layer in enumerate(payload['protected']['textLayers']):
+            target = 'text_layer_' + str(index) + '_attempt_1'
             for row, old in compatible:
                 if row['state'] != 'GENERATED_PENDING_REVIEW' or not row['result_json']:continue
                 try:
-                    old_index = old['protected']['textLayers'].index(layer)
+                    old_index = [self.lettering_identity(value) for value in old['protected']['textLayers']].index(
+                        self.lettering_identity(layer))
                     result, _ = self.result(row)
                     if canonical(result) != row['result_json']:
                         raise ValueError('image_result_receipt_changed')
                     selected = result['selectedLetteringAssets'][old_index]
                     path = Path(selected['path'])
-                    entry, image = native_entry(path, 'text_layer_' + str(index) + '_attempt_1', text=True)
+                    entry, image = native_entry(path, target, text=True)
                     if entry['sha256'] != selected['sha256']:
                         raise ValueError('image_stage_cache_selected_asset_changed')
                     from PIL import Image
@@ -357,6 +391,25 @@ class ImageJobs:
                                             font_prompt(layer, False))
                     manifest['assets'].append(entry);break
                 except (OSError, ValueError, KeyError, IndexError):pass
+            if any(entry['stage'] == target for entry in manifest['assets']):continue
+            # Only the latest completed native attempt of an otherwise exact
+            # failed request may supply a sheet. Its rows still have to pass
+            # fresh component selection, OCR and final-ROI verification.
+            for row, old in compatible:
+                if (row['state'] != 'FAILED' or row['error_code'] != 'protected_generated_text_mismatch'
+                        or self.protected_generation_identity(old['protected']) !=
+                           self.protected_generation_identity(payload['protected'])):continue
+                for attempt in (2, 1):
+                    try:
+                        path = (self.folder(row['job_id']) / 'stages' /
+                                ('text_layer_' + str(index) + '_attempt_' + str(attempt)) / 'model.png')
+                        entry, image = native_entry(path, target, text=True, selection_mode='complete-line')
+                        from PIL import Image
+                        _verify_asset_reference({'path': str(path)}, Image.new('RGB', image.size, (255, 0, 255)),
+                                                path.with_name('prompt.txt').read_text())
+                        manifest['assets'].append(entry);break
+                    except (OSError, ValueError, KeyError, IndexError):pass
+                if any(entry['stage'] == target for entry in manifest['assets']):break
         return manifest
 
     def row(self, job_id, scope):

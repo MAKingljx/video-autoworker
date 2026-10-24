@@ -15,7 +15,7 @@ from PIL import Image
 from .protected_cover import (RESULT_SCHEMA, digest_bytes, erase_context, font_prompt,
     implementation_digest, keyed_letters, normalize_protected, paste_erasure, erasure_prompt,
     paste_letters, protection_summary, source_image, split_letter_rows,
-    validate_ocr, verify_protected_result, text_roi)
+    validate_ocr, verify_protected_result, text_roi, lettering_row, white_preview)
 from .ocr import recognize
 from .stage_cache import HEX, read_cached_asset, validate_stage_cache
 
@@ -32,6 +32,17 @@ def atomic_json(path, value):
 def save_png(path, image):
     with path.open('xb') as f:image.save(f, 'PNG')
     path.chmod(0o600)
+
+
+def saved_preview(path, image):
+    if path.is_symlink():raise ValueError('protected_ocr_preview_drift')
+    if not path.exists():save_png(path,image)
+    else:
+        with Image.open(path) as cached:
+            if cached.mode!='RGB' or cached.size!=image.size or cached.tobytes()!=image.tobytes():
+                raise ValueError('protected_ocr_preview_drift')
+    return {'Path':str(path),'Sha256':digest_bytes(path.read_bytes()),
+            'PixelSha256':digest_bytes(image.tobytes())}
 
 
 class NativeRunner:
@@ -54,23 +65,26 @@ class NativeRunner:
         entry=next((e for e in self.stage_cache['assets']if e['stage']==folder.name),None)
         if entry is None:return None
         native,receipt=read_cached_asset(entry,self.job_folder)
+        sheet=entry.get('selectionMode')=='complete-line'
         if (receipt.get('repository')!=self.repository or receipt.get('revision')!=self.revision
                 or receipt.get('precision')!='BF16'or receipt.get('offline')is not True
                 or not isinstance(receipt.get('componentDtypes'),dict)
                 or set(receipt.get('componentDtypes',{}).values())!={'torch.bfloat16'}
-                or receipt.get('width')!=width or receipt.get('height')!=height
+                or not sheet and (receipt.get('width')!=width or receipt.get('height')!=height)
                 or receipt.get('steps')!=self.steps or receipt.get('guidance')!=self.guidance
                 or receipt.get('seed')!=self.seed):
             return None
         path=Path(receipt['output']);parent=path.parent
-        if (parent/'prompt.txt').read_text()!=prompt:return None
+        if not sheet and (parent/'prompt.txt').read_text()!=prompt:return None
         with Image.open(parent/'reference.png')as old:
-            if old.size!=reference.size or old.convert('RGB').tobytes()!=reference.convert('RGB').tobytes():
-                return None
+            if sheet:
+                if (old.size!=native.size or old.convert('RGB').getextrema()!=((255,255),(0,0),(255,255))
+                        or reference.convert('RGB').getextrema()!=((255,255),(0,0),(255,255))):return None
+            elif old.size!=reference.size or old.convert('RGB').tobytes()!=reference.convert('RGB').tobytes():return None
         return native,{'path':str(path),'sha256':receipt['outputSha256'],
             'receiptSha256':entry['receiptSha256'],'repository':self.repository,
             'revision':self.revision,'precision':'BF16','offline':True,
-            'cacheSourceJobId':entry['sourceJobId']}
+            'cacheSourceJobId':entry['sourceJobId'],**({'selectionMode':'complete-line'}if sheet else{})}
 
     def __call__(self, folder, reference, prompt, width, height, progress):
         output = folder / 'model.png';receipt_file = output.with_suffix('.receipt.json')
@@ -204,7 +218,12 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                 'protected_text_background_key_mismatch','protected_text_matte_invalid',
                 'protected_text_asset_clipped','protected_text_row_count_invalid',
                 'protected_text_row_empty','protected_text_pixels_lost_during_split',
-                'protected_generated_text_mismatch','protected_text_native_resolution_too_low'}
+                'protected_generated_text_mismatch','protected_text_native_resolution_too_low',
+                'protected_text_line_selection_missing','protected_text_line_ocr_uncertain',
+                'protected_text_component_crosses_lines','protected_text_component_unassigned',
+                'protected_text_component_ambiguous','protected_text_ocr_line_without_ink',
+                'protected_text_ocr_row_geometry_ambiguous','protected_text_line_asset_clipped',
+                'protected_text_line_selection_budget'}
             for index,layer in enumerate(spec['textLayers']):
                 # Each exact string gets its own native asset. A later layer's
                 # retry does not regenerate earlier accepted model stages.
@@ -223,21 +242,19 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                     assets.append({'role':'lettering','layerIndex':index,'attempt':attempt+1,**record})
                     try:
                         matte=keyed_letters(raw)
-                        rows=split_letter_rows(matte,1)
                         # Check the actual model bitmap before fitting, then
                         # independently check the exact pixels in its final ROI.
-                        preview=Image.new('RGB',matte.size,'white')
-                        preview.paste(matte,(0,0),matte.getchannel('A'))
+                        source_view=white_preview(matte)
+                        native_preview_path=stage_folder(stage)/'native-ocr-preview.png'
+                        source_binding=saved_preview(native_preview_path,source_view)
+                        progress('ocr_layer_'+str(index));native_observed=ocr(native_preview_path)
+                        row,selection=lettering_row(matte,native_observed,layer)
+                        preview=white_preview(row)
                         preview_path=stage_folder(stage)/'ocr-preview.png'
-                        if preview_path.is_symlink():raise ValueError('protected_ocr_preview_drift')
-                        if not preview_path.exists():save_png(preview_path,preview)
-                        else:
-                            with Image.open(preview_path)as cached:
-                                if cached.mode!='RGB' or cached.size!=preview.size or cached.tobytes()!=preview.tobytes():
-                                    raise ValueError('protected_ocr_preview_drift')
-                        progress('ocr_layer_'+str(index));observed=ocr(preview_path)
+                        asset_binding=saved_preview(preview_path,preview)
+                        observed=ocr(preview_path)if selection is not None else native_observed
                         validate_ocr([layer],observed)
-                        trial=composed.copy();placed=paste_letters(trial,rows,[layer])
+                        trial=composed.copy();placed=paste_letters(trial,[row],[layer])
                         crop=text_roi(trial,layer)
                         path=stage_folder(stage)/('final-ocr-layer-'+str(index)+'.png')
                         if path.is_symlink():raise ValueError('protected_final_ocr_preview_drift')
@@ -247,7 +264,10 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                                 if cached.mode!='RGB' or cached.size!=crop.size or cached.tobytes()!=crop.tobytes():
                                     raise ValueError('protected_final_ocr_preview_drift')
                         actual=ocr(path);validate_ocr([layer],actual)
-                        bindings.append({'layerIndex':index,'assetObserved':observed,
+                        bindings.append({'layerIndex':index,'assetObserved':observed,'nativeObserved':native_observed,
+                            'assetSelection':selection,
+                            **{'nativePreview'+key:value for key,value in source_binding.items()},
+                            **{'assetPreview'+key:value for key,value in asset_binding.items()},
                             'previewPath':str(path),'previewSha256':digest_bytes(path.read_bytes()),
                             'pixelSha256':digest_bytes(crop.tobytes()),'observed':actual})
                         composed=trial;placements.extend(placed)

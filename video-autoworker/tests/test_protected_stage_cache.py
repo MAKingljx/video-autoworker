@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image,ImageDraw
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'src'))
@@ -92,6 +92,47 @@ class ProtectedStageCacheTest(unittest.TestCase):
              {'schema':SCHEMA,'assets':[entry,{**entry,'stage':'erase_2'}]}]
         for value in bad:
             with self.subTest(value=value),self.assertRaises(ValueError):validate_stage_cache(value,self.job)
+
+    def test_failed_parent_native_sheet_keeps_complete_line_and_rechecks_final_roi(self):
+        stage='text_layer_0_attempt_2';folder=self.old/'stages'/stage;folder.mkdir(parents=True)
+        native=Image.new('RGB',(2048,768),(255,0,255));draw=ImageDraw.Draw(native)
+        draw.rectangle((200,100,1600,280),fill=(75,35,4))
+        draw.rectangle((200,430,1600,610),fill=(75,35,4))
+        fixtures.FixtureRunner()(folder,Image.new('RGB',native.size,(255,0,255)),
+                                 'older native sample-sheet prompt',*native.size,lambda *_:None)
+        path=folder/'model.png';path.write_bytes(fixtures.png(native))
+        proof_path=path.with_suffix('.receipt.json');proof=json.loads(proof_path.read_text())
+        proof.update(outputSha256=sha(path),outputBytes=path.stat().st_size)
+        proof_path.write_text(json.dumps(proof))
+        entry={**self.entry(stage,'text_layer_0_attempt_1'),'selectionMode':'complete-line'}
+        manifest=self.manifest(entry)
+        source=self.job/'reference-0.png';source.write_bytes(fixtures.png(fixtures.ProtectedCoverTest().source()))
+        spec={'schema':'aiworker-protected-cover/v1','textLayers':[
+            {'text':'北极驯鹿人','style':'brown brush lettering','box':{'x':40,'y':30,'width':320,'height':80}}]}
+        specfile=self.job/'input.json';specfile.write_text(json.dumps(spec))
+        (self.job/'stage-cache.json').write_text(json.dumps(manifest))
+        runner=NativeRunner(self.backend,30,4,301,stage_cache=manifest,job_folder=self.job)
+        seen=[]
+        def ocr(image):
+            seen.append(Path(image).name)
+            if Path(image).name=='native-ocr-preview.png':
+                return {'engine':'apple-vision','width':2048,'height':768,'lines':[
+                    {'text':'北极驯鹿人','confidence':1,'box':[200,100,1401,181]},
+                    {'text':'北极驯鹿人','confidence':1,'box':[200,430,1401,181]}]}
+            return {'engine':'apple-vision','lines':[{'text':'北极驯鹿人'}]}
+        before=path.read_bytes();output=self.job/'image.png'
+        with patch('image_generation.protected_worker.subprocess.Popen',side_effect=AssertionError('no model replay')):
+            result=build_protected(specfile,source,output,runner,ocr=ocr,stage_cache=manifest)
+        self.assertEqual(seen,['native-ocr-preview.png','ocr-preview.png','final-ocr-layer-0.png'])
+        self.assertEqual(result['assets'][0]['path'],str(path))
+        self.assertEqual(result['assets'][0]['selectionMode'],'complete-line')
+        self.assertEqual(result['photoProtection']['outsideChangedPixels'],0)
+        self.assertEqual(path.read_bytes(),before)
+        binding=result['textValidation']['layers'][0]
+        self.assertEqual(binding['assetSelection']['selectedLineIndex'],0)
+        binding['assetSelection']['selectedLineIndex']=1
+        with self.assertRaisesRegex(ValueError,'native_line_selection_changed'):
+            verify_protected_result(source,output,spec,result,stage_cache=manifest)
 
     def test_source_asset_and_all_owned_ancestors_reject_symlinks(self):
         _,entry=self.source_stage();path=self.old/'stages'/'erase_1'/'model.png'
