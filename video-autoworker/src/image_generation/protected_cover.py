@@ -402,13 +402,14 @@ def text_roi(image, layer):
 
 
 def erasure_prompt(local):
-    # Database round-trips reorder keys; identical rectangles must retain the
-    # same model prompt and native cache fingerprint.
-    rectangle = {key: local[key] for key in ('x', 'y', 'width', 'height')}
-    return ('Photo editing. Remove all overlaid lettering, sponsor marks and logos ONLY inside '
-            'the rectangle '+json.dumps(rectangle)+'. Fill it naturally from adjacent photographic texture. '
-            'No new lettering, symbols, objects, boxes or borders. Preserve real people, clothing, '
-            'animals, ropes and wooden structure. Do not color grade, beautify or smooth the photo.')
+    if set(local) != RECT_KEYS or any(type(local[key]) is not int for key in RECT_KEYS):
+        raise ValueError('protected_erase_prompt_region_invalid')
+    # The compositor owns exact coordinates. Asking the model to paint a JSON
+    # rectangle can leave a flat replacement panel instead of real texture.
+    return ('清除参考画面中后期叠加的文字、赞助商标、节目角标，以及它们的底板、边框和实心色块。'
+            '把被遮挡的区域自然补回周围连续的真实背景纹理，不能残留长方形色块或广告底板。'
+            '不要用纯色、模糊块、贴纸或矩形遮盖。保留原有草地、木条、绳索、人物和动物的真实结构与位置。'
+            '不新增文字、标志、图案或物体，不全图调色，不磨皮。')
 
 
 def font_prompt(layer, retry=False):

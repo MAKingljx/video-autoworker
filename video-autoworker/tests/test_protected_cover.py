@@ -54,6 +54,9 @@ class ProtectedCoverTest(unittest.TestCase):
         ordered={'x':3,'y':7,'width':40,'height':30}
         reloaded=json.loads(json.dumps(ordered,sort_keys=True))
         self.assertEqual(erasure_prompt(ordered),erasure_prompt(reloaded))
+        self.assertIn('底板',erasure_prompt(ordered))
+        self.assertIn('真实背景纹理',erasure_prompt(ordered))
+        self.assertNotIn('"width"',erasure_prompt(ordered))
 
     def fixture_ocr(self,path):
         name=Path(path).name
