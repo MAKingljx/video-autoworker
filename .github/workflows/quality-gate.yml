@@ -36,6 +36,7 @@ jobs:
       integration: ${{ steps.plan.outputs.integration }}
       plugins: ${{ steps.plan.outputs.plugins }}
       browser: ${{ steps.plan.outputs.browser }}
+      image: ${{ steps.plan.outputs.image }}
       impact: ${{ steps.plan.outputs.impact }}
     steps:
       - uses: actions/checkout@v4
@@ -60,15 +61,12 @@ jobs:
           import { resolve } from 'node:path'
           import { resolveGitSourceLayout, gitSourceEnvironment } from './scripts/lib/git-source-layout.mjs'
           import { scanReleaseFile } from './scripts/check-sensitive-content.mjs'
+          import { assertCiTrackedSourceBoundary } from './scripts/ci-impact-plan.mjs'
           const plan = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/ci-impact.json`))
           const { gitRoot } = resolveGitSourceLayout(process.cwd())
           const git = args => execFileSync('git', ['-C', gitRoot, ...args], { encoding: 'utf8', env: gitSourceEnvironment() })
           const paths = git(['ls-files', '-z']).split('\0').filter(Boolean)
-          const forbidden = paths.filter(p => /(^|\/)(?:\.PhoenixBrain|node_modules|\.venv|__pycache__)(\/|$)/u.test(p)
-            || /^(?:private|repositories|rollback|memory|output|tmp)\//u.test(p)
-            || /^(?:TOOLS|MEMORY|USER|IDENTITY|SOUL|HEARTBEAT)\.md$/u.test(p)
-            || /\.(?:db|sqlite|sqlite3|safetensors|gguf|pem|key)$/iu.test(p))
-          if (forbidden.length) throw new Error(`Private runtime members are tracked: ${JSON.stringify(forbidden)}`)
+          assertCiTrackedSourceBoundary(paths)
           if (plan.mode === 'docs') {
             git(['diff', '--check', plan.base, plan.head])
             const changed = git(['diff', '--name-only', '-z', '--diff-filter=ACMR', plan.base, plan.head]).split('\0').filter(Boolean)
@@ -88,6 +86,7 @@ jobs:
             partitions: JSON.stringify(plan.rootPartitions.length ? plan.rootPartitions : ['regular']),
             integration: String(plan.runIntegration), plugins: String(plan.runPluginTests),
             browser: String(plan.runBrowserTests), impact: JSON.stringify(plan),
+            image: String(plan.runImageTests),
           }
           appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''))
           appendFileSync(process.env.GITHUB_STEP_SUMMARY,
@@ -96,7 +95,7 @@ jobs:
 
   root-tests:
     needs: plan
-    if: needs.plan.outputs.mode != 'docs'
+    if: needs.plan.outputs.mode != 'docs' && needs.plan.outputs.mode != 'image-component'
     runs-on: macos-15
     strategy:
       fail-fast: false
@@ -138,7 +137,7 @@ jobs:
 
   integration:
     needs: plan
-    if: needs.plan.outputs.mode != 'docs'
+    if: needs.plan.outputs.mode != 'docs' && needs.plan.outputs.mode != 'image-component'
     runs-on: macos-15
     defaults:
       run:
@@ -211,6 +210,10 @@ jobs:
             ['task-flow', 'test:openclaw-task-flow'],
           ])
           for (const suite of plan.pluginSuites || []) {
+            if (suite === 'image-command') {
+              if (plan.runImageTests !== true) throw new Error('Image plugin checks must be selected')
+              continue // This suite needs Node24 and runs in image-component.
+            }
             if (!scripts.has(suite)) throw new Error('Unknown plugin test suite')
             execFileSync('pnpm', [scripts.get(suite)], { stdio: 'inherit' })
           }
@@ -249,9 +252,112 @@ jobs:
           include-hidden-files: true
           compression-level: 0
 
+  image-component:
+    needs: plan
+    if: needs.plan.outputs.image == 'true'
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: video-autoworker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify image source privacy and selected checks
+        env:
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process'
+          import { lstatSync, readFileSync } from 'node:fs'
+          import { resolve } from 'node:path'
+          import { assertCiTrackedSourceBoundary, isImageComponentPath, isCiControlPath, selectImagePythonTests } from './scripts/ci-impact-plan.mjs'
+          import { resolveGitSourceLayout, gitSourceEnvironment } from './scripts/lib/git-source-layout.mjs'
+          import { scanReleaseFile } from './scripts/check-sensitive-content.mjs'
+          const plan = JSON.parse(process.env.CI_IMPACT_PLAN)
+          selectImagePythonTests(plan)
+          const { gitRoot, productPrefix } = resolveGitSourceLayout(process.cwd())
+          const git = args => execFileSync('git', ['-C', gitRoot, ...args], { encoding: 'utf8', env: gitSourceEnvironment() })
+          const tracked = git(['ls-files', '-z']).split('\0').filter(Boolean)
+          assertCiTrackedSourceBoundary(tracked)
+          const changed = plan.base ? new Set(git(['diff', '--name-only', '-z', '--diff-filter=ACMR', plan.base, plan.head]).split('\0').filter(Boolean)) : new Set()
+          const members = tracked.filter(member => {
+            const logical = productPrefix && member.startsWith(productPrefix) ? member.slice(productPrefix.length) : member
+            return isImageComponentPath(logical) || isCiControlPath(logical) || changed.has(member)
+          })
+          if (!members.length) throw new Error('Image privacy scope is empty')
+          const findings = []
+          for (const member of members) {
+            const file = resolve(gitRoot, member), stat = lstatSync(file)
+            if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('Unsafe image component member')
+            findings.push(...scanReleaseFile(member, readFileSync(file), { useTypescript: false, allowTestPlaceholders: true }))
+          }
+          if (findings.length) throw new Error(`Sensitive content detected: ${JSON.stringify(findings)}`)
+          git(['diff', '--check', ...(plan.base ? [plan.base, plan.head] : [plan.head])])
+          JS
+      - name: Extract the existing lightweight hashed Python requirements
+        run: |
+          python - <<'PY'
+          import os,re
+          from pathlib import Path
+          lines=Path('ops/image-generation/qwen-image-edit-2511/requirements.lock').read_text().splitlines()
+          blocks={};current=None
+          for line in lines:
+              package=re.fullmatch(r'([A-Za-z0-9_.-]+)==([0-9]+\.[0-9]+\.[0-9]+)\s*\\?',line)
+              if package:
+                  current=package[1].lower() if package[1].lower() in {'numpy','pillow'} else None
+                  if current:
+                      if current in blocks:raise RuntimeError('duplicate lightweight package pin')
+                      blocks[current]={'version':package[2],'hashes':[]}
+              elif current and re.fullmatch(r'\s+--hash=sha256:[a-f0-9]{64}\s*\\?',line):
+                  blocks[current]['hashes'].append(line.strip().rstrip('\\').strip())
+              elif line and not line.lstrip().startswith('#'):
+                  current=None
+          if set(blocks)!={'numpy','pillow'} or any(not v['hashes'] for v in blocks.values()):raise RuntimeError('lightweight hashed pins missing')
+          records=[]
+          for name in ['numpy','pillow']:
+              item=blocks[name];records.append(name+'=='+item['version']+' '+' '.join(item['hashes']))
+          Path(os.environ['RUNNER_TEMP'],'image-ci-requirements.txt').write_text('\n'.join(records)+'\n')
+          PY
+          python -m pip install --require-hashes --only-binary=:all: --no-deps -r "$RUNNER_TEMP/image-ci-requirements.txt"
+      - name: Run selected image Python and Node suites without model downloads
+        env:
+          CI_IMPACT_PLAN: ${{ needs.plan.outputs.impact }}
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: src
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process'
+          import { lstatSync, readdirSync } from 'node:fs'
+          import { selectImagePythonTests } from './scripts/ci-impact-plan.mjs'
+          const plan = JSON.parse(process.env.CI_IMPACT_PLAN)
+          const pythonTests = selectImagePythonTests(plan)
+          for (const member of pythonTests) if (!lstatSync(member).isFile()) throw new Error('Selected Python suite is missing')
+          const python = `import sys,unittest
+          from pathlib import Path
+          suite=unittest.TestSuite()
+          for member in sys.argv[1:]:
+              selected=unittest.defaultTestLoader.discover('tests',pattern=Path(member).name)
+              if selected.countTestCases()==0:raise RuntimeError('selected Python suite is empty: '+member)
+              suite.addTests(selected)
+          result=unittest.TextTestRunner(verbosity=1).run(suite)
+          raise SystemExit(0 if result.wasSuccessful() else 1)`
+          execFileSync('python', ['-c', python, ...pythonTests], { stdio: 'inherit' })
+          const dir = 'openclaw-plugins/aiworker-image-command/test'
+          const pluginTests = readdirSync(dir).filter(name => name.endsWith('.test.mjs')).map(name => `${dir}/${name}`)
+          if (!pluginTests.length) throw new Error('Selected image plugin suite is empty')
+          execFileSync(process.execPath, ['--test', 'scripts/test-ci-impact-image-component.test.mjs', ...pluginTests], { stdio: 'inherit' })
+          JS
+
   quality-gate:
     name: quality-gate
-    needs: [plan, root-tests, integration]
+    needs: [plan, root-tests, integration, image-component]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -261,12 +367,22 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           TEST_RESULT: ${{ needs.root-tests.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
+          IMAGE_REQUIRED: ${{ needs.plan.outputs.image }}
+          IMAGE_RESULT: ${{ needs.image-component.result }}
         run: |
           test "$PLAN_RESULT" = success
-          if [[ "$MODE" == docs ]]; then
+          if [[ "$MODE" == docs || "$MODE" == image-component ]]; then
             test "$TEST_RESULT" = skipped
             test "$INTEGRATION_RESULT" = skipped
           else
+            [[ "$MODE" == targeted || "$MODE" == full ]]
             test "$TEST_RESULT" = success
             test "$INTEGRATION_RESULT" = success
+          fi
+          if [[ "$MODE" == image-component || "$MODE" == full ]]; then test "$IMAGE_REQUIRED" = true; fi
+          if [[ "$IMAGE_REQUIRED" == true ]]; then
+            test "$IMAGE_RESULT" = success
+          else
+            test "$IMAGE_REQUIRED" = false
+            test "$IMAGE_RESULT" = skipped
           fi

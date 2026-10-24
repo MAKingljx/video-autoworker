@@ -1,6 +1,6 @@
 # H1 完整中文封面设计输入
 
-本入口在H1本地Qwen-Image-Edit-2511上生成完整图片，全部文字和特效由模型输出。调用程序只整理设计说明，不渲染字体、不做人工叠字或后期像素修正。运行目录为`/Users/heisenbergs-1/ai-worker/services/qwen-image-edit-2511/`，生成入口为其中的`venv/bin/python aiworker-qwen-cover.py generate`。
+本文描述H1本地Qwen-Image-Edit-2511的原生整图生成入口，全部文字和特效由模型输出。调用程序只整理设计说明，不渲染字体、不做人工叠字或后期像素修正。运行目录为`/Users/heisenbergs-1/ai-worker/services/qwen-image-edit-2511/`，生成入口为其中的`venv/bin/python aiworker-qwen-cover.py generate`。照片需要严格保留原片像素时，使用同一图片应用的 protected 模式，见[独立图片入口](openclaw-image-studio.md)；不要通过反复整图编辑代替区域保护。
 
 生成命令支持互斥的`--design-file`和`--prompt-file`。前者适合当前已验证的冰晶纪实封面规格；后者继续处理普通自由提示词，不要求所有图片填同一种设计格式。两种输入共用同一个模型生成函数。
 

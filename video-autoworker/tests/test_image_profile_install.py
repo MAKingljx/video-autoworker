@@ -480,6 +480,11 @@ class InstallFixture:
         self.fail_validation = False
         self.fail_health = False
         self.gateway_pid, self.active_tasks, self.watcher_restart = None, 0, False
+        self.core_version = "2026.9.2"
+        self.node24 = None
+        self.next_launch_pid = 200
+        self.active_work = {key: 0 for key in ("rootRequests", "cronRuns", "sessionMutations", "terminalPersistence", "lifecycleWrites")}
+        self.bridge_changes, self.bridge_calls = {}, []
         self.plugin = home / "ai-worker/services/image/plugin"
         for directory in [self.plugin, home / "ai-worker/bin", home / "ai-worker/node/current/bin",
                           home / "Library/LaunchAgents", home / "ai-worker/state"]:
@@ -523,6 +528,13 @@ class InstallFixture:
 
     def run(self, command, env, *, check=True, timeout=120):
         self.commands.append(command)
+        if command[:2] == ["/bin/launchctl", "bootout"]:
+            self.gateway_pid = None
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:2] == ["/bin/launchctl", "bootstrap"]:
+            self.gateway_pid = self.next_launch_pid
+            self.next_launch_pid += 1
+            return subprocess.CompletedProcess(command, 0, "", "")
         if command[:2] == ["/bin/launchctl", "print"]:
             return subprocess.CompletedProcess(command, 113, "", "Could not find service") if self.gateway_pid is None else subprocess.CompletedProcess(command, 0, f"\tpid = {self.gateway_pid}\n", "")
         if command[0] == "/usr/sbin/lsof":
@@ -532,9 +544,9 @@ class InstallFixture:
             stdout = json.dumps({"tasks": {"active": self.active_tasks, "byStatus": {"queued": 0, "running": 0}},
                                  "degradedPlugins": [], "degradedSecretOwners": []})
         if "--version" in command:
-            stdout = "OpenClaw 2026.9.2"
+            stdout = "OpenClaw " + self.core_version
         if command[1:] == ["--version"] and command[0].endswith("/node"):
-            stdout = "v22.22.3"
+            stdout = "v24.21.0" if self.node24 is not None and command[0] == str(self.node24) else "v22.22.3"
         if "validate" in command and self.fail_validation:
             if check:
                 raise install.InstallError("component_command_failed")
@@ -560,6 +572,245 @@ class InstallFixture:
         return {str(path): path.read_bytes() for base in [self.home / ".openclaw-image-studio",
                   self.home / "ai-worker/workspaces/image-studio", self.home / "ai-worker/state/openclaw-image-studio",
                   self.home / "Library/LaunchAgents"] for path in base.rglob("*") if path.is_file()}
+
+    def migrate_current_runtime(self):
+        """Simulate the already-completed official migration, not an install action."""
+        state = self.home / ".openclaw-image-studio"
+        workspace = self.home / "ai-worker/workspaces/image-studio"
+        receipt_file = self.home / "ai-worker/state/openclaw-image-studio/install-receipt.json"
+        receipt = json.loads(receipt_file.read_bytes())
+        for name in ("AGENTS.md", "IDENTITY.md"):
+            (workspace / name).write_bytes(("historical " + name + "\n").encode())
+            receipt["payloadSha256"][name] = install.sha((workspace / name).read_bytes())
+        receipt_file.write_bytes(install.encoded(receipt))
+        config = json.loads((state / "openclaw.json").read_bytes())
+        config["meta"] = {"lastTouchedVersion": "2026.9.9"}
+        (state / "openclaw.json").write_bytes(install.encoded(config))
+        self.core_version = "2026.9.9"
+        core = self.home / "ai-worker/services/openclaw-runtime/releases/2026.9.9/install/lib/node_modules/openclaw"
+        self.node24 = self.home / "ai-worker/services/openclaw-runtime/runtimes/node-v24.21.0-darwin-arm64/bin/node"
+        self.node24.parent.mkdir(parents=True, mode=0o700)
+        (core / "dist").mkdir(parents=True, mode=0o700)
+        for path, content in [(self.node24, b"verified Node24 fixture"), (core / "dist/index.js", b"gateway fixture"),
+                              (core / "openclaw.mjs", b"CLI fixture"),
+                              (core / "package.json", install.encoded({"name": "openclaw", "version": self.core_version}))]:
+            path.write_bytes(content)
+            path.chmod(0o700)
+        cli = core / ".aiworker-cli-entry.sh"
+        cli.write_text('#!/bin/sh\nset -eu\nexec ' + shlex.quote(str(self.node24)) + " "
+                       + shlex.quote(str(core / "openclaw.mjs")) + ' "$@"\n')
+        cli.chmod(0o700)
+        binary = self.home / "ai-worker/bin/openclaw"
+        binary.unlink()
+        binary.symlink_to(cli)
+        plist = self.home / "Library/LaunchAgents/ai.openclaw.image-studio.plist"
+        value = plistlib.loads(plist.read_bytes())
+        value["EnvironmentVariables"]["NODE_OPTIONS"] = ""
+        value["ProgramArguments"] = [str(self.node24), "--max-old-space-size=131072", str(core / "dist/index.js"),
+                                    "gateway", "--port", "19289"]
+        plist.write_bytes(plistlib.dumps(value))
+
+    def adoption_arguments(self, mode, plugin, *, instructions=True, restore=False):
+        args = self.plugin_arguments(mode, plugin)
+        args[args.index("2026.9.2")] = self.core_version
+        config = self.home / ".openclaw-image-studio/openclaw.json"
+        plist = self.home / "Library/LaunchAgents/ai.openclaw.image-studio.plist"
+        args += ["--adopt-current-runtime", "--expected-current-config-sha256", install.sha(config.read_bytes()),
+                 "--expected-current-plist-sha256", install.sha(plist.read_bytes())]
+        if instructions:
+            args += ["--update-workspace-instructions"]
+        if restore:
+            args += ["--restore-plugin-update"]
+        return args
+
+    def gateway_operation(self, home, binary, node, env, runtime, operation):
+        self.bridge_calls.append(operation)
+        if operation == "secret-check":
+            return {"secretReady": True}
+        if operation == "restart":
+            self.gateway_pid += 1
+            return {"restarted": True}
+        value = {"runtimeVersion": self.core_version, "activeWork": copy.deepcopy(self.active_work), "writeCustodyCount": 0,
+            "modelRuntime": {"degraded": False, "pendingAgents": []},
+            "childRuntime": {"execPath": str(self.node24), "available": True},
+            "degradedPlugins": [], "degradedSecretOwners": [], "healthOk": not self.fail_health,
+            "statusSha256": "1" * 64, "healthSha256": "2" * 64}
+        value.update(copy.deepcopy(self.bridge_changes))
+        return value
+
+
+class CurrentRuntimeAdoptionTests(unittest.TestCase):
+    def test_adopts_verified_node24_and_updates_only_plugin_and_same_commit_instructions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time, "sleep"):
+                install.main(fixture.arguments("--apply"))
+                fixture.migrate_current_runtime()
+                before = json.loads((fixture.home / ".openclaw-image-studio/openclaw.json").read_bytes())
+                business_node = (fixture.home / "ai-worker/node/current/bin/node").read_bytes()
+                with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation), \
+                     patch.object(install, "keychain_token", side_effect=AssertionError("legacy keychain path used")):
+                    self.assertEqual(install.main(fixture.adoption_arguments("--apply", plugin)), 0)
+            after = json.loads((fixture.home / ".openclaw-image-studio/openclaw.json").read_bytes())
+            self.assertEqual(after["plugins"]["load"]["paths"], [str(plugin)])
+            after["plugins"]["load"]["paths"] = before["plugins"]["load"]["paths"]
+            self.assertEqual(after, before)
+            self.assertEqual((fixture.home / "ai-worker/node/current/bin/node").read_bytes(), business_node)
+            receipt = json.loads((fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json").read_bytes())
+            self.assertEqual(receipt["runtime"], {"openclaw": "2026.9.9", "node": "v24.21.0"})
+            self.assertEqual(receipt["originalInstallRuntime"], {"openclaw": "2026.9.2", "node": "v22.22.3"})
+            self.assertEqual(receipt["runtimeEvidence"]["nodePath"], str(fixture.node24))
+            self.assertEqual(receipt["runtimeEvidence"]["authorityScope"], "image-studio")
+            self.assertEqual(receipt["workspaceSourceCommit"], "d" * 40)
+            self.assertEqual(receipt["sourceCommit"], "b" * 40)
+            self.assertEqual(receipt["currentState"], "SERVICE_HEALTHY_FEISHU_DISABLED")
+            for name in ("AGENTS.md", "IDENTITY.md"):
+                self.assertEqual((fixture.home / "ai-worker/workspaces/image-studio" / name).read_bytes(),
+                                 (install.ROOT / "ops/openclaw-image-studio" / name).read_bytes())
+            self.assertIn("restart", fixture.bridge_calls)
+            self.assertEqual(fixture.keychain_creates, 1)
+
+    def test_dry_run_adoption_is_read_only_and_legacy_runtime_guard_stays_strict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                install.main(fixture.arguments("--apply"))
+                fixture.migrate_current_runtime()
+                before = fixture.managed_bytes()
+                with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation):
+                    self.assertEqual(install.main(fixture.adoption_arguments("--dry-run", plugin)), 0)
+                legacy_args = fixture.plugin_arguments("--dry-run", plugin)
+                legacy_args[legacy_args.index("2026.9.2")] = "2026.9.9"
+                with self.assertRaisesRegex(install.InstallError, "image_profile_runtime_drift"):
+                    install.main(legacy_args)
+            self.assertEqual(fixture.managed_bytes(), before)
+            self.assertFalse((fixture.home / "ai-worker/backups/openclaw-image-studio").exists())
+
+    def test_fresh_fingerprint_runtime_path_and_package_guards_are_not_bypassed(self):
+        for scenario, error in [("fingerprint", "current_runtime_fingerprint_mismatch"),
+                                ("node-argument", "current_runtime_node_argument_invalid"),
+                                ("package", "current_runtime_package_version_invalid"),
+                                ("receipt-evidence", "image_profile_original_install_evidence_invalid"),
+                                ("workspace", "image_profile_workspace_drift")]:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+                with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                    install.main(fixture.arguments("--apply"))
+                    fixture.migrate_current_runtime()
+                    if scenario == "node-argument":
+                        plist = fixture.home / "Library/LaunchAgents/ai.openclaw.image-studio.plist"
+                        value = plistlib.loads(plist.read_bytes())
+                        value["ProgramArguments"].insert(1, "--require=/outside/inject.js")
+                        plist.write_bytes(plistlib.dumps(value))
+                    elif scenario == "package":
+                        core = fixture.home / "ai-worker/services/openclaw-runtime/releases/2026.9.9/install/lib/node_modules/openclaw"
+                        (core / "package.json").write_bytes(install.encoded({"name": "openclaw", "version": "2026.9.2"}))
+                    elif scenario == "workspace":
+                        (fixture.home / "ai-worker/workspaces/image-studio/AGENTS.md").write_text("unrelated local edit")
+                    elif scenario == "receipt-evidence":
+                        receipt_file = fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json"
+                        value = json.loads(receipt_file.read_bytes())
+                        value["runtime"] = None
+                        receipt_file.write_bytes(install.encoded(value))
+                    args = fixture.adoption_arguments("--apply", plugin)
+                    if scenario == "fingerprint":
+                        args[args.index("--expected-current-config-sha256") + 1] = "0" * 64
+                    before = fixture.managed_bytes()
+                    with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation), \
+                         self.assertRaisesRegex(install.InstallError, error):
+                        install.main(args)
+                self.assertEqual(fixture.managed_bytes(), before)
+                self.assertNotIn("restart", fixture.bridge_calls)
+
+    def test_current_idle_requires_all_real_99_counters_and_live_child_binding(self):
+        for change, error in [
+            ({"activeWork": {}}, "image_profile_idle_unproven"),
+            ({"activeWork": {"rootRequests": 0}}, "image_profile_idle_unproven"),
+            ({"writeCustodyCount": None}, "image_profile_idle_unproven"),
+            ({"runtimeVersion": "2026.9.2"}, "image_profile_live_runtime_mismatch"),
+            ({"childRuntime": {"execPath": "/outside/node", "available": True}}, "image_profile_live_runtime_mismatch"),
+            ({"modelRuntime": {"degraded": False, "pendingAgents": ["busy"]}}, "image_profile_runtime_degraded"),
+            ({"healthOk": False}, "image_profile_runtime_unhealthy"),
+        ]:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+                with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                    install.main(fixture.arguments("--apply"))
+                    fixture.migrate_current_runtime()
+                    fixture.bridge_changes = change
+                    before = fixture.managed_bytes()
+                    with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation), \
+                         self.assertRaisesRegex(install.InstallError, error):
+                        install.main(fixture.adoption_arguments("--apply", plugin))
+                self.assertEqual(fixture.managed_bytes(), before)
+
+    def test_failed_partial_update_restores_config_workspace_and_adopted_receipt_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time, "sleep"):
+                install.main(fixture.arguments("--apply"))
+                fixture.migrate_current_runtime()
+                state = fixture.home / ".openclaw-image-studio"
+                workspace = fixture.home / "ai-worker/workspaces/image-studio"
+                before = {"openclaw.json": (state / "openclaw.json").read_bytes(),
+                    "AGENTS.md": (workspace / "AGENTS.md").read_bytes(), "IDENTITY.md": (workspace / "IDENTITY.md").read_bytes()}
+                with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation), \
+                     patch.object(install, "keychain_token", side_effect=AssertionError("legacy keychain path used")):
+                    fixture.fail_validation = True
+                    with self.assertRaisesRegex(install.InstallError, "component_command_failed"):
+                        install.main(fixture.adoption_arguments("--apply", plugin))
+                    receipt_path = fixture.home / "ai-worker/state/openclaw-image-studio/install-receipt.json"
+                    failed = json.loads(receipt_path.read_bytes())
+                    self.assertEqual(failed["currentState"], "PLUGIN_UPDATE_NEEDS_INSPECTION")
+                    # Simulate a crash after only one workspace file was replaced.
+                    (state / "openclaw.json").write_bytes(before["openclaw.json"])
+                    (workspace / "IDENTITY.md").write_bytes(before["IDENTITY.md"])
+                    fixture.fail_validation = False
+                    self.assertEqual(install.main(fixture.adoption_arguments("--apply", plugin, instructions=False, restore=True)), 0)
+                restored = json.loads(receipt_path.read_bytes())
+                self.assertEqual(restored["currentState"], "SERVICE_HEALTHY_FEISHU_DISABLED")
+                self.assertEqual(restored["runtime"], {"openclaw": "2026.9.9", "node": "v24.21.0"})
+                self.assertEqual(restored["originalInstallRuntime"]["openclaw"], "2026.9.2")
+                self.assertEqual((state / "openclaw.json").read_bytes(), before["openclaw.json"])
+                self.assertEqual((workspace / "AGENTS.md").read_bytes(), before["AGENTS.md"])
+                self.assertEqual((workspace / "IDENTITY.md").read_bytes(), before["IDENTITY.md"])
+                self.assertEqual(restored["payloadSha256"], {name: install.sha(raw) for name, raw in before.items()})
+                self.assertLessEqual(len(list((fixture.home / "ai-worker/backups/openclaw-image-studio").iterdir())), 2)
+
+    def test_restore_rejects_unrelated_postfailure_workspace_edits_without_stopping_gateway(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                install.main(fixture.arguments("--apply"))
+                fixture.migrate_current_runtime()
+                with patch.object(install, "current_gateway_operation", side_effect=fixture.gateway_operation):
+                    fixture.fail_validation = True
+                    with self.assertRaises(install.InstallError):
+                        install.main(fixture.adoption_arguments("--apply", plugin))
+                    (fixture.home / "ai-worker/workspaces/image-studio/AGENTS.md").write_text("external edit after failure")
+                    before = fixture.managed_bytes()
+                    calls = len(fixture.commands)
+                    with self.assertRaisesRegex(install.InstallError, "plugin_restore_external_payload_drift"):
+                        install.main(fixture.adoption_arguments("--apply", plugin, instructions=False, restore=True))
+                self.assertEqual(fixture.managed_bytes(), before)
+                self.assertFalse(any(command[:2] == ["/bin/launchctl", "bootout"] for command in fixture.commands[calls:]))
+
+    def test_shared_secretref_adapter_keeps_actual_token_out_of_python_argv_and_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory).resolve()
+            state = home / ".openclaw-image-studio"
+            state.mkdir(mode=0o700)
+            install.create_file(state / "openclaw.json", install.encoded({"gateway": {"port": 19289}}))
+            node = home / "node24"
+            env = install.cli_environment(home, node)
+            with patch.object(install, "run", return_value=subprocess.CompletedProcess([], 0, '{"secretReady":true}', '')) as command:
+                self.assertEqual(install.current_gateway_operation(home, home / "openclaw", node, env,
+                    {"coreRoot": str(home / "core")}, "secret-check"), {"secretReady": True})
+            argv = command.call_args.args[0]
+            self.assertEqual(argv[:3], [str(node), "--input-type=module", "-e"])
+            self.assertIn("resolveGatewayTokenFromConfigPath", argv[3])
+            self.assertNotIn("a" * 64, " ".join(argv))
+            self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", env)
 
 
 def artifact_fixture(base):

@@ -6,6 +6,7 @@ selection pointers, or learning results. No platform owns a second queue.
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -26,8 +27,13 @@ import uuid
 
 HEX = re.compile(r'^[a-f0-9]{64}$')
 JOB = re.compile(r'^[a-f0-9]{32}$')
+WORKER_ERROR = re.compile(r'^(?:protected|image_protected|image_ocr)_[a-z0-9_]{1,80}$')
 TERMINAL = ('GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED', 'RECONCILE_REQUIRED')
 MAX_INPUT = 20 * 1024 * 1024
+MAX_PROTECTED_INPUT = 40 * 1024 * 1024
+MAX_OUTPUT = 40 * 1024 * 1024
+MAX_INSPECTION_JSON = 6 * 1024 * 1024
+WORKER_OWNER_ENV = 'AIWORKER_IMAGE_JOB_OWNER'
 
 
 def canonical(value):
@@ -110,7 +116,7 @@ class ImageJobs:
         if not isinstance(scope, str) or not HEX.fullmatch(scope):
             raise ValueError('image_scope_invalid')
 
-    def reference(self, value, scope):
+    def reference(self, value, scope, maximum=MAX_INPUT):
         if not isinstance(value, str) or not Path(value).is_absolute():
             raise ValueError('image_reference_invalid')
         path = Path(value).resolve(strict=True)
@@ -126,9 +132,9 @@ class ImageJobs:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd, 'rb') as source:
             before = os.fstat(source.fileno())
-            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_INPUT:
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= maximum:
                 raise ValueError('image_reference_size_invalid')
-            data = source.read(MAX_INPUT + 1)
+            data = source.read(maximum + 1)
             after = os.fstat(source.fileno())
             if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
                     after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
@@ -140,15 +146,20 @@ class ImageJobs:
         return {'source': str(path), 'sha256': sha(data), 'suffix': path.suffix.lower()}, data
 
     def normalize(self, request):
-        allowed = {'scope', 'requestKey', 'prompt', 'design', 'images', 'width', 'height', 'steps', 'guidance', 'seed'}
+        allowed = {'scope', 'requestKey', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed'}
         if not isinstance(request, dict) or set(request) - allowed:
             raise ValueError('image_request_invalid')
         self.check_scope(request.get('scope'))
         if not isinstance(request.get('requestKey'), str) or not HEX.fullmatch(request['requestKey']):
             raise ValueError('image_request_key_invalid')
-        if ('prompt' in request) == ('design' in request):
+        if sum(key in request for key in ('prompt', 'design', 'protected')) != 1:
             raise ValueError('image_prompt_or_design_required')
-        if 'design' in request:
+        protected = 'protected' in request
+        if protected:
+            if 'width' in request or 'height' in request:
+                raise ValueError('image_protected_native_dimensions_required')
+            limit = 1
+        elif 'design' in request:
             self.backend.cover_design_prompt(request['design'], self.profiles)
             limit = self.profiles['profiles'][request['design']['profile']]['maximum_reference_images']
         else:
@@ -161,20 +172,31 @@ class ImageJobs:
             raise ValueError('image_reference_count_invalid')
         defaults = {'width': 1280, 'height': 720, 'steps': 40, 'guidance': 4, 'seed': 301}
         values = {key: request.get(key, default) for key, default in defaults.items()}
-        for key in ('width', 'height'):
-            if type(values[key]) is not int or not 512 <= values[key] <= 2048 or values[key] % 16:
-                raise ValueError('image_dimensions_invalid')
+        if not protected:
+            for key in ('width', 'height'):
+                if type(values[key]) is not int or not 512 <= values[key] <= 2048 or values[key] % 16:
+                    raise ValueError('image_dimensions_invalid')
         if type(values['steps']) is not int or not 1 <= values['steps'] <= 60:
             raise ValueError('image_steps_invalid')
         if type(values['seed']) is not int or not 0 <= values['seed'] < 2**31:
             raise ValueError('image_seed_invalid')
         if type(values['guidance']) not in (int, float) or not 1 <= values['guidance'] <= 8:
             raise ValueError('image_guidance_invalid')
-        references = [self.reference(value, request['scope']) for value in images]
+        if protected and len(images) != 1:
+            raise ValueError('image_protected_single_source_required')
+        references = [self.reference(value, request['scope'], MAX_PROTECTED_INPUT if protected else MAX_INPUT) for value in images]
+        protected_spec = None
+        protected_execution = {}
+        if protected:
+            from .protected_cover import normalize_protected, implementation_digest
+            protected_spec, (values['width'], values['height']) = normalize_protected(request['protected'], references[0][1])
+            protected_execution = {'protectedSourceSha256': implementation_digest()}
         payload = {**values, 'references': [r[0] for r in references],
                    'execution': {'sourceCommit': self.config.source_commit,
-                                 'backendSha256': self.backend_sha, 'profilesSha256': self.profiles_sha},
-                   **({key: request[key] for key in ('prompt', 'design') if key in request})}
+                                 'backendSha256': self.backend_sha, 'profilesSha256': self.profiles_sha,
+                                 **protected_execution},
+                   **({key: request[key] for key in ('prompt', 'design') if key in request}),
+                   **({'protected': protected_spec} if protected else {})}
         return payload, [r[1] for r in references]
 
     def submit(self, request):
@@ -196,9 +218,9 @@ class ImageJobs:
             folder.mkdir(mode=0o700)
             for index, (record, content) in enumerate(zip(payload['references'], data)):
                 private_write(folder / ('reference-' + str(index) + record['suffix']), content)
-            key = 'design' if 'design' in payload else 'prompt'
-            content = canonical(payload[key]).encode() if key == 'design' else payload[key].encode()
-            private_write(folder / ('input.json' if key == 'design' else 'prompt.txt'), content)
+            key = 'protected' if 'protected' in payload else 'design' if 'design' in payload else 'prompt'
+            content = payload[key].encode() if key == 'prompt' else canonical(payload[key]).encode()
+            private_write(folder / ('prompt.txt' if key == 'prompt' else 'input.json'), content)
             now = stamp()
             db.execute('INSERT INTO image_jobs VALUES (?,?,?,?,?,?,?,?,NULL,NULL)',
                        (job_id, request['scope'], request['requestKey'], payload_sha,
@@ -223,7 +245,8 @@ class ImageJobs:
         return folder
 
     def present(self, row):
-        execution = json.loads(row['payload_json'])['execution']
+        payload = json.loads(row['payload_json'])
+        execution = payload['execution']
         result = {'jobId': row['job_id'], 'currentState': row['state'],
                   'createdAt': row['created_at'], 'updatedAt': row['updated_at'],
                   'errorCode': row['error_code'], **execution,
@@ -231,14 +254,35 @@ class ImageJobs:
                       'inspect_and_reconcile' if row['state'] == 'RECONCILE_REQUIRED' else
                       'inspect_error' if row['state'] == 'FAILED' else
                       'none' if row['state'] == 'CANCELLED' else 'wait_or_query_status'}
+        if 'protected' in payload:
+            result['mode'] = 'protected'
         if row['result_json']:
             saved = json.loads(row['result_json'])
             result.update({key: saved[key] for key in ('output', 'outputSha256', 'outputBytes', 'width', 'height', 'elapsedSeconds', 'postProcessing') if key in saved})
+            if 'protected' in payload and isinstance(saved.get('photoProtection'), dict):
+                proof = saved['photoProtection']
+                result['photoProtection'] = {key: proof[key] for key in (
+                    'outsideChangedPixels', 'protectedPixels', 'changedPixels', 'sourceWidth', 'sourceHeight'
+                ) if type(proof.get(key)) is int and proof[key] >= 0}
+            if 'protected' in payload and isinstance(saved.get('textValidation'), dict):
+                proof = saved['textValidation']
+                summary = {}
+                if type(proof.get('matched')) is bool:
+                    summary['matched'] = proof['matched']
+                for key, expected in (('engine', 'apple-vision'), ('mode', 'normalized_text_sequence')):
+                    if proof.get(key) == expected:
+                        summary[key] = expected
+                for key in ('expectedCount', 'observedCount'):
+                    if type(proof.get(key)) is int and 0 <= proof[key] <= 32:
+                        summary[key] = proof[key]
+                result['textValidation'] = summary
         if row['state'] in ('RUNNING', 'CANCEL_REQUESTED'):
             intent = self.folder(row['job_id']) / 'image.intent.json'
             try:
                 progress = json.loads(intent.read_text())
                 result.update({key: progress[key] for key in ('completedSteps', 'totalSteps', 'elapsedSeconds') if key in progress})
+                if isinstance(progress.get('stage'), str) and re.fullmatch(r'[a-z][a-z0-9_]{0,63}', progress['stage']):
+                    result['stage'] = progress['stage']
             except (OSError, ValueError):
                 pass
         return result
@@ -259,7 +303,7 @@ class ImageJobs:
         self.wake.set()
         return self.get(job_id, scope)
 
-    def result(self, row):
+    def result(self, row, *, verify_current_composition=False):
         folder = self.folder(row['job_id'])
         receipt_path = folder / 'image.receipt.json'
         output = folder / 'image.png'
@@ -267,13 +311,15 @@ class ImageJobs:
             raise ValueError('image_result_path_invalid')
         result = json.loads(receipt_path.read_text())
         with output.open('rb') as source:
-            data = source.read(40 * 1024 * 1024 + 1)
+            data = source.read(MAX_OUTPUT + 1)
         payload = json.loads(row['payload_json'])
-        if (len(data) > 40 * 1024 * 1024 or result.get('currentState') != 'GENERATED_PENDING_REVIEW'
+        protected = 'protected' in payload
+        if (len(data) > MAX_OUTPUT or result.get('currentState') != 'GENERATED_PENDING_REVIEW'
                 or result.get('output') != str(output) or result.get('outputSha256') != sha(data)
                 or result.get('repository') != self.backend.REPOSITORY
                 or result.get('revision') != self.backend.REVISION
-                or result.get('outputBytes') != len(data) or result.get('postProcessing') is not False
+                or result.get('outputBytes') != len(data)
+                or result.get('postProcessing') is not protected
                 or data[:8] != b'\x89PNG\r\n\x1a\n' or len(data) < 24
                 or struct.unpack('>II', data[16:24]) != (payload['width'], payload['height'])):
             raise ValueError('image_result_integrity_failed')
@@ -287,6 +333,15 @@ class ImageJobs:
                 image.load()
         except (OSError, SyntaxError) as error:
             raise ValueError('image_result_decode_failed') from error
+        if protected:
+            from .protected_cover import verify_protected_result
+            source = folder / ('reference-0' + payload['references'][0]['suffix'])
+            if source.is_symlink() or sha(source.read_bytes()) != payload['references'][0]['sha256']:
+                raise ValueError('image_protected_source_changed')
+            if result.get('protectedSourceSha256') != payload['execution']['protectedSourceSha256']:
+                raise ValueError('image_protected_implementation_receipt_changed')
+            verify_protected_result(source, output, payload['protected'], result,
+                                    strict_live=verify_current_composition)
         return result, data
 
     def image(self, job_id, scope):
@@ -297,6 +352,45 @@ class ImageJobs:
         if canonical(result) != row['result_json']:
             raise ValueError('image_result_receipt_changed')
         return data
+
+    def inspection(self, job_id, scope):
+        """Return only owned source/result previews; never accept arbitrary paths."""
+        row = self.row(job_id, scope)
+        if row['state'] != 'GENERATED_PENDING_REVIEW':
+            raise ValueError('image_result_not_ready')
+        result, data = self.result(row)
+        if canonical(result) != row['result_json']:
+            raise ValueError('image_result_receipt_changed')
+        payload = json.loads(row['payload_json'])
+        source = self.folder(job_id) / ('reference-0' + payload['references'][0]['suffix'])
+        if source.is_symlink():
+            raise ValueError('image_inspection_source_invalid')
+        original = source.read_bytes()
+        if len(original) > MAX_PROTECTED_INPUT or sha(original) != payload['references'][0]['sha256']:
+            raise ValueError('image_inspection_source_changed')
+        from PIL import Image, ImageOps
+        try:
+            for maximum in (1024, 768, 512):
+                images = []
+                for role, raw in (('source', original), ('result', data)):
+                    with Image.open(io.BytesIO(raw)) as decoded:
+                        if decoded.width * decoded.height > 24 * 1024 * 1024 or max(decoded.size) > 8192:
+                            raise ValueError('image_inspection_dimensions_invalid')
+                        image = ImageOps.exif_transpose(decoded).convert('RGB')
+                        image.thumbnail((maximum, maximum), Image.Resampling.LANCZOS)
+                        buffer = io.BytesIO()
+                        image.save(buffer, format='PNG')
+                        preview = buffer.getvalue()
+                        images.append({'role': role, 'mimeType': 'image/png',
+                                       'data': base64.b64encode(preview).decode('ascii'),
+                                       'sha256': sha(preview), 'width': image.width, 'height': image.height})
+                response = {'jobId': job_id, 'currentState': row['state'], 'images': images}
+                if (all(len(base64.b64decode(item['data'])) <= 2 * 1024 * 1024 for item in images)
+                        and len(canonical(response).encode()) <= MAX_INSPECTION_JSON):
+                    return response
+        except (OSError, SyntaxError, Image.DecompressionBombError) as error:
+            raise ValueError('image_inspection_decode_failed') from error
+        raise ValueError('image_inspection_too_large')
 
     def settle(self, row, state, error=None, result=None):
         with self.db() as db:
@@ -309,7 +403,16 @@ class ImageJobs:
             rows = db.execute("SELECT * FROM image_jobs WHERE state IN ('RUNNING','CANCEL_REQUESTED')").fetchall()
         for row in rows:
             try:
-                result, _ = self.result(row)
+                payload = json.loads(row['payload_json'])
+                if 'protected' in payload:
+                    # This result has not yet been sealed in SQLite. Recovery
+                    # is a first acceptance, not a historical read, so it must
+                    # still use the exact renderer admitted for this job.
+                    from .protected_cover import implementation_digest
+                    if payload['execution']['protectedSourceSha256'] != implementation_digest():
+                        self.settle(row, 'RECONCILE_REQUIRED', 'image_job_runtime_changed')
+                        continue
+                result, _ = self.result(row, verify_current_composition=True)
                 self.settle(row, 'GENERATED_PENDING_REVIEW', result=result)
             except (OSError, ValueError, KeyError):
                 self.settle(row, 'RECONCILE_REQUIRED', 'image_worker_interrupted')
@@ -323,19 +426,32 @@ class ImageJobs:
             db.execute("UPDATE image_jobs SET state='RUNNING',updated_at=? WHERE job_id=? AND state='QUEUED'", (stamp(), row['job_id']))
         payload = json.loads(row['payload_json'])
         folder = self.folder(row['job_id'])
-        command = [str(self.config.backend_python), str(self.config.backend_script), 'generate', '--wait-for-model',
-                   '--output', str(folder / 'image.png'), '--images',
-                   *[str(folder / ('reference-' + str(i) + r['suffix'])) for i, r in enumerate(payload['references'])]]
-        if 'design' in payload:
-            command += ['--design-file', str(folder / 'input.json'), '--profiles-file', str(self.config.profiles_file)]
+        protected = 'protected' in payload
+        if protected:
+            command = [str(self.config.backend_python), '-m', 'image_generation.protected_worker',
+                       '--spec-file', str(folder / 'input.json'),
+                       '--source', str(folder / ('reference-0' + payload['references'][0]['suffix'])),
+                       '--output', str(folder / 'image.png'), '--backend-script', str(self.config.backend_script)]
         else:
-            command += ['--prompt-file', str(folder / 'prompt.txt')]
-        for key in ('width', 'height', 'steps', 'guidance', 'seed'):
+            command = [str(self.config.backend_python), str(self.config.backend_script), 'generate', '--wait-for-model',
+                       '--output', str(folder / 'image.png'), '--images',
+                       *[str(folder / ('reference-' + str(i) + r['suffix'])) for i, r in enumerate(payload['references'])]]
+            if 'design' in payload:
+                command += ['--design-file', str(folder / 'input.json'), '--profiles-file', str(self.config.profiles_file)]
+            else:
+                command += ['--prompt-file', str(folder / 'prompt.txt')]
+        for key in (('steps', 'guidance', 'seed') if protected else ('width', 'height', 'steps', 'guidance', 'seed')):
             command += ['--' + key, str(payload[key])]
         process = None
+        owner = None
+        outcome = None
+        cancelled = False
         try:
             expected_execution = {'sourceCommit': self.config.source_commit,
                                   'backendSha256': self.backend_sha, 'profilesSha256': self.profiles_sha}
+            if protected:
+                from .protected_cover import implementation_digest
+                expected_execution['protectedSourceSha256'] = implementation_digest()
             if payload['execution'] != expected_execution:
                 self.settle(row, 'RECONCILE_REQUIRED', 'image_job_runtime_changed')
                 return True
@@ -344,44 +460,164 @@ class ImageJobs:
                 raise ValueError('image_backend_source_changed')
             fd = os.open(folder / 'generator.log', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, 'wb') as log:
-                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                cancelled = False
+                env = os.environ.copy()
+                owner_nonce = uuid.uuid4().hex
+                env[WORKER_OWNER_ENV] = owner_nonce
+                if protected:
+                    env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
+                    env['PYTHONDONTWRITEBYTECODE'] = '1'
+                    env['AIWORKER_IMAGE_OCR_CACHE'] = str(self.config.state_root / 'vision-ocr-cache')
+                process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                           start_new_session=True, env=env)
+                owner = self.claim_process_group(process, owner_nonce)
                 while process.poll() is None:
                     current = self.row(row['job_id'], row['scope'])
                     if current['state'] == 'CANCEL_REQUESTED' or self.stopping.is_set():
                         cancelled = True
-                        self.stop_process(process)
+                        self.stop_process(process, owner)
                         break
                     self.stopping.wait(0.5)
             # If completion raced cancellation, keep the verified native result.
             if process.returncode == 0:
-                result, _ = self.result(row)
-                self.settle(row, 'GENERATED_PENDING_REVIEW', result=result)
+                result, _ = self.result(row, verify_current_composition=True)
+                outcome = ('GENERATED_PENDING_REVIEW', None, result)
             elif cancelled:
-                self.settle(row, 'CANCELLED', 'image_generation_cancelled')
+                outcome = ('CANCELLED', 'image_generation_cancelled', None)
             else:
-                self.settle(row, 'FAILED', 'image_generator_exit_' + str(process.returncode))
-        except Exception:
+                error_code = 'image_generator_exit_' + str(process.returncode)
+                if protected:
+                    try:
+                        intent = json.loads((folder / 'image.intent.json').read_text())
+                        candidate = intent.get('errorCode')
+                        if isinstance(candidate, str) and WORKER_ERROR.fullmatch(candidate):
+                            error_code = candidate
+                    except (OSError, ValueError):
+                        pass
+                outcome = ('FAILED', error_code, None)
+        except Exception as error:
             if process and process.poll() is None:
-                self.stop_process(process)
-            self.settle(row, 'FAILED', 'image_generation_execution_failed')
+                try:
+                    self.stop_process(process, owner)
+                except ValueError:
+                    # A Popen leader is still ours even when a descendant's
+                    # group identity cannot be proved. Never kill an unknown
+                    # group to compensate for a failed ownership probe.
+                    self.stop_leader(process)
+            code = str(error)
+            if not protected or not WORKER_ERROR.fullmatch(code):
+                code = 'image_generation_execution_failed'
+            outcome = ('FAILED', code, None)
+        finally:
+            if process is not None:
+                try:
+                    if owner is None:
+                        owner = self.claim_process_group(process, owner_nonce)
+                    self.cleanup_process_group(owner)
+                    self.stop_leader(process)  # reap the leader even on BaseException
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    if process.poll() is None:
+                        self.stop_leader(process)
+                    outcome = ('RECONCILE_REQUIRED', 'image_worker_group_cleanup_unproven', None)
+            if outcome is not None:
+                self.settle(row, outcome[0], outcome[1], outcome[2])
         return True
 
     @staticmethod
-    def stop_process(process):
-        # Only the owned child process group. Process exit may race cancellation.
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+    def stop_leader(process):
+        """Stop only the Popen handle when no wider group proof is available."""
+        if process.poll() is None:
+            process.terminate()
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            process.kill()
             process.wait()
+
+    @staticmethod
+    def live_group_members(pgid):
+        if type(pgid) is not int or pgid <= 1 or pgid == os.getpgrp():
+            raise ValueError('image_worker_group_identity_invalid')
+        report = subprocess.run(['/bin/ps', '-axo', 'pid=,pgid=,uid=,stat='],
+                                capture_output=True, text=True, errors='replace', timeout=10)
+        if report.returncode != 0 or len(report.stdout) > 2 * 1024 * 1024:
+            raise ValueError('image_worker_group_inspection_failed')
+        members = []
+        for line in report.stdout.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if (len(fields) != 4 or not all(value.isdecimal() for value in fields[:2])
+                    or not re.fullmatch(r'-?[0-9]+', fields[2])):
+                raise ValueError('image_worker_group_inspection_failed')
+            pid, group, uid = map(int, fields[:3])
+            # Zombies hold no model lock or live computation and may await
+            # reaping by launchd/init after their worker parent has exited.
+            if group == pgid and not fields[3].startswith('Z'):
+                members.append((pid, uid))
+        return members
+
+    @classmethod
+    def owned_group_members(cls, owner):
+        pgid = owner['pgid']
+        members = cls.live_group_members(pgid)
+        proved = []
+        marker = re.compile(r'(?:^|\s)' + re.escape(WORKER_OWNER_ENV + '=' + owner['nonce']) + r'(?=\s|$)')
+        for pid, uid in members:
+            try:
+                if uid != owner['uid'] or os.getpgid(pid) != pgid or os.getsid(pid) != pgid:
+                    raise ValueError('image_worker_group_owner_changed')
+            except ProcessLookupError:
+                continue
+            report = subprocess.run(['/bin/ps', 'eww', '-p', str(pid), '-o', 'command='],
+                                    capture_output=True, text=True, errors='replace', timeout=10)
+            if report.returncode != 0 or len(report.stdout) > 2 * 1024 * 1024 or not marker.search(report.stdout):
+                if pid not in {member[0] for member in cls.live_group_members(pgid)}:
+                    continue  # exited or became a resource-free zombie
+                raise ValueError('image_worker_group_owner_unproven')
+            proved.append(pid)
+        return proved
+
+    @classmethod
+    def claim_process_group(cls, process, nonce):
+        # start_new_session=True is fixed at the sole Popen call above. Its
+        # PID is the expected PGID/SID, and this per-job marker is inherited by
+        # its model/OCR descendants. It is never a model-supplied PID.
+        owner = {'pgid': process.pid, 'uid': os.getuid(), 'nonce': nonce}
+        cls.owned_group_members(owner)
+        return owner
+
+    @classmethod
+    def cleanup_process_group(cls, owner):
+        if owner is None:
+            return
+        if not cls.owned_group_members(owner):
+            return
+        try:
+            os.killpg(owner['pgid'], signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + 5
+        while cls.owned_group_members(owner):
+            if time.monotonic() >= deadline:
+                # Re-prove the remaining membership immediately before the
+                # stronger signal. No service group or another CLI's group.
+                if cls.owned_group_members(owner):
+                    try:
+                        os.killpg(owner['pgid'], signal.SIGKILL)
+                    except ProcessLookupError:
+                        return
+                final_deadline = time.monotonic() + 3
+                while cls.owned_group_members(owner):
+                    if time.monotonic() >= final_deadline:
+                        raise ValueError('image_worker_group_cleanup_failed')
+                    time.sleep(.05)
+                return
+            time.sleep(.05)
+
+    @classmethod
+    def stop_process(cls, process, owner):
+        cls.cleanup_process_group(owner)
+        cls.stop_leader(process)
 
     def start(self):
         self.lock = (self.config.state_root / 'service.lock').open('a')

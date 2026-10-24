@@ -81,7 +81,7 @@ async function writeStore(path, subscriptions) {
 
 function noticeText(r) {
   if (r.currentState === 'GENERATED_PENDING_REVIEW') {
-    return `H1 图片任务 ${r.jobId} 已生成候选图片。请调用 aiworker_generate_image 的 result 读取并展示图片，提醒检查中文与画面；不得重新生成、叠字、采用或发布。`
+    return `H1 图片任务 ${r.jobId} 已生成候选图片。请调用 aiworker_generate_image 的 result 读取并展示原尺寸图片，再调用 inspect 对照源图与成品检查中文、主体、字效及清晰度。保护校验和OCR匹配不等于视觉通过；看不到原生图块须如实说明。不得重新提交、手工叠字、采用或发布。`
   }
   const states = { FAILED: '生成失败', CANCELLED: '已取消', RECONCILE_REQUIRED: '状态需要核对' }
   return `H1 图片任务 ${r.jobId} ${states[r.currentState]}。请调用 aiworker_generate_image 的 status 核对收据并如实告知；不要自行重新提交或重试生成。`

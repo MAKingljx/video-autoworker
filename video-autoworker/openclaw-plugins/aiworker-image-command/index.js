@@ -3,6 +3,7 @@ import { saveMediaBuffer } from 'openclaw/plugin-sdk/media-runtime'
 import { createPluginRuntimeStore } from 'openclaw/plugin-sdk/runtime-store'
 
 import { registerImageCommands } from './lib/plugin-registration.js'
+import { PROTECTED_IMAGE_BYTES_LIMIT } from './lib/image-job-client.js'
 
 export default definePluginEntry({
   id: 'aiworker-image-command',
@@ -11,7 +12,9 @@ export default definePluginEntry({
   register(api) {
     registerImageCommands(api, {
       createRuntimeStore: createPluginRuntimeStore,
-      saveMedia: buffer => saveMediaBuffer(buffer, 'image/png', 'outbound', 10 * 1024 * 1024),
+      // The application client retains the raw 10MiB cap; only verified
+      // protected-mode source-sized images can reach this HD storage bound.
+      saveMedia: buffer => saveMediaBuffer(buffer, 'image/png', 'outbound', PROTECTED_IMAGE_BYTES_LIMIT),
     })
   },
 })

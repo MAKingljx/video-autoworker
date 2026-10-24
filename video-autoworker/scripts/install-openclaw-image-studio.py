@@ -369,7 +369,7 @@ def advance_receipt(path: Path, old: dict, changes: dict) -> dict:
     return updated
 
 
-def verify_installed_service(plist: Path, state: Path, config: bytes) -> dict:
+def verify_installed_service(plist: Path, state: Path, config: bytes, *, include_binding: bool = False) -> dict:
     installed = plistlib.loads(owned_public_file(plist))
     require(isinstance(installed, dict), "installed_service_shape_invalid")
     service_env = installed.get("EnvironmentVariables", {})
@@ -412,7 +412,112 @@ def verify_installed_service(plist: Path, state: Path, config: bytes) -> dict:
             and "--port" in arguments and arguments.index("--port") + 1 < len(arguments)
             and arguments[arguments.index("--port") + 1] == str(port), "installed_service_port_mismatch")
     require(not any(arg in {"--token", "--password", "--allow-unconfigured"} for arg in arguments), "service_secret_or_bypass_argument_rejected")
-    return {"launchAgentSha256": sha(owned_public_file(plist)), **native_hashes}
+    result = {"launchAgentSha256": sha(owned_public_file(plist)), **native_hashes}
+    if include_binding:
+        result["arguments"] = arguments
+        result["nodeOptions"] = service_env.get("NODE_OPTIONS")
+    return result
+
+
+def current_managed_runtime(home: Path, config_raw: bytes, plist: Path, binary: Path,
+                            expected_version: str, config_sha: str, plist_sha: str) -> tuple[Path, dict]:
+    """Explicitly adopt an already-running managed core, never switch its runtime."""
+    require(sha(config_raw) == config_sha and sha(owned_public_file(plist)) == plist_sha,
+            "current_runtime_fingerprint_mismatch")
+    config = json.loads(config_raw)
+    require(isinstance(config, dict) and isinstance(config.get("gateway"), dict)
+        and type(config["gateway"].get("port")) is int, "current_runtime_config_shape_invalid")
+    state = home / f".openclaw-{PROFILE}"
+    binding = verify_installed_service(plist, state, config_raw, include_binding=True)
+    arguments = binding.pop("arguments")
+    node_options = binding.pop("nodeOptions")
+    require(node_options in (None, "") or (isinstance(node_options, str)
+        and re.fullmatch(r"--max-old-space-size=[1-9][0-9]{0,6}", node_options) is not None),
+            "current_runtime_node_options_invalid")
+    require(len(arguments) >= 5, "current_runtime_arguments_invalid")
+    node = safe_path(Path(arguments[0]), file=True)
+    runtime_root = home / "ai-worker/services/openclaw-runtime"
+    require(node.parent.parent.parent == runtime_root / "runtimes"
+        and re.fullmatch(r"node-v([0-9]+\.[0-9]+\.[0-9]+)-darwin-(arm64|x64)", node.parent.parent.name) is not None
+        and node.name == "node", "current_runtime_node_path_invalid")
+    index = 1
+    if index < len(arguments) and arguments[index].startswith("--"):
+        require(re.fullmatch(r"--max-old-space-size=[1-9][0-9]{0,6}", arguments[index]) is not None,
+                "current_runtime_node_argument_invalid")
+        index += 1
+    require(index < len(arguments), "current_runtime_entry_missing")
+    core = runtime_root / "releases" / expected_version / "install/lib/node_modules/openclaw"
+    entry = safe_path(Path(arguments[index]), file=True)
+    require(entry == core / "dist/index.js" and arguments[index + 1:] == ["gateway", "--port", str(config["gateway"]["port"])],
+            "current_runtime_gateway_binding_invalid")
+    package_path = safe_path(core / "package.json", file=True)
+    package_raw = owned_public_file(package_path)
+    package = json.loads(package_raw)
+    require(isinstance(package, dict) and package.get("name") == "openclaw"
+        and package.get("version") == expected_version, "current_runtime_package_version_invalid")
+    cli = safe_path(binary.resolve(strict=True), file=True)
+    require(cli == core / ".aiworker-cli-entry.sh", "current_runtime_cli_target_invalid")
+    expected_cli = ("#!/bin/sh\nset -eu\nexec " + shlex.quote(str(node)) + " "
+                    + shlex.quote(str(core / "openclaw.mjs")) + ' "$@"\n').encode()
+    require(owned_public_file(cli) == expected_cli and os.access(cli, os.X_OK), "current_runtime_cli_wrapper_invalid")
+    cli_entry = safe_path(core / "openclaw.mjs", file=True)
+    evidence = {"schema": "aiworker-image-profile-runtime/v1", "profile": PROFILE,
+        "openclaw": expected_version, "nodePath": str(node), "nodeSha256": sha(owned_public_file(node)),
+        "coreRoot": str(core), "entryPath": str(entry), "entrySha256": sha(owned_public_file(entry)),
+        "packageJsonSha256": sha(package_raw), "cliTarget": str(cli), "cliSha256": sha(expected_cli),
+        "cliEntrypointSha256": sha(owned_public_file(cli_entry)), "authorityScope": PROFILE,
+        "gatewayArguments": arguments, "configSha256": config_sha, "serviceEvidence": binding}
+    return node, evidence
+
+
+def current_gateway_operation(home: Path, binary: Path, node: Path, env: dict,
+                              runtime: dict, operation: str) -> dict:
+    """Keep actual credentials inside the one shared adapter and its child process."""
+    require(operation in {"inspect", "inspect-unhealthy", "secret-check", "restart"}, "current_gateway_operation_invalid")
+    adapter = ROOT / "scripts/lib/openclaw-secret-reference.mjs"
+    safe_path(adapter, file=True)
+    settings = {"home": str(home), "binary": str(binary), "core": runtime["coreRoot"],
+        "config": str(home / f".openclaw-{PROFILE}/openclaw.json"), "adapter": str(adapter),
+        "port": json.loads(private_file(home / f".openclaw-{PROFILE}/openclaw.json"))["gateway"]["port"],
+        "operation": operation}
+    script = r'''
+import {createRequire} from 'node:module';
+import {pathToFileURL} from 'node:url';
+import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+const options=SETTINGS;
+try {
+ const {resolveGatewayTokenFromConfigPath}=await import(pathToFileURL(options.adapter).href);
+ const token=resolveGatewayTokenFromConfigPath(options.config);
+ if(!token)throw Error('gateway_secret_unavailable');
+ if(options.operation==='secret-check'){
+  process.stdout.write(JSON.stringify({secretReady:true}));
+ }else if(options.operation==='restart'){
+  const child=spawnSync(options.binary,['--profile','image-studio','gateway','restart','--json'],
+   {env:{...process.env,OPENCLAW_GATEWAY_TOKEN:token},encoding:'utf8',timeout:90000});
+  if(child.status!==0)throw Error('gateway_restart_failed');
+  process.stdout.write(JSON.stringify({restarted:true,outputSha256:createHash('sha256').update(child.stdout).digest('hex')}));
+ }else{
+  const require=createRequire(options.core+'/package.json');
+  const {callGatewayFromCli}=await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/gateway-runtime')).href);
+  const call=method=>callGatewayFromCli(method,{url:'ws://127.0.0.1:'+options.port,token,timeout:20000},{},{expectFinal:true,sharedStateMode:'read-only'});
+  const status=await call('status');
+  const health=options.operation==='inspect-unhealthy'?null:await call('health');
+  process.stdout.write(JSON.stringify({runtimeVersion:status.runtimeVersion,activeWork:status.shutdownBudget?.activeWork,
+   writeCustodyCount:Array.isArray(status.shutdownBudget?.writeCustody)?status.shutdownBudget.writeCustody.length:null,
+   modelRuntime:status.modelRuntime,childRuntime:status.childRuntime,
+   degradedPlugins:status.degradedPlugins,degradedSecretOwners:status.degradedSecretOwners,
+   healthOk:health?.ok, statusSha256:createHash('sha256').update(JSON.stringify(status)).digest('hex'),
+   healthSha256:health?createHash('sha256').update(JSON.stringify(health)).digest('hex'):null}));
+ }
+}catch{
+ process.stderr.write('current_image_gateway_probe_failed');process.exitCode=1;
+}
+'''.replace("SETTINGS", json.dumps(settings))
+    result = run([str(node), "--input-type=module", "-e", script], env)
+    value = json.loads(result.stdout)
+    require(isinstance(value, dict), "current_runtime_probe_shape_invalid")
+    return value
 
 
 def verify_prepared_adoption(home: Path, previous: str, receipt: dict, payload: dict,
@@ -546,23 +651,213 @@ def profile_idle(binary: Path, env: dict) -> dict:
         "activity": {"active": 0, "queued": 0, "running": 0}}
 
 
+def current_profile_idle(home: Path, binary: Path, node: Path, env: dict, runtime: dict,
+                         *, require_health: bool = True) -> dict:
+    value = current_gateway_operation(home, binary, node, env, runtime,
+                                      "inspect" if require_health else "inspect-unhealthy")
+    keys = {"rootRequests", "cronRuns", "sessionMutations", "terminalPersistence", "lifecycleWrites"}
+    active = value.get("activeWork")
+    require(isinstance(active, dict) and set(active) == keys
+        and all(type(active[key]) is int and active[key] == 0 for key in keys)
+        and type(value.get("writeCustodyCount")) is int and value["writeCustodyCount"] == 0,
+        "image_profile_idle_unproven")
+    require(value.get("runtimeVersion") == runtime["openclaw"]
+        and value.get("childRuntime", {}).get("available") is True
+        and value.get("childRuntime", {}).get("execPath") == str(node), "image_profile_live_runtime_mismatch")
+    model = value.get("modelRuntime")
+    require(isinstance(model, dict) and model.get("pendingAgents") == []
+        and isinstance(value.get("degradedPlugins"), list) and isinstance(value.get("degradedSecretOwners"), list),
+        "image_profile_runtime_degraded")
+    if require_health:
+        require(model.get("degraded") is False and value["degradedPlugins"] == []
+            and value["degradedSecretOwners"] == [], "image_profile_runtime_degraded")
+        require(value.get("healthOk") is True, "image_profile_runtime_unhealthy")
+    require(re.fullmatch(r"[a-f0-9]{64}", value.get("statusSha256", "")) is not None
+        and (not require_health or re.fullmatch(r"[a-f0-9]{64}", value.get("healthSha256", "")) is not None),
+        "image_profile_probe_digest_invalid")
+    return {"healthSha256": value.get("healthSha256"), "statusSha256": value["statusSha256"],
+        "activity": {**active, "writeCustody": 0}}
+
+
+def replace_private_cas(path: Path, before: bytes, replacement: bytes, label: str) -> None:
+    require(private_file(path) == before, f"{label}_cas_changed")
+    if replacement == before:
+        return
+    temporary = path.parent / f".{path.name}.{label}-{os.getpid()}"
+    create_file(temporary, replacement)
+    require(private_file(path) == before, f"{label}_cas_changed")
+    os.replace(temporary, path)
+    require(private_file(path) == replacement, f"{label}_readback_failed")
+
+
+def update_runtime_evidence(before: dict, after: dict) -> None:
+    require({key: value for key, value in before.items() if key != "configSha256"}
+        == {key: value for key, value in after.items() if key != "configSha256"},
+        "image_profile_runtime_binding_changed")
+
+
+def plugin_payload_paths(state: Path, workspace: Path) -> dict[str, Path]:
+    return {"openclaw.json": state / "openclaw.json", "AGENTS.md": workspace / "AGENTS.md",
+            "IDENTITY.md": workspace / "IDENTITY.md"}
+
+
+def restore_plugin_update(args, home: Path, binary: Path, node: Path, env: dict,
+                          receipt_path: Path, receipt: dict, runtime: dict | None, node_version: str) -> int:
+    require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
+        and receipt.get("feishuEnabled") is False, "plugin_restore_receipt_identity_invalid")
+    require(receipt.get("currentState") in {"PLUGIN_UPDATE_PREPARED", "PLUGIN_UPDATE_NEEDS_INSPECTION",
+            "PLUGIN_RESTORE_NEEDS_INSPECTION"}, "plugin_restore_requires_owned_incomplete_update")
+    plan = receipt.get("pluginUpdatePlan")
+    require(isinstance(plan, dict) and plan.get("schema") == "aiworker-image-plugin-update/v1"
+        and plan.get("targetSourceCommit") == args.source_commit
+        and plan.get("targetPluginRoot") == str(args.plugin_root), "plugin_restore_plan_mismatch")
+    backup = safe_path(Path(plan["recoveryBackup"]), file=False)
+    require(backup.parent == home / "ai-worker/backups/openclaw-image-studio", "plugin_restore_backup_path_invalid")
+    raw_manifest = private_file(backup / "manifest.json")
+    manifest = json.loads(raw_manifest)
+    names = {"openclaw.json", "AGENTS.md", "IDENTITY.md", "install-receipt.json"}
+    require(manifest.get("schema") == "aiworker-image-studio-recovery/v1" and set(manifest.get("files", {})) == names
+        and bounded_files(backup) == {**manifest["files"], "manifest.json": sha(raw_manifest)},
+        "plugin_restore_backup_integrity_failed")
+    baseline = json.loads(private_file(backup / "install-receipt.json"))
+    require(baseline.get("schema") == SCHEMA and baseline.get("profile") == PROFILE
+        and baseline.get("currentState") == "SERVICE_HEALTHY_FEISHU_DISABLED"
+        and baseline.get("feishuEnabled") is False and baseline.get("runtime") == {
+            "openclaw": args.expected_openclaw_version, "node": node_version}, "plugin_restore_baseline_invalid")
+    state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
+    paths = plugin_payload_paths(state, workspace)
+    restored = {name: private_file(backup / name) for name in paths}
+    require({name: sha(raw) for name, raw in restored.items()} == baseline.get("payloadSha256")
+        == plan.get("beforePayloadSha256"), "plugin_restore_baseline_payload_mismatch")
+    current = {name: private_file(path) for name, path in paths.items()}
+    require(all(sha(raw) in {plan["beforePayloadSha256"][name], plan["targetPayloadSha256"][name]}
+        for name, raw in current.items()), "plugin_restore_external_payload_drift")
+    old_config = json.loads(restored["openclaw.json"])
+    old_plugin = Path(old_config["plugins"]["load"]["paths"][0])
+    old_artifact = plugin_artifact(home, safe_path(old_plugin, file=False))
+    require(old_artifact == plan["previousPluginArtifact"], "plugin_restore_previous_artifact_drift")
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    require(verify_installed_service(plist, state, current["openclaw.json"]) == plan["serviceEvidence"],
+            "plugin_restore_service_drift")
+    print(json.dumps({"currentState": "PLUGIN_RESTORE_READY", "profile": PROFILE,
+                      "restorePluginSourceCommit": old_artifact["sourceCommit"]}))
+    if args.dry_run:
+        return 0
+    # This is the same install lock and recovery object, not a second updater.
+    with installation_lock(receipt_path.parent.parent / ".openclaw-image-studio-install.lock"):
+        require(private_file(receipt_path) == encoded(receipt)
+            and all(private_file(paths[name]) == raw for name, raw in current.items()), "plugin_restore_cas_changed")
+        require(verify_installed_service(plist, state, current["openclaw.json"]) == plan["serviceEvidence"],
+                "plugin_restore_service_drift")
+        require(bounded_files(backup) == {**manifest["files"], "manifest.json": sha(raw_manifest)}
+            and plugin_artifact(home, old_plugin) == old_artifact, "plugin_restore_recovery_changed")
+        if runtime is not None:
+            fresh_node, fresh_runtime = current_managed_runtime(home, current["openclaw.json"], plist, binary,
+                args.expected_openclaw_version, sha(current["openclaw.json"]), args.expected_current_plist_sha256)
+            require(fresh_node == node, "plugin_restore_runtime_changed")
+            update_runtime_evidence(runtime, fresh_runtime)
+            require(current_gateway_operation(home, binary, node, env, runtime, "secret-check").get("secretReady") is True,
+                    "plugin_restore_secret_unavailable")
+            try:
+                current_profile_idle(home, binary, node, env, runtime, require_health=False)
+            except InstallError as error:
+                require(str(error) == "component_command_failed", "plugin_restore_idle_or_identity_unproven")
+        else:
+            token = keychain_token(home, create=False)
+            require(token is not None, "gateway_secret_missing")
+            try:
+                profile_idle(binary, dict(env, OPENCLAW_GATEWAY_TOKEN=token))
+            except InstallError as error:
+                require(str(error) in {"component_command_failed", "image_profile_runtime_degraded"},
+                        "plugin_restore_idle_or_identity_unproven")
+        # A failed new plugin may make health unavailable. Stop only this pinned
+        # label, prove its listener gone, then restore the complete old cohort.
+        stopped = run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], env, check=False)
+        require(stopped.returncode == 0 or "Could not find service" in stopped.stderr
+            or "Could not find specified service" in stopped.stderr, "plugin_restore_stop_failed")
+        absent = run(["/bin/launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], env, check=False)
+        require(absent.returncode != 0 and ("Could not find service" in absent.stderr or "Could not find specified service" in absent.stderr)
+            and args.gateway_port not in live_ports(args.gateway_port),
+                "plugin_restore_gateway_still_active")
+        try:
+            for name in ("AGENTS.md", "IDENTITY.md", "openclaw.json"):
+                replace_private_cas(paths[name], current[name], restored[name], "plugin-restore")
+            run([str(binary), "--profile", PROFILE, "config", "validate"], env)
+            require(verify_installed_service(plist, state, restored["openclaw.json"]) == plan["serviceEvidence"],
+                    "plugin_restore_service_changed_before_start")
+            run(["/bin/launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)], env)
+            deadline = time.monotonic() + args.startup_timeout
+            while True:
+                try:
+                    health = (current_profile_idle(home, binary, node, env, runtime) if runtime is not None
+                              else profile_idle(binary, dict(env, OPENCLAW_GATEWAY_TOKEN=token)))
+                    pid = profile_process_identity(home, args.gateway_port)
+                    break
+                except (InstallError, OSError, ValueError, subprocess.SubprocessError):
+                    require(time.monotonic() < deadline, "plugin_restore_health_failed")
+                    time.sleep(1)
+            service = verify_installed_service(plist, state, restored["openclaw.json"])
+            require(service == plan["serviceEvidence"]
+                and all(private_file(paths[name]) == raw for name, raw in restored.items())
+                and plugin_artifact(home, old_plugin) == old_artifact, "plugin_restore_readback_failed")
+            completed = dict(baseline, serviceEvidence=service, healthEvidenceSha256=health["healthSha256"],
+                lastPluginRestore={"failedSourceCommit": args.source_commit, "restoredPluginSourceCommit": old_artifact["sourceCommit"],
+                    "gatewayPid": pid, "recoveryBackup": str(backup)}, errorCode=None,
+                nextAction="configure_dedicated_feishu_app_when_user_ready")
+            if runtime is not None:
+                _, observed = current_managed_runtime(home, restored["openclaw.json"], plist, binary,
+                    args.expected_openclaw_version, sha(restored["openclaw.json"]), args.expected_current_plist_sha256)
+                update_runtime_evidence(runtime, observed)
+                completed["runtimeEvidence"] = dict(observed, gatewayPid=pid,
+                    nodeVersion=baseline["runtime"]["node"], **health)
+            replace_private_cas(receipt_path, encoded(receipt), encoded(completed), "plugin-restore-receipt")
+        except (InstallError, OSError, ValueError, subprocess.SubprocessError) as error:
+            code = str(error) if isinstance(error, InstallError) else "plugin_restore_probe_or_io_failed"
+            advance_receipt(receipt_path, receipt, {"currentState": "PLUGIN_RESTORE_NEEDS_INSPECTION", "errorCode": code,
+                "nextAction": "inspect_owned_image_profile_then_retry_same_verified_restore"})
+            raise
+    print(json.dumps({"currentState": "SERVICE_HEALTHY_FEISHU_DISABLED", "profile": PROFILE,
+                      "restoredPluginSourceCommit": old_artifact["sourceCommit"]}))
+    return 0
+
+
 def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path, env: dict,
                        node_version: str) -> int:
     state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
     receipt_path = home / "ai-worker/state/openclaw-image-studio/install-receipt.json"
     config_path, plist = state / "openclaw.json", home / "Library/LaunchAgents" / f"{LABEL}.plist"
     receipt = json.loads(private_file(receipt_path))
+    runtime = getattr(args, "current_runtime_evidence", None)
+    if args.restore_plugin_update:
+        return restore_plugin_update(args, home, binary, node, env, receipt_path, receipt, runtime, node_version)
     require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
         and receipt.get("currentState") == "SERVICE_HEALTHY_FEISHU_DISABLED" and receipt.get("feishuEnabled") is False,
         "healthy_owned_image_profile_required")
-    require(receipt.get("runtime") == {"openclaw": args.expected_openclaw_version, "node": node_version}, "image_profile_runtime_drift")
     before = {"openclaw.json": private_file(config_path), "AGENTS.md": private_file(workspace / "AGENTS.md"),
               "IDENTITY.md": private_file(workspace / "IDENTITY.md")}
-    require({name: sha(raw) for name, raw in before.items()} == receipt.get("payloadSha256"), "image_profile_payload_drift")
+    hashes = {name: sha(raw) for name, raw in before.items()}
+    if runtime is None:
+        require(receipt.get("runtime") == {"openclaw": args.expected_openclaw_version, "node": node_version}, "image_profile_runtime_drift")
+        require(hashes == receipt.get("payloadSha256"), "image_profile_payload_drift")
+    else:
+        previous_runtime = receipt.get("runtime")
+        previous_payload = receipt.get("payloadSha256")
+        require(isinstance(previous_runtime, dict) and set(previous_runtime) == {"openclaw", "node"}
+            and all(isinstance(value, str) and value for value in previous_runtime.values())
+            and isinstance(previous_payload, dict) and set(previous_payload) == set(before)
+            and all(isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+                    for value in previous_payload.values()), "image_profile_original_install_evidence_invalid")
+        require(all(hashes[name] == receipt.get("payloadSha256", {}).get(name) for name in ("AGENTS.md", "IDENTITY.md")),
+                "image_profile_workspace_drift")
     config = json.loads(before["openclaw.json"])
     require(config.get("channels") == {} and config.get("agents", {}).get("entries", {}).keys() == {PROFILE}
         and config.get("gateway", {}).get("port") == args.gateway_port, "image_profile_boundary_drift")
-    require(verify_installed_service(plist, state, before["openclaw.json"]) == receipt.get("serviceEvidence"), "image_profile_service_drift")
+    if runtime is not None:
+        token_ref = config.get("gateway", {}).get("auth", {}).get("token")
+        require(isinstance(token_ref, dict) and token_ref.get("source") == "exec", "image_profile_secretref_required")
+    service_before = verify_installed_service(plist, state, before["openclaw.json"])
+    if runtime is None:
+        require(service_before == receipt.get("serviceEvidence"), "image_profile_service_drift")
     paths = config.get("plugins", {}).get("load", {}).get("paths")
     require(isinstance(paths, list) and len(paths) == 1, "one_owned_image_plugin_required")
     old_plugin = safe_path(Path(paths[0]), file=False)
@@ -574,47 +869,76 @@ def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path,
         require(old_artifact["pluginTreeSha256"] == receipt.get("sourceEvidence", {}).get("pluginInventorySha256"),
                 "installed_plugin_source_drift")
     new_artifact = plugin_artifact(home, plugin, standalone_commit=args.source_commit)
-    source = source_identity(ROOT, plugin, args.source_commit, exclude_plugin_manifest=True)
+    source = source_identity(ROOT, plugin, args.source_commit, exclude_plugin_manifest=True,
+        extra_sources=(ROOT / "scripts/lib/openclaw-secret-reference.mjs",) if runtime is not None else ())
     pid = profile_process_identity(home, args.gateway_port)
-    token = keychain_token(home, create=False)
-    require(token is not None, "gateway_secret_missing")
-    health_env = dict(env, OPENCLAW_GATEWAY_TOKEN=token)
-    idle = profile_idle(binary, health_env)
-    if str(plugin) == paths[0]:
+    if runtime is None:
+        token = keychain_token(home, create=False)
+        require(token is not None, "gateway_secret_missing")
+        health_env = dict(env, OPENCLAW_GATEWAY_TOKEN=token)
+        probe = lambda: profile_idle(binary, health_env)
+    else:
+        probe = lambda: current_profile_idle(home, binary, node, env, runtime)
+    idle = probe()
+    if str(plugin) == paths[0] and not args.update_workspace_instructions:
         require(recorded_old == new_artifact and receipt.get("pluginSourceEvidence") == source, "plugin_update_source_drift")
+        require(hashes == receipt.get("payloadSha256") and receipt.get("runtime") == {
+            "openclaw": args.expected_openclaw_version, "node": node_version}, "runtime_adoption_requires_payload_update")
         print(json.dumps({"currentState": "UNCHANGED_HEALTHY_FEISHU_DISABLED", "profile": PROFILE}))
         return 0
-    config["plugins"]["load"]["paths"] = [str(plugin)]
-    replacement = encoded(config)
-    original = json.loads(before["openclaw.json"])
-    config["plugins"]["load"]["paths"] = original["plugins"]["load"]["paths"]
-    require(config == original, "plugin_update_changes_outside_load_path")
+    replacement_config = copy.deepcopy(config)
+    replacement_config["plugins"]["load"]["paths"] = [str(plugin)]
+    semantic_check = copy.deepcopy(replacement_config)
+    semantic_check["plugins"]["load"]["paths"] = paths
+    require(semantic_check == config, "plugin_update_changes_outside_load_path")
+    target = {**before, "openclaw.json": encoded(replacement_config)}
+    if args.update_workspace_instructions:
+        for name in ("AGENTS.md", "IDENTITY.md"):
+            target[name] = owned_public_file(ROOT / "ops/openclaw-image-studio" / name)
+    target_hashes = {name: sha(raw) for name, raw in target.items()}
     print(json.dumps({"currentState": "PLUGIN_UPDATE_READY", "profile": PROFILE, "gatewayPort": args.gateway_port,
-        "pluginSourceCommit": args.source_commit, "pluginTreeSha256": new_artifact["pluginTreeSha256"], "feishuEnabled": False}))
+        "pluginSourceCommit": args.source_commit, "pluginTreeSha256": new_artifact["pluginTreeSha256"], "feishuEnabled": False,
+        "adoptCurrentRuntime": runtime is not None, "workspaceInstructionsUpdated": args.update_workspace_instructions}))
     if args.dry_run:
         return 0
     with installation_lock(receipt_path.parent.parent / ".openclaw-image-studio-install.lock"):
-        require(private_file(receipt_path) == encoded(receipt) and private_file(config_path) == before["openclaw.json"],
-                "plugin_update_cas_changed")
+        require(private_file(receipt_path) == encoded(receipt)
+            and all(private_file(plugin_payload_paths(state, workspace)[name]) == raw for name, raw in before.items()),
+            "plugin_update_cas_changed")
         require(profile_process_identity(home, args.gateway_port) == pid, "plugin_update_gateway_pid_changed")
-        profile_idle(binary, health_env)
+        probe()
         require(plugin_artifact(home, old_plugin) == old_artifact
             and plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact,
             "plugin_update_artifact_changed")
-        # Reuse the verified profile recovery object (config/workspace/receipt)
-        # without adopting another install commit or writing unchanged workspace.
+        if runtime is not None:
+            fresh_node, fresh = current_managed_runtime(home, before["openclaw.json"], plist, binary,
+                args.expected_openclaw_version, args.expected_current_config_sha256, args.expected_current_plist_sha256)
+            require(fresh_node == node, "image_profile_runtime_binding_changed")
+            update_runtime_evidence(runtime, fresh)
+            # Preserve the installation-era evidence and explicitly adopt this
+            # profile's live binding before taking a consistent recovery cohort.
+            receipt = advance_receipt(receipt_path, receipt, {
+                "originalInstallRuntime": receipt.get("originalInstallRuntime", receipt.get("runtime")),
+                "originalInstallPayloadSha256": receipt.get("originalInstallPayloadSha256", receipt.get("payloadSha256")),
+                "originalInstallServiceEvidence": receipt.get("originalInstallServiceEvidence", receipt.get("serviceEvidence")),
+                "preRuntimeAdoptionReceiptSha256": receipt.get("preRuntimeAdoptionReceiptSha256", sha(encoded(receipt))),
+                "runtime": {"openclaw": args.expected_openclaw_version, "node": node_version},
+                "runtimeEvidence": dict(runtime, nodeVersion=node_version, gatewayPid=pid, **idle),
+                "payloadSha256": hashes, "serviceEvidence": service_before})
         backup = verified_profile_backup(home, {**before, "install-receipt.json": encoded(receipt)})
-        temporary = config_path.parent / f".openclaw.plugin-update-{os.getpid()}.json"
-        create_file(temporary, replacement)
-        require(private_file(config_path) == before["openclaw.json"], "plugin_update_config_cas_changed")
-        os.replace(temporary, config_path)
-        require(private_file(config_path) == replacement, "plugin_update_config_readback_failed")
+        plan = {"schema": "aiworker-image-plugin-update/v1", "targetSourceCommit": args.source_commit,
+            "targetPluginRoot": str(plugin), "beforePayloadSha256": hashes, "targetPayloadSha256": target_hashes,
+            "previousPluginArtifact": old_artifact, "serviceEvidence": service_before, "recoveryBackup": str(backup)}
+        receipt = advance_receipt(receipt_path, receipt, {"currentState": "PLUGIN_UPDATE_PREPARED", "pluginUpdatePlan": plan,
+            "recoveryBackup": str(backup), "errorCode": None, "nextAction": "finish_owned_plugin_update_or_restore_verified_cohort"})
         try:
+            for name in ("AGENTS.md", "IDENTITY.md", "openclaw.json"):
+                replace_private_cas(plugin_payload_paths(state, workspace)[name], before[name], target[name], "plugin-update")
             run([str(binary), "--profile", PROFILE, "config", "validate"], env)
             try:
                 after_validate_pid = profile_process_identity(home, args.gateway_port)
             except InstallError:
-                after_validate_pid = None  # Official config watcher may be restarting.
+                after_validate_pid = None
             for _ in range(3):
                 if after_validate_pid != pid:
                     break
@@ -625,34 +949,47 @@ def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path,
                     after_validate_pid = None
             restart_method = "official_config_watcher"
             if after_validate_pid == pid:
-                profile_idle(binary, health_env)
-                run([str(binary), "--profile", PROFILE, "gateway", "restart", "--json"], env)
-                restart_method = "official_gateway_restart"
+                probe()
+                if runtime is None:
+                    run([str(binary), "--profile", PROFILE, "gateway", "restart", "--json"], env)
+                    restart_method = "official_gateway_restart"
+                else:
+                    current_gateway_operation(home, binary, node, env, runtime, "restart")
+                    restart_method = "official_gateway_restart_with_shared_secretref_adapter"
             deadline = time.monotonic() + args.startup_timeout
             while True:
                 try:
-                    health = profile_idle(binary, health_env)
+                    health = probe()
                     new_pid = profile_process_identity(home, args.gateway_port)
                     require(new_pid != pid, "plugin_update_fresh_restart_unproven")
                     break
                 except (InstallError, OSError, ValueError, subprocess.SubprocessError):
                     require(time.monotonic() < deadline, "plugin_update_health_failed")
                     time.sleep(1)
-            service = verify_installed_service(plist, state, replacement)
+            service = verify_installed_service(plist, state, target["openclaw.json"])
             require(plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact
-                and private_file(config_path) == replacement, "plugin_update_postrestart_drift")
-            require(all(private_file(workspace / name) == before[name] for name in ("AGENTS.md", "IDENTITY.md")), "plugin_update_workspace_drift")
-            receipt = advance_receipt(receipt_path, receipt, {"originalInstallSourceCommit": receipt.get("originalInstallSourceCommit", receipt["sourceCommit"]),
+                and all(private_file(plugin_payload_paths(state, workspace)[name]) == raw for name, raw in target.items()),
+                "plugin_update_postrestart_drift")
+            changes = {"currentState": "SERVICE_HEALTHY_FEISHU_DISABLED",
+                "originalInstallSourceCommit": receipt.get("originalInstallSourceCommit", receipt["sourceCommit"]),
                 "pluginSourceCommit": args.source_commit, "pluginSourceEvidence": source, "pluginArtifact": new_artifact,
-                "payloadSha256": {**receipt["payloadSha256"], "openclaw.json": sha(replacement)}, "serviceEvidence": service,
+                "payloadSha256": target_hashes, "serviceEvidence": service,
                 "healthEvidenceSha256": health["healthSha256"], "recoveryBackup": str(backup), "errorCode": None,
                 "pluginUpdateEvidence": {"previousGatewayPid": pid, "gatewayPid": new_pid, "restartMethod": restart_method,
-                    "statusSha256": health["statusSha256"]},
-                "nextAction": "configure_dedicated_feishu_app_when_user_ready"})
+                    "statusSha256": health["statusSha256"], "workspaceInstructionsUpdated": args.update_workspace_instructions},
+                "nextAction": "configure_dedicated_feishu_app_when_user_ready"}
+            if args.update_workspace_instructions:
+                changes["workspaceSourceCommit"] = args.source_commit
+            if runtime is not None:
+                _, observed = current_managed_runtime(home, target["openclaw.json"], plist, binary,
+                    args.expected_openclaw_version, sha(target["openclaw.json"]), args.expected_current_plist_sha256)
+                update_runtime_evidence(runtime, observed)
+                changes["runtimeEvidence"] = dict(observed, nodeVersion=node_version, gatewayPid=new_pid, **health)
+            receipt = advance_receipt(receipt_path, receipt, changes)
         except (InstallError, OSError, ValueError, subprocess.SubprocessError) as error:
             code = str(error) if isinstance(error, InstallError) else "plugin_update_probe_or_io_failed"
             advance_receipt(receipt_path, receipt, {"currentState": "PLUGIN_UPDATE_NEEDS_INSPECTION", "errorCode": code,
-                "recoveryBackup": str(backup), "nextAction": "inspect_only_image_studio_update_and_verified_recovery"})
+                "recoveryBackup": str(backup), "nextAction": "inspect_owned_update_or_use_explicit_restore_plugin_update"})
             raise
     print(json.dumps({"currentState": receipt["currentState"], "profile": PROFILE, "pluginSourceCommit": args.source_commit,
         "gatewayPid": new_pid, "feishuEnabled": False}))
@@ -667,6 +1004,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--resume", action="store_true", help="Continue one matching, owned incomplete installation.")
     parser.add_argument("--adopt-prepared", action="store_true", help="Move a known inactive prepared profile to identical new plugin source.")
     parser.add_argument("--update-plugin-only", action="store_true", help="Update only one owned healthy image profile's immutable image plugin.")
+    parser.add_argument("--adopt-current-runtime", action="store_true",
+                        help="Explicitly verify and adopt the image profile's already-running managed runtime.")
+    parser.add_argument("--expected-current-config-sha256")
+    parser.add_argument("--expected-current-plist-sha256")
+    parser.add_argument("--update-workspace-instructions", action="store_true",
+                        help="Update AGENTS/IDENTITY from this same canonical source commit with the plugin.")
+    parser.add_argument("--restore-plugin-update", action="store_true",
+                        help="Restore one owned incomplete plugin update's complete verified recovery cohort.")
     parser.add_argument("--previous-source-commit")
     parser.add_argument("--gateway-port", type=int, default=19289)
     parser.add_argument("--image-endpoint", default="http://127.0.0.1:18095")
@@ -679,6 +1024,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact-sha256", help="Expected SHA-256 supplied by the verified release controller.")
     parser.add_argument("--startup-timeout", type=int, default=90)
     args = parser.parse_args(argv)
+    require(not any((args.adopt_current_runtime, args.update_workspace_instructions, args.restore_plugin_update,
+                     args.expected_current_config_sha256, args.expected_current_plist_sha256))
+            or args.update_plugin_only, "plugin_runtime_options_require_plugin_update")
+    require(not args.update_workspace_instructions or not args.restore_plugin_update, "plugin_restore_workspace_options_invalid")
+    require(bool(args.expected_current_config_sha256) == args.adopt_current_runtime
+        and bool(args.expected_current_plist_sha256) == args.adopt_current_runtime,
+        "current_runtime_fingerprints_required")
+    for fingerprint in (args.expected_current_config_sha256, args.expected_current_plist_sha256):
+        require(fingerprint is None or re.fullmatch(r"[a-f0-9]{64}", fingerprint) is not None,
+                "current_runtime_fingerprint_invalid")
     require(not args.update_plugin_only or not any((args.resume, args.adopt_prepared, args.previous_source_commit,
         args.artifact_manifest, args.artifact_sha256, args.model_provider_file)), "plugin_update_mode_options_invalid")
     require(args.update_plugin_only or args.model_provider_file is not None, "model_provider_file_required")
@@ -692,15 +1047,21 @@ def main(argv: list[str] | None = None) -> int:
     require(platform.system() == "Darwin", "macos_required")
     require(re.fullmatch(r"[a-f0-9]{40}", args.source_commit) is not None, "source_commit_invalid")
     require(10 <= args.startup_timeout <= 3600, "startup_timeout_invalid")
-    plugin = safe_path(args.plugin_root, file=False)
+    plugin = safe_path(args.plugin_root, file=None if args.restore_plugin_update else False)
     require(plugin.is_relative_to(home / "ai-worker/services"), "managed_plugin_path_required")
-    manifest = json.loads((plugin / "openclaw.plugin.json").read_bytes())
-    require(manifest.get("id") == "aiworker-image-command", "plugin_identity_invalid")
+    if not args.restore_plugin_update:
+        manifest = json.loads((plugin / "openclaw.plugin.json").read_bytes())
+        require(manifest.get("id") == "aiworker-image-command", "plugin_identity_invalid")
     if not args.update_plugin_only:
         source = source_identity(ROOT, plugin, args.source_commit, args.artifact_manifest, args.artifact_sha256)
         model = provider_config(json.loads(private_file(args.model_provider_file)))
         config = profile_config(home, args.gateway_port, plugin, args.image_endpoint, model)
     binary, node = home / "ai-worker/bin/openclaw", home / "ai-worker/node/current/bin/node"
+    if args.adopt_current_runtime:
+        node, args.current_runtime_evidence = current_managed_runtime(home,
+            private_file(home / f".openclaw-{PROFILE}/openclaw.json"),
+            home / "Library/LaunchAgents" / f"{LABEL}.plist", binary,
+            args.expected_openclaw_version, args.expected_current_config_sha256, args.expected_current_plist_sha256)
     require(binary.is_file() and os.access(binary, os.X_OK) and node.is_file() and os.access(node, os.X_OK),
             "managed_openclaw_runtime_missing")
     require(binary.resolve().is_relative_to(home / "ai-worker") and node.resolve().is_relative_to(home / "ai-worker"),
@@ -713,6 +1074,10 @@ def main(argv: list[str] | None = None) -> int:
     require(re.search(rf"\b{re.escape(args.expected_openclaw_version)}\b", version) is not None,
             "openclaw_version_mismatch")
     node_version = run([str(node), "--version"], env).stdout.strip()
+    if args.adopt_current_runtime:
+        named_node_version = re.fullmatch(r"node-v([0-9]+\.[0-9]+\.[0-9]+)-darwin-(arm64|x64)", node.parent.parent.name)
+        require(named_node_version is not None and node_version == "v" + named_node_version.group(1),
+                "current_runtime_node_version_mismatch")
     if args.update_plugin_only:
         return update_plugin_only(args, home, plugin, binary, node, env, node_version)
     state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE

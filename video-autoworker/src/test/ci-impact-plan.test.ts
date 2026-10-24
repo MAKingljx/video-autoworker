@@ -255,8 +255,8 @@ describe('CI impact plan', () => {
 
   it.each([
     ['root CI', '.github/workflows/ci.yml', 'name: CI\n', [], true, false, []],
-    ['runtime skill', 'openclaw-skills/example/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow']],
-    ['skill inside docs', 'docs/examples/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow']],
+    ['runtime skill', 'openclaw-skills/example/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow', 'image-command']],
+    ['skill inside docs', 'docs/examples/SKILL.md', '# Runtime skill\n', [], false, false, ['video-command', 'director-brain', 'task-flow', 'image-command']],
     ['executable inside docs', 'docs/examples/check.ts', 'export {}\n', ['docs/examples/check.ts'], true, false, []],
     ['build config', 'package.json', '{"name":"video-autoworker","version":"2.0.0"}\n', [], true, false, []],
     ['unknown product path', 'config/unknown.txt', 'unknown\n', [], true, false, []],
@@ -309,7 +309,7 @@ describe('CI impact plan', () => {
       '--base', entry.base, '--head', head, '--force-full',
     ]).json).toMatchObject({
       mode: 'full', reasons: ['force_full'], rootPartitions: partitions,
-      testFiles: [], pluginSuites: ['video-command', 'director-brain', 'task-flow'],
+      testFiles: [], pluginSuites: ['video-command', 'director-brain', 'task-flow', 'image-command'],
     })
   })
 

@@ -1,15 +1,20 @@
 """Real isolated HTTP/job/child-process checks; no model or production writes."""
+import base64
+import fcntl
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sqlite3
 import struct
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 from http.server import ThreadingHTTPServer
@@ -17,12 +22,13 @@ from http.server import ThreadingHTTPServer
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
 from image_generation.service import Configuration, ImageJobs, canonical
+from PIL import Image
 
 spec = importlib.util.spec_from_file_location('image_http_adapter', ROOT / 'scripts/aiworker-image-service.py')
 http_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(http_module)
 
-FAKE = '''import argparse, hashlib, json, pathlib, struct, time
+FAKE = '''import argparse, hashlib, json, pathlib, struct, time, subprocess, sys
 from PIL import Image
 REPOSITORY='Qwen/Qwen-Image-Edit-2511'
 REVISION='6f3ccc0b56e431dc6a0c2b2039706d7d26f22cb9'
@@ -34,6 +40,16 @@ if __name__ == '__main__':
  prompt=(output.parent/'prompt.txt').read_text() if (output.parent/'prompt.txt').exists() else ''
  if prompt=='slow': time.sleep(60)
  if prompt=='fail': raise SystemExit(7)
+ if prompt.startswith('orphan-'):
+  child_code="import fcntl,os,pathlib,time,sys;root=pathlib.Path(sys.argv[1]);f=(root/'fixture-model.lock').open('a');fcntl.flock(f,fcntl.LOCK_EX);(root/'orphan.pid').write_text(str(os.getpid()));(root/'owned-ready').write_text('ready');time.sleep(60)"
+  subprocess.Popen([sys.executable,'-c',child_code,str(output.parent)])
+  deadline=time.monotonic()+5
+  while not (output.parent/'owned-ready').exists():
+   if time.monotonic()>deadline:raise RuntimeError('fixture_child_start_failed')
+   time.sleep(.01)
+  if prompt=='orphan-fail':raise SystemExit(9)
+  if prompt=='orphan-invalid':
+   output.write_bytes(b'invalid fixture output');raise SystemExit(0)
  Image.new('RGB',(args.width,args.height),'navy').save(output,format='PNG')
  data=output.read_bytes()
  result={'currentState':'GENERATED_PENDING_REVIEW','repository':REPOSITORY,'revision':REVISION,'output':str(output),'outputSha256':hashlib.sha256(data).hexdigest(),'outputBytes':len(data),'postProcessing':False,'width':args.width,'height':args.height}
@@ -182,6 +198,250 @@ class ImageJobTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def protected_request(self):
+        Image.new('RGB', (1920, 1080), 'navy').save(self.reference)
+        return {'scope': self.request['scope'], 'requestKey': self.request['requestKey'],
+                'images': [str(self.reference)], 'protected': {
+                    'schema': 'aiworker-protected-cover/v1',
+                    'eraseRegions': [{'x': 100, 'y': 100, 'width': 24, 'height': 24}]}}
+
+    def protected_candidate(self, accepted):
+        """A synthetic native patch tests acceptance, never text generation."""
+        from image_generation.protected_worker import build_protected
+        fixture_spec = importlib.util.spec_from_file_location('protected_job_fixtures', ROOT / 'tests/test_protected_cover.py')
+        fixtures = importlib.util.module_from_spec(fixture_spec)
+        fixture_spec.loader.exec_module(fixtures)
+        folder = self.jobs.folder(accepted['jobId'])
+        output = folder / 'image.png'
+        runner = fixtures.FixtureRunner()
+        runner.repository, runner.revision = self.jobs.backend.REPOSITORY, self.jobs.backend.REVISION
+        receipt = build_protected(folder / 'input.json', folder / 'reference-0.png', output, runner)
+        return receipt, output
+
+    def test_protected_source_dimensions_and_single_queue_idempotency(self):
+        request = self.protected_request()
+        first = self.jobs.submit(request)
+        self.assertEqual(self.jobs.submit(request)['jobId'], first['jobId'])
+        self.assertEqual(first['mode'], 'protected')
+        payload = json.loads(self.jobs.row(first['jobId'], request['scope'])['payload_json'])
+        self.assertEqual((payload['width'], payload['height']), (1920, 1080))
+        self.assertEqual(len(payload['references']), 1)
+        self.assertIn('protectedSourceSha256', payload['execution'])
+        self.assertTrue((self.jobs.folder(first['jobId']) / 'input.json').is_file())
+        self.assertFalse((self.jobs.folder(first['jobId']) / 'prompt.txt').exists())
+        with self.assertRaisesRegex(ValueError, 'native_dimensions_required'):
+            self.jobs.submit({**request, 'width': 1280})
+        with self.assertRaisesRegex(ValueError, 'prompt_or_design_required'):
+            self.jobs.submit({**request, 'prompt': 'ambiguous'})
+
+    def test_invalid_protected_region_fails_before_creating_job(self):
+        request = self.protected_request()
+        request['protected']['eraseRegions'][0]['x'] = 1920
+        with self.assertRaisesRegex(ValueError, 'protected_region'):
+            self.jobs.submit(request)
+        self.assertFalse(list(self.config.output_root.iterdir()))
+        self.assertEqual(self.jobs.list(request['scope'])['jobs'], [])
+
+    def test_protected_dispatch_uses_same_worker_and_independent_pixel_verification(self):
+        request = self.protected_request()
+        accepted = self.jobs.submit(request)
+        receipt, output = self.protected_candidate(accepted)
+        class Finished:
+            returncode = 0
+            def poll(self): return 0
+            def wait(self, timeout=None): return 0
+        with patch('image_generation.service.subprocess.Popen', return_value=Finished()) as launch, \
+             patch.object(self.jobs, 'claim_process_group', return_value=None), \
+             patch.object(self.jobs, 'cleanup_process_group'), \
+             patch.object(self.jobs, 'result', wraps=self.jobs.result) as accepted_result:
+            self.jobs.run_one()
+        self.assertEqual(accepted_result.call_args.kwargs, {'verify_current_composition': True})
+        command = launch.call_args.args[0]
+        self.assertIn('image_generation.protected_worker', command)
+        self.assertIn('--spec-file', command)
+        self.assertNotIn('--width', command)
+        self.assertNotIn('--height', command)
+        self.assertEqual(launch.call_args.kwargs['env']['PYTHONPATH'], str(ROOT / 'src'))
+        self.assertEqual(launch.call_args.kwargs['env']['AIWORKER_IMAGE_OCR_CACHE'], str(self.config.state_root / 'vision-ocr-cache'))
+        result = self.jobs.get(accepted['jobId'], request['scope'])
+        self.assertEqual(result['currentState'], 'GENERATED_PENDING_REVIEW')
+        self.assertEqual(result['photoProtection']['outsideChangedPixels'], 0)
+        self.assertTrue(result['textValidation']['matched'])
+        self.assertEqual(hashlib.sha256(self.jobs.image(accepted['jobId'], request['scope'])).hexdigest(), receipt['outputSha256'])
+        # A forged output digest cannot hide mutation outside edit regions.
+        with Image.open(output) as image:
+            altered = image.copy()
+        altered.putpixel((10, 10), (255, 0, 0))
+        altered.save(output)
+        data = output.read_bytes()
+        receipt.update(outputSha256=hashlib.sha256(data).hexdigest(), outputBytes=len(data))
+        output.with_suffix('.receipt.json').write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'protected_photo_pixels_changed'):
+            self.jobs.image(accepted['jobId'], request['scope'])
+
+    def test_sealed_protected_images_survive_renderer_changes_but_not_receipt_tampering(self):
+        request = self.protected_request()
+        accepted = self.jobs.submit(request)
+        receipt, output = self.protected_candidate(accepted)
+        with self.jobs.db() as db:
+            db.execute("UPDATE image_jobs SET state='RUNNING' WHERE job_id=?", (accepted['jobId'],))
+        self.jobs.recover()
+        self.assertEqual(self.jobs.get(accepted['jobId'], request['scope'])['currentState'], 'GENERATED_PENDING_REVIEW')
+        with patch('image_generation.protected_cover.erasure_prompt', side_effect=AssertionError('new renderer must not run')):
+            self.assertEqual(self.jobs.image(accepted['jobId'], request['scope']), output.read_bytes())
+            self.assertEqual(self.jobs.inspection(accepted['jobId'], request['scope'])['jobId'], accepted['jobId'])
+        # Even an irrelevant new field violates the sealed database receipt.
+        receipt['unsealedExtra'] = True
+        output.with_suffix('.receipt.json').write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(ValueError, 'receipt_changed'):
+            self.jobs.image(accepted['jobId'], request['scope'])
+        with self.assertRaisesRegex(ValueError, 'receipt_changed'):
+            self.jobs.inspection(accepted['jobId'], request['scope'])
+
+    def test_unsealed_protected_recovery_cannot_bypass_current_renderer_verification(self):
+        request = self.protected_request()
+        accepted = self.jobs.submit(request)
+        self.protected_candidate(accepted)
+        with self.jobs.db() as db:
+            db.execute("UPDATE image_jobs SET state='RUNNING' WHERE job_id=?", (accepted['jobId'],))
+        with patch.object(self.jobs, 'result', wraps=self.jobs.result) as recovered_result:
+            self.jobs.recover()
+        self.assertEqual(recovered_result.call_args.kwargs, {'verify_current_composition': True})
+        self.assertEqual(self.jobs.get(accepted['jobId'], request['scope'])['currentState'], 'GENERATED_PENDING_REVIEW')
+
+    def test_unsealed_protected_recovery_after_renderer_change_requires_reconciliation(self):
+        request = self.protected_request()
+        accepted = self.jobs.submit(request)
+        self.protected_candidate(accepted)
+        with self.jobs.db() as db:
+            db.execute("UPDATE image_jobs SET state='RUNNING' WHERE job_id=?", (accepted['jobId'],))
+        with patch('image_generation.protected_cover.implementation_digest', return_value='f' * 64), \
+             patch.object(self.jobs, 'result', wraps=self.jobs.result) as recovered_result:
+            self.jobs.recover()
+        recovered_result.assert_not_called()
+        result = self.jobs.get(accepted['jobId'], request['scope'])
+        self.assertEqual((result['currentState'], result['errorCode']), ('RECONCILE_REQUIRED', 'image_job_runtime_changed'))
+
+    def test_protected_implementation_drift_does_not_start_model(self):
+        request = self.protected_request()
+        accepted = self.jobs.submit(request)
+        with patch('image_generation.protected_cover.implementation_digest', return_value='f' * 64), \
+             patch('image_generation.service.subprocess.Popen') as launch:
+            self.jobs.run_one()
+        launch.assert_not_called()
+        self.assertEqual(self.jobs.get(accepted['jobId'], request['scope'])['currentState'], 'RECONCILE_REQUIRED')
+
+    def test_owned_inspection_is_bounded_hashed_read_only_and_scope_isolated(self):
+        Image.new('RGB', (1920, 1080), 'olive').save(self.reference)
+        accepted = self.jobs.submit(self.request)
+        self.jobs.run_one()
+        before = self.jobs.row(accepted['jobId'], self.request['scope'])['result_json']
+        result = self.jobs.inspection(accepted['jobId'], self.request['scope'])
+        self.assertEqual(result['jobId'], accepted['jobId'])
+        self.assertEqual([image['role'] for image in result['images']], ['source', 'result'])
+        self.assertLessEqual(len(canonical(result).encode()), 6 * 1024 * 1024)
+        for image in result['images']:
+            data = base64.b64decode(image['data'], validate=True)
+            self.assertEqual(hashlib.sha256(data).hexdigest(), image['sha256'])
+            self.assertLessEqual(len(data), 2 * 1024 * 1024)
+            self.assertLessEqual(max(image['width'], image['height']), 1024)
+            self.assertEqual(struct.unpack('>II', data[16:24]), (image['width'], image['height']))
+        self.assertEqual(self.jobs.row(accepted['jobId'], self.request['scope'])['result_json'], before)
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'inspection.png').exists())
+        with self.assertRaisesRegex(ValueError, 'job_not_found'):
+            self.jobs.inspection(accepted['jobId'], 'c' * 64)
+        self.reference.write_bytes(b'original external file changed')
+        self.assertEqual(self.jobs.inspection(accepted['jobId'], self.request['scope'])['images'], result['images'])
+
+    def test_inspection_http_and_unready_result_fail_without_exposing_other_scope(self):
+        Image.new('RGB', (1280, 720), 'olive').save(self.reference)
+        accepted = self.jobs.submit(self.request)
+        with self.assertRaisesRegex(ValueError, 'not_ready'):
+            self.jobs.inspection(accepted['jobId'], self.request['scope'])
+        self.jobs.run_one()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), http_module.handler_type(self.jobs))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = 'http://127.0.0.1:' + str(server.server_port) + '/v1/jobs/' + accepted['jobId'] + '/inspection?scope='
+        direct = build_opener(ProxyHandler({})).open
+        try:
+            with direct(base + self.request['scope']) as response:
+                value = json.load(response)
+                self.assertEqual({a['role'] for a in value['images']}, {'source', 'result'})
+            with self.assertRaises(HTTPError) as error:
+                direct(base + 'c' * 64)
+            self.assertEqual(error.exception.code, 404)
+            error.exception.close()
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
+    def test_orphaned_grandchild_is_cleaned_after_success_failure_and_verifier_exception(self):
+        other_code = '''import fcntl,pathlib,sys,time
+root=pathlib.Path(sys.argv[1]);deadline=time.monotonic()+10
+while not (root/'owned-ready').exists():
+ if time.monotonic()>deadline:raise SystemExit(3)
+ time.sleep(.01)
+with (root/'fixture-model.lock').open('a') as lock:
+ fcntl.flock(lock,fcntl.LOCK_EX)
+ (root/'other-acquired').write_text('ready')
+ time.sleep(60)
+'''
+        for index, (prompt, expected) in enumerate([
+                ('orphan-success', 'GENERATED_PENDING_REVIEW'),
+                ('orphan-fail', 'FAILED'), ('orphan-invalid', 'FAILED')]):
+            with self.subTest(prompt=prompt):
+                request = {**self.request, 'requestKey': str(index + 1) * 64, 'prompt': prompt}
+                accepted = self.jobs.submit(request)
+                folder = self.jobs.folder(accepted['jobId'])
+                env = os.environ.copy()
+                env['AIWORKER_IMAGE_JOB_OWNER'] = 'unrelated-model-caller'
+                other = subprocess.Popen([sys.executable, '-c', other_code, str(folder)],
+                                         env=env, start_new_session=True)
+                try:
+                    self.jobs.run_one()
+                    result = self.jobs.get(accepted['jobId'], request['scope'])
+                    self.assertEqual(result['currentState'], expected)
+                    child = int((folder / 'orphan.pid').read_text())
+                    deadline = time.monotonic() + 3
+                    while not (folder / 'other-acquired').exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue((folder / 'other-acquired').exists(), 'owned grandchild must release the shared model lock')
+                    self.assertIsNone(other.poll(), 'another model caller in its own group must survive')
+                    report = subprocess.run(['/bin/ps', '-p', str(child), '-o', 'stat='], capture_output=True, text=True)
+                    self.assertTrue(report.returncode != 0 or report.stdout.strip().startswith('Z'))
+                    with (folder / 'fixture-model.lock').open('a') as lock:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    if other.poll() is None:
+                        other.terminate()
+                    other.wait(timeout=5)
+
+    def test_unproven_group_never_receives_group_signal(self):
+        with patch.object(ImageJobs, 'owned_group_members', side_effect=ValueError('owner unproven')), \
+             patch('image_generation.service.os.killpg') as kill:
+            with self.assertRaises(ValueError):
+                self.jobs.cleanup_process_group({'pgid': 999999, 'uid': os.getuid(), 'nonce': 'test'})
+        kill.assert_not_called()
+        with self.assertRaisesRegex(ValueError, 'identity_invalid'):
+            self.jobs.live_group_members(os.getpgrp())
+
+    def test_process_snapshot_accepts_unrelated_negative_system_uid(self):
+        report = subprocess.CompletedProcess([], 0, '837 837 -2 S\n999999 999999 501 S\n', '')
+        with patch('image_generation.service.subprocess.run', return_value=report):
+            self.assertEqual(self.jobs.live_group_members(999999), [(999999, 501)])
+
+    def test_unproven_cleanup_cannot_be_reported_as_successful_generation(self):
+        accepted = self.jobs.submit(self.request)
+        with patch.object(self.jobs, 'cleanup_process_group', side_effect=ValueError('owner unproven')):
+            self.jobs.run_one()
+        result = self.jobs.get(accepted['jobId'], self.request['scope'])
+        self.assertEqual(result['currentState'], 'RECONCILE_REQUIRED')
+        self.assertEqual(result['errorCode'], 'image_worker_group_cleanup_unproven')
+        self.assertFalse(self.jobs.run_one())
+        with self.assertRaisesRegex(ValueError, 'not_ready'):
+            self.jobs.image(accepted['jobId'], self.request['scope'])
 
 
 if __name__ == '__main__':

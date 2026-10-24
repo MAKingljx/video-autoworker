@@ -1,22 +1,25 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, normalize } from 'node:path'
 
-import { createImageJobClient, ImageServiceError } from './image-job-client.js'
+import { createImageJobClient, ImageServiceError, normalizeImageInspection } from './image-job-client.js'
 
 export const IMAGE_COMMAND_TOOL_NAME = 'aiworker_generate_image'
 export const IMAGE_AGENT_ID = 'image-studio'
 const JOB_ID = /^[0-9a-f]{32}$/u
 const STATES = new Set(['QUEUED', 'RUNNING', 'GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED', 'CANCEL_REQUESTED', 'RECONCILE_REQUIRED'])
-const SUBMIT_KEYS = new Set(['action', 'prompt', 'design', 'images', 'width', 'height', 'steps', 'guidance', 'seed'])
+const SUBMIT_KEYS = new Set(['action', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed'])
 const TEXT_FIELDS = ['kicker', 'title', 'subtitle', 'caption']
+const RECTANGLE = { type: 'object', additionalProperties: false, required: ['x', 'y', 'width', 'height'],
+  properties: { x: { type: 'integer', minimum: 0, maximum: 8192 }, y: { type: 'integer', minimum: 0, maximum: 8192 },
+    width: { type: 'integer', minimum: 1, maximum: 8192 }, height: { type: 'integer', minimum: 1, maximum: 8192 } } }
 
 const PARAMETERS = {
   type: 'object', additionalProperties: false, required: ['action'],
   properties: {
-    action: { type: 'string', enum: ['submit', 'status', 'result', 'cancel'] },
+    action: { type: 'string', enum: ['submit', 'status', 'result', 'inspect', 'cancel'] },
     jobId: { type: 'string', pattern: '^[0-9a-f]{32}$', description: '由本工具返回的图片任务编号；status 可省略，列出本会话最近任务。' },
     prompt: { type: 'string', minLength: 1, maxLength: 8192,
-      description: '完整出图要求。中文文字也由 H1 模型生成；与 design 二选一。' },
+      description: '原生创作出图要求。与 design、protected 三选一；照片封面保真编辑优先 protected。' },
     design: {
       type: 'object', additionalProperties: false, required: ['schema', 'profile', 'text'],
       properties: {
@@ -27,6 +30,19 @@ const PARAMETERS = {
         scene: { type: 'string', maxLength: 1000 },
       },
       description: '使用已部署的封面设计方案；四组准确中文文字填写在 text 中。',
+    },
+    protected: {
+      type: 'object', additionalProperties: false, required: ['schema'],
+      properties: {
+        schema: { type: 'string', const: 'aiworker-protected-cover/v1' },
+        eraseRegions: { type: 'array', maxItems: 4, items: RECTANGLE },
+        textLayers: { type: 'array', maxItems: 4, items: {
+          type: 'object', additionalProperties: false, required: ['text', 'box'],
+          properties: { text: { type: 'string', minLength: 1, maxLength: 128 }, box: RECTANGLE,
+            style: { type: 'string', maxLength: 1000 }, align: { type: 'string', enum: ['left', 'center'] } },
+        } },
+      },
+      description: '原片保护封面：只传一张真实高清原图；坐标是源图原生像素，不能按缩略图猜。H1模型生成字形/修补素材，应用自动合成并核验保护区。至少有一项编辑；保持原尺寸，不填写外层width/height。',
     },
     images: { type: 'array', minItems: 1, maxItems: 3,
       items: { type: 'string', minLength: 1, maxLength: 4096 },
@@ -54,19 +70,56 @@ function absolutePath(value) {
     && !value.startsWith('//') && normalize(value) === value && !/[\r\n\t]/u.test(value)
 }
 
+function rectangle(value) {
+  if (!plainObject(value) || Object.keys(value).sort().join(',') !== 'height,width,x,y'
+    || ['x', 'y', 'width', 'height'].some(key => !Number.isSafeInteger(value[key])
+      || value[key] < (key === 'x' || key === 'y' ? 0 : 1) || value[key] > 8192)) return null
+  return { x: value.x, y: value.y, width: value.width, height: value.height }
+}
+
+// Only normalize the public request shape here. Source bounds, edited-area
+// budget, model stages and pixel protection remain application-owned.
+function protectedRequest(value) {
+  if (!plainObject(value) || value.schema !== 'aiworker-protected-cover/v1'
+    || Object.keys(value).some(key => !['schema', 'eraseRegions', 'textLayers'].includes(key))) return null
+  const eraseRegions = Object.hasOwn(value, 'eraseRegions') ? value.eraseRegions : []
+  const textLayers = Object.hasOwn(value, 'textLayers') ? value.textLayers : []
+  if (!Array.isArray(eraseRegions) || !Array.isArray(textLayers)
+    || eraseRegions.length > 4 || textLayers.length > 4 || eraseRegions.length + textLayers.length === 0) return null
+  const erasures = eraseRegions.map(rectangle)
+  if (erasures.some(item => item === null)) return null
+  const layers = []
+  for (const item of textLayers) {
+    if (!plainObject(item) || Object.keys(item).some(key => !['text', 'box', 'style', 'align'].includes(key))
+      || !safeString(item.text, 128) || item.text !== item.text.trim() || /[\r\n\t]/u.test(item.text)
+      || (Object.hasOwn(item, 'style') && !safeString(item.style, 1000, true))
+      || (Object.hasOwn(item, 'align') && !['left', 'center'].includes(item.align))) return null
+    const box = rectangle(item.box)
+    if (!box) return null
+    layers.push({ text: item.text, box, ...(Object.hasOwn(item, 'style') ? { style: item.style } : {}),
+      ...(Object.hasOwn(item, 'align') ? { align: item.align } : {}) })
+  }
+  return { schema: value.schema, eraseRegions: erasures, textLayers: layers }
+}
+
 export function normalizeImageRequest(params) {
-  if (!plainObject(params) || !['submit', 'status', 'result', 'cancel'].includes(params.action)) return null
+  if (!plainObject(params) || !['submit', 'status', 'result', 'inspect', 'cancel'].includes(params.action)) return null
   if (params.action !== 'submit') {
     if (params.action === 'status' && Object.keys(params).length === 1) return { action: 'status' }
     return Object.keys(params).length === 2 && typeof params.jobId === 'string' && JOB_ID.test(params.jobId)
       ? { action: params.action, jobId: params.jobId } : null
   }
   if (Object.keys(params).some(key => !SUBMIT_KEYS.has(key))) return null
-  if (Object.hasOwn(params, 'prompt') === Object.hasOwn(params, 'design')) return null
+  if (['prompt', 'design', 'protected'].filter(key => Object.hasOwn(params, key)).length !== 1) return null
   if (!Array.isArray(params.images) || params.images.length < 1 || params.images.length > 3
     || !params.images.every(absolutePath)) return null
   const request = { action: 'submit', images: [...params.images] }
-  if (Object.hasOwn(params, 'prompt')) {
+  if (Object.hasOwn(params, 'protected')) {
+    if (params.images.length !== 1 || Object.hasOwn(params, 'width') || Object.hasOwn(params, 'height')) return null
+    const plan = protectedRequest(params.protected)
+    if (!plan) return null
+    request.protected = plan
+  } else if (Object.hasOwn(params, 'prompt')) {
     if (!safeString(params.prompt, 8192)) return null
     request.prompt = params.prompt
   } else {
@@ -133,7 +186,56 @@ export function imageReceipt(data, expectedJobId) {
   for (const key of ['createdAt', 'updatedAt']) {
     if (typeof data[key] === 'string' && /^[0-9TZ:+. -]{1,64}$/u.test(data[key])) short[key] = data[key]
   }
+  if (Object.hasOwn(data, 'stage')) {
+    if (typeof data.stage !== 'string' || !/^[a-z0-9_]{1,64}$/u.test(data.stage)) throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+    short.stage = data.stage
+  }
+  if (Object.hasOwn(data, 'mode')) {
+    if (!['raw', 'protected'].includes(data.mode)) throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+    short.mode = data.mode
+  }
+  for (const key of ['width', 'height']) {
+    if (Object.hasOwn(data, key)) {
+      if (!Number.isSafeInteger(data[key]) || data[key] < 1 || data[key] > 8192) throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+      short[key] = data[key]
+    }
+  }
+  if (Object.hasOwn(data, 'postProcessing')) {
+    if (typeof data.postProcessing !== 'boolean') throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+    short.postProcessing = data.postProcessing
+  }
+  if (Object.hasOwn(data, 'photoProtection')) {
+    if (!plainObject(data.photoProtection)) throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+    short.photoProtection = {}
+    for (const key of ['outsideChangedPixels', 'protectedPixels', 'changedPixels', 'sourceWidth', 'sourceHeight']) {
+      if (Object.hasOwn(data.photoProtection, key)) {
+        const value = data.photoProtection[key]
+        if (!Number.isSafeInteger(value) || value < 0 || value > 2 ** 31 - 1) throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+        short.photoProtection[key] = value
+      }
+    }
+  }
+  if (Object.hasOwn(data, 'textValidation')) {
+    const check = data.textValidation
+    if (!plainObject(check) || typeof check.matched !== 'boolean'
+      || check.engine !== (check.expectedCount === 0 ? 'not-applicable' : 'apple-vision') || check.mode !== 'normalized_text_sequence'
+      || !Number.isSafeInteger(check.expectedCount) || check.expectedCount < 0 || check.expectedCount > 4
+      || !Number.isSafeInteger(check.observedCount) || check.observedCount < 0 || check.observedCount > 128) {
+      throw new ImageServiceError('IMAGE_RECEIPT_INVALID')
+    }
+    short.textValidation = { matched: check.matched, engine: check.engine, mode: check.mode,
+      expectedCount: check.expectedCount, observedCount: check.observedCount }
+  }
   return short
+}
+
+function generationMethod(r) {
+  if (r.mode !== 'protected') return '图片由H1本地模型生成。'
+  const protection = r.photoProtection
+  const counts = protection && Number.isSafeInteger(protection.outsideChangedPixels)
+    ? `保护区变化${protection.outsideChangedPixels}像素。` : '请核对照片保护收据。'
+  const text = r.textValidation?.expectedCount > 0 ? `文字核验${r.textValidation.matched ? '匹配' : '未匹配'}。` : ''
+  return `采用原片保护；新增字形与修补素材由H1模型生成，应用自动合成。${counts}${text}`
 }
 
 function stateText(r) {
@@ -143,7 +245,13 @@ function stateText(r) {
     RECONCILE_REQUIRED: '任务状态需要核对，请先查询，不要重复提交' }
   const progress = r.currentState === 'RUNNING' && Number.isInteger(r.completedSteps) && r.totalSteps > 0
     ? `（${r.completedSteps}/${r.totalSteps}步）` : ''
-  return `${names[r.currentState]}${progress}。任务编号：${r.jobId}。`
+  const stage = r.currentState === 'RUNNING' && r.stage
+    ? r.stage.startsWith('erase_') ? '，正在修补指定区域'
+      : r.stage.startsWith('text_layer_') ? '，正在生成字形素材'
+        : r.stage.startsWith('ocr') ? '，正在核对成品文字'
+          : r.stage === 'verify' ? '，正在核对照片保护区域' : ''
+    : ''
+  return `${names[r.currentState]}${stage}${progress}。任务编号：${r.jobId}。`
 }
 
 export function createImageCommandTool({ context, client = createImageJobClient(), saveMedia, releaseReady = true,
@@ -157,7 +265,7 @@ export function createImageCommandTool({ context, client = createImageJobClient(
   function isErrorNotice(r) { return ['FAILED', 'CANCELLED', 'RECONCILE_REQUIRED'].includes(r.currentState) }
   return {
     name: IMAGE_COMMAND_TOOL_NAME, label: 'H1 图片生成',
-    description: '调用 H1 本地图片生成服务。submit 快速受理后台任务，不能等待模型推理或反复轮询；完成后可收到原会话的系统事件提示，事件排入不代表图片已送达；status 查询真实进度，省略 jobId 列出本会话最近任务；result 读取本会话已生成候选图片并返回附件，回复时使用原样 MEDIA 引用展示图片，不公布物理路径；cancel 仅在用户明确要求取消时调用。图片与中文文字全部由本地模型生成，禁止另行叠字或后期修补。任务生成成功仍待用户检查，不能保证中文准确或声称已经采用、发布。只处理当前会话工具返回的任务编号，不读取其他会话或任意文件。是否可发送飞书图片，以当前通道配置和真实附件路由验收为准，不能把会话事件当作已送达。',
+    description: '调用H1唯一图片应用。照片封面优先protected：保留原图原生分辨率，H1模型生成字形及修补素材，应用保护原片并自动合成；原创整图用prompt/design。只有工具实际返回32位hex任务编号和受理状态才可声称已受理，不得自造编号；submit成功后立即结束回复，等待完成提醒，不反复轮询。status查实际进度；result读回原生尺寸候选附件，原样使用MEDIA引用，不公布物理路径；inspect仅对当前会话已完成任务返回源图和成品的原生image图块，供对照文字、主体、字效与清晰度。看不到图块就明确未完成视觉审核，不能依据收据冒称看图通过。cancel只在用户明确要求取消时用。不得直接运行模型、人工绘字/修图、改其他profile或创建第二队列。生成、保护区校验或OCR匹配不等于最终视觉通过，不自动采用发布。飞书送达以实际渠道和媒体路由验收为准。',
     parameters: PARAMETERS, executionMode: 'sequential',
     async execute(toolCallId, params, signal) {
       if (!releaseReady) return result('图片服务正在维护，请稍后再试。', { errorCode: 'IMAGE_SERVICE_NOT_READY' })
@@ -190,16 +298,26 @@ export function createImageCommandTool({ context, client = createImageJobClient(
         }
         const data = await client.status(request.jobId, scope, signal)
         const r = imageReceipt(data, request.jobId)
+        if (request.action === 'inspect' && r.currentState === 'GENERATED_PENDING_REVIEW') {
+          const inspection = normalizeImageInspection(await client.inspection(r.jobId, scope, signal), r.jobId)
+          const content = [{ type: 'text', text: `${generationMethod(r)}以下依次为源图和成品缩略检查图；请逐项对照，未经看图不能声明视觉通过。` }]
+          for (const image of inspection.images) {
+            content.push({ type: 'text', text: image.role === 'source' ? '源图' : '成品' })
+            content.push({ type: 'image', data: image.data, mimeType: image.mimeType })
+          }
+          return { content, details: { ...r, visualInspectionImagesAvailable: true,
+            inspectionImages: inspection.images.map(({ role, sha256, width, height }) => ({ role, sha256, width, height })) } }
+        }
         if (request.action !== 'result' || r.currentState !== 'GENERATED_PENDING_REVIEW') {
           if (isErrorNotice(r)) await acknowledgeRead(r)
           return result(stateText(r), r)
         }
         if (typeof saveMedia !== 'function') throw new ImageServiceError('IMAGE_MEDIA_UNAVAILABLE')
-        const buffer = await client.image(r.jobId, scope, data.outputSha256, signal)
+        const buffer = await client.image(r.jobId, scope, data.outputSha256, signal, { mode: r.mode ?? 'raw' })
         const media = await saveMedia(buffer)
         if (!absolutePath(media?.path)) throw new ImageServiceError('IMAGE_MEDIA_INVALID')
         await acknowledgeRead(r)
-        return result(`图片已生成，请检查中文文字与画面。\nMEDIA:${media.path}`, r)
+        return result(`图片已生成，请检查中文文字与画面。${generationMethod(r)}可调用inspect看源图和成品，不要仅凭收据判通过。\nMEDIA:${media.path}`, r)
       } catch (error) {
         const errorCode = error instanceof ImageServiceError ? error.errorCode
           : signal?.aborted ? 'IMAGE_REQUEST_ABORTED' : 'IMAGE_SERVICE_UNAVAILABLE'

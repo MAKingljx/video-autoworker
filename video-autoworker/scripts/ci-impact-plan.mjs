@@ -13,7 +13,19 @@ import {
 } from './lib/git-source-layout.mjs'
 
 const COMMIT = /^[a-f0-9]{40}$/u
-const PLUGIN_SUITES = Object.freeze(['video-command', 'director-brain', 'task-flow'])
+const PLUGIN_SUITES = Object.freeze(['video-command', 'director-brain', 'task-flow', 'image-command'])
+export const IMAGE_COMPONENT_PYTHON_TESTS = Object.freeze([
+  'tests/test_image_jobs.py', 'tests/test_image_service_install.py',
+  'tests/test_image_profile_install.py', 'tests/test_qwen_cover_design.py',
+  'tests/test_protected_cover.py', 'tests/test_protected_worker_freeze.py',
+  'tests/test_protected_ocr.py', 'tests/test_cover_reference.py',
+])
+const IMAGE_CI_TEST = 'scripts/test-ci-impact-image-component.test.mjs'
+const IMAGE_COMPONENT_SCRIPTS = new Set([
+  'scripts/aiworker-image-service.py', 'scripts/install-aiworker-image-service.py',
+  'scripts/install-openclaw-image-studio.py', 'scripts/aiworker-qwen-cover.py',
+  'scripts/aiworker-image-ocr.swift', 'scripts/extract-cover-reference.py',
+])
 const BUILD_CONFIG_FILES = Object.freeze([
   'package.json', '.nvmrc', 'next.config.js', 'next.config.mjs', 'next.config.ts',
   'tsconfig.json', 'scripts/build-standalone.mjs',
@@ -151,6 +163,51 @@ function isDocumentation(pathname) {
   return /\.(?:md|mdx|txt|png|jpe?g|gif|webp|svg|pdf)$/iu.test(pathname)
 }
 
+export function isImageComponentPath(pathname) {
+  return typeof pathname === 'string' && (
+    pathname.startsWith('src/image_generation/')
+    || pathname.startsWith('openclaw-plugins/aiworker-image-command/')
+    || pathname.startsWith('ops/image-generation/service/')
+    || pathname.startsWith('ops/image-generation/qwen-image-edit-2511/')
+    || pathname.startsWith('ops/openclaw-image-studio/')
+    || IMAGE_COMPONENT_SCRIPTS.has(pathname)
+    || IMAGE_COMPONENT_PYTHON_TESTS.includes(pathname)
+  )
+}
+
+export function isCiControlPath(pathname) {
+  return pathname === 'scripts/ci-impact-plan.mjs' || pathname === IMAGE_CI_TEST
+    || pathname.startsWith('.github/workflows/')
+}
+
+// Shared by the planner and component runner. A lightweight component job must
+// retain the same repository privacy boundary as the Next validation jobs.
+export function assertCiTrackedSourceBoundary(paths) {
+  if (!Array.isArray(paths) || paths.some(member => typeof member !== 'string'
+    || !member || member.startsWith('/') || member.split('/').includes('..'))) {
+    throw new Error('ci_tracked_source_paths_invalid')
+  }
+  const forbidden = paths.filter(p => /(^|\/)(?:\.PhoenixBrain|node_modules|\.venv|__pycache__)(\/|$)/u.test(p)
+    || /^(?:private|repositories|rollback|memory|output|tmp)\//u.test(p)
+    || /^(?:TOOLS|MEMORY|USER|IDENTITY|SOUL|HEARTBEAT)\.md$/u.test(p)
+    || /\.(?:db|sqlite|sqlite3|safetensors|gguf|pem|key)$/iu.test(p))
+  if (forbidden.length) throw new Error(`Private runtime members are tracked: ${JSON.stringify(forbidden)}`)
+}
+
+function imageChecks(run) {
+  return { runImageTests: run, imagePythonTests: run ? [...IMAGE_COMPONENT_PYTHON_TESTS] : [] }
+}
+
+export function selectImagePythonTests(plan) {
+  const files = plan?.imagePythonTests
+  if (plan?.runImageTests !== true || !Array.isArray(files) || files.length === 0
+    || new Set(files).size !== files.length || files.some(member => !IMAGE_COMPONENT_PYTHON_TESTS.includes(member))) {
+    throw new Error('ci_image_selection_empty_or_invalid')
+  }
+  if (files.length !== IMAGE_COMPONENT_PYTHON_TESTS.length) throw new Error('ci_image_selection_incomplete')
+  return [...files]
+}
+
 function isRuntimeSkill(pathname) {
   return pathname === 'SKILL.md' || pathname.startsWith('openclaw-skills/')
     || /(?:^|\/)SKILL\.md$/u.test(pathname)
@@ -183,9 +240,11 @@ function pluginSuitesFor(paths) {
       || pathname === 'scripts/install-aiworker-task-flow-skill.sh') {
       suites.add('task-flow')
     }
+    if (pathname.startsWith('openclaw-plugins/aiworker-image-command/')) suites.add('image-command')
     if (isRuntimeSkill(pathname)
       && !pathname.startsWith('openclaw-plugins/aiworker-video-command/')
       && !pathname.startsWith('openclaw-plugins/aiworker-director-brain/')
+      && !pathname.startsWith('openclaw-plugins/aiworker-image-command/')
       && !pathname.startsWith('openclaw-skills/aiworker-director-brain/')
       && !pathname.startsWith('openclaw-skills/aiworker-task-flow/')) {
       for (const suite of PLUGIN_SUITES) suites.add(suite)
@@ -340,6 +399,7 @@ function fullPlan({ base, head, reasons, changedCount, partitions, buildCache, p
     browserTestFiles,
     browserReasons: ['explicit_full_suite'],
     pluginSuites: [...PLUGIN_SUITES],
+    ...imageChecks(true),
     buildCache,
     runIntegration: true,
     runBrowserTests: true,
@@ -352,6 +412,7 @@ function unknownTargetedPlan({ base, head, reason, buildCache }) {
     mode: 'targeted', base, head, reasons: [reason], changedCount: 0,
     rootPartitions: ['regular'], relatedFiles: [],
     testFiles: [], pluginSuites: [],
+    ...imageChecks(true),
     browserTestFiles: [], browserReasons: [],
     buildCache,
     runIntegration: true, runBrowserTests: false, runPluginTests: false,
@@ -422,6 +483,7 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['no_changes'], changedCount: 0,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      ...imageChecks(false),
       browserTestFiles: [], browserReasons: [],
       buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
@@ -436,17 +498,35 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       mode: 'docs', base, head, reasons: ['documentation_only'], changedCount,
       rootPartitions: [], relatedFiles: [],
       testFiles: [], pluginSuites: [],
+      ...imageChecks(false),
       browserTestFiles: [], browserReasons: [],
       buildCache,
       runIntegration: false, runBrowserTests: false, runPluginTests: false,
     }
   }
-  const relatedFiles = productPaths.filter(isProductionSource)
-  const testFiles = productPaths.filter(pathname => isTestFile(pathname) && !pathname.startsWith('tests/'))
+  const sharedCiChanged = [...productPaths, ...repositoryPaths].some(isCiControlPath)
+  const imageChanged = productPaths.some(isImageComponentPath)
+  const imageOnly = !layoutChanged && !sharedCiChanged && imageChanged
+    && productPaths.every(pathname => isImageComponentPath(pathname) || isDocumentation(pathname))
+    && repositoryPaths.every(isDocumentation)
+  if (imageOnly) {
+    return {
+      mode: 'image-component', base, head, reasons: ['independent_image_component_changed'], changedCount,
+      rootPartitions: [], relatedFiles: [], testFiles: [],
+      browserTestFiles: [], browserReasons: [], pluginSuites: ['image-command'],
+      ...imageChecks(true), buildCache,
+      runIntegration: false, runBrowserTests: false, runPluginTests: true,
+    }
+  }
+  const relatedFiles = productPaths.filter(pathname => isProductionSource(pathname) && !isImageComponentPath(pathname))
+  const testFiles = productPaths.filter(pathname => isTestFile(pathname) && !pathname.startsWith('tests/')
+    && pathname !== IMAGE_CI_TEST && !isImageComponentPath(pathname))
   const browserSelection = selectBrowserTests({
-    paths: productPaths, sources: readBrowserSources(layout.gitRoot, headTrees.product),
+    paths: productPaths.filter(pathname => !isImageComponentPath(pathname)),
+    sources: readBrowserSources(layout.gitRoot, headTrees.product),
   })
   const pluginSuites = pluginSuitesFor(productPaths)
+  if (imageChanged && !pluginSuites.includes('image-command')) pluginSuites.push('image-command')
   const nonDocumentation = [...productPaths, ...repositoryPaths].filter(pathname => (
     isRuntimeSkill(pathname) || !isDocumentation(pathname)
   ))
@@ -457,11 +537,14 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
       || isProductionSource(pathname) || pathname.startsWith('public/')
       || pathname.startsWith('messages/')
   ))
+  const unknownImageLanguage = productPaths.some(pathname => /\.(?:py|swift)$/u.test(pathname)
+    && !isImageComponentPath(pathname))
   const reasons = [
     ...(layoutChanged ? ['git_source_layout_changed_without_content_drift'] : []),
     ...(relatedFiles.length ? ['production_source_changed'] : []),
+    ...(imageChanged ? ['image_component_changed'] : []),
     ...(onlyTestsOrFixtures ? ['test_or_fixture_only'] : []),
-    ...(!knownProductInputs || repositoryPaths.some(pathname => !isDocumentation(pathname))
+    ...(!knownProductInputs || unknownImageLanguage || sharedCiChanged || repositoryPaths.some(pathname => !isDocumentation(pathname))
       ? ['unknown_requires_build_static'] : []),
   ]
   return {
@@ -473,6 +556,8 @@ export function createCiImpactPlan({ productRoot = process.cwd(), ...options } =
     testFiles,
     ...browserSelection,
     pluginSuites,
+    ...imageChecks(imageChanged || sharedCiChanged || layoutChanged || reasons.includes('unknown_requires_build_static')
+      || pluginSuites.includes('image-command')),
     buildCache,
     runIntegration: layoutChanged || relatedFiles.length > 0
       || browserSelection.browserTestFiles.length > 0 || reasons.includes('unknown_requires_build_static'),

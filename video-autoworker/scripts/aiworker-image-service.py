@@ -60,6 +60,8 @@ def handler_type(jobs):
                         return self.send(200, jobs.get(job_id, scope))
                     if self.command == 'GET' and len(parts) == 4 and parts[3] == 'image':
                         return self.send(200, jobs.image(job_id, scope), 'image/png')
+                    if self.command == 'GET' and len(parts) == 4 and parts[3] == 'inspection':
+                        return self.send(200, jobs.inspection(job_id, scope))
                     if self.command == 'POST' and len(parts) == 4 and parts[3] == 'cancel' and set(body) == {'scope'}:
                         return self.send(200, jobs.cancel(job_id, scope))
                 self.send(404, {'errorCode': 'image_route_not_found'})
