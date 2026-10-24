@@ -27,7 +27,7 @@ import uuid
 
 HEX = re.compile(r'^[a-f0-9]{64}$')
 JOB = re.compile(r'^[a-f0-9]{32}$')
-WORKER_ERROR = re.compile(r'^(?:protected|image_protected|image_ocr)_[a-z0-9_]{1,80}$')
+WORKER_ERROR = re.compile(r'^(?:protected|image_protected|image_ocr|image_stage_cache)_[a-z0-9_]{1,80}$')
 TERMINAL = ('GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED', 'RECONCILE_REQUIRED')
 MAX_INPUT = 20 * 1024 * 1024
 MAX_PROTECTED_INPUT = 40 * 1024 * 1024
@@ -221,12 +221,143 @@ class ImageJobs:
             key = 'protected' if 'protected' in payload else 'design' if 'design' in payload else 'prompt'
             content = payload[key].encode() if key == 'prompt' else canonical(payload[key]).encode()
             private_write(folder / ('prompt.txt' if key == 'prompt' else 'input.json'), content)
+            if key == 'protected':
+                cache = self.select_stage_cache(db, request['scope'], payload, data[0], folder)
+                if cache['assets']:
+                    private_write(folder / 'stage-cache.json', canonical(cache).encode())
             now = stamp()
             db.execute('INSERT INTO image_jobs VALUES (?,?,?,?,?,?,?,?,NULL,NULL)',
                        (job_id, request['scope'], request['requestKey'], payload_sha,
                         canonical(payload), 'QUEUED', now, now))
         self.wake.set()
         return self.get(job_id, request['scope'])
+
+    def compatible_cache_source(self, row, payload):
+        """Reuse execution inputs, never another session's task or payload."""
+        previous = json.loads(row['payload_json'])
+        if (row['state'] not in TERMINAL or 'protected' not in previous
+                or sha(canonical(previous).encode()) != row['payload_sha']
+                or previous['references'][0]['sha256'] != payload['references'][0]['sha256']
+                or any(previous[key] != payload[key] for key in ('steps', 'guidance', 'seed'))
+                or any(previous['execution'][key] != payload['execution'][key]
+                       for key in ('backendSha256', 'profilesSha256'))):
+            raise ValueError('image_stage_cache_source_incompatible')
+        return previous
+
+    def stage_cache(self, row, *, result=None):
+        """Bind private execution references back to same-scope SQLite rows."""
+        from .stage_cache import validate_stage_cache
+        path = self.folder(row['job_id']) / 'stage-cache.json'
+        if path.is_symlink():raise ValueError('image_stage_cache_path_invalid')
+        if not path.exists():
+            if result is not None and result.get('stageCacheSha256') is not None:
+                raise ValueError('image_stage_cache_receipt_changed')
+            return None, None
+        if not path.is_file() or not 0 < path.stat().st_size <= 256 * 1024:
+            raise ValueError('image_stage_cache_file_invalid')
+        raw = path.read_bytes();digest = sha(raw)
+        if result is not None and result.get('stageCacheSha256') != digest:
+            raise ValueError('image_stage_cache_receipt_changed')
+        manifest = validate_stage_cache(json.loads(raw), path.parent)
+        payload = json.loads(row['payload_json'])
+        for entry in manifest['assets']:
+            source = self.row(entry['sourceJobId'], row['scope'])
+            if source['payload_sha'] != entry['sourcePayloadSha256']:
+                raise ValueError('image_stage_cache_source_payload_changed')
+            self.compatible_cache_source(source, payload)
+            if entry['stage'].startswith('text_layer_') and (
+                    source['state'] != 'GENERATED_PENDING_REVIEW' or not source['result_json']):
+                raise ValueError('image_stage_cache_text_not_sealed')
+        return manifest, digest
+
+    def select_stage_cache(self, db, scope, payload, source_bytes, folder):
+        """Bounded, read-only discovery of already completed native stages."""
+        from .protected_cover import (source_image, erase_context, erasure_prompt,
+                                      font_prompt, _verify_asset_reference)
+        from .stage_cache import cached_asset_paths, read_cached_asset
+        manifest = {'schema': 'aiworker-protected-stage-cache/v1', 'assets': []}
+        candidates = db.execute(
+            "SELECT * FROM image_jobs WHERE scope=? AND state IN ('GENERATED_PENDING_REVIEW','FAILED','CANCELLED','RECONCILE_REQUIRED') AND json_type(payload_json,'$.protected')='object' ORDER BY created_at DESC,job_id DESC LIMIT 12",
+            (scope,)).fetchall()
+        compatible = []
+        for row in candidates:
+            try:compatible.append((row, self.compatible_cache_source(row, payload)))
+            except (ValueError, KeyError, IndexError):pass
+        original = source_image(source_bytes)
+
+        def native_entry(path, target, *, text=False):
+            path = Path(path)
+            relative = path.relative_to(self.config.output_root)
+            if (len(relative.parts) != 4 or not JOB.fullmatch(relative.parts[0])
+                    or relative.parts[1] != 'stages' or relative.parts[3] != 'model.png'):
+                raise ValueError('image_stage_cache_native_path_invalid')
+            owner = db.execute('SELECT * FROM image_jobs WHERE job_id=? AND scope=?',
+                               (relative.parts[0], scope)).fetchone()
+            if not owner:raise ValueError('image_stage_cache_scope_invalid')
+            self.compatible_cache_source(owner, payload)
+            if text and (owner['state'] != 'GENERATED_PENDING_REVIEW' or not owner['result_json']):
+                raise ValueError('image_stage_cache_text_not_sealed')
+            for member in (path, path.with_suffix('.receipt.json'), *path.parents):
+                if member.is_symlink():raise ValueError('image_stage_cache_native_path_invalid')
+                if member == self.config.output_root:break
+            proof_path = path.with_suffix('.receipt.json')
+            if (not path.is_file() or not 0 < path.stat().st_size <= MAX_OUTPUT
+                    or not proof_path.is_file() or not 0 < proof_path.stat().st_size <= 256 * 1024):
+                raise ValueError('image_stage_cache_native_file_invalid')
+            entry = {'stage': target, 'sourceJobId': owner['job_id'], 'sourceStage': relative.parts[2],
+                     'sourcePayloadSha256': owner['payload_sha'], 'sha256': sha(path.read_bytes()),
+                     'receiptSha256': sha(proof_path.read_bytes())}
+            image, proof = read_cached_asset(entry, folder)
+            if (proof.get('repository') != self.backend.REPOSITORY or proof.get('revision') != self.backend.REVISION
+                    or proof.get('precision') != 'BF16' or proof.get('offline') is not True
+                    or proof.get('postProcessing') is not False
+                    or not isinstance(proof.get('componentDtypes'), dict)
+                    or set(proof.get('componentDtypes', {}).values()) != {'torch.bfloat16'}
+                    or any(proof.get(key) != payload[key] for key in ('steps', 'guidance', 'seed'))
+                    or not all(512 <= side <= 2048 and side % 16 == 0 for side in image.size)):
+                raise ValueError('image_stage_cache_native_runtime_invalid')
+            return entry, image
+
+        def erasure_path(row, stage):
+            own = self.folder(row['job_id']) / 'stages' / stage / 'model.png'
+            if own.exists():return own
+            cache, _ = self.stage_cache(row)
+            if cache:
+                for path, entry in cached_asset_paths(cache, self.folder(row['job_id'])).items():
+                    if entry['stage'] == stage:return Path(path)
+            raise ValueError('image_stage_cache_stage_missing')
+
+        for index, region in enumerate(payload['protected']['eraseRegions']):
+            crop, context = erase_context(original, region)
+            local = {**region, 'x': region['x'] - context['x'], 'y': region['y'] - context['y']}
+            for row, old in compatible:
+                try:
+                    old_index = old['protected']['eraseRegions'].index(region)
+                    path = erasure_path(row, 'erase_' + str(old_index + 1))
+                    entry, _ = native_entry(path, 'erase_' + str(index + 1))
+                    _verify_asset_reference({'path': str(path)}, crop, erasure_prompt(local))
+                    manifest['assets'].append(entry);break
+                except (OSError, ValueError, KeyError, IndexError):pass
+
+        for index, layer in enumerate(payload['protected']['textLayers']):
+            for row, old in compatible:
+                if row['state'] != 'GENERATED_PENDING_REVIEW' or not row['result_json']:continue
+                try:
+                    old_index = old['protected']['textLayers'].index(layer)
+                    result, _ = self.result(row)
+                    if canonical(result) != row['result_json']:
+                        raise ValueError('image_result_receipt_changed')
+                    selected = result['selectedLetteringAssets'][old_index]
+                    path = Path(selected['path'])
+                    entry, image = native_entry(path, 'text_layer_' + str(index) + '_attempt_1', text=True)
+                    if entry['sha256'] != selected['sha256']:
+                        raise ValueError('image_stage_cache_selected_asset_changed')
+                    from PIL import Image
+                    _verify_asset_reference({'path': str(path)}, Image.new('RGB', image.size, (255, 0, 255)),
+                                            font_prompt(layer, False))
+                    manifest['assets'].append(entry);break
+                except (OSError, ValueError, KeyError, IndexError):pass
+        return manifest
 
     def row(self, job_id, scope):
         self.check_scope(scope)
@@ -340,8 +471,9 @@ class ImageJobs:
                 raise ValueError('image_protected_source_changed')
             if result.get('protectedSourceSha256') != payload['execution']['protectedSourceSha256']:
                 raise ValueError('image_protected_implementation_receipt_changed')
+            stage_cache, _ = self.stage_cache(row, result=result)
             verify_protected_result(source, output, payload['protected'], result,
-                                    strict_live=verify_current_composition)
+                                    strict_live=verify_current_composition, stage_cache=stage_cache)
         return result, data
 
     def image(self, job_id, scope):
@@ -455,6 +587,11 @@ class ImageJobs:
             if payload['execution'] != expected_execution:
                 self.settle(row, 'RECONCILE_REQUIRED', 'image_job_runtime_changed')
                 return True
+            if protected:
+                _, cache_sha = self.stage_cache(row)
+                if cache_sha:
+                    command += ['--stage-cache-file', str(folder / 'stage-cache.json'),
+                                '--stage-cache-sha256', cache_sha]
             if (sha(self.config.backend_script.read_bytes()) != self.backend_sha
                     or sha(self.config.profiles_file.read_bytes()) != self.profiles_sha):
                 raise ValueError('image_backend_source_changed')

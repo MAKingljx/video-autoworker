@@ -18,6 +18,7 @@ export const IMAGE_COMPONENT_PYTHON_TESTS = Object.freeze([
   'tests/test_image_jobs.py', 'tests/test_image_service_install.py',
   'tests/test_image_profile_install.py', 'tests/test_qwen_cover_design.py',
   'tests/test_protected_cover.py', 'tests/test_protected_worker_freeze.py',
+  'tests/test_protected_stage_cache.py',
   'tests/test_protected_ocr.py', 'tests/test_cover_reference.py',
 ])
 const IMAGE_CI_TEST = 'scripts/test-ci-impact-image-component.test.mjs'

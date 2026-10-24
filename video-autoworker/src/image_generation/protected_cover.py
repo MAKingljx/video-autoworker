@@ -121,7 +121,7 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True):
 def implementation_digest():
     root = Path(__file__).resolve().parents[2]
     names = ('src/image_generation/protected_cover.py', 'src/image_generation/protected_worker.py',
-             'src/image_generation/ocr.py', 'scripts/aiworker-image-ocr.swift')
+             'src/image_generation/stage_cache.py', 'src/image_generation/ocr.py', 'scripts/aiworker-image-ocr.swift')
     records = []
     for name in names:
         path = root / name
@@ -152,7 +152,7 @@ def protection_summary(source, output, spec):
             'protectedOutputSha256': digest_bytes(after[~mask].tobytes())}
 
 
-def verify_protected_result(source_path, output_path, spec, receipt, *, strict_live=True):
+def verify_protected_result(source_path, output_path, spec, receipt, *, strict_live=True, stage_cache=None):
     original = Path(source_path).read_bytes()
     canonical, size = normalize_protected(spec, original, compile_prompt=strict_live)
     source = source_image(original)
@@ -178,13 +178,29 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
     if not isinstance(assets, list) or not assets:
         raise ValueError('protected_native_assets_missing')
     job = Path(output_path).parent
+    cached = {}
+    if stage_cache is not None:
+        from .stage_cache import cached_asset_paths
+        cached = cached_asset_paths(stage_cache, job)
+        cache_file = job / 'stage-cache.json'
+        if cache_file.is_symlink() or digest_bytes(cache_file.read_bytes()) != receipt.get('stageCacheSha256'):
+            raise ValueError('protected_stage_cache_changed')
+    elif receipt.get('stageCacheSha256') is not None:
+        raise ValueError('protected_stage_cache_missing')
     decoded = {}
     for asset in assets:
-        p = checked_stage_file(Path(asset.get('path', '')), job)
-        if (p.name != 'model.png' or p.parent.parent != job / 'stages'
+        p = checked_native_file(Path(asset.get('path', '')), job, cached)
+        entry = cached.get(str(p))
+        if (p.name != 'model.png' or not entry and p.parent.parent != job / 'stages'
                 or digest_bytes(p.read_bytes()) != asset.get('sha256')):
             raise ValueError('protected_native_asset_changed')
-        proof_path = checked_stage_file(p.with_suffix('.receipt.json'), job)
+        if entry:
+            if (asset.get('cacheSourceJobId') != entry['sourceJobId'] or asset.get('sha256') != entry['sha256']
+                    or asset.get('receiptSha256') != entry['receiptSha256']):
+                raise ValueError('protected_cached_asset_binding_changed')
+        elif asset.get('cacheSourceJobId') is not None:
+            raise ValueError('protected_cached_asset_binding_changed')
+        proof_path = checked_native_file(p.with_suffix('.receipt.json'), job, cached)
         raw_proof = proof_path.read_bytes()
         proof = json.loads(raw_proof)
         if (digest_bytes(raw_proof) != asset.get('receiptSha256')
@@ -199,7 +215,7 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
                 or any(proof.get(key) != receipt.get(key) for key in ('steps', 'guidance', 'seed'))):
             raise ValueError('protected_native_asset_receipt_invalid')
         input_paths = [p.parent / 'prompt.txt', p.parent / 'reference.png']
-        for member in input_paths:checked_stage_file(member, job)
+        for member in input_paths:checked_native_file(member, job, cached)
         if proof.get('inputs') != [{'path': str(f), 'sha256': digest_bytes(f.read_bytes())} for f in input_paths]:
             raise ValueError('protected_native_asset_inputs_changed')
         if proof.get('promptSha256') != digest_bytes(input_paths[0].read_bytes()):
@@ -218,8 +234,10 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
     if (len(erasures) != len(canonical['eraseRegions']) or len(erasures) + len(lettering) != len(assets)
             or len(lettering) > 2 * len(canonical['textLayers']) or bool(lettering) != bool(canonical['textLayers'])):
         raise ValueError('protected_native_asset_roles_invalid')
-    for asset, region in zip(erasures, canonical['eraseRegions']):
+    for index, (asset, region) in enumerate(zip(erasures, canonical['eraseRegions'])):
         if asset.get('region') != region:raise ValueError('protected_erase_asset_region_changed')
+        if asset['path'] in cached and cached[asset['path']]['stage'] != 'erase_' + str(index + 1):
+            raise ValueError('protected_cached_asset_stage_changed')
         if strict_live:
             crop, context = erase_context(source, region)
             local = {'x': region['x'] - context['x'], 'y': region['y'] - context['y'],
@@ -241,6 +259,9 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             chosen = attempts[-1]
             if selected[i] != {'layerIndex': i, 'path': chosen['path'], 'sha256': chosen['sha256']}:
                 raise ValueError('protected_selected_text_asset_invalid')
+            for item in attempts:
+                if item['path'] in cached and cached[item['path']]['stage'] != 'text_layer_' + str(i) + '_attempt_' + str(item['attempt']):
+                    raise ValueError('protected_cached_asset_stage_changed')
             if strict_live:
                 native = decoded[chosen['path']]
                 _verify_asset_reference(chosen, Image.new('RGB', native.size, (255, 0, 255)),
@@ -252,7 +273,8 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             if binding.get('layerIndex') != i or binding.get('pixelSha256') != digest_bytes(crop.tobytes()):
                 raise ValueError('protected_final_ocr_pixels_changed')
             preview = checked_stage_file(Path(binding.get('previewPath', '')), job)
-            if preview.parent != Path(chosen['path']).parent or digest_bytes(preview.read_bytes()) != binding.get('previewSha256'):
+            expected_preview_parent = job / 'stages' / ('text_layer_' + str(i) + '_attempt_' + str(chosen['attempt']))
+            if preview.parent != expected_preview_parent or digest_bytes(preview.read_bytes()) != binding.get('previewSha256'):
                 raise ValueError('protected_final_ocr_preview_changed')
             with Image.open(preview) as view:
                 if view.mode != 'RGB' or view.size != crop.size or view.tobytes() != crop.tobytes():
@@ -299,6 +321,23 @@ def checked_stage_file(path, job):
         if member.is_symlink():raise ValueError('protected_stage_path_invalid')
         if member == job:break
     if not path.is_file() or not path.resolve(strict=True).is_relative_to((job / 'stages').resolve(strict=True)):
+        raise ValueError('protected_stage_path_invalid')
+    return path
+
+
+def checked_native_file(path, job, cached):
+    """Allow only application-authorized original native members across jobs."""
+    path, job = Path(path), Path(job)
+    entry = cached.get(str(path.parent / 'model.png'))
+    if entry is None:
+        return checked_stage_file(path, job)
+    if path.name not in ('model.png', 'model.receipt.json', 'prompt.txt', 'reference.png'):
+        raise ValueError('protected_cached_member_invalid')
+    root = job.parent
+    for member in [path, *path.parents]:
+        if member.is_symlink():raise ValueError('protected_stage_path_invalid')
+        if member == root:break
+    if not path.is_file() or not path.resolve(strict=True).is_relative_to(root.resolve(strict=True)):
         raise ValueError('protected_stage_path_invalid')
     return path
 

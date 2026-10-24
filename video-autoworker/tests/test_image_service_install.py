@@ -23,9 +23,17 @@ class ServiceInstallTests(unittest.TestCase):
         payload = install.bundle_payload(install.ROOT)
         self.assertIn("scripts/aiworker-image-service.py", payload)
         self.assertIn("src/image_generation/service.py", payload)
+        self.assertIn("src/image_generation/stage_cache.py", payload)
         self.assertIn("openclaw-plugins/aiworker-image-command/index.js", payload)
         self.assertFalse(any(set(Path(name).parts) & {"tests", "test", "__pycache__", "node_modules"} for name in payload))
         self.assertFalse(any("qwen-cover.py" in name for name in payload))
+
+    def test_protected_payload_requires_its_cache_dependency(self):
+        real_rglob = Path.rglob
+        with patch.object(Path, 'rglob', autospec=True) as listing:
+            listing.side_effect = lambda root, pattern: (p for p in real_rglob(root, pattern) if p.name != 'stage_cache.py')
+            with self.assertRaisesRegex(install.contract.InstallError, 'protected_bundle_dependency_missing'):
+                install.bundle_payload(install.ROOT)
 
     def test_private_routing_marker_is_rejected_from_final_bundle_members(self):
         with tempfile.TemporaryDirectory() as task_dir:

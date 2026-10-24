@@ -52,7 +52,7 @@ def bundle_payload(root: Path) -> dict[str, bytes]:
                          "bundle_member_mode_invalid")
         files["scripts/aiworker-image-ocr.swift"] = ocr.read_bytes()
         contract.require(all(name in files for name in ("src/image_generation/protected_worker.py",
-            "src/image_generation/ocr.py")), "protected_bundle_dependency_missing")
+            "src/image_generation/stage_cache.py", "src/image_generation/ocr.py")), "protected_bundle_dependency_missing")
     return files
 
 

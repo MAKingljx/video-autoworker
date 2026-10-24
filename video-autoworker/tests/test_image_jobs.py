@@ -206,7 +206,7 @@ class ImageJobTest(unittest.TestCase):
                     'schema': 'aiworker-protected-cover/v1',
                     'eraseRegions': [{'x': 100, 'y': 100, 'width': 24, 'height': 24}]}}
 
-    def protected_candidate(self, accepted):
+    def protected_candidate(self, accepted, *, ocr=None):
         """A synthetic native patch tests acceptance, never text generation."""
         from image_generation.protected_worker import build_protected
         fixture_spec = importlib.util.spec_from_file_location('protected_job_fixtures', ROOT / 'tests/test_protected_cover.py')
@@ -216,8 +216,176 @@ class ImageJobTest(unittest.TestCase):
         output = folder / 'image.png'
         runner = fixtures.FixtureRunner()
         runner.repository, runner.revision = self.jobs.backend.REPOSITORY, self.jobs.backend.REVISION
-        receipt = build_protected(folder / 'input.json', folder / 'reference-0.png', output, runner)
+        options = {'ocr': ocr} if ocr else {}
+        if (folder / 'stage-cache.json').exists():
+            options['stage_cache'] = json.loads((folder / 'stage-cache.json').read_text())
+        receipt = build_protected(folder / 'input.json', folder / 'reference-0.png', output, runner, **options)
         return receipt, output
+
+    def cache_source(self, *, completed=False, text=False, retry_text=False):
+        request = {**self.protected_request(), 'steps': 30}
+        if text:
+            request['protected']['textLayers'] = [{'text': '北极驯鹿人',
+                'box': {'x': 900, 'y': 40, 'width': 600, 'height': 160}, 'align': 'left'}]
+        accepted = self.jobs.submit(request)
+        def ocr(path):
+            wrong = retry_text and 'text_layer_0_attempt_1' in str(path)
+            return {'lines': [{'text': '错误' if wrong else '北极驯鹿人'}]}
+        result, output = self.protected_candidate(accepted, ocr=ocr if text else None)
+        with self.jobs.db() as db:
+            db.execute("UPDATE image_jobs SET state='RUNNING' WHERE job_id=?", (accepted['jobId'],))
+        self.jobs.settle(self.jobs.row(accepted['jobId'], request['scope']),
+                         'GENERATED_PENDING_REVIEW' if completed else 'FAILED',
+                         None if completed else 'protected_generated_text_mismatch',
+                         result if completed else None)
+        return request, accepted, result, output
+
+    def test_failed_task_reuses_completed_erasure_but_never_failed_text_or_payload_identity(self):
+        request, old, _, _ = self.cache_source(text=True)
+        before = self.jobs.row(old['jobId'], request['scope'])
+        next_request = {**request, 'requestKey': 'c' * 64}
+        accepted = self.jobs.submit(next_request)
+        folder = self.jobs.folder(accepted['jobId']);path = folder / 'stage-cache.json'
+        manifest = json.loads(path.read_text())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([(entry['stage'], entry['sourceJobId'], entry['sourceStage']) for entry in manifest['assets']],
+                         [('erase_1', old['jobId'], 'erase_1')])
+        self.assertEqual(manifest['assets'][0]['sourcePayloadSha256'], before['payload_sha'])
+        after = self.jobs.row(accepted['jobId'], request['scope'])
+        self.assertEqual((before['payload_json'], before['payload_sha']), (after['payload_json'], after['payload_sha']))
+        original = path.read_bytes()
+        with patch.object(self.jobs, 'select_stage_cache', side_effect=AssertionError('duplicate cannot select again')):
+            duplicate = self.jobs.submit(next_request)
+        self.assertTrue(duplicate['duplicate']);self.assertEqual(duplicate['jobId'], accepted['jobId'])
+        self.assertEqual(path.read_bytes(), original)
+        with self.assertRaisesRegex(ValueError, 'request_invalid'):
+            self.jobs.submit({**next_request, 'cache': manifest})
+
+    def test_stage_cache_is_scope_parameter_and_native_proof_isolated(self):
+        request, old, _, output = self.cache_source()
+        for index, change in enumerate(({'scope': 'd' * 64}, {'steps': 31}, {'guidance': 3.5}, {'seed': 302})):
+            with self.subTest(change=change):
+                accepted = self.jobs.submit({**request, **change, 'requestKey': str(index + 1) * 64})
+                self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+                self.jobs.cancel(accepted['jobId'], request['scope'] if 'scope' not in change else change['scope'])
+        native = output.parent / 'stages' / 'erase_1' / 'model.png'
+        native.write_bytes(native.read_bytes() + b'changed')
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+        self.assertEqual(self.jobs.get(old['jobId'], request['scope'])['currentState'], 'FAILED')
+
+    def test_cache_requires_matching_photo_backend_and_profiles_fingerprints(self):
+        request, _, _, _ = self.cache_source()
+        for attribute, key in (('backend_sha', 'c'), ('profiles_sha', 'd')):
+            with self.subTest(attribute=attribute), patch.object(self.jobs, attribute, 'f' * 64):
+                accepted = self.jobs.submit({**request, 'requestKey': key * 64})
+                self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+                self.jobs.cancel(accepted['jobId'], request['scope'])
+        Image.new('RGB', (1920, 1080), 'olive').save(self.reference)
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+
+    def test_malformed_native_dtype_metadata_is_a_cache_miss(self):
+        request, _, _, output = self.cache_source()
+        proof_path = output.parent / 'stages' / 'erase_1' / 'model.receipt.json'
+        proof = json.loads(proof_path.read_text());proof['componentDtypes'] = None
+        proof_path.write_text(json.dumps(proof))
+        accepted = self.jobs.submit({**request, 'requestKey': 'e' * 64})
+        self.assertEqual(accepted['currentState'], 'QUEUED')
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+
+    def test_only_latest_twelve_terminal_tasks_are_considered_for_cache(self):
+        request, old, _, _ = self.cache_source()
+        for index in range(12):
+            unrelated = json.loads(json.dumps(request))
+            unrelated['protected']['eraseRegions'][0]['x'] = 400
+            accepted = self.jobs.submit({**unrelated, 'requestKey': format(index + 1, '064x')})
+            self.jobs.cancel(accepted['jobId'], request['scope'])
+        accepted = self.jobs.submit({**request, 'requestKey': 'f' * 64})
+        self.assertFalse((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').exists())
+        self.assertEqual(self.jobs.get(old['jobId'], request['scope'])['currentState'], 'FAILED')
+
+    def test_raw_tasks_do_not_consume_the_protected_cache_discovery_limit(self):
+        request, old, _, _ = self.cache_source()
+        for index in range(12):
+            accepted = self.jobs.submit({**self.request, 'requestKey': format(index + 1, '064x')})
+            self.jobs.cancel(accepted['jobId'], request['scope'])
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['sourceJobId'] for entry in cache['assets']], [old['jobId']])
+
+    def test_completed_text_cache_requires_sealed_selected_asset_exact_layer_and_first_prompt(self):
+        request, old, result, _ = self.cache_source(completed=True, text=True)
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1', 'text_layer_0_attempt_1'])
+        self.assertEqual(cache['assets'][1]['sourceJobId'], old['jobId'])
+        self.assertEqual(cache['assets'][1]['sha256'], result['selectedLetteringAssets'][0]['sha256'])
+        changed = json.loads(json.dumps(request))
+        changed['requestKey'] = 'd' * 64
+        changed['protected']['textLayers'][0]['style'] = 'A newly requested ivory finish.'
+        accepted = self.jobs.submit(changed)
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1'])
+
+    def test_retry_lettering_prompt_is_not_reused_as_a_new_first_attempt(self):
+        request, _, result, _ = self.cache_source(completed=True, text=True, retry_text=True)
+        self.assertEqual(result['textValidation']['assetAttempts'], 2)
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1'])
+
+    def test_modified_completed_receipt_cannot_authorize_reusing_its_lettering(self):
+        request, _, result, output = self.cache_source(completed=True, text=True)
+        result['unsealedExtra'] = True
+        output.with_suffix('.receipt.json').write_text(json.dumps(result))
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        cache = json.loads((self.jobs.folder(accepted['jobId']) / 'stage-cache.json').read_text())
+        self.assertEqual([entry['stage'] for entry in cache['assets']], ['erase_1'])
+
+    def test_cache_readback_checks_file_hash_source_scope_and_sqlite_payload(self):
+        request, old, _, _ = self.cache_source()
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        row = self.jobs.row(accepted['jobId'], request['scope'])
+        path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json';raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        cache, read_digest = self.jobs.stage_cache(row, result={'stageCacheSha256': digest})
+        self.assertEqual(read_digest, digest)
+        with self.assertRaisesRegex(ValueError, 'cache_receipt_changed'):
+            self.jobs.stage_cache(row, result={'stageCacheSha256': '0' * 64})
+        cache['assets'][0]['sourcePayloadSha256'] = 'f' * 64
+        path.write_text(canonical(cache))
+        with self.assertRaisesRegex(ValueError, 'source_payload_changed'):
+            self.jobs.stage_cache(row)
+        path.write_bytes(raw)
+        with self.jobs.db() as db:
+            db.execute('UPDATE image_jobs SET scope=? WHERE job_id=?', ('d' * 64, old['jobId']))
+        with self.assertRaisesRegex(ValueError, 'job_not_found'):
+            self.jobs.stage_cache(row)
+
+    def test_cached_worker_command_and_result_are_bound_to_the_private_manifest(self):
+        request, _, _, _ = self.cache_source()
+        accepted = self.jobs.submit({**request, 'requestKey': 'c' * 64})
+        path = self.jobs.folder(accepted['jobId']) / 'stage-cache.json'
+        expected_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        result, output = self.protected_candidate(accepted)
+        class Finished:
+            returncode = 0
+            def poll(self):return 0
+            def wait(self, timeout=None):return 0
+        with patch('image_generation.service.subprocess.Popen', return_value=Finished()) as launch, \
+             patch.object(self.jobs, 'claim_process_group', return_value=None), \
+             patch.object(self.jobs, 'cleanup_process_group'):
+            self.jobs.run_one()
+        command = launch.call_args.args[0]
+        self.assertEqual(command[command.index('--stage-cache-file') + 1], str(path))
+        self.assertEqual(command[command.index('--stage-cache-sha256') + 1], expected_sha)
+        self.assertEqual(result['stageCacheSha256'], expected_sha)
+        self.assertEqual(self.jobs.get(accepted['jobId'], request['scope'])['currentState'], 'GENERATED_PENDING_REVIEW')
+        self.assertEqual(self.jobs.image(accepted['jobId'], request['scope']), output.read_bytes())
+        path.write_bytes(path.read_bytes() + b' ')
+        with self.assertRaisesRegex(ValueError, 'cache_receipt_changed'):
+            self.jobs.image(accepted['jobId'], request['scope'])
 
     def test_protected_source_dimensions_and_single_queue_idempotency(self):
         request = self.protected_request()

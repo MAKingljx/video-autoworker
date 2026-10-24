@@ -17,6 +17,7 @@ from .protected_cover import (RESULT_SCHEMA, digest_bytes, erase_context, font_p
     paste_letters, protection_summary, source_image, split_letter_rows,
     validate_ocr, verify_protected_result, text_roi)
 from .ocr import recognize
+from .stage_cache import HEX, read_cached_asset, validate_stage_cache
 
 
 def atomic_json(path, value):
@@ -34,17 +35,50 @@ def save_png(path, image):
 
 
 class NativeRunner:
-    def __init__(self, backend_script, steps, guidance, seed):
+    def __init__(self, backend_script, steps, guidance, seed, *, stage_cache=None, job_folder=None):
         self.script = Path(backend_script).resolve(strict=True)
         self.steps, self.guidance, self.seed = steps, guidance, seed
         self.sha = digest_bytes(self.script.read_bytes())
         definition = importlib.util.spec_from_file_location('protected_qwen_backend', self.script)
         module = importlib.util.module_from_spec(definition);definition.loader.exec_module(module)
         self.repository, self.revision = module.REPOSITORY, module.REVISION
+        self.job_folder=Path(job_folder)if job_folder is not None else None
+        if stage_cache is not None and self.job_folder is None:
+            raise ValueError('protected_stage_cache_job_invalid')
+        self.stage_cache=validate_stage_cache(stage_cache,self.job_folder)if stage_cache is not None else None
+
+    def cached(self,folder,reference,prompt,width,height):
+        if self.stage_cache is None:return None
+        if folder.parent.parent!=self.job_folder:
+            raise ValueError('protected_stage_cache_job_invalid')
+        entry=next((e for e in self.stage_cache['assets']if e['stage']==folder.name),None)
+        if entry is None:return None
+        native,receipt=read_cached_asset(entry,self.job_folder)
+        if (receipt.get('repository')!=self.repository or receipt.get('revision')!=self.revision
+                or receipt.get('precision')!='BF16'or receipt.get('offline')is not True
+                or not isinstance(receipt.get('componentDtypes'),dict)
+                or set(receipt.get('componentDtypes',{}).values())!={'torch.bfloat16'}
+                or receipt.get('width')!=width or receipt.get('height')!=height
+                or receipt.get('steps')!=self.steps or receipt.get('guidance')!=self.guidance
+                or receipt.get('seed')!=self.seed):
+            return None
+        path=Path(receipt['output']);parent=path.parent
+        if (parent/'prompt.txt').read_text()!=prompt:return None
+        with Image.open(parent/'reference.png')as old:
+            if old.size!=reference.size or old.convert('RGB').tobytes()!=reference.convert('RGB').tobytes():
+                return None
+        return native,{'path':str(path),'sha256':receipt['outputSha256'],
+            'receiptSha256':entry['receiptSha256'],'repository':self.repository,
+            'revision':self.revision,'precision':'BF16','offline':True,
+            'cacheSourceJobId':entry['sourceJobId']}
 
     def __call__(self, folder, reference, prompt, width, height, progress):
         output = folder / 'model.png';receipt_file = output.with_suffix('.receipt.json')
         ref = folder / 'reference.png';prompt_file = folder / 'prompt.txt'
+        if any(p.is_symlink()for p in (output,receipt_file,ref,prompt_file)):
+            raise ValueError('protected_stage_path_invalid')
+        if digest_bytes(self.script.read_bytes())!=self.sha:
+            raise ValueError('protected_backend_changed')
         if not ref.exists():save_png(ref, reference)
         else:
             with Image.open(ref) as old:
@@ -55,6 +89,12 @@ class NativeRunner:
             prompt_file.chmod(0o600)
         if prompt_file.read_text() != prompt:
             raise ValueError('protected_stage_prompt_drift')
+        cached=self.cached(folder,reference,prompt,width,height)
+        if cached is not None and not receipt_file.exists():
+            if output.exists()or output.with_suffix('.intent.json').exists():
+                raise ValueError('protected_cached_stage_incomplete')
+            progress(self.steps,self.steps)
+            return cached
         if not receipt_file.exists():
             if output.exists() or output.with_suffix('.intent.json').exists():
                 raise ValueError('protected_cached_stage_incomplete')
@@ -111,7 +151,7 @@ class NativeRunner:
 
 
 def build_protected(spec_file, source_path, output, runner, *, steps=30, guidance=4,
-                    seed=301, ocr=recognize):
+                    seed=301, ocr=recognize, stage_cache=None):
     started = time.monotonic();output = Path(output);source_path = Path(source_path);spec_file = Path(spec_file)
     if any(p.is_symlink() for p in (output, source_path, spec_file)):
         raise ValueError('protected_job_path_invalid')
@@ -120,6 +160,14 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
     if source_path.parent != output.parent or spec_file.parent != output.parent:
         raise ValueError('protected_job_members_invalid')
     spec_raw, source_raw = spec_file.read_bytes(), source_path.read_bytes()
+    cache_file=output.parent/'stage-cache.json';cache_raw=None
+    if stage_cache is not None:
+        if cache_file.is_symlink()or not cache_file.is_file()or cache_file.stat().st_size>64*1024:
+            raise ValueError('protected_stage_cache_file_invalid')
+        cache_raw=cache_file.read_bytes()
+        stage_cache=validate_stage_cache(stage_cache,output.parent)
+        if validate_stage_cache(json.loads(cache_raw),output.parent)!=stage_cache:
+            raise ValueError('protected_stage_cache_file_changed')
     spec, _ = normalize_protected(json.loads(spec_raw), source_raw)
     original = source_image(source_raw);composed = original.copy()
     implementation = implementation_digest()
@@ -217,6 +265,8 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
         if proof['outsideChangedPixels']!=0:raise ValueError('protected_photo_pixels_changed')
         if source_path.read_bytes()!=source_raw or spec_file.read_bytes()!=spec_raw:
             raise ValueError('protected_inputs_changed')
+        if cache_raw is not None and (cache_file.is_symlink()or cache_file.read_bytes()!=cache_raw):
+            raise ValueError('protected_stage_cache_file_changed')
         # Seal the actual accepted pixels, not a recipe tied to today's prompt
         # compiler or matting implementation. Historical readback can reproduce
         # this composition even after either implementation evolves.
@@ -254,8 +304,10 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
             'steps':steps,'guidance':guidance,'seed':seed,'protectedSourceSha256':implementation,
             'elapsedSeconds':round(time.monotonic()-started,3),'output':str(output),
             'outputBytes':temp.stat().st_size,'outputSha256':digest_bytes(temp.read_bytes())}
+        if cache_raw is not None:result['stageCacheSha256']=digest_bytes(cache_raw)
         # Verify the actual encoded PNG independently before making it visible.
-        verify_protected_result(source_path,temp,spec,result)
+        verify_protected_result(source_path,temp,spec,result,
+                                **({'stage_cache':stage_cache}if stage_cache is not None else{}))
         os.link(temp,output);temp.unlink()
         atomic_json(output.with_suffix('.receipt.json'),result)
         atomic_json(intent,{'currentState':'GENERATED_PENDING_REVIEW','pid':os.getpid(),
@@ -273,12 +325,27 @@ def main():
     parser.add_argument('--steps',type=int,default=30)
     parser.add_argument('--guidance',type=float,default=4)
     parser.add_argument('--seed',type=int,default=301)
+    parser.add_argument('--stage-cache-file')
+    parser.add_argument('--stage-cache-sha256')
     args=parser.parse_args()
     if not 1<=args.steps<=60 or not 1<=args.guidance<=8 or not 0<=args.seed<2**31:
         raise ValueError('protected_generation_parameters_invalid')
-    runner=NativeRunner(args.backend_script,args.steps,args.guidance,args.seed)
+    if bool(args.stage_cache_file)!=bool(args.stage_cache_sha256):
+        raise ValueError('protected_stage_cache_arguments_invalid')
+    cache=None
+    if args.stage_cache_file:
+        path=Path(args.stage_cache_file)
+        if (path!=Path(args.output).parent/'stage-cache.json'or not path.is_absolute()
+                or path.is_symlink()or not path.is_file()or path.stat().st_size>64*1024
+                or not HEX.fullmatch(args.stage_cache_sha256)):
+            raise ValueError('protected_stage_cache_file_invalid')
+        raw=path.read_bytes()
+        if digest_bytes(raw)!=args.stage_cache_sha256:raise ValueError('protected_stage_cache_file_changed')
+        cache=validate_stage_cache(json.loads(raw),Path(args.output).parent)
+    runner=NativeRunner(args.backend_script,args.steps,args.guidance,args.seed,
+                        stage_cache=cache,job_folder=Path(args.output).parent)
     try:result=build_protected(Path(args.spec_file),Path(args.source),Path(args.output),runner,
-                              steps=args.steps,guidance=args.guidance,seed=args.seed)
+                              steps=args.steps,guidance=args.guidance,seed=args.seed,stage_cache=cache)
     except (ValueError,OSError)as error:
         print(json.dumps({'currentState':'FAILED','errorCode':str(error)}),file=sys.stderr);return 1
     print(json.dumps(result,ensure_ascii=False));return 0
