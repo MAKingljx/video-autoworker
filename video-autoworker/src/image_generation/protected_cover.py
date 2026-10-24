@@ -402,8 +402,11 @@ def text_roi(image, layer):
 
 
 def erasure_prompt(local):
+    # Database round-trips reorder keys; identical rectangles must retain the
+    # same model prompt and native cache fingerprint.
+    rectangle = {key: local[key] for key in ('x', 'y', 'width', 'height')}
     return ('Photo editing. Remove all overlaid lettering, sponsor marks and logos ONLY inside '
-            'the rectangle '+json.dumps(local)+'. Fill it naturally from adjacent photographic texture. '
+            'the rectangle '+json.dumps(rectangle)+'. Fill it naturally from adjacent photographic texture. '
             'No new lettering, symbols, objects, boxes or borders. Preserve real people, clothing, '
             'animals, ropes and wooden structure. Do not color grade, beautify or smooth the photo.')
 

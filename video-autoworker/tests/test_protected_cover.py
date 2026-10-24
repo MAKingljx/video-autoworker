@@ -49,6 +49,12 @@ class FixtureRunner:
 
 
 class ProtectedCoverTest(unittest.TestCase):
+    def test_erasure_model_prompt_is_stable_after_json_key_reordering(self):
+        from image_generation.protected_cover import erasure_prompt
+        ordered={'x':3,'y':7,'width':40,'height':30}
+        reloaded=json.loads(json.dumps(ordered,sort_keys=True))
+        self.assertEqual(erasure_prompt(ordered),erasure_prompt(reloaded))
+
     def fixture_ocr(self,path):
         name=Path(path).name
         strings=['逐鹿而生']if 'text_layer_1_'in str(path)or name=='final-ocr-layer-1.png'else ['北极驯鹿人']
