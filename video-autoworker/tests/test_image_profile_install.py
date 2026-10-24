@@ -640,6 +640,22 @@ class InstallFixture:
 
 
 class CurrentRuntimeAdoptionTests(unittest.TestCase):
+    def test_optional_cold_start_model_runtime_does_not_claim_inference_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture, plugin = plugin_update_fixture(Path(directory).resolve())
+            def cold_gateway(*arguments):
+                value=fixture.gateway_operation(*arguments)
+                if arguments[-1] not in {"restart", "secret-check"}:value.pop("modelRuntime",None)
+                return value
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()), patch.object(install.time,"sleep"):
+                install.main(fixture.arguments("--apply"));fixture.migrate_current_runtime()
+                with patch.object(install,"current_gateway_operation",side_effect=cold_gateway):
+                    self.assertEqual(install.main(fixture.adoption_arguments("--apply",plugin)),0)
+            receipt=json.loads((fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json').read_bytes())
+            self.assertFalse(receipt['runtimeEvidence']['modelRuntimeReported'])
+            self.assertFalse(receipt['runtimeEvidence']['modelInferenceValidated'])
+            self.assertEqual(receipt['currentState'],'SERVICE_HEALTHY_FEISHU_DISABLED')
+
     def test_adopts_verified_node24_and_updates_only_plugin_and_same_commit_instructions(self):
         with tempfile.TemporaryDirectory() as directory:
             fixture, plugin = plugin_update_fixture(Path(directory).resolve())
@@ -730,6 +746,9 @@ class CurrentRuntimeAdoptionTests(unittest.TestCase):
             ({"runtimeVersion": "2026.9.2"}, "image_profile_live_runtime_mismatch"),
             ({"childRuntime": {"execPath": "/outside/node", "available": True}}, "image_profile_live_runtime_mismatch"),
             ({"modelRuntime": {"degraded": False, "pendingAgents": ["busy"]}}, "image_profile_runtime_degraded"),
+            ({"modelRuntime": None}, "image_profile_runtime_degraded"),
+            ({"modelRuntime": {"degraded": True, "pendingAgents": []}}, "image_profile_runtime_degraded"),
+            ({"degradedPlugins": ["bad-plugin"]}, "image_profile_runtime_degraded"),
             ({"healthOk": False}, "image_profile_runtime_unhealthy"),
         ]:
             with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
@@ -811,6 +830,140 @@ class CurrentRuntimeAdoptionTests(unittest.TestCase):
             self.assertIn("resolveGatewayTokenFromConfigPath", argv[3])
             self.assertNotIn("a" * 64, " ".join(argv))
             self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", env)
+
+
+class AppliedPluginResumeTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def applied_failure(self, directory):
+        fixture,plugin=plugin_update_fixture(Path(directory).resolve())
+        with fixture.patches(),contextlib.redirect_stdout(io.StringIO()),patch.object(install.time,'sleep'), \
+                patch.object(install,'current_gateway_operation',side_effect=fixture.gateway_operation):
+            install.main(fixture.arguments('--apply'));fixture.migrate_current_runtime()
+            fixture.fail_validation=True
+            with self.assertRaisesRegex(install.InstallError,'component_command_failed'):
+                install.main(fixture.adoption_arguments('--apply',plugin))
+            fixture.fail_validation=False
+            # The repair only seals an already completed official restart.
+            fixture.gateway_pid+=1
+            source={'mode':'canonical_git','sourceRepository':install.SOURCE_REPOSITORY,'sourceCommit':'d'*40}
+            controller={'mode':'canonical_git','sourceRepository':install.SOURCE_REPOSITORY,'sourceCommit':'e'*40}
+            with patch.object(install,'resume_source_evidence',return_value=(source,controller)) as verify:
+                yield fixture,plugin,verify
+
+    def resume_args(self,fixture,plugin,mode='--apply'):
+        return fixture.adoption_arguments(mode,plugin,instructions=False)+[
+            '--resume','--controller-source-commit','e'*40]
+
+    def test_resume_seals_existing_target_with_separate_controller_without_payload_writes_or_restart(self):
+        with tempfile.TemporaryDirectory() as directory,self.applied_failure(directory) as (fixture,plugin,verify):
+            before=fixture.managed_bytes();calls=len(fixture.commands);bridges=len(fixture.bridge_calls)
+            self.assertEqual(install.main(self.resume_args(fixture,plugin,'--dry-run')),0)
+            self.assertEqual(fixture.managed_bytes(),before)
+            self.assertEqual(install.main(self.resume_args(fixture,plugin)),0)
+            after=fixture.managed_bytes();receipt_path=str(fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json')
+            self.assertEqual({p:v for p,v in after.items()if p!=receipt_path},{p:v for p,v in before.items()if p!=receipt_path})
+            receipt=json.loads(after[receipt_path])
+            self.assertEqual(receipt['currentState'],'SERVICE_HEALTHY_FEISHU_DISABLED')
+            self.assertEqual(receipt['pluginSourceCommit'],'d'*40)
+            self.assertEqual(receipt['pluginResumeEvidence']['controllerSourceEvidence']['sourceCommit'],'e'*40)
+            self.assertFalse(receipt['pluginResumeEvidence']['modelInferenceValidated'])
+            self.assertTrue(receipt['pluginResumeEvidence']['resumedWithoutPayloadWritesOrRestart'])
+            self.assertNotIn('restart',fixture.bridge_calls[bridges:])
+            self.assertFalse(any('restart'in command or 'bootstrap'in command or 'bootout'in command
+                                 for command in fixture.commands[calls:]))
+            self.assertEqual(len(list((fixture.home/'ai-worker/backups/openclaw-image-studio').iterdir())),1)
+            self.assertEqual(verify.call_args.args[-2:],('d'*40,'e'*40))
+
+    def test_resume_rejects_target_backup_artifact_pid_and_activity_drift(self):
+        for scenario,error in [('workspace','plugin_resume_target_payload_drift'),
+                ('backup','plugin_resume_backup_integrity_failed'),('artifact','plugin_artifact_members_or_digest_drift'),
+                ('same-pid','plugin_update_fresh_restart_unproven'),('busy','image_profile_idle_unproven'),
+                ('plan','plugin_resume_plan_mismatch')]:
+            with self.subTest(scenario=scenario),tempfile.TemporaryDirectory() as directory, \
+                    self.applied_failure(directory) as (fixture,plugin,verify):
+                receipt_path=fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json'
+                receipt=json.loads(receipt_path.read_bytes())
+                if scenario=='workspace':(fixture.home/'ai-worker/workspaces/image-studio/AGENTS.md').write_text('outside edit')
+                elif scenario=='backup':(Path(receipt['recoveryBackup'])/'AGENTS.md').write_text('damaged backup')
+                elif scenario=='artifact':(plugin/'index.js').write_text('tampered immutable artifact')
+                elif scenario=='same-pid':fixture.gateway_pid=receipt['pluginUpdatePlan']['previousGatewayPid']
+                elif scenario=='busy':fixture.active_work['rootRequests']=1
+                elif scenario=='plan':
+                    receipt['pluginUpdatePlan']['targetSourceCommit']='f'*40
+                    receipt_path.write_bytes(install.encoded(receipt))
+                before=fixture.managed_bytes();commands=len(fixture.commands)
+                with self.assertRaisesRegex(install.InstallError,error):install.main(self.resume_args(fixture,plugin))
+                self.assertEqual(fixture.managed_bytes(),before)
+                self.assertFalse(any('restart'in c or 'bootout'in c or 'bootstrap'in c for c in fixture.commands[commands:]))
+
+    def test_legacy_prepared_plan_can_resume_from_adopted_backup_pid(self):
+        with tempfile.TemporaryDirectory() as directory,self.applied_failure(directory) as (fixture,plugin,verify):
+            path=fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json'
+            receipt=json.loads(path.read_bytes())
+            for key in ['previousGatewayPid','targetPluginArtifact','workspaceInstructionsUpdated']:
+                receipt['pluginUpdatePlan'].pop(key)
+            path.write_bytes(install.encoded(receipt))
+            self.assertEqual(install.main(self.resume_args(fixture,plugin)),0)
+            saved=json.loads(path.read_bytes());self.assertEqual(saved['pluginSourceCommit'],'d'*40)
+
+    def test_resume_rejects_payload_change_after_health_probe_before_sealing(self):
+        with tempfile.TemporaryDirectory() as directory,self.applied_failure(directory) as (fixture,plugin,verify):
+            original=fixture.gateway_operation
+            def mutate(*args):
+                value=original(*args)
+                (fixture.home/'ai-worker/workspaces/image-studio/AGENTS.md').write_text('concurrent edit')
+                return value
+            path=fixture.home/'ai-worker/state/openclaw-image-studio/install-receipt.json';before=path.read_bytes()
+            with patch.object(install,'current_gateway_operation',side_effect=mutate), \
+                    self.assertRaisesRegex(install.InstallError,'plugin_resume_cas_changed'):
+                install.main(self.resume_args(fixture,plugin))
+            self.assertEqual(path.read_bytes(),before)
+
+    def test_controller_override_is_not_allowed_outside_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture,plugin=plugin_update_fixture(Path(directory).resolve())
+            with fixture.patches(),self.assertRaisesRegex(install.InstallError,'plugin_resume_controller_option_invalid'):
+                install.main(fixture.plugin_arguments('--dry-run',plugin)+['--controller-source-commit','e'*40])
+
+
+class ResumeSourceEvidenceTests(unittest.TestCase):
+    def test_real_git_binds_old_target_and_new_controller_bytes_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory).resolve();root=base/'canonical';root.mkdir();plugin=base/'installed';plugin.mkdir()
+            def git(*args):
+                result=subprocess.run(['/usr/bin/git','-C',str(root),*args],capture_output=True,text=True,check=True)
+                return result.stdout.strip()
+            git('init','--quiet');git('config','user.name','Image installer test');git('config','user.email','installer-test@example.invalid')
+            git('remote','add','origin',install.SOURCE_REPOSITORY+'.git')
+            members={name:b'controller v1\n' for name in ['scripts/install-openclaw-image-studio.py',
+                'scripts/openclaw-keychain-secretref.sh','scripts/lib/openclaw-secret-reference.mjs']}
+            members.update({'openclaw-plugins/aiworker-image-command/index.js':b'export default {}\n',
+                'ops/openclaw-image-studio/AGENTS.md':b'accepted target instructions\n',
+                'ops/openclaw-image-studio/IDENTITY.md':b'accepted target identity\n'})
+            for name,data in members.items():
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(data)
+            git('add','.');git('commit','--quiet','-m','target fixture');target_commit=git('rev-parse','HEAD')
+            (plugin/'index.js').write_bytes(members['openclaw-plugins/aiworker-image-command/index.js'])
+            (plugin/'manifest.json').write_text('{}')
+            controller=root/'scripts/install-openclaw-image-studio.py';controller.write_bytes(b'controller repair v2\n')
+            git('add','scripts/install-openclaw-image-studio.py');git('commit','--quiet','-m','controller repair fixture')
+            controller_commit=git('rev-parse','HEAD')
+            target={name:members['ops/openclaw-image-studio/'+name]for name in ['AGENTS.md','IDENTITY.md']}
+            source,evidence=install.resume_source_evidence(root,plugin,target,target_commit,controller_commit)
+            self.assertEqual(source['sourceCommit'],target_commit);self.assertEqual(evidence['sourceCommit'],controller_commit)
+            self.assertNotEqual(target_commit,controller_commit)
+            with self.assertRaisesRegex(install.InstallError,'controller_commit_mismatch'):
+                install.resume_source_evidence(root,plugin,target,target_commit,target_commit)
+            (plugin/'index.js').write_text('tampered target')
+            with self.assertRaisesRegex(install.InstallError,'committed_source_drift'):
+                install.resume_source_evidence(root,plugin,target,target_commit,controller_commit)
+            (plugin/'index.js').write_bytes(members['openclaw-plugins/aiworker-image-command/index.js'])
+            controller.write_text('uncommitted controller edit')
+            with self.assertRaisesRegex(install.InstallError,'committed_source_drift'):
+                install.resume_source_evidence(root,plugin,target,target_commit,controller_commit)
+            controller.write_bytes(b'controller repair v2\n');git('remote','set-url','origin','https://example.invalid/unrelated.git')
+            with self.assertRaisesRegex(install.InstallError,'canonical_git_remote_mismatch'):
+                install.resume_source_evidence(root,plugin,target,target_commit,controller_commit)
 
 
 def artifact_fixture(base):

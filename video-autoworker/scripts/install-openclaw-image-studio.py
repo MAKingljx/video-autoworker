@@ -664,18 +664,21 @@ def current_profile_idle(home: Path, binary: Path, node: Path, env: dict, runtim
     require(value.get("runtimeVersion") == runtime["openclaw"]
         and value.get("childRuntime", {}).get("available") is True
         and value.get("childRuntime", {}).get("execPath") == str(node), "image_profile_live_runtime_mismatch")
+    # 9.9's PreparedModelRuntimeStartupStatus is optional: native providers can
+    # omit it after a cold start. Absence does not prove model inference QA.
     model = value.get("modelRuntime")
-    require(isinstance(model, dict) and model.get("pendingAgents") == []
+    require(("modelRuntime" not in value or isinstance(model, dict) and model.get("pendingAgents") == [])
         and isinstance(value.get("degradedPlugins"), list) and isinstance(value.get("degradedSecretOwners"), list),
         "image_profile_runtime_degraded")
     if require_health:
-        require(model.get("degraded") is False and value["degradedPlugins"] == []
+        require(("modelRuntime" not in value or model.get("degraded") is False) and value["degradedPlugins"] == []
             and value["degradedSecretOwners"] == [], "image_profile_runtime_degraded")
         require(value.get("healthOk") is True, "image_profile_runtime_unhealthy")
     require(re.fullmatch(r"[a-f0-9]{64}", value.get("statusSha256", "")) is not None
         and (not require_health or re.fullmatch(r"[a-f0-9]{64}", value.get("healthSha256", "")) is not None),
         "image_profile_probe_digest_invalid")
     return {"healthSha256": value.get("healthSha256"), "statusSha256": value["statusSha256"],
+        "modelRuntimeReported": "modelRuntime" in value, "modelInferenceValidated": False,
         "activity": {**active, "writeCustody": 0}}
 
 
@@ -821,6 +824,149 @@ def restore_plugin_update(args, home: Path, binary: Path, node: Path, env: dict,
     return 0
 
 
+def resume_source_evidence(root: Path, plugin: Path, target: dict[str, bytes], target_commit: str,
+                           controller_commit: str) -> tuple[dict, dict]:
+    """Bind an already-applied target separately from a newer repair controller."""
+    git_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
+    def git(*arguments):
+        result = subprocess.run(["/usr/bin/git", "-C", str(root), *arguments], env=git_env,
+                                capture_output=True, timeout=30)
+        require(result.returncode == 0, "plugin_resume_canonical_git_probe_failed")
+        return result.stdout
+    git_root = safe_path(Path(git("rev-parse", "--show-toplevel").decode().strip()), file=False)
+    require(git("rev-parse", "HEAD").decode().strip() == controller_commit,
+            "plugin_resume_controller_commit_mismatch")
+    require(git("remote", "get-url", "origin").decode().strip() in {
+        SOURCE_REPOSITORY, SOURCE_REPOSITORY + ".git", "git@github.com:MAKingljx/video-autoworker.git"},
+        "canonical_git_remote_mismatch")
+    require(git("cat-file", "-t", target_commit).strip() == b"commit", "plugin_resume_target_commit_invalid")
+    def verify(commit, members):
+        evidence = {}
+        for path, data in members.items():
+            require(path.is_relative_to(git_root), "canonical_dependency_outside_git")
+            relative = path.relative_to(git_root).as_posix()
+            require(git("show", commit + ":" + relative) == data, "plugin_resume_committed_source_drift")
+            evidence[relative] = sha(data)
+        return {"mode": "canonical_git", "sourceRepository": SOURCE_REPOSITORY, "sourceCommit": commit,
+                "payloadInventorySha256": sha(encoded(evidence))}
+    controller_members = {root / name: owned_public_file(root / name) for name in (
+        "scripts/install-openclaw-image-studio.py", "scripts/openclaw-keychain-secretref.sh",
+        "scripts/lib/openclaw-secret-reference.mjs")}
+    controller = verify(controller_commit, controller_members)
+    inventory = bounded_files(plugin)
+    inventory.pop("manifest.json")
+    target_members = {root / "openclaw-plugins/aiworker-image-command" / name: owned_public_file(plugin / name)
+                      for name in inventory}
+    target_members.update({root / "ops/openclaw-image-studio" / name: target[name]
+                           for name in ("AGENTS.md", "IDENTITY.md") if name in target})
+    source = verify(target_commit, target_members)
+    source["pluginInventorySha256"] = sha(encoded(inventory))
+    return source, controller
+
+
+def resume_plugin_update(args, home: Path, plugin: Path, binary: Path, node: Path, env: dict,
+                         receipt_path: Path, receipt: dict, runtime: dict | None, node_version: str) -> int:
+    """Finish an applied, healthy owned target without rewriting or restarting it."""
+    require(runtime is not None, "plugin_resume_verified_current_runtime_required")
+    require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
+        and receipt.get("feishuEnabled") is False and receipt.get("currentState") in {
+            "PLUGIN_UPDATE_PREPARED", "PLUGIN_UPDATE_NEEDS_INSPECTION"}, "plugin_resume_requires_owned_incomplete_update")
+    plan = receipt.get("pluginUpdatePlan")
+    require(isinstance(plan, dict) and plan.get("schema") == "aiworker-image-plugin-update/v1"
+        and plan.get("targetSourceCommit") == args.source_commit and plan.get("targetPluginRoot") == str(plugin),
+        "plugin_resume_plan_mismatch")
+    state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
+    paths = plugin_payload_paths(state, workspace)
+    target = {name: private_file(path) for name, path in paths.items()}
+    hashes = {name: sha(raw) for name, raw in target.items()}
+    require(hashes == plan.get("targetPayloadSha256"), "plugin_resume_target_payload_drift")
+    backup = safe_path(Path(plan.get("recoveryBackup", "")), file=False)
+    require(backup.parent == home / "ai-worker/backups/openclaw-image-studio", "plugin_resume_backup_path_invalid")
+    manifest_raw = private_file(backup / "manifest.json")
+    manifest = json.loads(manifest_raw)
+    names = set(paths) | {"install-receipt.json"}
+    require(manifest.get("schema") == "aiworker-image-studio-recovery/v1" and set(manifest.get("files", {})) == names
+        and bounded_files(backup) == {**manifest["files"], "manifest.json": sha(manifest_raw)},
+        "plugin_resume_backup_integrity_failed")
+    baseline = json.loads(private_file(backup / "install-receipt.json"))
+    require(baseline.get("schema") == SCHEMA and baseline.get("profile") == PROFILE
+        and baseline.get("currentState") == "SERVICE_HEALTHY_FEISHU_DISABLED" and baseline.get("feishuEnabled") is False
+        and baseline.get("runtime") == {"openclaw": args.expected_openclaw_version, "node": node_version},
+        "plugin_resume_baseline_invalid")
+    before = {name: private_file(backup / name) for name in paths}
+    require({name: sha(raw) for name, raw in before.items()} == baseline.get("payloadSha256")
+        == plan.get("beforePayloadSha256"), "plugin_resume_baseline_payload_mismatch")
+    old_config = json.loads(before["openclaw.json"])
+    old_paths = old_config.get("plugins", {}).get("load", {}).get("paths")
+    require(isinstance(old_paths, list) and len(old_paths) == 1, "plugin_resume_previous_plugin_invalid")
+    require(plugin_artifact(home, safe_path(Path(old_paths[0]), file=False)) == plan.get("previousPluginArtifact"),
+            "plugin_resume_previous_artifact_drift")
+    expected_config = copy.deepcopy(old_config)
+    expected_config["plugins"]["load"]["paths"] = [str(plugin)]
+    require(target["openclaw.json"] == encoded(expected_config) and expected_config.get("channels") == {}
+        and expected_config.get("agents", {}).get("entries", {}).keys() == {PROFILE}
+        and expected_config.get("gateway", {}).get("port") == args.gateway_port, "plugin_resume_boundary_drift")
+    new_artifact = plugin_artifact(home, plugin, standalone_commit=args.source_commit)
+    require(plan.get("targetPluginArtifact", new_artifact) == new_artifact, "plugin_resume_target_artifact_drift")
+    changed_workspace = {name: target[name] for name in ("AGENTS.md", "IDENTITY.md")
+                         if before[name] != target[name]}
+    source, controller = resume_source_evidence(ROOT, plugin, changed_workspace, args.source_commit,
+                                               args.controller_source_commit or args.source_commit)
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    service = verify_installed_service(plist, state, target["openclaw.json"])
+    require(service == plan.get("serviceEvidence") == baseline.get("serviceEvidence"), "plugin_resume_service_drift")
+    previous_pid = plan.get("previousGatewayPid", baseline.get("runtimeEvidence", {}).get("gatewayPid"))
+    require(type(previous_pid) is int and previous_pid > 0, "plugin_resume_previous_pid_unproven")
+    pid = profile_process_identity(home, args.gateway_port)
+    require(pid != previous_pid, "plugin_update_fresh_restart_unproven")
+    health = current_profile_idle(home, binary, node, env, runtime)
+    print(json.dumps({"currentState": "PLUGIN_RESUME_READY", "profile": PROFILE,
+        "pluginSourceCommit": args.source_commit, "controllerSourceCommit": controller["sourceCommit"],
+        "gatewayPid": pid, "modelInferenceValidated": False}))
+    if args.dry_run:
+        return 0
+    with installation_lock(receipt_path.parent.parent / ".openclaw-image-studio-install.lock"):
+        require(private_file(receipt_path) == encoded(receipt)
+            and all(private_file(paths[name]) == raw for name, raw in target.items()), "plugin_resume_cas_changed")
+        require(bounded_files(backup) == {**manifest["files"], "manifest.json": sha(manifest_raw)}
+            and plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact,
+            "plugin_resume_evidence_changed")
+        require(profile_process_identity(home, args.gateway_port) == pid, "plugin_resume_gateway_pid_changed")
+        fresh_node, fresh = current_managed_runtime(home, target["openclaw.json"], plist, binary,
+            args.expected_openclaw_version, args.expected_current_config_sha256, args.expected_current_plist_sha256)
+        require(fresh_node == node, "plugin_resume_runtime_changed")
+        update_runtime_evidence(runtime, fresh)
+        health = current_profile_idle(home, binary, node, env, runtime)
+        require(verify_installed_service(plist, state, target["openclaw.json"]) == service,
+                "plugin_resume_service_drift")
+        fresh_source, fresh_controller = resume_source_evidence(ROOT, plugin, changed_workspace, args.source_commit,
+            args.controller_source_commit or args.source_commit)
+        require((fresh_source, fresh_controller) == (source, controller), "plugin_resume_source_changed")
+        require(all(private_file(paths[name]) == raw for name, raw in target.items())
+            and profile_process_identity(home, args.gateway_port) == pid
+            and plugin_artifact(home, plugin, standalone_commit=args.source_commit) == new_artifact,
+            "plugin_resume_final_readback_changed")
+        changes = {"currentState": "SERVICE_HEALTHY_FEISHU_DISABLED", "errorCode": None,
+            "originalInstallSourceCommit": receipt.get("originalInstallSourceCommit", receipt["sourceCommit"]),
+            "pluginSourceCommit": args.source_commit, "pluginSourceEvidence": source, "pluginArtifact": new_artifact,
+            "payloadSha256": hashes, "serviceEvidence": service, "healthEvidenceSha256": health["healthSha256"],
+            "runtimeEvidence": dict(fresh, nodeVersion=node_version, gatewayPid=pid, **health),
+            "pluginUpdateEvidence": {"previousGatewayPid": previous_pid, "gatewayPid": pid,
+                "restartMethod": "verified_existing_restart", "statusSha256": health["statusSha256"],
+                "workspaceInstructionsUpdated": before["AGENTS.md"] != target["AGENTS.md"]
+                    or before["IDENTITY.md"] != target["IDENTITY.md"]},
+            "pluginResumeEvidence": {"controllerSourceEvidence": controller, "targetSourceCommit": args.source_commit,
+                "backupManifestSha256": sha(manifest_raw), "resumedWithoutPayloadWritesOrRestart": True,
+                "previousErrorCode": receipt.get("errorCode"), "modelInferenceValidated": False},
+            "nextAction": "verify_private_image_studio_dialogue_and_protected_cover"}
+        if before["AGENTS.md"] != target["AGENTS.md"] or before["IDENTITY.md"] != target["IDENTITY.md"]:
+            changes["workspaceSourceCommit"] = args.source_commit
+        advance_receipt(receipt_path, receipt, changes)
+    print(json.dumps({"currentState": changes["currentState"], "profile": PROFILE,
+        "pluginSourceCommit": args.source_commit, "gatewayPid": pid, "resumed": True, "feishuEnabled": False}))
+    return 0
+
+
 def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path, env: dict,
                        node_version: str) -> int:
     state, workspace = home / f".openclaw-{PROFILE}", home / "ai-worker/workspaces" / PROFILE
@@ -830,6 +976,8 @@ def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path,
     runtime = getattr(args, "current_runtime_evidence", None)
     if args.restore_plugin_update:
         return restore_plugin_update(args, home, binary, node, env, receipt_path, receipt, runtime, node_version)
+    if args.resume:
+        return resume_plugin_update(args, home, plugin, binary, node, env, receipt_path, receipt, runtime, node_version)
     require(receipt.get("schema") == SCHEMA and receipt.get("profile") == PROFILE
         and receipt.get("currentState") == "SERVICE_HEALTHY_FEISHU_DISABLED" and receipt.get("feishuEnabled") is False,
         "healthy_owned_image_profile_required")
@@ -928,7 +1076,9 @@ def update_plugin_only(args, home: Path, plugin: Path, binary: Path, node: Path,
         backup = verified_profile_backup(home, {**before, "install-receipt.json": encoded(receipt)})
         plan = {"schema": "aiworker-image-plugin-update/v1", "targetSourceCommit": args.source_commit,
             "targetPluginRoot": str(plugin), "beforePayloadSha256": hashes, "targetPayloadSha256": target_hashes,
-            "previousPluginArtifact": old_artifact, "serviceEvidence": service_before, "recoveryBackup": str(backup)}
+            "previousPluginArtifact": old_artifact, "targetPluginArtifact": new_artifact,
+            "previousGatewayPid": pid, "workspaceInstructionsUpdated": args.update_workspace_instructions,
+            "serviceEvidence": service_before, "recoveryBackup": str(backup)}
         receipt = advance_receipt(receipt_path, receipt, {"currentState": "PLUGIN_UPDATE_PREPARED", "pluginUpdatePlan": plan,
             "recoveryBackup": str(backup), "errorCode": None, "nextAction": "finish_owned_plugin_update_or_restore_verified_cohort"})
         try:
@@ -1012,6 +1162,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Update AGENTS/IDENTITY from this same canonical source commit with the plugin.")
     parser.add_argument("--restore-plugin-update", action="store_true",
                         help="Restore one owned incomplete plugin update's complete verified recovery cohort.")
+    parser.add_argument("--controller-source-commit",
+                        help="Canonical repair-controller commit; only with plugin-update --resume.")
     parser.add_argument("--previous-source-commit")
     parser.add_argument("--gateway-port", type=int, default=19289)
     parser.add_argument("--image-endpoint", default="http://127.0.0.1:18095")
@@ -1034,10 +1186,15 @@ def main(argv: list[str] | None = None) -> int:
     for fingerprint in (args.expected_current_config_sha256, args.expected_current_plist_sha256):
         require(fingerprint is None or re.fullmatch(r"[a-f0-9]{64}", fingerprint) is not None,
                 "current_runtime_fingerprint_invalid")
-    require(not args.update_plugin_only or not any((args.resume, args.adopt_prepared, args.previous_source_commit,
+    require(not args.update_plugin_only or not any((args.adopt_prepared, args.previous_source_commit,
         args.artifact_manifest, args.artifact_sha256, args.model_provider_file)), "plugin_update_mode_options_invalid")
+    require(not args.update_plugin_only or not args.resume or not any((args.restore_plugin_update,
+        args.update_workspace_instructions)), "plugin_resume_mode_options_invalid")
+    require(args.controller_source_commit is None or args.update_plugin_only and args.resume
+        and re.fullmatch(r"[a-f0-9]{40}", args.controller_source_commit) is not None,
+        "plugin_resume_controller_option_invalid")
     require(args.update_plugin_only or args.model_provider_file is not None, "model_provider_file_required")
-    require(not args.resume or args.apply, "resume_requires_apply")
+    require(not args.resume or args.apply or args.update_plugin_only and args.dry_run, "resume_requires_apply")
     require(not args.adopt_prepared or not args.resume, "prepared_adoption_mode_invalid")
     require(bool(args.previous_source_commit) == args.adopt_prepared, "prepared_adoption_previous_commit_required")
     if args.previous_source_commit:
