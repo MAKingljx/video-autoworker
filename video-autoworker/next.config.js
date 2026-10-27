@@ -34,6 +34,7 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/openclaw-private-gateway-rpc.mjs',
   './scripts/lib/openclaw-agent-config.mjs',
   './scripts/lib/openclaw-runtime-convergence.mjs',
+  './scripts/lib/openclaw-managed-sdk.mjs',
   './scripts/lib/openclaw-canonical-tool-upgrade.mjs',
   './scripts/lib/canonical-release-source.mjs',
   './scripts/lib/openclaw-runtime-contract.mjs',

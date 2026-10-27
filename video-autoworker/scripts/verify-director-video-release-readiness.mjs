@@ -1106,18 +1106,22 @@ function inspectionEntry(pathname, label, optional = false) {
   return entry
 }
 
-function inspectionTree(root, label, { optional = false, video = false } = {}) {
+function inspectionTree(root, label, { optional = false, sdkPlugin = false, allowSdkMigration = false } = {}) {
   const rootEntry = inspectionEntry(root, label, optional)
   if (!rootEntry) return null
   if (!rootEntry.isDirectory()) fail(`${label}_unsafe`)
   const entries = []
+  const sdkLinks = []
   const visit = directory => {
     for (const name of readdirSync(directory).sort()) {
       const pathname = join(directory, name), member = relative(root, pathname)
       const initial = lstatSync(pathname)
-      if (video && member === 'node_modules/openclaw' && initial.isSymbolicLink()) {
-        const sdk = validateOpenClawSdkLink(pathname, EXPECTED_OPENCLAW_VERSION)
+      if (sdkPlugin && member === 'node_modules/openclaw' && initial.isSymbolicLink()) {
+        const sdk = validateOpenClawSdkLink(pathname, EXPECTED_OPENCLAW_VERSION,
+          { allowRecognizedLegacy: allowSdkMigration })
         entries.push([member, 'sdk', sdk.evidence])
+        sdkLinks.push({ currentState: sdk.currentState, before: sdk.evidence,
+          expectedSdkRoot: sdk.expectedSdkRoot, expectedSdkIdentity: sdk.expectedSdkIdentity })
         continue
       }
       const entry = inspectionEntry(pathname, label)
@@ -1127,7 +1131,7 @@ function inspectionTree(root, label, { optional = false, video = false } = {}) {
     }
   }
   visit(root)
-  return { root, mode: rootEntry.mode & 0o777, entries }
+  return { root, mode: rootEntry.mode & 0o777, entries, ...(sdkLinks.length ? { sdkLinks } : {}) }
 }
 
 function inspectionFile(pathname, label, optional = false) {
@@ -1161,7 +1165,7 @@ function componentConfigProjection(config, component) {
   return { matches, projection: { enabled: config.plugins?.enabled, allowed, entry, agents: scoped, globalGrants } }
 }
 
-export function inspectInstalledReleaseComponent({ component, repositoryRoot, profileStateRoot, workspaceRoot }) {
+export function inspectInstalledReleaseComponent({ component, repositoryRoot, profileStateRoot, workspaceRoot, allowSdkMigration = false }) {
   if (!['taskFlow', 'videoCommand', 'directorBrain'].includes(component)) fail('component_invalid')
   for (const pathname of [repositoryRoot, profileStateRoot, workspaceRoot]) {
     if (typeof pathname !== 'string' || !isAbsolute(pathname) || resolve(pathname) !== pathname) fail('component_root_path_invalid')
@@ -1198,7 +1202,8 @@ export function inspectInstalledReleaseComponent({ component, repositoryRoot, pr
   const expected = selectedSourceManifest(repository, members)
   if (component !== 'taskFlow') maskedCompatiblePluginPackage(join(sourceRoot, 'package.json'),
     component === 'videoCommand' ? 'aiworker-video-command' : 'aiworker-director-brain', 'component_source_package', true)
-  const actual = inspectionTree(installedRoot, 'component_target', { optional: true, video: component === 'videoCommand' })
+  const actual = inspectionTree(installedRoot, 'component_target', { optional: true,
+    sdkPlugin: component === 'videoCommand', allowSdkMigration })
   const state = { component, repository, profile, workspace, sourceFiles, expected, actual, secondary }
   let configuration = null, renderedMatches = true
   if (component === 'taskFlow') {
@@ -1230,6 +1235,8 @@ export function inspectInstalledReleaseComponent({ component, repositoryRoot, pr
   }
   const fingerprint = sha256(canonicalJson(state))
   if (!actual || (secondary && !secondary.actual)) return { matches: false, fingerprint, reason: 'component_missing' }
+  const sdkMigrations = (actual.sdkLinks || []).filter(item => item.currentState === 'legacy-needed-update')
+  if (sdkMigrations.length) return { matches: false, fingerprint, reason: 'legacy-needed-update', sdkMigrations }
   if (!renderedMatches) return { matches: false, fingerprint, reason: 'managed_sections_changed' }
   if (configuration && !configuration.matches) return { matches: false, fingerprint, reason: 'component_config_changed' }
   try {

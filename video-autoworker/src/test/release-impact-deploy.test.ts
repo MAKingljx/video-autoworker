@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -767,6 +768,35 @@ describe('release impact deployment', () => {
 
 
 describe('local component evidence reuse', () => {
+  it('seals a recognized old SDK as a required preinstall update even when component source did not change', () => {
+    const components = releaseComponentSummary(new Map(), new Map()) as ComponentSummary
+    const oldRoot = '/private/managed-node/lib/node_modules/openclaw'
+    const sdkMigrations = [{ currentState: 'legacy-needed-update', before: {
+      path: 'node_modules/openclaw', type: 'symlink', target: oldRoot,
+      targetSha256: createHash('sha256').update(oldRoot).digest('hex'),
+      sdk: { name: 'openclaw', version: '2026.9.2', packageSha256: 'a'.repeat(64) },
+    }, expectedSdkRoot: '/private/runtime/2026.9.9/install/lib/node_modules/openclaw',
+    expectedSdkIdentity: { root: '/private/runtime/2026.9.9/install/lib/node_modules/openclaw',
+      name: 'openclaw', version: '2026.9.9', packageSha256: 'b'.repeat(64) } }]
+    const inspect = vi.fn(({ component, allowSdkMigration }) => {
+      expect(allowSdkMigration).toBe(true)
+      return component === 'videoCommand'
+        ? { matches: false, fingerprint: 'c'.repeat(64), reason: 'legacy-needed-update', sdkMigrations }
+        : { matches: true, fingerprint: 'd'.repeat(64) }
+    })
+    const result = inspectReleasePayloadComponents(components, {}, inspect)
+    expect(result.videoCommand).toMatchObject({ changed: true, installedFingerprint: 'c'.repeat(64), sdkMigrations })
+    expect(result.videoCommand.before).not.toBe(result.videoCommand.after)
+    expect(result.directorBrain.changed).toBe(false)
+    expect(components.videoCommand.changed).toBe(false)
+    for (const invalid of [[], [{ ...sdkMigrations[0], before: { ...sdkMigrations[0].before,
+      sdk: { ...sdkMigrations[0].before.sdk, version: '2026.9.3' } } }]]) {
+      expect(() => inspectReleasePayloadComponents(components, {}, () => ({ matches: false,
+        fingerprint: 'c'.repeat(64), reason: 'legacy-needed-update', sdkMigrations: invalid })))
+        .toThrow('component SDK migration evidence is invalid')
+    }
+  })
+
   it('reuses matching components independently and detects installed drift even with unchanged source', () => {
     const tree = new Map([['src/app/page.tsx', 'app']])
     const components = releaseComponentSummary(tree, tree) as ComponentSummary

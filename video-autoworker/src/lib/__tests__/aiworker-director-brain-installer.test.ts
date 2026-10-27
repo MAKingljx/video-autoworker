@@ -394,6 +394,7 @@ async function initializeCleanInstallerRepository() {
     'scripts/lib/git-source-layout.mjs',
     'scripts/lib/git-source-layout.sh',
     'scripts/lib/openclaw-runtime-contract.mjs',
+    'scripts/lib/openclaw-managed-sdk.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
   ]
@@ -416,10 +417,13 @@ async function initializeCleanInstallerRepository() {
 }
 
 async function initializeFakeOpenClaw() {
-  commandFixtureRoot = await mkdtemp(resolve(tmpdir(), 'director-brain-installer-commands-'))
+  commandFixtureRoot = await realpath(await mkdtemp(resolve(tmpdir(), 'director-brain-installer-commands-')))
   fakeCommandBin = resolve(commandFixtureRoot, 'bin')
   fakeOpenClawCallLog = resolve(commandFixtureRoot, 'openclaw-calls.ndjson')
   await mkdir(fakeCommandBin, { mode: 0o700 })
+  const sdkRoot = resolve(commandFixtureRoot, 'managed-node/lib/node_modules/openclaw')
+  await mkdir(sdkRoot, { recursive: true, mode: 0o700 })
+  await writeFile(resolve(sdkRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9' }), { mode: 0o600 })
   await writeFile(fakeOpenClawCallLog, '', { mode: 0o600 })
   const fakeOpenClaw = resolve(fakeCommandBin, 'openclaw')
   await writeFile(fakeOpenClaw, `#!${process.execPath}
@@ -483,6 +487,8 @@ function installerTestEnvironment(
   return {
     ...process.env,
     AIWORKER_TEST_OPENCLAW_CALL_LOG: fakeOpenClawCallLog,
+    AIWORKER_OPENCLAW_RUNTIME_TEST_MODE: '1',
+    AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT: resolve(commandFixtureRoot, 'managed-node'),
     ...environment,
     PATH: [
       fakeCommandBin,

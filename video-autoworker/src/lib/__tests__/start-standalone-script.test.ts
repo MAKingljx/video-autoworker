@@ -140,6 +140,8 @@ function createLauncherFixture(): LauncherFixture {
     'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-task.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs': 'export {}\n',
@@ -246,6 +248,7 @@ describe('standalone runtime launcher', () => {
     try {
       const checker = await import(pathToFileURL(artifactCheckerPath).href)
       const helpers = [
+        'scripts/lib/openclaw-managed-sdk.mjs',
         'scripts/lib/openclaw-canonical-tool-upgrade.mjs',
         'scripts/lib/canonical-release-source.mjs',
       ]
@@ -257,18 +260,35 @@ describe('standalone runtime launcher', () => {
       copyFileSync(resolve('scripts/lib/openclaw-runtime-convergence.mjs'),
         join(fixture.standaloneRoot, 'scripts/lib/openclaw-runtime-convergence.mjs'))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
-        .rejects.toThrow('standalone_import_missing:scripts/lib/openclaw-runtime-convergence.mjs:./openclaw-canonical-tool-upgrade.mjs')
+        .rejects.toThrow('standalone_import_missing:scripts/lib/openclaw-runtime-convergence.mjs:./openclaw-managed-sdk.mjs')
       copyFileSync(resolve(helpers[0]), join(fixture.standaloneRoot, helpers[0]))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing:scripts/lib/openclaw-runtime-convergence.mjs:./openclaw-canonical-tool-upgrade.mjs')
+      copyFileSync(resolve(helpers[1]), join(fixture.standaloneRoot, helpers[1]))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
 
       copyFileSync(resolve('scripts/verify-director-video-release-readiness.mjs'),
         join(fixture.standaloneRoot, 'scripts/verify-director-video-release-readiness.mjs'))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
         .rejects.toThrow('standalone_import_missing:scripts/verify-director-video-release-readiness.mjs:./lib/canonical-release-source.mjs')
-      copyFileSync(resolve(helpers[1]), join(fixture.standaloneRoot, helpers[1]))
+      copyFileSync(resolve(helpers[2]), join(fixture.standaloneRoot, helpers[2]))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
       const forbidden = await checker.findForbiddenStandaloneMembers(fixture.standaloneRoot)
       for (const helper of helpers) expect(forbidden).not.toContain(helper)
+    } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
+  })
+
+  it('requires the managed SDK helper only for updated installer scripts that actually consume it', async () => {
+    const fixture = createLauncherFixture()
+    try {
+      const checker = await import(pathToFileURL(artifactCheckerPath).href)
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
+      const installer = join(fixture.standaloneRoot, 'scripts/install-aiworker-video-command-plugin.sh')
+      writeFileSync(installer, '#!/bin/sh\nnode "$PROJECT_ROOT/scripts/lib/openclaw-managed-sdk.mjs" assert-current\n')
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_dynamic_dependency_missing:scripts/install-aiworker-video-command-plugin.sh:scripts/lib/openclaw-managed-sdk.mjs')
+      copyFileSync(resolve('scripts/lib/openclaw-managed-sdk.mjs'), join(fixture.standaloneRoot, 'scripts/lib/openclaw-managed-sdk.mjs'))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
     } finally { rmSync(fixture.projectRoot, { recursive: true, force: true }) }
   })
 
@@ -375,7 +395,7 @@ describe('standalone runtime launcher', () => {
         for (const entry of readdirSync(directory, { withFileTypes: true })) {
           const pathname = join(directory, entry.name)
           if (entry.isDirectory()) visit(pathname)
-          else if (entry.isFile()) files.push(relative(repositoryRoot, pathname))
+          else if (entry.isFile() && !/\.d\.[cm]?ts$/u.test(entry.name)) files.push(relative(repositoryRoot, pathname))
         }
       }
       visit(root)
@@ -406,7 +426,7 @@ describe('standalone runtime launcher', () => {
       `${pathToFileURL(artifactCheckerPath).href}?payload=${Date.now()}`
     ) as { REQUIRED_STANDALONE_FILES: string[] }
     const importClosureOnly = new Set([
-      'openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs',
+      'openclaw-plugins/aiworker-video-command/lib/saved-summary-direct-dispatch.js',
       'openclaw-plugins/aiworker-director-brain/lib/director-chat-review.js',
       'scripts/lib/director-projection-contract-compatibility.mjs',
     ])
@@ -451,6 +471,7 @@ describe('standalone runtime launcher', () => {
       './scripts/install-aiworker-director-brain.sh',
       './scripts/apply-openclaw-runtime-convergence.sh',
       './scripts/lib/openclaw-private-gateway-rpc.mjs',
+      './scripts/lib/openclaw-managed-sdk.mjs',
       './scripts/lib/openclaw-canonical-tool-upgrade.mjs',
       './scripts/lib/canonical-release-source.mjs',
       './scripts/lib/render-managed-markdown-section.mjs',

@@ -15,6 +15,7 @@ EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
 OPENCLAW_AGENT_CONFIG_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-agent-config.mjs"
+OPENCLAW_MANAGED_SDK_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-managed-sdk.mjs"
 OPENCLAW_VERSION="$(node "$OPENCLAW_RUNTIME_CONTRACT" runtime-version)" \
   || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_DIR="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
@@ -492,6 +493,8 @@ validate_source() {
   [[ -f "$SHARED_DEPLOYMENT_LOCK_HELPER" && ! -L "$SHARED_DEPLOYMENT_LOCK_HELPER" ]] || return 1
   [[ -f "$RUNTIME_TREE_MANIFEST" && ! -L "$RUNTIME_TREE_MANIFEST" ]] || return 1
   [[ -f "$OPENCLAW_AGENT_CONFIG_HELPER" && ! -L "$OPENCLAW_AGENT_CONFIG_HELPER" ]] || return 1
+  [[ -f "$OPENCLAW_MANAGED_SDK_HELPER" && ! -L "$OPENCLAW_MANAGED_SDK_HELPER" ]] || return 1
+  node "$OPENCLAW_MANAGED_SDK_HELPER" assert-current || return 1
   [[ "$(read_version "$PLUGIN_DIR/package.json")" == "$CURRENT_VERSION" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/openclaw.plugin.json")" == "$CURRENT_VERSION" ]] || return 1
   node --input-type=module - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" \
@@ -1098,6 +1101,17 @@ acquire_video_local_lock() {
   write_video_lock_owner
 }
 
+rebind_installed_sdk() {
+  local phase="$1" receipt
+  if [[ -n "$RESULT_OUTPUT" ]]; then
+    receipt="$RESULT_OUTPUT.$phase.sdk-rebind.json"
+  else
+    receipt="$BACKUP_ROOT/sdk-rebind-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM-$phase.json"
+  fi
+  node "$OPENCLAW_MANAGED_SDK_HELPER" rebind-link \
+    "$INSTALLED_PLUGIN_DIR/node_modules/openclaw" "$receipt"
+}
+
 restore_backup() {
   local candidate="$1" defer_gateway_restart="${2:-0}" metadata previous_version restore_status=0
   ROLLBACK_FAILURE_PHASE="rollback-backup-validation"
@@ -1112,6 +1126,9 @@ restore_backup() {
     ROLLBACK_FAILURE_STATUS="$restore_status"
     return 1
   fi
+  # Restoring plugin source does not roll the already-validated core back to
+  # its historical SDK. Bind the current core and record this adaptation.
+  rebind_installed_sdk restored || return 1
   if [[ "$TEST_FAILPOINT" == sigkill-after-first-mutation ]]; then
     wait_for_test_barrier sigkill-ready sigkill-continue 'SIGKILL after first rollback mutation'
   fi
@@ -1475,6 +1492,7 @@ if [[ "$apply_failed" -eq 0 ]]; then
     FAILURE_STATUS="$step_status"
     apply_failed=1
   else
+    rebind_installed_sdk current || apply_failed=1
     FAILURE_PHASE="apply-postcheck"
     FAILURE_STATUS=1
   fi

@@ -9,6 +9,7 @@ DEFAULT_AGENT_ID="second-original"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OPENCLAW_RUNTIME_CONTRACT="$REPOSITORY_ROOT/scripts/lib/openclaw-runtime-contract.mjs"
 OPENCLAW_AGENT_CONFIG="$REPOSITORY_ROOT/scripts/lib/openclaw-agent-config.mjs"
+OPENCLAW_MANAGED_SDK_HELPER="$REPOSITORY_ROOT/scripts/lib/openclaw-managed-sdk.mjs"
 OPENCLAW_SOURCE_PLUGIN_PEER="$(node "$OPENCLAW_RUNTIME_CONTRACT" source-plugin-peer)" \
   || { printf 'OpenClaw runtime contract is unavailable.\n' >&2; exit 1; }
 PLUGIN_SOURCE="$REPOSITORY_ROOT/openclaw-plugins/$PLUGIN_ID"
@@ -682,6 +683,14 @@ regular_file "$OPENCLAW_AGENT_CONFIG" || {
   printf 'OpenClaw agent config helper is unavailable: %s\n' "$OPENCLAW_AGENT_CONFIG" >&2
   exit 1
 }
+regular_file "$OPENCLAW_MANAGED_SDK_HELPER" || {
+  printf 'OpenClaw managed SDK resolver is unavailable.\n' >&2
+  exit 1
+}
+# Director payloads are intentionally regular-file trees. Their SDK is supplied
+# by the official loader; validate that loader's actual managed core instead of
+# adding a second dependency tree or changing historical backup manifests.
+"$NODE_BIN" "$OPENCLAW_MANAGED_SDK_HELPER" assert-current
 
 if [[ "$MODE" != "rollback" ]]; then
   validate_agent_workspace "$PROFILE_CONFIG"

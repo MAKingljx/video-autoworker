@@ -183,6 +183,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/lib/openclaw-private-gateway-rpc.mjs',
   'scripts/lib/openclaw-agent-config.mjs',
   'scripts/lib/openclaw-runtime-convergence.mjs',
+  'scripts/lib/openclaw-managed-sdk.mjs',
   'scripts/lib/openclaw-canonical-tool-upgrade.mjs',
   'scripts/lib/canonical-release-source.mjs',
   'scripts/lib/openclaw-runtime-contract.mjs',
@@ -1069,6 +1070,17 @@ export async function assertStandaloneStaticImportClosure(
       ...(dynamicRuntimeDependencies.get(importer) || []),
       'scripts/lib/git-source-layout.sh',
     ])
+  }
+  // Only updated installers consume the managed-SDK resolver. Older immutable
+  // rollback artifacts keep their original closure until that import exists.
+  for (const importer of ['scripts/install-aiworker-video-command-plugin.sh',
+    'scripts/install-aiworker-director-brain.sh', 'scripts/apply-openclaw-runtime-convergence.sh']) {
+    const pathname = resolve(root, importer)
+    const entry = await lstat(pathname).catch(() => null)
+    if (!entry?.isFile() || entry.isSymbolicLink()) continue
+    if (!(await readFile(pathname, 'utf8')).includes('scripts/lib/openclaw-managed-sdk.mjs')) continue
+    dynamicRuntimeDependencies.set(importer, [...(dynamicRuntimeDependencies.get(importer) || []),
+      'scripts/lib/openclaw-managed-sdk.mjs'])
   }
   for (const [importer, dependencies] of dynamicRuntimeDependencies) {
     const importerStat = await lstat(resolve(root, importer)).catch(() => null)

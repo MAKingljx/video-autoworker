@@ -1,7 +1,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  access, chmod, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat,
+  access, chmod, cp, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, stat,
   symlink, writeFile,
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -25,7 +25,7 @@ async function createExecutable(pathname, source) {
 }
 
 async function createVideoInstallerFixture(agentLayout = 'list', previousVersion = '0.5.15') {
-  const root = await mkdtemp(resolve(tmpdir(), 'video-command-installer-'))
+  const root = await realpath(await mkdtemp(resolve(tmpdir(), 'video-command-installer-')))
   const physicalRoot = await realpath(root)
   const repository = resolve(root, 'repository')
   const bin = resolve(root, 'bin')
@@ -50,6 +50,7 @@ async function createVideoInstallerFixture(agentLayout = 'list', previousVersion
     'scripts/lib/openclaw-secret-reference.mjs',
     'scripts/lib/openclaw-runtime-contract.mjs',
     'scripts/lib/openclaw-agent-config.mjs',
+    'scripts/lib/openclaw-managed-sdk.mjs',
     'scripts/lib/runtime-tree-manifest.mjs',
     'scripts/lib/shared-deployment-lock.mjs',
     'scripts/lib/shared-deployment-lock.sh',
@@ -232,6 +233,10 @@ if (command[0] === 'plugins' && command[1] === 'install') {
   console.log('{"ok":true}')
 } else process.exit(82)
 `)
+  const managedNodeRoot = resolve(physicalRoot, 'managed-node')
+  const sdkRoot = resolve(managedNodeRoot, 'lib/node_modules/openclaw')
+  await mkdir(sdkRoot, { recursive: true, mode: 0o700 })
+  await writeFile(resolve(sdkRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9' }), { mode: 0o600 })
   const environment = {
     ...process.env,
     HOME: home,
@@ -246,6 +251,8 @@ if (command[0] === 'plugins' && command[1] === 'install') {
     AIWORKER_VIDEO_BATCH_DIR: videoBatchRoot,
     AIWORKER_INSTALLER_ISOLATED_TEST_ROOT: physicalRoot,
     NODE_ENV: 'test',
+    AIWORKER_OPENCLAW_RUNTIME_TEST_MODE: '1',
+    AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT: managedNodeRoot,
   }
   return {
     root,
@@ -393,6 +400,35 @@ describe('current video-command plugin installer', () => {
       'No plugin, config, gateway, queue, n8n, media, database, or scheduler state changed.',
     )
   })
+
+  it('rebinds a recognized legacy SDK during install and explicit rollback without rewriting its backup', async () => {
+    const fixture = await createVideoInstallerFixture('list', '0.5.19')
+    try {
+      const legacyRoot = resolve(fixture.environment.AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT, 'lib/node_modules/openclaw')
+      await writeFile(resolve(legacyRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.2' }), { mode: 0o600 })
+      const currentRoot = resolve(fixture.root, 'current-sdk')
+      await mkdir(currentRoot, { mode: 0o700 })
+      await writeFile(resolve(currentRoot, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9' }), { mode: 0o600 })
+      fixture.environment.AIWORKER_TEST_OPENCLAW_SDK_ROOT = currentRoot
+      await mkdir(resolve(fixture.installedPlugin, 'node_modules'), { mode: 0o700 })
+      await symlink(legacyRoot, resolve(fixture.installedPlugin, 'node_modules/openclaw'))
+      const applyOutput = resolve(fixture.root, 'apply-sdk.json')
+      await runFixtureInstaller(fixture, '--apply', '--result-output', applyOutput)
+      const applied = await readJson(applyOutput)
+      const manifest = resolve(applied.backup.path, 'MANIFEST.sha256')
+      const before = await readFile(manifest)
+      expect(await readlink(resolve(fixture.installedPlugin, 'node_modules/openclaw'))).toBe(currentRoot)
+      expect(await readlink(resolve(applied.backup.path, 'previous-plugin/node_modules/openclaw'))).toBe(legacyRoot)
+      const rollbackOutput = resolve(fixture.root, 'rollback-sdk.json')
+      await runFixtureInstaller(fixture, '--rollback', '--backup', applied.backup.path, '--result-output', rollbackOutput)
+      expect(await readlink(resolve(fixture.installedPlugin, 'node_modules/openclaw'))).toBe(currentRoot)
+      expect(await readFile(manifest)).toEqual(before)
+      expect(await readJson(`${rollbackOutput}.restored.sdk-rebind.json`)).toMatchObject({
+        schema: 'aiworker-openclaw-sdk-rebind/v1', before: { target: legacyRoot, sdk: { version: '2026.9.2' } },
+        after: { target: currentRoot, sdk: { version: '2026.9.9' } },
+      })
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  }, 30_000)
 
   it.each(['0.5.14', '0.5.15', '0.5.16', '0.5.17', '0.5.18', '0.5.19'])('upgrades %s to 0.5.20 and writes bound no-op and rollback results', async previousVersion => {
     const fixture = await createVideoInstallerFixture('list', previousVersion)

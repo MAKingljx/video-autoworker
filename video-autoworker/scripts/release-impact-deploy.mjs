@@ -22,6 +22,8 @@ import {
 import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-manager.mjs'
 import { readRouterState } from './standalone-router.mjs'
 import { inspectInstalledReleaseComponent } from './verify-director-video-release-readiness.mjs'
+import { RECOGNIZED_LEGACY_OPENCLAW_VERSION } from './lib/openclaw-managed-sdk.mjs'
+import { OPENCLAW_RUNTIME_VERSION } from './lib/openclaw-runtime-contract.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
 import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
 import { discoverDeploymentEnvironment } from './lib/deployment-discovery.mjs'
@@ -157,6 +159,22 @@ function componentDigest(tree, component) {
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([pathname, identity]) => `${pathname}\0${identity}\n`)
   return sha256(rows.join(''))
+}
+
+function validSdkMigrations(value) {
+  return Array.isArray(value) && value.length === 1 && value.every(item => (
+    item?.currentState === 'legacy-needed-update'
+    && item.before?.path === 'node_modules/openclaw' && item.before?.type === 'symlink'
+    && typeof item.before.target === 'string' && isAbsolute(item.before.target)
+    && item.before.targetSha256 === sha256(item.before.target)
+    && item.before.sdk?.name === 'openclaw' && item.before.sdk.version === RECOGNIZED_LEGACY_OPENCLAW_VERSION
+    && SHA256.test(item.before.sdk.packageSha256 || '')
+    && typeof item.expectedSdkRoot === 'string' && isAbsolute(item.expectedSdkRoot)
+    && item.expectedSdkRoot !== item.before.target
+    && item.expectedSdkIdentity?.root === item.expectedSdkRoot
+    && item.expectedSdkIdentity.name === 'openclaw' && item.expectedSdkIdentity.version === OPENCLAW_RUNTIME_VERSION
+    && SHA256.test(item.expectedSdkIdentity.packageSha256 || '')
+  ))
 }
 
 function installedComponentState(component, changed, output) {
@@ -302,6 +320,7 @@ function validatePlan(plan) {
     const value = plan.components[name]
     if (!value || !SHA256.test(value.before) || !SHA256.test(value.after)
       || (value.installedFingerprint !== undefined && !SHA256.test(value.installedFingerprint))
+      || (value.sdkMigrations !== undefined && (!value.changed || !validSdkMigrations(value.sdkMigrations)))
       || value.changed !== (value.before !== value.after)) fail('component summary is invalid')
   }
   if (plan.components.app.changed && !SHA256.test(plan.artifactManifestSha256 || '')) {
@@ -1169,13 +1188,17 @@ async function plannedRouterState(intakeUrl, runtimeBinding = null) {
 export function inspectReleasePayloadComponents(components, options, inspect = inspectInstalledReleaseComponent) {
   const result = structuredClone(components)
   for (const component of ['taskFlow', 'directorBrain', 'videoCommand']) {
-    const evidence = inspect({ ...options, component })
+    const evidence = inspect({ ...options, component, allowSdkMigration: true })
     if (typeof evidence.matches !== 'boolean' || !SHA256.test(evidence.fingerprint)) {
       fail('component inspection evidence is invalid')
+    }
+    if (evidence.reason === 'legacy-needed-update' && (evidence.matches || !validSdkMigrations(evidence.sdkMigrations))) {
+      fail('component SDK migration evidence is invalid')
     }
     result[component] = {
       ...installedControlComponentState(result[component], evidence.matches, evidence.fingerprint),
       installedFingerprint: evidence.fingerprint,
+      ...(evidence.reason === 'legacy-needed-update' ? { sdkMigrations: evidence.sdkMigrations } : {}),
     }
   }
   return result

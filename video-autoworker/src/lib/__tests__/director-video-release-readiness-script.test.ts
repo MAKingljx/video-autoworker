@@ -26,6 +26,7 @@ import {
   extractionProjectionVersion,
   inspectDirectorEvidenceOutboxCompatibility,
   inspectDirectorExtractionIntegrity,
+  inspectInstalledReleaseComponent,
   parseDirectorVideoReleaseReadinessArguments,
   verifyDirectorExtractionReleaseProvenance,
   verifyInstalledReleasePayloads,
@@ -553,6 +554,54 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     })).toThrow('video-command OpenClaw SDK package identity is invalid')
+  })
+
+  it('recognizes a sealed old SDK only for preinstall planning and requires the current SDK after installation', async () => {
+    const currentSdk = join(root, 'current-openclaw-sdk')
+    await mkdir(currentSdk, { mode: 0o755 })
+    await writeFile(join(currentSdk, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9' }), { mode: 0o644 })
+    vi.stubEnv('AIWORKER_TEST_OPENCLAW_SDK_ROOT', currentSdk)
+    const oldSdk = join(managedNodeRoot, 'lib', 'node_modules', 'openclaw')
+    await writeFile(join(oldSdk, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.2' }), { mode: 0o644 })
+    await writeFile(join(profileRoot, 'openclaw.json'), JSON.stringify({
+      agents: { list: [{ id: 'second-original', workspace: workspaceRoot, tools: { alsoAllow: ['aiworker_analyze_video'] } }] },
+      plugins: { entries: { 'aiworker-video-command': { enabled: true, llm: { allowAgentIdOverride: true }, config: { releaseReady: true } } } },
+    }), { mode: 0o600 })
+    const options = { component: 'videoCommand', repositoryRoot, profileStateRoot: profileRoot, workspaceRoot }
+    const before = inspectInstalledReleaseComponent({ ...options, allowSdkMigration: true })
+    expect(before).toMatchObject({ matches: false, reason: 'legacy-needed-update', sdkMigrations: [{
+      before: { target: oldSdk, sdk: { name: 'openclaw', version: '2026.9.2' } }, expectedSdkRoot: currentSdk,
+    }] })
+    expect(before.fingerprint).toMatch(/^[a-f0-9]{64}$/u)
+    expect(() => inspectInstalledReleaseComponent(options)).toThrow(/SDK|sdk/u)
+    expect(() => verifyInstalledReleasePayloads({ repositoryRoot, profileStateRoot: profileRoot, workspaceRoot })).toThrow(/SDK|sdk/u)
+    await writeFile(join(currentSdk, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9', description: 'new identity' }), { mode: 0o644 })
+    const targetDrift = inspectInstalledReleaseComponent({ ...options, allowSdkMigration: true })
+    expect(targetDrift.fingerprint).not.toBe(before.fingerprint)
+    const sdkLink = join(profileRoot, 'extensions/aiworker-video-command/node_modules/openclaw')
+    await unlink(sdkLink)
+    await symlink(currentSdk, sdkLink)
+    execFileSync('/bin/chmod', ['-h', '700', sdkLink])
+    expect(inspectInstalledReleaseComponent(options).matches).toBe(true)
+    expect(verifyInstalledReleasePayloads({ repositoryRoot, profileStateRoot: profileRoot, workspaceRoot }))
+      .toHaveProperty('videoCommand.manifestSha256')
+  })
+
+  it('does not classify unknown old SDK versions or foreign roots as an installable migration', async () => {
+    const currentSdk = join(root, 'current-openclaw-sdk')
+    await mkdir(currentSdk, { mode: 0o755 })
+    await writeFile(join(currentSdk, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.9' }), { mode: 0o644 })
+    vi.stubEnv('AIWORKER_TEST_OPENCLAW_SDK_ROOT', currentSdk)
+    const options = { component: 'videoCommand', repositoryRoot, profileStateRoot: profileRoot, workspaceRoot, allowSdkMigration: true }
+    await writeFile(join(managedNodeRoot, 'lib/node_modules/openclaw/package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.3' }), { mode: 0o644 })
+    expect(() => inspectInstalledReleaseComponent(options)).toThrow(/SDK|sdk/u)
+    const foreign = join(root, 'foreign-old-openclaw')
+    await mkdir(foreign, { mode: 0o755 })
+    await writeFile(join(foreign, 'package.json'), JSON.stringify({ name: 'openclaw', version: '2026.9.2' }), { mode: 0o644 })
+    const link = join(profileRoot, 'extensions/aiworker-video-command/node_modules/openclaw')
+    await unlink(link)
+    await symlink(foreign, link)
+    expect(() => inspectInstalledReleaseComponent(options)).toThrow(/SDK|sdk/u)
   })
 
   it('reports incompatible contracts, invalid receipts, and rows outside the director scope', () => {
