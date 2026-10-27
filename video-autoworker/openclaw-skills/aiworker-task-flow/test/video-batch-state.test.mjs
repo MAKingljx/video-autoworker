@@ -23,7 +23,24 @@ import {
   verifyBatchItemSource,
   writeBatchState,
   globalBatchLockPath,
+  summarizeBatchState,
 } from '../lib/video-batch-state.mjs'
+import { buildVideoLearningResult } from '../lib/video-learning-result.mjs'
+
+test('batch summaries count partial learning separately while keeping terminal execution status', () => {
+  const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+    stage: 'vision', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+  const summary = summarizeBatchState({ batchId: 'partial-test', status: 'completed_with_errors', items: [
+    { index: 1, taskId: 'a', name: 'a.mp4', status: 'succeeded', learningResult },
+    { index: 2, taskId: 'b', name: 'b.mp4', status: 'succeeded' },
+    { index: 3, taskId: 'c', name: 'c.mp4', status: 'succeeded', learningResult: null },
+  ] })
+  assert.deepEqual(summary.counts, { partial: 1, succeeded: 1, learning_invalid: 1 })
+  assert.equal(summary.items[0].status, 'succeeded')
+  assert.equal(summary.items[0].displayState, 'partial')
+  assert.deepEqual(summary.items[0].learningResult, learningResult)
+  assert.equal(summary.items[2].learningResultInvalid, true)
+})
 
 const execFileAsync = promisify(execFile)
 const lockRaceModuleUrl = new URL('../lib/video-batch-state.mjs', import.meta.url).href

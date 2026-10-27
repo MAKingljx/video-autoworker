@@ -6,19 +6,20 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { buildVideoLearningResult } from '../lib/video-learning-result.mjs'
 import { singleVideoStatePath } from '../lib/video-batch-state.mjs'
 
 const execute = promisify(execFile)
 const script = new URL('../scripts/submit-task.mjs', import.meta.url).pathname
 const taskId = `video-command-${'a'.repeat(64)}`
 const segments = Array.from({ length: 200 }, (_, index) => ({ index: index + 1, sourceName: '项目第一集.mp4', timeRange: `${index}:00-${index + 1}:00`, summary: `片段${index + 1}独立摘要` }))
-async function fixture(callback) {
+async function fixture(callback, resultOutput = { segmentSummaries: segments, summary: '不应重新生成全片报告' }, status = 'succeeded') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'result-cli-')))
   const calls = []
   const server = createServer((request, response) => {
     calls.push({ method: request.method, url: request.url })
     response.setHeader('Content-Type', 'application/json')
-    response.end(JSON.stringify({ runs: [{ taskId, status: 'succeeded', output: { segmentSummaries: segments, summary: '不应重新生成全片报告' } }] }))
+    response.end(JSON.stringify({ runs: [{ taskId, status, output: resultOutput }] }))
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const run = async args => {
@@ -60,3 +61,44 @@ test('CLI rejects incompatible pagination before network and does not merge ambi
   assert.equal(ambiguous.kind, 'matches'); assert.equal(ambiguous.total, 2)
   assert.equal(calls.length, 0)
 }))
+
+test('CLI partial result and export preserve failure gaps and explicitly describe partial completion', async () => {
+  const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+    stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+  await fixture(async ({ run }) => {
+    const directory = await run(['--result', taskId, '--result-view', 'segments'])
+    assert.equal(directory.status, 'succeeded')
+    assert.equal(directory.displayStatus, '部分完成')
+    assert.equal(directory.displayState, 'partial')
+    assert.deepEqual(directory.items.map(item => item.index), [1, 3])
+    const failed = await run(['--result', taskId, '--result-view', 'segment', '--segment-index', '2'])
+    assert.equal(failed.segment, null)
+    assert.equal(failed.failedSegments[0].index, 2)
+    const exported = await run(['--result', taskId, '--result-view', 'export', '--export-format', 'markdown'])
+    assert.match(await readFile(exported.artifact.path, 'utf8'), /部分完成：2 \/ 3 段/u)
+    const brief = await run(['--status-brief', taskId])
+    assert.equal(brief.displayState, 'partial')
+    assert.deepEqual(brief.output.learningResult, learningResult)
+  }, { learningResult, segmentSummaries: [{ ...segments[0], index: 1 }, { ...segments[2], index: 3 }] })
+})
+
+test('repair in progress can read a validated saved partial snapshot without dispatching work', async () => {
+  const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+    stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+  await fixture(async ({ run, calls }) => {
+    const directory = await run(['--result', taskId, '--result-view', 'segments'])
+    assert.equal(directory.status, 'running')
+    assert.equal(directory.displayState, 'running')
+    assert.equal(directory.savedPartialSnapshot, true)
+    assert.match(directory.learningSummary, /^补学中，以下为已保存结果/u)
+    assert.deepEqual(directory.items.map(item => item.index), [1, 3])
+    const selected = await run(['--result', taskId, '--result-view', 'segment', '--segment-index', '3'])
+    assert.equal(selected.segment.summary, segments[2].summary)
+    assert.ok(calls.every(call => call.method === 'GET'))
+  }, { learningResult, segmentSummaries: [segments[0], segments[2]] }, 'running')
+  await fixture(async ({ run }) => {
+    const result = await run(['--result', taskId, '--result-view', 'segments'])
+    assert.equal(result.savedPartialSnapshot, undefined)
+    assert.deepEqual(result.items, [])
+  }, { segmentSummaries: [segments[0]] }, 'running')
+})

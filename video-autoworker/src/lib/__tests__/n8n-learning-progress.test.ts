@@ -90,6 +90,27 @@ describe('rebuildable learning projection', () => {
     })
     expect(estimateLearningStageRemaining(0, 100, [1, 2, 3])).toBeNull()
   })
+
+  it('keeps failed segment counts distinct from completed learning after the phase finishes', async () => {
+    await createLearningProgressReporter(taskId, 'vision', 10, 'Model A', () => [4, 7])(8, 0)
+    expect((await getScopedLearningProgress(db, taskId, scope))?.stages[2]).toMatchObject({
+      completedSegments: 8, failedSegments: 2, failedSegmentIndexes: [4, 7],
+    })
+    const learningResult = { schema: 'aiworker-video-learning-result/v1', status: 'partial', totalSegments: 10,
+      completedSegments: 8, failedSegments: [4, 7].map(index => ({ index, stage: 'vision',
+        timeRange: '00:00:00-00:00:05', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' })) }
+    db.prepare(`UPDATE n8n_task_runs SET status='succeeded',output=? WHERE task_id=?`)
+      .run(JSON.stringify({ segmentCount: 10, learningResult }), mediaChildIdentity('task', taskId, 'vision'))
+    expect((await getScopedLearningProgress(db, taskId, scope))?.stages[2]).toMatchObject({
+      state: 'succeeded', completedSegments: 8, totalSegments: 10, failedSegments: 2,
+    })
+    await rm(join(workspace, 'progress/vision.json'))
+    db.prepare(`UPDATE n8n_task_runs SET output=? WHERE task_id=?`)
+      .run(JSON.stringify({ segmentSummaries: Array(8).fill({}), learningResult }), mediaChildIdentity('task', taskId, 'vision'))
+    expect((await getScopedLearningProgress(db, taskId, scope))?.stages[2]).toMatchObject({
+      completedSegments: 8, totalSegments: 10, failedSegments: 2,
+    })
+  })
 })
 
 describe('prepared evidence for consumed-source recovery', () => {

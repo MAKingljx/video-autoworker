@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TaskRunsPanel } from './task-runs-panel'
 import { useMissionControl } from '@/store'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 const baseRun = {
   taskType: 'video-analysis',
@@ -36,6 +37,43 @@ afterEach(() => {
 })
 
 describe('TaskRunsPanel', () => {
+  it('shows partial learning with original failed indexes and confirms a failed-segment-only repair', async () => {
+    const inspectionToken = randomUUID()
+    const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+      stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    const run = { ...baseRun, taskId: 'repair-parts', title: '部分学习视频', status: 'succeeded',
+      completedAt: 1_700_000_040, resultAvailable: true, learningResult }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/runs/recovery') && init?.method === 'POST') return jsonResponse({ taskId: run.taskId, currentState: 'queued' })
+      if (url.includes('/runs/recovery')) return jsonResponse({ canRecover: true, inspection: {
+        taskId: run.taskId, mode: 'repair-segments', segmentIndexes: [2], eligible: true,
+        currentState: 'partial', errorCode: null, nextAction: 'confirm_failed_segment_repair',
+        missingResources: [], preservedStages: ['prepare', 'audio', 'vision'], expectedRevision: 'r', inspectionToken,
+      } })
+      if (url.includes('view=queue')) return jsonResponse({ queue: [], total: 0, counts: { waiting: 0, running: 0, attention: 0 }, generatedAt: 1 })
+      return jsonResponse({ runs: [run], total: 1, limit: 50, offset: 0 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    render(<TaskRunsPanel />)
+    fireEvent.click(await screen.findByRole('tab', { name: '运行记录 1' }))
+    fireEvent.click(screen.getByRole('button', { name: /部分学习视频/ }))
+    const detail = screen.getByRole('complementary', { name: '任务链详情' })
+    expect(within(detail).getByText('部分完成')).toBeInTheDocument()
+    expect(within(detail).getByText('部分完成 2 / 3 段，1 段待修复')).toBeInTheDocument()
+    expect(within(detail).getByText(/片段 2（00:00:05-00:00:10）片段摘要失败/u)).toBeInTheDocument()
+    fireEvent.click(within(detail).getByRole('button', { name: '检查失败片段补学条件' }))
+    const repair = await screen.findByRole('button', { name: '确认补学失败片段' })
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0)
+    fireEvent.click(repair)
+    await screen.findByText('失败片段已加入补学队列，请刷新查看进度')
+    expect(confirm).toHaveBeenCalledWith('仅补学失败片段，保留成功片段。确认补学？')
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
+    expect(JSON.parse(String(post?.[1]?.body))).toEqual({ taskId: run.taskId, inspectionToken,
+      confirm: true, mode: 'repair-segments', segmentIndexes: [2] })
+    confirm.mockRestore()
+  })
   it('shows bounded learning evidence and requires inspection plus human confirmation for recovery', async () => {
     const inspectionToken = randomUUID()
     const failed = { ...baseRun, taskId: 'recover-me', title: '恢复学习任务', status: 'failed', error: 'vision: interrupted',

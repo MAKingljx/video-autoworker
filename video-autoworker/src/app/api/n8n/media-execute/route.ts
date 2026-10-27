@@ -30,6 +30,7 @@ import {
 import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 import { logSafeOperationError, SafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
+import { hasPartialVideoLearning } from '../../../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 export const runtime = 'nodejs'
 
@@ -80,6 +81,7 @@ async function retryableFinalizeCleanupResponse(input: {
   output: Record<string, unknown> | null
   cached: boolean
 }): Promise<NextResponse | null> {
+  if (hasPartialVideoLearning(input.output)) return null
   try {
     const scheduled = ensureN8nMediaCleanupDebt(input.db, input.taskId)
     const attempt = scheduled.scheduled

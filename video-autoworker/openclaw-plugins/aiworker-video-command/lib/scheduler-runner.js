@@ -751,6 +751,26 @@ function safeSummary(output) {
   return text.length > 160 ? `${text.slice(0, 160)}…` : text
 }
 
+// The canonical application/CLI owns coverage validation and wording. This adapter
+// only accepts bounded presentation fields and never invents completion counts.
+function normalizeLearningPresentation(value) {
+  const present = value && ['displayState', 'learningSummary', 'learningResult', 'learningResultInvalid']
+    .some(key => Object.hasOwn(value, key))
+  if (!present) return {}
+  if ((!TASK_STATUSES.has(value.displayState) && !['partial', 'learning_invalid'].includes(value.displayState))
+    || typeof value.learningSummary !== 'string' || !value.learningSummary.trim()
+    || Buffer.byteLength(value.learningSummary, 'utf8') > 2_048
+    || /[\u0000-\u001f\u007f]/u.test(value.learningSummary)
+    || (['partial', 'learning_invalid'].includes(value.displayState) && value.status !== 'succeeded')) {
+    throw new Error('invalid_learning_presentation')
+  }
+  if (value.savedPartialSnapshot !== undefined && (value.savedPartialSnapshot !== true
+    || !['queued', 'accepted', 'running'].includes(value.status) || value.displayState !== value.status
+    || !value.learningSummary.startsWith('补学中，以下为已保存结果。'))) throw new Error('invalid_learning_presentation')
+  return { displayState: value.displayState, learningSummary: value.learningSummary,
+    ...(value.savedPartialSnapshot ? { savedPartialSnapshot: true } : {}) }
+}
+
 function normalizeTaskStatus(value, expectedTaskId) {
   if (
     !value
@@ -766,6 +786,7 @@ function normalizeTaskStatus(value, expectedTaskId) {
     id: expectedTaskId,
     status: value.status,
     summary: value.status === 'succeeded' ? safeSummary(value.output) : null,
+    ...normalizeLearningPresentation(value),
     ...(executionAvailability ? { executionAvailability } : {}),
     ...(progress ? { progress } : {}),
   }
@@ -789,6 +810,7 @@ function normalizeBatchItem(value, total) {
     index: value.index,
     name: normalizeSearchName(value.name),
     status: value.status,
+    ...normalizeLearningPresentation(value),
   }
 }
 
@@ -978,7 +1000,8 @@ function normalizeResultMatch(value) {
 function normalizeResultReport(value) {
   if (value === null) return null
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_result_report')
-  if (!['summary', 'combinedText'].includes(value.source) || typeof value.text !== 'string') {
+  if (!['summary', 'combinedText', 'segment_summary', 'legacy_chapter', 'legacy_timeline', 'none'].includes(value.source)
+    || typeof value.text !== 'string') {
     throw new Error('invalid_result_report')
   }
   if (Buffer.byteLength(value.text, 'utf8') > MAX_RESULT_PAGE_BYTES) {
@@ -1030,13 +1053,15 @@ function normalizeTaskResult(value, expectedOffset) {
   ) throw new Error('invalid_task_result')
   const report = normalizeResultReport(value.report)
   if (report && report.offset !== expectedOffset) throw new Error('invalid_task_result')
-  if (value.status !== 'succeeded' && report !== null) throw new Error('invalid_task_result')
+  const learning = normalizeLearningPresentation(value)
+  if (value.status !== 'succeeded' && !learning.savedPartialSnapshot && report !== null) throw new Error('invalid_task_result')
   return {
     kind: 'report',
     taskId: value.taskId,
     name: normalizeResultName(value.name),
     status: value.status,
     report,
+    ...learning,
   }
 }
 
@@ -1119,9 +1144,11 @@ async function normalizeSegmentResult(value, request) {
   if (!value || value.kind !== expectedKind || !isResultTaskId(value.taskId)
     || !SEARCH_ITEM_STATUSES.has(value.status)) throw new Error('invalid_segment_result')
   if (isResultTaskId(request.query) && value.taskId !== request.query) throw new Error('invalid_segment_result')
-  const base = { kind: value.kind, taskId: value.taskId, name: normalizeResultName(value.name), status: value.status }
+  const base = { kind: value.kind, taskId: value.taskId, name: normalizeResultName(value.name), status: value.status,
+    ...normalizeLearningPresentation(value) }
+  const readable = value.status === 'succeeded' || base.savedPartialSnapshot === true
   if (value.kind === 'artifact') {
-    if (value.status !== 'succeeded' && value.artifact !== null) throw new Error('invalid_export_artifact')
+    if (!readable && value.artifact !== null) throw new Error('invalid_export_artifact')
     return { ...base, artifact: value.artifact === null ? null : await verifiedExport(value.artifact, value.taskId, request.exportFormat) }
   }
   const source = segmentSource(value.source)
@@ -1129,7 +1156,7 @@ async function normalizeSegmentResult(value, request) {
   if (value.kind === 'segments') {
     if (value.segmentOffset !== request.segmentOffset || value.segmentLimit !== request.segmentLimit
       || !Array.isArray(value.items) || value.items.length > request.segmentLimit
-      || value.items.length > totalSegments || (value.status !== 'succeeded' && value.items.length)) throw new Error('invalid_segment_result')
+      || value.items.length > totalSegments || (!readable && value.items.length)) throw new Error('invalid_segment_result')
     const next = value.nextSegmentOffset
     if (next !== null && (!Number.isSafeInteger(next) || next !== request.segmentOffset + value.items.length
       || next <= request.segmentOffset || next >= totalSegments)) throw new Error('invalid_segment_result')
@@ -1138,9 +1165,17 @@ async function normalizeSegmentResult(value, request) {
       || items.some(item => item.source !== source)) throw new Error('invalid_segment_result')
     return { ...base, source, totalSegments, segmentOffset: value.segmentOffset, segmentLimit: value.segmentLimit, nextSegmentOffset: next, items }
   }
-  if (value.segment === null) return { ...base, source, totalSegments, segment: null }
+  if (value.segment === null) {
+    const failureMessage = value.failureMessage
+    if (failureMessage !== undefined && (typeof failureMessage !== 'string'
+      || !failureMessage.startsWith(`片段 ${request.segmentIndex}（`)
+      || Buffer.byteLength(failureMessage, 'utf8') > 2_048 || /[\u0000-\u001f\u007f]/u.test(failureMessage))) {
+      throw new Error('invalid_segment_result')
+    }
+    return { ...base, source, totalSegments, segment: null, ...(failureMessage ? { failureMessage } : {}) }
+  }
   const item = value.segment
-  if (value.status !== 'succeeded' || item.index !== request.segmentIndex || item.source !== source || typeof item.truncated !== 'boolean') throw new Error('invalid_segment_result')
+  if (!readable || item.index !== request.segmentIndex || item.source !== source || typeof item.truncated !== 'boolean') throw new Error('invalid_segment_result')
   const summary = segmentText(item.summary, 12 * 1024)
   const totalBytes = segmentInteger(item.totalBytes, Buffer.byteLength(summary, 'utf8'), 64 * 1024 * 1024)
   if (item.truncated !== (totalBytes > Buffer.byteLength(summary, 'utf8'))
@@ -1271,6 +1306,7 @@ export function createSchedulerRunner({
         index,
         name: item.name,
         status: item.status,
+        ...normalizeLearningPresentation(item),
         batchStatus: batch.status,
         total: batch.total,
         counts: batch.counts,

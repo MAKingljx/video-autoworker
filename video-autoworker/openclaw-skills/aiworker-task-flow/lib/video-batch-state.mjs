@@ -12,6 +12,7 @@ import {
   sourceIdentity,
 } from './media-ingest.mjs'
 import { assertOptionalDirectorWork } from './director-work-policy.mjs'
+import { readVideoLearningResult, videoLearningDisplayState, videoLearningSummary } from './video-learning-result.mjs'
 
 const BATCH_ID_PATTERN = /^[A-Za-z0-9._:-]+$/
 const MAX_BATCH_ITEMS = 100
@@ -558,6 +559,25 @@ function stagingRecoveryValid(value) {
   )
 }
 
+export function learningRepairRequestValid(value, item, bindingId) {
+  if (value === undefined) return true
+  const keys = ['schema', 'requestId', 'taskId', 'bindingId', 'tenantId', 'workspaceId', 'actorId',
+    'segmentIndexes', 'outputSha256', 'revisionSha256', 'evidenceSha256', 'generation', 'previousStatus', 'createdAt']
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
+    && value.schema === 'aiworker-video-segment-repair-request/v1'
+    && value.taskId === item?.taskId && value.bindingId === bindingId
+    && ['requestId', 'outputSha256', 'revisionSha256', 'evidenceSha256'].every(key => /^[a-f0-9]{64}$/u.test(value[key]))
+    && ['tenantId', 'workspaceId'].every(key => Number.isSafeInteger(value[key]) && value[key] > 0)
+    && Number.isSafeInteger(value.actorId)
+    && Number.isSafeInteger(value.generation) && value.generation >= 1 && value.generation <= 3
+    && ['succeeded', 'failed'].includes(value.previousStatus)
+    && Array.isArray(value.segmentIndexes) && value.segmentIndexes.length >= 1 && value.segmentIndexes.length <= 1000
+    && value.segmentIndexes.every((index, offset) => Number.isSafeInteger(index) && index > 0 && index <= 100_000
+      && (offset === 0 || index > value.segmentIndexes[offset - 1]))
+    && typeof value.createdAt === 'string' && Number.isFinite(Date.parse(value.createdAt)))
+}
+
 function parseBatchStateText(text) {
   let parsed
   try {
@@ -573,6 +593,7 @@ function parseBatchStateText(text) {
     && trustedMaterialStateValid(parsed.items)
     && parsed.items.every(item => sourceIdentityValid(item?.sourceIdentity))
     && parsed.items.every(item => stagingRecoveryValid(item?.stagingRecovery))
+    && parsed.items.every(item => learningRepairRequestValid(item?.learningRepairRequest, item, parsed.bindingId))
   if (!validV1 && !validV2) {
     throw invalidBatchStateError()
   }
@@ -1719,7 +1740,10 @@ export async function readSingleVideoTaskState(taskId, root = defaultBatchRoot()
 
 export function summarizeBatchState(state) {
   const counts = {}
-  for (const item of state.items) counts[item.status] = (counts[item.status] || 0) + 1
+  for (const item of state.items) {
+    const displayState = videoLearningDisplayState(item.status, item)
+    counts[displayState] = (counts[displayState] || 0) + 1
+  }
   const current = state.items.find(item => ['staging', 'submitted', 'accepted', 'running', 'waiting'].includes(item.status))
   return {
     batchId: state.batchId,
@@ -1737,6 +1761,11 @@ export function summarizeBatchState(state) {
       name: item.name,
       taskId: item.taskId,
       status: item.status,
+      ...(Object.hasOwn(item, 'learningResult') ? {
+        displayState: videoLearningDisplayState(item.status, item),
+        ...(() => { try { return { learningResult: readVideoLearningResult(item), learningSummary: videoLearningSummary(item) } }
+          catch { return { learningResultInvalid: true, learningSummary: '学习结果待核对。' } } })(),
+      } : {}),
       ...(item.error ? { error: item.error } : {}),
     })),
     error: state.error || null,
@@ -2217,6 +2246,20 @@ export async function acquireGlobalBatchLock(statePath) {
   return acquireFileLock(globalBatchLockPath(statePath))
 }
 
+/** Execution ownership only: the existing private worker lock remains the sole video lane. */
+export async function assertVideoRepairWorkerLease(statePath, lease) {
+  if (!lease || !Number.isSafeInteger(lease.pid) || lease.pid <= 0
+    || typeof lease.token !== 'string' || !UUID_PATTERN.test(lease.token)) throw new Error('recovery_worker_lease_invalid')
+  const pathname = globalBatchLockPath(statePath)
+  const first = await readLockSample(pathname)
+  const second = await readLockSample(pathname)
+  if (!sameLockSample(first, second) || second.pid !== lease.pid || second.token !== lease.token
+    || !await pidIsAlive(lease.pid)) throw new Error('recovery_worker_lease_invalid')
+  const batch = await readLockSample(`${resolve(statePath)}.lock`)
+  if (batch.pid !== lease.pid || !await pidIsAlive(batch.pid)) throw new Error('recovery_worker_batch_lease_invalid')
+  return true
+}
+
 async function acquireFileLock(lockPath) {
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 })
   await chmod(dirname(lockPath), 0o700)
@@ -2246,6 +2289,7 @@ async function acquireFileLock(lockPath) {
       let released = false
       return {
         acquired: true,
+        lease: { pid: process.pid, token },
         async release() {
           if (released) return
           await handle.close().catch(() => undefined)

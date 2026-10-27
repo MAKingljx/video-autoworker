@@ -25,6 +25,7 @@ import {
   createN8nWorkflowBinding,
   n8nWorkflowBindingInputSchema,
 } from '@/lib/n8n-workflows'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 describe('durable n8n media cleanup debts', () => {
   let db: Database.Database
@@ -115,6 +116,27 @@ describe('durable n8n media cleanup debts', () => {
     })
   })
 
+  it('retains partial result assets and rejects a stale cleanup obligation', async () => {
+    const taskId = 'video-cleanup-partial'
+    const childTaskId = createFinalizePair(taskId)
+    const workspace = await createBoundWorkspace(taskId)
+    const learningResult = buildVideoLearningResult(3, [{ index: 2, stage: 'vision',
+      timeRange: '00:00:05-00:00:10', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    completeN8nFinalizeRun(db, { parentTaskId: taskId, childTaskId, output: { summary: '已学两段', learningResult } })
+    expect(getN8nMediaCleanupDebt(db, taskId)).toBeNull()
+    expect((await stat(workspace)).isDirectory()).toBe(true)
+    db.prepare(`INSERT INTO n8n_media_cleanup_debts
+      (task_id,binding_id,workspace_id,tenant_id,workspace_digest,reason)
+      VALUES (?,?,?,?,?,'finalize_succeeded')`).run(taskId, bindingId, scope.workspaceId, scope.tenantId,
+      createHash('sha256').update(taskId).digest('hex'))
+    const cleanup = vi.fn().mockResolvedValue(undefined)
+    expect(await retryN8nMediaCleanupDebt(db, taskId, { force: true, cleanup })).toMatchObject({
+      outcome: 'rejected', error: expect.stringContaining('保留媒体与检查点'),
+    })
+    expect(cleanup).not.toHaveBeenCalled()
+    expect((await stat(workspace)).isDirectory()).toBe(true)
+  })
+
   it('does not commit a successful finalize when its durable cleanup obligation cannot be recorded', () => {
     const taskId = 'video-cleanup-atomic-debt'
     const childTaskId = createFinalizePair(taskId)
@@ -162,7 +184,7 @@ describe('durable n8n media cleanup debts', () => {
     expect(getN8nTaskRunByTaskId(db, taskId)?.status).toBe('succeeded')
   })
 
-  it('creates a hard-lease cleanup debt, cleans it, and fences a late finalize callback', async () => {
+  it('preserves learned assets after hard-lease failure and fences a late finalize callback', async () => {
     const taskId = 'video-cleanup-hard-lease'
     const childTaskId = createFinalizePair(taskId)
     const workspace = await createBoundWorkspace(taskId)
@@ -177,19 +199,27 @@ describe('durable n8n media cleanup debts', () => {
       code: 'VIDEO_FINALIZE_LEASE_EXPIRED',
       run: { status: 'failed' },
     })
-    expect(getN8nMediaCleanupDebt(db, taskId)).toMatchObject({
-      reason: 'finalize_lease_expired', attemptCount: 0,
-    })
+    expect(getN8nMediaCleanupDebt(db, taskId)).toBeNull()
     expect(completeN8nFinalizeRun(db, {
       parentTaskId: taskId,
       childTaskId,
       output: { summary: 'late result' },
     })).toMatchObject({ outcome: 'terminal', parent: { status: 'failed' } })
-    expect(getN8nMediaCleanupDebt(db, taskId)).toMatchObject({ reason: 'finalize_lease_expired' })
-
-    await expect(retryN8nMediaCleanupDebt(db, taskId, { force: true }))
-      .resolves.toMatchObject({ outcome: 'cleaned' })
-    await expect(stat(workspace)).rejects.toThrow()
+    expect(getN8nMediaCleanupDebt(db, taskId)).toBeNull()
+    // Old failure cleanup records are retained for audit but never scanned
+    // automatically, so neither evidence nor retry budgets are destroyed.
+    db.prepare(`INSERT INTO n8n_media_cleanup_debts
+      (task_id,binding_id,workspace_id,tenant_id,workspace_digest,reason)
+      VALUES (?,?,?,?,?,'finalize_lease_expired')`).run(taskId, bindingId, scope.workspaceId, scope.tenantId,
+      createHash('sha256').update(taskId).digest('hex'))
+    await expect(drainN8nMediaCleanupDebts(db, { nowSeconds: Math.floor(Date.now() / 1000) + 1 }))
+      .resolves.toEqual({ scanned: 0, cleaned: 0, pending: 0, rejected: 0 })
+    expect(getN8nMediaCleanupDebt(db, taskId)).toMatchObject({ reason: 'finalize_lease_expired', attemptCount: 0,
+      retainedForRecovery: true })
+    expect(await retryN8nMediaCleanupDebt(db, taskId, { force: true })).toMatchObject({
+      outcome: 'rejected', debt: { attemptCount: 0, retainedForRecovery: true },
+    })
+    expect((await stat(workspace)).isDirectory()).toBe(true)
     expect(getN8nTaskRunByTaskId(db, taskId)).toMatchObject({
       status: 'failed', error: expect.stringContaining('VIDEO_FINALIZE_LEASE_EXPIRED'),
     })

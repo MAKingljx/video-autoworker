@@ -2,6 +2,7 @@ import { lstat, readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, extname, join, resolve } from 'node:path'
 import { isTerminalTaskStatus } from '../../openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs'
+import { learningRepairRequestValid } from '../../openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs'
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v'])
 const TASK_ID_PATTERN = /^[A-Za-z0-9._:-]{1,120}$/
@@ -36,6 +37,7 @@ export interface N8nVideoQueueItem {
   error: string | null
   sourceAvailable: boolean
   queuePosition: number
+  repairQueued?: boolean
 }
 
 interface SourceCache {
@@ -225,6 +227,8 @@ async function buildQueueIndex(
         error: safeQueueText(item.error, 240) || safeQueueText(state.error, 240),
         sourceAvailable: sources.has(taskId),
         queuePosition: 0,
+        ...(item.learningRepairRequest && learningRepairRequestValid(item.learningRepairRequest, item, bindingId)
+          ? { repairQueued: true } : {}),
       })
     }
   }

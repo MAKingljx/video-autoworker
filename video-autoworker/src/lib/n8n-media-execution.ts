@@ -23,6 +23,10 @@ import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/li
 import { mediaInboxRoot, mediaTaskWorkspace, mediaWorkRoot } from '@/lib/n8n-media-workspace'
 import { createLearningProgressReporter, readControlledMediaJson } from '@/lib/n8n-learning-progress'
 import { writePreparedMediaProof } from '@/lib/n8n-prepared-evidence'
+import { createMediaCheckpointModelIdentity, matchesMediaCheckpointModelIdentity,
+  MEDIA_ANALYSIS_SYSTEM_PROMPT } from '@/lib/n8n-media-checkpoint-identity'
+import { buildVideoLearningResult, readVideoLearningResult, hasPartialVideoLearning,
+  type VideoLearningFailure } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 export { mediaInboxRoot, mediaTaskWorkspace, mediaWorkRoot, mediaChildIdentity } from '@/lib/n8n-media-workspace'
 
 const videoKeySchema = z.string().trim().regex(
@@ -37,7 +41,7 @@ export const VIDEO_LEARNING_MODEL_BATCH_SEGMENTS = 12
 // may declare a lower limit; use the strictest candidate so failover does not
 // receive a batch that it cannot process either.
 const DEFAULT_VIDEO_VISION_MAX_IMAGES = 8
-const VISION_CHECKPOINT_SCHEMA = 'aiworker-vision-checkpoint-v2'
+const VISION_CHECKPOINT_SCHEMA = 'aiworker-vision-checkpoint-v3'
 const VISION_OUTPUT_SCHEMA = 'visual-perception-v1'
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u
 
@@ -547,6 +551,78 @@ function jsonSha256(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
+const segmentFailureSchema = z.object({
+  schema: z.literal('aiworker-learning-segment-failure/v1'),
+  taskId: z.string().min(1).max(120), stage: z.enum(['vision', 'summary']),
+  index: z.number().int().positive(), timeRange: z.string().max(120),
+  inputSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  errorCode: z.enum(['N8N_MEDIA_MODEL_HTTP_FAILED', 'N8N_MEDIA_MODEL_OUTPUT_INVALID']),
+  generation: z.number().int().min(0).max(3), updatedAt: z.number().int().positive(),
+}).strict()
+
+function learningRepair(routing: Record<string, unknown>) {
+  const raw = routing.learningRepair
+  if (raw === undefined) return { generation: 0, indexes: [] as number[], previousLearningResult: null }
+  const value = objectValue(raw)
+  if (!Number.isSafeInteger(value.generation) || Number(value.generation) < 1 || Number(value.generation) > 3
+    || !Array.isArray(value.indexes) || !value.indexes.length
+    || value.indexes.some(index => !Number.isSafeInteger(index) || Number(index) < 1)) {
+    throw new Error('learning_repair_selection_invalid')
+  }
+  const previousLearningResult = readVideoLearningResult({ learningResult: value.previousLearningResult })
+  if (!previousLearningResult || previousLearningResult.status !== 'partial'
+    || value.indexes.some(index => !previousLearningResult.failedSegments.some(failure => failure.index === index))) {
+    throw new Error('learning_repair_selection_invalid')
+  }
+  return { generation: Number(value.generation), indexes: value.indexes as number[], previousLearningResult }
+}
+
+function assertLearningRepairMayGenerate(routing: Record<string, unknown>, stage: VideoLearningFailure['stage'], index: number) {
+  const repair = learningRepair(routing)
+  if (!repair.generation) return
+  const originalFailure = repair.previousLearningResult!.failedSegments.some(failure => failure.index === index
+    && (failure.stage === stage || (stage === 'summary' && failure.stage === 'vision')))
+  if (!repair.indexes.includes(index) || !originalFailure) throw new Error('learning_repair_outside_selection')
+}
+
+function segmentFailureName(stage: VideoLearningFailure['stage'], index: number) {
+  return `segment-failure-${stage}-${String(index).padStart(3, '0')}.json`
+}
+
+async function retainedSegmentFailure(taskId: string, routing: Record<string, unknown>,
+  stage: VideoLearningFailure['stage'], index: number, inputSha256: string): Promise<VideoLearningFailure | null> {
+  const raw = await readControlledMediaJson(mediaTaskWorkspace(taskId), `checkpoints/${segmentFailureName(stage, index)}`)
+  if (!raw) {
+    try { await lstat(join(mediaTaskWorkspace(taskId), 'checkpoints', segmentFailureName(stage, index))) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+    throw new Error('learning_failure_checkpoint_unreadable')
+  }
+  const parsed = segmentFailureSchema.safeParse(raw)
+  if (!parsed.success || parsed.data.taskId !== taskId || parsed.data.stage !== stage || parsed.data.index !== index) {
+    throw new Error('learning_failure_checkpoint_identity_changed')
+  }
+  if (parsed.data.inputSha256 !== inputSha256) return null
+  const repair = learningRepair(routing)
+  if (parsed.data.generation > repair.generation) throw new Error('learning_repair_generation_stale')
+  if (repair.generation > parsed.data.generation && repair.indexes.includes(index)) return null
+  const { timeRange, errorCode } = parsed.data
+  return { index, stage, timeRange, errorCode }
+}
+
+async function persistSegmentFailure(taskId: string, routing: Record<string, unknown>,
+  stage: VideoLearningFailure['stage'], index: number, timeRange: string, inputSha256: string,
+  error: unknown): Promise<VideoLearningFailure> {
+  // Only a bounded model failure may be isolated. Storage, source, permission
+  // and execution-lease failures retain their existing fail-closed boundary.
+  if (!(error instanceof SafeOperationError)
+    || !['N8N_MEDIA_MODEL_HTTP_FAILED', 'N8N_MEDIA_MODEL_OUTPUT_INVALID'].includes(error.publicCode)) throw error
+  const value = segmentFailureSchema.parse({ schema: 'aiworker-learning-segment-failure/v1',
+    taskId, stage, index, timeRange, inputSha256, errorCode: error.publicCode,
+    generation: learningRepair(routing).generation, updatedAt: Date.now() })
+  await writeCheckpoint(mediaTaskWorkspace(taskId), segmentFailureName(stage, index), value)
+  return { index, stage, timeRange, errorCode: value.errorCode }
+}
+
 function materialSourceSha256(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const match = /^MATERIAL-SHA256-([a-f0-9]{64})$/u.exec(value)
@@ -607,13 +683,19 @@ async function readTrustedVisionCheckpoint(
     if (!proof || typeof proof !== 'object' || Array.isArray(proof)) return null
     const receipt = proof as Record<string, unknown>
     const route = candidates.find(candidate => candidate.id === result.routeId)
-    if (!route?.modelRevisionSha256) return null
-    const expectedProof = {
-      ...expected,
-      routeId: route.id,
-      model: route.model,
-      modelRevisionSha256: route.modelRevisionSha256,
-      resultSha256: jsonSha256(result),
+    if (!route) return null
+    const generation = videoModelGenerationProfile('vision')
+    const modern = receipt.schema === VISION_CHECKPOINT_SCHEMA
+    if (modern && !matchesMediaCheckpointModelIdentity(receipt.modelIdentity, route, generation)) return null
+    if (!modern && (receipt.schema !== 'aiworker-vision-checkpoint-v2' || !route.modelRevisionSha256)) return null
+    const historicalExpected = { ...expected }
+    delete historicalExpected.taskId
+    const expectedProof = modern ? {
+      ...expected, routeId: route.id, model: route.model,
+      modelIdentity: createMediaCheckpointModelIdentity(route, generation), resultSha256: jsonSha256(result),
+    } : {
+      ...historicalExpected, schema: 'aiworker-vision-checkpoint-v2', routeId: route.id, model: route.model,
+      modelRevisionSha256: route.modelRevisionSha256, resultSha256: jsonSha256(result),
     }
     if (JSON.stringify(receipt) !== JSON.stringify(expectedProof)) return null
     if (!visualPerceptionSchema.safeParse(result.perception).success
@@ -631,7 +713,7 @@ async function readTrustedVisionCheckpoint(
 
 function visionCheckpointExpected(metadata: MediaMetadata, segment: MediaSegment, sourceSha256: string,
   promptSha256: string, frameSha256s: string[]) {
-  return { schema: VISION_CHECKPOINT_SCHEMA, sourceSha256, sourceBytes: metadata.sourceBytes,
+  return { schema: VISION_CHECKPOINT_SCHEMA, taskId: metadata.taskId, sourceSha256, sourceBytes: metadata.sourceBytes,
     segmentSeconds: metadata.segmentSeconds, promptSha256, outputSchema: VISION_OUTPUT_SCHEMA,
     outputSchemaSha256: VISION_OUTPUT_SCHEMA_SHA256, segmentIndex: segment.index,
     startSeconds: segment.startSeconds, durationSeconds: segment.durationSeconds,
@@ -969,7 +1051,7 @@ async function callCompatibleModel(
     body: JSON.stringify({
       model: route.model,
       messages: [
-        { role: 'system', content: '你是无状态视频分析工作节点，只处理当前请求，不读取或写入任何会话记忆。' },
+        { role: 'system', content: MEDIA_ANALYSIS_SYSTEM_PROMPT },
         { role: 'user', content },
       ],
       ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
@@ -1273,6 +1355,10 @@ export async function analyzeN8nVideoFrames(
   taskInput: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const metadata = await readMetadata(taskId)
+  const repair = learningRepair(routing)
+  if (repair.previousLearningResult && repair.previousLearningResult.totalSegments !== metadata.segmentCount) {
+    throw new Error('learning_repair_segment_count_changed')
+  }
   const resolved = resolveN8nNodeRoute(routing, 'vision')
   const candidates = compatibleRouteCandidates(resolved)
   if (!candidates.length) throw new Error('视频画面节点没有可用的 OpenAI-compatible 路由')
@@ -1297,12 +1383,16 @@ export async function analyzeN8nVideoFrames(
     candidate.maxImagesPerRequest || DEFAULT_VIDEO_VISION_MAX_IMAGES
   )))
   const segmentResults = new Map<number, Record<string, unknown>>()
+  const failures = new Map<number, VideoLearningFailure>()
   let activeRouteIndex = 0
   let modelBatches = 0
   let individualFallbackCalls = 0
   let cacheHits = 0
+  let consecutiveTransportFailures = 0
+  let unavailableTransport: SafeOperationError | null = null
   const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
-  const reportProgress = createLearningProgressReporter(taskId, 'vision', metadata.segmentCount, modelLabel(route))
+  const reportProgress = createLearningProgressReporter(taskId, 'vision', metadata.segmentCount, modelLabel(route),
+    () => [...failures.keys()])
   await reportProgress(0, 0)
   for (const batch of visualSegmentBatches(metadata.segments, maxImagesPerRequest)) {
     const missing: MediaSegment[] = []
@@ -1310,7 +1400,7 @@ export async function analyzeN8nVideoFrames(
     for (const segment of batch) {
       const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
       let cached: Record<string, unknown> | null = null
-      if (sourceSha256 && candidates.some(candidate => candidate.modelRevisionSha256)) {
+      if (sourceSha256) {
         const frameSha256s = await Promise.all(segment.frameFiles.map(name => visionFrameSha256(workspace, name)))
         const expected = visionCheckpointExpected(metadata, segment, sourceSha256, promptSha256, frameSha256s)
         proofByIndex.set(segment.index, expected)
@@ -1323,9 +1413,28 @@ export async function analyzeN8nVideoFrames(
         if (cachedRouteIndex >= 0) activeRouteIndex = cachedRouteIndex
         await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0,
           model: modelLabel(candidates[activeRouteIndex]) })
-      } else missing.push(segment)
+      } else {
+        const failureInputSha256 = jsonSha256({ expected: proofByIndex.get(segment.index),
+          segment, promptSha256, models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
+        const failure = await retainedSegmentFailure(taskId, routing, 'vision', segment.index, failureInputSha256)
+        if (failure) failures.set(segment.index, failure)
+        else {
+          assertLearningRepairMayGenerate(routing, 'vision', segment.index)
+          missing.push(segment)
+        }
+      }
     }
     if (missing.length) {
+      if (unavailableTransport) {
+        for (const segment of missing) {
+          const inputSha256 = jsonSha256({ expected: proofByIndex.get(segment.index), segment, promptSha256,
+            models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
+          failures.set(segment.index, await persistSegmentFailure(taskId, routing, 'vision', segment.index,
+            segmentTimeLabel(segment), inputSha256, unavailableTransport))
+        }
+        await reportProgress(segmentResults.size, cacheHits)
+        continue
+      }
       const content: Array<Record<string, unknown>> = [{
         type: 'text',
         text: [
@@ -1371,12 +1480,12 @@ export async function analyzeN8nVideoFrames(
           routeId: usedRoute.id,
         }
         const expected = proofByIndex.get(segment.index)
-        const proof = expected && usedRoute.modelRevisionSha256
+        const proof = expected
           ? {
               ...expected,
               routeId: usedRoute.id,
               model: usedRoute.model,
-              modelRevisionSha256: usedRoute.modelRevisionSha256,
+              modelIdentity: createMediaCheckpointModelIdentity(usedRoute, generation),
               resultSha256: jsonSha256(segmentResult),
             }
           : null
@@ -1386,6 +1495,7 @@ export async function analyzeN8nVideoFrames(
           proof ? { ...segmentResult, proof } : segmentResult,
         )
         segmentResults.set(segment.index, segmentResult)
+        failures.delete(segment.index)
         await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0, model: modelLabel(usedRoute) })
       }
       const batchStartedAt = Date.now()
@@ -1407,6 +1517,7 @@ export async function analyzeN8nVideoFrames(
           ),
         )
         activeRouteIndex = attempt.routeIndex
+        consecutiveTransportFailures = 0
         modelBatches += 1
         const perceptions = attempt.validated as Array<{ index: number; perception: N8nVisualPerception }>
         for (const { index, perception } of perceptions) {
@@ -1418,6 +1529,7 @@ export async function analyzeN8nVideoFrames(
           units: missing.length, model: modelLabel(attempt.route) })
         continue
       } catch (error) {
+        if (!(error instanceof SafeOperationError)) throw error
         const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
         logSafeOperationError('media_visual_batch_fallback', error, projection)
       }
@@ -1438,6 +1550,8 @@ export async function analyzeN8nVideoFrames(
           },
           ...images.map(url => ({ type: 'image_url', image_url: { url } })),
         ]
+        try {
+        if (unavailableTransport) throw unavailableTransport
         const attempt = await callCompatibleModelWithFallback(
           resolved,
           candidates,
@@ -1452,18 +1566,31 @@ export async function analyzeN8nVideoFrames(
           payload => parseVisualPerceptionAnswer(payload?.choices?.[0]?.message?.content),
         )
         activeRouteIndex = attempt.routeIndex
+        consecutiveTransportFailures = 0
         individualFallbackCalls += 1
         await persist(segment, attempt.validated as N8nVisualPerception, attempt.route)
         await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
           units: 1, model: modelLabel(attempt.route) })
+        } catch (error) {
+          const inputSha256 = jsonSha256({ expected: proofByIndex.get(segment.index),
+            segment, promptSha256, models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
+          const failure = await persistSegmentFailure(taskId, routing, 'vision', segment.index,
+            segmentTimeLabel(segment), inputSha256, error)
+          failures.set(segment.index, failure)
+          consecutiveTransportFailures = failure.errorCode === 'N8N_MEDIA_MODEL_HTTP_FAILED' ? consecutiveTransportFailures + 1 : 0
+          if (consecutiveTransportFailures >= 3) unavailableTransport = error as SafeOperationError
+          await reportProgress(segmentResults.size, cacheHits)
+        }
       }
     }
   }
-  const segments = metadata.segments.map(segment => {
+  const segments = metadata.segments.flatMap(segment => {
     const result = segmentResults.get(segment.index)
-    if (!result) throw new Error(`第 ${segment.index} 段画面结果缺失`)
-    return result
+    if (result) return [result]
+    if (failures.has(segment.index)) return []
+    throw new Error(`第 ${segment.index} 段画面结果缺失`)
   })
+  await reportProgress(segmentResults.size, cacheHits)
   const totalFrames = segments.reduce(
     (total, segment) => total + Number(segment.frameCount || 0),
     0,
@@ -1474,7 +1601,8 @@ export async function analyzeN8nVideoFrames(
   return {
     analysis,
     segments,
-    segmentCount: segments.length,
+    segmentCount: metadata.segmentCount,
+    learningResult: buildVideoLearningResult(metadata.segmentCount, [...failures.values()]),
     frameCount: totalFrames,
     routeId: candidates[activeRouteIndex]?.id || route.id,
     routeCandidates: candidates.map(candidate => candidate.id),
@@ -1502,7 +1630,9 @@ export function mergeN8nMediaResults(
   const visualAnalysis = String(vision.analysis || '').trim()
   const audioSegments = Array.isArray(audio.segments) ? audio.segments : []
   const visionSegments = Array.isArray(vision.segments) ? vision.segments : []
+  const learningResult = readVideoLearningResult(vision)
   const segmentIndexes = new Set<number>()
+  for (const failure of learningResult?.failedSegments || []) segmentIndexes.add(failure.index)
   for (const segment of [...audioSegments, ...visionSegments]) {
     const index = Number(objectValue(segment).index)
     if (Number.isInteger(index) && index > 0) segmentIndexes.add(index)
@@ -1515,7 +1645,8 @@ export function mergeN8nMediaResults(
       .filter(value => Number.isFinite(value) && value >= 0 && value <= 1)
     return {
       index,
-      timeRange: String(audioSegment.timeRange || visionSegment.timeRange || ''),
+      timeRange: String(audioSegment.timeRange || visionSegment.timeRange
+        || learningResult?.failedSegments.find(failure => failure.index === index)?.timeRange || ''),
       transcript: String(audioSegment.transcript || ''),
       visualAnalysis: String(visionSegment.analysis || ''),
       ...(visionSegment.perception && typeof visionSegment.perception === 'object'
@@ -1535,6 +1666,7 @@ export function mergeN8nMediaResults(
   ].join('\n')).join('\n\n')
   return {
     taskType: 'video-analysis',
+    ...(learningResult ? { learningResult } : {}),
     audio,
     vision,
     timeline,
@@ -1635,6 +1767,10 @@ export async function synthesizeN8nMediaResults(
 ): Promise<Record<string, unknown>> {
   const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
   if (!timeline.length) return merged
+  const repair = learningRepair(routing)
+  if (repair.previousLearningResult && repair.previousLearningResult.totalSegments !== timeline.length) {
+    throw new Error('learning_repair_segment_count_changed')
+  }
   const workspace = mediaTaskWorkspace(taskId)
   // A completed historical report is immutable evidence. Do not re-infer it
   // merely to populate a newer shape, or require a still-available model route.
@@ -1662,8 +1798,13 @@ export async function synthesizeN8nMediaResults(
   if (!candidates.length) throw new Error('视频片段摘要没有可用的 OpenAI-compatible 路由')
   const route = assertVisionRoute(candidates[0])
   const businessPrompt = String(taskInput.prompt || '综合语音和画面，按时间线分析视频内容。').trim()
+  const inheritedLearning = readVideoLearningResult(merged)
+  const failures = new Map<number, VideoLearningFailure>(
+    (inheritedLearning?.failedSegments || []).map(failure => [failure.index, failure]),
+  )
   const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
-  const reportProgress = createLearningProgressReporter(taskId, 'finalize', timeline.length, modelLabel(route))
+  const reportProgress = createLearningProgressReporter(taskId, 'finalize', timeline.length, modelLabel(route),
+    () => [...failures.keys()])
   let cacheHits = 0
   await reportProgress(0, 0)
   const sourceName = basename(String(taskInput.displayName || taskInput.originalFilename || taskInput.fileName || taskInput.videoName || taskInput.videoKey || taskId))
@@ -1680,6 +1821,8 @@ export async function synthesizeN8nMediaResults(
   let activeRouteIndex = 0
   let modelBatches = 0
   let individualFallbackCalls = 0
+  let consecutiveTransportFailures = 0
+  let unavailableTransport: SafeOperationError | null = null
   for (let batchOffset = 0; batchOffset < timeline.length; batchOffset += VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) {
     const batch = timeline.slice(batchOffset, batchOffset + VIDEO_LEARNING_MODEL_BATCH_SEGMENTS)
     const pending: Array<{
@@ -1692,6 +1835,7 @@ export async function synthesizeN8nMediaResults(
     }> = []
     for (const [localOffset, segment] of batch.entries()) {
       const index = batchOffset + localOffset + 1
+      if (failures.get(index)?.stage === 'vision') continue
       const timeRange = String(segment.timeRange || '')
       const transcript = String(segment.transcript || '')
       const visualAnalysis = visibleModelAnswer(segment.visualAnalysis)
@@ -1716,10 +1860,21 @@ export async function synthesizeN8nMediaResults(
         await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: 0, units: 0,
           model: modelLabel(candidates[activeRouteIndex]) })
       } else {
-        pending.push({ index, segment, timeRange, transcript, visualAnalysis, inputSha256 })
+        const failure = await retainedSegmentFailure(taskId, routing, 'summary', index, inputSha256)
+        if (failure) failures.set(index, failure)
+        else {
+          assertLearningRepairMayGenerate(routing, 'summary', index)
+          pending.push({ index, segment, timeRange, transcript, visualAnalysis, inputSha256 })
+        }
       }
     }
     if (!pending.length) continue
+    if (unavailableTransport) {
+      for (const item of pending) failures.set(item.index, await persistSegmentFailure(taskId, routing, 'summary',
+        item.index, item.timeRange, item.inputSha256, unavailableTransport))
+      await reportProgress(segmentResults.size, cacheHits)
+      continue
+    }
 
     const persist = async (
       item: typeof pending[number],
@@ -1747,6 +1902,7 @@ export async function synthesizeN8nMediaResults(
         result,
       )
       segmentResults.set(item.index, result)
+      failures.delete(item.index)
       await reportProgress(segmentResults.size, cacheHits)
     }
 
@@ -1786,13 +1942,16 @@ export async function synthesizeN8nMediaResults(
         },
         payload => {
           if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error('片段批次摘要输出被截断')
-          return parseDirectorPerceptionBatchAnswer(
+          const perceptions = parseDirectorPerceptionBatchAnswer(
             payload?.choices?.[0]?.message?.content,
             expectedIndexes,
           )
+          if (perceptions.some(item => item.perception.summary.length > 4_000)) throw new Error('片段摘要超出长度边界')
+          return perceptions
         },
       )
       activeRouteIndex = attempt.routeIndex
+      consecutiveTransportFailures = 0
       modelBatches += 1
       const perceptions = attempt.validated as Array<{ index: number; perception: N8nDirectorPerception }>
       for (const { index, perception } of perceptions) {
@@ -1804,6 +1963,7 @@ export async function synthesizeN8nMediaResults(
         units: pending.length, model: modelLabel(attempt.route) })
       continue
     } catch (error) {
+      if (!(error instanceof SafeOperationError)) throw error
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
       logSafeOperationError('media_segment_summary_batch_fallback', error, projection)
     }
@@ -1827,6 +1987,8 @@ export async function synthesizeN8nMediaResults(
       if (Buffer.byteLength(individualPrompt, 'utf8') > 128 * 1024) {
         throw new Error(`片段 ${item.index} 输入超出单段摘要边界，需重新分段`)
       }
+      try {
+      if (unavailableTransport) throw unavailableTransport
       const attempt = await callCompatibleModelWithFallback(
         resolved,
         candidates,
@@ -1841,26 +2003,43 @@ export async function synthesizeN8nMediaResults(
         },
         payload => {
           if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error(`片段 ${item.index} 摘要输出被截断`)
-          return parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content)
+          const perception = parseDirectorSynthesisAnswer(payload?.choices?.[0]?.message?.content)
+          if (perception.summary.length > 4_000) throw new Error('片段摘要超出长度边界')
+          return perception
         },
       )
       activeRouteIndex = attempt.routeIndex
+      consecutiveTransportFailures = 0
       individualFallbackCalls += 1
       await persist(item, attempt.validated as N8nDirectorPerception, attempt.route.id)
       await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
         units: 1, model: modelLabel(attempt.route) })
+      } catch (error) {
+        const failure = await persistSegmentFailure(taskId, routing, 'summary', item.index,
+          item.timeRange, item.inputSha256, error)
+        failures.set(item.index, failure)
+        consecutiveTransportFailures = failure.errorCode === 'N8N_MEDIA_MODEL_HTTP_FAILED' ? consecutiveTransportFailures + 1 : 0
+        if (consecutiveTransportFailures >= 3) unavailableTransport = error as SafeOperationError
+        await reportProgress(segmentResults.size, cacheHits)
+      }
     }
   }
-  const segmentSummaries = timeline.map((_, offset) => {
+  const segmentSummaries = timeline.flatMap((_, offset) => {
     const result = segmentResults.get(offset + 1)
-    if (!result) throw new Error(`片段 ${offset + 1} 摘要结果缺失`)
-    return result
+    if (result) return [result]
+    if (failures.has(offset + 1)) return []
+    throw new Error(`片段 ${offset + 1} 摘要结果缺失`)
   })
-  const summary = `已完成 ${segmentSummaries.length} 个片段的独立音画摘要。按文件名、片段编号与时间码保存；此处为索引概览，完整事实和不确定项见逐片段摘要，不代表全片叙事总结。`
+  const learningResult = buildVideoLearningResult(timeline.length, [...failures.values()])
+  await reportProgress(segmentResults.size, cacheHits)
+  const summary = `${learningResult.status === 'partial' ? '部分完成：' : ''}已完成 ${segmentSummaries.length}/${timeline.length} 个片段的独立音画摘要。${failures.size ? `${failures.size} 个片段失败，已保留成功结果，可单独补学。` : ''}按文件名、片段编号与时间码保存；此处为索引概览，完整事实和不确定项见逐片段摘要，不代表全片叙事总结。`
   return {
-    ...merged, segmentSummaries,
+    ...merged, segmentSummaries, learningResult,
     timeline: timeline.map((segment, offset) => ({
-      ...segment, segmentSummaryIndex: offset + 1, segmentSummaryInputSha256: segmentSummaries[offset].inputSha256,
+      ...segment,
+      ...(segmentResults.has(offset + 1) ? { segmentSummaryIndex: offset + 1,
+        segmentSummaryInputSha256: segmentResults.get(offset + 1)!.inputSha256 }
+        : { learningFailure: failures.get(offset + 1) }),
     })),
     // Legacy readers may still use chapters: each entry now maps exactly to
     // one segment, not an inferred five-minute chapter.
@@ -1887,7 +2066,8 @@ export async function synthesizeN8nMediaResults(
 
 /** Reuse the executor's exact checkpoint validators before permitting recovery. */
 export async function inspectN8nMediaCheckpointReuse(taskId: string, routing: Record<string, unknown>,
-  taskInput: Record<string, unknown>, outputs: { audio: Record<string, unknown> | null; vision: Record<string, unknown> | null },
+  taskInput: Record<string, unknown>, outputs: { audio: Record<string, unknown> | null; vision: Record<string, unknown> | null;
+    result?: Record<string, unknown> | null },
 ): Promise<{ eligible: boolean; errorCode: string | null }> {
   const blocked = (errorCode: string) => ({ eligible: false, errorCode })
   try {
@@ -1902,6 +2082,8 @@ export async function inspectN8nMediaCheckpointReuse(taskId: string, routing: Re
       return blocked('recovery_checkpoint_path_invalid')
     }
     const metadata = await readMetadata(taskId)
+    const baseline = outputs.result ? readVideoLearningResult(outputs.result) : null
+    if (baseline && baseline.totalSegments !== metadata.segmentCount) return blocked('recovery_segment_count_changed')
     const resolved = resolveN8nNodeRoute(routing, 'vision')
     const candidates = compatibleRouteCandidates(resolved)
     if (!candidates.length || !metadata.sourceSha256) return blocked('recovery_checkpoint_identity_missing')
@@ -1920,21 +2102,33 @@ export async function inspectN8nMediaCheckpointReuse(taskId: string, routing: Re
         }
       } else if (names.some(name => /^audio-\d+\.json$/u.test(name))) return blocked('recovery_audio_checkpoint_incomplete')
     }
-    if (!outputs.vision) {
+    if (!outputs.vision || hasPartialVideoLearning(outputs.vision) || baseline) {
       const generation = videoModelGenerationProfile('vision')
       const prompt = String(taskInput.prompt || '分析视频画面中的人物、场景、动作、文字和事件，并按时间顺序概括。').trim()
       const promptSha256 = jsonSha256({ contract: 'video-vision-configured-window-v1', prompt,
         instruction: resolved.instruction || '', generation })
       for (const segment of metadata.segments) {
         const name = `vision-${String(segment.index).padStart(3, '0')}.json`
-        if (!names.includes(name)) continue
+        const originalFailure = baseline?.failedSegments.find(failure => failure.index === segment.index && failure.stage === 'vision')
+        if (!names.includes(name) && !originalFailure) {
+          if (baseline) return blocked('recovery_successful_checkpoint_missing')
+          continue
+        }
         const frames = await Promise.all(segment.frameFiles.map(frame => visionFrameSha256(workspace, frame)))
         const expected = visionCheckpointExpected(metadata, segment, metadata.sourceSha256, promptSha256, frames)
-        if (!await readTrustedVisionCheckpoint(workspace, name, expected, candidates)) return blocked('recovery_checkpoint_identity_changed')
+        if (originalFailure) {
+          const inputSha256 = jsonSha256({ expected, segment, promptSha256,
+            models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
+          if (!await retainedSegmentFailure(taskId, routing, 'vision', segment.index, inputSha256)) {
+            return blocked('recovery_failure_checkpoint_missing')
+          }
+        } else if (!await readTrustedVisionCheckpoint(workspace, name, expected, candidates)) {
+          return blocked('recovery_checkpoint_identity_changed')
+        }
       }
     }
     const summaries = names.filter(name => /^segment-summary-\d{3,6}\.json$/u.test(name))
-    if (summaries.length) {
+    if (summaries.length || baseline) {
       if (!outputs.audio || !outputs.vision) return blocked('recovery_summary_dependencies_missing')
       const merged = mergeN8nMediaResults(outputs.audio, outputs.vision)
       const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
@@ -1943,6 +2137,20 @@ export async function inspectN8nMediaCheckpointReuse(taskId: string, routing: Re
       const generation = videoModelGenerationProfile('chapter')
       const modelIdentity = candidates.map(candidate => ({ id: candidate.id, model: candidate.model,
         baseUrl: candidate.baseUrl, transport: candidate.transport, temperature: candidate.temperature }))
+      if (baseline) for (const segment of metadata.segments) {
+        const failure = baseline.failedSegments.find(value => value.index === segment.index)
+        if (!failure && !summaries.includes(`segment-summary-${String(segment.index).padStart(3, '0')}.json`)) {
+          return blocked('recovery_successful_checkpoint_missing')
+        }
+        if (failure?.stage === 'summary') {
+          const evidence = timeline[segment.index - 1]
+          const expected = synthesisDigest({ contract: 'segment-audiovisual-summary-window-v1', sourceName,
+            index: segment.index, segment: evidence, businessPrompt, generation, modelIdentity })
+          if (!await retainedSegmentFailure(taskId, routing, 'summary', segment.index, expected)) {
+            return blocked('recovery_failure_checkpoint_missing')
+          }
+        }
+      }
       for (const name of summaries) {
         const index = Number(name.match(/\d+/u)?.[0])
         const segment = timeline[index - 1]

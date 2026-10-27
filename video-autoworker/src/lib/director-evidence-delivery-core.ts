@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { hasPartialVideoLearning } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 import type Database from 'better-sqlite3'
 import type { N8nTaskRun, N8nTaskScope } from '@/lib/n8n-task-runs'
 import {
@@ -572,7 +573,7 @@ export function enqueueDirectorEvidenceOutboxCore(
   nowSeconds: number,
 ): 'skipped' | 'created' | 'existing' | 'conflict' {
   const binding = directorEvidenceBindingFromInput(parent.input)
-  if (!binding || parent.status !== 'succeeded' || !parent.output) return 'skipped'
+  if (!binding || parent.status !== 'succeeded' || !parent.output || hasPartialVideoLearning(parent.output)) return 'skipped'
   const identity = buildOutboxIdentity(parent, binding, currentProjectionContractDigest)
   const existing = getDirectorEvidenceOutboxCore(db, parent.taskId)
   if (existing) {
@@ -660,7 +661,7 @@ function readCurrentEvidenceSource(
   const output = parseAuthorityObject(row?.output ?? null)
   const binding = directorEvidenceBindingFromInput(parseAuthorityObject(row?.input ?? null))
   if (!row || row.status !== 'succeeded' || row.task_type !== 'video-analysis'
-    || !output || directorEvidenceDigest(output) !== item.resultSha256
+    || !output || hasPartialVideoLearning(output) || directorEvidenceDigest(output) !== item.resultSha256
     || binding?.workId !== item.workId || binding?.queryDigest !== item.queryDigest) {
     throw new Error('director_evidence_authority_conflict')
   }

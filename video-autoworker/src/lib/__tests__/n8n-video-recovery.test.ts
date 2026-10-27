@@ -1,26 +1,36 @@
 // @vitest-environment node
 import Database from 'better-sqlite3'
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
 import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
 import { claimScopedN8nTaskRun, createN8nTaskRun, failN8nTaskRun, getScopedN8nTaskRunByTaskId,
-  inspectScopedN8nVideoRecoveryState, requeueScopedN8nVideoTaskRun } from '@/lib/n8n-task-runs'
+  inspectScopedN8nVideoRecoveryState, inspectScopedN8nVideoSegmentRepairState,
+  requeueScopedN8nVideoTaskRun, requeueScopedN8nVideoSegmentRepair } from '@/lib/n8n-task-runs'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+import { acquireBatchLock, acquireGlobalBatchLock, batchStatePath } from '../../../openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs'
 
 const mocks = vi.hoisted(() => ({ evidence: vi.fn(), checkpoints: vi.fn(), webhook: vi.fn() }))
 vi.mock('@/lib/n8n-prepared-evidence', () => ({ inspectPreparedRecoveryEvidence: mocks.evidence }))
 vi.mock('@/lib/n8n-media-execution', () => ({ inspectN8nMediaCheckpointReuse: mocks.checkpoints }))
 vi.mock('@/lib/n8n', async original => ({ ...await original<typeof import('@/lib/n8n')>(), triggerN8nWebhook: mocks.webhook }))
-import { inspectVideoRecovery, recoverVideoTask } from '@/lib/n8n-video-recovery'
+import { dispatchQueuedVideoSegmentRepair, inspectVideoRecovery, inspectVideoSegmentRepair,
+  recoverVideoTask, repairVideoSegments } from '@/lib/n8n-video-recovery'
 
 const scope = { tenantId: 3, workspaceId: 2 }
 let db: Database.Database
 let bindingId: number
+let batchRoot: string
 const taskId = 'recovery-parent'
 const identity = 'recovery-original-idem'
 
 beforeEach(() => {
   vi.clearAllMocks()
   db = new Database(':memory:')
+  batchRoot = realpathSync(mkdtempSync(join(tmpdir(), 'video-segment-repair-')))
+  vi.stubEnv('AIWORKER_VIDEO_BATCH_DIR', batchRoot)
   runMigrations(db)
   bindingId = Number(db.prepare(`INSERT INTO n8n_workflow_bindings
     (name,task_type,workflow_id,webhook_path,agent_role,model,enabled,timeout_seconds,retry_count,config,workspace_id,tenant_id)
@@ -41,7 +51,7 @@ beforeEach(() => {
   mocks.webhook.mockResolvedValue({ statusCode: 202, ok: true, latencyMs: 1 })
 })
 
-afterEach(() => { db.close(); vi.unstubAllEnvs() })
+afterEach(() => { db.close(); vi.unstubAllEnvs(); rmSync(batchRoot, { recursive: true, force: true }) })
 
 describe('scoped original video recovery authority', () => {
   it('preserves original identity, successes and budgets, and fences the retired owner', () => {
@@ -130,5 +140,192 @@ describe('two-step recovery service', () => {
     expect(result).toMatchObject({ taskId, currentState: 'queued', errorCode: 'recovery_dispatch_outcome_unknown' })
     expect(db.prepare('SELECT COUNT(*) AS count FROM n8n_task_runs').get()).toEqual({ count: 2 })
     expect(db.prepare('SELECT COUNT(*) AS count FROM n8n_task_dispatch_leases').get()).toEqual({ count: 1 })
+  })
+})
+
+function seedPartial(visionFailed = true) {
+  const learningResult = buildVideoLearningResult(3, [
+    { index: 2, timeRange: '00:00:05-00:00:10', stage: visionFailed ? 'vision' : 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' },
+    { index: 3, timeRange: '00:00:10-00:00:15', stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' },
+  ])
+  for (const stage of ['audio', 'vision', 'finalize'] as const) {
+    const childId = mediaChildIdentity('task', taskId, stage)
+    createN8nTaskRun(db, { taskId: childId, idempotencyKey: mediaChildIdentity('idem', identity, stage), bindingId,
+      source: 'n8n-media-node', requestedBy: 'test', routing: { taskType: 'video-analysis', mediaStage: stage },
+      taskInput: {}, delivery: { mode: 'none' }, maxAttempts: 2 }, scope)
+    db.prepare(`UPDATE n8n_task_runs SET status='succeeded',attempt_count=2,output=? WHERE task_id=?`)
+      .run(JSON.stringify(stage === 'finalize' ? { summary: '已有摘要', learningResult } : { stage, segments: [] }), childId)
+  }
+  db.prepare(`UPDATE n8n_task_runs SET status='succeeded',attempt_count=1,max_attempts=1,
+    input=json_set(input,'$.batchId','repair-batch'),output=? WHERE task_id=?`)
+    .run(JSON.stringify({ summary: '已有摘要', learningResult }), taskId)
+  writeFileSync(batchStatePath('repair-batch', batchRoot), JSON.stringify({ schemaVersion: 2,
+    batchId: 'repair-batch', requestFingerprint: 'f'.repeat(64), bindingId, status: 'completed_with_errors', error: null,
+    items: [{ taskId, idempotencyKey: identity, status: 'succeeded', learningResult }] }), { mode: 0o600 })
+  return learningResult
+}
+
+describe('same-task targeted segment repair', () => {
+  it('preserves successful outputs and counters while granting one explicit bounded repair round', () => {
+    const previousLearningResult = seedPartial()
+    const parentBefore = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+    const preserved = ['prepare', 'audio'].map(stage => db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?')
+      .get(mediaChildIdentity('task', taskId, stage)))
+    const inspection = inspectScopedN8nVideoSegmentRepairState(db, taskId, scope, [2])
+    expect(inspection).toMatchObject({ outcome: 'eligible', indexes: [2], stages: ['vision', 'finalize'], generation: 1 })
+    const repaired = requeueScopedN8nVideoSegmentRepair(db, { taskId,
+      expectedRevisionSha256: inspection.revisionSha256!, segmentIndexes: [2] }, scope)
+    expect(repaired).toMatchObject({ outcome: 'queued', run: { taskId, idempotencyKey: identity,
+      attemptCount: 1, maxAttempts: 2, output: parentBefore.output,
+      routing: { learningRepair: { generation: 1, indexes: [2], previousAttempts: 1, attemptLimit: 2, previousLearningResult } } } })
+    for (const [index, stage] of ['prepare', 'audio'].entries()) {
+      expect(db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?').get(mediaChildIdentity('task', taskId, stage))).toEqual(preserved[index])
+    }
+    for (const stage of ['vision', 'finalize']) expect(getScopedN8nTaskRunByTaskId(db,
+      mediaChildIdentity('task', taskId, stage), scope)).toMatchObject({ status: 'queued', attemptCount: 2, maxAttempts: 4 })
+    expect(claimScopedN8nTaskRun(db, { taskId, idempotencyKey: identity, bindingId, executionOwner: 'n8n-execution:original' }, scope).outcome).toBe('rejected')
+    expect(claimScopedN8nTaskRun(db, { taskId, idempotencyKey: identity, bindingId, executionOwner: 'n8n-execution:repair-1' }, scope).outcome).toBe('claimed')
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.attemptCount).toBe(2)
+  })
+
+  it('re-enters only synthesis for a summary-only failure and does not admit successful or cross-tenant indexes', () => {
+    seedPartial(false)
+    const vision = db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?').get(mediaChildIdentity('task', taskId, 'vision'))
+    expect(inspectScopedN8nVideoSegmentRepairState(db, taskId, scope, [1]).errorCode).toBe('recovery_repair_segments_invalid')
+    expect(inspectScopedN8nVideoSegmentRepairState(db, taskId, { ...scope, tenantId: 8 }).outcome).toBe('not_found')
+    const inspection = inspectScopedN8nVideoSegmentRepairState(db, taskId, scope)
+    expect(inspection.stages).toEqual(['finalize'])
+    expect(requeueScopedN8nVideoSegmentRepair(db, { taskId, expectedRevisionSha256: inspection.revisionSha256! }, scope).outcome).toBe('queued')
+    expect(db.prepare('SELECT * FROM n8n_task_runs WHERE task_id=?').get(mediaChildIdentity('task', taskId, 'vision'))).toEqual(vision)
+  })
+
+  it('rejects stale confirmations, exhausted rounds and unknown historical failures without changing rows', () => {
+    expect(inspectScopedN8nVideoSegmentRepairState(db, taskId, scope).errorCode).toBe('recovery_partial_result_required')
+    seedPartial()
+    const inspection = inspectScopedN8nVideoSegmentRepairState(db, taskId, scope)
+    db.prepare('UPDATE n8n_task_runs SET updated_at=updated_at+1 WHERE task_id=?').run(taskId)
+    expect(requeueScopedN8nVideoSegmentRepair(db, { taskId, expectedRevisionSha256: inspection.revisionSha256! }, scope).outcome).toBe('conflict')
+    const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+    db.prepare('UPDATE n8n_task_runs SET routing=? WHERE task_id=?')
+      .run(JSON.stringify({ ...run.routing, learningRepair: { generation: 3, indexes: [2] } }), taskId)
+    expect(inspectScopedN8nVideoSegmentRepairState(db, taskId, scope).errorCode).toBe('recovery_repair_rounds_exhausted')
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.status).toBe('succeeded')
+  })
+
+  it('seals the selected failed indexes and queues the original task until its sole worker owns the lane', async () => {
+    seedPartial()
+    const inspection = await inspectVideoSegmentRepair(db, taskId, scope, 0, [2])
+    expect(inspection).toMatchObject({ eligible: true, mode: 'repair-segments', segmentIndexes: [2],
+      nextAction: 'confirm_failed_segment_repair' })
+    expect(mocks.webhook).not.toHaveBeenCalled()
+    await expect(repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken!, segmentIndexes: [3] }, scope, 0)).rejects.toThrow()
+    await expect(repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken!, segmentIndexes: [2] }, scope, 99)).rejects.toThrow('recovery_confirmation_scope_mismatch')
+    expect(mocks.webhook).not.toHaveBeenCalled()
+    const result = await repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken!, segmentIndexes: [2] }, scope, 0)
+    expect(result.currentState).toBe('queued')
+    expect(mocks.webhook).not.toHaveBeenCalled()
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.status).toBe('succeeded')
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    const state = JSON.parse(readFileSync(pathname, 'utf8'))
+    expect(state).toMatchObject({ status: 'queued', items: [{ taskId, status: 'queued',
+      learningRepairRequest: { segmentIndexes: [2] } }] })
+    const input = { taskId, requestId: state.items[0].learningRepairRequest.requestId }
+    await expect(dispatchQueuedVideoSegmentRepair(db, { ...input,
+      workerLease: { pid: process.pid, token: '00000000-0000-4000-8000-000000000000' } }, scope)).rejects.toThrow()
+    expect(mocks.webhook).not.toHaveBeenCalled()
+    const global = await acquireGlobalBatchLock(pathname)
+    const batch = await acquireBatchLock(pathname)
+    try {
+      expect(global.acquired && batch.acquired).toBe(true)
+      const dispatched = await dispatchQueuedVideoSegmentRepair(db, { ...input, workerLease: global.lease! }, scope)
+      expect(dispatched.currentState).toBe('accepted')
+      const duplicate = await dispatchQueuedVideoSegmentRepair(db, { ...input, workerLease: global.lease! }, scope)
+      expect(duplicate.currentState).toBe('accepted')
+    } finally { await batch.release(); await global.release() }
+    expect(mocks.webhook).toHaveBeenCalledOnce()
+    expect(mocks.webhook.mock.calls[0][1]).toMatchObject({ taskId, idempotencyKey: identity })
+  })
+
+  it('blocks an unsettled lease or missing trusted evidence before granting a repair token', async () => {
+    seedPartial()
+    mocks.checkpoints.mockResolvedValueOnce({ eligible: false, errorCode: 'recovery_checkpoint_identity_changed' })
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false, inspectionToken: null })
+    db.prepare(`INSERT INTO n8n_child_execution_leases (task_id,tenant_id,workspace_id,owner_instance_id,lease_token,
+      lease_expires_at,heartbeat_at,revision,created_at,updated_at) VALUES (?,3,2,?,?,1,1,1,1,1)`)
+      .run(mediaChildIdentity('task', taskId, 'vision'), 'e'.repeat(64), 'c'.repeat(64))
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false,
+      errorCode: 'recovery_child_lease_unsettled', inspectionToken: null })
+    expect(mocks.webhook).not.toHaveBeenCalled()
+  })
+
+  it('requires the private original batch and never manufactures a parallel queue', async () => {
+    seedPartial()
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    chmodSync(pathname, 0o644)
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false,
+      errorCode: 'recovery_batch_file_invalid', inspectionToken: null })
+    unlinkSync(pathname)
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false, inspectionToken: null })
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.status).toBe('succeeded')
+    expect(mocks.webhook).not.toHaveBeenCalled()
+  })
+
+  it('revalidates persisted confirmation against changed output before a queued worker can dispatch', async () => {
+    seedPartial()
+    const inspection = await inspectVideoSegmentRepair(db, taskId, scope, 0)
+    await repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken! }, scope, 0)
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    const pending = JSON.parse(readFileSync(pathname, 'utf8')).items[0].learningRepairRequest
+    db.prepare(`UPDATE n8n_task_runs SET output=json_set(output,'$.summary','changed') WHERE task_id=?`).run(taskId)
+    const global = await acquireGlobalBatchLock(pathname)
+    const batch = await acquireBatchLock(pathname)
+    try {
+      await expect(dispatchQueuedVideoSegmentRepair(db, { taskId, requestId: pending.requestId,
+        workerLease: global.lease! }, scope)).rejects.toThrow('recovery_revision_changed')
+    } finally { await batch.release(); await global.release() }
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.status).toBe('succeeded')
+    expect(mocks.webhook).not.toHaveBeenCalled()
+  })
+
+  it('converges two overlapping dispatch requests after the first commits instead of rejecting the stale second snapshot', async () => {
+    seedPartial()
+    const inspection = await inspectVideoSegmentRepair(db, taskId, scope, 0)
+    await repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken! }, scope, 0)
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    const pending = JSON.parse(readFileSync(pathname, 'utf8')).items[0].learningRepairRequest
+    const global = await acquireGlobalBatchLock(pathname)
+    const batch = await acquireBatchLock(pathname)
+    const entered: Array<() => void> = []
+    const release: Array<() => void> = []
+    const seen = [0, 1].map(index => new Promise<void>(resolve => { entered[index] = resolve }))
+    const gates = [0, 1].map(index => new Promise<void>(resolve => { release[index] = resolve }))
+    let index = 0
+    mocks.checkpoints.mockImplementation(async () => {
+      const position = index++
+      entered[position]()
+      await gates[position]
+      return { eligible: true, errorCode: null }
+    })
+    mocks.webhook.mockImplementation(async () => {
+      const claimed = claimScopedN8nTaskRun(db, { taskId, idempotencyKey: identity, bindingId,
+        executionOwner: 'n8n-execution:concurrent-repair' }, scope)
+      expect(claimed.outcome).toBe('claimed')
+      return { statusCode: 202, ok: true, latencyMs: 1 }
+    })
+    try {
+      const input = { taskId, requestId: pending.requestId, workerLease: global.lease! }
+      const first = dispatchQueuedVideoSegmentRepair(db, input, scope)
+      await seen[0]
+      const second = dispatchQueuedVideoSegmentRepair(db, input, scope)
+      await seen[1]
+      release[0]()
+      expect(await first).toMatchObject({ currentState: 'running' })
+      release[1]()
+      expect(await second).toMatchObject({ currentState: 'running' })
+      expect(mocks.webhook).toHaveBeenCalledOnce()
+      expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.attemptCount).toBe(2)
+      await expect(dispatchQueuedVideoSegmentRepair(db, { ...input,
+        workerLease: { ...input.workerLease, token: '00000000-0000-4000-8000-000000000000' } }, scope)).rejects.toThrow()
+    } finally { release.forEach(resolve => resolve()); await batch.release(); await global.release() }
   })
 })

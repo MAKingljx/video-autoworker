@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, normalize } from 'node:path'
 import { z } from 'zod'
 import { getScopedN8nTaskRunByTaskId, type N8nTaskScope } from '@/lib/n8n-task-runs'
 import { mediaChildIdentity, mediaTaskWorkspace, mediaWorkRoot } from '@/lib/n8n-media-workspace'
+import { readVideoLearningResult, type VideoLearningResult } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 export const LEARNING_STAGES = ['prepare', 'audio', 'vision', 'finalize'] as const
 export type LearningStage = typeof LEARNING_STAGES[number]
@@ -16,10 +17,12 @@ const phaseProgressSchema = z.object({
   schema: z.literal('aiworker-learning-phase-progress/v1'), taskId: z.string().min(1).max(120),
   stage: stageSchema, totalSegments: z.number().int().min(1).max(MAX_SEGMENTS),
   completedSegments: z.number().int().min(0).max(MAX_SEGMENTS),
+  failedSegments: z.number().int().min(0).max(MAX_SEGMENTS).default(0),
+  failedSegmentIndexes: z.array(z.number().int().min(1).max(MAX_SEGMENTS)).max(100).default([]),
   model: z.string().min(1).max(180).nullable(), cacheHits: z.number().int().min(0).max(MAX_SEGMENTS),
   samples: z.array(z.number().positive().max(86_400)).max(16), updatedAt: z.number().int().positive(),
 }).strict().superRefine((value, ctx) => {
-  if (value.completedSegments > value.totalSegments || value.cacheHits > value.completedSegments) {
+  if (value.completedSegments + value.failedSegments > value.totalSegments || value.cacheHits > value.completedSegments) {
     ctx.addIssue({ code: 'custom', message: 'invalid_progress_count' })
   }
 })
@@ -31,6 +34,8 @@ export interface LearningStageProgress {
   completedSegments: number | null
   model: string | null
   cacheHits: number | null
+  failedSegments?: number
+  failedSegmentIndexes?: number[]
   remainingSeconds: { lower: number; upper: number; samples: number; basis: 'current-stage' } | null
 }
 
@@ -40,6 +45,7 @@ export interface LearningProgressProjection {
   state: string
   stages: LearningStageProgress[]
   activeStages: LearningStage[]
+  learningResult?: VideoLearningResult
   generatedAt: number
 }
 
@@ -79,7 +85,8 @@ export function estimateLearningStageRemaining(completed: number, total: number,
     upper: Math.ceil(Math.max(...valid) * remaining * 1.5), samples: valid.length, basis: 'current-stage' as const }
 }
 
-export function createLearningProgressReporter(taskId: string, stage: LearningStage, totalSegments: number, initialModel: string | null) {
+export function createLearningProgressReporter(taskId: string, stage: LearningStage, totalSegments: number, initialModel: string | null,
+  failedIndexes: () => number[] = () => []) {
   const workspace = mediaTaskWorkspace(taskId)
   let model = initialModel
   let samples: number[] = []
@@ -88,8 +95,10 @@ export function createLearningProgressReporter(taskId: string, stage: LearningSt
     if (sample && sample.elapsedSeconds > 0 && sample.units > 0) {
       samples = [...samples, sample.elapsedSeconds / sample.units].slice(-16)
     }
+    const failures = [...new Set(failedIndexes())].sort((a, b) => a - b)
     const parsed = phaseProgressSchema.safeParse({ schema: 'aiworker-learning-phase-progress/v1', taskId, stage,
-      totalSegments, completedSegments, model, cacheHits, samples, updatedAt: Date.now() })
+      totalSegments, completedSegments, failedSegments: failures.length, failedSegmentIndexes: failures.slice(0, 100),
+      model, cacheHits, samples, updatedAt: Date.now() })
     if (!parsed.success) return
     const directory = join(workspace, 'progress')
     const temporary = join(directory, `.${stage}-${randomUUID()}.tmp`)
@@ -109,7 +118,7 @@ export function createLearningProgressReporter(taskId: string, stage: LearningSt
   }
 }
 
-interface ChildSummary { status: string; segment_count: number | null; model: string | null }
+interface ChildSummary { status: string; segment_count: number | null; model: string | null; learning_result: string | null }
 
 export async function getScopedLearningProgress(db: Database.Database, taskId: string, scope: N8nTaskScope): Promise<LearningProgressProjection | null> {
   // This lookup must precede every filesystem read, including unknown tasks.
@@ -120,23 +129,32 @@ export async function getScopedLearningProgress(db: Database.Database, taskId: s
     const child = db.prepare(`SELECT status,
       CASE WHEN json_valid(output) THEN COALESCE(json_extract(output, '$.segmentCount'),
         json_array_length(json_extract(output, '$.segmentSummaries'))) END AS segment_count,
-      CASE WHEN json_valid(output) THEN json_extract(output, '$.model') END AS model
+      CASE WHEN json_valid(output) THEN json_extract(output, '$.model') END AS model,
+      CASE WHEN json_valid(output) THEN json_extract(output, '$.learningResult') END AS learning_result
       FROM n8n_task_runs WHERE task_id=? AND tenant_id=? AND workspace_id=? AND binding_id=? AND source='n8n-media-node'
     `).get(mediaChildIdentity('task', taskId, stage), scope.tenantId, scope.workspaceId, run.bindingId) as ChildSummary | undefined
     const raw = await readControlledMediaJson(workspace, `progress/${stage}.json`)
     const parsed = phaseProgressSchema.safeParse(raw)
     const value = parsed.success && parsed.data.taskId === taskId && parsed.data.stage === stage ? parsed.data : null
-    const total = value?.totalSegments ?? (Number.isSafeInteger(child?.segment_count) && Number(child?.segment_count) > 0 ? child!.segment_count : null)
+    const completion = child?.learning_result ? readVideoLearningResult({ learningResult: JSON.parse(child.learning_result) }) : null
+    const total = completion?.totalSegments ?? value?.totalSegments
+      ?? (Number.isSafeInteger(child?.segment_count) && Number(child?.segment_count) > 0 ? child!.segment_count : null)
     const state = child?.status || (run.status === 'succeeded' ? 'succeeded' : 'unknown')
-    const completed = state === 'succeeded' ? total : value?.completedSegments ?? null
+    const failed = completion ? completion.totalSegments - completion.completedSegments : value?.failedSegments ?? 0
+    const completed = state === 'succeeded' ? completion?.completedSegments ?? total : value?.completedSegments ?? null
     return { stage, state, totalSegments: total, completedSegments: completed,
+      failedSegments: failed,
+      failedSegmentIndexes: completion ? [...new Set(completion.failedSegments.map(failure => failure.index))].slice(0, 100)
+        : value?.failedSegmentIndexes ?? [],
       model: value?.model || (typeof child?.model === 'string' && child.model.length <= 180 ? child.model : null),
       cacheHits: value?.cacheHits ?? null,
       remainingSeconds: state === 'running' && run.status === 'running' && value
-        ? estimateLearningStageRemaining(value.completedSegments, value.totalSegments, value.samples) : null,
+        ? estimateLearningStageRemaining(value.completedSegments + failed, value.totalSegments, value.samples) : null,
     } satisfies LearningStageProgress
   }))
+  const learningResult = readVideoLearningResult(run.output)
   return { schema: 'aiworker-learning-progress/v1', taskId, state: run.status, stages,
+    ...(learningResult ? { learningResult } : {}),
     activeStages: run.status === 'running' ? stages.filter(stage => stage.state === 'running').map(stage => stage.stage) : [],
     generatedAt: Date.now() }
 }

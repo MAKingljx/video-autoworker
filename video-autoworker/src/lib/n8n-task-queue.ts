@@ -22,6 +22,7 @@ export interface N8nTaskQueueItem extends N8nTaskRunListItem {
   batchStatus: string | null
   sourceAvailable: boolean | null
   stale: boolean
+  repairQueued?: boolean
 }
 
 export interface N8nTaskQueueResult {
@@ -68,7 +69,8 @@ export async function listN8nTaskQueue(
     })
     if (active) activeRuns.delete(durable.taskId)
     if (!selected) continue
-    if (selected.source === 'platform' && isTerminalTaskStatus(selected.record.status)) continue
+    const repairQueued = durable.repairQueued && selected.source === 'platform' && isTerminalTaskStatus(selected.record.status)
+    if (selected.source === 'platform' && isTerminalTaskStatus(selected.record.status) && !repairQueued) continue
     const platform = selected.source === 'platform' ? selected.record : null
     const binding = bindings.get(durable.bindingId)!
     queue.push({
@@ -76,7 +78,7 @@ export async function listN8nTaskQueue(
       title: platform?.title || durable.name,
       taskType: platform?.taskType || binding.taskType || 'video-analysis',
       workflowName: platform?.workflowName || binding.name || '视频分析链',
-      status: platform?.status || durable.status,
+      status: repairQueued ? durable.status : platform?.status || durable.status,
       source: platform?.source || 'openclaw',
       attemptCount: platform?.attemptCount ?? 0,
       maxAttempts: platform?.maxAttempts ?? binding.retryCount + 1,
@@ -95,6 +97,9 @@ export async function listN8nTaskQueue(
       batchStatus: durable.batchStatus,
       sourceAvailable: durable.sourceAvailable,
       stale: false,
+      ...(repairQueued ? { repairQueued: true } : {}),
+      ...(platform?.learningResult ? { learningResult: platform.learningResult } : {}),
+      ...(platform?.learningResultInvalid ? { learningResultInvalid: true } : {}),
     })
   }
 

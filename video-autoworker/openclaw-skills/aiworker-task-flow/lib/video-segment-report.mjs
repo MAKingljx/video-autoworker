@@ -4,6 +4,7 @@ import { lstat, mkdir, open, link, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, join, parse, resolve } from 'node:path'
 import { MAX_RESULT_TOTAL_BYTES, selectFinalVideoReport } from './video-result-page.mjs'
+import { readVideoLearningResult } from './video-learning-result.mjs'
 
 export const MAX_SEGMENT_BYTES = 12 * 1024
 const MAX_SEGMENTS = 10_000
@@ -39,6 +40,7 @@ export function truncateUtf8(value, maxBytes) {
 // Historical chapters remain chapters; timeline observations are never relabelled as fusion summaries.
 export function selectVideoSegmentReport(output) {
   const record = output && typeof output === 'object' && !Array.isArray(output) ? output : {}
+  const learningResult = readVideoLearningResult(record)
   let source = 'none'
   let rows = []
   if (Array.isArray(record.segmentSummaries) && record.segmentSummaries.length) {
@@ -76,9 +78,18 @@ export function selectVideoSegmentReport(output) {
       ...(typeof row.inputSha256 === 'string' && /^[a-f0-9]{64}$/u.test(row.inputSha256) ? { inputSha256: row.inputSha256 } : {}),
     }
   }).sort((a, b) => a.index - b.index)
-  const legacyReport = segments.length ? null : selectFinalVideoReport(record)
+  if (learningResult) {
+    const failedIndexes = new Set(learningResult.failedSegments.map(row => row.index))
+    if ((segments.length && source !== 'segment_summary')
+      || segments.length !== learningResult.completedSegments
+      || segments.some(row => row.index > learningResult.totalSegments || failedIndexes.has(row.index))) {
+      throw new Error('video_learning_result_invalid')
+    }
+  }
+  const legacyReport = segments.length || learningResult ? null : selectFinalVideoReport(record)
   if (segments.reduce((sum, row) => sum + Buffer.byteLength(row.summary), 0) > MAX_RESULT_TOTAL_BYTES) throw new Error('片段摘要超过可读取范围')
-  return { source: segments.length ? source : legacyReport ? 'legacy_report' : 'none', segments, legacyReport }
+  return { source: segments.length ? source : legacyReport ? 'legacy_report' : 'none', segments, legacyReport,
+    ...(learningResult ? { learningResult } : {}) }
 }
 
 export function segmentDirectory(report, offset = 0, limit = 10) {
@@ -89,12 +100,16 @@ export function segmentDirectory(report, offset = 0, limit = 10) {
     ...row, preview: [...summary.replace(/\s+/gu, ' ')].slice(0, 160).join(''),
   }))
   return { source: report.source, totalSegments: report.segments.length, segmentOffset, segmentLimit,
-    nextSegmentOffset: segmentOffset + items.length < report.segments.length ? segmentOffset + items.length : null, items }
+    nextSegmentOffset: segmentOffset + items.length < report.segments.length ? segmentOffset + items.length : null, items,
+    ...(report.learningResult ? { learningResult: report.learningResult } : {}) }
 }
 
 export function singleSegment(report, index) {
   const selected = parseSegmentInteger(index, '--segment-index', null, 1, Number.MAX_SAFE_INTEGER)
   const row = report.segments.find(segment => segment.index === selected)
+  const failures = report.learningResult?.failedSegments.filter(segment => segment.index === selected) || []
+  if (!row && failures.length) return { source: report.source, totalSegments: report.segments.length,
+    segment: null, failedSegments: failures, learningResult: report.learningResult }
   if (!row) throw new Error('未找到指定片段；历史全片报告不能作为独立片段读取')
   const totalBytes = Buffer.byteLength(row.summary)
   return { source: report.source, totalSegments: report.segments.length,
@@ -102,9 +117,12 @@ export function singleSegment(report, index) {
 }
 
 function videoReportParagraphs(report, { name }) {
-  if (!report.segments.length && !report.legacyReport) throw new Error('没有已保存的学习报告可导出')
+  if (!report.segments.length && !report.legacyReport && !report.learningResult) throw new Error('没有已保存的学习报告可导出')
   const title = label(name) || '视频学习报告'
   const paragraphs = [{ style: 'Title', text: title }]
+  if (report.learningResult?.status === 'partial') {
+    paragraphs.push({ style: 'Normal', text: `部分完成：${report.learningResult.completedSegments} / ${report.learningResult.totalSegments} 段。失败片段保留原编号，待单独修复。` })
+  }
   if (report.segments.length) {
     paragraphs.push({ style: 'Normal', text: `${report.source === 'legacy_chapter' ? '章节' : '片段'}数量：${report.segments.length}` })
     if (report.source === 'legacy_chapter') paragraphs.push({ style: 'Normal', text: '以下内容为已保存的历史章节摘要。' })
@@ -114,9 +132,14 @@ function videoReportParagraphs(report, { name }) {
       // Stored body text never controls document styles or outline hierarchy.
       for (const line of row.summary.split('\n')) paragraphs.push({ style: 'Normal', text: line })
     }
-  } else {
+  } else if (report.legacyReport) {
     paragraphs.push({ style: 'Heading1', text: '历史全片报告（未保存独立片段摘要）' })
     for (const line of report.legacyReport.text.split('\n')) paragraphs.push({ style: 'Normal', text: line })
+  }
+  if (report.learningResult?.failedSegments.length) {
+    paragraphs.push({ style: 'Heading1', text: '待修复片段' })
+    for (const row of report.learningResult.failedSegments) paragraphs.push({ style: 'Normal',
+      text: `片段 ${row.index} · ${row.timeRange} · ${row.stage === 'vision' ? '画面分析' : '片段摘要'}：${row.errorCode}` })
   }
   return paragraphs
 }
@@ -132,7 +155,7 @@ export function renderVideoReportMarkdown(report, metadata) {
 }
 
 export function compatibleVideoReport(report, metadata) {
-  return report.segments.length ? { source: report.source, text: renderVideoReportMarkdown(report, metadata) } : report.legacyReport
+  return report.segments.length || report.learningResult ? { source: report.source, text: renderVideoReportMarkdown(report, metadata) } : report.legacyReport
 }
 
 const xml = value => value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]|[\uFFFE\uFFFF]/gu, '\uFFFD').replace(/&/gu, '&amp;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;').replace(/"/gu, '&quot;').replace(/'/gu, '&apos;')

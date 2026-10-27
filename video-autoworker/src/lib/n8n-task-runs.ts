@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { snapshotN8nMediaRouting } from '@/lib/n8n-media-config'
 import { enqueueDirectorEvidenceOutbox } from '@/lib/director-evidence-outbox'
 import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
+import { hasPartialVideoLearning, readVideoLearningResult } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 export const n8nTaskIdentitySchema = z.string()
   .trim()
@@ -218,6 +219,7 @@ interface N8nTaskRunSummaryRow {
   workflow_name: string | null
   binding_task_type: string | null
   result_available: number
+  learning_result?: string | null
 }
 
 interface N8nVideoResultRow extends N8nTaskRunRow {
@@ -250,6 +252,8 @@ export interface N8nTaskRunListItem {
   resultAvailable: boolean
   batchId: string | null
   batchIndex: number | null
+  learningResult?: ReturnType<typeof readVideoLearningResult>
+  learningResultInvalid?: boolean
 }
 
 export interface N8nTaskRunListResult {
@@ -273,6 +277,8 @@ export interface N8nVideoResultListItem {
   chapterCount: number
   timelineCount: number
   resultAvailable: boolean
+  learningResult?: ReturnType<typeof readVideoLearningResult>
+  learningResultInvalid?: boolean
 }
 
 export interface N8nVideoResultChapter {
@@ -325,6 +331,8 @@ export interface N8nVideoSearchHit {
   startSeconds: number | null
   endSeconds: number | null
   score: number
+  learningResult?: ReturnType<typeof readVideoLearningResult>
+  learningResultInvalid?: boolean
 }
 
 export interface N8nVideoSearchResult {
@@ -355,6 +363,7 @@ interface N8nTaskRunListProjection {
   workflowName: string | null
   bindingTaskType: string | null
   resultAvailable: boolean
+  output?: Record<string, unknown> | null
 }
 
 const TOP_LEVEL_TASK_SOURCES = ['video-autoworker', 'openclaw'] as const
@@ -461,6 +470,13 @@ function parseBatchIdentity(
   return { batchId: match[1], batchIndex: Number(match[2]) }
 }
 
+function learningResultProjection(output: Record<string, unknown> | null | undefined) {
+  try {
+    const learningResult = readVideoLearningResult(output || {})
+    return learningResult ? { learningResult } : {}
+  } catch { return { learningResultInvalid: true } }
+}
+
 export function projectN8nTaskRunListItem(
   run: N8nTaskRunListProjection,
 ): N8nTaskRunListItem {
@@ -495,6 +511,7 @@ export function projectN8nTaskRunListItem(
     resultAvailable: run.resultAvailable,
     batchId: batch.batchId,
     batchIndex: batch.batchIndex,
+    ...learningResultProjection(run.output),
   }
 }
 
@@ -526,6 +543,7 @@ export function projectN8nVideoResultListItem(
     chapterCount: arrayValue(run.output?.chapters).length,
     timelineCount: arrayValue(run.output?.timeline).length,
     resultAvailable: run.output !== null,
+    ...learningResultProjection(run.output),
   }
 }
 
@@ -818,6 +836,9 @@ export function claimScopedN8nTaskRun(
     if (!['queued', 'accepted'].includes(run.status) || ownership) {
       return { outcome: 'rejected', run }
     }
+    const repairLimit = objectValue(run.routing.learningRepair).attemptLimit
+    if (run.routing.learningRepair !== undefined
+      && (!Number.isSafeInteger(repairLimit) || run.attemptCount >= Number(repairLimit))) return { outcome: 'rejected', run }
 
     const result = db.prepare(`
       UPDATE n8n_task_runs
@@ -918,7 +939,7 @@ function validChildParent(
   scope: N8nTaskScope,
 ): boolean {
   const mode = input.parentMode ?? 'running_execution'
-  if (mode === 'succeeded_postprocess') return parent.status === 'succeeded'
+  if (mode === 'succeeded_postprocess') return parent.status === 'succeeded' && !hasPartialVideoLearning(parent.output || {})
   if (parent.status !== 'running' || !input.executionOwner) return false
   return isScopedN8nParentExecutionOwner(db, parent.taskId, input.executionOwner, scope)
 }
@@ -1070,6 +1091,17 @@ export function createAndClaimN8nChildRunFromParent(
     }
     if (child.status === 'succeeded') return { outcome: 'succeeded', parent, child, lease: null }
     if (child.status === 'cancelled') return { outcome: 'terminal', parent, child, lease: null }
+    let repairAttemptLimit = child.maxAttempts
+    if (parent.routing.learningRepair !== undefined) {
+      const stage = MEDIA_STAGES.find(value => mediaChildIdentity('task', parent.taskId, value) === child!.taskId)
+      const limits = objectValue(objectValue(parent.routing.learningRepair).stageAttempts)
+      const limit = objectValue(stage ? limits[stage] : undefined).attemptLimit
+      if (!Number.isSafeInteger(limit)) return { outcome: 'rejected', parent, child, lease: null }
+      repairAttemptLimit = Math.min(child.maxAttempts, Number(limit))
+      if (child.status !== 'running' && child.attemptCount >= repairAttemptLimit) {
+        return { outcome: 'exhausted', parent, child, lease: null }
+      }
+    }
     if (child.attemptCount >= child.maxAttempts && child.status !== 'running') {
       return { outcome: 'exhausted', parent, child, lease: null }
     }
@@ -1113,7 +1145,7 @@ export function createAndClaimN8nChildRunFromParent(
       if (current.lease_expires_at > now) {
         return { outcome: 'running', parent, child, lease: childLeaseFromRow(child.taskId, current) }
       }
-      if (child.attemptCount >= child.maxAttempts) {
+      if (child.attemptCount >= repairAttemptLimit) {
         db.prepare(`
           UPDATE n8n_task_runs
           SET status = 'failed', error = 'director_extraction_attempts_exhausted',
@@ -1460,6 +1492,9 @@ function insertN8nMediaCleanupDebt(
   parent: N8nTaskRun,
   reason: N8nMediaCleanupReason,
 ): void {
+  // Failed work retains its successful checkpoints and prepared frames for
+  // scoped recovery. Only a completely learned result may release assets.
+  if (reason === 'finalize_lease_expired' || hasPartialVideoLearning(parent.output || {})) return
   const workspaceDigest = createHash('sha256').update(parent.taskId).digest('hex')
   db.prepare(`
     INSERT INTO n8n_media_cleanup_debts (
@@ -1491,6 +1526,7 @@ export function ensureN8nMediaCleanupDebt(
     ? getScopedN8nTaskRunByTaskId(db, taskId, scope)
     : getN8nTaskRunByTaskId(db, taskId)
   if (!parent) return { scheduled: false, reason: null }
+  if (hasPartialVideoLearning(parent.output || {})) return { scheduled: false, reason: null }
   const binding = db.prepare(`
     SELECT 1
     FROM n8n_workflow_bindings
@@ -1511,13 +1547,6 @@ export function ensureN8nMediaCleanupDebt(
   let reason: N8nMediaCleanupReason | null = null
   if (parent.status === 'succeeded' && child.status === 'succeeded' && parent.output && child.output) {
     reason = 'finalize_succeeded'
-  } else if (
-    parent.status === 'failed'
-    && child.status === 'failed'
-    && String(parent.error || '').includes(`[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}]`)
-    && String(child.error || '').includes(`[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}]`)
-  ) {
-    reason = 'finalize_lease_expired'
   }
   if (!reason) return { scheduled: false, reason: null }
   insertN8nMediaCleanupDebt(db, parent, reason)
@@ -1761,9 +1790,8 @@ export function reconcileScopedN8nVideoTaskRun(
     if (parentResult.changes !== 1) {
       throw new Error('视频最终节点超时收敛未能原子更新父任务')
     }
-    const terminalParent = getScopedN8nTaskRunByTaskId(db, parent.taskId, scope)
-    if (!terminalParent) throw new Error('视频最终节点超时收敛后无法读取父任务')
-    insertN8nMediaCleanupDebt(db, terminalParent, 'finalize_lease_expired')
+    // Preserve prepared assets and successful checkpoints after failure.
+    // A hard-lease timeout terminates execution, not the retained learning.
     return true
   })
   if (reconcileFinalize.immediate()) {
@@ -1877,6 +1905,7 @@ function projectN8nTaskRunSummaryRows(
     workflowName: row.workflow_name,
     bindingTaskType: row.binding_task_type,
     resultAvailable: row.result_available === 1,
+    output: parseObject(row.learning_result || null),
   }))
 }
 
@@ -1947,7 +1976,9 @@ export function listN8nTaskRunSummaries(
       r.updated_at,
       b.name AS workflow_name,
       b.task_type AS binding_task_type,
-      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available
+      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available,
+      CASE WHEN json_valid(r.output) AND json_type(r.output, '$.learningResult') IS NOT NULL
+        THEN json_object('learningResult', json_extract(r.output, '$.learningResult')) ELSE NULL END AS learning_result
     FROM n8n_task_runs r
     LEFT JOIN n8n_workflow_bindings b
       ON b.id = r.binding_id
@@ -1987,7 +2018,9 @@ export function listN8nActiveTaskRunSummaries(
       r.updated_at,
       b.name AS workflow_name,
       b.task_type AS binding_task_type,
-      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available
+      CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available,
+      CASE WHEN json_valid(r.output) AND json_type(r.output, '$.learningResult') IS NOT NULL
+        THEN json_object('learningResult', json_extract(r.output, '$.learningResult')) ELSE NULL END AS learning_result
     FROM n8n_task_runs r
     LEFT JOIN n8n_workflow_bindings b
       ON b.id = r.binding_id
@@ -2037,7 +2070,9 @@ export function listScopedN8nTaskRunStatusSummaries(
         r.updated_at,
         b.name AS workflow_name,
         b.task_type AS binding_task_type,
-        CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available
+        CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available,
+        CASE WHEN json_valid(r.output) AND json_type(r.output, '$.learningResult') IS NOT NULL
+          THEN json_object('learningResult', json_extract(r.output, '$.learningResult')) ELSE NULL END AS learning_result
       FROM n8n_task_runs r
       LEFT JOIN n8n_workflow_bindings b
         ON b.id = r.binding_id
@@ -2140,6 +2175,7 @@ function projectVideoResultListRow(row: N8nVideoResultListRow): N8nVideoResultLi
     workflowName: row.workflow_name,
     bindingTaskType: row.binding_task_type,
     resultAvailable: row.result_available === 1,
+    output: parseObject(row.learning_result || null),
   })
   return {
     taskId: base.taskId,
@@ -2155,6 +2191,8 @@ function projectVideoResultListRow(row: N8nVideoResultListRow): N8nVideoResultLi
     chapterCount: Math.max(0, Number(row.chapter_count) || 0),
     timelineCount: Math.max(0, Number(row.timeline_count) || 0),
     resultAvailable: base.resultAvailable,
+    ...(base.learningResult ? { learningResult: base.learningResult } : {}),
+    ...(base.learningResultInvalid ? { learningResultInvalid: true } : {}),
   }
 }
 
@@ -2198,6 +2236,8 @@ export function listN8nVideoResults(
       b.name AS workflow_name,
       b.task_type AS binding_task_type,
       CASE WHEN r.output IS NULL THEN 0 ELSE 1 END AS result_available,
+      CASE WHEN json_valid(r.output) AND json_type(r.output, '$.learningResult') IS NOT NULL
+        THEN json_object('learningResult', json_extract(r.output, '$.learningResult')) ELSE NULL END AS learning_result,
       CASE
         WHEN json_valid(r.output) = 1 AND json_type(r.output, '$.summary') = 'text'
           THEN substr(json_extract(r.output, '$.summary'), 1, 320)
@@ -2305,6 +2345,8 @@ function buildVideoSearchHits(detail: N8nVideoResultDetail, terms: string[]): N8
       taskId: detail.taskId,
       title: detail.title,
       status: detail.status,
+      ...(detail.learningResult ? { learningResult: detail.learningResult } : {}),
+      ...(detail.learningResultInvalid ? { learningResultInvalid: true } : {}),
       completedAt: detail.completedAt,
       kind,
       label,
@@ -2543,6 +2585,143 @@ export function requeueScopedN8nVideoTaskRun(db: Database.Database,
       WHERE task_id=? AND tenant_id=? AND workspace_id=? AND execution_owner=?`)
       .run(run.taskId, scope.tenantId, scope.workspaceId, claim.execution_owner)
     db.prepare(`DELETE FROM n8n_task_dispatch_leases WHERE task_id=? AND tenant_id=? AND workspace_id=? AND lease_expires_at<=unixepoch()`)
+      .run(run.taskId, scope.tenantId, scope.workspaceId)
+    return { outcome: 'queued' as const, run: getScopedN8nTaskRunByTaskId(db, run.taskId, scope), errorCode: null }
+  }).immediate()
+}
+
+export interface N8nVideoSegmentRepairAuthority extends N8nVideoRecoveryAuthority {
+  indexes: number[]
+  stages: Array<'vision' | 'finalize'>
+  generation: number
+  outputSha256: string | null
+}
+
+/** A repair is an explicit, bounded round over the original task, not an automatic retry reset. */
+export function inspectScopedN8nVideoSegmentRepairState(
+  db: Database.Database, taskId: string, scope: N8nTaskScope, segmentIndexes?: readonly number[],
+  nowSeconds = Math.floor(Date.now() / 1000),
+): N8nVideoSegmentRepairAuthority {
+  const run = getScopedN8nTaskRunByTaskId(db, n8nTaskIdentitySchema.parse(taskId), scope)
+  const blocked = (errorCode: string): N8nVideoSegmentRepairAuthority => ({
+    outcome: run ? 'ineligible' : 'not_found', errorCode, revisionSha256: null, run,
+    successfulStages: [], indexes: [], stages: [], generation: 0, outputSha256: null,
+  })
+  if (!run) return blocked('recovery_task_not_found')
+  if (run.routing.taskType !== 'video-analysis'
+    || !TOP_LEVEL_TASK_SOURCES.includes(run.source as typeof TOP_LEVEL_TASK_SOURCES[number])) return blocked('recovery_task_unsupported')
+  if (!['succeeded', 'failed'].includes(run.status)) return blocked('recovery_repair_task_not_terminal')
+  let learning: ReturnType<typeof readVideoLearningResult>
+  try { learning = readVideoLearningResult(run.output || {}) } catch { return blocked('recovery_learning_result_invalid') }
+  if (!learning || learning.status !== 'partial') return blocked('recovery_partial_result_required')
+  const failed = [...new Set(learning.failedSegments.map(item => item.index))].sort((a, b) => a - b)
+  const indexes = segmentIndexes === undefined ? failed : [...new Set(segmentIndexes)].sort((a, b) => a - b)
+  if (!indexes.length || indexes.length > 1000 || indexes.some(index => !Number.isSafeInteger(index) || !failed.includes(index))) {
+    return blocked('recovery_repair_segments_invalid')
+  }
+  const repair = run.routing.learningRepair as { generation?: unknown } | undefined
+  const generation = repair?.generation ?? 0
+  if (!Number.isSafeInteger(generation) || Number(generation) < 0 || Number(generation) >= 3) {
+    return blocked('recovery_repair_rounds_exhausted')
+  }
+  const history = run.routing.learningRepairHistory ?? []
+  if (!Array.isArray(history) || history.length !== Math.max(0, Number(generation) - 1)) {
+    return blocked('recovery_repair_history_invalid')
+  }
+  const binding = db.prepare(`SELECT enabled,task_type,workflow_id,webhook_path FROM n8n_workflow_bindings
+    WHERE id=? AND tenant_id=? AND workspace_id=?`).get(run.bindingId, scope.tenantId, scope.workspaceId) as {
+      enabled: number; task_type: string; workflow_id: string | null; webhook_path: string
+    } | undefined
+  const dispatch = run.routing.dispatchIdentity as { workflowId?: string; webhookPath?: string } | undefined
+  if (!binding?.enabled || binding.task_type !== 'video-analysis') return blocked('recovery_binding_unavailable')
+  if (!dispatch || dispatch.workflowId !== (binding.workflow_id || '') || dispatch.webhookPath !== binding.webhook_path) {
+    return blocked('recovery_dispatch_identity_changed')
+  }
+  const children = MEDIA_STAGES.map(stage => db.prepare(`SELECT task_id,idempotency_key,binding_id,source,status,
+    output,attempt_count,max_attempts,updated_at FROM n8n_task_runs WHERE task_id=? AND tenant_id=? AND workspace_id=?`)
+    .get(mediaChildIdentity('task', taskId, stage), scope.tenantId, scope.workspaceId) as {
+      task_id: string; idempotency_key: string; binding_id: number; source: string; status: string;
+      output: string | null; attempt_count: number; max_attempts: number; updated_at: number
+    } | undefined)
+  for (const [index, child] of children.entries()) {
+    if (!child || child.binding_id !== run.bindingId || child.source !== 'n8n-media-node'
+      || child.idempotency_key !== mediaChildIdentity('idem', run.idempotencyKey, MEDIA_STAGES[index])) return blocked('recovery_child_identity_changed')
+    if (!['succeeded', 'failed'].includes(child.status)) return blocked('recovery_child_execution_unsettled')
+    if (index < 2 && (child.status !== 'succeeded' || !child.output)) return blocked('recovery_successful_output_missing')
+  }
+  const childLeases = db.prepare(`SELECT task_id FROM n8n_child_execution_leases WHERE tenant_id=? AND workspace_id=?
+    AND task_id IN (${MEDIA_STAGES.map(() => '?').join(',')})`).all(scope.tenantId, scope.workspaceId,
+    ...MEDIA_STAGES.map(stage => mediaChildIdentity('task', taskId, stage)))
+  if (childLeases.length) return blocked('recovery_child_lease_unsettled')
+  const dispatchLease = db.prepare(`SELECT lease_expires_at FROM n8n_task_dispatch_leases
+    WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(taskId, scope.tenantId, scope.workspaceId) as { lease_expires_at: number } | undefined
+  if (dispatchLease && dispatchLease.lease_expires_at > nowSeconds) return blocked('recovery_dispatch_in_progress')
+  const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
+    WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(taskId, scope.tenantId, scope.workspaceId) as { execution_owner: string } | undefined
+  if (!claim || !n8nExecutionOwnerSchema.safeParse(claim.execution_owner).success) return blocked('recovery_parent_owner_missing')
+  // Do not mutate a source that has already been projected as complete knowledge.
+  if (db.prepare(`SELECT 1 FROM n8n_director_evidence_outbox WHERE task_id=?`).get(taskId)) return blocked('recovery_repair_source_already_projected')
+  const stages: Array<'vision' | 'finalize'> = learning.failedSegments.some(item => indexes.includes(item.index) && item.stage === 'vision')
+    ? ['vision', 'finalize'] : ['finalize']
+  if (!stages.includes('vision') && children[2]?.status !== 'succeeded') return blocked('recovery_vision_result_unsettled')
+  const outputSha256 = createHash('sha256').update(JSON.stringify(run.output)).digest('hex')
+  const revisionSha256 = createHash('sha256').update(JSON.stringify({
+    run: { taskId, status: run.status, input: run.input, routing: run.routing, outputSha256,
+      attemptCount: run.attemptCount, maxAttempts: run.maxAttempts, updatedAt: run.updatedAt },
+    indexes, stages, binding, claim, dispatchLease: dispatchLease || null, children,
+  })).digest('hex')
+  return { outcome: 'eligible', errorCode: null, revisionSha256, run, successfulStages: ['prepare', 'audio',
+    ...(!stages.includes('vision') ? ['vision'] : [])], indexes, stages, generation: Number(generation) + 1, outputSha256 }
+}
+
+export function requeueScopedN8nVideoSegmentRepair(db: Database.Database,
+  input: { taskId: string; expectedRevisionSha256: string; segmentIndexes?: readonly number[]; queueRequestId?: string }, scope: N8nTaskScope,
+): { outcome: 'queued' | 'not_found' | 'ineligible' | 'conflict'; run: N8nTaskRun | null; errorCode: string | null } {
+  if (input.queueRequestId !== undefined && !/^[a-f0-9]{64}$/u.test(input.queueRequestId)) throw new Error('recovery_repair_request_invalid')
+  return db.transaction(() => {
+    const inspection = inspectScopedN8nVideoSegmentRepairState(db, input.taskId, scope, input.segmentIndexes)
+    if (inspection.outcome !== 'eligible' || !inspection.run) return {
+      outcome: inspection.outcome === 'not_found' ? 'not_found' as const : 'ineligible' as const,
+      run: inspection.run, errorCode: inspection.errorCode,
+    }
+    if (inspection.revisionSha256 !== input.expectedRevisionSha256) return {
+      outcome: 'conflict' as const, run: inspection.run, errorCode: 'recovery_revision_changed',
+    }
+    const run = inspection.run
+    const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
+      WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(run.taskId, scope.tenantId, scope.workspaceId) as { execution_owner: string }
+    const retired = Array.isArray(run.routing.recoveryRetiredOwners) ? run.routing.recoveryRetiredOwners as string[] : []
+    const stageAttempts: Record<string, { previousAttempts: number; attemptLimit: number }> = {}
+    for (const stage of inspection.stages) {
+      const childId = mediaChildIdentity('task', run.taskId, stage)
+      const child = getScopedN8nTaskRunByTaskId(db, childId, scope)!
+      stageAttempts[stage] = { previousAttempts: child.attemptCount, attemptLimit: child.attemptCount + 2 }
+      const changedChild = db.prepare(`UPDATE n8n_task_runs SET status='queued',error=NULL,accepted_at=NULL,started_at=NULL,completed_at=NULL,
+        max_attempts=MAX(max_attempts,attempt_count+2),updated_at=MAX(unixepoch(),updated_at+1)
+        WHERE task_id=? AND tenant_id=? AND workspace_id=? AND status=? AND updated_at=?`)
+        .run(childId, scope.tenantId, scope.workspaceId, child.status, child.updatedAt)
+      if (changedChild.changes !== 1) throw new Error('recovery_revision_changed')
+    }
+    const routing = { ...run.routing,
+      recoveryRetiredOwners: [...new Set([...retired, claim.execution_owner])],
+      learningRepairHistory: [...(run.routing.learningRepairHistory as unknown[] || []),
+        ...(run.routing.learningRepair ? [run.routing.learningRepair] : [])],
+      learningRepair: { generation: inspection.generation, indexes: inspection.indexes,
+        ...(input.queueRequestId ? { queueRequestId: input.queueRequestId } : {}),
+        previousLearningResult: readVideoLearningResult(run.output),
+        basedOnOutputSha256: inspection.outputSha256, expectedRevisionSha256: inspection.revisionSha256,
+        previousAttempts: run.attemptCount, attemptLimit: run.attemptCount + 1, stageAttempts },
+    }
+    const changed = db.prepare(`UPDATE n8n_task_runs SET status='queued',routing=?,error=NULL,accepted_at=NULL,
+      started_at=NULL,completed_at=NULL,max_attempts=MAX(max_attempts,attempt_count+1),updated_at=MAX(unixepoch(),updated_at+1)
+      WHERE task_id=? AND tenant_id=? AND workspace_id=? AND status=? AND updated_at=? AND attempt_count=?`)
+      .run(JSON.stringify(routing), run.taskId, scope.tenantId, scope.workspaceId, run.status, run.updatedAt, run.attemptCount)
+    if (changed.changes !== 1) throw new Error('recovery_revision_changed')
+    db.prepare(`DELETE FROM n8n_parent_execution_claims WHERE task_id=? AND tenant_id=? AND workspace_id=? AND execution_owner=?`)
+      .run(run.taskId, scope.tenantId, scope.workspaceId, claim.execution_owner)
+    db.prepare(`DELETE FROM n8n_task_dispatch_leases WHERE task_id=? AND tenant_id=? AND workspace_id=? AND lease_expires_at<=unixepoch()`)
+      .run(run.taskId, scope.tenantId, scope.workspaceId)
+    db.prepare(`DELETE FROM n8n_media_cleanup_debts WHERE task_id=? AND tenant_id=? AND workspace_id=? AND reason='finalize_succeeded'`)
       .run(run.taskId, scope.tenantId, scope.workspaceId)
     return { outcome: 'queued' as const, run: getScopedN8nTaskRunByTaskId(db, run.taskId, scope), errorCode: null }
   }).immediate()

@@ -11,6 +11,7 @@ import {
   taskRunDurationBasis,
   taskRunFailureInsight,
   learningProgressBrief, learningStageLabel, learningSegmentCount, learningRemainingLabel,
+  learningResultDisplayState, learningResultFailures, learningResultValue,
 } from '@/lib/task-run-presentation'
 import type { LearningProgressProjection } from '@/lib/n8n-learning-progress'
 import type { VideoRecoveryInspection } from '@/lib/n8n-video-recovery'
@@ -35,6 +36,8 @@ interface TaskRunListItem {
   batchId: string | null
   batchIndex: number | null
   progress?: LearningProgressProjection | null
+  learningResult?: unknown
+  learningResultInvalid?: boolean
 }
 
 interface TaskQueueItem extends TaskRunListItem {
@@ -43,6 +46,7 @@ interface TaskQueueItem extends TaskRunListItem {
   batchStatus: string | null
   sourceAvailable: boolean | null
   stale: boolean
+  repairQueued?: boolean
 }
 
 interface TaskQueueResponse {
@@ -82,9 +86,12 @@ const STATUS_LABELS: Record<string, string> = {
   waiting: '等待恢复',
   recovering: '恢复中',
   paused: '已暂停',
+  partial: '部分完成',
+  learning_invalid: '学习结果待核对',
 }
 
 function statusClass(status: string): string {
+  if (status === 'partial' || status === 'learning_invalid') return 'border-warning/30 bg-warning/10 text-warning'
   if (status === 'succeeded') return 'border-success/25 bg-success/10 text-success'
   if (status === 'failed' || status === 'cancelled') {
     return 'border-destructive/25 bg-destructive/10 text-destructive'
@@ -103,6 +110,7 @@ function queueStatusClass(item: TaskQueueItem): string {
 }
 
 function queueStatusLabel(item: TaskQueueItem): string {
+  if (item.repairQueued) return '补学排队中'
   if (item.stale) return '异常滞留'
   if (item.sourceAvailable === false) return '源视频不可用'
   return STATUS_LABELS[item.status] || item.status
@@ -236,7 +244,7 @@ export function TaskRunsPanel() {
   const page = Math.floor(offset / PAGE_SIZE) + 1
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const visibleSummary = useMemo(() => {
-    const completed = runs.filter(run => run.status === 'succeeded').length
+    const completed = runs.filter(run => learningResultDisplayState(run.status, learningResultValue(run)) === 'succeeded').length
     const active = runs.filter(run => ['queued', 'accepted', 'running'].includes(run.status)).length
     const failed = runs.filter(run => run.status === 'failed').length
     return { completed, active, failed }
@@ -559,8 +567,9 @@ function TaskRunRailItem({
   onSelect: () => void
 }) {
   const failure = taskRunFailureInsight(run.error)
-  const statusTone = queueItem ? queueStatusClass(queueItem) : statusClass(run.status)
-  const statusText = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[run.status] || run.status
+  const displayState = learningResultDisplayState(run.status, learningResultValue(run))
+  const statusTone = queueItem ? queueStatusClass(queueItem) : statusClass(displayState)
+  const statusText = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[displayState] || displayState
 
   return (
     <button
@@ -605,7 +614,7 @@ function TaskRunRailItem({
         </div>
       )}
       {run.taskType === 'video-analysis' && (
-        <div className="mt-2 text-[11px] text-muted-foreground">{learningProgressBrief(run.progress)}</div>
+        <div className="mt-2 text-[11px] text-muted-foreground">{learningProgressBrief(run.progress, learningResultValue(run))}</div>
       )}
     </button>
   )
@@ -635,8 +644,9 @@ function TaskRunDetailPane({
   onClose: () => void
   titleId?: string
 }) {
-  const detailStatusClass = queueItem ? queueStatusClass(queueItem) : statusClass(run.status)
-  const detailStatusLabel = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[run.status] || run.status
+  const displayState = learningResultDisplayState(run.status, learningResultValue(run))
+  const detailStatusClass = queueItem ? queueStatusClass(queueItem) : statusClass(displayState)
+  const detailStatusLabel = queueItem ? queueStatusLabel(queueItem) : STATUS_LABELS[displayState] || displayState
 
   return (
     <aside className="ml-auto flex h-full w-full max-w-md flex-col border-l border-border bg-card shadow-xl @4xl:max-w-none @4xl:shadow-none" aria-label="任务链详情" data-task-run-detail>
@@ -703,6 +713,7 @@ function LearningRunDetails({ run }: { run: TaskRunListItem }) {
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const identity = useRef(run.taskId)
+  const partial = learningResultDisplayState(run.status, learningResultValue(run)) === 'partial'
   useEffect(() => {
     identity.current = run.taskId
     setInspection(null)
@@ -714,7 +725,7 @@ function LearningRunDetails({ run }: { run: TaskRunListItem }) {
     setBusy(true)
     setMessage(null)
     try {
-      const response = await fetch(`/api/n8n/runs/recovery?taskId=${encodeURIComponent(taskId)}`, { cache: 'no-store' })
+      const response = await fetch(`/api/n8n/runs/recovery?taskId=${encodeURIComponent(taskId)}${partial ? '&mode=repair-segments' : ''}`, { cache: 'no-store' })
       const body = await response.json() as { inspection?: VideoRecoveryInspection; canRecover?: boolean; error?: string }
       if (!response.ok || !body.inspection) throw new Error(body.error || '无法读取恢复条件')
       if (identity.current !== taskId) return
@@ -726,20 +737,24 @@ function LearningRunDetails({ run }: { run: TaskRunListItem }) {
   }
 
   const recover = async () => {
+    const repair = inspection?.mode === 'repair-segments'
     if (!inspection?.eligible || !inspection.inspectionToken || !canRecover
-      || !window.confirm('将继续原任务并复用已验证的结果。确认恢复？')) return
+      || !window.confirm(repair ? '仅补学失败片段，保留成功片段。确认补学？' : '将继续原任务并复用已验证的结果。确认恢复？')) return
     const taskId = run.taskId
     setBusy(true)
     try {
       const response = await fetch('/api/n8n/runs/recovery', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ taskId, inspectionToken: inspection.inspectionToken, confirm: true }),
+        body: JSON.stringify({ taskId, inspectionToken: inspection.inspectionToken, confirm: true,
+          ...(repair ? { mode: 'repair-segments', segmentIndexes: inspection.segmentIndexes } : {}),
+        }),
       })
       const body = await response.json() as { currentState?: string; error?: string; errorCode?: string }
       if (!response.ok) throw new Error(body.error || '恢复条件已变化，请重新检查')
       if (identity.current !== taskId) return
       setInspection(null)
-      setMessage(body.errorCode ? '派发结果待核对，请查询原任务；不要重复提交' : '原任务已恢复，请刷新查看进度')
+      setMessage(body.errorCode ? '派发结果待核对，请查询原任务；不要重复提交'
+        : repair ? '失败片段已加入补学队列，请刷新查看进度' : '原任务已恢复，请刷新查看进度')
     } catch (error) {
       if (identity.current === taskId) setMessage(error instanceof Error ? error.message : '恢复失败，请重新检查')
     } finally { if (identity.current === taskId) setBusy(false) }
@@ -747,7 +762,12 @@ function LearningRunDetails({ run }: { run: TaskRunListItem }) {
 
   return (
     <section className="space-y-3 rounded-md border border-border p-3" aria-label="视频学习进度">
-      <h4 className="text-sm font-medium">{learningProgressBrief(run.progress)}</h4>
+      <h4 className="text-sm font-medium">{learningProgressBrief(run.progress, learningResultValue(run))}</h4>
+      {learningResultFailures(learningResultValue(run)).map(issue => (
+        <p key={`${issue.index}:${issue.stage}`} className="break-words text-xs text-warning">
+          片段 {issue.index}（{issue.timeRange}）{issue.stage === 'vision' ? '画面分析' : '片段摘要'}失败：{issue.errorCode}
+        </p>
+      ))}
       {run.progress?.stages.map(stage => (
         <div key={stage.stage} className="space-y-1 text-xs">
           <div className="flex flex-wrap justify-between gap-1"><span>{learningStageLabel(stage.stage)}</span><span>{learningSegmentCount(stage)}</span></div>
@@ -756,11 +776,12 @@ function LearningRunDetails({ run }: { run: TaskRunListItem }) {
         </div>
       ))}
       {run.status === 'failed' && <Button size="xs" variant="outline" disabled={busy} onClick={() => void inspect()}>检查恢复条件</Button>}
+      {partial && <Button size="xs" variant="outline" disabled={busy} onClick={() => void inspect()}>检查失败片段补学条件</Button>}
       {inspection && (
         <div className="space-y-2 text-xs">
-          <p>{inspection.eligible ? '可继续原任务，已验证的成功阶段将保留' : recoveryReason(inspection.errorCode)}</p>
+          <p>{inspection.eligible ? inspection.mode === 'repair-segments' ? '可补学失败片段，成功片段将保留' : '可继续原任务，已验证的成功阶段将保留' : recoveryReason(inspection.errorCode)}</p>
           {inspection.missingResources.length > 0 && <p>待核对：{inspection.missingResources.join('、')}</p>}
-          {inspection.eligible && canRecover && <Button size="xs" disabled={busy} onClick={() => void recover()}>确认恢复原任务</Button>}
+          {inspection.eligible && canRecover && <Button size="xs" disabled={busy} onClick={() => void recover()}>{inspection.mode === 'repair-segments' ? '确认补学失败片段' : '确认恢复原任务'}</Button>}
           {inspection.eligible && !canRecover && <p>当前权限只能查看恢复条件</p>}
         </div>
       )}

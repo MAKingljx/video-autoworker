@@ -190,8 +190,8 @@ async function deliver(request, dispatcher, runner, sendText, sendContext) {
       view: 'segment',
       segmentIndex: request.segmentIndex,
     })
-    if (result.kind !== 'segment' || result.status !== 'succeeded' || !result.segment) {
-      await send(dispatcher, `片段 ${request.segmentIndex} 读取失败，本次未重试其他片段。`, sendText, sendContext)
+    if (result.kind !== 'segment' || (result.status !== 'succeeded' && !result.savedPartialSnapshot) || !result.segment) {
+      await send(dispatcher, result.failureMessage || `片段 ${request.segmentIndex} 读取失败，本次未重试其他片段。`, sendText, sendContext)
       return { sent: 0, failed: true }
     }
     if (!await send(dispatcher, summaryMessage(result.segment, result.segment.summary), sendText, sendContext)) {
@@ -211,11 +211,14 @@ async function deliver(request, dispatcher, runner, sendText, sendContext) {
       await send(dispatcher, '匹配到多个视频结果，请补充明确的作品名称后再读取。', sendText, sendContext)
       return { sent, failed: true }
     }
-    if (page.kind !== 'segments' || page.status !== 'succeeded') {
+    if (page.kind !== 'segments' || (page.status !== 'succeeded' && !page.savedPartialSnapshot)) {
       await send(dispatcher, '当前没有可读取的已保存片段摘要，本次未重新学习。', sendText, sendContext)
       return { sent, failed: true }
     }
     total = page.totalSegments
+    if (offset === 0 && (page.displayState === 'partial' || page.savedPartialSnapshot) && page.learningSummary) {
+      if (!await send(dispatcher, page.learningSummary, sendText, sendContext)) return { sent, failed: true }
+    }
     if (!Number.isSafeInteger(total) || total < 0 || total > MAX_SEGMENTS) {
       await send(dispatcher, '片段数量超出受控读取范围，本次未发送。', sendText, sendContext)
       return { sent, failed: true }
@@ -228,7 +231,7 @@ async function deliver(request, dispatcher, runner, sendText, sendContext) {
         view: 'segment',
         segmentIndex: item.index,
       })
-      if (detail.kind !== 'segment' || detail.status !== 'succeeded' || !detail.segment) {
+      if (detail.kind !== 'segment' || (detail.status !== 'succeeded' && !detail.savedPartialSnapshot) || !detail.segment) {
         await send(dispatcher, `片段 ${item.index}（${item.timeRange}）读取失败，已停止后续发送；重试时只重试这一条。`, sendText, sendContext)
         return { sent, failed: true }
       }

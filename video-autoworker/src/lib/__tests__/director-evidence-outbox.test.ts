@@ -33,6 +33,7 @@ import {
   from '@/lib/__tests__/fixtures/director-evidence'
 import { registerDirectorExtractionJob } from '@/lib/director-extraction-runs'
 import { getN8nTaskRunByTaskId } from '@/lib/n8n-task-runs'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 const scope = { tenantId: 22, workspaceId: 33 }
 const binding = directorEvidenceBindingForResolvedWork('WORK-OUTBOX-001', 'root outbox')
@@ -324,6 +325,18 @@ describe('director evidence root outbox', () => {
     expect(delivered.status).toBe('delivered')
     expect(getDirectorEvidenceProjectionReceiptCore(db, delivered)?.receipt.workId)
       .toBe(binding.workId)
+  })
+
+  it('does not publish a partial or malformed learning result as complete director evidence', () => {
+    const { root } = seedRoot(db)
+    const partial = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+      stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    for (const learningResult of [partial, { status: 'complete' }, null]) {
+      expect(enqueueDirectorEvidenceOutbox(db, { ...root, output: { ...root.output, learningResult } }, 100)).toBe('skipped')
+    }
+    expect(getDirectorEvidenceOutbox(db, root.taskId)).toBeNull()
+    expect(enqueueDirectorEvidenceOutbox(db, { ...root, output: { ...root.output,
+      learningResult: buildVideoLearningResult(3, []) } }, 101)).toBe('created')
   })
 
   it('delivers a known legacy outbox with its stored immutable contract identity', async () => {

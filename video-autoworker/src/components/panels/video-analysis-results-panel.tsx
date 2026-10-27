@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { learningResultBrief, learningResultDisplayState, learningResultFailures, learningResultValue } from '@/lib/task-run-presentation'
 
 type ResultStatus = 'all' | 'queued' | 'accepted' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 
@@ -27,6 +28,8 @@ interface VideoResultListItem {
   chapterCount: number
   timelineCount: number
   resultAvailable: boolean
+  learningResult?: unknown
+  learningResultInvalid?: boolean
 }
 
 interface VideoResultChapter {
@@ -77,6 +80,8 @@ interface VideoSearchHit {
   startSeconds: number | null
   endSeconds: number | null
   mediaAvailable: boolean
+  learningResult?: unknown
+  learningResultInvalid?: boolean
 }
 
 interface VideoSearchResponse {
@@ -121,10 +126,13 @@ function statusLabel(status: string): string {
     succeeded: '已完成',
     failed: '失败',
     cancelled: '已取消',
+    partial: '部分完成',
+    learning_invalid: '学习结果待核对',
   } as Record<string, string>)[status] || status
 }
 
 function statusClass(status: string): string {
+  if (status === 'partial' || status === 'learning_invalid') return 'border-warning/30 bg-warning/10 text-warning'
   if (status === 'succeeded') return 'border-success/25 bg-success/10 text-success'
   if (status === 'failed' || status === 'cancelled') return 'border-destructive/25 bg-destructive/10 text-destructive'
   if (status === 'queued' || status === 'accepted' || status === 'running') {
@@ -451,10 +459,10 @@ export function VideoAnalysisResultsPanel({
               >
                 <div className="flex items-start justify-between gap-2">
                   <p className="min-w-0 truncate text-sm font-medium text-foreground">{item.title}</p>
-                  <StatusBadge status={item.status} />
+                  <StatusBadge status={learningResultDisplayState(item.status, learningResultValue(item))} />
                 </div>
                 <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {item.summary || (item.resultAvailable ? '结果已保存，点击查看明细。' : '尚未生成正式结果。')}
+                  {learningResultBrief(learningResultValue(item)) || item.summary || (item.resultAvailable ? '结果已保存，点击查看明细。' : '尚未生成正式结果。')}
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground/80">
                   <span>{formatDate(item.completedAt || item.updatedAt)}</span>
@@ -523,7 +531,7 @@ export function VideoAnalysisResultsPanel({
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge status={detail.status} />
+                      <StatusBadge status={learningResultDisplayState(detail.status, learningResultValue(detail))} />
                       {detail.batchId && (
                         <span className="rounded border border-border bg-background px-2 py-1 text-[10px] text-muted-foreground">
                           批次第 {detail.batchIndex || '-'} 项
@@ -542,6 +550,17 @@ export function VideoAnalysisResultsPanel({
                   </div>
                 </div>
               </header>
+
+              {(detail.learningResult !== undefined || detail.learningResultInvalid) && (
+                <section className="space-y-2 rounded-md border border-border p-3 text-sm" aria-label="学习完成情况">
+                  <p>{learningResultBrief(learningResultValue(detail))}</p>
+                  {learningResultFailures(learningResultValue(detail)).map(issue => (
+                    <p key={`${issue.index}:${issue.stage}`} className="break-words text-xs text-warning">
+                      片段 {issue.index}（{issue.timeRange}）{issue.stage === 'vision' ? '画面分析' : '片段摘要'}失败：{issue.errorCode}
+                    </p>
+                  ))}
+                </section>
+              )}
 
               {playableSource ? (
                 <div className="overflow-hidden rounded-lg border border-border bg-black">
@@ -721,7 +740,7 @@ function VideoSearchHitCard({
     >
       <div className="flex items-start justify-between gap-2">
         <p className="min-w-0 truncate text-sm font-medium text-foreground" title={hit.title}>{hit.title}</p>
-        <StatusBadge status={hit.status} />
+        <StatusBadge status={learningResultDisplayState(hit.status, learningResultValue(hit))} />
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
         <span className="rounded border border-border bg-card px-1.5 py-0.5">{hit.label}</span>

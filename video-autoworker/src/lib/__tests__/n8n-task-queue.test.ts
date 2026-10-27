@@ -19,6 +19,7 @@ vi.mock('@/lib/n8n-workflows', () => ({
 }))
 
 import { listN8nTaskQueue } from '@/lib/n8n-task-queue'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 describe('n8n task queue', () => {
   beforeEach(() => {
@@ -196,6 +197,21 @@ describe('n8n task queue', () => {
       queueOrigin: 'durable',
     }])
     expect(result.total).toBe(1)
+    expect(result.counts).toEqual({ waiting: 1, running: 0, attention: 0 })
+  })
+
+  it('keeps an explicitly queued repair visible without changing the saved partial result authority', async () => {
+    const durable = (await mocks.listN8nVideoQueueItems())[0]
+    const platform = mocks.listScopedN8nTaskRunStatusSummaries()[0]
+    const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+      stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    mocks.listN8nVideoQueueItems.mockResolvedValue([{ ...durable, repairQueued: true }])
+    mocks.listScopedN8nTaskRunStatusSummaries.mockReturnValue([{ ...platform, status: 'succeeded',
+      completedAt: 120, resultAvailable: true, learningResult }])
+    mocks.listN8nActiveTaskRunSummaries.mockReturnValue([])
+    const result = await listN8nTaskQueue({} as never, { tenantId: 3, workspaceId: 2 }, 1000)
+    expect(result.queue).toMatchObject([{ taskId: 'queued-video', status: 'queued', repairQueued: true,
+      learningResult, resultAvailable: true }])
     expect(result.counts).toEqual({ waiting: 1, running: 0, attention: 0 })
   })
 })

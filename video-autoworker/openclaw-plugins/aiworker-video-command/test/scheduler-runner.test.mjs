@@ -967,6 +967,35 @@ describe('bounded segment response contract', () => {
   const entry = { index: 1, startTime: '00:00:00', endTime: '00:01:00', timeRange: '00:00:00–00:01:00', source: 'segment_summary' }
   const directory = { kind: 'segments', taskId, name: 'S03E03.mp4', status: 'succeeded', source: 'segment_summary', totalSegments: 200, segmentOffset: 0, segmentLimit: 10, nextSegmentOffset: 1, items: [{ ...entry, preview: '片段预览' }] }
 
+  it('preserves canonical partial presentation and failed single-segment messages without new model work', async () => {
+    const learningSummary = '部分完成 2 / 3 段。待修复片段：2。'
+    const status = await fixture({ taskId, status: 'succeeded', output: { summary: '已有内容' },
+      displayState: 'partial', learningSummary, learningResult: { internal: 'already validated by CLI' },
+    }).runner.taskStatus({ taskId })
+    expect(status).toMatchObject({ status: 'succeeded', displayState: 'partial', learningSummary })
+    expect(status).not.toHaveProperty('learningResult')
+    const failureMessage = '片段 2（00:00:05-00:00:10）片段摘要失败：N8N_MEDIA_MODEL_OUTPUT_INVALID。'
+    const failed = await fixture({ kind: 'segment', taskId, name: 'S03E03', status: 'succeeded',
+      source: 'segment_summary', totalSegments: 2, segment: null, displayState: 'partial', learningSummary, failureMessage,
+    }).runner.taskResult({ query: taskId, view: 'segment', segmentIndex: 2 })
+    expect(failed).toMatchObject({ segment: null, displayState: 'partial', failureMessage })
+    await expect(fixture({ taskId, status: 'succeeded', learningResult: {} }).runner.taskStatus({ taskId }))
+      .rejects.toThrow('invalid_learning_presentation')
+  })
+
+  it('allows active saved partial snapshots only with the explicit bounded CLI marker', async () => {
+    const response = { ...directory, status: 'running', displayState: 'running', savedPartialSnapshot: true,
+      learningSummary: '补学中，以下为已保存结果。部分完成 199 / 200 段。待修复片段：2。' }
+    const result = await fixture(response).runner.taskResult({ query: taskId, view: 'segments' })
+    expect(result).toMatchObject({ status: 'running', savedPartialSnapshot: true, items: directory.items })
+    const { savedPartialSnapshot: _marker, ...unmarked } = response
+    await expect(fixture(unmarked).runner.taskResult({ query: taskId, view: 'segments' })).rejects.toThrow('invalid_segment_result')
+    const text = '# 已保存片段\n\n片段1已有证据。'
+    const report = { kind: 'report', taskId, name: 'S03E03', status: 'running', displayState: 'running', savedPartialSnapshot: true,
+      learningSummary: response.learningSummary, report: { source: 'segment_summary', text, offset: 0, nextOffset: null, totalBytes: Buffer.byteLength(text) } }
+    expect(await fixture(report).runner.taskResult({ query: taskId, view: 'report' })).toEqual(report)
+  })
+
   it('routes exact bounded parameters and strips unsolicited whole-report fields', async () => {
     const { runner, execute } = fixture({ ...directory, report: 'must not reach model', items: [{ ...directory.items[0], summary: 'unbounded text' }] })
     const result = await runner.taskResult({ query: 'S03E03', view: 'segments' })

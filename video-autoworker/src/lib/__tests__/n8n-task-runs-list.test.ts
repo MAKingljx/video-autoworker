@@ -11,6 +11,7 @@ import {
   projectN8nVideoResultDetail,
   searchN8nVideoResults,
 } from '@/lib/n8n-task-runs'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 describe('n8n task run list projection', () => {
   it('keeps only compact display metadata and removes path details', () => {
@@ -262,6 +263,25 @@ describe('listN8nTaskRunSummaries', () => {
   })
 
   afterEach(() => db.close())
+
+  it('carries partial coverage through summary, results and detail without exposing raw output', () => {
+    const taskId = 'batch-a:video:002:abcdef123456'
+    const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+      stage: 'vision', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    db.prepare('UPDATE n8n_task_runs SET output=? WHERE task_id=?').run(JSON.stringify({ summary: '部分摘要', learningResult }), taskId)
+    const scope = { tenantId: 3, workspaceId: 2 }
+    const outputs = [listN8nTaskRunSummaries(db, scope).runs.find(item => item.taskId === taskId),
+      listScopedN8nTaskRunStatusSummaries(db, scope, [taskId])[0],
+      listN8nVideoResults(db, scope).results.find(item => item.taskId === taskId),
+      getN8nVideoResultDetail(db, taskId, scope)]
+    for (const projected of outputs) {
+      expect(projected).toMatchObject({ status: 'succeeded', learningResult })
+      expect(projected).not.toHaveProperty('output')
+    }
+    db.prepare('UPDATE n8n_task_runs SET output=? WHERE task_id=?').run(JSON.stringify({ learningResult: null }), taskId)
+    expect(listN8nTaskRunSummaries(db, scope).runs[0]).toMatchObject({ learningResultInvalid: true })
+    expect(listN8nTaskRunSummaries(db, scope).runs[0]).not.toHaveProperty('learningResult')
+  })
 
   it('lists only top-level runs in the requested scope', () => {
     const result = listN8nTaskRunSummaries(

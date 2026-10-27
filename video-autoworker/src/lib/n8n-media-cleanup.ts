@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { cleanupN8nMediaTask, mediaChildIdentity } from '@/lib/n8n-media-execution'
-import { N8N_VIDEO_FINALIZE_LEASE_EXPIRED } from '@/lib/n8n-task-runs'
+import { hasPartialVideoLearning } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 export interface N8nMediaCleanupDebt {
   taskId: string
@@ -15,6 +15,7 @@ export interface N8nMediaCleanupDebt {
   nextAttemptAt: number
   createdAt: number
   updatedAt: number
+  retainedForRecovery?: boolean
 }
 
 interface CleanupDebtRow {
@@ -46,6 +47,7 @@ function rowToDebt(row: CleanupDebtRow): N8nMediaCleanupDebt {
     nextAttemptAt: row.next_attempt_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(row.reason === 'finalize_lease_expired' ? { retainedForRecovery: true } : {}),
   }
 }
 
@@ -72,7 +74,7 @@ export function listDueN8nMediaCleanupDebts(
   const rows = db.prepare(`
     SELECT *
     FROM n8n_media_cleanup_debts
-    WHERE next_attempt_at <= ?
+    WHERE next_attempt_at <= ? AND reason = 'finalize_succeeded'
     ORDER BY next_attempt_at ASC, updated_at ASC, task_id ASC
     LIMIT ?
   `).all(nowSeconds, limit) as CleanupDebtRow[]
@@ -80,6 +82,7 @@ export function listDueN8nMediaCleanupDebts(
 }
 
 function cleanupDebtBindingError(db: Database.Database, debt: N8nMediaCleanupDebt): string | null {
+  if (debt.reason === 'finalize_lease_expired') return '失败学习任务保留媒体与检查点，不自动清理'
   const expectedDigest = createHash('sha256').update(debt.taskId).digest('hex')
   if (debt.workspaceDigest !== expectedDigest) return '媒体清理债务的工作区摘要不匹配'
 
@@ -101,6 +104,13 @@ function cleanupDebtBindingError(db: Database.Database, debt: N8nMediaCleanupDeb
     debt.workspaceId,
   ) as { status: string; error: string | null; output: string | null; task_type: string } | undefined
   if (!parent || parent.task_type !== 'video-analysis') return '媒体清理债务与视频父任务不匹配'
+  // Partial results keep the prepared assets and checkpoints needed for a
+  // later scoped repair. A stale cleanup obligation must never remove them.
+  if (parent.output) {
+    try {
+      if (hasPartialVideoLearning(JSON.parse(parent.output))) return '部分学习结果仍需保留媒体与检查点'
+    } catch { return '学习结果完整性无法确认，保留媒体与检查点' }
+  }
 
   const child = db.prepare(`
     SELECT status, error, output
@@ -117,21 +127,8 @@ function cleanupDebtBindingError(db: Database.Database, debt: N8nMediaCleanupDeb
   ) as { status: string; error: string | null; output: string | null } | undefined
   if (!child) return '媒体清理债务缺少绑定的最终节点'
 
-  if (debt.reason === 'finalize_succeeded') {
-    if (parent.status !== 'succeeded' || child.status !== 'succeeded' || !parent.output || !child.output) {
-      return '媒体清理债务与成功终态不匹配'
-    }
-    return null
-  }
-
-  const leaseCode = `[${N8N_VIDEO_FINALIZE_LEASE_EXPIRED}]`
-  if (
-    parent.status !== 'failed'
-    || child.status !== 'failed'
-    || !String(parent.error || '').includes(leaseCode)
-    || !String(child.error || '').includes(leaseCode)
-  ) {
-    return '媒体清理债务与最终节点硬超时终态不匹配'
+  if (parent.status !== 'succeeded' || child.status !== 'succeeded' || !parent.output || !child.output) {
+    return '媒体清理债务与成功终态不匹配'
   }
   return null
 }
@@ -182,6 +179,8 @@ export async function retryN8nMediaCleanupDebt(
     : Math.floor(Date.now() / 1_000)
   const debt = getN8nMediaCleanupDebt(db, taskId)
   if (!debt) return { outcome: 'not_found', debt: null, error: null }
+  if (debt.retainedForRecovery) return { outcome: 'rejected', debt,
+    error: '失败学习任务的媒体与检查点已保留，须经独立保留策略处理' }
   if (!options.force && debt.nextAttemptAt > nowSeconds) {
     return { outcome: 'not_due', debt, error: null }
   }

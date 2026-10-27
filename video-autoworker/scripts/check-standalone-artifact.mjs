@@ -269,6 +269,8 @@ export const REQUIRED_STANDALONE_FILES = [
   'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs',
   'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs',
   'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs',
+  'openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs',
   'openclaw-skills/aiworker-task-flow/lib/video-task.mjs',
   'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs',
   'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs',

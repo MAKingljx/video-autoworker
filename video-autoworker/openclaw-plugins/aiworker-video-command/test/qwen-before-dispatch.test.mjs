@@ -5,6 +5,7 @@ import {
   extractExplicitDirectorWork,
   isClassifierCandidate,
   statusReceipt,
+  resultReceipt,
   validateDecision,
 } from '../lib/qwen-before-dispatch.js'
 import {
@@ -49,6 +50,20 @@ function handler({ classifier, runner, releaseReady = true, duplicateConfirmatio
 }
 
 describe('hook-owned Qwen video scheduler', () => {
+  it('labels partial completion and preserves failed original segment identifiers in receipts', () => {
+    const learningSummary = '部分完成 2 / 3 段。待修复片段：2。'
+    expect(statusReceipt({ kind: 'task', status: 'succeeded', displayState: 'partial', learningSummary,
+      summary: '只代表已成功的内容' })).toBe(learningSummary)
+    const directory = resultReceipt({ kind: 'segments', name: '视频', status: 'succeeded', displayState: 'partial', learningSummary,
+      totalSegments: 2, taskId: 'x', nextSegmentOffset: null,
+      items: [{ index: 1, timeRange: '00:00:00-00:00:05', preview: '第一段' }, { index: 3, timeRange: '00:00:10-00:00:15', preview: '第三段' }] }, 'segments')
+    expect(directory).toContain(learningSummary)
+    expect(directory).toContain('片段 3（00:00:10-00:00:15）')
+    expect(directory).not.toContain('片段 2（')
+    const failureMessage = '片段 2（00:00:05-00:00:10）片段摘要失败：N8N_MEDIA_MODEL_OUTPUT_INVALID。'
+    expect(resultReceipt({ kind: 'segment', status: 'succeeded', displayState: 'partial', learningSummary,
+      segment: null, failureMessage }, 'segment')).toBe(failureMessage)
+  })
   it('states maintenance blocking and real progress without promising automatic start', () => {
     const text = statusReceipt({
       kind: 'task',

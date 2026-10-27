@@ -8,6 +8,7 @@ import { parseN8nMediaConfig } from '@/lib/n8n-media-config'
 import { readControlledMediaJson } from '@/lib/n8n-learning-progress'
 import { mediaTaskWorkspace } from '@/lib/n8n-media-workspace'
 import { loadN8nModelRegistry, resolveN8nNodeRoute, publicAuxiliaryModelResource, publicN8nModelRoute } from '@/lib/n8n-model-routing'
+import { mediaCheckpointModelIdentitySchema } from '@/lib/n8n-media-checkpoint-identity'
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u)
 const metadataSchema = z.object({
@@ -122,9 +123,19 @@ export async function inspectPreparedRecoveryEvidence(taskId: string, routing: R
       if (!/^vision-\d{3,6}\.json$/u.test(name)) continue
       const checkpoint = await readControlledMediaJson(workspace, `checkpoints/${name}`, 256 * 1024)
       const identity = checkpoint?.proof as Record<string, unknown> | undefined
-      if (!identity || identity.schema !== 'aiworker-vision-checkpoint-v2'
-        || identity.sourceSha256 !== value.sourceSha256 || identity.segmentSeconds !== value.segmentSeconds
-        || typeof identity.modelRevisionSha256 !== 'string') return blocked('recovery_checkpoint_identity_missing')
+      const modelIdentity = mediaCheckpointModelIdentitySchema.safeParse(identity?.modelIdentity)
+      const currentEnvelope = identity?.schema === 'aiworker-vision-checkpoint-v3'
+        && identity.taskId === taskId && modelIdentity.success
+        && modelIdentity.data.routeId === identity.routeId && modelIdentity.data.model === identity.model
+      const historicalEnvelope = identity?.schema === 'aiworker-vision-checkpoint-v2'
+        && sha.safeParse(identity.modelRevisionSha256).success
+      // This is the prepared-asset preflight, not cache acceptance. Recovery
+      // still invokes the executor's full validator afterwards to compare the
+      // route configuration, frames, prompt, perception and result hashes.
+      if (!identity || (!currentEnvelope && !historicalEnvelope)
+        || identity.sourceSha256 !== value.sourceSha256 || identity.segmentSeconds !== value.segmentSeconds) {
+        return blocked('recovery_checkpoint_identity_missing')
+      }
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return blocked('recovery_checkpoint_unreadable')

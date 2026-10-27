@@ -1,3 +1,6 @@
+import { readVideoLearningResult, videoLearningDisplayState } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+import type { VideoLearningFailure } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+
 export interface TaskRunTiming {
   status: string
   createdAt: number
@@ -117,7 +120,33 @@ export function learningStageLabel(stage: string): string {
   return STAGE_LABELS[stage] || '阶段未知'
 }
 
-export function learningProgressBrief(progress: LearningProgressProjection | null | undefined): string {
+export function learningResultDisplayState(status: string, learningResult?: unknown): string {
+  return videoLearningDisplayState(status, learningResult === undefined ? {} : { learningResult })
+}
+
+export function learningResultValue(value: { learningResult?: unknown; learningResultInvalid?: boolean }): unknown {
+  return value.learningResultInvalid ? null : value.learningResult
+}
+
+export function learningResultBrief(learningResult?: unknown): string | null {
+  if (learningResult === undefined) return null
+  try {
+    const coverage = readVideoLearningResult({ learningResult })!
+    return coverage.status === 'partial'
+      ? `部分完成 ${coverage.completedSegments} / ${coverage.totalSegments} 段，${new Set(coverage.failedSegments.map(row => row.index)).size} 段待修复`
+      : `学习已完成 ${coverage.completedSegments} / ${coverage.totalSegments} 段`
+  } catch { return '学习结果待核对' }
+}
+
+export function learningResultFailures(learningResult?: unknown): VideoLearningFailure[] {
+  if (learningResult === undefined) return []
+  try { return readVideoLearningResult({ learningResult })?.failedSegments.slice(0, 100) || [] } catch { return [] }
+}
+
+export function learningProgressBrief(progress: LearningProgressProjection | null | undefined, learningResult?: unknown): string {
+  const coverage = learningResult === undefined && progress && 'learningResult' in progress ? progress.learningResult : learningResult
+  const coverageLabel = learningResultBrief(coverage)
+  if (coverageLabel && (!progress || progress.state === 'succeeded')) return coverageLabel
   if (!progress) return '学习进度未知'
   if (progress.state === 'succeeded') return '学习已完成'
   const active = progress.stages.filter(stage => progress.activeStages.includes(stage.stage))
@@ -128,6 +157,9 @@ export function learningProgressBrief(progress: LearningProgressProjection | nul
 }
 
 export function learningSegmentCount(stage: LearningStageProgress): string {
+  if ('failedSegments' in stage && typeof stage.failedSegments === 'number' && stage.failedSegments > 0) {
+    return `成功 ${stage.completedSegments ?? '未知'} / ${stage.totalSegments ?? '未知'} 段，失败 ${stage.failedSegments} 段`
+  }
   return `${stage.completedSegments ?? '未知'} / ${stage.totalSegments ?? '未知'} 段`
 }
 

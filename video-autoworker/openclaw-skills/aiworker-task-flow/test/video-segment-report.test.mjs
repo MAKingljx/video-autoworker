@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
+import { buildVideoLearningResult } from '../lib/video-learning-result.mjs'
 import {
   compatibleVideoReport, exportVideoSegmentReport, MAX_SEGMENT_BYTES,
   renderVideoReportDocx, renderVideoReportMarkdown, selectVideoSegmentReport, segmentDirectory, singleSegment,
@@ -44,6 +45,25 @@ test('single summary truncation preserves complete UTF8 and explicitly marks rem
   assert.ok(Buffer.byteLength(result.summary) <= MAX_SEGMENT_BYTES)
   assert.equal(Buffer.from(result.summary).toString('utf8'), result.summary)
   assert.ok(!result.summary.includes('�'))
+})
+
+test('partial reports keep successful original indexes and expose failures without fabricated summaries', () => {
+  const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+    stage: 'vision', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+  const partial = selectVideoSegmentReport({ learningResult,
+    segmentSummaries: [{ index: 1, timeRange: '00:00:00-00:00:05', summary: '第一段成功' },
+      { index: 3, timeRange: '00:00:10-00:00:15', summary: '第三段成功' }] })
+  assert.deepEqual(segmentDirectory(partial).items.map(row => row.index), [1, 3])
+  assert.equal(singleSegment(partial, 2).segment, null)
+  assert.deepEqual(singleSegment(partial, 2).failedSegments, learningResult.failedSegments)
+  assert.equal(singleSegment(partial, 3).segment.summary, '第三段成功')
+  const markdown = renderVideoReportMarkdown(partial, metadata)
+  assert.match(markdown, /部分完成：2 \/ 3 段/u)
+  assert.match(markdown, /片段 3.*00:00:10-00:00:15/u)
+  assert.match(markdown, /待修复片段/u)
+  assert.match(markdown, /片段 2.*N8N_MEDIA_MODEL_OUTPUT_INVALID/u)
+  assert.throws(() => selectVideoSegmentReport({ learningResult, segmentSummaries: [{ index: 2, summary: '伪造空洞' }] }), /video_learning_result_invalid/u)
+  assert.throws(() => selectVideoSegmentReport({ learningResult: null, segmentSummaries: [{ index: 1, summary: '完整' }] }), /video_learning_result_invalid/u)
 })
 
 test('historical chapters and timeline retain their evidence meaning; full summary is never a segment', () => {

@@ -703,6 +703,22 @@ describe('n8n media node execution route', () => {
     expect(mocks.failN8nTaskRun).toHaveBeenCalledTimes(1)
   })
 
+  it('returns partial learning without scheduling cleanup or asking n8n to repeat finalized work', async () => {
+    const output = { segmentSummaries: [{ index: 1, summary: '已保存' }], learningResult: {
+      schema: 'aiworker-video-learning-result/v1', status: 'partial', totalSegments: 2, completedSegments: 1,
+      failedSegments: [{ index: 2, stage: 'summary', timeRange: '00:00:05-00:00:10',
+        errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }],
+    } }
+    mocks.synthesizeN8nMediaResults.mockResolvedValue(output)
+    mocks.ensureN8nMediaCleanupDebt.mockReturnValue({ scheduled: false, reason: null })
+    const response = await POST(request('finalize'))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ status: 'succeeded', output })
+    expect(mocks.ensureN8nMediaCleanupDebt).not.toHaveBeenCalled()
+    expect(mocks.retryN8nMediaCleanupDebt).not.toHaveBeenCalled()
+    expect(mocks.cleanupN8nMediaTask).not.toHaveBeenCalled()
+  })
+
   it('keeps the committed result succeeded when media cleanup fails', async () => {
     mocks.retryN8nMediaCleanupDebt.mockResolvedValue({
       outcome: 'pending', debt: { attemptCount: 1 }, error: '媒体临时目录清理失败',

@@ -65,6 +65,23 @@ function pagedRunner(total) {
 }
 
 describe('saved summary direct delivery', () => {
+  it('announces partial coverage then sends saved segments with their original gaps unchanged', async () => {
+    const learningSummary = '部分完成 2 / 3 段。待修复片段：2。'
+    const runner = { taskResult: vi.fn(async ({ view, segmentIndex }) => view === 'segments' ? {
+      kind: 'segments', status: 'succeeded', taskId: 'x', name: title, displayState: 'partial', learningSummary,
+      totalSegments: 2, nextSegmentOffset: null,
+      items: [{ index: 1, timeRange: '00:00:00-00:00:05', preview: '一' }, { index: 3, timeRange: '00:00:10-00:00:15', preview: '三' }],
+    } : { kind: 'segment', status: 'succeeded', taskId: 'x', segment: {
+      index: segmentIndex, timeRange: segmentIndex === 1 ? '00:00:00-00:00:05' : '00:00:10-00:00:15', summary: `已保存摘要${segmentIndex}`,
+    } }) }
+    const send = dispatcher()
+    await createSavedSummaryDirectReplyHandler({ runner })(event(`请直读${title}已保存摘要，按条发送`), { dispatcher: send })
+    expect(send.sent).toHaveLength(3)
+    expect(send.sent[0]).toBe(learningSummary)
+    expect(send.sent[1]).toContain('片段 1')
+    expect(send.sent[2]).toContain('片段 3')
+    expect(runner.taskResult.mock.calls.map(([value]) => value.segmentIndex).filter(Boolean)).toEqual([1, 3])
+  })
   it('parses a requested count without hard-coding 20', () => {
     expect(parseSavedSummaryRequest(`请直读${title}前35个片段原文，逐条发送`)).toEqual({
       query: title,

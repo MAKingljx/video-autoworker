@@ -382,9 +382,13 @@ function executionReceipt(result) {
 }
 
 export function statusReceipt(result) {
+  if (result.savedPartialSnapshot) return result.learningSummary || '补学中，已有成功内容保持不变。'
+  if (result.status === 'succeeded' && ['partial', 'learning_invalid'].includes(result.displayState)) {
+    return result.learningSummary || '学习结果待核对。'
+  }
   if (result.kind === 'batch_item') {
     const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
-      + (result.counts.cancelled ?? 0)
+      + (result.counts.cancelled ?? 0) + (result.counts.partial ?? 0) + (result.counts.learning_invalid ?? 0)
     const itemLabels = {
       staging: '准备中',
       queued: '已排队',
@@ -404,11 +408,11 @@ export function statusReceipt(result) {
       succeeded: '已完成',
       completed_with_errors: '已完成（含失败项）',
     }
-    return `${searchName(result.name)}：${itemLabels[result.status] ?? '状态未知'}；所在批次${batchLabels[result.batchStatus] ?? '状态未知'}，已结束 ${completed}/${result.total}。${executionReceipt(result)}${progressReceipt(result)}`
+    return `${searchName(result.name)}：${result.learningSummary || itemLabels[result.status] || '状态未知'}；所在批次${batchLabels[result.batchStatus] ?? '状态未知'}，已结束 ${completed}/${result.total}。${executionReceipt(result)}${progressReceipt(result)}`
   }
   if (result.kind === 'batch') {
     const completed = (result.counts.succeeded ?? 0) + (result.counts.failed ?? 0)
-      + (result.counts.cancelled ?? 0)
+      + (result.counts.cancelled ?? 0) + (result.counts.partial ?? 0) + (result.counts.learning_invalid ?? 0)
     const labels = {
       queued: '已排队',
       running: '处理中',
@@ -423,7 +427,7 @@ export function statusReceipt(result) {
     if (result.status === 'unavailable') {
       return '该批次状态文件不可用，当前无法验证进度；未执行恢复或提交。'
     }
-    return `批次${labels[result.status] ?? '状态未知'}；已结束 ${completed}/${result.total}。${executionReceipt(result)}${progressReceipt(result)}`
+    return `批次${labels[result.status] ?? '状态未知'}；已结束 ${completed}/${result.total}。${result.counts.partial ? `${result.counts.partial} 个视频部分完成，失败片段待补学。` : ''}${result.counts.learning_invalid ? `${result.counts.learning_invalid} 个视频结果待核对。` : ''}${executionReceipt(result)}${progressReceipt(result)}`
   }
   if (result.status === 'succeeded' && result.summary) return `任务已完成。摘要：${result.summary}`
   const replies = {
@@ -486,26 +490,28 @@ function resultCandidatesReceipt(result, action = 'result') {
 
 export function resultReceipt(result, action = 'result') {
   if (result.kind === 'matches') return resultCandidatesReceipt(result, action)
-  if (result.status !== 'succeeded') return statusReceipt({ kind: 'task', status: result.status, summary: null })
+  if (result.status !== 'succeeded' && !result.savedPartialSnapshot) return statusReceipt({ kind: 'task', status: result.status, summary: null })
+  if (result.displayState === 'learning_invalid') return result.learningSummary || '学习结果待核对。'
+  const partial = result.displayState === 'partial' || result.savedPartialSnapshot ? `${result.learningSummary || '部分完成，失败片段待补学。'}\n` : ''
   if (result.kind === 'segments') {
-    const heading = `${result.name ? searchName(result.name) : '视频'}：共 ${result.totalSegments} 个片段。`
+    const heading = `${partial}${result.name ? searchName(result.name) : '视频'}：共 ${result.totalSegments} 个${partial ? '已保存' : ''}片段。`
     if (!result.items.length) return `${heading}当前没有可读取的片段摘要；不要重新提交学习或猜测片段内容。`
     return `${heading}\n${result.items.map(item => `片段 ${item.index}（${item.timeRange}）：${item.preview}`).join('\n')}\n任务编号：${result.taskId}。按需用 segment 和 segmentIndex 读取指定片段。${result.nextSegmentOffset === null ? '' : `目录后续偏移：${result.nextSegmentOffset}。`}不要循环读取全部片段；用户明确要求文件时直接 export。目录只是局部预览，不代表全部内容的总结。`
   }
   if (result.kind === 'segment') {
-    if (!result.segment) return '该任务没有此编号的可读取片段摘要；不要猜测或重新提交学习。'
+    if (!result.segment) return result.failureMessage || '该任务没有此编号的可读取片段摘要；不要猜测或重新提交学习。'
     return `${result.name ? searchName(result.name) : '视频'} · 片段 ${result.segment.index}（${result.segment.timeRange}）\n${result.segment.summary}${result.segment.truncated ? '\n该片段显示内容已截断；需要完整文件时使用 export，不要继续拼接读取。' : ''}`
   }
   if (result.kind === 'artifact') {
     if (!result.artifact) return '当前没有可导出的学习摘要文件。'
-    return `文件已生成并校验，尚未发送。只在用户明确要求发送时通过 OpenClaw 现有附件通道交付，不读取文件全文、不重新生成摘要。\n${JSON.stringify(result.artifact)}`
+    return `${partial}文件已生成并校验，尚未发送。只在用户明确要求发送时通过 OpenClaw 现有附件通道交付，不读取文件全文、不重新生成摘要。\n${JSON.stringify(result.artifact)}`
   }
-  if (!result.report) return '任务已完成，但尚未生成可读取的完整学习报告。'
-  const title = result.name ? `${searchName(result.name)}完整学习结果：\n` : '完整学习结果：\n'
+  if (!result.report) return partial || '任务已完成，但尚未生成可读取的完整学习报告。'
+  const title = result.name ? `${searchName(result.name)}${partial ? '已保存' : '完整'}学习结果：\n` : `${partial ? '已保存' : '完整'}学习结果：\n`
   const continuation = result.report.nextOffset === null
     ? ''
     : `\n\n报告较长；继续读取请使用相同查询并传 offset=${result.report.nextOffset}。`
-  return `${title}${result.report.text}${continuation}`
+  return `${partial}${title}${result.report.text}${continuation}`
 }
 
 export async function queryStatusSearch({ runner = schedulerRunner, query } = {}) {

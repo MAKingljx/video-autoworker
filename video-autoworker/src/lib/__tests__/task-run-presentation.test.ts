@@ -8,9 +8,22 @@ import {
   taskRunFailureInsight,
   taskRunProcessingDurationSeconds,
   taskRunQueueDurationSeconds,
+  learningProgressBrief, learningResultBrief, learningResultDisplayState, learningResultValue,
 } from '@/lib/task-run-presentation'
+import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 
 describe('task run presentation', () => {
+  it('never describes a partially processed or invalid learning result as fully learned', () => {
+    const learningResult = buildVideoLearningResult(3, [{ index: 2, timeRange: '00:00:05-00:00:10',
+      stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }])
+    expect(learningResultBrief(learningResult)).toBe('部分完成 2 / 3 段，1 段待修复')
+    expect(learningResultDisplayState('succeeded', learningResult)).toBe('partial')
+    expect(learningProgressBrief({ schema: 'aiworker-learning-progress/v1', taskId: 'x', state: 'succeeded',
+      stages: [], activeStages: [], generatedAt: 1 }, learningResult)).toBe('部分完成 2 / 3 段，1 段待修复')
+    expect(learningResultBrief(learningResultValue({ learningResultInvalid: true }))).toBe('学习结果待核对')
+    expect(learningResultDisplayState('succeeded', learningResultValue({ learningResultInvalid: true }))).toBe('learning_invalid')
+    expect(learningResultDisplayState('succeeded')).toBe('succeeded')
+  })
   it('uses creation time for total duration even when the parent starts at finalization', () => {
     const run = {
       status: 'failed',

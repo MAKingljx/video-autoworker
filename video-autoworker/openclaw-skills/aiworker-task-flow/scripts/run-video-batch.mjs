@@ -9,6 +9,7 @@ import {
   isRetryablePlatformError,
 } from '../lib/platform-client.mjs'
 import { isTerminalTaskStatus } from '../lib/task-status-authority.mjs'
+import { hasPartialVideoLearning, readVideoLearningResult } from '../lib/video-learning-result.mjs'
 import { submitStagedVideoTask, submitVideoTask } from '../lib/video-task.mjs'
 import {
   acquireBatchLock,
@@ -160,6 +161,17 @@ function authoritativeVideoKey(run) {
     : null
 }
 
+function retainLearningOutcome(item, run) {
+  try {
+    const coverage = readVideoLearningResult(run.output)
+    if (coverage) item.learningResult = coverage
+  } catch {
+    // Preserve an explicit invalid marker so a malformed result never becomes an all-success batch.
+    item.learningResult = null
+    item.error = '学习结果校验失败，待核对'
+  }
+}
+
 async function waitForTask(client, statePath, state, item, timeoutSeconds) {
   const deadline = Date.now() + timeoutSeconds * 1_000
   let lastStatus = item.status
@@ -170,6 +182,7 @@ async function waitForTask(client, statePath, state, item, timeoutSeconds) {
     if (run) {
       item.status = run.status
       item.error = run.error || null
+      retainLearningOutcome(item, run)
       if (item.status !== lastStatus || isTerminalTaskStatus(item.status) || Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
         lastStatus = item.status
         lastHeartbeatAt = Date.now()
@@ -214,7 +227,7 @@ async function waitForTask(client, statePath, state, item, timeoutSeconds) {
   return { state, terminal: false }
 }
 
-async function runBatch(statePath) {
+async function runBatch(statePath, workerLease) {
   let state = await prepareBatchStateForExecution(statePath)
   const entryStatus = state.status
   const entryError = state.error || null
@@ -266,8 +279,39 @@ async function runBatch(statePath) {
       state = await persist(statePath, state)
       return finishJournalCleanup()
     }
+    const finishLearningRepair = async repair => {
+      item.learningRepairCompleted = { requestId: repair.requestId, completedAt: new Date().toISOString() }
+      delete item.learningRepairRequest
+      item.completedAt = new Date().toISOString()
+      state = await persist(statePath, state)
+    }
 
     try {
+      // Repairs are transported by this same worker while it owns both the
+      // global lane and this batch. They never stage or submit a second video.
+      if (item.learningRepairRequest && !reconciliationOnly) {
+        const repair = item.learningRepairRequest
+        const response = await client.dispatchLearningRepair({ taskId: item.taskId,
+          requestId: repair.requestId, workerLease })
+        item.status = response.currentState || 'recovering'
+        item.error = response.errorCode || null
+        if (item.status === 'queued' || item.status === 'recovering') {
+          state.status = 'recovering'
+          state = await persist(statePath, state)
+          return state
+        }
+        state = await persist(statePath, state)
+        if (!isTerminalTaskStatus(item.status)) {
+          const waited = await waitForTask(client, statePath, state, item, timeoutSeconds)
+          state = waited.state
+          if (!waited.terminal) return state
+        } else {
+          const result = await client.getRun(item.taskId)
+          if (result) retainLearningOutcome(item, result)
+        }
+        await finishLearningRepair(repair)
+        continue
+      }
       // Attention items are explicitly quarantined: keep their journal and
       // media untouched while allowing the rest of this batch to advance.
       if (item.status === 'attention') continue
@@ -333,6 +377,7 @@ async function runBatch(statePath) {
       if (existing) {
         item.status = existing.status
         item.error = existing.error || null
+        retainLearningOutcome(item, existing)
         if (isTerminalTaskStatus(existing.status)) {
           item.completedAt = item.completedAt || new Date().toISOString()
           state = await persist(statePath, state)
@@ -504,6 +549,62 @@ async function runBatch(statePath) {
         return persist(statePath, state)
       }
       if (isRetryablePlatformError(error)) throw error
+      if (item.learningRepairRequest) {
+        if (['recovery_worker_lease_invalid', 'recovery_worker_batch_lease_invalid'].includes(error?.body?.code)) {
+          // A consistency race can be reconciled, but loss of actual lane
+          // ownership must stop this worker before it touches another video.
+          throw error
+        }
+        const request = item.learningRepairRequest
+        let current = null
+        try { current = await client.getRun(item.taskId) } catch { /* Unknown dispatch outcome retains the lane. */ }
+        const alreadyClaimed = current?.routing?.learningRepair?.queueRequestId === request.requestId
+        if (!current || !['queued', 'accepted', 'running', 'succeeded', 'failed', 'cancelled'].includes(current.status)) {
+          item.status = 'recovering'
+          item.error = '补学受理状态待核对，保留原请求'
+          state.status = 'recovering'
+          return persist(statePath, state)
+        }
+        if (alreadyClaimed || ['queued', 'accepted', 'running'].includes(current.status)) {
+          item.status = current.status
+          item.error = current.error || null
+          retainLearningOutcome(item, current)
+          state = await persist(statePath, state)
+          if (current.status === 'queued') {
+            state.status = 'recovering'
+            return persist(statePath, state)
+          }
+          if (!isTerminalTaskStatus(current.status)) {
+            try {
+              const waited = await waitForTask(client, statePath, state, item, timeoutSeconds)
+              state = waited.state
+              if (!waited.terminal) return state
+            } catch {
+              item.status = 'recovering'
+              state.status = 'recovering'
+              return persist(statePath, state)
+            }
+          }
+          if (!alreadyClaimed) {
+            let finished = null
+            try { finished = await client.getRun(item.taskId) } catch { /* Preserve an unconfirmed request. */ }
+            if (finished?.routing?.learningRepair?.queueRequestId !== request.requestId) {
+              item.status = 'recovering'
+              state.status = 'recovering'
+              return persist(statePath, state)
+            }
+          }
+          await finishLearningRepair(request)
+          continue
+        }
+        item.learningRepairRejected = { requestId: request.requestId,
+          error: error instanceof Error ? error.message.slice(0, 240) : '补学请求待核对' }
+        item.status = request.previousStatus
+        item.error = '补学请求已停止，请重新检查失败片段和原任务状态'
+        delete item.learningRepairRequest
+        state = await persist(statePath, state)
+        continue
+      }
       if (item.stagingRecovery) {
         item.status = 'recovering'
         item.error = `${batchItemDisplayName(item)}：${error instanceof Error ? error.message : String(error)}`.slice(0, 2_000)
@@ -525,12 +626,14 @@ async function runBatch(statePath) {
   }
 
   const failed = state.items.filter(item => item.status !== 'succeeded').length
-  state.status = failed ? 'completed_with_errors' : 'succeeded'
-  state.error = failed ? `${failed} 个视频失败；其余视频已完成` : null
+  const partial = state.items.filter(item => item.status === 'succeeded' && hasPartialVideoLearning(item)).length
+  state.status = failed || partial ? 'completed_with_errors' : 'succeeded'
+  state.error = partial ? `${partial} 个视频部分完成，失败片段待单独修复${failed ? `；${failed} 个视频失败` : ''}`
+    : failed ? `${failed} 个视频失败；其余视频已完成` : null
   return persist(statePath, state)
 }
 
-async function drainQueue(anchorStatePath) {
+async function drainQueue(anchorStatePath, workerLease) {
   while (true) {
     const statePaths = await listBatchStatePaths(anchorStatePath, {
       onWarning: warning => process.stderr.write(`${warning}\n`),
@@ -545,7 +648,7 @@ async function drainQueue(anchorStatePath) {
       const lock = await acquireBatchLock(statePath)
       if (!lock.acquired) continue
       try {
-        const nextState = await runBatch(statePath)
+        const nextState = await runBatch(statePath, workerLease)
         if (!batchTerminal(nextState.status)) {
           const remainingJournal = nextState.items.some(
             item => item?.stagingRecovery && item.status !== 'attention',
@@ -608,7 +711,7 @@ async function main() {
     // begin draining persisted work.
     await consumeLaunchMarker(launchMarker, { guardianAllowed: true })
     do {
-      await drainQueue(statePath)
+      await drainQueue(statePath, lock.lease)
       if (!persistent) break
       await sleep(RECOVERY_BACKOFF_MS)
     } while (true)

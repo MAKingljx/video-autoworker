@@ -119,5 +119,9 @@ export function createPlatformClient(rawBaseUrl) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }, 135_000),
+    dispatchLearningRepair: payload => request('/api/n8n/runs/recovery', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'dispatch-repair', ...payload }),
+    }, 135_000),
   }
 }

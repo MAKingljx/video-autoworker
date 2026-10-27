@@ -22,6 +22,7 @@ import {
   parseResultOffset,
 } from '../lib/video-result-page.mjs'
 import { compatibleVideoReport, exportVideoSegmentReport, parseSegmentInteger, selectVideoSegmentReport, segmentDirectory, singleSegment } from '../lib/video-segment-report.mjs'
+import { readVideoLearningResult, videoLearningDisplayState, videoLearningSummary } from '../lib/video-learning-result.mjs'
 import {
   batchStatePath,
   clearMaterialHandoffJournal,
@@ -259,7 +260,18 @@ function compactStatusOutput(value) {
   const summary = typeof value.summary === 'string'
     ? value.summary.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim()
     : ''
-  return summary ? { summary: summary.slice(0, 160) } : null
+  const learningResult = readVideoLearningResult(value)
+  return summary || learningResult ? { ...(summary ? { summary: summary.slice(0, 160) } : {}),
+    ...(learningResult ? { learningResult } : {}) } : null
+}
+
+function learningFields(value, status) {
+  const learningResult = readVideoLearningResult(value)
+  const savedPartialSnapshot = learningResult?.status === 'partial' && ['queued', 'accepted', 'running'].includes(status)
+  return learningResult ? { learningResult, displayState: videoLearningDisplayState(status, value),
+    learningSummary: `${savedPartialSnapshot ? '补学中，以下为已保存结果。' : ''}${videoLearningSummary(value)}`,
+    ...(savedPartialSnapshot ? { savedPartialSnapshot: true } : {}),
+    displayStatus: learningResult.status === 'partial' ? '部分完成' : '已完成' } : {}
 }
 
 function resultDisplayName(value) {
@@ -411,15 +423,21 @@ async function handleResult(client, query, options) {
   const status = String(run?.status || resolved.status || 'unknown')
   const storedName = run?.output?.sourceName || run?.output?.segmentSummaries?.[0]?.sourceName
     || run?.input?.displayName || run?.input?.originalFilename || run?.input?.fileName || run?.input?.videoName
-  const metadata = { taskId: resolved.taskId, name: resolved.name || (typeof storedName === 'string' ? resultDisplayName(basename(storedName)) : null), status }
-  const report = selectVideoSegmentReport(status === 'succeeded' ? run?.output : null)
+  const metadata = { taskId: resolved.taskId, name: resolved.name || (typeof storedName === 'string' ? resultDisplayName(basename(storedName)) : null), status,
+    ...learningFields(run?.output, status) }
+  const readable = status === 'succeeded' || metadata.savedPartialSnapshot === true
+  const report = selectVideoSegmentReport(readable ? run?.output : null)
   if (options.view === 'segments') {
     output({ kind: 'segments', ...metadata, ...segmentDirectory(report, options.offset, options.limit) })
   } else if (options.view === 'segment') {
-    output({ kind: 'segment', ...metadata, ...(status === 'succeeded'
-      ? singleSegment(report, options.index) : { source: report.source, totalSegments: 0, segment: null }) })
+    const segmentResult = readable ? singleSegment(report, options.index)
+      : { source: report.source, totalSegments: 0, segment: null }
+    output({ kind: 'segment', ...metadata, ...segmentResult,
+      ...(segmentResult.failedSegments?.length ? { failureMessage: segmentResult.failedSegments.map(issue =>
+        `片段 ${issue.index}（${issue.timeRange}）${issue.stage === 'vision' ? '画面分析' : '片段摘要'}失败：${issue.errorCode}。`).join('') } : {}),
+    })
   } else if (options.view === 'export') {
-    output({ kind: 'artifact', ...metadata, artifact: status === 'succeeded'
+    output({ kind: 'artifact', ...metadata, artifact: readable
       ? await exportVideoSegmentReport(report, { ...metadata, format: options.format }) : null })
   } else {
     const finalReport = compatibleVideoReport(report, metadata)
@@ -708,6 +726,7 @@ async function main() {
       attemptCount: run.attemptCount,
       maxAttempts: run.maxAttempts,
       output: briefStatus ? compactStatusOutput(run.output) : run.output,
+      ...learningFields(run.output, run.status),
       error: run.error,
       updatedAt: run.updatedAt,
       progress,

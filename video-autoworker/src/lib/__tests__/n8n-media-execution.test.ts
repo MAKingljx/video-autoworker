@@ -410,16 +410,17 @@ describe('n8n stateless media helpers', () => {
     const taskId = 'video-failed-final-summary-recompute'
     const legacy = { summary: '仍需保留的旧版汇总。' }
     const checkpointRoot = await seedSynthesisCheckpoints(taskId, legacy)
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
       error: { message: '汇总模型暂时不可用' },
     }), { status: 503, headers: { 'Content-Type': 'application/json' } }))
 
-    await expect(synthesizeN8nMediaResults(
+    const result = await synthesizeN8nMediaResults(
       taskId,
       synthesisRouting(),
       { prompt: '保持事实边界' },
       synthesisInput(),
-    )).rejects.toThrow()
+    )
+    expect(result.learningResult).toMatchObject({ status: 'partial', completedSegments: 0 })
 
     await expect(readFile(join(checkpointRoot, 'final-summary.json'), 'utf8'))
       .resolves.toBe(JSON.stringify(legacy))
@@ -503,40 +504,48 @@ describe('n8n stateless media helpers', () => {
     })
     const input = { prompt: '分析业务事实' }
     const merged = { timeline: [1, 2, 3].map(index => ({ index, timeRange: `${index}:00-${index + 1}:00`, transcript: `转写 ${index}`, visualAnalysis: `画面 ${index}` })) }
-    await expect(synthesizeN8nMediaResults('resume-segments', routing, input, merged)).rejects.toThrow()
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    const partial = await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
+    expect(partial.learningResult).toMatchObject({ status: 'partial', totalSegments: 3, completedSegments: 2,
+      failedSegments: [{ index: 2, stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_HTTP_FAILED' }] })
+    expect((partial.segmentSummaries as Array<{ index: number }>).map(segment => segment.index)).toEqual([1, 3])
+    expect(fetchMock).toHaveBeenCalledTimes(4)
     fail = false
     await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
     expect(fetchMock).toHaveBeenCalledTimes(4)
-    await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const repaired = await synthesizeN8nMediaResults('resume-segments', {
+      ...routing, learningRepair: { generation: 1, indexes: [2], previousLearningResult: partial.learningResult },
+    }, input, merged)
+    expect(repaired.learningResult).toMatchObject({ status: 'complete', completedSegments: 3, failedSegments: [] })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
     merged.timeline[1].transcript = '新增的事实'
     await synthesizeN8nMediaResults('resume-segments', routing, input, merged)
-    expect(fetchMock).toHaveBeenCalledTimes(5)
-    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
     expect(fetchMock).toHaveBeenCalledTimes(6)
-    process.env.AIWORKER_MODEL_ROUTES_JSON = String(process.env.AIWORKER_MODEL_ROUTES_JSON).replace('final-test-model', 'changed-model')
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
     expect(fetchMock).toHaveBeenCalledTimes(7)
-    await rm(join(mediaTaskWorkspace('resume-segments'), 'checkpoints', 'segment-summary-002.json'))
+    process.env.AIWORKER_MODEL_ROUTES_JSON = String(process.env.AIWORKER_MODEL_ROUTES_JSON).replace('final-test-model', 'changed-model')
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
     expect(fetchMock).toHaveBeenCalledTimes(8)
-    merged.timeline.push({ index: 4, timeRange: '4:00-5:00', transcript: '新增片段', visualAnalysis: '新增画面' })
+    await rm(join(mediaTaskWorkspace('resume-segments'), 'checkpoints', 'segment-summary-002.json'))
     await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
     expect(fetchMock).toHaveBeenCalledTimes(9)
+    merged.timeline.push({ index: 4, timeRange: '4:00-5:00', transcript: '新增片段', visualAnalysis: '新增画面' })
+    await synthesizeN8nMediaResults('resume-segments', routing, { prompt: '新的业务要求' }, merged)
+    expect(fetchMock).toHaveBeenCalledTimes(10)
   })
 
   it('does not checkpoint truncated or oversized segment responses', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify(directorPerception('不完整')) }, finish_reason: 'length' }],
     }), { status: 200 }))
     const routing = synthesisRouting()
-    await expect(synthesizeN8nMediaResults('truncated-segment', routing, {}, synthesisInput())).rejects.toThrow()
+    expect((await synthesizeN8nMediaResults('truncated-segment', routing, {}, synthesisInput())).learningResult)
+      .toMatchObject({ status: 'partial', completedSegments: 0, failedSegments: [{ errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }] })
     await expect(stat(join(mediaTaskWorkspace('truncated-segment'), 'checkpoints', 'segment-summary-001.json'))).rejects.toThrow()
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: {
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ choices: [{ message: {
       content: JSON.stringify(directorPerception('过长。'.repeat(1_500))),
     } }] }), { status: 200 }))
-    await expect(synthesizeN8nMediaResults('oversized-segment', routing, {}, synthesisInput())).rejects.toThrow()
+    expect((await synthesizeN8nMediaResults('oversized-segment', routing, {}, synthesisInput())).learningResult)
+      .toMatchObject({ status: 'partial', completedSegments: 0, failedSegments: [{ errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }] })
     await expect(stat(join(mediaTaskWorkspace('oversized-segment'), 'checkpoints', 'segment-summary-001.json'))).rejects.toThrow()
   })
 
@@ -760,8 +769,8 @@ describe('n8n stateless media helpers', () => {
     await analyze('相同提示词')
     const proof = JSON.parse(await readFile(checkpointPath, 'utf8')).proof
     expect(proof).toMatchObject({
-      schema: 'aiworker-vision-checkpoint-v2', sourceSha256, sourceBytes: 100,
-      segmentSeconds: windowSeconds, modelRevisionSha256: 'b'.repeat(64),
+      schema: 'aiworker-vision-checkpoint-v3', taskId, sourceSha256, sourceBytes: 100,
+      segmentSeconds: windowSeconds, modelIdentity: { assurance: 'model-revision', modelRevisionSha256: 'b'.repeat(64) },
       outputSchema: 'visual-perception-v1',
     })
     expect(proof.frameSha256s).toHaveLength(1)
@@ -793,15 +802,16 @@ describe('n8n stateless media helpers', () => {
     setRevision(null)
     await analyze('改变提示词')
     await analyze('改变提示词')
-    expect(fetchMock).toHaveBeenCalledTimes(8)
-    expect(JSON.parse(await readFile(checkpointPath, 'utf8'))).not.toHaveProperty('proof')
+    expect(fetchMock).toHaveBeenCalledTimes(7)
+    expect(JSON.parse(await readFile(checkpointPath, 'utf8')).proof.modelIdentity)
+      .toMatchObject({ assurance: 'request-configuration', modelRevisionSha256: null })
     setRevision('b'.repeat(64))
     await analyze('改变提示词')
     const metadata = JSON.parse(await readFile(join(workspace, 'metadata.json'), 'utf8'))
     metadata.segmentSeconds = windowSeconds + 1
     await writeFile(join(workspace, 'metadata.json'), JSON.stringify(metadata))
     await analyze('改变提示词')
-    expect(fetchMock).toHaveBeenCalledTimes(10)
+    expect(fetchMock).toHaveBeenCalledTimes(9)
   })
 
   it('classifies malformed visual output separately from an HTTP failure', async () => {
@@ -826,9 +836,106 @@ describe('n8n stateless media helpers', () => {
       choices: [{ message: { content: '不是 JSON' } }],
     }), { status: 200 }))
 
-    await expect(analyzeN8nVideoFrames(taskId, {
+    const result = await analyzeN8nVideoFrames(taskId, {
       config: { modelRouting: { nodes: { vision: { routeId: 'vision-malformed' } } } },
-    }, { prompt: '只分析画面' })).rejects.toThrow('N8N_MEDIA_MODEL_OUTPUT_INVALID')
+    }, { prompt: '只分析画面' })
+    expect(result.learningResult).toMatchObject({ status: 'partial', completedSegments: 0,
+      failedSegments: [{ index: 1, stage: 'vision', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }] })
+  })
+
+  it('isolates a bad visual segment, keeps later successes and repairs only the selected gap', async () => {
+    process.env.AIWORKER_MODEL_ROUTES_JSON = JSON.stringify({ version: 1, resources: [], routes: [{
+      id: 'vision-partial', label: '片段保留', location: 'local', transport: 'openai-compatible',
+      model: 'local-vision', baseUrl: 'http://127.0.0.1:18109/v1', enabled: true, capabilities: ['text', 'vision'],
+    }] })
+    const taskId = 'vision-partial-retained'
+    const workspace = mediaTaskWorkspace(taskId)
+    await mkdir(workspace, { recursive: true })
+    for (const index of [1, 2, 3]) await writeFile(join(workspace, `frame-${index}.jpg`), `frame ${index}`)
+    await writeFile(join(workspace, 'metadata.json'), JSON.stringify({ taskId, kind: 'prepared-video',
+      durationSeconds: 15, sourceBytes: 100, sourceSha256: 'a'.repeat(64), audioAvailable: false,
+      frameCount: 3, segmentCount: 3, segmentSeconds: 5, memoryMode: 'none', preparedAt: new Date().toISOString(),
+      segments: [1, 2, 3].map(index => ({ index, startSeconds: (index - 1) * 5, durationSeconds: 5,
+        audioFile: null, frameFiles: [`frame-${index}.jpg`] })),
+    }))
+    let fail = true
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const prompt = JSON.parse(String(init?.body)).messages[1].content.map((item: { text?: string }) => item.text || '').join('\n')
+      const indexes = requestedBatchIndexes(prompt)
+      const invalid = fail && (indexes.includes(2) || (!indexes.length && prompt.includes('00:00:05.000-00:00:10.000')))
+      return new Response(JSON.stringify({ choices: [{ message: { content: invalid ? '错误格式'
+        : indexes.length ? visualBatch(indexes) : perceptionJson('有效画面') } }] }), { status: 200 })
+    })
+    const routing = { config: { modelRouting: { nodes: { vision: { routeId: 'vision-partial' } } } } }
+    const partial = await analyzeN8nVideoFrames(taskId, routing, {})
+    expect(partial.learningResult).toMatchObject({ status: 'partial', totalSegments: 3, completedSegments: 2,
+      failedSegments: [{ index: 2, stage: 'vision', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' }] })
+    expect((partial.segments as Array<{ index: number }>).map(segment => segment.index)).toEqual([1, 3])
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const first = await readFile(join(workspace, 'checkpoints/vision-001.json'), 'utf8')
+    const third = await readFile(join(workspace, 'checkpoints/vision-003.json'), 'utf8')
+    fail = false
+    const repeated = await analyzeN8nVideoFrames(taskId, routing, {})
+    expect(repeated.learningResult).toEqual(partial.learningResult)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const repairRouting = { ...routing, learningRepair: { generation: 1, indexes: [2], previousLearningResult: partial.learningResult } }
+    await rm(join(workspace, 'checkpoints/vision-001.json'))
+    await expect(analyzeN8nVideoFrames(taskId, repairRouting, {})).rejects.toThrow('learning_repair_outside_selection')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    await writeFile(join(workspace, 'checkpoints/vision-001.json'), first, { mode: 0o600 })
+    const repaired = await analyzeN8nVideoFrames(taskId, repairRouting, {})
+    expect(repaired.learningResult).toMatchObject({ status: 'complete', completedSegments: 3, failedSegments: [] })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
+    expect(await readFile(join(workspace, 'checkpoints/vision-001.json'), 'utf8')).toBe(first)
+    expect(await readFile(join(workspace, 'checkpoints/vision-003.json'), 'utf8')).toBe(third)
+    expect(JSON.parse(first).proof.modelIdentity.assurance).toBe('request-configuration')
+    const merged = mergeN8nMediaResults({ segments: [] }, partial)
+    expect((merged.timeline as Array<{ index: number }>).map(segment => segment.index)).toEqual([1, 2, 3])
+    expect(merged.learningResult).toEqual(partial.learningResult)
+  })
+
+  it('does not repeatedly contact an unavailable provider for every remaining summary segment', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 503 }))
+    const timeline = Array.from({ length: 30 }, (_, offset) => ({ index: offset + 1,
+      timeRange: `${offset * 5}-${(offset + 1) * 5}`, transcript: '', visualAnalysis: '画面' }))
+    const result = await synthesizeN8nMediaResults('provider-unavailable', synthesisRouting(), {}, { timeline })
+    expect(result.learningResult).toMatchObject({ status: 'partial', totalSegments: 30, completedSegments: 0 })
+    expect((result.learningResult as { failedSegments: unknown[] }).failedSegments).toHaveLength(30)
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('refuses to expand selected summary repair when an unselected failure record is missing', async () => {
+    let fail = true
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const prompt = JSON.parse(String(init?.body)).messages[1].content
+      const indexes = requestedBatchIndexes(prompt)
+      const individual = Number(prompt.match(/片段编号：(\d+)/)?.[1])
+      const invalid = fail && (indexes.some(index => index > 1) || individual > 1)
+      return new Response(JSON.stringify({ choices: [{ message: { content: invalid ? '错误格式'
+        : indexes.length ? directorBatch(indexes) : JSON.stringify(directorPerception('已保存的成功摘要')) } }] }), { status: 200 })
+    })
+    const taskId = 'summary-repair-fence'
+    const routing = synthesisRouting()
+    const merged = { timeline: [1, 2, 3].map(index => ({ index, timeRange: `${index * 5}-${index * 5 + 5}`,
+      transcript: '转写', visualAnalysis: '画面' })) }
+    const partial = await synthesizeN8nMediaResults(taskId, routing, {}, merged)
+    expect(partial.learningResult).toMatchObject({ completedSegments: 1,
+      failedSegments: [{ index: 2 }, { index: 3 }] })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    const repairRouting = { ...routing, learningRepair: { generation: 1, indexes: [2], previousLearningResult: partial.learningResult } }
+    const failurePath = join(mediaTaskWorkspace(taskId), 'checkpoints/segment-failure-summary-003.json')
+    const failure = await readFile(failurePath, 'utf8')
+    await rm(failurePath)
+    fail = false
+    await expect(synthesizeN8nMediaResults(taskId, repairRouting, {}, merged)).rejects.toThrow('learning_repair_outside_selection')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    await writeFile(failurePath, '{"invalid":true}', { mode: 0o600 })
+    await expect(synthesizeN8nMediaResults(taskId, repairRouting, {}, merged)).rejects.toThrow('learning_failure_checkpoint_identity_changed')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+    await writeFile(failurePath, failure, { mode: 0o600 })
+    const repaired = await synthesizeN8nMediaResults(taskId, repairRouting, {}, merged)
+    expect(repaired.learningResult).toMatchObject({ completedSegments: 2, failedSegments: [{ index: 3 }] })
+    expect(fetchMock).toHaveBeenCalledTimes(5)
   })
 
   it('uses the fallback when the primary returns HTTP 200 with invalid structured output', async () => {
