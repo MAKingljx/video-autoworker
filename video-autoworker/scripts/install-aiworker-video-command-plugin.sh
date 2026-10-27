@@ -494,7 +494,6 @@ validate_source() {
   [[ -f "$RUNTIME_TREE_MANIFEST" && ! -L "$RUNTIME_TREE_MANIFEST" ]] || return 1
   [[ -f "$OPENCLAW_AGENT_CONFIG_HELPER" && ! -L "$OPENCLAW_AGENT_CONFIG_HELPER" ]] || return 1
   [[ -f "$OPENCLAW_MANAGED_SDK_HELPER" && ! -L "$OPENCLAW_MANAGED_SDK_HELPER" ]] || return 1
-  node "$OPENCLAW_MANAGED_SDK_HELPER" assert-current || return 1
   [[ "$(read_version "$PLUGIN_DIR/package.json")" == "$CURRENT_VERSION" ]] || return 1
   [[ "$(read_version "$PLUGIN_DIR/openclaw.plugin.json")" == "$CURRENT_VERSION" ]] || return 1
   node --input-type=module - "$PROFILE_CONFIG" "$PLUGIN_DIR/openclaw.plugin.json" \
@@ -1270,6 +1269,9 @@ enforce_retention() {
 }
 
 validate_source
+if [[ "$MODE" == dry-run ]]; then
+  node "$OPENCLAW_MANAGED_SDK_HELPER" assert-current
+fi
 [[ -d "$INSTALLED_PLUGIN_DIR" && ! -L "$INSTALLED_PLUGIN_DIR" ]] || {
   printf 'Installed plugin directory is missing or unsafe.\n' >&2
   exit 1
@@ -1295,6 +1297,9 @@ if [[ "$MODE" != dry-run ]]; then
     exit 1
   }
   verify_shared_install_gate
+  # Refuse untrusted production runtime/queue overrides at the shared gate
+  # before resolving their SDK context. Keep this check before locks/backups.
+  node "$OPENCLAW_MANAGED_SDK_HELPER" assert-current
   acquire_shared_deployment_lock
   [[ "$(target_manifest_sha256)" == "$RESERVATION_TARGET_STATE_SHA256" ]] || {
     printf 'Video-command target changed between reservation and the locked mutation.\n' >&2
