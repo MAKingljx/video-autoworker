@@ -7,6 +7,7 @@ import {
   verifyCanonicalVideoToolUpgrade,
 } from '../../scripts/lib/openclaw-canonical-tool-upgrade.mjs'
 import { fingerprintOpenClawToolInventory } from '../../scripts/lib/openclaw-tool-capability-fingerprint.mjs'
+import { OPENCLAW_VIDEO_PLUGIN_VERSION } from '../../scripts/lib/openclaw-runtime-contract.mjs'
 
 const agentId = 'second-original'
 const toolId = 'aiworker_analyze_video'
@@ -31,7 +32,7 @@ describe('declared canonical video tool definition upgrade', () => {
   it.each(['catalog', 'effective'] as const)('accepts only the Git-bound old and canonical current %s definitions', async kind => {
     const { request } = await fixture(kind)
     const proof = await verifyCanonicalVideoToolUpgrade(request)
-    expect(proof).toMatchObject({ toolId, kind, fromVersion: '0.5.17', toVersion: '0.5.18' })
+    expect(proof).toMatchObject({ toolId, kind, fromVersion: '0.5.17', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION })
     expect(proof.canonicalSchemaSha256).toMatch(/^[a-f0-9]{64}$/u)
     expect(proof.beforeDescriptorSha256).toBe(request.before.descriptorSurfaceSha256)
   })
@@ -69,7 +70,7 @@ describe('declared canonical video tool definition upgrade', () => {
     current.notices = [notice] as any
     request.before = capability(old)
     request.after = capability(current)
-    await expect(verifyCanonicalVideoToolUpgrade(request)).resolves.toMatchObject({ toVersion: '0.5.18' })
+    await expect(verifyCanonicalVideoToolUpgrade(request)).resolves.toMatchObject({ toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION })
     current.notices[0].message += ' Changed policy.'
     request.after = capability(current)
     await expect(verifyCanonicalVideoToolUpgrade(request)).rejects.toThrow('previous definition')

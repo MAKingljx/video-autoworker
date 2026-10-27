@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { verifyOpenClawRuntimeCompatibility } from '../../scripts/verify-openclaw-runtime-compatibility.mjs'
 import {
   isOpenClawConfigRevisionToken,
+  OPENCLAW_VIDEO_PLUGIN_VERSION,
   openClawRuntimeCompatibilityDigest,
   validateOpenClawRuntimeCompatibility,
 } from '../../scripts/lib/openclaw-runtime-contract.mjs'
@@ -43,7 +44,7 @@ describe('OpenClaw supported stable runtime compatibility', () => {
       writeFileSync(join(target, 'openclaw.plugin.json'), `${JSON.stringify({ id: name, version })}\n`, { mode: 0o600 })
       return target
     }
-    const video = plugin('aiworker-video-command', '0.5.19', '>=2026.7.1-2')
+    const video = plugin('aiworker-video-command', OPENCLAW_VIDEO_PLUGIN_VERSION, '>=2026.7.1-2')
     const director = plugin('aiworker-director-brain', '0.4.4', '2026.7.1-2')
     const previousHome = process.env.HOME
     process.env.HOME = join(root, 'home')

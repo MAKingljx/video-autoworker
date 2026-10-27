@@ -24,6 +24,7 @@ function state(root, baseUrl, batchId, taskId, repair = false) {
         tenantId: 1, workspaceId: 1, actorId: 0, segmentIndexes: [2], outputSha256: 'b'.repeat(64),
         revisionSha256: 'c'.repeat(64), evidenceSha256: 'd'.repeat(64), generation: 1,
         previousStatus: 'succeeded', createdAt: '2026-02-01T00:00:00Z',
+        targetCallbackBinding: { callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: 'release-current', port: 3317 },
       } } : {}),
     }] }
 }

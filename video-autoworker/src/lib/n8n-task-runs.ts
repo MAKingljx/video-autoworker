@@ -5,6 +5,8 @@ import { snapshotN8nMediaRouting } from '@/lib/n8n-media-config'
 import { enqueueDirectorEvidenceOutbox } from '@/lib/director-evidence-outbox'
 import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
 import { hasPartialVideoLearning, readVideoLearningResult } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+import { assertCurrentVideoRepairCallbackBinding, bindVideoRepairCallbacks, currentVideoRepairCallbackBinding,
+  snapshotVideoRepairCallbackBinding, type VideoRepairCallbackBinding } from '@/lib/n8n-video-repair-affinity'
 
 export const n8nTaskIdentitySchema = z.string()
   .trim()
@@ -2600,7 +2602,6 @@ export interface N8nVideoSegmentRepairAuthority extends N8nVideoRecoveryAuthorit
 /** A repair is an explicit, bounded round over the original task, not an automatic retry reset. */
 export function inspectScopedN8nVideoSegmentRepairState(
   db: Database.Database, taskId: string, scope: N8nTaskScope, segmentIndexes?: readonly number[],
-  nowSeconds = Math.floor(Date.now() / 1000),
 ): N8nVideoSegmentRepairAuthority {
   const run = getScopedN8nTaskRunByTaskId(db, n8nTaskIdentitySchema.parse(taskId), scope)
   const blocked = (errorCode: string): N8nVideoSegmentRepairAuthority => ({
@@ -2614,6 +2615,7 @@ export function inspectScopedN8nVideoSegmentRepairState(
   let learning: ReturnType<typeof readVideoLearningResult>
   try { learning = readVideoLearningResult(run.output || {}) } catch { return blocked('recovery_learning_result_invalid') }
   if (!learning || learning.status !== 'partial') return blocked('recovery_partial_result_required')
+  try { snapshotVideoRepairCallbackBinding(run.routing) } catch { return blocked('recovery_original_callback_binding_invalid') }
   const failed = [...new Set(learning.failedSegments.map(item => item.index))].sort((a, b) => a - b)
   const indexes = segmentIndexes === undefined ? failed : [...new Set(segmentIndexes)].sort((a, b) => a - b)
   if (!indexes.length || indexes.length > 1000 || indexes.some(index => !Number.isSafeInteger(index) || !failed.includes(index))) {
@@ -2655,7 +2657,7 @@ export function inspectScopedN8nVideoSegmentRepairState(
   if (childLeases.length) return blocked('recovery_child_lease_unsettled')
   const dispatchLease = db.prepare(`SELECT lease_expires_at FROM n8n_task_dispatch_leases
     WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(taskId, scope.tenantId, scope.workspaceId) as { lease_expires_at: number } | undefined
-  if (dispatchLease && dispatchLease.lease_expires_at > nowSeconds) return blocked('recovery_dispatch_in_progress')
+  if (dispatchLease) return blocked('recovery_dispatch_in_progress')
   const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
     WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(taskId, scope.tenantId, scope.workspaceId) as { execution_owner: string } | undefined
   if (!claim || !n8nExecutionOwnerSchema.safeParse(claim.execution_owner).success) return blocked('recovery_parent_owner_missing')
@@ -2675,7 +2677,8 @@ export function inspectScopedN8nVideoSegmentRepairState(
 }
 
 export function requeueScopedN8nVideoSegmentRepair(db: Database.Database,
-  input: { taskId: string; expectedRevisionSha256: string; segmentIndexes?: readonly number[]; queueRequestId?: string }, scope: N8nTaskScope,
+  input: { taskId: string; expectedRevisionSha256: string; segmentIndexes?: readonly number[]; queueRequestId?: string;
+    targetCallbackBinding?: VideoRepairCallbackBinding }, scope: N8nTaskScope,
 ): { outcome: 'queued' | 'not_found' | 'ineligible' | 'conflict'; run: N8nTaskRun | null; errorCode: string | null } {
   if (input.queueRequestId !== undefined && !/^[a-f0-9]{64}$/u.test(input.queueRequestId)) throw new Error('recovery_repair_request_invalid')
   return db.transaction(() => {
@@ -2687,28 +2690,34 @@ export function requeueScopedN8nVideoSegmentRepair(db: Database.Database,
     if (inspection.revisionSha256 !== input.expectedRevisionSha256) return {
       outcome: 'conflict' as const, run: inspection.run, errorCode: 'recovery_revision_changed',
     }
+    const targetCallbackBinding = assertCurrentVideoRepairCallbackBinding(input.targetCallbackBinding || currentVideoRepairCallbackBinding())
     const run = inspection.run
     const claim = db.prepare(`SELECT execution_owner FROM n8n_parent_execution_claims
       WHERE task_id=? AND tenant_id=? AND workspace_id=?`).get(run.taskId, scope.tenantId, scope.workspaceId) as { execution_owner: string }
     const retired = Array.isArray(run.routing.recoveryRetiredOwners) ? run.routing.recoveryRetiredOwners as string[] : []
     const stageAttempts: Record<string, { previousAttempts: number; attemptLimit: number }> = {}
+    const previousChildCallbackBindings: Record<string, ReturnType<typeof snapshotVideoRepairCallbackBinding>> = {}
     for (const stage of inspection.stages) {
       const childId = mediaChildIdentity('task', run.taskId, stage)
       const child = getScopedN8nTaskRunByTaskId(db, childId, scope)!
+      previousChildCallbackBindings[stage] = snapshotVideoRepairCallbackBinding(child.routing)
       stageAttempts[stage] = { previousAttempts: child.attemptCount, attemptLimit: child.attemptCount + 2 }
-      const changedChild = db.prepare(`UPDATE n8n_task_runs SET status='queued',error=NULL,accepted_at=NULL,started_at=NULL,completed_at=NULL,
+      const changedChild = db.prepare(`UPDATE n8n_task_runs SET status='queued',routing=?,error=NULL,accepted_at=NULL,started_at=NULL,completed_at=NULL,
         max_attempts=MAX(max_attempts,attempt_count+2),updated_at=MAX(unixepoch(),updated_at+1)
         WHERE task_id=? AND tenant_id=? AND workspace_id=? AND status=? AND updated_at=?`)
-        .run(childId, scope.tenantId, scope.workspaceId, child.status, child.updatedAt)
+        .run(JSON.stringify(bindVideoRepairCallbacks(child.routing, targetCallbackBinding)),
+          childId, scope.tenantId, scope.workspaceId, child.status, child.updatedAt)
       if (changedChild.changes !== 1) throw new Error('recovery_revision_changed')
     }
-    const routing = { ...run.routing,
+    const routing = { ...bindVideoRepairCallbacks(run.routing, targetCallbackBinding),
       recoveryRetiredOwners: [...new Set([...retired, claim.execution_owner])],
       learningRepairHistory: [...(run.routing.learningRepairHistory as unknown[] || []),
         ...(run.routing.learningRepair ? [run.routing.learningRepair] : [])],
       learningRepair: { generation: inspection.generation, indexes: inspection.indexes,
         ...(input.queueRequestId ? { queueRequestId: input.queueRequestId } : {}),
         previousLearningResult: readVideoLearningResult(run.output),
+        previousCallbackBinding: snapshotVideoRepairCallbackBinding(run.routing), targetCallbackBinding,
+        previousChildCallbackBindings,
         basedOnOutputSha256: inspection.outputSha256, expectedRevisionSha256: inspection.revisionSha256,
         previousAttempts: run.attemptCount, attemptLimit: run.attemptCount + 1, stageAttempts },
     }

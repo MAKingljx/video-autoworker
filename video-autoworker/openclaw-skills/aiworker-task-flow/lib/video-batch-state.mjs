@@ -562,7 +562,8 @@ function stagingRecoveryValid(value) {
 export function learningRepairRequestValid(value, item, bindingId) {
   if (value === undefined) return true
   const keys = ['schema', 'requestId', 'taskId', 'bindingId', 'tenantId', 'workspaceId', 'actorId',
-    'segmentIndexes', 'outputSha256', 'revisionSha256', 'evidenceSha256', 'generation', 'previousStatus', 'createdAt']
+    'segmentIndexes', 'outputSha256', 'revisionSha256', 'evidenceSha256', 'generation', 'previousStatus', 'createdAt', 'targetCallbackBinding']
+  const target = value?.targetCallbackBinding
   return Boolean(value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
     && value.schema === 'aiworker-video-segment-repair-request/v1'
@@ -571,6 +572,11 @@ export function learningRepairRequestValid(value, item, bindingId) {
     && ['tenantId', 'workspaceId'].every(key => Number.isSafeInteger(value[key]) && value[key] > 0)
     && Number.isSafeInteger(value.actorId)
     && Number.isSafeInteger(value.generation) && value.generation >= 1 && value.generation <= 3
+    && target && typeof target === 'object' && !Array.isArray(target)
+    && Object.keys(target).sort().join(',') === 'callbackProtocol,port,runtimeReleaseId,runtimeSlot'
+    && target.callbackProtocol === 'slot-v1' && ['blue', 'green'].includes(target.runtimeSlot)
+    && typeof target.runtimeReleaseId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(target.runtimeReleaseId)
+    && Number.isSafeInteger(target.port) && target.port >= 1 && target.port <= 65_535
     && ['succeeded', 'failed'].includes(value.previousStatus)
     && Array.isArray(value.segmentIndexes) && value.segmentIndexes.length >= 1 && value.segmentIndexes.length <= 1000
     && value.segmentIndexes.every((index, offset) => Number.isSafeInteger(index) && index > 0 && index <= 100_000

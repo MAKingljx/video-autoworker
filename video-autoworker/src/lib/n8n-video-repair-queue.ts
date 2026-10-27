@@ -5,6 +5,7 @@ import { dirname } from 'node:path'
 import { n8nVideoBatchRoot } from '@/lib/n8n-video-sources'
 import { readVideoLearningResult } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 import type { N8nTaskRun, N8nTaskScope } from '@/lib/n8n-task-runs'
+import type { VideoRepairCallbackBinding } from '@/lib/n8n-video-repair-affinity'
 import { acquireBatchLock, assertVideoRepairWorkerLease, batchStatePath, learningRepairRequestValid,
   writeBatchState } from '../../openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs'
 
@@ -23,6 +24,7 @@ export interface QueuedVideoSegmentRepair {
   generation: number
   previousStatus: string
   createdAt: string
+  targetCallbackBinding: VideoRepairCallbackBinding
 }
 
 interface ControlledBatch {

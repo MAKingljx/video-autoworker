@@ -13,6 +13,8 @@ import { inspectN8nMediaCheckpointReuse } from '@/lib/n8n-media-execution'
 import { getScopedN8nTaskRunByTaskId } from '@/lib/n8n-task-runs'
 import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
 import { enqueueOriginalVideoRepair, locateOriginalVideoRepairBatch, readOwnedQueuedVideoRepair } from '@/lib/n8n-video-repair-queue'
+import { assertCurrentVideoRepairCallbackBinding, currentVideoRepairCallbackBinding,
+  type VideoRepairCallbackBinding } from '@/lib/n8n-video-repair-affinity'
 
 const registryKey = Symbol.for('aiworker.video-recovery.confirmation/v1')
 const globals = globalThis as typeof globalThis & { [registryKey]?: Buffer }
@@ -23,6 +25,7 @@ const tokenSchema = z.object({ taskId: z.string().min(1).max(120), tenantId: z.n
   evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/u), expiresAt: z.number().int().positive(), actorId: z.number().int(),
   mode: z.literal('repair-segments').optional(),
   indexesSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+  targetCallbackBindingSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
 }).strict()
 
 function seal(data: z.infer<typeof tokenSchema>) {
@@ -54,6 +57,7 @@ export interface VideoRecoveryInspection {
   inspectionToken: string | null
   mode?: 'repair-segments'
   segmentIndexes?: number[]
+  targetCallbackBinding?: VideoRepairCallbackBinding
 }
 
 export async function inspectVideoRecovery(db: Database.Database, taskId: string, scope: N8nTaskScope, actorId: number): Promise<VideoRecoveryInspection | null> {
@@ -125,6 +129,7 @@ async function dispatchOriginalTask(db: Database.Database, run: N8nTaskRun, scop
 }
 
 const indexesDigest = (indexes: readonly number[]) => createHash('sha256').update(JSON.stringify(indexes)).digest('hex')
+const targetBindingDigest = (binding: VideoRepairCallbackBinding) => createHash('sha256').update(JSON.stringify(binding)).digest('hex')
 
 export async function inspectVideoSegmentRepair(db: Database.Database, taskId: string, scope: N8nTaskScope,
   actorId: number, segmentIndexes?: readonly number[],
@@ -136,8 +141,11 @@ export async function inspectVideoSegmentRepair(db: Database.Database, taskId: s
     preservedStages: authority.successfulStages, expectedRevision: authority.revisionSha256, inspectionToken: null,
     mode: 'repair-segments', segmentIndexes: authority.indexes }
   if (authority.outcome !== 'eligible' || !authority.revisionSha256) return base
-  const admission = checkN8nCallbackAdmission(authority.run.routing)
-  if (!admission.allowed) return { ...base, errorCode: admission.code, nextAction: 'inspect_runtime_affinity' }
+  let targetCallbackBinding: VideoRepairCallbackBinding
+  try { targetCallbackBinding = currentVideoRepairCallbackBinding() } catch (error) {
+    return { ...base, errorCode: error instanceof Error ? error.message : 'recovery_target_runtime_identity_invalid',
+      nextAction: 'inspect_runtime_affinity' }
+  }
   if (!getN8nIntakeControl(db).accepting) return { ...base, errorCode: 'recovery_intake_paused', nextAction: 'wait_for_intake' }
   const evidence = await inspectPreparedRecoveryEvidence(taskId, authority.run.routing, authority.run.input, authority.successfulStages)
   if (!evidence.eligible || !evidence.revisionSha256) return { ...base, errorCode: evidence.errorCode,
@@ -151,9 +159,10 @@ export async function inspectVideoSegmentRepair(db: Database.Database, taskId: s
     const code = error instanceof Error && /^recovery_[a-z_]+$/u.test(error.message) ? error.message : 'recovery_original_batch_missing'
     return { ...base, errorCode: code, nextAction: 'inspect_original_batch' }
   }
-  return { ...base, eligible: true, errorCode: null, nextAction: 'confirm_failed_segment_repair',
+  return { ...base, eligible: true, errorCode: null, nextAction: 'confirm_failed_segment_repair', targetCallbackBinding,
     inspectionToken: seal({ taskId, ...scope, actorId, mode: 'repair-segments',
       indexesSha256: indexesDigest(authority.indexes), revisionSha256: authority.revisionSha256,
+      targetCallbackBindingSha256: targetBindingDigest(targetCallbackBinding),
       evidenceSha256: evidence.revisionSha256, expiresAt: Date.now() + 5 * 60_000 }) }
 }
 
@@ -167,7 +176,8 @@ export async function repairVideoSegments(db: Database.Database,
   }
   const current = await inspectVideoSegmentRepair(db, input.taskId, scope, actorId, input.segmentIndexes)
   if (!current?.eligible || !current.inspectionToken || current.expectedRevision !== confirmed.revisionSha256
-    || !current.segmentIndexes || indexesDigest(current.segmentIndexes) !== confirmed.indexesSha256) {
+    || !current.segmentIndexes || indexesDigest(current.segmentIndexes) !== confirmed.indexesSha256
+    || !current.targetCallbackBinding || targetBindingDigest(current.targetCallbackBinding) !== confirmed.targetCallbackBindingSha256) {
     throw new Error(current?.errorCode || 'recovery_revision_changed')
   }
   if (verify(current.inspectionToken).evidenceSha256 !== confirmed.evidenceSha256) throw new Error('recovery_evidence_changed')
@@ -177,9 +187,11 @@ export async function repairVideoSegments(db: Database.Database,
   await enqueueOriginalVideoRepair(authority.run, { actorId,
     segmentIndexes: current.segmentIndexes, outputSha256: authority.outputSha256,
     revisionSha256: confirmed.revisionSha256, evidenceSha256: confirmed.evidenceSha256, generation: authority.generation,
+    targetCallbackBinding: current.targetCallbackBinding,
   }, () => {
     const latest = inspectScopedN8nVideoSegmentRepairState(db, input.taskId, scope, current.segmentIndexes)
     if (latest.outcome !== 'eligible' || latest.revisionSha256 !== confirmed.revisionSha256) throw new Error('recovery_revision_changed')
+    assertCurrentVideoRepairCallbackBinding(current.targetCallbackBinding)
   })
   return { taskId: input.taskId, currentState: 'queued', errorCode: null, nextAction: 'wait_for_original_video_worker' }
 }
@@ -199,25 +211,33 @@ export async function dispatchQueuedVideoSegmentRepair(db: Database.Database,
     const active = current?.routing.learningRepair as { queueRequestId?: string } | undefined
     if (!current || active?.queueRequestId !== queued.requestId) return null
     await readOwnedQueuedVideoRepair(current, scope, input)
-    if (current.status === 'queued') return dispatchOriginalTask(db, current, scope)
+    if (current.status === 'queued') {
+      assertCurrentVideoRepairCallbackBinding(queued.targetCallbackBinding)
+      return dispatchOriginalTask(db, current, scope)
+    }
     return { taskId: current.taskId, currentState: current.status, errorCode: null, nextAction: 'query_original_task' }
   }
   const claimed = await convergeClaimedRequest()
   if (claimed) return claimed
   try {
+    assertCurrentVideoRepairCallbackBinding(queued.targetCallbackBinding)
     const inspection = await inspectVideoSegmentRepair(db, input.taskId, scope, queued.actorId, queued.segmentIndexes)
     if (!inspection?.eligible || !inspection.inspectionToken || inspection.expectedRevision !== queued.revisionSha256) {
       throw new Error(inspection?.errorCode || 'recovery_revision_changed')
     }
     const fresh = verify(inspection.inspectionToken)
     if (fresh.evidenceSha256 !== queued.evidenceSha256) throw new Error('recovery_evidence_changed')
+    if (fresh.targetCallbackBindingSha256 !== targetBindingDigest(queued.targetCallbackBinding)) {
+      throw new Error('recovery_target_callback_binding_changed')
+    }
     const authority = inspectScopedN8nVideoSegmentRepairState(db, run.taskId, scope, queued.segmentIndexes)
     if (authority.outputSha256 !== queued.outputSha256 || authority.generation !== queued.generation) throw new Error('recovery_revision_changed')
     // Resource inspection can take time. Recheck the existing lane ownership
     // immediately before granting the new execution round.
     await readOwnedQueuedVideoRepair(run, scope, input)
     const transition = requeueScopedN8nVideoSegmentRepair(db, { taskId: run.taskId,
-      expectedRevisionSha256: queued.revisionSha256, segmentIndexes: queued.segmentIndexes, queueRequestId: queued.requestId }, scope)
+      expectedRevisionSha256: queued.revisionSha256, segmentIndexes: queued.segmentIndexes, queueRequestId: queued.requestId,
+      targetCallbackBinding: queued.targetCallbackBinding }, scope)
     if (transition.outcome !== 'queued' || !transition.run) throw new Error(transition.errorCode || 'recovery_revision_changed')
     return dispatchOriginalTask(db, transition.run, scope)
   } catch (error) {

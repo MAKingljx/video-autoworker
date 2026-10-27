@@ -10,6 +10,7 @@ import { claimScopedN8nTaskRun, createN8nTaskRun, failN8nTaskRun, getScopedN8nTa
   inspectScopedN8nVideoRecoveryState, inspectScopedN8nVideoSegmentRepairState,
   requeueScopedN8nVideoTaskRun, requeueScopedN8nVideoSegmentRepair } from '@/lib/n8n-task-runs'
 import { buildVideoLearningResult } from '../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+import { checkN8nCallbackAdmission } from '@/lib/n8n-runtime-affinity'
 import { acquireBatchLock, acquireGlobalBatchLock, batchStatePath } from '../../../openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs'
 
 const mocks = vi.hoisted(() => ({ evidence: vi.fn(), checkpoints: vi.fn(), webhook: vi.fn() }))
@@ -144,14 +145,24 @@ describe('two-step recovery service', () => {
 })
 
 function seedPartial(visionFailed = true) {
+  vi.stubEnv('AIWORKER_SLOT', 'blue')
+  vi.stubEnv('AIWORKER_RELEASE_ID', 'release-current')
+  vi.stubEnv('PORT', '3317')
+  vi.stubEnv('AIWORKER_N8N_CALLBACK_FREEZE_FILE', join(batchRoot, 'current.callbacks-frozen.json'))
   const learningResult = buildVideoLearningResult(3, [
     { index: 2, timeRange: '00:00:05-00:00:10', stage: visionFailed ? 'vision' : 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' },
     { index: 3, timeRange: '00:00:10-00:00:15', stage: 'summary', errorCode: 'N8N_MEDIA_MODEL_OUTPUT_INVALID' },
   ])
+  const accepted = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+  const originalRouting = { ...accepted.routing, callbackProtocol: 'slot-v1', runtimeSlot: 'green', runtimeReleaseId: 'release-retired',
+    nodeCallbackUrl: 'http://127.0.0.1:3417/api/n8n/node-execute',
+    mediaCallbackUrl: 'http://127.0.0.1:3417/api/n8n/media-execute', claimCallbackUrl: 'http://127.0.0.1:3417/api/n8n/claim',
+    model: 'qwen38-27b-vl', config: { media: { segmentSeconds: 5 } } }
+  db.prepare('UPDATE n8n_task_runs SET routing=? WHERE task_id=?').run(JSON.stringify(originalRouting), taskId)
   for (const stage of ['audio', 'vision', 'finalize'] as const) {
     const childId = mediaChildIdentity('task', taskId, stage)
     createN8nTaskRun(db, { taskId: childId, idempotencyKey: mediaChildIdentity('idem', identity, stage), bindingId,
-      source: 'n8n-media-node', requestedBy: 'test', routing: { taskType: 'video-analysis', mediaStage: stage },
+      source: 'n8n-media-node', requestedBy: 'test', routing: { ...originalRouting, mediaStage: stage },
       taskInput: {}, delivery: { mode: 'none' }, maxAttempts: 2 }, scope)
     db.prepare(`UPDATE n8n_task_runs SET status='succeeded',attempt_count=2,output=? WHERE task_id=?`)
       .run(JSON.stringify(stage === 'finalize' ? { summary: '已有摘要', learningResult } : { stage, segments: [] }), childId)
@@ -166,6 +177,79 @@ function seedPartial(visionFailed = true) {
 }
 
 describe('same-task targeted segment repair', () => {
+  it('binds a confirmed terminal repair to the current slot while preserving the retired receiver and rejecting its old actor', async () => {
+    seedPartial()
+    const original = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+    const audioBefore = getScopedN8nTaskRunByTaskId(db, mediaChildIdentity('task', taskId, 'audio'), scope)
+    expect(checkN8nCallbackAdmission(original.routing)).toMatchObject({ allowed: false, code: 'runtime_affinity_mismatch' })
+    const inspection = await inspectVideoSegmentRepair(db, taskId, scope, 0, [2])
+    expect(inspection).toMatchObject({ eligible: true, targetCallbackBinding: {
+      callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: 'release-current', port: 3317,
+    } })
+    expect(Object.keys(inspection!.targetCallbackBinding!)).toHaveLength(4)
+    await repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken!, segmentIndexes: [2] }, scope, 0)
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.routing).toEqual(original.routing)
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    const pending = JSON.parse(readFileSync(pathname, 'utf8')).items[0].learningRepairRequest
+    expect(pending.targetCallbackBinding).toEqual(inspection!.targetCallbackBinding)
+    const global = await acquireGlobalBatchLock(pathname)
+    const batch = await acquireBatchLock(pathname)
+    try {
+      await dispatchQueuedVideoSegmentRepair(db, { taskId, requestId: pending.requestId, workerLease: global.lease! }, scope)
+    } finally { await batch.release(); await global.release() }
+    const repaired = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+    expect(repaired).toMatchObject({ input: original.input, output: original.output, attemptCount: original.attemptCount,
+      routing: { callbackProtocol: 'slot-v1', runtimeSlot: 'blue', runtimeReleaseId: 'release-current',
+        nodeCallbackUrl: 'http://127.0.0.1:3317/api/n8n/node-execute',
+        mediaCallbackUrl: 'http://127.0.0.1:3317/api/n8n/media-execute', claimCallbackUrl: 'http://127.0.0.1:3317/api/n8n/claim',
+        model: original.routing.model, config: original.routing.config,
+        learningRepair: { previousCallbackBinding: { runtimeSlot: 'green', runtimeReleaseId: 'release-retired', port: 3417 },
+          targetCallbackBinding: inspection!.targetCallbackBinding } } })
+    expect(checkN8nCallbackAdmission(repaired.routing).allowed).toBe(true)
+    expect(getScopedN8nTaskRunByTaskId(db, mediaChildIdentity('task', taskId, 'audio'), scope)).toEqual(audioBefore)
+    const beforeOldActor = db.prepare('SELECT * FROM n8n_task_runs ORDER BY id').all()
+    expect(claimScopedN8nTaskRun(db, { taskId, idempotencyKey: identity, bindingId,
+      executionOwner: 'n8n-execution:original' }, scope).outcome).toBe('rejected')
+    expect(db.prepare('SELECT * FROM n8n_task_runs ORDER BY id').all()).toEqual(beforeOldActor)
+    expect(mocks.webhook).toHaveBeenCalledOnce()
+  })
+
+  it('requires a new confirmation when the target release changes before queueing or dispatch', async () => {
+    seedPartial()
+    const inspection = await inspectVideoSegmentRepair(db, taskId, scope, 0)
+    vi.stubEnv('AIWORKER_RELEASE_ID', 'release-next')
+    await expect(repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken! }, scope, 0)).rejects.toThrow('recovery_revision_changed')
+    expect(JSON.parse(readFileSync(batchStatePath('repair-batch', batchRoot), 'utf8')).status).toBe('completed_with_errors')
+    vi.stubEnv('AIWORKER_RELEASE_ID', 'release-current')
+    await repairVideoSegments(db, { taskId, inspectionToken: inspection!.inspectionToken! }, scope, 0)
+    const pathname = batchStatePath('repair-batch', batchRoot)
+    const pending = JSON.parse(readFileSync(pathname, 'utf8')).items[0].learningRepairRequest
+    const original = getScopedN8nTaskRunByTaskId(db, taskId, scope)!
+    vi.stubEnv('AIWORKER_RELEASE_ID', 'release-next')
+    const global = await acquireGlobalBatchLock(pathname)
+    const batch = await acquireBatchLock(pathname)
+    try {
+      await expect(dispatchQueuedVideoSegmentRepair(db, { taskId, requestId: pending.requestId,
+        workerLease: global.lease! }, scope)).rejects.toThrow('recovery_target_callback_binding_changed')
+    } finally { await batch.release(); await global.release() }
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)).toEqual(original)
+    expect(mocks.webhook).not.toHaveBeenCalled()
+  })
+
+  it('keeps current freeze and original lease protections when rebinding a retired terminal source', async () => {
+    seedPartial()
+    writeFileSync(join(batchRoot, 'current.callbacks-frozen.json'), '{}', { mode: 0o600 })
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false,
+      errorCode: 'recovery_target_callback_freeze_invalid', inspectionToken: null })
+    unlinkSync(join(batchRoot, 'current.callbacks-frozen.json'))
+    db.prepare(`INSERT INTO n8n_task_dispatch_leases (task_id,tenant_id,workspace_id,owner_token,lease_expires_at,revision)
+      VALUES (?,3,2,?,1,1)`).run(taskId, 'b'.repeat(64))
+    expect(await inspectVideoSegmentRepair(db, taskId, scope, 0)).toMatchObject({ eligible: false,
+      errorCode: 'recovery_dispatch_in_progress', inspectionToken: null })
+    expect(getScopedN8nTaskRunByTaskId(db, taskId, scope)?.routing.runtimeSlot).toBe('green')
+    expect(mocks.webhook).not.toHaveBeenCalled()
+  })
+
   it('preserves successful outputs and counters while granting one explicit bounded repair round', () => {
     const previousLearningResult = seedPartial()
     const parentBefore = getScopedN8nTaskRunByTaskId(db, taskId, scope)!

@@ -4,13 +4,14 @@ import { URL, fileURLToPath, pathToFileURL } from 'node:url'
 import { createTaskChainTool } from '../../openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js'
 import { readGitProductFile, resolveGitSourceLayout } from './git-source-layout.mjs'
 import { fingerprintOpenClawToolInventory } from './openclaw-tool-capability-fingerprint.mjs'
+import { OPENCLAW_VIDEO_PLUGIN_VERSION } from './openclaw-runtime-contract.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const toolPath = 'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js'
 const pluginId = 'aiworker-video-command'
 const toolId = 'aiworker_analyze_video'
 const declaration = Object.freeze({
-  fromVersion: '0.5.17', toVersion: '0.5.18',
+  fromVersion: '0.5.17', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION,
   sourceCommit: '28433d5ca59cc4dbe849b8747ec86aeea7191c9e',
   sourceSha256: '450873716ecf72dcf943482648f5efbb394961da8f643ee9c62a1263a7354ddb',
 })
