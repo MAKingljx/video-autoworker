@@ -11,9 +11,9 @@ export interface VideoLearningResult {
   completedSegments: number
   failedSegments: VideoLearningFailure[]
 }
-export const VIDEO_LEARNING_RESULT_SCHEMA: 'aiworker-video-learning-result/v1'
-export function buildVideoLearningResult(totalSegments: number, failures: VideoLearningFailure[]): VideoLearningResult
-export function readVideoLearningResult(output: unknown): VideoLearningResult | null
-export function hasPartialVideoLearning(output: unknown): boolean
-export function videoLearningDisplayState(status: string, output: unknown): string
-export function videoLearningSummary(output: unknown): string | null
+export declare const VIDEO_LEARNING_RESULT_SCHEMA: 'aiworker-video-learning-result/v1'
+export declare function buildVideoLearningResult(totalSegments: number, failures: VideoLearningFailure[]): VideoLearningResult
+export declare function readVideoLearningResult(output: unknown): VideoLearningResult | null
+export declare function hasPartialVideoLearning(output: unknown): boolean
+export declare function videoLearningDisplayState(status: string, output: unknown): string
+export declare function videoLearningSummary(output: unknown): string | null
