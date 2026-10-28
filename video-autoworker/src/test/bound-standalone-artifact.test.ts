@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import {
   auditBoundStandaloneArtifact, auditStandaloneArtifact,
   computeStandaloneArtifactContentBinding, readStandaloneArtifactContractForGitCommit,
+  writeStandaloneReleaseAttestations,
 } from '../../scripts/check-standalone-artifact.mjs'
 import {
   createStandaloneBuildSourceAnchor, sourceClosureForGitCommit,
@@ -131,6 +132,22 @@ describe('immutable bound standalone release contracts', () => {
     }))
     expect(result).toMatchObject({ ok: true, auditMode: 'bound-release', sourceCommit: commit,
       verificationBundle: { schema: 'video-autoworker-standalone-verification-bundle/v1' } })
+  })
+
+  it('requires the new proof helper when a current runtime script imports it', async () => {
+    const f = fixture()
+    for (const member of ['video-learning-result.mjs', 'video-segment-report.mjs']) {
+      write(join(f.root, 'openclaw-skills/aiworker-task-flow/lib', member), 'export {}\n')
+    }
+    write(join(f.root, 'scripts/check-standalone-artifact.mjs'),
+      "export * from './lib/standalone-release-source-proof.mjs'\n")
+    const helper = join(f.root, 'scripts/lib/standalone-release-source-proof.mjs')
+    write(helper, 'export {}\n')
+    await writeStandaloneReleaseAttestations(f.root)
+    await expect(auditStandaloneArtifact(f.root)).resolves.toMatchObject({ ok: true })
+    rmSync(helper)
+    await expect(auditStandaloneArtifact(f.root)).rejects
+      .toThrow('standalone_import_missing:scripts/check-standalone-artifact.mjs:./lib/standalone-release-source-proof.mjs')
   })
 
   it('rejects a changed manifest despite an otherwise intact old release', async () => {

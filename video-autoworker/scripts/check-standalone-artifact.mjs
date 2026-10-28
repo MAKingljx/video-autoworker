@@ -195,6 +195,7 @@ const ALLOWED_STANDALONE_SCRIPT_PATHS = new Set([
   'scripts/lib/render-managed-markdown-section.mjs',
   'scripts/lib/runtime-tree-manifest.mjs',
   'scripts/lib/director-extraction-release-provenance.mjs',
+  'scripts/lib/standalone-release-source-proof.mjs',
   'scripts/lib/git-source-layout.mjs',
   'scripts/lib/git-source-layout.sh',
   'scripts/lib/director-projection-contract-compatibility.mjs',
@@ -1533,7 +1534,7 @@ export async function auditBoundStandaloneArtifact(rootPath, {
   const before = await pinnedBoundManifest(root, manifestSha256)
   // This verifier already owns canonical Git/mainline, exact build-source
   // closure, source anchor and provenance/content binding. Reuse that authority.
-  const { assertRepositoryRelease, verifyDirectorExtractionReleaseProvenance } = await import('./verify-director-video-release-readiness.mjs')
+  const { assertRepositoryRelease, verifyDirectorExtractionReleaseProvenance } = await import('./lib/standalone-release-source-proof.mjs')
   const commit = assertRepositoryRelease(repositoryRoot, releaseId, 'ancestor')
   const provenance = verifyDirectorExtractionReleaseProvenance({ repositoryRoot, releaseRoot: root, commit })
   const contract = readStandaloneArtifactContractForGitCommit(repositoryRoot, commit)
@@ -1676,9 +1677,6 @@ export async function verifyStandaloneVerificationBundle(rootPath, bundle) {
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null
 if (invokedPath === import.meta.url) {
-  // Finish module evaluation before importing the existing readiness verifier,
-  // which also imports this auditor. The CLI promise retains its own errors.
-  void (async () => {
   try {
     const command = process.argv[2]
     const rootPath = command?.startsWith('--') ? process.argv[3] : command
@@ -1700,5 +1698,4 @@ if (invokedPath === import.meta.url) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: message })}\n`)
     process.exitCode = 1
   }
-  })()
 }

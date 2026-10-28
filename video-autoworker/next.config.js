@@ -44,6 +44,7 @@ const standaloneRuntimeIncludes = [
   './scripts/lib/application-release-manifest-contract.mjs',
   './scripts/lib/legacy-preinstall-handoff-contract.mjs',
   './scripts/lib/director-extraction-release-provenance.mjs',
+  './scripts/lib/standalone-release-source-proof.mjs',
   './scripts/lib/git-source-layout.mjs',
   './scripts/lib/git-source-layout.sh',
   './scripts/lib/director-projection-contract-compatibility.mjs',

@@ -251,6 +251,7 @@ describe('standalone runtime launcher', () => {
         'scripts/lib/openclaw-managed-sdk.mjs',
         'scripts/lib/openclaw-canonical-tool-upgrade.mjs',
         'scripts/lib/canonical-release-source.mjs',
+        'scripts/lib/standalone-release-source-proof.mjs',
       ]
       // Older payloads do not reference these helpers and must remain valid.
       for (const helper of helpers) expect(checker.REQUIRED_STANDALONE_FILES).not.toContain(helper)
@@ -270,7 +271,10 @@ describe('standalone runtime launcher', () => {
       copyFileSync(resolve('scripts/verify-director-video-release-readiness.mjs'),
         join(fixture.standaloneRoot, 'scripts/verify-director-video-release-readiness.mjs'))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
-        .rejects.toThrow('standalone_import_missing:scripts/verify-director-video-release-readiness.mjs:./lib/canonical-release-source.mjs')
+        .rejects.toThrow('standalone_import_missing:scripts/verify-director-video-release-readiness.mjs:./lib/standalone-release-source-proof.mjs')
+      copyFileSync(resolve(helpers[3]), join(fixture.standaloneRoot, helpers[3]))
+      await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot))
+        .rejects.toThrow('standalone_import_missing:scripts/lib/standalone-release-source-proof.mjs:./canonical-release-source.mjs')
       copyFileSync(resolve(helpers[2]), join(fixture.standaloneRoot, helpers[2]))
       await expect(checker.assertStandaloneStaticImportClosure(fixture.standaloneRoot)).resolves.toBeDefined()
       const forbidden = await checker.findForbiddenStandaloneMembers(fixture.standaloneRoot)
