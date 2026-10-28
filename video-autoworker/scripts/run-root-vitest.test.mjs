@@ -160,3 +160,25 @@ test('impact collection preserves an explicitly provided production NODE_ENV', a
   assert.equal(result.status, 0, result.stderr)
   assert.equal((await calls()).filter(args => args[0] === 'run').length, 1)
 })
+
+test('impact collection follows an executable mjs module to its real importing Vitest suite', async () => {
+  await mkdir(join(root, 'scripts'), { recursive: true })
+  await writeFile(join(root, 'scripts/controller.mjs'), 'export const contract = true\n')
+  await writeFile(join(root, regular[0]), "import '../../../scripts/controller.mjs'\n")
+  const pathname = join(root, 'impact.json')
+  await writeFile(pathname, JSON.stringify({ mode: 'targeted', relatedFiles: ['scripts/controller.mjs'], testFiles: [] }))
+  const result = run(['--partition', 'regular', '--impact-plan', pathname])
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual((await calls()).filter(args => args[0] === 'run')[0].filter(arg => arg.endsWith('.test.ts')), [regular[0]])
+})
+
+test('an uncovered executable module still fails instead of treating an empty impact selection as success', async () => {
+  await mkdir(join(root, 'scripts'), { recursive: true })
+  await writeFile(join(root, 'scripts/uncovered.mjs'), 'export const untested = true\n')
+  const pathname = join(root, 'impact.json')
+  await writeFile(pathname, JSON.stringify({ mode: 'targeted', relatedFiles: ['scripts/uncovered.mjs'], testFiles: [] }))
+  const result = run(['--partition', 'regular', '--impact-plan', pathname])
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /targeted_test_selection_empty/)
+  assert.equal((await calls()).filter(args => args[0] === 'run').length, 0)
+})
