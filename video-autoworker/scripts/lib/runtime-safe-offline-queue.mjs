@@ -501,10 +501,15 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
 
     const durable = new Map()
     const fileProjections = []
-    let activeJournals = 0
+    const stateRecords = new Map()
+    const retainedAttentionBatches = []
+    // Only a primary can own work. Backups remain fully checked snapshot
+    // evidence but must never multiply the current execution/journal count.
+    let authoritativeActiveJournals = 0
+    let backupActiveJournals = 0
     let visited = 0
     let totalBytes = 0
-    const readState = (pathname, terminalHistoryPrimary = false) => {
+    const readState = (pathname, { authoritative, terminalHistoryPrimary = false }) => {
       const record = readJsonRecord(pathname, 'bootstrap resume video batch state', {
         maximumBytes: maximumStateBytes,
       })
@@ -543,21 +548,35 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
           && !terminalStatuses.has(status)) status = 'paused'
         else if (state.status === 'recovering' && status === 'queued') status = 'recovering'
         if (!activeStatuses.has(status)) continue
-        if (item.stagingRecovery) activeJournals += 1
+        if (item.stagingRecovery) {
+          if (authoritative) authoritativeActiveJournals += 1
+          else backupActiveJournals += 1
+        }
         activeItems += 1
         active.push({ taskId, status, origin: 'durable' })
       }
+      stateRecords.set(pathname, { batchId: state.batchId })
       if (activeStatuses.has(state.status) && activeItems === 0) {
         const batchId = typeof state.batchId === 'string' ? state.batchId.trim() : ''
         if (!/^[A-Za-z0-9._:-]{1,80}$/u.test(batchId)) {
           fail('bootstrap resume active video batch has no valid durable identity')
         }
         const taskId = `batch:${batchId}`
-        active.push({
-          taskId,
-          status: state.status === 'running' ? 'running' : 'waiting',
-          origin: 'durable-batch',
-        })
+        const retainedAttention = state.status === 'paused' && state.items.length > 0
+          && state.items.every(item => item.status === 'attention')
+        if (retainedAttention) {
+          if (authoritative) retainedAttentionBatches.push({
+            classification: 'retained-attention', batchId, pathname: relative(root, pathname),
+            itemCount: state.items.length,
+            retainedJournals: state.items.filter(item => Boolean(item.stagingRecovery)).length,
+          })
+        } else {
+          active.push({
+            taskId,
+            status: state.status === 'running' ? 'running' : 'waiting',
+            origin: 'durable-batch',
+          })
+        }
       }
       if (terminalHistoryPrimary && active.length > 0) {
         fail('bootstrap resume video batch terminal history contains an active primary')
@@ -566,14 +585,25 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
     }
 
     for (const pathname of primary.sort()) {
-      for (const item of readState(pathname)) {
+      for (const item of readState(pathname, { authoritative: true })) {
         if (durable.has(item.taskId)) fail('bootstrap resume video batch task identity is duplicated')
         durable.set(item.taskId, item)
       }
     }
-    for (const pathname of backups.sort()) readState(pathname)
+    for (const pathname of backups.sort()) readState(pathname, { authoritative: false })
     for (const item of historyFiles.sort((left, right) => left.pathname.localeCompare(right.pathname))) {
-      readState(item.pathname, item.primary)
+      readState(item.pathname, { authoritative: item.primary, terminalHistoryPrimary: item.primary })
+    }
+    // Backups may describe an earlier phase or task set. They remain checked
+    // evidence for the same batch, never a second execution authority.
+    for (const [pathname, backupIdentity] of stateRecords) {
+      if (!backupPattern.test(pathname.split('/').at(-1))) continue
+      const currentIdentity = stateRecords.get(pathname.slice(0, -4))
+      if (!currentIdentity || typeof currentIdentity.batchId !== 'string'
+        || !/^[A-Za-z0-9._:-]{1,80}$/u.test(currentIdentity.batchId)
+        || currentIdentity.batchId !== backupIdentity.batchId) {
+        fail('bootstrap resume video batch backup identity differs from its primary')
+      }
     }
 
     for (const history of historyProjections) {
@@ -596,7 +626,9 @@ export function scanOfflineDurableBatchStates(batchRoot, { includeEvidence = fal
         entries: rootEntries.sort((left, right) => left.name.localeCompare(right.name)),
         histories: historyProjections,
         files: fileProjections.sort((left, right) => left.pathname.localeCompare(right.pathname)),
-        activeJournals,
+        activeJournals: authoritativeActiveJournals,
+        backupActiveJournals,
+        retainedAttentionBatches,
         guardian: guardian ? {
           marker: {
             identity: entryProjection(guardian.marker.entry, false),

@@ -2,15 +2,17 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
   applyReleaseImpactPlan,
+  assertSharedInstallerActivityUnchanged,
   assertAllowedArguments,
   assertControlSourceBinding,
   buildReleaseImpactPlan,
+  captureSharedInstallerActivity,
   installedControlComponentState,
   inspectReleasePayloadComponents,
   inspectSharedRuntimeDatabase,
@@ -18,17 +20,24 @@ import {
   isCommittedPlanRoute,
   isOriginalPlanRoute,
   parseBlueGreenStatus,
+  persistSharedInstallerBaseline,
   releaseCommandEnvironment,
   releaseComponentSummary,
   releaseFailureSummary,
   prepareReleaseReceiptDirectory,
+  prepareSharedInstallerBaseline,
   releaseSourceRoles,
   recoveryTargetDisposition,
+  readSharedInstallerBaseline,
   restoreOwnedIntake,
+  sharedInstallerGateFailure,
+  sharedReleaseQueueHasPendingWork,
   resumeCommittedPlan,
   validateResumeRuntimeProofOverride,
   waitForGatewayListener,
 } from '../../scripts/release-impact-deploy.mjs'
+import { scanOfflineDurableBatchStates } from '../../scripts/lib/runtime-safe-offline-queue.mjs'
+import { appendReleaseOperationEvent, createReleaseOperationScope, readReleaseOperationJournal } from '../../scripts/lib/release-operation.mjs'
 
 describe('release failure diagnostics', () => {
   it('prepares an idempotent private receipt leaf and rejects unsafe existing permissions', () => {
@@ -139,6 +148,8 @@ function services(events: string[], {
     assertComponents: async () => action('components'),
     routerStatus: async () => { await action('status'); return router },
     stage: async () => action('stage'),
+    inspectSharedQueue: async () => ({ items: [], snapshot: { activeJournals: 0 } }),
+    prepareSharedInstallerBaseline: async () => undefined,
     pauseSharedWorker: async () => action('worker:pause'),
     resumeSharedWorker: async () => action('worker:resume'),
     install: async (name: string) => {
@@ -179,6 +190,401 @@ function services(events: string[], {
 }
 
 describe('release impact deployment', () => {
+  const pendingQueue = () => ({ items: [{ taskId: 'original-video-8', status: 'staging', origin: 'durable' }],
+    snapshot: { activeJournals: 1, backupActiveJournals: 1 } })
+  const gateFailure = () => sharedInstallerGateFailure('install-aiworker-task-flow-skill.sh', ['--apply'], {
+    code: 1, signal: null, timedOut: false, overflow: false, groupStopped: true,
+    stderr: 'shared_runtime_install_not_ready:active_tasks_present\n',
+  })!
+  const operationId = 'e'.repeat(64)
+
+  it('uses authoritative queue evidence without counting retained backups as new work', () => {
+    expect(sharedReleaseQueueHasPendingWork({ items: [], snapshot: {
+      activeJournals: 0, backupActiveJournals: 3, retainedAttentionBatches: [{ batchId: 'retained-29' }],
+    } })).toBe(false)
+    expect(sharedReleaseQueueHasPendingWork(pendingQueue())).toBe(true)
+    expect(sharedReleaseQueueHasPendingWork({ items: [], snapshot: { activeJournals: 1 } })).toBe(true)
+    expect(() => sharedReleaseQueueHasPendingWork({ items: [] })).toThrow('evidence is invalid')
+  })
+
+  it('defers before staging, pausing intake, or stopping the original worker', async () => {
+    const events: string[] = []
+    const actions = services(events)
+    const evidence = pendingQueue()
+    const frozen = JSON.stringify(evidence)
+    Object.assign(actions, { inspectSharedQueue: async () => evidence })
+    await expect(applyReleaseImpactPlan(plan(['app', 'taskFlow'], 'assess-first'), actions))
+      .rejects.toMatchObject({ currentState: 'deferred_pending_handoff', errorCode: 'deferred_pending_handoff',
+        nextAction: 'wait_for_tasks_then_replan', effectState: 'unchanged', keepIntakeHold: false })
+    expect(events).not.toContain('stage')
+    expect(events).not.toContain('worker:pause')
+    expect(events.some(event => event.startsWith('intake:drain') || event.startsWith('install:'))).toBe(false)
+    expect(await actions.intake.read()).toEqual(activeIntake())
+    expect(JSON.stringify(evidence)).toBe(frozen)
+  })
+
+  it('reads the real primary/backup projection and leaves staged bytes and both journals unchanged', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'release-pending-handoff-')))
+    const batchRoot = join(root, 'batches')
+    mkdirSync(batchRoot, { mode: 0o700 })
+    const primary = join(batchRoot, `${'a'.repeat(64)}.json`)
+    const video = join(root, 'original-staged.mp4')
+    const state = { schemaVersion: 2, batchId: 'original-batch-8', status: 'staging',
+      items: [{ taskId: 'original-video-8', status: 'staging',
+        stagingRecovery: { phase: 'triggering', videoKey: 'original-staged.mp4' } }] }
+    writeFileSync(primary, JSON.stringify(state), { mode: 0o600 })
+    writeFileSync(`${primary}.bak`, JSON.stringify({ ...state, status: 'queued' }), { mode: 0o600 })
+    writeFileSync(video, Buffer.alloc(4096, 0x78), { mode: 0o600 })
+    const snapshot = () => [primary, `${primary}.bak`, video].map(pathname => {
+      const details = statSync(pathname)
+      return { pathname, ino: details.ino, size: details.size, mtimeMs: details.mtimeMs,
+        sha256: createHash('sha256').update(readFileSync(pathname)).digest('hex') }
+    })
+    try {
+      const before = snapshot()
+      const events: string[] = []
+      const actions = services(events)
+      Object.assign(actions, { inspectSharedQueue: async () => scanOfflineDurableBatchStates(batchRoot, { includeEvidence: true }) })
+      await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions))
+        .rejects.toMatchObject({ currentState: 'deferred_pending_handoff', effectState: 'unchanged' })
+      expect(snapshot()).toEqual(before)
+      expect(events).not.toContain('worker:pause')
+      expect(events.some(event => event.startsWith('install:') || event.startsWith('intake:drain'))).toBe(false)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  })
+
+  it('defers a real running task before taking its intake away', async () => {
+    const events: string[] = []
+    const initialControl = { ...activeIntake(), counts: { active: 1 } }
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: initialControl,
+      components: components(['taskFlow']), toolBaseline: '/private/baseline.json', receiptDir: '/private/receipts',
+      runtimeConvergenceProof: '/private/runtime-proof.json' })
+    const actions = services(events, { initialControl })
+    actions.inspectSharedQueue = vi.fn(async () => { throw new Error('active writer must not be sampled') })
+    await expect(applyReleaseImpactPlan(value, actions))
+      .rejects.toMatchObject({ errorCode: 'deferred_pending_handoff', effectState: 'unchanged' })
+    expect(actions.inspectSharedQueue).not.toHaveBeenCalled()
+    expect(events).not.toContain('worker:pause')
+    expect(events.some(event => event.startsWith('intake:drain'))).toBe(false)
+  })
+
+  it.each(['install-aiworker-task-flow-skill.sh', 'install-aiworker-director-brain.sh',
+    'install-aiworker-video-command-plugin.sh'])('classifies an official gate rejection without claiming a mutation phase: %s', script => {
+    const failure = { code: 1, signal: null, timedOut: false, overflow: false, groupStopped: true,
+      stderr: 'shared_runtime_install_not_ready:active_tasks_present\n' }
+    expect(sharedInstallerGateFailure(script, ['--apply'], failure)).toMatchObject({
+      sharedInstallGateRejected: true, errorCode: 'shared_runtime_install_not_ready',
+      effectState: 'component_mutation_unverified',
+      sharedInstallGateReason: 'active_tasks_present', installerFailure: failure,
+    })
+    expect(sharedInstallerGateFailure(script, ['--apply'], failure)).not.toHaveProperty('mutationNotStarted')
+    expect(sharedInstallerGateFailure(script, ['--rollback'], failure)).toBeNull()
+    expect(sharedInstallerGateFailure(script, ['--apply'], { ...failure, groupStopped: false })).toBeNull()
+    expect(sharedInstallerGateFailure(script, ['--apply'], { ...failure, timedOut: true })).toBeNull()
+    expect(sharedInstallerGateFailure('unrecognized.sh', ['--apply'], failure)).toBeNull()
+  })
+
+  function raceServices(events: string[], initialControl = activeIntake()) {
+    const actions = services(events, { initialControl })
+    let inspections = 0
+    Object.assign(actions, {
+      operation: { scope: { operationId }, record: vi.fn() },
+      inspectSharedQueue: async () => ++inspections === 1
+        ? { items: [], snapshot: { activeJournals: 0 } } : pendingQueue(),
+      install: async () => { events.push('gate:reject'); throw gateFailure() },
+      assertSharedRuntimeMatchesBefore: vi.fn(async () => { events.push('components:unchanged') }),
+      assertOwnedSharedWorkerHold: vi.fn(async () => { events.push('worker:owned'); return true }),
+    })
+    return actions as typeof actions & {
+      operation: { scope: { operationId: string }; record: ReturnType<typeof vi.fn> }
+      assertSharedRuntimeMatchesBefore: ReturnType<typeof vi.fn>
+      assertOwnedSharedWorkerHold: ReturnType<typeof vi.fn>
+    }
+  }
+
+  function activityFixture() {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'release-installer-activity-')))
+    const options = { workspaceRoot: join(root, 'workspace'), profileStateRoot: join(root, 'profile'),
+      backupRoots: ['task-backups', 'video-backups', 'director-backups'].map(name => join(root, name)) }
+    const target = join(options.workspaceRoot, 'skills/aiworker-task-flow/script.mjs')
+    for (const pathname of [join(options.workspaceRoot, 'skills/aiworker-task-flow'),
+      join(options.profileStateRoot, 'extensions/aiworker-video-command/node_modules'), ...options.backupRoots]) {
+      mkdirSync(pathname, { recursive: true, mode: 0o700 })
+    }
+    writeFileSync(target, 'original target', { mode: 0o600 })
+    return { root, options, target, receipt: join(root, 'current.apply.json') }
+  }
+
+  async function persistentBaselineFixture() {
+    const fixture = activityFixture()
+    const receiptDir = join(fixture.root, 'receipts')
+    mkdirSync(receiptDir, { mode: 0o700 })
+    const summary = components(['taskFlow'])
+    for (const name of ['taskFlow', 'directorBrain', 'videoCommand'] as const) {
+      Object.assign(summary[name], { installedFingerprint: 'b'.repeat(64) })
+    }
+    const value = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(), components: summary,
+      receiptDir, toolBaseline: '/private/tool-baseline.json', runtimeConvergenceProof: '/private/runtime-proof.json' })
+    const scope = createReleaseOperationScope(value)
+    const attemptId = '11111111-1111-4111-8111-111111111111'
+    const journal = join(receiptDir, 'operation.jsonl')
+    const record = (event: Record<string, unknown>) => appendReleaseOperationEvent(journal, scope, { ...event, attemptId })
+    const activity = captureSharedInstallerActivity(fixture.options)
+    const baseline = await persistSharedInstallerBaseline(value, { scope, owner: { attemptId }, record }, activity)
+    return { ...fixture, value, scope, attemptId, journal, record, baseline }
+  }
+
+  it('recovers an interrupted same-operation hold using its durable original baseline and verified journal', async () => {
+    const fixture = await persistentBaselineFixture()
+    try {
+      fixture.record({ step: 'pause-intake', status: 'completed' })
+      fixture.record({ step: 'pause-shared-worker', status: 'completed' })
+      fixture.record({ step: 'install-task-flow', status: 'started' })
+      const previousEvents = readReleaseOperationJournal(fixture.journal, fixture.scope.operationId)
+      const loaded = readSharedInstallerBaseline(fixture.value, fixture.scope.operationId, previousEvents)
+      expect(loaded.value.activitySha256).toBe(fixture.baseline.value.activitySha256)
+      expect(JSON.stringify(loaded.value)).not.toContain('pathname')
+      const events: string[] = []
+      const capture = vi.fn(() => { throw new Error('resume must reuse the original digest') })
+      const resumeRecord = vi.fn()
+      const journalBefore = readFileSync(fixture.journal, 'utf8')
+      const actions = raceServices(events, { ...pausedIntake(),
+        reason: `准备受控增量发布，暂停接收新任务 [operation:${fixture.scope.operationId}]` })
+      Object.assign(actions, { inspectSharedQueue: async () => pendingQueue(),
+        prepareSharedInstallerBaseline: async () => prepareSharedInstallerBaseline(fixture.value,
+          { resume: true, scope: fixture.scope, previousEvents, record: resumeRecord }, capture),
+        operation: { ...actions.operation, scope: fixture.scope, resume: true,
+          owner: { attemptId: '22222222-2222-4222-8222-222222222222' },
+          previousWorkerHold: { attemptId: fixture.attemptId }, previousEvents } })
+      actions.assertSharedRuntimeMatchesBefore.mockImplementation(async () =>
+        assertSharedInstallerActivityUnchanged(loaded.value.activitySha256, fixture.options, [fixture.receipt]))
+      await expect(applyReleaseImpactPlan(fixture.value, actions)).rejects.toMatchObject({
+        currentState: 'deferred_pending_handoff', recovery: { intake: { restored: true } },
+      })
+      expect(events).toContain('worker:resume')
+      expect(events).toContain('intake:resume:19')
+      expect(events).not.toContain('worker:pause')
+      expect(capture).not.toHaveBeenCalled()
+      expect(resumeRecord).not.toHaveBeenCalled()
+      expect(readFileSync(fixture.journal, 'utf8')).toBe(journalBefore)
+    } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['missing', 'receipt-tampered', 'reference-sha', 'forged-binding', 'different-operation', 'old-attempt', 'event-order', 'directory-drift'])(
+    'rejects an untrusted or changed persistent baseline without releasing the hold: %s', async fault => {
+      const fixture = await persistentBaselineFixture()
+      try {
+        const reference = readReleaseOperationJournal(fixture.journal, fixture.scope.operationId)[0]
+        let previousEvents = readReleaseOperationJournal(fixture.journal, fixture.scope.operationId)
+        if (fault === 'missing') previousEvents = []
+        if (fault === 'receipt-tampered') writeFileSync(fixture.baseline.pathname,
+          `${readFileSync(fixture.baseline.pathname, 'utf8')} `, { mode: 0o600 })
+        if (['reference-sha', 'forged-binding', 'different-operation', 'old-attempt', 'event-order'].includes(fault)) {
+          rmSync(fixture.journal)
+          if (fault === 'forged-binding') {
+            const value = JSON.parse(readFileSync(fixture.baseline.pathname, 'utf8'))
+            writeFileSync(fixture.baseline.pathname, JSON.stringify({ ...value, controlSourceCommit: 'c'.repeat(40) }), { mode: 0o600 })
+          }
+          if (fault === 'event-order') fixture.record({ step: 'install-task-flow', status: 'started' })
+          const event = { step: 'shared-installer-baseline', status: 'completed',
+            effectState: fault === 'reference-sha' ? `baseline_sha256:${'f'.repeat(64)}`
+              : fault === 'forged-binding' ? `baseline_sha256:${createHash('sha256').update(readFileSync(fixture.baseline.pathname)).digest('hex')}`
+                : reference.effectState,
+            attemptId: fault === 'old-attempt' ? '33333333-3333-4333-8333-333333333333' : fixture.attemptId }
+          if (fault === 'different-operation') appendReleaseOperationEvent(fixture.journal,
+            { ...fixture.scope, operationId: 'd'.repeat(64) }, event)
+          else appendReleaseOperationEvent(fixture.journal, fixture.scope, event)
+          previousEvents = readReleaseOperationJournal(fixture.journal)
+        }
+        if (fault === 'directory-drift') writeFileSync(fixture.target, 'changed since original baseline')
+        const events: string[] = []
+        const actions = raceServices(events, { ...pausedIntake(),
+          reason: `准备受控增量发布，暂停接收新任务 [operation:${fixture.scope.operationId}]` })
+        let loaded: ReturnType<typeof readSharedInstallerBaseline>
+        Object.assign(actions, { inspectSharedQueue: async () => pendingQueue(),
+          prepareSharedInstallerBaseline: async () => {
+            loaded = readSharedInstallerBaseline(fixture.value, fixture.scope.operationId, previousEvents)
+          }, operation: { ...actions.operation, scope: fixture.scope, resume: true,
+            previousWorkerHold: { attemptId: fixture.attemptId }, previousEvents } })
+        actions.assertSharedRuntimeMatchesBefore.mockImplementation(async () =>
+          assertSharedInstallerActivityUnchanged(loaded.value.activitySha256, fixture.options, [fixture.receipt]))
+        await expect(applyReleaseImpactPlan(fixture.value, actions)).rejects.toThrow()
+        expect(events).not.toContain('worker:resume')
+        expect(events.some(event => event.startsWith('intake:resume'))).toBe(false)
+      } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+    })
+
+  it.each(['target-restored', 'transaction', 'backup', 'backup-transaction', 'receipt'])(
+    'keeps a same-stderr post-commit gate failure protected using real activity evidence: %s', async scenario => {
+      const fixture = activityFixture()
+      try {
+        const baseline = captureSharedInstallerActivity(fixture.options)
+        const events: string[] = []
+        const actions = raceServices(events)
+        actions.assertSharedRuntimeMatchesBefore.mockImplementation(async () =>
+          assertSharedInstallerActivityUnchanged(baseline, fixture.options, [fixture.receipt]))
+        actions.install = async () => {
+          if (scenario === 'target-restored') {
+            writeFileSync(fixture.target, 'changed temporarily')
+            writeFileSync(fixture.target, 'original target')
+          }
+          if (scenario === 'transaction') mkdirSync(join(fixture.options.profileStateRoot,
+            '.aiworker-video-command-install.lock'), { mode: 0o700 })
+          if (scenario === 'backup') writeFileSync(join(fixture.options.backupRoots[0], 'new-backup.json'), '{}', { mode: 0o600 })
+          if (scenario === 'backup-transaction') mkdirSync(join(fixture.options.backupRoots[0], '.rollback-source-claim.ABCD12'), { mode: 0o700 })
+          if (scenario === 'receipt') writeFileSync(fixture.receipt, JSON.stringify({
+            schema: 'video-autoworker-installer-result/v1', status: 'applied',
+          }), { mode: 0o600 })
+          throw gateFailure()
+        }
+        await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions)).rejects.toMatchObject({
+          recovery: { components: { ok: false, reason: 'pending_handoff_recovery_unverified' } },
+        })
+        expect(events).not.toContain('worker:resume')
+        expect(events.some(event => event.startsWith('intake:resume'))).toBe(false)
+        expect(actions.operation.record).toHaveBeenCalledWith(expect.objectContaining({
+          step: 'install-task-flow', effectState: 'component_mutation_unverified',
+        }))
+        expect(actions.operation.record.mock.calls.some(([event]) =>
+          ['mutation_not_started', 'target_state_matches_before'].includes(event.effectState))).toBe(false)
+      } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+    })
+
+  it('inspects only the recognized target and backup SDK links without following SDK contents', () => {
+    const fixture = activityFixture()
+    try {
+      const legacyRoot = join(fixture.root, 'managed-node')
+      const legacySdk = join(legacyRoot, 'lib/node_modules/openclaw')
+      const currentSdk = join(fixture.root, 'current-sdk')
+      for (const [root, version] of [[legacySdk, '2026.9.2'], [currentSdk, '2026.9.9']]) {
+        mkdirSync(root, { recursive: true, mode: 0o700 })
+        writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'openclaw', version }), { mode: 0o600 })
+      }
+      vi.stubEnv('NODE_ENV', 'test'); vi.stubEnv('AIWORKER_OPENCLAW_RUNTIME_TEST_MODE', '1')
+      vi.stubEnv('AIWORKER_TEST_OPENCLAW_MANAGED_NODE_ROOT', legacyRoot)
+      vi.stubEnv('AIWORKER_TEST_OPENCLAW_SDK_ROOT', currentSdk)
+      const targetLink = join(fixture.options.profileStateRoot, 'extensions/aiworker-video-command/node_modules/openclaw')
+      const backupModules = join(fixture.options.backupRoots[1],
+        'current-release-20261028-090000.ABCD12/previous-plugin/node_modules')
+      mkdirSync(backupModules, { recursive: true, mode: 0o700 })
+      symlinkSync(legacySdk, targetLink)
+      symlinkSync(join(fixture.root, 'retired-and-absent-sdk'), join(backupModules, 'openclaw'))
+      const before = captureSharedInstallerActivity(fixture.options)
+      expect(before.filter(record => record.sdk)).toHaveLength(1)
+      expect(before.filter(record => record.historicalSdkReference)).toHaveLength(1)
+      expect(() => assertSharedInstallerActivityUnchanged(before, fixture.options, [fixture.receipt])).not.toThrow()
+      symlinkSync(currentSdk, join(fixture.options.workspaceRoot, 'skills/aiworker-task-flow/arbitrary-link'))
+      expect(() => captureSharedInstallerActivity(fixture.options)).toThrow('activity path is unsafe')
+      rmSync(join(fixture.options.workspaceRoot, 'skills/aiworker-task-flow/arbitrary-link'))
+      rmSync(targetLink)
+      symlinkSync(join(fixture.root, 'retired-and-absent-sdk'), targetLink)
+      expect(() => captureSharedInstallerActivity(fixture.options)).toThrow()
+    } finally { vi.unstubAllEnvs(); rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+
+  it('rejects group/world-writable ordinary activity evidence', () => {
+    const fixture = activityFixture()
+    try {
+      chmodSync(fixture.target, 0o666)
+      expect(() => captureSharedInstallerActivity(fixture.options)).toThrow('activity path is unsafe')
+    } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+  })
+
+  it('restores only its own exact holds after a late handoff race and verified zero installation mutation', async () => {
+    const events: string[] = []
+    const actions = raceServices(events)
+    await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions))
+      .rejects.toMatchObject({ currentState: 'deferred_pending_handoff', effectState: 'owned_runtime_restored',
+        keepIntakeHold: false, recovery: { components: { reason: 'verified_current_equivalent' },
+          intake: { restored: true, revision: 20 } } })
+    expect(events).toContain('components:unchanged')
+    expect(events).toContain('worker:owned')
+    expect(events).toContain('worker:resume')
+    expect(events).toContain('intake:resume:19')
+    expect(events.some(event => event.startsWith('recover:'))).toBe(false)
+    expect(events).not.toContain('converge')
+    expect(actions.operation.record).toHaveBeenCalledWith(expect.objectContaining({
+      step: 'install-task-flow', status: 'failed', effectState: 'component_mutation_unverified',
+    }))
+    expect(actions.operation.record).toHaveBeenCalledWith(expect.objectContaining({
+      step: 'shared-installer-state-verified', effectState: 'target_state_matches_before',
+    }))
+    expect(actions.operation.record.mock.calls.some(([event]) => event.effectState === 'mutation_not_started')).toBe(false)
+    expect(await actions.intake.read()).toMatchObject({ accepting: true, revision: 20 })
+  })
+
+  it.each(['foreign-intake', 'component-drift', 'foreign-worker', 'missing-proof'])(
+    'keeps the hold closed when late-race recovery cannot prove ownership: %s', async scenario => {
+      const events: string[] = []
+      const actions = raceServices(events)
+      if (scenario === 'foreign-intake') {
+        const read = actions.intake.read
+        actions.intake.read = async () => {
+          const value = await read()
+          return value.accepting ? value : { ...value, reason: 'another operation' }
+        }
+      }
+      if (scenario === 'component-drift') actions.assertSharedRuntimeMatchesBefore.mockRejectedValue(new Error('installed fingerprint changed'))
+      if (scenario === 'foreign-worker') actions.assertOwnedSharedWorkerHold.mockResolvedValue(false)
+      if (scenario === 'missing-proof') Object.assign(actions, { assertOwnedSharedWorkerHold: undefined })
+      await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions)).rejects.toMatchObject({
+        recovery: { components: { ok: false, reason: 'pending_handoff_recovery_unverified' },
+          intake: { restored: false, reason: 'recovery_incomplete' } },
+      })
+      expect(events).not.toContain('worker:resume')
+      expect(events.some(event => event.startsWith('intake:resume') || event.startsWith('recover:'))).toBe(false)
+    })
+
+  it('refuses a worker owner that changes after the zero-mutation proof', async () => {
+    const events: string[] = []
+    const actions = raceServices(events)
+    actions.assertOwnedSharedWorkerHold.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions)).rejects.toMatchObject({
+      recovery: { components: { ok: false, reason: 'video_worker_restore_failed' } },
+    })
+    expect(events).not.toContain('worker:resume')
+    expect(events.some(event => event.startsWith('intake:resume'))).toBe(false)
+  })
+
+  it('does not call a later gate rejection zero mutation after an earlier component was installed', async () => {
+    const events: string[] = []
+    const actions = raceServices(events)
+    let attempts = 0
+    actions.install = async () => {
+      if (++attempts === 1) return { component: 'taskFlow', status: 'applied' }
+      throw gateFailure()
+    }
+    await expect(applyReleaseImpactPlan(plan(['taskFlow', 'directorBrain'], 'assess-first'), actions))
+      .rejects.toMatchObject({ recovery: { components: { ok: false, reason: 'pending_handoff_recovery_unverified' } } })
+    expect(actions.assertSharedRuntimeMatchesBefore).not.toHaveBeenCalled()
+    expect(events).not.toContain('worker:resume')
+    expect(events.some(event => event.startsWith('intake:resume') || event.startsWith('recover:'))).toBe(false)
+  })
+
+  it('settles an interrupted same-operation hold before deferring instead of re-pausing work', async () => {
+    const events: string[] = []
+    const actions = raceServices(events, { ...pausedIntake(),
+      reason: `准备受控增量发布，暂停接收新任务 [operation:${operationId}]` })
+    Object.assign(actions, { inspectSharedQueue: async () => pendingQueue(),
+      operation: { ...actions.operation, resume: true, previousWorkerHold: { attemptId: 'prior-owned-attempt' } } })
+    await expect(applyReleaseImpactPlan(plan(['taskFlow'], 'assess-first'), actions))
+      .rejects.toMatchObject({ currentState: 'deferred_pending_handoff', keepIntakeHold: false,
+        recovery: { intake: { restored: true, revision: 20 } } })
+    expect(events).not.toContain('worker:pause')
+    expect(events).not.toContain('intake:drain:18')
+    expect(events).toContain('worker:resume')
+    expect(events).toContain('intake:resume:19')
+  })
+
+  it('does not resume a same-revision pause whose owner reason changed', async () => {
+    const mutate = vi.fn()
+    await expect(restoreOwnedIntake({ before: activeIntake(), paused: pausedIntake(),
+      read: async () => ({ ...pausedIntake(), reason: 'foreign owner' }), mutate,
+      pauseReason: `准备受控增量发布，暂停接收新任务 [operation:${operationId}]`,
+    })).resolves.toMatchObject({ restored: false, reason: 'revision_changed' })
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
   it('defaults newly sealed plans to assessment before compensation', () => {
     const value = buildPlan({ baseCommit, sourceCommit, router, intake: activeIntake(), components: components() })
     expect(value.failurePolicy).toBe('assess-first')

@@ -6,10 +6,10 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import {
   closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
-  realpathSync, statSync, writeFileSync,
+  readdirSync, readlinkSync, realpathSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { runManagedChild, sanitizeMaintenanceFailure } from './legacy-release-runner.mjs'
@@ -24,6 +24,7 @@ import { readRouterState } from './standalone-router.mjs'
 import { inspectInstalledReleaseComponent } from './verify-director-video-release-readiness.mjs'
 import { RECOGNIZED_LEGACY_OPENCLAW_VERSION } from './lib/openclaw-managed-sdk.mjs'
 import { OPENCLAW_RUNTIME_VERSION } from './lib/openclaw-runtime-contract.mjs'
+import { validateOpenClawSdkLink } from './lib/openclaw-runtime-convergence.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
 import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
 import { discoverDeploymentEnvironment } from './lib/deployment-discovery.mjs'
@@ -73,6 +74,7 @@ const INSTALL_STEP_BY_COMPONENT = Object.freeze({
   directorBrain: 'install-director-brain',
   videoCommand: 'install-video-command',
 })
+const SHARED_COMPONENTS = Object.freeze(Object.keys(INSTALL_STEP_BY_COMPONENT))
 let activeOperationSignal = null
 let activeRuntimeEnvironment = {}
 
@@ -422,7 +424,7 @@ export function buildReleaseImpactPlan({ baseCommit, sourceCommit, router, intak
 }
 
 export async function restoreOwnedIntake({ before, paused, read, mutate,
-  resumeReason = RESUME_REASON, allowDraining = false }) {
+  resumeReason = RESUME_REASON, pauseReason = /** @type {string | null} */ (null), allowDraining = false }) {
   if (!before.accepting) return { restored: false, reason: 'not_owned' }
   const current = validateIntake(await read())
   if (current.accepting === true) {
@@ -433,6 +435,7 @@ export async function restoreOwnedIntake({ before, paused, read, mutate,
     return { restored: false, reason: 'revision_changed', revision: current.revision }
   }
   if (current.revision !== paused.revision
+    || (pauseReason !== null && current.reason !== pauseReason)
     || (current.mode !== 'paused' && !(allowDraining && current.mode === 'draining'))) {
     return { restored: false, reason: 'revision_changed', revision: current.revision }
   }
@@ -453,10 +456,176 @@ export async function restoreOwnedIntake({ before, paused, read, mutate,
   return { restored: true, revision: restored.revision, reason: 'cas_restored' }
 }
 
+export function sharedReleaseQueueHasPendingWork(evidence) {
+  if (!Array.isArray(evidence?.items)
+    || !Number.isSafeInteger(evidence.snapshot?.activeJournals)
+    || evidence.snapshot.activeJournals < 0) fail('shared queue preflight evidence is invalid')
+  // The scanner owns primary/backup authority and retained-attention semantics.
+  // A queued item is also unfinished work: let this original lane finish before
+  // taking it away for a shared installer. Backup-only journals are evidence.
+  return evidence.items.length > 0 || evidence.snapshot.activeJournals > 0
+}
+
+function pendingHandoffDeferral(phase, { keepIntakeHold = false, cause } = {}) {
+  const error = new ReleaseOperationError('shared runtime deployment deferred until original video work finishes', {
+    phase, errorCode: 'deferred_pending_handoff', effectState: 'unchanged', retryable: true, cause,
+  })
+  return Object.assign(error, { currentState: 'deferred_pending_handoff',
+    nextAction: 'wait_for_tasks_then_replan', keepIntakeHold })
+}
+
+export function sharedInstallerGateFailure(script, args, failure) {
+  if (!['install-aiworker-task-flow-skill.sh', 'install-aiworker-director-brain.sh',
+    'install-aiworker-video-command-plugin.sh'].includes(basename(script))
+    || !args.includes('--apply') || failure?.groupStopped !== true
+    || !Number.isInteger(failure.code) || failure.code === 0
+    || failure.timedOut || failure.overflow || failure.signal) return null
+  const reason = /shared_runtime_install_not_ready:([a-z0-9_]+)/u.exec(failure.stderr || '')?.[1]
+  if (!reason) return null
+  // The same gate also runs while writing the final receipt, after commit.
+  // Its stderr alone never identifies whether an installer already mutated.
+  const error = new ReleaseOperationError(`shared_runtime_install_not_ready:${reason}; installer target state requires verification`, {
+    errorCode: 'shared_runtime_install_not_ready', effectState: 'component_mutation_unverified', retryable: true,
+  })
+  return Object.assign(error, { sharedInstallGateRejected: true, sharedInstallGateReason: reason,
+    installerFailure: failure })
+}
+
+export function captureSharedInstallerActivity({ workspaceRoot, profileStateRoot, backupRoots }) {
+  const identity = entry => Object.fromEntries(['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']
+    .map(key => [key, String(entry[key])]))
+  const capture = () => {
+    const records = []
+    let visited = 0
+    const sample = (pathname, recursive = false, depth = 0) => {
+      if (++visited > 20_000 || depth > 40) fail('shared installer activity exceeds bounded limits')
+      if (recursive && depth > 0 && /^\.rollback-source-claim\./u.test(basename(pathname))) {
+        fail('shared installer backup transaction is still present')
+      }
+      let entry
+      try { entry = lstatSync(pathname, { bigint: true }) } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+        const parent = dirname(pathname)
+        if (parent === pathname) throw error
+        sample(parent)
+        records.push({ pathname, absent: true })
+        return
+      }
+      const targetSdk = join(profileStateRoot, 'extensions/aiworker-video-command/node_modules/openclaw')
+      const backupMember = backupRoots[1] ? relative(backupRoots[1], pathname).split('/') : []
+      const backupSdk = backupMember.length === 4
+        && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/u.test(backupMember[0])
+        && backupMember.slice(1).join('/') === 'previous-plugin/node_modules/openclaw'
+      const nestedLink = recursive && depth > 0 && entry.isSymbolicLink()
+        && (pathname === targetSdk || backupSdk)
+      if ((!nestedLink && (realpathSync.native(pathname) !== pathname || entry.isSymbolicLink()))
+        || (!entry.isSymbolicLink() && (entry.mode & 0o022n) !== 0n)
+        || entry.uid !== BigInt(process.getuid())) fail('shared installer activity path is unsafe')
+      const before = identity(entry)
+      records.push({ pathname, identity: before,
+        ...(nestedLink ? { linkSha256: sha256(readlinkSync(pathname)),
+          ...(pathname === targetSdk ? {
+            sdk: validateOpenClawSdkLink(pathname, OPENCLAW_RUNTIME_VERSION, { allowRecognizedLegacy: true }).evidence,
+          } : { historicalSdkReference: true }) } : {}) })
+      if (entry.isDirectory()) {
+        const names = readdirSync(pathname).sort()
+        if (!recursive && names.some(name => /^\.(?:aiworker-(?:task-flow|director-brain|video-command).*(?:install\.lock|txn\.|next\.|previous\.)|openclaw\.json\.(?:next|previous)\.)/u.test(name))) {
+          fail('shared installer transaction is still present')
+        }
+        if (recursive) for (const name of names) sample(join(pathname, name), true, depth + 1)
+      } else if (!entry.isFile() && !nestedLink) fail('shared installer activity object is unsupported')
+      if (JSON.stringify(identity(lstatSync(pathname, { bigint: true }))) !== JSON.stringify(before)) {
+        fail('shared installer activity changed during inspection')
+      }
+    }
+    for (const pathname of [workspaceRoot, join(workspaceRoot, 'skills'), profileStateRoot,
+      join(profileStateRoot, 'extensions')]) sample(pathname)
+    for (const pathname of [join(workspaceRoot, 'AGENTS.md'), join(workspaceRoot, 'MEMORY.md'),
+      join(profileStateRoot, 'openclaw.json'), join(workspaceRoot, 'skills/aiworker-task-flow'),
+      join(workspaceRoot, 'skills/aiworker-director-brain'),
+      join(profileStateRoot, 'extensions/aiworker-video-command'),
+      join(profileStateRoot, 'extensions/aiworker-director-brain')]) sample(pathname, true)
+    for (const pathname of backupRoots) sample(pathname, true)
+    return records
+  }
+  const first = capture()
+  if (JSON.stringify(first) !== JSON.stringify(capture())) fail('shared installer activity is not stable')
+  return first
+}
+
+export function assertSharedInstallerActivityUnchanged(baseline, options, receiptPaths) {
+  const expectedSha256 = Array.isArray(baseline) ? sha256(JSON.stringify(baseline)) : baseline
+  if (!SHA256.test(expectedSha256 || '') || !Array.isArray(receiptPaths)) fail('shared installer activity baseline is missing')
+  for (const pathname of receiptPaths) {
+    if (lstatSync(pathname, { throwIfNoEntry: false })) fail('shared installer receipt requires assessment')
+  }
+  if (sha256(JSON.stringify(captureSharedInstallerActivity(options))) !== expectedSha256) {
+    fail('shared installer transaction, backup or target activity changed')
+  }
+}
+
+const SHARED_BASELINE_SCHEMA = 'video-autoworker-shared-installer-baseline/v1'
+const BASELINE_EVENT = 'shared-installer-baseline'
+const ATTEMPT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u
+function sharedBaselineBinding(plan, operationId) {
+  if (!COMMIT.test(plan.sourceCommit || '') || !COMMIT.test(plan.controlSourceCommit || '')) fail('shared baseline source binding is missing')
+  if (createReleaseOperationScope(plan).operationId !== operationId) fail('shared baseline operation differs from plan')
+  const beforeFingerprints = Object.fromEntries(SHARED_COMPONENTS.map(name => [name, plan.components[name].installedFingerprint]))
+  if (Object.values(beforeFingerprints).some(value => !SHA256.test(value || ''))) fail('shared baseline component identity is missing')
+  return { schema: SHARED_BASELINE_SCHEMA, operationId, planSha256: plan.planSha256,
+    applicationSourceCommit: plan.sourceCommit, controlSourceCommit: plan.controlSourceCommit, beforeFingerprints }
+}
+function sharedBaselinePath(plan, attemptId) {
+  if (!ATTEMPT_ID.test(attemptId || '')) fail('shared baseline attempt is invalid')
+  privateDirectory(plan.receiptDir)
+  return join(plan.receiptDir, `shared-installer-baseline.${attemptId}.json`)
+}
+
+export async function persistSharedInstallerBaseline(plan, operation, activity) {
+  const binding = sharedBaselineBinding(plan, operation?.scope?.operationId)
+  if (!Array.isArray(activity) || typeof operation?.record !== 'function') fail('shared baseline evidence is invalid')
+  const value = { ...binding, attemptId: operation.owner?.attemptId, activitySha256: sha256(JSON.stringify(activity)) }
+  const pathname = sharedBaselinePath(plan, value.attemptId)
+  privateWrite(pathname, value)
+  const parent = openSync(dirname(pathname), constants.O_RDONLY)
+  try { fsyncSync(parent) } finally { closeSync(parent) }
+  const sourceSha256 = privateFileSha256(pathname)
+  await operation.record({ step: BASELINE_EVENT, status: 'completed', phase: 'shared-baseline-preflight',
+    effectState: `baseline_sha256:${sourceSha256}` })
+  return { pathname, sourceSha256, value }
+}
+
+export function readSharedInstallerBaseline(plan, operationId, events) {
+  const binding = sharedBaselineBinding(plan, operationId)
+  if (!Array.isArray(events) || events.some(event => event.operationId !== operationId)) fail('shared baseline journal belongs to another operation')
+  const references = events.map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.step === BASELINE_EVENT && event.status === 'completed')
+  if (references.length !== 1) fail('shared baseline original reference is missing or ambiguous')
+  const { event, index } = references[0]
+  const sourceSha256 = /^baseline_sha256:([a-f0-9]{64})$/u.exec(event.effectState || '')?.[1]
+  const firstMutation = events.findIndex(item => ['started', 'completed'].includes(item.status)
+    && ['pause-intake', 'pause-shared-worker', ...Object.values(INSTALL_STEP_BY_COMPONENT)].includes(item.step))
+  if (!sourceSha256 || (firstMutation !== -1 && index >= firstMutation)) fail('shared baseline reference is not before maintenance')
+  const pathname = sharedBaselinePath(plan, event.attemptId)
+  if (privateFileSha256(pathname) !== sourceSha256) fail('shared baseline receipt changed')
+  const value = privateRead(pathname)
+  const expected = { ...binding, attemptId: event.attemptId, activitySha256: value.activitySha256 }
+  if (!SHA256.test(value.activitySha256 || '')
+    || JSON.stringify(value) !== JSON.stringify(expected)) fail('shared baseline receipt binding is invalid')
+  return { pathname, sourceSha256, value }
+}
+
+export async function prepareSharedInstallerBaseline(plan, operation, captureActivity) {
+  return operation?.resume
+    ? readSharedInstallerBaseline(plan, operation.scope.operationId, operation.previousEvents)
+    : persistSharedInstallerBaseline(plan, operation, captureActivity())
+}
+
 export async function applyReleaseImpactPlan(planSource, services) {
   const plan = validatePlan(structuredClone(planSource))
   const failurePolicy = releaseFailurePolicy(services.operation?.failurePolicy || plan.failurePolicy)
   const pauseNewOnly = plan.admissionPolicy === 'pause-new'
+  const changesSharedRuntime = SHARED_COMPONENTS.some(name => plan.components[name].changed)
   const operationId = services.operation?.scope?.operationId || null
   const drainReason = operationReason(DRAIN_REASON, operationId)
   const resumeReason = operationReason(RESUME_REASON, operationId)
@@ -484,8 +653,11 @@ export async function applyReleaseImpactPlan(planSource, services) {
           ? (services.operation.signal.reason || new Error('release operation cancelled')) : error,
         { phase: step, effectState },
       )
+      if (structured.phase === 'unknown') structured.phase = step
       if (error?.mutationNotStarted === true) structured.mutationNotStarted = true
-      await record({ step, status: 'failed', phase: step, effectState,
+      await record({ step, status: 'failed', phase: step,
+        effectState: structured.sharedInstallGateRejected ? 'component_mutation_unverified'
+          : structured.mutationNotStarted ? 'mutation_not_started' : effectState,
         errorCode: structured.errorCode, retryable: structured.retryable,
         elapsedMs: Date.now() - startedAt })
       throw structured
@@ -526,6 +698,17 @@ export async function applyReleaseImpactPlan(planSource, services) {
     return { ok: true, sourceCommit: plan.sourceCommit, actions: [],
       intake: { restored: false, reason: 'unchanged' } }
   }
+  const inspectPendingWork = async () => sharedReleaseQueueHasPendingWork(
+    await services.inspectSharedQueue(plan),
+  )
+  if (changesSharedRuntime && !resumingOwnedPause) {
+    await runStep('shared-queue-preflight', async () => {
+      if (observedIntake.counts.active > 0 || await inspectPendingWork()) throw pendingHandoffDeferral('shared-queue-preflight', {
+        keepIntakeHold: !before.accepting,
+      })
+    })
+  }
+  if (changesSharedRuntime) await runStep('shared-baseline-preflight', () => services.prepareSharedInstallerBaseline(plan))
   if (plan.components.app.changed) {
     await runStep('stage-app', () => services.stage(plan), { effectState: 'artifact_staged' })
     if (services.transitionPreflight) {
@@ -541,9 +724,13 @@ export async function applyReleaseImpactPlan(planSource, services) {
   let installInFlight = null
   let switched = false
   let transitionAccepted = false
-  let workerMaintenance = false
+  let workerMaintenance = Boolean(resumingOwnedPause && services.operation?.previousWorkerHold)
+  let deferredPendingHandoff = false
   let recovery = { ok: true, reason: 'not_needed' }
   try {
+    if (changesSharedRuntime && resumingOwnedPause && await inspectPendingWork()) {
+      throw pendingHandoffDeferral('shared-queue-preflight', { keepIntakeHold: true })
+    }
     if (resumingOwnedPause) {
       await record({ step: 'drain-intake', status: 'skipped', phase: 'resume',
         effectState: 'owned_pause_verified' })
@@ -569,7 +756,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
     } else if (!pauseNewOnly && (before.mode !== 'paused' || before.counts.active !== 0)) {
       fail('pre-existing intake hold has not drained')
     }
-    if (['taskFlow', 'directorBrain', 'videoCommand'].some(name => plan.components[name].changed)) {
+    if (changesSharedRuntime) {
       workerMaintenance = true
       await runStep('pause-shared-worker', () => services.pauseSharedWorker(plan),
         { effectState: 'worker_paused' })
@@ -641,23 +828,62 @@ export async function applyReleaseImpactPlan(planSource, services) {
   } finally {
     if (operationError) {
       services.operation?.beginRecovery?.()
-      try {
-        let current = null
-        try { current = await (services.routeReadback ? services.routeReadback() : services.routerStatus()) } catch { /* Unknown routes cannot authorize compensation. */ }
-        const assessment = releaseFailureAssessment({ policy: failurePolicy,
-          routeState: isCommittedPlanRoute(plan, current) ? 'committed'
-            : isOriginalPlanRoute(plan, current) || isRestoredOriginalPlanRoute(plan, current) ? 'original' : 'unknown',
-          errorCode: operationError.errorCode || 'release_step_failed' })
-        operationError.assessment = assessment
-        recovery = assessment.restorePrevious
-          ? await services.recover({ plan, receipts, installInFlight, switched, assessment })
-          : { ok: false, reason: 'assessment_required', assessment }
-      } catch (error) {
-        recovery = { ok: false, reason: 'recovery_failed', error: String(error?.message || error) }
+      const pendingGateRejection = operationError.sharedInstallGateRejected === true
+        && operationError.errorCode === 'shared_runtime_install_not_ready'
+        && ['active_tasks_present', 'maintenance_queue_snapshot_changed'].includes(operationError.sharedInstallGateReason)
+      const pendingBeforeResume = operationError.errorCode === 'deferred_pending_handoff' && resumingOwnedPause
+      if (changesSharedRuntime && (pendingGateRejection || pendingBeforeResume)) {
+        try {
+          if (!SHA256.test(operationId || '') || !before.accepting || !workerMaintenance
+            || receipts.length !== 0 || (installInFlight && !pendingGateRejection) || switched
+            || SHARED_COMPONENTS.some(name => services.completedInstall?.(name))) {
+            fail('pending handoff recovery lacks zero-mutation ownership evidence')
+          }
+          const current = await (services.routeReadback ? services.routeReadback() : services.routerStatus())
+          const control = validateIntake(await services.intake.read())
+          if (!isOriginalPlanRoute(plan, current) || control.accepting
+            || control.revision !== before.revision + 1 || control.revision !== paused.revision
+            || control.reason !== drainReason || control.mode !== 'paused') {
+            fail('pending handoff recovery authority changed')
+          }
+          await services.assertSharedRuntimeMatchesBefore(plan)
+          if (await services.assertOwnedSharedWorkerHold(plan) !== true || !await inspectPendingWork()) {
+            fail('pending handoff recovery ownership or pending work is unverified')
+          }
+          await record({ step: 'shared-installer-state-verified', status: 'completed',
+            phase: operationError.phase, effectState: 'target_state_matches_before' })
+          installInFlight = null
+          deferredPendingHandoff = true
+          recovery = { ok: true, reason: 'verified_current_equivalent' }
+        } catch (error) {
+          recovery = { ok: false, reason: 'pending_handoff_recovery_unverified', error: String(error?.message || error) }
+        }
+      } else {
+        try {
+          let current = null
+          try { current = await (services.routeReadback ? services.routeReadback() : services.routerStatus()) } catch { /* Unknown routes cannot authorize compensation. */ }
+          const assessment = releaseFailureAssessment({ policy: failurePolicy,
+            routeState: isCommittedPlanRoute(plan, current) ? 'committed'
+              : isOriginalPlanRoute(plan, current) || isRestoredOriginalPlanRoute(plan, current) ? 'original' : 'unknown',
+            errorCode: operationError.errorCode || 'release_step_failed' })
+          operationError.assessment = assessment
+          recovery = assessment.restorePrevious
+            ? await services.recover({ plan, receipts, installInFlight, switched, assessment })
+            : { ok: false, reason: 'assessment_required', assessment }
+        } catch (error) {
+          recovery = { ok: false, reason: 'recovery_failed', error: String(error?.message || error) }
+        }
       }
     }
     if (workerMaintenance && (!operationError || recovery.ok)) {
-      try { await services.resumeSharedWorker(plan) }
+      try {
+        if (deferredPendingHandoff) {
+          const control = validateIntake(await services.intake.read())
+          if (control.accepting || control.revision !== paused.revision || control.reason !== drainReason
+            || await services.assertOwnedSharedWorkerHold(plan) !== true) fail('pending handoff restore ownership changed')
+        }
+        await services.resumeSharedWorker(plan)
+      }
       catch (error) {
         operationError ||= error
         recovery = { ok: false, reason: 'video_worker_restore_failed' }
@@ -667,7 +893,7 @@ export async function applyReleaseImpactPlan(planSource, services) {
       try {
         restore = await restoreOwnedIntake({
           before, paused, read: services.intake.read, mutate: services.intake.mutate,
-          resumeReason, allowDraining: pauseNewOnly,
+          resumeReason, pauseReason: drainReason, allowDraining: pauseNewOnly,
         })
       } catch (error) {
         restore = { restored: false, reason: 'restore_failed', error: String(error?.message || error) }
@@ -675,6 +901,14 @@ export async function applyReleaseImpactPlan(planSource, services) {
     } else {
       restore = { restored: false, reason: 'recovery_incomplete' }
     }
+  }
+  if (deferredPendingHandoff && recovery.ok && restore.restored) {
+    await record({ step: 'deferred-pending-handoff', status: 'observed', phase: 'settlement',
+      effectState: 'owned_runtime_restored', errorCode: 'deferred_pending_handoff', retryable: true })
+    const error = pendingHandoffDeferral('settlement', { cause: operationError })
+    error.effectState = 'owned_runtime_restored'
+    error.recovery = { components: recovery, intake: restore }
+    throw error
   }
   if (operationError) {
     const classified = classifyReleaseOperationError(operationError, {
@@ -1078,12 +1312,8 @@ async function managed(command, args, timeoutMs = 900_000, extraEnvironment = {}
       process.stderr.write(`${JSON.stringify({ step,
         ...sanitizeMaintenanceFailure(failure, process.env.AIWORKER_OPENCLAW_RUNTIME_SESSION_KEY || ''),
       })}\n`)
-      if (step === 'install-aiworker-director-brain.sh' && args.includes('--apply')
-        && failure.stderr.includes('shared_runtime_install_not_ready:')) {
-        const error = new Error('director installer preflight rejected before target mutation')
-        error.mutationNotStarted = true
-        throw error
-      }
+      const gateError = sharedInstallerGateFailure(step, args, failure)
+      if (gateError) throw gateError
     },
   })
 }
@@ -1338,6 +1568,20 @@ async function executePlan(values, operation = null) {
   const workerLabel = `gui/${process.getuid()}/ai.aiworker.video-lane-supervisor`
   const workerModule = await import(pathToFileURL(join(coordinatorRoot,
     'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs')).href)
+  const activityOptions = {
+    workspaceRoot: process.env.AIWORKER_QWEN_WORKSPACE || join(homedir(), 'AI-worker-second-original-workspace'),
+    profileStateRoot: process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR || join(homedir(), '.openclaw-qwen-current'),
+    backupRoots: [process.env.AIWORKER_SKILL_BACKUP_ROOT || join(homedir(), 'ai-worker/backups/aiworker-task-flow-skill'),
+      join(homedir(), 'ai-worker/backups/aiworker-video-command'),
+      join(process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR || join(homedir(), '.openclaw-qwen-current'),
+        'backups/aiworker-director-brain')],
+  }
+  let installerBaselineEvidence = null
+  const inspectSharedQueue = async () => {
+    const { scanOfflineDurableBatchStates } = await import(pathToFileURL(join(coordinatorRoot,
+      'scripts/lib/runtime-safe-offline-queue.mjs')).href)
+    return scanOfflineDurableBatchStates(workerRoot, { includeEvidence: true })
+  }
   const pauseSharedWorker = async () => {
     const snapshot = workerModule.inspectVideoExecutionControlSnapshotSync(workerRoot)
     if (snapshot.status === 'blocked' && snapshot.reason === 'worker_unavailable') return
@@ -1411,7 +1655,53 @@ async function executePlan(values, operation = null) {
   const services = {
     operation,
     completedInstall,
-    pauseSharedWorker, resumeSharedWorker,
+    pauseSharedWorker, resumeSharedWorker, inspectSharedQueue,
+    prepareSharedInstallerBaseline: async currentPlan => {
+      installerBaselineEvidence = await prepareSharedInstallerBaseline(currentPlan, operation,
+        () => captureSharedInstallerActivity(activityOptions))
+    },
+    assertSharedRuntimeMatchesBefore: currentPlan => {
+      if (!installerBaselineEvidence || privateFileSha256(installerBaselineEvidence.pathname)
+        !== installerBaselineEvidence.sourceSha256) fail('shared baseline original receipt is unavailable or changed')
+      const attempts = new Set([operation?.owner?.attemptId,
+        ...(operation?.previousEvents || []).map(event => event.attemptId)].filter(Boolean))
+      if (attempts.size === 0) fail('shared installer attempt identity is missing')
+      const receiptPaths = [...attempts].flatMap(attemptId => SHARED_COMPONENTS.map(name =>
+        join(currentPlan.receiptDir, `${currentPlan.sourceCommit}.${name}.${attemptId}.apply.json`)))
+      assertSharedInstallerActivityUnchanged(installerBaselineEvidence.value.activitySha256, activityOptions, receiptPaths)
+      const current = inspectReleasePayloadComponents(currentPlan.components, {
+        repositoryRoot: productRoot,
+        profileStateRoot: process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR || join(homedir(), '.openclaw-qwen-current'),
+        workspaceRoot: process.env.AIWORKER_QWEN_WORKSPACE || join(homedir(), 'AI-worker-second-original-workspace'),
+      })
+      for (const name of SHARED_COMPONENTS) {
+        if (!SHA256.test(currentPlan.components[name].installedFingerprint || '')
+          || current[name].installedFingerprint !== currentPlan.components[name].installedFingerprint) {
+          fail(`shared component zero-mutation evidence changed: ${name}`)
+        }
+      }
+    },
+    assertOwnedSharedWorkerHold: () => {
+      if (!SHA256.test(operation?.scope?.operationId || '') || !workerHold
+        || (workerHold.attemptId !== operation?.owner?.attemptId
+          && (!operation?.resume || JSON.stringify(workerHold) !== JSON.stringify(operation.previousWorkerHold)))) {
+        fail('video worker hold does not belong to this operation')
+      }
+      const persisted = privateRead(workerHoldPath(plan.receiptDir, workerHold.attemptId))
+      if (JSON.stringify(persisted) !== JSON.stringify(workerHold)
+        || sha256(readFileSync(workerPlist)) !== workerHold.plistSha256
+        || workerHold.label !== workerLabel) fail('video worker hold identity changed')
+      try { process.kill(workerHold.pid, 0); fail('held video worker is still alive') }
+      catch (error) { if (error.code !== 'ESRCH') throw error }
+      const snapshot = workerModule.inspectVideoExecutionControlSnapshotSync(workerRoot)
+      if (snapshot.status !== 'blocked' || snapshot.reason !== 'worker_unavailable'
+        || existsSync(join(workerRoot, '.global-video-worker.lock'))) fail('video worker lane is no longer held')
+      try {
+        execFileSync('/bin/launchctl', ['print', workerLabel], { stdio: 'ignore' })
+        fail('video supervisor is no longer held')
+      } catch (error) { if (error.status !== 113) throw error }
+      return true
+    },
     assertSource: commit => assertCleanGitSource(productRoot, commit),
     assertWorker: () => assertPlannedWorker(plan),
     completeWorkerHandoff: () => completePlannedWorkerHandoff(plan),

@@ -795,6 +795,46 @@ describe('shared runtime installation gate', () => {
     }
   })
 
+  it('keeps a retained attention backup as evidence without blocking a frozen queued task', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-retained-attention-'))
+    try {
+      const fixture = await createDatabase(root)
+      await writeHeldQueuedArtifacts(fixture.videoBatchRoot)
+      const items = Array.from({ length: 29 }, (_, index) => ({ taskId: `retained-${index}`, status: 'attention' }))
+      const primary = resolve(fixture.videoBatchRoot, `${'c'.repeat(64)}.json`)
+      await writeFile(primary, JSON.stringify({ schemaVersion: 2, batchId: 'retained-attention-batch',
+        status: 'paused', items }) + '\n', { mode: 0o600 })
+      await writeFile(`${primary}.bak`, JSON.stringify({ schemaVersion: 2, batchId: 'retained-attention-batch',
+        status: 'running', items: items.map((item, index) => index === 7
+          ? { ...item, status: 'staging', stagingRecovery: { phase: 'triggering' } } : item) }) + '\n', { mode: 0o600 })
+      const before = [await readFile(primary), await readFile(`${primary}.bak`)]
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      expect(verifySharedRuntimeInstallGate(fixture)).toMatchObject({ waiting: 1, running: 0,
+        maintenanceQueue: { reason: 'maintenance_guardian', baseline: { queue: { durableSnapshot: {
+          activeJournals: 0, backupActiveJournals: 1,
+          retainedAttentionBatches: [{ classification: 'retained-attention', itemCount: 29 }],
+        } } } },
+      })
+      expect([await readFile(primary), await readFile(`${primary}.bak`)]).toEqual(before)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  it('still blocks an authoritative staging journal even when its backup is the same handoff', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-authoritative-journal-'))
+    try {
+      const fixture = await createDatabase(root)
+      const primary = await writeHeldQueuedArtifacts(fixture.videoBatchRoot)
+      const state = JSON.parse(await readFile(primary, 'utf8'))
+      state.status = 'running'
+      state.items[0].status = 'staging'
+      state.items[0].stagingRecovery = { phase: 'triggering' }
+      await writeFile(primary, JSON.stringify(state) + '\n', { mode: 0o600 })
+      await writeFile(`${primary}.bak`, JSON.stringify(state) + '\n', { mode: 0o600 })
+      const { verifySharedRuntimeInstallGate } = await verifier()
+      expect(() => verifySharedRuntimeInstallGate(fixture)).toThrow(/active_tasks_present/u)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
   it('rejects a queued task that is not durable even when a guardian is live', async () => {
     const root = await mkdtemp(resolve(tmpdir(), 'shared-runtime-install-gate-nondurable-queue-'))
     try {
