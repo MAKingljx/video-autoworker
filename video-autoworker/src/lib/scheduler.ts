@@ -14,6 +14,7 @@ import { syncLocalAgents } from './local-agent-sync'
 import { dispatchAssignedTasks, runAegisReviews, requeueStaleTasks, autoRouteInboxTasks } from './task-dispatch'
 import { spawnRecurringTasks } from './recurring-tasks'
 import { drainN8nMediaCleanupDebts } from './n8n-media-cleanup'
+import { drainScopedVideoStops } from './n8n-video-stop'
 import { drainDirectorEvidenceOutbox } from './director-evidence-outbox'
 import { drainDirectorExtractionJobs } from './director-extraction-service'
 import {
@@ -826,6 +827,10 @@ async function tick() {
 
   try {
     if (!reconcileSchedulerLeadership()) return
+    // Stop intents are control work already authorized by the original actor.
+    // The existing leader retries bounded observations after process restarts.
+    try { drainScopedVideoStops(getDatabase(), { limit: 10 }) }
+    catch { logger.warn({ code: 'N8N_VIDEO_STOP_DRAIN_UNAVAILABLE' }, 'Video stop observations will retry on the next owned tick') }
     const now = Date.now()
 
     for (const [id, task] of tasks) {

@@ -5,13 +5,14 @@ import Database from 'better-sqlite3'
 import ts from 'typescript'
 import { describe, expect, it } from 'vitest'
 import { runMigrations } from '@/lib/migrations'
+import { inspectVideoStopSchema, VIDEO_STOP_SCHEMA_OBJECTS } from '@/lib/database-capabilities'
 import {
   getN8nRollingDatabaseCompatibility,
   N8N_ROLLING_DATABASE_COMPATIBILITY,
 } from '@/lib/n8n-runtime-affinity'
 
 describe('n8n rolling database compatibility epoch', () => {
-  it('keeps published migration 057 byte-stable while appending 058 through 060', () => {
+  it('keeps published migration 057 byte-stable while appending 058 through 061', () => {
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
     const start = source.indexOf("  {\n    id: '057_n8n_director_evidence_outbox'")
     const end = source.indexOf("  {\n    id: '058_director_extraction_task_runs'", start)
@@ -23,11 +24,11 @@ describe('n8n rolling database compatibility epoch', () => {
     )
   })
 
-  it('keeps the declared rolling epoch additive-only through migration 060', () => {
+  it('keeps old core DDL additive and separately validates the narrow 061 stop capability', () => {
     expect(N8N_ROLLING_DATABASE_COMPATIBILITY).toEqual({
       schemaEpoch: 1,
       rollingSafeFrom: '052_n8n_intake_controls',
-      latestMigration: '060_video_edit_task_receipts',
+      latestMigration: '061_n8n_video_stop_requests',
     })
 
     const source = readFileSync(join(process.cwd(), 'src/lib/migrations.ts'), 'utf8')
@@ -45,7 +46,9 @@ describe('n8n rolling database compatibility epoch', () => {
         && ts.isStringLiteral(property.initializer)
         && property.initializer.text === N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom))
     expect(start).toBeGreaterThanOrEqual(0)
-    const epoch = array.elements.slice(start).map(element => element.getText(syntax)).join('\n')
+    const all = array.elements.slice(start).map(element => element.getText(syntax))
+    expect(all.at(-1)).toContain("id: '061_n8n_video_stop_requests'")
+    const epoch = all.slice(0, -1).join('\n')
     const ids = [...epoch.matchAll(/\bid:\s*'(\d{3}_[^']+)'/gu)].map(match => match[1])
     expect(ids.at(-1)).toBe('060_video_edit_task_receipts')
     expect(epoch).not.toMatch(/\bdb\.(?:prepare|pragma|transaction)\s*\(/gu)
@@ -58,6 +61,14 @@ describe('n8n rolling database compatibility epoch', () => {
         expect(statement).toMatch(/^CREATE\s+(?:TABLE|(?:UNIQUE\s+)?INDEX)\s+IF\s+NOT\s+EXISTS\b/iu)
       }
     }
+    const db = new Database(':memory:')
+    try {
+      runMigrations(db)
+      expect(inspectVideoStopSchema(db)).toBe(true)
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'n8n_video_stop_%'")
+        .pluck().all()).toHaveLength(9)
+      expect(getN8nRollingDatabaseCompatibility(db).schemaEpoch).toBe(1)
+    } finally { db.close() }
   })
 
   it('attests the task-run-only extraction schema without rewriting the published root outbox', () => {
@@ -66,7 +77,7 @@ describe('n8n rolling database compatibility epoch', () => {
       db.pragma('foreign_keys = ON')
       runMigrations(db)
       expect(getN8nRollingDatabaseCompatibility(db))
-        .toEqual(N8N_ROLLING_DATABASE_COMPATIBILITY)
+        .toEqual({ ...N8N_ROLLING_DATABASE_COMPATIBILITY, videoEditingMigrationPresent: true })
 
       const tables = new Set((db.prepare(`
         SELECT name FROM sqlite_master WHERE type = 'table'
@@ -122,11 +133,16 @@ describe('n8n rolling database compatibility epoch', () => {
     }
   })
 
-  it('adds 060 without changing tables and indexes read by the previous release', () => {
+  it('adds 060 and 061 without changing table and index definitions read by the previous release', () => {
     const db = new Database(':memory:')
     try {
       runMigrations(db)
+      for (const [name, [type]] of Object.entries(VIDEO_STOP_SCHEMA_OBJECTS)) {
+        if (type === 'trigger') db.exec(`DROP TRIGGER ${name}`)
+      }
       db.exec(`
+        DROP TABLE n8n_video_stop_requests;
+        DELETE FROM schema_migrations WHERE id='061_n8n_video_stop_requests';
         DROP TABLE video_edit_operations;
         DROP TABLE video_edit_plans;
         DELETE FROM schema_migrations WHERE id = '060_video_edit_task_receipts';
@@ -144,13 +160,16 @@ describe('n8n rolling database compatibility epoch', () => {
         WHERE name NOT LIKE 'video_edit_%'
           AND name NOT LIKE 'idx_video_edit_%'
           AND name NOT LIKE 'sqlite_autoindex_video_edit_%'
+          AND name NOT LIKE 'n8n_video_stop_%'
+          AND name NOT LIKE 'idx_n8n_video_stop_%'
+          AND name NOT LIKE 'sqlite_autoindex_n8n_video_stop_%'
         ORDER BY type, name
       `).all()
       expect(afterSchema).toEqual(previousSchema)
       expect(db.prepare('SELECT id FROM schema_migrations ORDER BY id').pluck().all())
-        .toEqual([...previousMarkers, '060_video_edit_task_receipts'])
+        .toEqual([...previousMarkers, '060_video_edit_task_receipts', '061_n8n_video_stop_requests'])
       expect(getN8nRollingDatabaseCompatibility(db).latestMigration)
-        .toBe('060_video_edit_task_receipts')
+        .toBe('061_n8n_video_stop_requests')
     } finally { db.close() }
   })
 

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, readFile, readdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -60,6 +60,17 @@ function currentProof() {
 }
 
 describe('prepared recovery accepts the current checkpoint identity envelope', () => {
+  it('retains the original prepared proof when a stop commits before its final publication fence', async () => {
+    const proofPath = join(workspace, 'prepared-proof.json'), before = await readFile(proofPath)
+    const metadata = JSON.parse(await readFile(join(workspace, 'metadata.json'), 'utf8'))
+    const controller = new AbortController(), reason = Object.assign(new Error('stopped'), { code: 'N8N_VIDEO_STOP_REQUESTED' })
+    await expect(writePreparedMediaProof(taskId, routing, input, { ...metadata, preparedAt: 'new-attempt' }, {
+      signal: controller.signal, assertActive: () => controller.signal.throwIfAborted(),
+      commitIfActive: publish => { controller.abort(reason); controller.signal.throwIfAborted(); return publish() },
+    })).rejects.toBe(reason)
+    expect(await readFile(proofPath)).toEqual(before)
+    expect((await readdir(workspace)).some(name => name.startsWith('.prepared-proof-'))).toBe(false)
+  })
   it('permits a configuration-level v3 envelope without inventing a weight revision', async () => {
     expect(await inspectWithProof(currentProof())).toMatchObject({ eligible: true, totalSegments: 1 })
   })

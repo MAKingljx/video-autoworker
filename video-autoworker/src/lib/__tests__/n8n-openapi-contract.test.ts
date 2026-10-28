@@ -3,6 +3,17 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('n8n rolling and callback OpenAPI contract', () => {
+  it('exposes only scoped confirmation input for a durable single-video stop', () => {
+    const stop = document.paths['/api/n8n/runs/stop']
+    const schema = stop.post.requestBody.content['application/json'].schema
+    expect(schema.additionalProperties).toBe(false)
+    expect(schema.required).toEqual(['taskId', 'expectedRevision', 'confirm'])
+    expect(Object.keys(schema.properties)).toEqual(['taskId', 'expectedRevision', 'confirm'])
+    expect(schema.properties.confirm.const).toBe(true)
+    expect(stop.post.responses['202'].description).toContain('not proof that compute stopped')
+    expect(stop.post.description).toContain('no PID, path or termination proof')
+    expect(stop.get.parameters[0].name).toBe('taskId')
+  })
   it('documents the server-resolved director work name on the trigger boundary', () => {
     const trigger = document.paths['/api/n8n/trigger'].post
     const request = trigger.requestBody.content['application/json'].schema
@@ -120,7 +131,7 @@ describe('n8n rolling and callback OpenAPI contract', () => {
   it('uses a strict scheduler schema only for release readiness', () => {
     const readiness = document.components.schemas.N8nReleaseReadiness
     expect(readiness.properties.database.properties.latestMigration.enum)
-      .toEqual(['059_director_evidence_projection_receipts', '060_video_edit_task_receipts'])
+      .toEqual(['059_director_evidence_projection_receipts', '060_video_edit_task_receipts', '061_n8n_video_stop_requests'])
     expect(readiness.properties.scheduler.$ref)
       .toBe('#/components/schemas/N8nReleaseSchedulerLeadershipStatus')
     expect(readiness.properties.projection.required).toEqual(expect.arrayContaining([

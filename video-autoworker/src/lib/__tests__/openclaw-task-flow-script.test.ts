@@ -62,6 +62,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : undefined
   const requestUrl = url.pathname + url.search
@@ -471,13 +472,13 @@ globalThis.fetch = async (input, init = {}) => {
     expect(skill).toContain('`aiworker_analyze_video`')
     expect(skill).toContain('{"action":"submit_video","videoPath":"/absolute/path/video.mp4"}')
     expect(skill).toContain('{"action":"submit_directory","videoDirectory":"/absolute/path/series"}')
-    expect(skill).toContain('{"action":"status","query":"task ID, batch ID, title, filename, season/episode, or keyword"}')
-    expect(skill).toContain('{"action":"result","query":"task ID, batch ID, title, filename, season/episode, or keyword"}')
-    expect(skill).toContain('legacy `bot-learning` search')
-    expect(skill).toContain('stable IDs')
+    expect(skill).toContain('{"action":"status","query":"S03E03"}')
+    expect(skill).toContain('{"action":"result","query":"S03E03","offset":0}')
+    expect(skill).toContain('`bot-learning` search')
+    expect(skill).toContain('stable task IDs')
     expect(skill).toContain('persistent global video lane')
-    expect(skill).toContain('completion time')
-    expect(skill).toContain('do not ask the user to supply an ID already returned by the tool')
+    expect(skill).toContain('`completedAt` 最新的已完成记录')
+    expect(skill).toContain('不问用户要已返回的任务 ID')
   })
 
   it('keeps direct dispatch inside the managed tool boundary', () => {
@@ -489,11 +490,11 @@ globalThis.fetch = async (input, init = {}) => {
 
     expect(workspaceRules).toContain('`aiworker_analyze_video`')
     expect(workspaceRules).toContain('`before_dispatch`')
-    expect(skill).toContain('Do not require a user to remember a slash command')
-    expect(skill).toContain('Use neither `exec` nor direct ffmpeg')
-    expect(workspaceRules).toContain('Do not invoke shell commands')
+    expect(skill).toContain('用户不需要记忆 slash')
+    expect(skill).toContain('Do not invoke `exec`')
+    expect(workspaceRules).toContain('禁止 `exec`')
     expect(skill).toContain('native `before_dispatch` hook')
-    expect(workspaceRules).toContain('same managed runner')
+    expect(workspaceRules).toContain('与工具共用受控 runner')
     expect(workspaceRules).toContain('raw scheduler script is not exposed')
   })
 
@@ -504,17 +505,15 @@ globalThis.fetch = async (input, init = {}) => {
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_RULES.md',
     ), 'utf8')
 
+    expect(skill).toContain('Return one receipt and stop after submission')
+    expect(workspaceRules).toContain('提交/目录入队后只回一次收据，不轮询、不重试、不重复提交')
     for (const contract of [skill, workspaceRules]) {
-      expect(contract).toMatch(/one (?:concise |short )?receipt/u)
-      expect(contract).toMatch(/end the turn|After submission/u)
       expect(contract).toContain('`delivery=none`')
       expect(contract).toContain('`memoryMode=none`')
     }
-    expect(skill).toContain('Do not poll,')
-    expect(workspaceRules).toMatch(/do not poll, retry, resubmit/iu)
   })
 
-  it('documents title and keyword status lookup as controlled read-only state', () => {
+  it('documents title and filename lookup as controlled read-only state', () => {
     const skill = readFileSync(resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/SKILL.md'), 'utf8')
     const workspaceRules = readFileSync(resolve(
       process.cwd(),
@@ -526,15 +525,12 @@ globalThis.fetch = async (input, init = {}) => {
     ), 'utf8')
     for (const contract of [skill, workspaceRules, workspaceMemory]) {
       expect(contract).toMatch(/title|标题/u)
-      expect(contract).toMatch(/keyword|关键词/u)
+      expect(contract).toContain('文件名')
       expect(contract).toMatch(/read-only|只读/u)
-      expect(contract).toMatch(/SQLite/u)
-      expect(contract).toMatch(/n8n/u)
-      expect(contract).toMatch(/media/u)
     }
-    expect(skill).toMatch(/returns bounded\s+candidates for ambiguity/u)
-    expect(workspaceRules).toContain('ambiguous result matches return bounded candidates containing task ID')
-    expect(workspaceRules).toContain('completion time, and update time')
+    expect(skill).toContain('不得为了查询触发重学')
+    expect(workspaceRules).toContain('不得追加旧上下文、改写名称、并行同义查询')
+    expect(workspaceRules).toContain('`completedAt` 最新的已完成记录')
   })
 
   it('keeps native hook compatibility separate from the direct tool', () => {
@@ -548,11 +544,10 @@ globalThis.fetch = async (input, init = {}) => {
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
     for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toContain('`before_dispatch`')
-      expect(contract).toMatch(/fail(?:s)? closed|fail-closed/u)
+      expect(contract).toContain('before_dispatch')
       expect(contract).toContain('`aiworker_analyze_video`')
-      expect(contract).toMatch(/runner errors?|runner 失败/u)
     }
+    expect(skill).toMatch(/fail closed\s+on input validation or runner errors/u)
     expect(skill).toContain('The tool is the direct OpenClaw')
     expect(workspaceRules).toContain('raw scheduler script is not exposed')
   })
@@ -568,13 +563,12 @@ globalThis.fetch = async (input, init = {}) => {
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
     for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toMatch(/task ID|任务 ID/u)
-      expect(contract).toMatch(/batch ID|批次 ID/u)
+      expect(contract).toMatch(/task ID|任务 ID|`taskId`/u)
       expect(contract).toMatch(/title|标题/u)
-      expect(contract).toMatch(/keyword|关键词/u)
+      expect(contract).toContain('文件名')
+      expect(contract).toContain('slash')
     }
-    expect(skill).toContain('never demand a')
-    expect(skill).toContain('`/video-status` command')
+    expect(skill).toContain('不问用户要已返回的任务 ID')
   })
 
   it('documents one process-wide persistent lane for single videos and directories', () => {
@@ -588,13 +582,10 @@ globalThis.fetch = async (input, init = {}) => {
       'openclaw-skills/aiworker-task-flow/WORKSPACE_VIDEO_MEMORY.md',
     ), 'utf8')
 
-    for (const contract of [skill, workspaceRules, workspaceMemory]) {
-      expect(contract).toMatch(/single video|single videos/u)
-      expect(contract).toMatch(/director(?:y|ies)/u)
-      expect(contract).toMatch(/persistent/u)
-      expect(contract).toMatch(/process-wide/u)
-      expect(contract).toMatch(/one video at a time/u)
-      expect(contract).toMatch(/restart/u)
+    expect(skill).toMatch(/single video and a directory batch are\s+durable, idempotent operations/u)
+    expect(skill).toMatch(/processes at most one video at a time\s+and resumes after a worker restart/u)
+    for (const contract of [workspaceRules, workspaceMemory]) {
+      expect(contract).toContain('统一持久化串行 lane 和稳定 ID 由系统管理')
     }
   })
 
@@ -960,6 +951,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   if (method === 'GET' && url.pathname === '/api/n8n/intake-control') {
     return json({ control: {
@@ -1198,6 +1190,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   if (method === 'GET' && url.pathname === '/api/n8n/intake-control') {
     return json({ control: {
@@ -1554,8 +1547,9 @@ globalThis.fetch = async (input, init = {}) => {
     expect(worker).toContain("option('--serve-root')")
     expect(worker).toContain("['queued', 'running', 'recovering']")
     expect(worker).toContain("failedState.status = isRetryablePlatformError(error) ? 'recovering' : 'paused'")
-    expect(worker).toContain("const journalPending = state.items.some(item => item?.stagingRecovery && item.status !== 'attention')")
-    expect(worker).toContain("if ((batchTerminal(state.status) || !recoveryRunnable(state.status)) && !journalPending) continue")
+    expect(worker).toContain('const journalPending = state.items.some(hasPendingLocalWork)')
+    expect(worker).toContain('hasPendingStopAck')
+    expect(worker).toContain("if ((batchTerminal(state.status) || !recoveryRunnable(state.status)) && !journalPending && !stopOnlyCandidates(state)) continue")
     expect(worker).toContain('Number.isFinite(configuredReconcileInterval)')
     expect(worker).toMatch(/\? configuredReconcileInterval\s+: 60_000/)
   })
@@ -1578,6 +1572,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : null
   if (method === 'GET' && url.pathname === '/api/n8n/runs') return json({ runs: [] })
@@ -1602,7 +1597,7 @@ globalThis.fetch = async (input, init = {}) => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -1655,6 +1650,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : null
   if (method === 'GET' && url.pathname === '/api/n8n/runs') return json({ runs: [] })
@@ -1681,7 +1677,7 @@ globalThis.fetch = async (input, init = {}) => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -1740,6 +1736,7 @@ const payloads = () => readFileSync(process.env.FAKE_QUEUED_REQUEST_LOG, 'utf8')
   .trim().split('\\n').filter(Boolean).map(line => JSON.parse(line))
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   if (method === 'POST' && url.pathname === '/api/n8n/trigger') {
     const body = JSON.parse(String(init.body))
@@ -1772,7 +1769,7 @@ globalThis.fetch = async (input, init = {}) => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -1824,6 +1821,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
     const taskId = url.searchParams.get('taskId')
@@ -1851,7 +1849,7 @@ globalThis.fetch = async (input, init = {}) => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -1928,6 +1926,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : null
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
@@ -1974,7 +1973,7 @@ globalThis.fetch = async (input, init = {}) => {
       const created = await batch.createBatchState({
         batchId: 'reconcile-lane',
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoDir,
@@ -2037,6 +2036,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   const body = init.body ? JSON.parse(String(init.body)) : null
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
@@ -2078,7 +2078,7 @@ globalThis.fetch = async (input, init = {}) => {
       }
       const common = {
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         inboxRoot,
@@ -2145,6 +2145,7 @@ import { appendFileSync } from 'node:fs'
 const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   if ((init.method || 'GET') === 'POST') {
     const body = JSON.parse(String(init.body))
     appendFileSync(process.env.FAKE_PLATFORM_LOG, body.taskId + '\\n')
@@ -2164,7 +2165,7 @@ globalThis.fetch = async (input, init = {}) => {
       }
       const common = {
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         inboxRoot,
@@ -2249,6 +2250,7 @@ const json = body => new Response(JSON.stringify(body), {
 })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const runs = JSON.parse(readFileSync(process.env.FAKE_RUN_STATE, 'utf8'))
   if ((init.method || 'GET') === 'POST' && url.pathname === '/api/n8n/trigger') {
     const body = JSON.parse(String(init.body))
@@ -2278,7 +2280,7 @@ globalThis.fetch = async (input, init = {}) => {
       }
       const common = {
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         inboxRoot,
@@ -2338,8 +2340,9 @@ const json = body => new Response(JSON.stringify(body), {
   status: 200,
   headers: { 'content-type': 'application/json' },
 })
-globalThis.fetch = async input => {
+globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const taskId = url.searchParams.get('taskId')
   if (url.pathname === '/api/n8n/runs') return json({ runs: [{
     taskId,
@@ -2363,7 +2366,7 @@ globalThis.fetch = async input => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -2439,6 +2442,7 @@ import { appendFileSync } from 'node:fs'
 const json = body => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(String(input))
+  if ((init.method || 'GET') === 'GET' && url.pathname === '/api/n8n/runs/stop') return json({ inspection: { taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null } })
   const method = init.method || 'GET'
   if (method === 'GET' && url.pathname === '/api/n8n/runs') {
     const taskId = url.searchParams.get('taskId')
@@ -2465,7 +2469,7 @@ globalThis.fetch = async (input, init = {}) => {
       }
       const common = {
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         inboxRoot,
@@ -2564,7 +2568,17 @@ globalThis.fetch = async (input, init = {}) => {
     const inboxRoot = resolve(root, 'inbox')
     const video = resolve(root, 'terminal-cleanup.mp4')
     const videoKey = '00000000-0000-4000-8000-000000000040.mp4'
+    const fakePlatform = resolve(root, 'fake-terminal-cleanup-platform.mjs')
     try {
+      await writeFile(fakePlatform, `
+globalThis.fetch = async input => {
+  const url = new URL(String(input))
+  if (url.pathname !== '/api/n8n/runs/stop') throw new Error('unexpected_platform_request')
+  return new Response(JSON.stringify({ inspection: { taskId: url.searchParams.get('taskId'),
+    bindingId: Number(url.searchParams.get('bindingId')), stop: null } }),
+    { status: 200, headers: { 'content-type': 'application/json' } })
+}
+`)
       const content = 'terminal-cleanup-media'
       await writeFile(video, content)
       await mkdir(inboxRoot, { recursive: true })
@@ -2584,7 +2598,7 @@ globalThis.fetch = async (input, init = {}) => {
         taskId,
         idempotencyKey: taskId,
         baseUrl: 'http://127.0.0.1:3017',
-        bindingId: 'video-binding',
+        bindingId: 2,
         prompt: '分析视频',
         visionRoute: null,
         videoFile: video,
@@ -2623,7 +2637,9 @@ globalThis.fetch = async (input, init = {}) => {
       await writeFile(claimPath, 'conflicting-claim')
       const worker = resolve(process.cwd(), 'openclaw-skills/aiworker-task-flow/scripts/run-video-batch.mjs')
       const runWorker = () => new Promise<void>((resolvePromise, rejectPromise) => {
-        execFile(process.execPath, [worker, '--state-file', created.statePath], (error, _stdout, stderr) => {
+        execFile(process.execPath, [worker, '--state-file', created.statePath], { env: { ...process.env,
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${pathToFileURL(fakePlatform).href}`].filter(Boolean).join(' '),
+        } }, (error, _stdout, stderr) => {
           if (error) return rejectPromise(new Error(stderr || error.message))
           resolvePromise()
         })

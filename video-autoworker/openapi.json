@@ -164,6 +164,57 @@
         ]
       }
     },
+    "/api/n8n/runs/stop": {
+      "get": {
+        "summary": "Read scoped video stop state and current confirmation revision",
+        "tags": ["n8n"],
+        "parameters": [{ "in": "query", "name": "taskId", "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" } },
+          { "in": "query", "name": "view", "schema": { "type": "string", "enum": ["request"] }, "description": "Cheap intent-only worker poll without file or model-output scans" },
+          { "in": "query", "name": "bindingId", "schema": { "type": "integer", "minimum": 1 }, "description": "Required for view=request; verified against the authenticated scope" }],
+        "responses": { "200": { "description": "Viewer-only read. Requested/stopping/blocked do not prove execution has stopped." },
+          "403": { "description": "Viewer required" }, "404": { "description": "Task not found in scope" },
+          "409": { "description": "Original target, cleanup phase or queue identity is unconfirmed; no success is fabricated" } }
+      },
+      "post": {
+        "summary": "Record an idempotent operator-authorized stop intent for one video",
+        "description": "Only the trusted stop executor can confirm n8n, local writers and provider termination before cancelled is committed. This endpoint accepts no PID, path or termination proof. Saved successful segments and source media are retained. Queued/staging targets without a parent share the same intent and are stopped by the original batch worker under its existing locks; no shadow parent or second queue is created. Unknown identity or cleanup in progress fails closed.",
+        "tags": ["n8n"],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false, "required": ["taskId", "expectedRevision", "confirm"],
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "expectedRevision": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "confirm": { "const": true }
+          }
+        } } } },
+        "responses": { "202": { "description": "Stop intent recorded or an existing intent returned; this is not proof that compute stopped." },
+          "200": { "description": "Task already terminal; no process was terminated" },
+          "400": { "description": "Explicit confirmation and current revision required" },
+          "403": { "description": "Operator required" }, "404": { "description": "Task not found in scope" },
+          "409": { "description": "Task identity or revision changed; inspect again" }, "429": { "description": "Rate limit exceeded" } }
+      }
+    },
+    "/api/n8n/runs/stop/batch-ack": {
+      "post": {
+        "summary": "Acknowledge a retained batch-item stop from its original lock owner",
+        "description": "Internal execution-ownership transport using existing operator authentication and ephemeral global/batch lock ownership. The server reads and validates the primary file receipt and resources; caller-supplied paths or proof are forbidden.",
+        "tags": ["n8n"],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false, "required": ["taskId", "requestId", "workerLease"],
+          "properties": {
+            "taskId": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._:-]+$" },
+            "requestId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "workerLease": { "type": "object", "additionalProperties": false, "required": ["pid", "token"],
+              "properties": { "pid": { "type": "integer", "minimum": 1 }, "token": { "type": "string", "format": "uuid" } } }
+          }
+        } } } },
+        "responses": { "200": { "description": "The same batch-item request is durably stopped" },
+          "202": { "description": "The same acknowledgement is still converging; retain local pending state" },
+          "400": { "description": "Invalid worker ownership input" }, "403": { "description": "Operator required" },
+          "404": { "description": "Stop request not found in scope" }, "409": { "description": "Original lock, receipt or resource identity changed; do not discard media or clear pending" } }
+      }
+    },
     "/api/n8n/runs/recovery": {
       "get": {
         "summary": "Inspect whether an existing failed video task can safely resume",
@@ -12562,8 +12613,11 @@
             "properties": {
               "schemaEpoch": { "type": "integer", "enum": [1] },
               "rollingSafeFrom": { "type": "string", "enum": ["052_n8n_intake_controls"] },
-              "latestMigration": { "type": "string", "enum": ["059_director_evidence_projection_receipts", "060_video_edit_task_receipts"] }
-            }
+              "latestMigration": { "type": "string", "enum": ["059_director_evidence_projection_receipts", "060_video_edit_task_receipts", "061_n8n_video_stop_requests"] },
+              "videoEditingMigrationPresent": { "type": "boolean" }
+            },
+            "allOf": [{ "if": { "properties": { "latestMigration": { "const": "061_n8n_video_stop_requests" } } },
+              "then": { "required": ["videoEditingMigrationPresent"] } }]
           },
           "projection": {
             "type": "object",

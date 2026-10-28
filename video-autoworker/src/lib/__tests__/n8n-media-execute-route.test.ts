@@ -10,10 +10,13 @@ const mocks = vi.hoisted(() => ({
   createN8nMediaChildRunFromParent: vi.fn(),
   getN8nTaskRunByTaskId: vi.fn(),
   isScopedN8nParentExecutionOwner: vi.fn(),
+  hasScopedN8nVideoStopRequest: vi.fn(),
   markN8nTaskAccepted: vi.fn(),
   claimN8nTaskRun: vi.fn(),
   completeN8nFinalizeRun: vi.fn(),
   completeN8nTaskRun: vi.fn(),
+  settleChild: vi.fn(),
+  failChild: vi.fn(),
   failN8nTaskRun: vi.fn(),
   prepareN8nMedia: vi.fn(),
   transcribeN8nMedia: vi.fn(),
@@ -24,6 +27,9 @@ const mocks = vi.hoisted(() => ({
   ensureN8nMediaCleanupDebt: vi.fn(),
   retryN8nMediaCleanupDebt: vi.fn(),
   checkN8nCallbackAdmission: vi.fn(),
+  recordScopedN8nVideoChildStopAck: vi.fn(),
+  recordScopedN8nVideoChildStopUnconfirmed: vi.fn(),
+  executionControl: { signal: new AbortController().signal, assertActive: vi.fn() },
 }))
 
 vi.mock('@/lib/db', () => ({ getDatabase: mocks.getDatabase }))
@@ -74,26 +80,32 @@ vi.mock('@/lib/n8n-task-runs', async (importOriginal) => {
     },
     getN8nTaskRunByTaskId: mocks.getN8nTaskRunByTaskId,
     isScopedN8nParentExecutionOwner: mocks.isScopedN8nParentExecutionOwner,
+    hasScopedN8nVideoStopRequest: mocks.hasScopedN8nVideoStopRequest,
     completeN8nFinalizeRun: mocks.completeN8nFinalizeRun,
-    completeN8nChildExecution: (_db: unknown, lease: Record<string, unknown>, output: Record<string, unknown>) => {
+    completeN8nChildExecution: (_db: unknown, lease: Record<string, unknown>, output: Record<string, unknown>, scope: unknown, options: unknown) => {
       mocks.completeN8nTaskRun(_db, lease.taskId, output)
-      return { settled: true }
+      return mocks.settleChild(_db, lease, output, scope, options)
     },
-    failN8nChildExecution: (_db: unknown, lease: Record<string, unknown>, error: string) => {
+    failN8nChildExecution: (_db: unknown, lease: Record<string, unknown>, error: string, scope: unknown, options: unknown) => {
       mocks.failN8nTaskRun(_db, lease.taskId, error)
-      return { settled: true }
+      return mocks.failChild(_db, lease, error, scope, options)
     },
     failN8nTaskRun: mocks.failN8nTaskRun,
     ensureN8nMediaCleanupDebt: mocks.ensureN8nMediaCleanupDebt,
     pollN8nChildExecutionResult: (_attempt: unknown, initial: unknown) => Promise.resolve(initial),
-    runWithN8nChildExecutionHeartbeat: (_db: unknown, _lease: unknown, _scope: unknown, operation: () => Promise<unknown>) => operation(),
+    runWithN8nChildExecutionHeartbeat: (_db: unknown, _lease: unknown, _scope: unknown,
+      operation: (control: { signal: AbortSignal; assertActive: () => void }) => Promise<unknown>) => operation(mocks.executionControl),
   }
 })
 vi.mock('@/lib/n8n-media-cleanup', () => ({
   retryN8nMediaCleanupDebt: mocks.retryN8nMediaCleanupDebt,
 }))
+vi.mock('@/lib/n8n-video-stop', () => ({ recordScopedN8nVideoChildStopAck: mocks.recordScopedN8nVideoChildStopAck,
+  recordScopedN8nVideoChildStopUnconfirmed: mocks.recordScopedN8nVideoChildStopUnconfirmed }))
 
 import { POST } from '@/app/api/n8n/media-execute/route'
+import { N8nVideoStopRequestedError } from '@/lib/n8n-task-runs'
+import { isObservedMediaProviderObservation, mediaProviderRequestFinished, mediaProviderRequestStarted } from '@/lib/n8n-media-control'
 
 const parent = {
   id: 1,
@@ -148,6 +160,9 @@ function mediaChildId(prefix: 'task' | 'idem', identity: string, stage: 'prepare
 describe('n8n media node execution route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mocks.executionControl = { signal: new AbortController().signal, assertActive: vi.fn() }
+    mocks.settleChild.mockReturnValue({ settled: true })
+    mocks.failChild.mockReturnValue({ settled: true })
     mocks.getDatabase.mockReturnValue({})
     mocks.getN8nTaskRunByTaskId.mockImplementation((_db, taskId: string) => {
       if (taskId === parent.taskId) return parent
@@ -157,6 +172,7 @@ describe('n8n media node execution route', () => {
       return null
     })
     mocks.isScopedN8nParentExecutionOwner.mockReturnValue(true)
+    mocks.hasScopedN8nVideoStopRequest.mockReturnValue(false)
     mocks.checkN8nCallbackAdmission.mockReturnValue({ allowed: true, mode: 'legacy' })
     mocks.createN8nMediaChildRunFromParent.mockImplementation((_db, input) => {
       const digest = createHash('sha256')
@@ -192,6 +208,86 @@ describe('n8n media node execution route', () => {
     mocks.cleanupN8nMediaTask.mockResolvedValue(undefined)
     mocks.ensureN8nMediaCleanupDebt.mockReturnValue({ scheduled: true, reason: 'finalize_succeeded' })
     mocks.retryN8nMediaCleanupDebt.mockResolvedValue({ outcome: 'cleaned', debt: null, error: null })
+    mocks.recordScopedN8nVideoChildStopAck.mockReturnValue(true)
+  })
+
+  it('returns a read-only stopping response for an owned callback replay before starting any attempt', async () => {
+    mocks.hasScopedN8nVideoStopRequest.mockReturnValue(true)
+    const response = await POST(request('vision'))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ status: 'stopping', code: 'N8N_VIDEO_STOP_REQUESTED', retryable: false })
+    expect(mocks.isScopedN8nParentExecutionOwner).toHaveBeenCalledTimes(1)
+    expect(mocks.createN8nMediaChildRunFromParent).not.toHaveBeenCalled()
+    expect(mocks.analyzeN8nVideoFrames).not.toHaveBeenCalled()
+    expect(mocks.recordScopedN8nVideoChildStopAck).not.toHaveBeenCalled()
+    expect(mocks.recordScopedN8nVideoChildStopUnconfirmed).not.toHaveBeenCalled()
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.completeN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.cleanupN8nMediaTask).not.toHaveBeenCalled()
+  })
+  it.each(['prepare', 'audio', 'vision', 'finalize'] as const)('acknowledges a quiescent stopped %s without failing or completing its child', async stage => {
+    const error = new N8nVideoStopRequestedError()
+    error.providerCancellation = stage === 'vision' ? 'provider_unconfirmed' : 'confirmed'
+    const executor = { prepare: mocks.prepareN8nMedia, audio: mocks.transcribeN8nMedia,
+      vision: mocks.analyzeN8nVideoFrames, finalize: mocks.synthesizeN8nMediaResults }[stage]
+    executor.mockRejectedValueOnce(error)
+    const response = await POST(request(stage))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ status: 'stopping', code: 'N8N_VIDEO_STOP_REQUESTED',
+      retryable: false, providerCancellation: error.providerCancellation, localAcknowledged: true })
+    expect(mocks.recordScopedN8nVideoChildStopAck).toHaveBeenCalledWith({}, expect.objectContaining({ revision: 1 }),
+      { workspaceId: parent.workspaceId, tenantId: parent.tenantId }, expect.objectContaining({ providerCancellation: error.providerCancellation }))
+    expect(mocks.completeN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.completeN8nFinalizeRun).not.toHaveBeenCalled()
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
+    expect(mocks.ensureN8nMediaCleanupDebt).not.toHaveBeenCalled()
+  })
+
+  it('does not acknowledge local termination when the owned process exit could not be confirmed', async () => {
+    mocks.transcribeN8nMedia.mockRejectedValueOnce(Object.assign(new Error('unconfirmed own process'), { code: 'N8N_MEDIA_TERMINATION_UNCONFIRMED' }))
+    const response = await POST(request('audio'))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ status: 'stopping', code: 'N8N_MEDIA_TERMINATION_UNCONFIRMED', retryable: false })
+    expect(mocks.recordScopedN8nVideoChildStopAck).not.toHaveBeenCalled()
+    expect(mocks.recordScopedN8nVideoChildStopUnconfirmed).toHaveBeenCalledWith({}, expect.objectContaining({ revision: 1 }),
+      { workspaceId: parent.workspaceId, tenantId: parent.tenantId })
+    expect(mocks.failN8nTaskRun).not.toHaveBeenCalled()
+  })
+  it.each(['child', 'finalize', 'failure'] as const)('acknowledges a stop that wins the %s settlement transaction after execution returned', async mode => {
+    const reason = new N8nVideoStopRequestedError()
+    const winStop = () => {
+      mocks.hasScopedN8nVideoStopRequest.mockReturnValue(true)
+      mocks.executionControl.assertActive.mockImplementation(() => { throw reason })
+    }
+    if (mode === 'child') mocks.settleChild.mockImplementation(() => { winStop(); return { settled: false } })
+    if (mode === 'finalize') mocks.completeN8nFinalizeRun.mockImplementation(() => { winStop(); return { outcome: 'rejected', parent, child: null, output: null } })
+    if (mode === 'failure') {
+      mocks.analyzeN8nVideoFrames.mockRejectedValueOnce(new Error('model invalid'))
+      mocks.failChild.mockImplementation(() => { winStop(); return { settled: false } })
+    } else {
+      const executor = mode === 'child' ? mocks.analyzeN8nVideoFrames : mocks.synthesizeN8nMediaResults
+      executor.mockImplementation(async () => {
+        mediaProviderRequestStarted(mocks.executionControl); mediaProviderRequestFinished(mocks.executionControl)
+        return { text: 'already finished' }
+      })
+    }
+    const response = await POST(request(mode === 'finalize' ? 'finalize' : 'vision'))
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ status: 'stopping', localAcknowledged: true,
+      providerCancellation: mode === 'failure' ? 'not_started' : 'confirmed' })
+    expect(mocks.recordScopedN8nVideoChildStopAck).toHaveBeenCalledTimes(1)
+    expect(mocks.ensureN8nMediaCleanupDebt).not.toHaveBeenCalled()
+  })
+  it('passes a branded risk observation to settlement after an uncertain provider followed by a successful fallback', async () => {
+    mocks.analyzeN8nVideoFrames.mockImplementationOnce(async () => {
+      mediaProviderRequestStarted(mocks.executionControl)
+      mediaProviderRequestStarted(mocks.executionControl); mediaProviderRequestFinished(mocks.executionControl)
+      return { text: 'fallback complete' }
+    })
+    expect((await POST(request('vision'))).status).toBe(200)
+    const observation = mocks.settleChild.mock.calls[0][4].providerObservation
+    expect(isObservedMediaProviderObservation(observation)).toBe(true)
+    expect(observation.status).toBe('unconfirmed')
   })
 
   it.each(['succeeded', 'failed', 'cancelled'])('rejects a late callback after the parent is %s', async status => {
@@ -372,7 +468,7 @@ describe('n8n media node execution route', () => {
       stage: 'prepare',
       taskInput: parent.input,
     })
-    expect(mocks.prepareN8nMedia).toHaveBeenCalledWith(parent.taskId, parent.routing, parent.input)
+    expect(mocks.prepareN8nMedia).toHaveBeenCalledWith(parent.taskId, parent.routing, parent.input, mocks.executionControl)
     expect(mocks.completeN8nTaskRun).toHaveBeenCalledTimes(1)
   })
 
@@ -467,6 +563,7 @@ describe('n8n media node execution route', () => {
       parent.routing,
       parent.input,
       expect.objectContaining({ combinedText: '合并结果' }),
+      mocks.executionControl,
     )
     expect(mocks.completeN8nFinalizeRun).toHaveBeenCalledWith({}, expect.objectContaining({
       parentTaskId: parent.taskId,

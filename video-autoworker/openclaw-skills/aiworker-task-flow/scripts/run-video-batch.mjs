@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import { constants } from 'node:fs'
-import { lstat, open, rm } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { lstat, open, realpath, rm } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import {
   createPlatformClient,
   isN8nIntakeDrainingError,
@@ -10,7 +10,9 @@ import {
 } from '../lib/platform-client.mjs'
 import { isTerminalTaskStatus } from '../lib/task-status-authority.mjs'
 import { hasPartialVideoLearning, readVideoLearningResult } from '../lib/video-learning-result.mjs'
-import { submitStagedVideoTask, submitVideoTask } from '../lib/video-task.mjs'
+import { submitStagedVideoTask, submitVideoTask, VideoTaskStopRequestedError,
+  VideoTaskStopUnconfirmedError, isVideoTaskStopRequestedError, isVideoTaskStopError } from '../lib/video-task.mjs'
+import { sourceIdentity, sameSourceIdentity } from '../lib/media-ingest.mjs'
 import {
   acquireBatchLock,
   acquireGlobalBatchLock,
@@ -20,10 +22,10 @@ import {
   loadBatchItemStagedMedia,
   prepareBatchStateForExecution,
   readBatchState,
-  recoverBatchItemStaging,
   sourceFingerprintFromIdentity,
   verifyBatchItemSource,
   writeBatchState,
+  assertVideoRepairWorkerLease,
 } from '../lib/video-batch-state.mjs'
 import {
   consumeWorkerLaunchAuthorizationSync,
@@ -46,6 +48,77 @@ const recoveryRunnable = status => ['queued', 'running', 'recovering'].includes(
 const activeParent = status => ['accepted', 'running'].includes(status)
 const cleanupPhase = phase => ['discarding_prepared', 'discarding'].includes(phase)
 const handoffPhase = phase => ['staged', 'triggering'].includes(phase)
+// A stopped item retains its handoff as evidence, but must not keep the lane
+// running or be dispatched again merely because that evidence is present.
+const hasRunnableJournal = item => Boolean(item?.stagingRecovery)
+  && !['attention', 'cancelled'].includes(item.status)
+const hasPendingStopAck = item => item?.stopAckPending === true
+const hasPendingLocalWork = item => hasRunnableJournal(item) || hasPendingStopAck(item)
+const pendingBatchItem = item => ['queued', 'staging', 'recovering'].includes(item?.status)
+const stopOnlyCandidates = state => state.schemaVersion === 2
+  && (state.status === 'paused' || batchTerminal(state.status)) && state.items.some(pendingBatchItem)
+const SHA = /^[a-f0-9]{64}$/u
+const stopStates = new Set(['requested', 'stopping', 'blocked', 'stopped'])
+
+function stopOwnershipLost(error) {
+  for (let current = error, depth = 0; current && depth < 5; current = current.cause, depth++) {
+    if (current.code === 'N8N_VIDEO_WORKER_LEASE_LOST') return true
+  }
+  return false
+}
+async function assertStopWorkerLease(statePath, workerLease) {
+  try { await assertVideoRepairWorkerLease(statePath, workerLease) }
+  catch { throw Object.assign(new Error('视频停止执行者已失去原队列所有权'), { code: 'N8N_VIDEO_WORKER_LEASE_LOST' }) }
+}
+function checkedStop(stop, state, item) {
+  if (stop === null) return null
+  if (!stop || typeof stop !== 'object' || stop.taskId !== item.taskId || stop.bindingId !== state.bindingId
+    || !SHA.test(stop.requestId || '') || !SHA.test(stop.targetSha256 || '')
+    || !['batch_item', 'runtime'].includes(stop.targetKind) || !stopStates.has(stop.currentState)) {
+    throw new VideoTaskStopUnconfirmedError(null, new Error('video_stop_control_identity_unconfirmed'))
+  }
+  return stop
+}
+async function stopResource(pathname, { optional = false, privateArtifact = false } = {}) {
+  if (typeof pathname !== 'string' || resolve(pathname) !== pathname || /[\u0000-\u001f\u007f]/u.test(pathname)) throw new Error('video_stop_resource_path_invalid')
+  let before
+  try { before = await lstat(pathname) } catch (error) { if (optional && error.code === 'ENOENT') return null; throw error }
+  if (!before.isFile() || before.isSymbolicLink() || await realpath(pathname) !== pathname
+    || (privateArtifact && ((before.mode & 0o077) || before.nlink !== 1
+      || typeof process.getuid === 'function' && before.uid !== process.getuid()))) throw new Error('video_stop_resource_identity_unconfirmed')
+  const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = await handle.stat(), after = await lstat(pathname)
+    if (!sameSourceIdentity(sourceIdentity(before), opened) || !sameSourceIdentity(sourceIdentity(opened), after)
+      || before.uid !== opened.uid || before.mode !== opened.mode || before.nlink !== opened.nlink
+      || opened.uid !== after.uid || opened.mode !== after.mode || opened.nlink !== after.nlink) throw new Error('video_stop_resource_identity_unconfirmed')
+    return { path: pathname, identity: sourceIdentity(opened) }
+  } finally { await handle.close() }
+}
+async function makeStopReceipt(state, item, stop) {
+  const source = await stopResource(item.sourcePath), recovery = item.stagingRecovery || null
+  const permitted = sameSourceIdentity(item.sourceIdentity, { ...source.identity, isFile: () => true })
+    || recovery?.anchoredIdentity && sameSourceIdentity(recovery.anchoredIdentity, { ...source.identity, isFile: () => true })
+  if (!permitted || source.identity.size !== item.sourceBytes) throw new Error('video_stop_source_identity_unconfirmed')
+  const artifact = async (name, privateArtifact) => {
+    if (!recovery) return null
+    if (typeof name !== 'string' || dirname(join(state.inboxRoot, name)) !== state.inboxRoot) throw new Error('video_stop_staging_identity_unconfirmed')
+    return stopResource(join(state.inboxRoot, name), { optional: true, privateArtifact })
+  }
+  const [incoming, staged, anchor] = await Promise.all([artifact(recovery?.incomingName, true), artifact(recovery?.videoKey, true), artifact(recovery?.anchorName, false)])
+  if (incoming && incoming.identity.size > item.sourceBytes || staged && staged.identity.size !== item.sourceBytes) throw new Error('video_stop_staging_identity_unconfirmed')
+  for (const [current, expected] of [[incoming, recovery?.incomingIdentity], [staged, recovery?.stagedIdentity], [anchor, recovery?.anchoredIdentity]]) {
+    if (current && expected && (current.identity.dev !== expected.dev || current.identity.ino !== expected.ino)) throw new Error('video_stop_staging_identity_unconfirmed')
+  }
+  if (recovery?.stagedIdentity && !staged || recovery?.incomingIdentity && !incoming
+    && (!staged || staged.identity.dev !== recovery.incomingIdentity.dev || staged.identity.ino !== recovery.incomingIdentity.ino)) throw new Error('video_stop_staging_resource_lost')
+  item.sourceIdentity = source.identity
+  item.sourceFingerprint = sourceFingerprintFromIdentity(item.sourcePath, source.identity)
+  return { schema: 'aiworker-video-batch-stop-local/v1', requestId: stop.requestId, targetSha256: stop.targetSha256,
+    taskId: item.taskId, batchId: state.batchId, bindingId: state.bindingId, idempotencyKey: item.idempotencyKey,
+    observedAt: new Date().toISOString(), quiescent: { copy: true, hash: true, submission: true, writers: true },
+    resources: { source, incoming, staged, anchor } }
+}
 const HEARTBEAT_INTERVAL_MS = Math.max(1_000, Math.min(30_000,
   Number(process.env.AIWORKER_VIDEO_WORKER_HEARTBEAT_MS || 10_000)))
 const configuredReconcileInterval = Number(process.env.AIWORKER_VIDEO_RECONCILE_INTERVAL_MS || 60_000)
@@ -232,8 +305,9 @@ async function runBatch(statePath, workerLease) {
   const entryStatus = state.status
   const entryError = state.error || null
   const reconciliationOnly = entryStatus === 'paused' || batchTerminal(entryStatus)
-  const journalPendingAtEntry = state.items.some(item => item?.stagingRecovery)
-  if (reconciliationOnly && !journalPendingAtEntry) return state
+  const journalPendingAtEntry = state.items.some(hasPendingLocalWork)
+  if (reconciliationOnly && !journalPendingAtEntry && !stopOnlyCandidates(state)) return state
+  const reconciliationEntryState = state
   const client = createPlatformClient(state.baseUrl)
   const timeoutSeconds = Math.max(3_600, Math.min(86_400,
     Number(process.env.AIWORKER_VIDEO_BATCH_ITEM_TIMEOUT_SECONDS || 28_800)))
@@ -252,6 +326,9 @@ async function runBatch(statePath, workerLease) {
     }
     const finishJournalCleanup = async () => {
       try {
+        // The discard phase is already durable. This request uses the server's
+        // IMMEDIATE intent fence before any claim/remove can begin.
+        await control.assertActive()
         const recovered = await cleanupBatchItemStagedMedia(item, {
           inboxRoot: state.inboxRoot,
           binding,
@@ -261,6 +338,7 @@ async function runBatch(statePath, workerLease) {
         state = await persist(statePath, state)
         return true
       } catch (error) {
+        if (stopOwnershipLost(error) || isVideoTaskStopError(error)) throw error
         const cleanupError = `${batchItemDisplayName(item)}：${error instanceof Error ? error.message : String(error)}`.slice(0, 2_000)
         if (!isTerminalTaskStatus(item.status)) {
           item.status = 'recovering'
@@ -274,6 +352,7 @@ async function runBatch(statePath, workerLease) {
       }
     }
     const finalizeTerminalJournal = async () => {
+      if (item.status === 'cancelled') return true
       if (!handoffPhase(item.stagingRecovery?.phase)) return true
       item.stagingRecovery = { ...item.stagingRecovery, phase: 'discarding' }
       state = await persist(statePath, state)
@@ -285,8 +364,69 @@ async function runBatch(statePath, workerLease) {
       item.completedAt = new Date().toISOString()
       state = await persist(statePath, state)
     }
+    let observedStop = null
+    const readStop = async () => {
+      try {
+        await assertStopWorkerLease(statePath, workerLease)
+        const stop = checkedStop(await client.getVideoStopRequest(item.taskId, state.bindingId), state, item)
+        await assertStopWorkerLease(statePath, workerLease)
+        delete item.stopControlErrorCode
+        if (observedStop && (!stop || stop.requestId !== observedStop.requestId || stop.targetSha256 !== observedStop.targetSha256
+          || stop.targetKind !== observedStop.targetKind)) throw new Error('video_stop_control_changed')
+        if (stop) observedStop = stop
+        return stop
+      } catch (error) {
+        if (stopOwnershipLost(error) || isVideoTaskStopError(error)) throw error
+        throw new VideoTaskStopUnconfirmedError(error, error)
+      }
+    }
+    const control = { async assertActive() {
+      const stop = await readStop()
+      if (stop) throw new VideoTaskStopRequestedError(stop.requestId)
+    } }
+    const persistStopState = async () => {
+      await assertStopWorkerLease(statePath, workerLease)
+      state = await persist(statePath, state)
+      return state
+    }
+    const acknowledgeStop = async stop => {
+      if (stop.targetKind !== 'batch_item' || item.stopRequestId !== stop.requestId
+        || item.stopReceipt?.targetSha256 !== stop.targetSha256 || item.stopAckPending !== true) throw new Error('video_stop_pending_receipt_changed')
+      await assertStopWorkerLease(statePath, workerLease)
+      const acknowledged = checkedStop(await client.ackVideoBatchStop({ taskId: item.taskId, requestId: stop.requestId, workerLease }), state, item)
+      if (!acknowledged || acknowledged.targetKind !== 'batch_item' || acknowledged.requestId !== stop.requestId
+        || acknowledged.targetSha256 !== stop.targetSha256 || acknowledged.currentState !== 'stopped') throw new Error('video_stop_ack_unconfirmed')
+      delete item.stopAckPending
+      delete item.stopControlErrorCode
+      item.error = null
+      await persistStopState()
+    }
+    const parkStopControl = async error => {
+      if (!item.stopAckPending && !reconciliationOnly) item.status = 'recovering'
+      item.error = '单条停止控制或资源证据待核对，原任务与素材已保留'
+      const diagnostic = typeof error?.message === 'string' && /^video_stop_[a-z_]{1,100}$/u.test(error.message)
+        ? error.message : typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{1,100}$/u.test(error.code)
+          ? error.code : 'N8N_VIDEO_STOP_CONTROL_UNCONFIRMED'
+      item.stopControlErrorCode = diagnostic
+      state.status = reconciliationOnly ? entryStatus : 'recovering'
+      state.error = reconciliationOnly ? entryError : item.error
+      return persistStopState()
+    }
 
     try {
+      // A persisted local stop owns its original receipt until the same worker
+      // lane can obtain an authoritative ACK. Never restage a pending stop.
+      if (hasPendingStopAck(item)) {
+        try {
+          const stop = await readStop()
+          if (!stop) throw new Error('video_stop_request_missing')
+          await acknowledgeStop(stop)
+          continue
+        } catch (error) {
+          if (stopOwnershipLost(error)) throw error
+          return parkStopControl(error)
+        }
+      }
       // Repairs are transported by this same worker while it owns both the
       // global lane and this batch. They never stage or submit a second video.
       if (item.learningRepairRequest && !reconciliationOnly) {
@@ -314,7 +454,17 @@ async function runBatch(statePath, workerLease) {
       }
       // Attention items are explicitly quarantined: keep their journal and
       // media untouched while allowing the rest of this batch to advance.
-      if (item.status === 'attention') continue
+      if (item.status === 'attention' || item.status === 'cancelled') continue
+
+      // A paused batch can acknowledge a stop but may never treat it as resume.
+      if (reconciliationOnly && pendingBatchItem(item) && !item.stagingRecovery) {
+        await control.assertActive()
+        continue
+      }
+
+      // Journal recovery can remove partial files. Check intent first while
+      // still holding both original locks, before any recovery or cleanup.
+      if (item.stagingRecovery) await control.assertActive()
 
       // A journal that already committed to local discard must finish that
       // discard before platform or terminal-state shortcuts are considered.
@@ -323,17 +473,12 @@ async function runBatch(statePath, workerLease) {
       }
 
       if (item.stagingRecovery && !handoffPhase(item.stagingRecovery.phase)) {
-        const recoveredStaging = await recoverBatchItemStaging(item, {
-            inboxRoot: state.inboxRoot,
-            binding,
-            onCheckpoint: async recovery => {
-              item.stagingRecovery = recovery
-              state = await persist(statePath, state)
-            },
-          })
-        applyRecoveredSourceIdentity(recoveredStaging)
-        delete item.stagingRecovery
+        // Publish cleanup intent before asking for the DB intent fence. New
+        // stop CAS rejects this phase; an earlier CAS is visible at the fence.
+        item.stagingRecovery = { ...item.stagingRecovery,
+          phase: item.stagingRecovery.materialId === null ? 'discarding_prepared' : 'discarding' }
         state = await persist(statePath, state)
+        if (!await finishJournalCleanup()) return state
       }
 
       if (isTerminalTaskStatus(item.status) && !item.stagingRecovery) continue
@@ -343,6 +488,19 @@ async function runBatch(statePath, workerLease) {
       let existing = await client.getRun(item.taskId)
       if (existing && handoffPhase(item.stagingRecovery?.phase)) {
         const existingVideoKey = authoritativeVideoKey(existing)
+        if (existing.status === 'cancelled') {
+          if (existingVideoKey !== item.stagingRecovery.videoKey) {
+            item.status = 'attention'
+            item.error = `${batchItemDisplayName(item)}：停止结果与暂存素材无法确认对应，已保留资料等待复核`.slice(0, 2_000)
+          } else {
+            item.status = 'cancelled'
+            item.error = existing.error || null
+            retainLearningOutcome(item, existing)
+          }
+          item.completedAt = item.completedAt || new Date().toISOString()
+          state = await persist(statePath, state)
+          continue
+        }
         if (existingVideoKey === item.stagingRecovery.videoKey) {
           if (isTerminalTaskStatus(existing.status)) {
             // Once the exact task is terminal, the platform can no longer be
@@ -391,6 +549,8 @@ async function runBatch(statePath, workerLease) {
         continue
       }
 
+      await control.assertActive()
+
       item.status = 'staging'
       item.error = null
       delete item.completedAt
@@ -398,18 +558,18 @@ async function runBatch(statePath, workerLease) {
       const lifecycleCallbacks = {
         onTriggerStarted: async () => {
           item.stagingRecovery = { ...item.stagingRecovery, phase: 'triggering' }
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onLocalCleanupStarted: async () => {
           const phase = item.stagingRecovery?.materialId === null
             ? 'discarding_prepared'
             : 'discarding'
           item.stagingRecovery = { ...item.stagingRecovery, phase }
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onMediaSettled: async () => {
           delete item.stagingRecovery
-          state = await persist(statePath, state)
+          await persistStopState()
         },
       }
       let response
@@ -419,6 +579,7 @@ async function runBatch(statePath, workerLease) {
           binding,
         })
         response = await submitStagedVideoTask({
+          control,
           client,
           bindingId: state.bindingId,
           taskId: item.taskId,
@@ -434,6 +595,7 @@ async function runBatch(statePath, workerLease) {
       } else {
         const admittedSource = await verifyBatchItemSource(item, { inboxRoot: state.inboxRoot })
         response = await submitVideoTask({
+        control,
         client,
         bindingId: state.bindingId,
         taskId: item.taskId,
@@ -453,11 +615,11 @@ async function runBatch(statePath, workerLease) {
         onHashProgress: async () => {
           // Keep the durable worker heartbeat fresh while a large source is
           // hashed. No filename, path, size, or digest is emitted.
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onStagingPrepared: async recovery => {
           item.stagingRecovery = recovery
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onSourceAnchorCreated: async anchoredIdentity => {
           // Keep the admission identity immutable. The separate checkpoint is
@@ -469,7 +631,7 @@ async function runBatch(statePath, workerLease) {
             phase: 'anchor_observed',
             anchoredIdentity,
           }
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onSourceStaged: async (sourceIdentity, artifact) => {
           // Hard-link anchoring intentionally changes source ctime. Persist the
@@ -483,7 +645,7 @@ async function runBatch(statePath, workerLease) {
             sourceIdentity,
             incomingIdentity: artifact?.incomingIdentity || null,
           }
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         onStagingCompleted: async staged => {
           item.stagingRecovery = {
@@ -495,7 +657,7 @@ async function runBatch(statePath, workerLease) {
             contentSha256: staged.contentSha256,
             ownershipToken: staged.ownershipToken,
           }
-          state = await persist(statePath, state)
+          await persistStopState()
         },
         ...lifecycleCallbacks,
         })
@@ -506,6 +668,7 @@ async function runBatch(statePath, workerLease) {
           binding,
         })
         response = await submitStagedVideoTask({
+          control,
           client,
           bindingId: state.bindingId,
           taskId: item.taskId,
@@ -540,6 +703,42 @@ async function runBatch(statePath, workerLease) {
         return state
       }
     } catch (error) {
+      if (stopOwnershipLost(error)) throw error
+      if (isVideoTaskStopRequestedError(error)) {
+        try {
+          const stop = observedStop
+          if (!stop || stop.requestId !== error.stopRequestId) throw new Error('video_stop_request_unconfirmed')
+          if (stop.targetKind === 'runtime') {
+            const current = await client.getRun(item.taskId)
+            if (!current || item.stagingRecovery && authoritativeVideoKey(current) !== item.stagingRecovery.videoKey) throw new Error('video_stop_runtime_handoff_unconfirmed')
+            item.status = current.status
+            item.error = current.error || null
+            retainLearningOutcome(item, current)
+            if (isTerminalTaskStatus(current.status)) {
+              item.completedAt = item.completedAt || new Date().toISOString()
+              await persistStopState()
+              continue
+            }
+            state.status = reconciliationOnly ? entryStatus : 'recovering'
+            return persistStopState()
+          }
+          await assertStopWorkerLease(statePath, workerLease)
+          const receipt = await makeStopReceipt(state, item, stop)
+          item.status = 'cancelled'
+          item.stopRequestId = stop.requestId
+          item.stopReceipt = receipt
+          item.stopAckPending = true
+          item.completedAt = new Date().toISOString()
+          item.error = null
+          await persistStopState()
+          await acknowledgeStop(stop)
+          continue
+        } catch (stopError) {
+          if (stopOwnershipLost(stopError)) throw stopError
+          return parkStopControl(stopError)
+        }
+      }
+      if (isVideoTaskStopError(error) || error?.code === 'N8N_VIDEO_STOP_CONTROL_UNCONFIRMED') return parkStopControl(error)
       if (isN8nIntakeDrainingError(error)) {
         // Intake can close after the submit-side preflight. Park the batch
         // without changing item order/identity or discarding staged media;
@@ -622,14 +821,16 @@ async function runBatch(statePath, workerLease) {
   if (reconciliationOnly) {
     state.status = entryStatus
     state.error = entryError
+    if (state === reconciliationEntryState) return state
     return persist(statePath, state)
   }
 
-  const failed = state.items.filter(item => item.status !== 'succeeded').length
+  const failed = state.items.filter(item => !['succeeded', 'cancelled'].includes(item.status)).length
+  const stopped = state.items.filter(item => item.status === 'cancelled').length
   const partial = state.items.filter(item => item.status === 'succeeded' && hasPartialVideoLearning(item)).length
-  state.status = failed || partial ? 'completed_with_errors' : 'succeeded'
-  state.error = partial ? `${partial} 个视频部分完成，失败片段待单独修复${failed ? `；${failed} 个视频失败` : ''}`
-    : failed ? `${failed} 个视频失败；其余视频已完成` : null
+  state.status = failed || partial || stopped ? 'completed_with_errors' : 'succeeded'
+  state.error = [partial ? `${partial} 个视频部分完成，失败片段待单独修复` : null,
+    failed ? `${failed} 个视频失败` : null, stopped ? `${stopped} 个视频已停止` : null].filter(Boolean).join('；') || null
   return persist(statePath, state)
 }
 
@@ -642,25 +843,28 @@ async function drainQueue(anchorStatePath, workerLease) {
     let progressed = false
     for (const statePath of statePaths) {
       const state = await readBatchState(statePath)
-      const journalPending = state.items.some(item => item?.stagingRecovery && item.status !== 'attention')
-      if ((batchTerminal(state.status) || !recoveryRunnable(state.status)) && !journalPending) continue
+      const journalPending = state.items.some(hasPendingLocalWork)
+      if ((batchTerminal(state.status) || !recoveryRunnable(state.status)) && !journalPending && !stopOnlyCandidates(state)) continue
       pending = true
       const lock = await acquireBatchLock(statePath)
       if (!lock.acquired) continue
       try {
         const nextState = await runBatch(statePath, workerLease)
+        // Pending ACK is durable unfinished work even in a manually closed
+        // batch. Retry on the next worker turn, never spin or advance the lane.
+        if (nextState.items.some(hasPendingStopAck)) return
+        if (nextState.items.some(item => item.stopControlErrorCode
+          && (hasRunnableJournal(item) || pendingBatchItem(item)))) return
         if (!batchTerminal(nextState.status)) {
-          const remainingJournal = nextState.items.some(
-            item => item?.stagingRecovery && item.status !== 'attention',
-          )
+          const remainingJournal = nextState.items.some(hasPendingLocalWork)
           if (nextState.status === 'paused' && !remainingJournal) {
-            progressed = true
             continue
           }
           return
         }
-        progressed = true
+        if (!batchTerminal(state.status) || journalPending) progressed = true
       } catch (error) {
+        if (stopOwnershipLost(error)) throw error
         const failedState = await readBatchState(statePath).catch(() => null)
         if (failedState) {
           failedState.status = isRetryablePlatformError(error) ? 'recovering' : 'paused'

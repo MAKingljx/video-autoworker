@@ -20,8 +20,10 @@ import {
   failN8nChildExecution,
   failN8nTaskRun,
   getN8nTaskRunByTaskId,
+  hasScopedN8nVideoStopRequest,
   isScopedN8nParentExecutionOwner,
   N8nChildExecutionLeaseLostError,
+  N8nVideoStopRequestedError,
   n8nExecutionOwnerSchema,
   n8nTaskIdentitySchema,
   pollN8nChildExecutionResult,
@@ -31,6 +33,8 @@ import { n8nMaterialIdentitySchema } from '@/lib/n8n-media-identity'
 import { logSafeOperationError, SafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
 import { checkOpenClawN8nCallbackRequest } from '@/lib/openclaw-loopback-auth'
 import { hasPartialVideoLearning } from '../../../../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
+import { assertMediaExecutionActive, captureMediaProviderObservation, type N8nMediaExecutionControl } from '@/lib/n8n-media-control'
+import { recordScopedN8nVideoChildStopAck, recordScopedN8nVideoChildStopUnconfirmed } from '@/lib/n8n-video-stop'
 
 export const runtime = 'nodejs'
 
@@ -47,10 +51,11 @@ function stageOutput(
   taskId: string,
   routing: Record<string, unknown>,
   taskInput: Record<string, unknown>,
+  control?: N8nMediaExecutionControl,
 ) {
-  if (stage === 'prepare') return prepareN8nMedia(taskId, routing, taskInput)
-  if (stage === 'audio') return transcribeN8nMedia(taskId, routing)
-  if (stage === 'vision') return analyzeN8nVideoFrames(taskId, routing, taskInput)
+  if (stage === 'prepare') return prepareN8nMedia(taskId, routing, taskInput, control)
+  if (stage === 'audio') return transcribeN8nMedia(taskId, routing, control)
+  if (stage === 'vision') return analyzeN8nVideoFrames(taskId, routing, taskInput, control)
   throw new Error(`不支持直接执行阶段：${stage}`)
 }
 
@@ -136,6 +141,10 @@ export async function POST(request: NextRequest) {
   const scope = { workspaceId: observedParent.workspaceId, tenantId: observedParent.tenantId }
   if (!isScopedN8nParentExecutionOwner(db, observedParent.taskId, parsed.data.executionOwner, scope)) {
     return NextResponse.json({ taskId: observedParent.taskId, error: 'n8n execution 不拥有该父任务' }, { status: 409 })
+  }
+  if (hasScopedN8nVideoStopRequest(db, observedParent.taskId, scope)) {
+    return NextResponse.json({ taskId: observedParent.taskId, stage, status: 'stopping',
+      code: 'N8N_VIDEO_STOP_REQUESTED', retryable: false }, { status: 409 })
   }
   if (['succeeded', 'failed', 'cancelled'].includes(observedParent.status)) {
     if (observedParent.status === 'succeeded' && stage === 'finalize') {
@@ -321,9 +330,25 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: '媒体节点状态不可执行' }, { status: 409 })
   }
 
+  let executionControl: N8nMediaExecutionControl | undefined
+  const stoppingResponse = (reason?: N8nVideoStopRequestedError) => {
+    const observation = captureMediaProviderObservation(executionControl)
+    const providerCancellation = observation.status === 'unconfirmed' || reason?.providerCancellation === 'provider_unconfirmed'
+      ? 'provider_unconfirmed' : observation.status === 'confirmed' || reason?.providerCancellation === 'confirmed'
+        ? 'confirmed' : 'not_started'
+    const localAcknowledged = recordScopedN8nVideoChildStopAck(db, guarded.lease!, scope, {
+      providerCancellation, evidenceSha256: observation.evidenceSha256,
+    })
+    return NextResponse.json({ taskId: parent.taskId, nodeTaskId: childTaskId, stage,
+      status: 'stopping', code: 'N8N_VIDEO_STOP_REQUESTED', retryable: false,
+      providerCancellation, localAcknowledged,
+    }, { status: 409 })
+  }
   try {
-    const output = await runWithN8nChildExecutionHeartbeat(db, guarded.lease, scope, async () => {
-      if (stage !== 'finalize') return stageOutput(stage, parent.taskId, parent.routing, parent.input)
+    const output = await runWithN8nChildExecutionHeartbeat(db, guarded.lease, scope, async control => {
+      executionControl = control
+      assertMediaExecutionActive(control)
+      if (stage !== 'finalize') return stageOutput(stage, parent.taskId, parent.routing, parent.input, control)
       const prepareRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'prepare'))
       const audioRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'audio'))
       const visionRun = getN8nTaskRunByTaskId(db, mediaChildIdentity('task', parent.taskId, 'vision'))
@@ -345,7 +370,9 @@ export async function POST(request: NextRequest) {
         parent.routing,
         parent.input,
         merged,
+        control,
       )
+      assertMediaExecutionActive(control)
       const rawMaterialId = parent.input.materialId
       const materialIdResult = rawMaterialId === undefined
         ? null
@@ -365,6 +392,7 @@ export async function POST(request: NextRequest) {
         analysisVersion: 'video-analysis-v1',
       }
     })
+    assertMediaExecutionActive(executionControl)
     let finalOutput = output
     if (stage === 'finalize') {
       const finalized = completeN8nFinalizeRun(db, {
@@ -372,8 +400,11 @@ export async function POST(request: NextRequest) {
         childTaskId,
         output,
         executionLease: guarded.lease,
+        providerObservation: captureMediaProviderObservation(executionControl),
       })
       if (finalized.outcome !== 'completed' && finalized.outcome !== 'cached') {
+        // A stop may win the DB transaction after the heartbeat returned.
+        assertMediaExecutionActive(executionControl)
         const finalizeFailure = finalized.parent?.error
           ? projectSafeOperationError(finalized.parent.error, 'N8N_MEDIA_STAGE_FAILED')
           : null
@@ -394,8 +425,10 @@ export async function POST(request: NextRequest) {
       })
       if (cleanupPending) return cleanupPending
     } else {
-      const completed = completeN8nChildExecution(db, guarded.lease, output, scope)
-      if (!completed.settled) throw new N8nChildExecutionLeaseLostError()
+      const completed = completeN8nChildExecution(db, guarded.lease, output, scope, {
+        providerObservation: captureMediaProviderObservation(executionControl),
+      })
+      if (!completed.settled) { assertMediaExecutionActive(executionControl); throw new N8nChildExecutionLeaseLostError() }
     }
 
     return NextResponse.json({
@@ -407,6 +440,16 @@ export async function POST(request: NextRequest) {
       output: finalOutput,
     })
   } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'N8N_MEDIA_TERMINATION_UNCONFIRMED') {
+      recordScopedN8nVideoChildStopUnconfirmed(db, guarded.lease, scope)
+      return NextResponse.json({ taskId: parent.taskId, nodeTaskId: childTaskId, stage,
+        status: 'stopping', code: 'N8N_MEDIA_TERMINATION_UNCONFIRMED', retryable: false,
+        error: '本任务媒体进程退出尚未确认，保留停止状态等待核对',
+      }, { status: 409 })
+    }
+    if (error instanceof N8nVideoStopRequestedError || hasScopedN8nVideoStopRequest(db, parent.taskId, scope)) {
+      return stoppingResponse(error instanceof N8nVideoStopRequestedError ? error : undefined)
+    }
     const failure = projectSafeOperationError(
       error,
       error instanceof N8nChildExecutionLeaseLostError
@@ -425,7 +468,10 @@ export async function POST(request: NextRequest) {
         retryable: true,
       }, { status: 409 })
     }
-    const failed = failN8nChildExecution(db, guarded.lease, failure.persistedMessage, scope)
+    const failed = failN8nChildExecution(db, guarded.lease, failure.persistedMessage, scope, {
+      providerObservation: captureMediaProviderObservation(executionControl),
+    })
+    if (!failed.settled && hasScopedN8nVideoStopRequest(db, parent.taskId, scope)) return stoppingResponse()
     const retryable = !failed.settled || guarded.child.attemptCount < guarded.child.maxAttempts
     if (!retryable) {
       failN8nTaskRun(

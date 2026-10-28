@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { lstat, open, readdir, realpath, rename, unlink, access } from 'node:fs/promises'
+import { lstat, open, readdir, realpath, unlink, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { z } from 'zod'
@@ -9,6 +9,7 @@ import { readControlledMediaJson } from '@/lib/n8n-learning-progress'
 import { mediaTaskWorkspace } from '@/lib/n8n-media-workspace'
 import { loadN8nModelRegistry, resolveN8nNodeRoute, publicAuxiliaryModelResource, publicN8nModelRoute } from '@/lib/n8n-model-routing'
 import { mediaCheckpointModelIdentitySchema } from '@/lib/n8n-media-checkpoint-identity'
+import { assertMediaExecutionActive, publishControlledMediaFile, type N8nMediaExecutionControl } from '@/lib/n8n-media-control'
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u)
 const metadataSchema = z.object({
@@ -57,7 +58,8 @@ async function assetManifest(workspace: string, metadata: z.infer<typeof metadat
   return digest(manifest)
 }
 
-export async function writePreparedMediaProof(taskId: string, routing: Record<string, unknown>, input: Record<string, unknown>, metadataValue: Record<string, unknown>) {
+export async function writePreparedMediaProof(taskId: string, routing: Record<string, unknown>, input: Record<string, unknown>, metadataValue: Record<string, unknown>, control?: N8nMediaExecutionControl) {
+  assertMediaExecutionActive(control)
   const metadata = metadataSchema.parse(metadataValue)
   if (metadata.taskId !== taskId || metadata.segmentCount !== metadata.segments.length) throw new Error('prepared_media_identity_invalid')
   const workspace = mediaTaskWorkspace(taskId)
@@ -69,7 +71,8 @@ export async function writePreparedMediaProof(taskId: string, routing: Record<st
   try {
     const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
     try { await handle.writeFile(JSON.stringify(proof)); await handle.sync() } finally { await handle.close() }
-    await rename(temporary, join(workspace, 'prepared-proof.json'))
+    publishControlledMediaFile(temporary, join(workspace, 'prepared-proof.json'), control)
+    assertMediaExecutionActive(control)
   } finally { await unlink(temporary).catch(() => {}) }
 }
 

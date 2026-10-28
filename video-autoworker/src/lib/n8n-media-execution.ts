@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { access, chmod, lstat, mkdir, open, readFile, readdir, realpath, rm, stat } from 'node:fs/promises'
+import { constants, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { z } from 'zod'
@@ -23,6 +23,9 @@ import { assertMediaCapacity } from '../../openclaw-skills/aiworker-task-flow/li
 import { mediaInboxRoot, mediaTaskWorkspace, mediaWorkRoot } from '@/lib/n8n-media-workspace'
 import { createLearningProgressReporter, readControlledMediaJson } from '@/lib/n8n-learning-progress'
 import { writePreparedMediaProof } from '@/lib/n8n-prepared-evidence'
+import { assertMediaExecutionActive, mediaProviderRequestSignal, noteUnconfirmedProviderCancellation,
+  rethrowMediaExecutionInterruption, runOwnedMediaCommand, writeControlledMediaJson, commitMediaExecutionIfActive,
+  mediaProviderRequestStarted, mediaProviderRequestFinished, type N8nMediaExecutionControl } from '@/lib/n8n-media-control'
 import { createMediaCheckpointModelIdentity, matchesMediaCheckpointModelIdentity,
   MEDIA_ANALYSIS_SYSTEM_PROMPT } from '@/lib/n8n-media-checkpoint-identity'
 import { buildVideoLearningResult, readVideoLearningResult, hasPartialVideoLearning,
@@ -266,8 +269,9 @@ export function compatibleReasoningPayload(
 function runCommand(
   command: string,
   args: string[],
-  options: { timeoutMs?: number; maxBuffer?: number },
+  options: { timeoutMs?: number; maxBuffer?: number; control?: N8nMediaExecutionControl },
 ): Promise<CommandResult> {
+  if (options.control) return runOwnedMediaCommand(command, args, { ...options, control: options.control })
   return new Promise((resolvePromise, reject) => {
     execFile(command, args, {
       ...(options.timeoutMs === undefined ? {} : { timeout: options.timeoutMs }),
@@ -308,15 +312,17 @@ function parseDuration(stderr: string): number {
   return duration
 }
 
-async function probeMedia(ffmpeg: string, sourcePath: string) {
+async function probeMedia(ffmpeg: string, sourcePath: string, control?: N8nMediaExecutionControl) {
   let stderr = ''
   try {
     const result = await runCommand(ffmpeg, ['-nostdin', '-hide_banner', '-i', sourcePath], {
       timeoutMs: 15_000,
       maxBuffer: 2 * 1024 * 1024,
+      control,
     })
     stderr = result.stderr
   } catch (error) {
+    rethrowMediaExecutionInterruption(error, control)
     stderr = String((error as { stderr?: string }).stderr || '')
     if (!stderr.includes('Duration:')) throw commandFailure(error, '视频容器探测失败')
   }
@@ -344,7 +350,8 @@ async function assertControlledSource(videoKey: string) {
   return { sourcePath, sourceBytes: sourceStat.size }
 }
 
-async function verifiedSourceSha256(sourcePath: string, expectedBytes: number, materialId: unknown): Promise<string> {
+async function verifiedSourceSha256(sourcePath: string, expectedBytes: number, materialId: unknown, control?: N8nMediaExecutionControl): Promise<string> {
+  assertMediaExecutionActive(control)
   if (materialId !== undefined && !materialSourceSha256(materialId)) {
     throw new Error('已登记素材哈希无效')
   }
@@ -353,7 +360,11 @@ async function verifiedSourceSha256(sourcePath: string, expectedBytes: number, m
     const before = await handle.stat()
     if (!before.isFile() || before.size !== expectedBytes) throw new Error('视频源文件身份已变化')
     const hash = createHash('sha256')
-    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk)
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      assertMediaExecutionActive(control)
+      hash.update(chunk)
+    }
+    assertMediaExecutionActive(control)
     const after = await handle.stat()
     if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
       || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
@@ -370,12 +381,10 @@ async function verifiedSourceSha256(sourcePath: string, expectedBytes: number, m
   }
 }
 
-async function writeMetadata(workspace: string, metadata: MediaMetadata) {
+async function writeMetadata(workspace: string, metadata: MediaMetadata, control?: N8nMediaExecutionControl) {
+  assertMediaExecutionActive(control)
   const path = join(workspace, 'metadata.json')
-  const temporaryPath = `${path}.tmp-${process.pid}`
-  await writeFile(temporaryPath, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
+  await writeControlledMediaJson(path, metadata, control)
 }
 
 async function readMetadata(taskId: string): Promise<MediaMetadata> {
@@ -522,14 +531,22 @@ export function projectTimedTranscriptToWindows(
   return buckets.map(parts => normalizeTranscriptText(parts.join('')))
 }
 
-async function writeCheckpoint(workspace: string, name: string, value: Record<string, unknown>) {
+async function writeCheckpoint(workspace: string, name: string, value: Record<string, unknown>, control?: N8nMediaExecutionControl) {
+  assertMediaExecutionActive(control)
   const checkpointDir = join(workspace, 'checkpoints')
   await mkdir(checkpointDir, { recursive: true, mode: 0o700 })
   const path = join(checkpointDir, name)
-  const temporaryPath = `${path}.tmp-${process.pid}`
-  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { encoding: 'utf8', mode: 0o600 })
-  await rename(temporaryPath, path)
-  await chmod(path, 0o600)
+  await writeControlledMediaJson(path, value, control)
+}
+
+function createMediaProgressReporter(control: N8nMediaExecutionControl | undefined,
+  ...args: Parameters<typeof createLearningProgressReporter>) {
+  const report = createLearningProgressReporter(...args)
+  return async (...values: Parameters<typeof report>) => {
+    assertMediaExecutionActive(control)
+    await report(...values)
+    assertMediaExecutionActive(control)
+  }
 }
 
 async function readCheckpoint(
@@ -611,7 +628,8 @@ async function retainedSegmentFailure(taskId: string, routing: Record<string, un
 
 async function persistSegmentFailure(taskId: string, routing: Record<string, unknown>,
   stage: VideoLearningFailure['stage'], index: number, timeRange: string, inputSha256: string,
-  error: unknown): Promise<VideoLearningFailure> {
+  error: unknown, control?: N8nMediaExecutionControl): Promise<VideoLearningFailure> {
+  rethrowMediaExecutionInterruption(error, control)
   // Only a bounded model failure may be isolated. Storage, source, permission
   // and execution-lease failures retain their existing fail-closed boundary.
   if (!(error instanceof SafeOperationError)
@@ -619,7 +637,7 @@ async function persistSegmentFailure(taskId: string, routing: Record<string, unk
   const value = segmentFailureSchema.parse({ schema: 'aiworker-learning-segment-failure/v1',
     taskId, stage, index, timeRange, inputSha256, errorCode: error.publicCode,
     generation: learningRepair(routing).generation, updatedAt: Date.now() })
-  await writeCheckpoint(mediaTaskWorkspace(taskId), segmentFailureName(stage, index), value)
+  await writeCheckpoint(mediaTaskWorkspace(taskId), segmentFailureName(stage, index), value, control)
   return { index, stage, timeRange, errorCode: value.errorCode }
 }
 
@@ -724,27 +742,32 @@ export async function prepareN8nMedia(
   taskId: string,
   routing: Record<string, unknown>,
   input: Record<string, unknown>,
+  control?: N8nMediaExecutionControl,
 ): Promise<PreparedMedia> {
+  assertMediaExecutionActive(control)
   const settings = mediaConfig(routing)
   const videoKey = videoKeySchema.parse(input.videoKey)
   const cached = await readExistingMetadata(taskId)
   if (cached) {
     const orphanedSource = await assertControlledSource(videoKey).catch(() => null)
-    if (orphanedSource) await unlink(orphanedSource.sourcePath).catch(() => undefined)
+    assertMediaExecutionActive(control)
+    if (orphanedSource) commitMediaExecutionIfActive(control, () => { try { unlinkSync(orphanedSource.sourcePath) } catch { /* Best-effort owned duplicate cleanup. */ } })
+    assertMediaExecutionActive(control)
     return preparedOutput(cached)
   }
 
   const { sourcePath, sourceBytes } = await assertControlledSource(videoKey)
-  const sourceSha256 = await verifiedSourceSha256(sourcePath, sourceBytes, input.materialId)
+  const sourceSha256 = await verifiedSourceSha256(sourcePath, sourceBytes, input.materialId, control)
   const ffmpeg = ffmpegCommand()
   await access(ffmpeg, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)
   await mkdir(mediaWorkRoot(), { recursive: true, mode: 0o700 })
   await chmod(mediaWorkRoot(), 0o700)
+  assertMediaExecutionActive(control)
   await rm(workspace, { recursive: true, force: true })
   await mkdir(workspace, { recursive: false, mode: 0o700 })
 
-  const probe = await probeMedia(ffmpeg, sourcePath)
+  const probe = await probeMedia(ffmpeg, sourcePath, control)
   if (!probe.hasVideo) throw new Error('输入文件没有可分析的视频流')
   if (probe.durationSeconds > settings.maxDurationSeconds) {
     throw new Error(`视频时长超过 ${settings.maxDurationSeconds} 秒上限`)
@@ -756,19 +779,21 @@ export async function prepareN8nMedia(
       await runCommand(ffmpeg, [
         '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-i', sourcePath,
         '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audioSourcePath,
-      ], { timeoutMs })
+      ], { timeoutMs, control })
     } catch (error) {
+      rethrowMediaExecutionInterruption(error, control)
       throw commandFailure(error, '视频音轨提取失败')
     }
   }
 
   const segmentWindows = buildMediaSegmentWindows(probe.durationSeconds, settings.segmentSeconds)
   const segmentCount = segmentWindows.length
-  const reportProgress = createLearningProgressReporter(taskId, 'prepare', segmentCount, null)
+  const reportProgress = createMediaProgressReporter(control, taskId, 'prepare', segmentCount, null)
   await reportProgress(0, 0)
   const segments: MediaSegment[] = []
   let frameCount = 0
   for (const window of segmentWindows) {
+    assertMediaExecutionActive(control)
     const index = window.index - 1
     const { startSeconds, durationSeconds } = window
     const prefix = `segment-${String(index + 1).padStart(3, '0')}`
@@ -787,8 +812,9 @@ export async function prepareN8nMedia(
         '-ss', String(startSeconds), '-t', String(durationSeconds), '-i', sourcePath, '-an',
         '-vf', `select=gt(scene\\,0.20),scale=${settings.frameWidth}:-2:force_original_aspect_ratio=decrease`,
         '-fps_mode', 'vfr', '-frames:v', String(settings.maxKeyframesPerSegment), '-q:v', '3', scenePattern,
-      ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
-    } catch {
+      ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)), control })
+    } catch (error) {
+      rethrowMediaExecutionInterruption(error, control)
       // Some videos have no scene boundary in a window; uniform fallback below is authoritative.
     }
     const sceneFrames = (await readdir(segmentDir))
@@ -804,8 +830,9 @@ export async function prepareN8nMedia(
           '-ss', String(startSeconds), '-t', String(durationSeconds), '-i', sourcePath, '-an',
           '-vf', `fps=${Math.max(0.001, needed / durationSeconds)},scale=${settings.frameWidth}:-2:force_original_aspect_ratio=decrease`,
           '-frames:v', String(needed), '-q:v', '3', join(segmentDir, 'uniform-%02d.jpg'),
-        ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)) })
+        ], { timeoutMs: Math.max(60_000, Math.ceil(durationSeconds * 2_000)), control })
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, control)
         if (!frameFiles.length) throw commandFailure(error, `第 ${index + 1} 段画面抽帧失败`)
       }
       const uniformFrames = (await readdir(segmentDir))
@@ -840,9 +867,11 @@ export async function prepareN8nMedia(
     memoryMode: 'none',
     preparedAt: new Date().toISOString(),
   }
-  await writeMetadata(workspace, metadata)
-  await writePreparedMediaProof(taskId, routing, input, metadata)
-  await unlink(sourcePath).catch(() => undefined)
+  await writeMetadata(workspace, metadata, control)
+  assertMediaExecutionActive(control)
+  await writePreparedMediaProof(taskId, routing, input, metadata, control)
+  assertMediaExecutionActive(control)
+  commitMediaExecutionIfActive(control, () => { try { unlinkSync(sourcePath) } catch { /* Prepared evidence remains authoritative if source cleanup fails. */ } })
   return preparedOutput(metadata)
 }
 
@@ -864,11 +893,15 @@ function resolveAudioResource(routing: Record<string, unknown>): CliAudioResourc
 export async function transcribeN8nMedia(
   taskId: string,
   routing: Record<string, unknown>,
+  control?: N8nMediaExecutionControl,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(control)
   const metadata = await readMetadata(taskId)
+  assertMediaExecutionActive(control)
   const settings = mediaConfig(routing)
   const resource = resolveAudioResource(routing)
   if (!metadata.audioAvailable) {
+    assertMediaExecutionActive(control)
     return {
       transcript: '',
       skipped: true,
@@ -881,7 +914,7 @@ export async function transcribeN8nMedia(
   const command = expandHome(resource.runtime.command)
   await access(command, constants.X_OK)
   const workspace = mediaTaskWorkspace(taskId)
-  const reportProgress = createLearningProgressReporter(taskId, 'audio', metadata.segmentCount, resource.model)
+  const reportProgress = createMediaProgressReporter(control, taskId, 'audio', metadata.segmentCount, resource.model)
   await reportProgress(0, 0)
   if (metadata.audioSourceFile) {
     const audioPath = join(workspace, metadata.audioSourceFile)
@@ -914,8 +947,9 @@ export async function transcribeN8nMedia(
           '--json-segments',
           '--word-timestamps',
           audioPath,
-        ], { maxBuffer: 16 * 1024 * 1024 })
+        ], { maxBuffer: 16 * 1024 * 1024, control })
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, control)
         throw commandFailure(error, '整段音频模型转写失败')
       }
       const timed = parseTimedTranscriptPayload(result.stdout.trim())
@@ -928,7 +962,7 @@ export async function transcribeN8nMedia(
         transcript: timed.text.slice(0, settings.maxTranscriptChars),
         projected,
       }
-      await writeCheckpoint(workspace, checkpointName, checkpoint)
+      await writeCheckpoint(workspace, checkpointName, checkpoint, control)
     }
     const projected = checkpoint.projected as string[]
     const segments = metadata.segments.map((segment, offset) => ({
@@ -939,14 +973,16 @@ export async function transcribeN8nMedia(
       transcript: String(projected[offset] || '').slice(0, settings.maxTranscriptCharsPerSegment),
     }))
     for (const segment of segments) {
+      assertMediaExecutionActive(control)
       await writeCheckpoint(
         workspace,
         `audio-${String(segment.index).padStart(3, '0')}.json`,
-        segment,
+        segment, control,
       )
     }
     await reportProgress(segments.length, reused ? segments.length : 0,
       reused ? undefined : { elapsedSeconds: (Date.now() - startedAt) / 1000, units: segments.length, model: resource.model })
+    assertMediaExecutionActive(control)
     return {
       transcript: String(checkpoint.transcript || '').slice(0, settings.maxTranscriptChars),
       segments,
@@ -963,6 +999,7 @@ export async function transcribeN8nMedia(
   const segments: Record<string, unknown>[] = []
   let cacheHits = 0
   for (const segment of metadata.segments) {
+    assertMediaExecutionActive(control)
     if (!segment.audioFile) continue
     const checkpointName = `audio-${String(segment.index).padStart(3, '0')}.json`
     let segmentResult = await readCheckpoint(workspace, checkpointName, value => (
@@ -981,9 +1018,10 @@ export async function transcribeN8nMedia(
           '--max-chars', String(settings.maxTranscriptCharsPerSegment),
           audioPath,
         ], {
-          maxBuffer: 2 * 1024 * 1024,
+          maxBuffer: 2 * 1024 * 1024, control,
         })
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, control)
         throw commandFailure(error, `第 ${segment.index} 段音频模型转写失败`)
       }
       const transcript = result.stdout.trim().slice(0, settings.maxTranscriptCharsPerSegment)
@@ -995,7 +1033,7 @@ export async function transcribeN8nMedia(
         timeRange: segmentTimeLabel(segment),
         transcript,
       }
-      await writeCheckpoint(workspace, checkpointName, segmentResult)
+      await writeCheckpoint(workspace, checkpointName, segmentResult, control)
     }
     segments.push(segmentResult)
     if (reused) cacheHits += 1
@@ -1006,6 +1044,7 @@ export async function transcribeN8nMedia(
     `[${segment.timeRange}]\n${String(segment.transcript || '').trim()}`
   )).join('\n\n').slice(0, settings.maxTranscriptChars)
   if (!transcript) throw new Error('音频模型返回空转写')
+  assertMediaExecutionActive(control)
   return {
     transcript,
     segments,
@@ -1038,32 +1077,48 @@ async function callCompatibleModel(
     timeoutSeconds?: number
     reasoningEffort?: N8nVideoReasoningEffort
     phase?: N8nVideoModelPhase
+    control?: N8nMediaExecutionControl
   } = {},
 ): Promise<any> {
   const maxTokens = options.maxTokens ?? route.maxTokens
   const timeoutSeconds = options.timeoutSeconds ?? route.timeoutSeconds
-  const response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: route.model,
-      messages: [
-        { role: 'system', content: MEDIA_ANALYSIS_SYSTEM_PROMPT },
-        { role: 'user', content },
-      ],
-      ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
-      ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
-      ...(options.reasoningEffort === undefined
-        ? {}
-        : compatibleReasoningPayload(options.reasoningEffort)),
-      ...(options.phase === undefined ? {} : { aiworker_stage: options.phase }),
-    }),
-    signal: AbortSignal.timeout(timeoutSeconds * 1_000),
-  })
-  const raw = await response.text()
+  assertMediaExecutionActive(options.control)
+  let response: Response
+  let raw: string
+  const request = mediaProviderRequestSignal(options.control, timeoutSeconds * 1_000, { drainOnUserStop: route.location === 'local' })
+  mediaProviderRequestStarted(options.control)
+  try {
+    response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: route.model,
+        messages: [
+          { role: 'system', content: MEDIA_ANALYSIS_SYSTEM_PROMPT },
+          { role: 'user', content },
+        ],
+        ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
+        ...(maxTokens === undefined ? {} : { max_tokens: maxTokens }),
+        ...(options.reasoningEffort === undefined
+          ? {}
+          : compatibleReasoningPayload(options.reasoningEffort)),
+        ...(options.phase === undefined ? {} : { aiworker_stage: options.phase }),
+      }),
+      signal: request.signal,
+    })
+    raw = await response.text()
+  } catch (error) {
+    noteUnconfirmedProviderCancellation(options.control)
+    rethrowMediaExecutionInterruption(error, options.control)
+    throw error
+  } finally { request.dispose() }
+  // Non-success replies (notably gateway 504) do not prove the provider's
+  // background inference finished. Only a complete successful body does.
+  if (response.ok) mediaProviderRequestFinished(options.control)
+  assertMediaExecutionActive(options.control)
   let parsed: any = null
   try {
     parsed = raw ? JSON.parse(raw) : null
@@ -1130,16 +1185,19 @@ async function callCompatibleModelWithFallback(
   let lastFailureCode: SafeOperationErrorCode = 'N8N_MEDIA_MODEL_HTTP_FAILED'
   const start = Math.max(0, Math.min(startRouteIndex, Math.max(0, candidates.length - 1)))
   for (let routeIndex = start; routeIndex < candidates.length; routeIndex += 1) {
+    assertMediaExecutionActive(options.control)
     const route = candidates[routeIndex]
     try {
       assertVisionRoute(route)
       const apiKey = route.apiKeyEnv ? String(process.env[route.apiKeyEnv] || '').trim() : ''
       if (route.apiKeyEnv && !apiKey) throw new Error(`缺少外部凭据引用 ${route.apiKeyEnv}`)
       const payload = await callCompatibleModel(route, apiKey, content, failurePrefix, options)
+      assertMediaExecutionActive(options.control)
       let validated: unknown
       try {
         validated = validatePayload ? validatePayload(payload) : undefined
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, options.control)
         throw new SafeOperationError('N8N_MEDIA_MODEL_OUTPUT_INVALID', {
           operation: failurePrefix,
           routeId: route.id,
@@ -1148,6 +1206,7 @@ async function callCompatibleModelWithFallback(
       }
       return { payload, validated, route, routeIndex }
     } catch (error) {
+      rethrowMediaExecutionInterruption(error, options.control)
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
       lastFailureCode = projection.code
       logSafeOperationError('media_model_route_attempt', error, projection)
@@ -1353,8 +1412,11 @@ export async function analyzeN8nVideoFrames(
   taskId: string,
   routing: Record<string, unknown>,
   taskInput: Record<string, unknown>,
+  control?: N8nMediaExecutionControl,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(control)
   const metadata = await readMetadata(taskId)
+  assertMediaExecutionActive(control)
   const repair = learningRepair(routing)
   if (repair.previousLearningResult && repair.previousLearningResult.totalSegments !== metadata.segmentCount) {
     throw new Error('learning_repair_segment_count_changed')
@@ -1391,13 +1453,15 @@ export async function analyzeN8nVideoFrames(
   let consecutiveTransportFailures = 0
   let unavailableTransport: SafeOperationError | null = null
   const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
-  const reportProgress = createLearningProgressReporter(taskId, 'vision', metadata.segmentCount, modelLabel(route),
+  const reportProgress = createMediaProgressReporter(control, taskId, 'vision', metadata.segmentCount, modelLabel(route),
     () => [...failures.keys()])
   await reportProgress(0, 0)
   for (const batch of visualSegmentBatches(metadata.segments, maxImagesPerRequest)) {
+    assertMediaExecutionActive(control)
     const missing: MediaSegment[] = []
     const proofByIndex = new Map<number, Record<string, unknown>>()
     for (const segment of batch) {
+      assertMediaExecutionActive(control)
       const checkpointName = `vision-${String(segment.index).padStart(3, '0')}.json`
       let cached: Record<string, unknown> | null = null
       if (sourceSha256) {
@@ -1427,10 +1491,11 @@ export async function analyzeN8nVideoFrames(
     if (missing.length) {
       if (unavailableTransport) {
         for (const segment of missing) {
+          assertMediaExecutionActive(control)
           const inputSha256 = jsonSha256({ expected: proofByIndex.get(segment.index), segment, promptSha256,
             models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
           failures.set(segment.index, await persistSegmentFailure(taskId, routing, 'vision', segment.index,
-            segmentTimeLabel(segment), inputSha256, unavailableTransport))
+            segmentTimeLabel(segment), inputSha256, unavailableTransport, control))
         }
         await reportProgress(segmentResults.size, cacheHits)
         continue
@@ -1449,6 +1514,7 @@ export async function analyzeN8nVideoFrames(
       const frameCounts = new Map<number, number>()
       const imagesByIndex = new Map<number, string[]>()
       for (const segment of missing) {
+        assertMediaExecutionActive(control)
         const images = await Promise.all(segment.frameFiles.map(async name => {
           const buffer = await readFile(join(workspace, name))
           if (buffer.byteLength > 4 * 1024 * 1024) throw new Error(`抽帧文件过大：${name}`)
@@ -1492,7 +1558,7 @@ export async function analyzeN8nVideoFrames(
         await writeCheckpoint(
           workspace,
           `vision-${String(segment.index).padStart(3, '0')}.json`,
-          proof ? { ...segmentResult, proof } : segmentResult,
+          proof ? { ...segmentResult, proof } : segmentResult, control,
         )
         segmentResults.set(segment.index, segmentResult)
         failures.delete(segment.index)
@@ -1510,6 +1576,7 @@ export async function analyzeN8nVideoFrames(
             maxTokens: Math.min(4_096, generation.maxTokens * missing.length),
             reasoningEffort: generation.reasoningEffort,
             phase: generation.phase,
+            control,
           },
           payload => parseVisualPerceptionBatchAnswer(
             payload?.choices?.[0]?.message?.content,
@@ -1521,6 +1588,7 @@ export async function analyzeN8nVideoFrames(
         modelBatches += 1
         const perceptions = attempt.validated as Array<{ index: number; perception: N8nVisualPerception }>
         for (const { index, perception } of perceptions) {
+          assertMediaExecutionActive(control)
           const segment = missing.find(item => item.index === index)
           if (!segment) throw new Error(`视频画面批次返回未知片段：${index}`)
           await persist(segment, perception, attempt.route)
@@ -1529,11 +1597,13 @@ export async function analyzeN8nVideoFrames(
           units: missing.length, model: modelLabel(attempt.route) })
         continue
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, control)
         if (!(error instanceof SafeOperationError)) throw error
         const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
         logSafeOperationError('media_visual_batch_fallback', error, projection)
       }
       for (const segment of missing) {
+        assertMediaExecutionActive(control)
         const individualStartedAt = Date.now()
         const images = imagesByIndex.get(segment.index) || []
         const individualContent = [
@@ -1562,6 +1632,7 @@ export async function analyzeN8nVideoFrames(
             maxTokens: generation.maxTokens,
             reasoningEffort: generation.reasoningEffort,
             phase: generation.phase,
+            control,
           },
           payload => parseVisualPerceptionAnswer(payload?.choices?.[0]?.message?.content),
         )
@@ -1572,10 +1643,11 @@ export async function analyzeN8nVideoFrames(
         await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
           units: 1, model: modelLabel(attempt.route) })
         } catch (error) {
+          rethrowMediaExecutionInterruption(error, control)
           const inputSha256 = jsonSha256({ expected: proofByIndex.get(segment.index),
             segment, promptSha256, models: candidates.map(candidate => createMediaCheckpointModelIdentity(candidate, generation)) })
           const failure = await persistSegmentFailure(taskId, routing, 'vision', segment.index,
-            segmentTimeLabel(segment), inputSha256, error)
+            segmentTimeLabel(segment), inputSha256, error, control)
           failures.set(segment.index, failure)
           consecutiveTransportFailures = failure.errorCode === 'N8N_MEDIA_MODEL_HTTP_FAILED' ? consecutiveTransportFailures + 1 : 0
           if (consecutiveTransportFailures >= 3) unavailableTransport = error as SafeOperationError
@@ -1598,6 +1670,7 @@ export async function analyzeN8nVideoFrames(
   const analysis = segments.map(segment => (
     `[${segment.timeRange}]\n${String(segment.analysis || '').trim()}`
   )).join('\n\n').slice(0, 100_000)
+  assertMediaExecutionActive(control)
   return {
     analysis,
     segments,
@@ -1764,7 +1837,9 @@ export async function synthesizeN8nMediaResults(
   routing: Record<string, unknown>,
   taskInput: Record<string, unknown>,
   merged: Record<string, unknown>,
+  control?: N8nMediaExecutionControl,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(control)
   const timeline = Array.isArray(merged.timeline) ? merged.timeline.map(objectValue) : []
   if (!timeline.length) return merged
   const repair = learningRepair(routing)
@@ -1781,11 +1856,13 @@ export async function synthesizeN8nMediaResults(
     const historical = finalSummaryCheckpointSchema.parse(storedFinal)
     const chapters: Record<string, unknown>[] = []
     for (let index = 1; index <= Math.ceil(timeline.length / 5); index++) {
+      assertMediaExecutionActive(control)
       const chapter = await readCheckpoint(workspace, `chapter-${String(index).padStart(3, '0')}.json`, value => (
         value.index === index && typeof value.summary === 'string'
       ))
       if (chapter) chapters.push(chapter)
     }
+    assertMediaExecutionActive(control)
     return {
       ...merged, chapters, summary: historical.summary,
       directorPerception: historical.directorPerception,
@@ -1803,7 +1880,7 @@ export async function synthesizeN8nMediaResults(
     (inheritedLearning?.failedSegments || []).map(failure => [failure.index, failure]),
   )
   const modelLabel = (value: N8nModelRoute) => `${value.label} · ${value.model}`.slice(0, 180)
-  const reportProgress = createLearningProgressReporter(taskId, 'finalize', timeline.length, modelLabel(route),
+  const reportProgress = createMediaProgressReporter(control, taskId, 'finalize', timeline.length, modelLabel(route),
     () => [...failures.keys()])
   let cacheHits = 0
   await reportProgress(0, 0)
@@ -1824,6 +1901,7 @@ export async function synthesizeN8nMediaResults(
   let consecutiveTransportFailures = 0
   let unavailableTransport: SafeOperationError | null = null
   for (let batchOffset = 0; batchOffset < timeline.length; batchOffset += VIDEO_LEARNING_MODEL_BATCH_SEGMENTS) {
+    assertMediaExecutionActive(control)
     const batch = timeline.slice(batchOffset, batchOffset + VIDEO_LEARNING_MODEL_BATCH_SEGMENTS)
     const pending: Array<{
       index: number
@@ -1834,6 +1912,7 @@ export async function synthesizeN8nMediaResults(
       inputSha256: string
     }> = []
     for (const [localOffset, segment] of batch.entries()) {
+      assertMediaExecutionActive(control)
       const index = batchOffset + localOffset + 1
       if (failures.get(index)?.stage === 'vision') continue
       const timeRange = String(segment.timeRange || '')
@@ -1871,7 +1950,7 @@ export async function synthesizeN8nMediaResults(
     if (!pending.length) continue
     if (unavailableTransport) {
       for (const item of pending) failures.set(item.index, await persistSegmentFailure(taskId, routing, 'summary',
-        item.index, item.timeRange, item.inputSha256, unavailableTransport))
+        item.index, item.timeRange, item.inputSha256, unavailableTransport, control))
       await reportProgress(segmentResults.size, cacheHits)
       continue
     }
@@ -1899,7 +1978,7 @@ export async function synthesizeN8nMediaResults(
       await writeCheckpoint(
         workspace,
         `segment-summary-${String(item.index).padStart(3, '0')}.json`,
-        result,
+        result, control,
       )
       segmentResults.set(item.index, result)
       failures.delete(item.index)
@@ -1939,6 +2018,7 @@ export async function synthesizeN8nMediaResults(
           timeoutSeconds,
           reasoningEffort: generation.reasoningEffort,
           phase: generation.phase,
+          control,
         },
         payload => {
           if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error('片段批次摘要输出被截断')
@@ -1955,6 +2035,7 @@ export async function synthesizeN8nMediaResults(
       modelBatches += 1
       const perceptions = attempt.validated as Array<{ index: number; perception: N8nDirectorPerception }>
       for (const { index, perception } of perceptions) {
+        assertMediaExecutionActive(control)
         const item = pending.find(candidate => candidate.index === index)
         if (!item) throw new Error(`片段摘要批次返回未知片段：${index}`)
         await persist(item, perception, attempt.route.id)
@@ -1963,6 +2044,7 @@ export async function synthesizeN8nMediaResults(
         units: pending.length, model: modelLabel(attempt.route) })
       continue
     } catch (error) {
+      rethrowMediaExecutionInterruption(error, control)
       if (!(error instanceof SafeOperationError)) throw error
       const projection = projectSafeOperationError(error, 'N8N_MEDIA_MODEL_HTTP_FAILED')
       logSafeOperationError('media_segment_summary_batch_fallback', error, projection)
@@ -1972,6 +2054,7 @@ export async function synthesizeN8nMediaResults(
     // one-segment contract. Successful per-segment checkpoints remain reusable
     // if a later segment fails, preserving the existing recovery boundary.
     for (const item of pending) {
+      assertMediaExecutionActive(control)
       const individualStartedAt = Date.now()
       const individualPrompt = [
         '仅为下面这一个视频片段生成独立摘要与结构化导演感知，不汇总其他片段。',
@@ -2000,6 +2083,7 @@ export async function synthesizeN8nMediaResults(
           timeoutSeconds,
           reasoningEffort: generation.reasoningEffort,
           phase: generation.phase,
+          control,
         },
         payload => {
           if (payload?.choices?.[0]?.finish_reason === 'length') throw new Error(`片段 ${item.index} 摘要输出被截断`)
@@ -2015,8 +2099,9 @@ export async function synthesizeN8nMediaResults(
       await reportProgress(segmentResults.size, cacheHits, { elapsedSeconds: (Date.now() - individualStartedAt) / 1000,
         units: 1, model: modelLabel(attempt.route) })
       } catch (error) {
+        rethrowMediaExecutionInterruption(error, control)
         const failure = await persistSegmentFailure(taskId, routing, 'summary', item.index,
-          item.timeRange, item.inputSha256, error)
+          item.timeRange, item.inputSha256, error, control)
         failures.set(item.index, failure)
         consecutiveTransportFailures = failure.errorCode === 'N8N_MEDIA_MODEL_HTTP_FAILED' ? consecutiveTransportFailures + 1 : 0
         if (consecutiveTransportFailures >= 3) unavailableTransport = error as SafeOperationError
@@ -2033,6 +2118,7 @@ export async function synthesizeN8nMediaResults(
   const learningResult = buildVideoLearningResult(timeline.length, [...failures.values()])
   await reportProgress(segmentResults.size, cacheHits)
   const summary = `${learningResult.status === 'partial' ? '部分完成：' : ''}已完成 ${segmentSummaries.length}/${timeline.length} 个片段的独立音画摘要。${failures.size ? `${failures.size} 个片段失败，已保留成功结果，可单独补学。` : ''}按文件名、片段编号与时间码保存；此处为索引概览，完整事实和不确定项见逐片段摘要，不代表全片叙事总结。`
+  assertMediaExecutionActive(control)
   return {
     ...merged, segmentSummaries, learningResult,
     timeline: timeline.map((segment, offset) => ({

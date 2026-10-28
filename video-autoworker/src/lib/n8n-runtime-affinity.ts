@@ -2,7 +2,8 @@ import { createHash, randomBytes } from 'node:crypto'
 import { constants as fsConstants, closeSync, fstatSync, openSync, readFileSync } from 'node:fs'
 import { isAbsolute, join, normalize } from 'node:path'
 import type Database from 'better-sqlite3'
-import { CORE_DATABASE_MIGRATION, inspectVideoEditingSchema, VIDEO_EDIT_MIGRATION, VIDEO_EDIT_TABLES, videoEditingEnabled } from '@/lib/database-capabilities'
+import { CORE_DATABASE_MIGRATION, inspectVideoEditingSchema, inspectVideoStopSchema, VIDEO_EDIT_MIGRATION, VIDEO_EDIT_TABLES,
+  VIDEO_STOP_MIGRATION, videoEditingEnabled } from '@/lib/database-capabilities'
 import type { N8nIntakeControl } from '@/lib/n8n-intake-control'
 import type { SchedulerLeadershipStatus } from '@/lib/scheduler'
 
@@ -15,10 +16,11 @@ export const N8N_RELEASE_READINESS_SCHEMA = 'video-autoworker-release-readiness/
 export const N8N_ROLLING_DATABASE_COMPATIBILITY = {
   schemaEpoch: 1,
   rollingSafeFrom: '052_n8n_intake_controls',
-  latestMigration: '060_video_edit_task_receipts',
+  latestMigration: '061_n8n_video_stop_requests',
 } as const
 
-export type N8nRollingDatabaseCompatibility = Omit<typeof N8N_ROLLING_DATABASE_COMPATIBILITY, 'latestMigration'> & { latestMigration: string }
+export type N8nRollingDatabaseCompatibility = Omit<typeof N8N_ROLLING_DATABASE_COMPATIBILITY, 'latestMigration'>
+  & { latestMigration: string; videoEditingMigrationPresent?: boolean }
 
 type RequiredColumn = {
   name: string
@@ -475,6 +477,7 @@ export function getN8nRollingDatabaseCompatibility(
   db: Database.Database,
 ): N8nRollingDatabaseCompatibility {
   const editingInstalled = inspectVideoEditingSchema(db)
+  const stopInstalled = inspectVideoStopSchema(db, false)
   const isEditingTable = (name: string) => (VIDEO_EDIT_TABLES as readonly string[]).includes(name)
   const requiredMigrations = REQUIRED_ROLLING_MIGRATIONS.filter(id => id !== VIDEO_EDIT_MIGRATION || editingInstalled)
   for (const [table, requiredColumns] of Object.entries(REQUIRED_ROLLING_TABLES)) {
@@ -648,7 +651,8 @@ export function getN8nRollingDatabaseCompatibility(
   }
 
   return { ...N8N_ROLLING_DATABASE_COMPATIBILITY,
-    latestMigration: editingInstalled ? VIDEO_EDIT_MIGRATION : CORE_DATABASE_MIGRATION }
+    latestMigration: stopInstalled ? VIDEO_STOP_MIGRATION : editingInstalled ? VIDEO_EDIT_MIGRATION : CORE_DATABASE_MIGRATION,
+    ...(stopInstalled ? { videoEditingMigrationPresent: editingInstalled } : {}) }
 }
 
 interface DrainAggregateRow {
@@ -883,7 +887,10 @@ export function buildN8nReleaseReadiness(
   ) throw new TypeError('n8n release retirement identity does not match the current runtime')
   // The schema inspector already validates all required tables/indexes. Core
   // 059 is a supported result while the optional editing capability is off.
-  const supportedMigration = database.latestMigration === VIDEO_EDIT_MIGRATION
+  const supportedMigration = (database.latestMigration === VIDEO_STOP_MIGRATION
+      && typeof database.videoEditingMigrationPresent === 'boolean'
+      && (!videoEditingEnabled() || database.videoEditingMigrationPresent))
+    || database.latestMigration === VIDEO_EDIT_MIGRATION
     || (database.latestMigration === CORE_DATABASE_MIGRATION && !videoEditingEnabled())
   if (database.schemaEpoch !== N8N_ROLLING_DATABASE_COMPATIBILITY.schemaEpoch
     || database.rollingSafeFrom !== N8N_ROLLING_DATABASE_COMPATIBILITY.rollingSafeFrom

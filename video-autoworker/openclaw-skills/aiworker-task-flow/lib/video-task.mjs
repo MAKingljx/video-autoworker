@@ -8,7 +8,12 @@ import {
   sha256FileHandle,
   StagedMediaCleanupError,
   stageVideoFile,
+  assertVideoTaskActive,
+  isVideoTaskStopError,
+  VideoTaskStopUnconfirmedError,
 } from './media-ingest.mjs'
+export { VideoTaskStopRequestedError, VideoTaskStopUnconfirmedError,
+  isVideoTaskStopRequestedError, isVideoTaskStopError } from './media-ingest.mjs'
 import { isN8nIntakeDrainingError } from './platform-client.mjs'
 import { assertOptionalDirectorWork } from './director-work-policy.mjs'
 
@@ -113,6 +118,8 @@ function validateVideoTaskRequest(request) {
     throw new TypeError('video_task_request_invalid')
   }
   if (Object.hasOwn(request, 'materialId')) throw new Error('untrusted_material_id_field')
+  if (request.control !== null && request.control !== undefined
+    && (typeof request.control !== 'object' || typeof request.control.assertActive !== 'function')) throw new TypeError('video_task_execution_control_invalid')
   assertOptionalDirectorWork(request.directorWork)
   for (const [name, value] of [
     ['onStagingPrepared', request.onStagingPrepared],
@@ -148,10 +155,21 @@ async function triggerStagedVideoTask(request, staged) {
   } = request
   let ownershipTransferred = false
   let localReleased = false
+  const assertActive = () => assertVideoTaskActive(request.control)
+  const releaseStaged = async primaryError => {
+    if (request.control && primaryError) throw primaryError
+    await assertActive()
+    await onLocalCleanupStarted?.(staged)
+    await assertActive()
+    await discardStagedVideo(staged, primaryError)
+    localReleased = true
+  }
   try {
     let response
     try {
+      await assertActive()
       await onTriggerStarted?.(staged)
+      await assertActive()
       response = await client.trigger(buildVideoTaskPayload({
         bindingId,
         taskId,
@@ -165,7 +183,9 @@ async function triggerStagedVideoTask(request, staged) {
         visionRoute,
         directorWork,
       }))
+      await assertActive()
     } catch (error) {
+      if (isVideoTaskStopError(error)) throw error
       if (isN8nIntakeDrainingError(error)) {
         // The platform rejected this top-level dispatch before creating a run.
         // Preserve the exact staged artifact and stable identity so the
@@ -184,8 +204,11 @@ async function triggerStagedVideoTask(request, staged) {
       // the exact task before deciding whether the managed clone is still ours.
       let recovered
       try {
+        await assertActive()
         recovered = await client.getRun(taskId)
-      } catch {
+        await assertActive()
+      } catch (readError) {
+        if (isVideoTaskStopError(readError)) throw readError
         // The acceptance state is ambiguous while the loopback service is
         // unavailable. Keep the APFS clone for the platform or its bounded
         // stale-media cleanup, then pause and query the same task on resume.
@@ -197,19 +220,16 @@ async function triggerStagedVideoTask(request, staged) {
         if (resolved.ownership === 'same') {
           ownershipTransferred = true
           if (TERMINAL_RUN_STATUSES.has(recovered.status)) {
-            await onLocalCleanupStarted?.(staged)
-            await discardStagedVideo(staged, error)
-            localReleased = true
+            await releaseStaged(error)
           }
         } else if (resolved.ownership === 'different') {
-          await onLocalCleanupStarted?.(staged)
-          await discardStagedVideo(staged, error)
-          localReleased = true
+          await releaseStaged(error)
         } else {
           ownershipTransferred = true
           throw error
         }
         if (localReleased) await onMediaSettled?.(staged)
+        await assertActive()
         return {
           taskId: recovered.taskId,
           status: recovered.status,
@@ -242,16 +262,13 @@ async function triggerStagedVideoTask(request, staged) {
       if (resolved.ownership === 'same') {
         ownershipTransferred = true
         if (TERMINAL_RUN_STATUSES.has(resolved.run.status)) {
-          await onLocalCleanupStarted?.(staged)
-          await discardStagedVideo(staged)
-          localReleased = true
+          await releaseStaged()
         }
       } else {
-        await onLocalCleanupStarted?.(staged)
-        await discardStagedVideo(staged)
-        localReleased = true
+        await releaseStaged()
       }
       if (localReleased) await onMediaSettled?.(staged)
+      await assertActive()
       return {
         ...resolved.run,
         duplicate: true,
@@ -269,14 +286,10 @@ async function triggerStagedVideoTask(request, staged) {
       if (resolved.ownership === 'same') {
         ownershipTransferred = true
         if (TERMINAL_RUN_STATUSES.has(resolved.run.status)) {
-          await onLocalCleanupStarted?.(staged)
-          await discardStagedVideo(staged)
-          localReleased = true
+          await releaseStaged()
         }
       } else if (resolved.ownership === 'different') {
-        await onLocalCleanupStarted?.(staged)
-        await discardStagedVideo(staged)
-        localReleased = true
+        await releaseStaged()
       } else {
         ownershipTransferred = true
         throw new VideoTriggerUnconfirmedError(new Error('duplicate_video_ownership_unconfirmed'))
@@ -284,18 +297,18 @@ async function triggerStagedVideoTask(request, staged) {
     } else {
       ownershipTransferred = true
       if (TERMINAL_RUN_STATUSES.has(response.status)) {
-        await onLocalCleanupStarted?.(staged)
-        await discardStagedVideo(staged)
-        localReleased = true
+        await releaseStaged()
       }
     }
     if (localReleased) await onMediaSettled?.(staged)
+    await assertActive()
     return response
   } catch (error) {
+    // Controlled failures retain the original handoff for its batch owner;
+    // an intent may commit concurrently with a failed submission response.
+    if (isVideoTaskStopError(error) || request.control) throw error
     if (!ownershipTransferred && !localReleased && !(error instanceof StagedMediaCleanupError)) {
-      await onLocalCleanupStarted?.(staged)
-      await discardStagedVideo(staged, error)
-      localReleased = true
+      await releaseStaged(error)
       await onMediaSettled?.(staged)
     }
     throw error
@@ -304,6 +317,7 @@ async function triggerStagedVideoTask(request, staged) {
 
 export async function submitStagedVideoTask(request, staged) {
   validateVideoTaskRequest(request)
+  await assertVideoTaskActive(request.control)
   if (!staged || typeof staged !== 'object' || !staged.videoKey || !staged.stagedPath) {
     throw new TypeError('staged_video_task_invalid')
   }
@@ -337,6 +351,7 @@ export async function submitStagedVideoTask(request, staged) {
   ) throw new Error('staged_video_task_binding_invalid')
   const details = await lstat(staged.stagedPath)
   let handle
+  let operationError
   try {
     if (!details.isFile() || details.isSymbolicLink()) {
       throw new Error('staged_video_task_identity_invalid')
@@ -348,15 +363,19 @@ export async function submitStagedVideoTask(request, staged) {
       || handleStat.ino !== details.ino
       || !sameSourceIdentity(staged.stagedIdentity, handleStat)
     ) throw new Error('staged_video_task_identity_invalid')
-    if (await sha256FileHandle(handle) !== staged.contentSha256) {
+    if (await sha256FileHandle(handle, { control: request.control }) !== staged.contentSha256) {
       throw new Error('staged_video_task_content_invalid')
     }
     if (!sameSourceIdentity(staged.stagedIdentity, await handle.stat())) {
       throw new Error('staged_video_task_identity_invalid')
     }
+    if (request.control && !sameSourceIdentity(staged.stagedIdentity, await lstat(staged.stagedPath))) throw new Error('staged_video_task_identity_invalid')
+  } catch (error) { operationError = error; throw error
   } finally {
-    await handle?.close().catch(() => undefined)
+    try { await handle?.close() }
+    catch (error) { throw isVideoTaskStopError(operationError) ? new VideoTaskStopUnconfirmedError(operationError, error) : error }
   }
+  await assertVideoTaskActive(request.control)
   return triggerStagedVideoTask(request, staged)
 }
 
@@ -375,6 +394,7 @@ export async function submitVideoTask(request) {
     onStagingCompleted = null,
   } = request
   const staged = await stageVideoFile(videoFile, {
+    control: request.control,
     inboxRoot,
     maxBytes,
     onHashProgress,

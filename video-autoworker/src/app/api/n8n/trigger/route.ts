@@ -10,6 +10,7 @@ import {
 } from '@/lib/n8n'
 import {
   getN8nTaskRunByIdempotencyKey,
+  hasScopedN8nVideoStopRequest,
   n8nTaskDeliverySchema,
   n8nTaskIdentitySchema,
   type N8nTaskRun,
@@ -375,7 +376,11 @@ export async function POST(request: NextRequest) {
       ...(binding.taskType === 'video-analysis' ? { memoryMode: 'none' } : {}),
       ...(body?.routing === undefined ? {} : { taskRouting: taskRoutingResult.data }),
     }
-    const admission = createN8nTaskRunWithIntakeGate(db, {
+    const stoppedResponse = () => NextResponse.json({ taskId, code: 'N8N_VIDEO_STOP_REQUESTED',
+      status: 'stopping', retryable: false, error: '此视频已请求停止，保留原素材并查询原停止请求' },
+    { status: 503, headers: { 'Cache-Control': 'no-store' } })
+    let admission: ReturnType<typeof createN8nTaskRunWithIntakeGate>
+    try { admission = createN8nTaskRunWithIntakeGate(db, {
       taskId,
       idempotencyKey,
       bindingId: binding.id,
@@ -385,7 +390,16 @@ export async function POST(request: NextRequest) {
       taskInput: trustedTaskInput,
       delivery: deliveryResult.data,
       maxAttempts: binding.retryCount + 1,
-    }, scope)
+    }, scope) } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes('N8N_VIDEO_STOP_REQUESTED')) throw error
+      return { ok: false, response: hasScopedN8nVideoStopRequest(db, taskId, scope) ? stoppedResponse()
+        : NextResponse.json({ code: 'N8N_TASK_IDENTITY_CONFLICT', error: '任务标识不可用于此次受理，请使用新的任务标识' }, { status: 409 }) }
+    }
+    if (admission.outcome !== 'blocked' && admission.run.taskId === taskId
+      && admission.run.idempotencyKey === idempotencyKey && admission.run.bindingId === binding.id
+      && admission.run.status === 'cancelled' && admission.run.error?.startsWith('[N8N_VIDEO_STOPPED_BY_USER]')) {
+      return { ok: false, response: stoppedResponse() }
+    }
     return { ok: true, trustedTaskInput, routing: admission.outcome === 'blocked' ? routing : admission.run.routing, admission }
   }
 

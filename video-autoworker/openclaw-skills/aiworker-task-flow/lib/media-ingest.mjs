@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { constants, createReadStream } from 'node:fs'
+import { constants } from 'node:fs'
 import { chmod, copyFile, link, lstat, mkdir, open, readdir, realpath, rename, rm, stat, utimes } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, extname, join, resolve } from 'node:path'
@@ -8,6 +8,53 @@ import { assertMediaCapacity, configuredMediaFileLimit } from './media-policy.mj
 
 export const SUPPORTED_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v'])
 const MATERIAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/
+
+export class VideoTaskStopRequestedError extends Error {
+  constructor(stopRequestId = null) {
+    if (stopRequestId !== null && (typeof stopRequestId !== 'string' || !/^[a-f0-9]{64}$/u.test(stopRequestId))) throw new TypeError('video_stop_request_identity_invalid')
+    super('video_task_stop_requested')
+    this.name = 'VideoTaskStopRequestedError'
+    this.code = 'N8N_VIDEO_STOP_REQUESTED'
+    this.stopRequestId = stopRequestId
+  }
+}
+export class VideoTaskStopUnconfirmedError extends Error {
+  constructor(primaryError, resourceError) {
+    super('video_task_stop_resource_exit_unconfirmed', { cause: resourceError })
+    this.name = 'VideoTaskStopUnconfirmedError'
+    this.code = 'N8N_VIDEO_STAGING_STOP_UNCONFIRMED'
+    const requestId = primaryError?.stopRequestId
+    this.stopRequestId = typeof requestId === 'string' && /^[a-f0-9]{64}$/u.test(requestId) ? requestId : null
+  }
+}
+export const isVideoTaskStopRequestedError = error => error instanceof VideoTaskStopRequestedError
+export const isVideoTaskStopError = error => isVideoTaskStopRequestedError(error) || error instanceof VideoTaskStopUnconfirmedError
+
+export async function assertVideoTaskActive(control) {
+  if (control === undefined || control === null) return
+  if (typeof control !== 'object' || typeof control.assertActive !== 'function') throw new TypeError('video_task_execution_control_invalid')
+  try { await control.assertActive() }
+  catch (error) {
+    if (isVideoTaskStopError(error)) throw error
+    // A failed ownership/identity check is not a confirmed user stop and must
+    // not authorize either further work or cleanup of a possibly handed-off file.
+    throw new VideoTaskStopUnconfirmedError(error, error)
+  }
+}
+
+async function closeStagingHandles(sourceHandle, destination, primaryError) {
+  let resourceError = null
+  // A typed stop is observable only after this attempt's writer is durable
+  // and both owned descriptors are closed. Never claim quiescence on failure.
+  if (destination && isVideoTaskStopError(primaryError)) {
+    try { await destination.sync() } catch (error) { resourceError = error }
+  }
+  for (const handle of [destination, sourceHandle]) {
+    if (handle) try { await handle.close() } catch (error) { resourceError ||= error }
+  }
+  if (resourceError) throw isVideoTaskStopError(primaryError)
+    ? new VideoTaskStopUnconfirmedError(primaryError, resourceError) : resourceError
+}
 
 export class StagedMediaCleanupError extends Error {
   constructor(primaryError, cleanupError, videoKey) {
@@ -35,6 +82,8 @@ export function normalizeMaterialId(value) {
 export async function deriveMaterialIdFromFile(videoFile, {
   onProgress = null,
   progressIntervalMs = 5_000,
+  control = null,
+  expectedSourceIdentity = null,
 } = {}) {
   if (onProgress !== null && typeof onProgress !== 'function') {
     throw new TypeError('素材哈希进度回调无效')
@@ -42,7 +91,7 @@ export async function deriveMaterialIdFromFile(videoFile, {
   if (!Number.isInteger(progressIntervalMs) || progressIntervalMs < 100 || progressIntervalMs > 60_000) {
     throw new TypeError('素材哈希心跳间隔无效')
   }
-  const hash = createHash('sha256')
+  await assertVideoTaskActive(control)
   let lastProgressAt = 0
   const reportProgress = async (force = false) => {
     const now = Date.now()
@@ -53,12 +102,21 @@ export async function deriveMaterialIdFromFile(videoFile, {
     await onProgress?.()
   }
   await reportProgress(true)
-  for await (const chunk of createReadStream(videoFile)) {
-    hash.update(chunk)
-    await reportProgress()
+  const handle = await open(videoFile, constants.O_RDONLY | (control ? constants.O_NOFOLLOW : 0))
+  let contentSha256, operationError
+  try {
+    if (expectedSourceIdentity) await assertHandleIdentity(handle, expectedSourceIdentity)
+    contentSha256 = await sha256FileHandle(handle, { control, onProgress: reportProgress })
+    if (expectedSourceIdentity) {
+      await assertHandleIdentity(handle, expectedSourceIdentity)
+      await assertSourceIdentity(videoFile, expectedSourceIdentity)
+    }
   }
+  catch (error) { operationError = error; throw error }
+  finally { await closeStagingHandles(handle, null, operationError) }
   await reportProgress(true)
-  return `MATERIAL-SHA256-${hash.digest('hex')}`
+  await assertVideoTaskActive(control)
+  return `MATERIAL-SHA256-${contentSha256}`
 }
 
 function validateProgressOptions(onProgress, progressIntervalMs) {
@@ -183,33 +241,43 @@ function sourceHandlePath(sourceHandle) {
   return `/dev/fd/${sourceHandle.fd}`
 }
 
-async function copyIntoHandlePhysical(sourceHandle, destination) {
+async function copyIntoHandlePhysical(sourceHandle, destination, control = null) {
   const buffer = Buffer.allocUnsafe(8 * 1024 * 1024)
   let position = 0
-  while (true) {
-    const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position)
-    if (bytesRead === 0) break
-    let written = 0
-    while (written < bytesRead) {
-      const result = await destination.write(buffer, written, bytesRead - written, position + written)
-      written += result.bytesWritten
+  let operationError
+  try {
+    while (true) {
+      await assertVideoTaskActive(control)
+      const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position)
+      if (bytesRead === 0) break
+      let written = 0
+      while (written < bytesRead) {
+        await assertVideoTaskActive(control)
+        const result = await destination.write(buffer, written, bytesRead - written, position + written)
+        if (result.bytesWritten === 0) throw new Error('video_staging_zero_byte_write')
+        written += result.bytesWritten
+      }
+      position += bytesRead
+      await assertVideoTaskActive(control)
     }
-    position += bytesRead
+  } catch (error) { operationError = error; throw error }
+  finally {
+    try { await destination.sync() }
+    catch (error) { throw isVideoTaskStopError(operationError) ? new VideoTaskStopUnconfirmedError(operationError, error) : error }
   }
-  await destination.sync()
 }
 
-async function copyFromHandlePhysical(sourceHandle, stagedPath) {
+async function copyFromHandlePhysical(sourceHandle, stagedPath, control = null) {
+  await assertVideoTaskActive(control)
   const destination = await open(
     stagedPath,
     constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
     0o600,
   )
-  try {
-    await copyIntoHandlePhysical(sourceHandle, destination)
-  } finally {
-    await destination.close()
-  }
+  let operationError
+  try { await copyIntoHandlePhysical(sourceHandle, destination, control) }
+  catch (error) { operationError = error; throw error }
+  finally { await closeStagingHandles(null, destination, operationError) }
 }
 
 async function runDarwinCloneFallback(sourceAnchorPath, stagedPath, spawnImpl = spawn) {
@@ -233,7 +301,9 @@ async function runDarwinCloneFallback(sourceAnchorPath, stagedPath, spawnImpl = 
 export async function copyDarwinVideoFileFromAnchor(sourceAnchorPath, stagedPath, {
   copyFileImpl = copyFile,
   spawnImpl = spawn,
+  control = null,
 } = {}) {
+  await assertVideoTaskActive(control)
   try {
     await copyFileImpl(
       sourceAnchorPath,
@@ -241,6 +311,8 @@ export async function copyDarwinVideoFileFromAnchor(sourceAnchorPath, stagedPath
       constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE_FORCE,
     )
   } catch (error) {
+    if (isVideoTaskStopError(error)) throw error
+    await assertVideoTaskActive(control)
     const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : ''
     if (!['ENOSYS', 'ENOTSUP', 'EINVAL'].includes(code)) {
       throw new Error('视频与受控收件箱必须位于支持 APFS 克隆的同一文件系统，未执行大文件完整复制')
@@ -248,6 +320,7 @@ export async function copyDarwinVideoFileFromAnchor(sourceAnchorPath, stagedPath
     await rm(stagedPath, { force: true })
     await runDarwinCloneFallback(sourceAnchorPath, stagedPath, spawnImpl)
   }
+  await assertVideoTaskActive(control)
 }
 
 async function createVerifiedSourceAnchor(sourcePath, sourceHandle, expectedIdentity, anchorPath) {
@@ -308,7 +381,9 @@ export async function cleanupOrphanedMediaStaging(inbox) {
 export async function copyPhysicalVideoFile(sourcePath, stagedPath, {
   copyFileImpl = copyFile,
   expectedSourceIdentity = null,
+  control = null,
 } = {}) {
+  await assertVideoTaskActive(control)
   const sourceBefore = await stat(sourcePath)
   if (!sourceBefore.isFile()) throw new Error('视频源文件在收件期间发生变化')
   const copyIdentity = expectedSourceIdentity || sourceIdentity(sourceBefore)
@@ -316,25 +391,29 @@ export async function copyPhysicalVideoFile(sourcePath, stagedPath, {
     throw new Error('视频源文件在收件期间发生变化')
   }
   const sourceHandle = await openVerifiedSource(sourcePath, copyIdentity)
+  let operationError
   try {
-    if (copyFileImpl === copyFile) await copyFromHandlePhysical(sourceHandle, stagedPath)
+    if (copyFileImpl === copyFile) await copyFromHandlePhysical(sourceHandle, stagedPath, control)
     else await copyFileImpl(sourceHandlePath(sourceHandle), stagedPath, constants.COPYFILE_EXCL)
+    await assertVideoTaskActive(control)
     await assertHandleIdentity(sourceHandle, copyIdentity)
     await assertSourceIdentity(sourcePath, copyIdentity)
-  } finally {
-    await sourceHandle.close()
-  }
+  } catch (error) { operationError = error; throw error }
+  finally { await closeStagingHandles(sourceHandle, null, operationError) }
 }
 
-export async function sha256FileHandle(handle) {
+export async function sha256FileHandle(handle, { control = null, onProgress = null } = {}) {
   const hash = createHash('sha256')
   const buffer = Buffer.allocUnsafe(8 * 1024 * 1024)
   let position = 0
   while (true) {
+    await assertVideoTaskActive(control)
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, position)
     if (bytesRead === 0) break
     hash.update(buffer.subarray(0, bytesRead))
     position += bytesRead
+    await onProgress?.()
+    await assertVideoTaskActive(control)
   }
   return hash.digest('hex')
 }
@@ -472,6 +551,7 @@ export async function inspectVideoFile(videoFile, options = {}) {
 }
 
 export async function stageVideoFile(videoFile, options = {}) {
+  await assertVideoTaskActive(options.control)
   if (Object.hasOwn(options, 'materialId')) throw new Error('untrusted_material_id_field')
   if (options.onStagingPrepared !== undefined
     && typeof options.onStagingPrepared !== 'function') {
@@ -516,6 +596,7 @@ export async function stageVideoFile(videoFile, options = {}) {
     maxBytes: options.maxBytes,
     capacityRoot: inbox,
   })
+  await assertVideoTaskActive(options.control)
   const expectedSourceIdentity = options.expectedSourceIdentity || inspected.sourceIdentity
   if (!sameSourceIdentity(expectedSourceIdentity, {
     ...inspected.sourceIdentity,
@@ -540,17 +621,17 @@ export async function stageVideoFile(videoFile, options = {}) {
       const sourceHandle = await openVerifiedSource(inspected.sourcePath, expectedSourceIdentity)
       let durableIncomingHandle = null
       let initialIncomingIdentity = null
-      if (options.onStagingPrepared !== undefined) {
-        durableIncomingHandle = await open(
-          incomingPath,
-          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-          0o600,
-        )
-        initialIncomingIdentity = sourceIdentity(await durableIncomingHandle.stat())
-        cleanupIncomingIdentity = initialIncomingIdentity
-      }
-      stagingPrepared = options.onStagingPrepared !== undefined
       try {
+        if (options.onStagingPrepared !== undefined) {
+          durableIncomingHandle = await open(
+            incomingPath,
+            constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+            0o600,
+          )
+          initialIncomingIdentity = sourceIdentity(await durableIncomingHandle.stat())
+          cleanupIncomingIdentity = initialIncomingIdentity
+        }
+        stagingPrepared = options.onStagingPrepared !== undefined
         await options.onStagingPrepared?.(Object.freeze({
           schemaVersion: 1,
           phase: 'prepared',
@@ -566,21 +647,23 @@ export async function stageVideoFile(videoFile, options = {}) {
           ownershipToken,
           ...stagingBinding,
         }))
+        await assertVideoTaskActive(options.control)
       } catch (error) {
-        await durableIncomingHandle?.close().catch(() => undefined)
-        await sourceHandle.close().catch(() => undefined)
+        await closeStagingHandles(sourceHandle, durableIncomingHandle, error)
         throw error
       }
       let sourceAnchor = null
       let finalSourceIdentity = inspected.sourceIdentity
       let finalIncomingIdentity = null
       let sourceIdentityReported = false
+      let operationError
       try {
+        await assertVideoTaskActive(options.control)
         if (durableIncomingHandle) {
           // A durable worker journals the empty destination inode before the
           // first byte is written. Copy through that bound descriptor so a
           // crash can never leave an unowned incoming/final path.
-          await copyIntoHandlePhysical(sourceHandle, durableIncomingHandle)
+          await copyIntoHandlePhysical(sourceHandle, durableIncomingHandle, options.control)
           await assertHandleIdentity(sourceHandle, expectedSourceIdentity)
           const [incomingPathStat, incomingHandleStat] = await Promise.all([
             lstat(incomingPath),
@@ -608,14 +691,14 @@ export async function stageVideoFile(videoFile, options = {}) {
           }
           if (sourceAnchor) {
             await options.onSourceAnchorCreated?.(sourceAnchor.anchoredIdentity)
-            await copyDarwinVideoFileFromAnchor(sourceAnchor.anchorPath, incomingPath)
+            await copyDarwinVideoFileFromAnchor(sourceAnchor.anchorPath, incomingPath, { control: options.control })
             await assertHandleIdentity(sourceHandle, sourceAnchor.anchoredIdentity)
           } else {
-            await copyFromHandlePhysical(sourceHandle, incomingPath)
+            await copyFromHandlePhysical(sourceHandle, incomingPath, options.control)
             await assertHandleIdentity(sourceHandle, expectedSourceIdentity)
           }
         } else {
-          await copyFromHandlePhysical(sourceHandle, incomingPath)
+          await copyFromHandlePhysical(sourceHandle, incomingPath, options.control)
           await assertHandleIdentity(sourceHandle, expectedSourceIdentity)
         }
         await assertSourceIdentity(
@@ -627,9 +710,11 @@ export async function stageVideoFile(videoFile, options = {}) {
         await chmod(incomingPath, 0o600)
         finalIncomingIdentity = sourceIdentity(await stat(incomingPath))
         cleanupIncomingIdentity = finalIncomingIdentity
+        await assertVideoTaskActive(options.control)
+      } catch (error) { operationError = error; throw error
       } finally {
         try {
-          if (sourceAnchor) {
+          if (sourceAnchor && !isVideoTaskStopError(operationError)) {
             try {
               await (options.removeSourceAnchorImpl || rm)(sourceAnchor.anchorPath, { force: true })
             } catch (error) {
@@ -644,8 +729,7 @@ export async function stageVideoFile(videoFile, options = {}) {
             sourceIdentityReported = true
           }
         } finally {
-          await durableIncomingHandle?.close().catch(() => undefined)
-          await sourceHandle.close()
+          await closeStagingHandles(sourceHandle, durableIncomingHandle, operationError)
         }
       }
 
@@ -654,13 +738,16 @@ export async function stageVideoFile(videoFile, options = {}) {
           incomingIdentity: finalIncomingIdentity,
         })
       }
+      await assertVideoTaskActive(options.control)
 
       const stagedStat = await stat(incomingPath)
       if (!stagedStat.isFile() || stagedStat.size !== inspected.sourceBytes) {
         throw new Error('视频收件副本校验失败')
       }
       // Bind generated identity to the exact controlled snapshot submitted.
-      const contentMaterialId = await deriveMaterialIdFromFile(incomingPath)
+      const contentMaterialId = await deriveMaterialIdFromFile(incomingPath, { control: options.control,
+        ...(options.control ? { expectedSourceIdentity: finalIncomingIdentity } : {}) })
+      await assertVideoTaskActive(options.control)
       const contentSha256 = contentMaterialId.slice('MATERIAL-SHA256-'.length)
       const materialId = options.trustedExistingMaterialId === undefined
         ? contentMaterialId
@@ -683,12 +770,17 @@ export async function stageVideoFile(videoFile, options = {}) {
         ownershipToken,
       }
       await options.onStagingCompleted?.(staged)
+      await assertVideoTaskActive(options.control)
       return staged
     }, {
       onProgress: options.onHashProgress ?? null,
       progressIntervalMs: options.hashProgressIntervalMs ?? 5_000,
     })
   } catch (error) {
+    // Controlled durable attempts leave failure cleanup to the original batch
+    // owner. A cross-process stop can win while ordinary async cleanup is
+    // underway, so this producer never removes journal-bound recovery data.
+    if (isVideoTaskStopError(error) || (options.control && stagingPrepared)) throw error
     if (error instanceof StagedMediaCleanupError) throw error
     if (stagingPrepared) await options.onStagingCleanupStarted?.()
     if (cleanupIncomingIdentity) {

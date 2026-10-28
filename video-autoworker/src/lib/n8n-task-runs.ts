@@ -7,6 +7,9 @@ import { mediaChildIdentity } from '@/lib/n8n-media-workspace'
 import { hasPartialVideoLearning, readVideoLearningResult } from '../../openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs'
 import { assertCurrentVideoRepairCallbackBinding, bindVideoRepairCallbacks, currentVideoRepairCallbackBinding,
   snapshotVideoRepairCallbackBinding, type VideoRepairCallbackBinding } from '@/lib/n8n-video-repair-affinity'
+import { isObservedMediaProviderObservation, type N8nMediaExecutionControl,
+  type N8nMediaProviderObservation } from '@/lib/n8n-media-control'
+export type { N8nMediaExecutionControl } from '@/lib/n8n-media-control'
 
 export const n8nTaskIdentitySchema = z.string()
   .trim()
@@ -143,10 +146,95 @@ export async function pollN8nChildExecutionResult(
 }
 
 export class N8nChildExecutionLeaseLostError extends Error {
+  readonly code = 'N8N_CHILD_LEASE_LOST'
   constructor() {
     super('n8n 子任务执行租约已失效')
     this.name = 'N8nChildExecutionLeaseLostError'
   }
+}
+
+export class N8nVideoStopRequestedError extends Error {
+  readonly code = 'N8N_VIDEO_STOP_REQUESTED'
+  providerCancellation: 'confirmed' | 'not_started' | 'provider_unconfirmed' = 'not_started'
+  constructor() {
+    super('视频任务已请求停止，拒绝继续执行或提交结果')
+    this.name = 'N8nVideoStopRequestedError'
+  }
+}
+
+/** The one durable stop authority also covers deterministic future children. */
+export function hasScopedN8nVideoStopRequest(db: Database.Database, taskId: string, scope: N8nTaskScope): boolean {
+  return Boolean(db.prepare(`SELECT 1 FROM n8n_video_stop_requests stop
+    WHERE stop.tenant_id=? AND stop.workspace_id=?
+      AND (stop.task_id=? OR ? IN (SELECT value FROM json_each(stop.child_task_ids_json))) LIMIT 1`)
+    .get(scope.tenantId, scope.workspaceId, taskId, taskId))
+}
+
+export function assertScopedN8nVideoExecutionActive(db: Database.Database, taskId: string, scope: N8nTaskScope): void {
+  if (hasScopedN8nVideoStopRequest(db, taskId, scope)) throw new N8nVideoStopRequestedError()
+}
+
+const providerReceiptSchema = z.object({ schema: z.literal('aiworker-media-provider-receipt/v1'),
+  childTaskId: n8nTaskIdentitySchema, ownerInstanceId: z.string().regex(/^[a-f0-9]{64}$/u),
+  leaseRevision: z.number().int().positive(), leaseTokenSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  attemptCount: z.number().int().min(1).max(11), status: z.enum(['confirmed', 'not_started', 'unconfirmed']),
+  evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/u), receiptSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+}).strict()
+const providerReceiptDigest = (value: Record<string, unknown>) => createHash('sha256')
+  .update(JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))))
+  .digest('hex')
+function validProviderReceipts(value: unknown, childTaskId: string) {
+  if (!Array.isArray(value) || value.length > 11) return null
+  const receipts: Array<z.infer<typeof providerReceiptSchema>> = []
+  for (const item of value) {
+    const parsed = providerReceiptSchema.safeParse(item)
+    if (!parsed.success || parsed.data.childTaskId !== childTaskId) return null
+    const { receiptSha256, ...body } = parsed.data
+    if (providerReceiptDigest(body) !== receiptSha256
+      || receipts.some(receipt => receipt.attemptCount === body.attemptCount)) return null
+    receipts.push(parsed.data)
+  }
+  return receipts
+}
+
+/** Normal settlements persist risk before releasing the lease. A later success
+ * cannot erase an earlier provider request whose termination was unconfirmed. */
+function appendMediaProviderReceipt(db: Database.Database, lease: N8nChildExecutionLease, scope: N8nTaskScope,
+  observation?: N8nMediaProviderObservation): void {
+  const child = getScopedN8nTaskRunByTaskId(db, lease.taskId, scope)
+  if (!child || child.source !== 'n8n-media-node') return
+  const prior = validProviderReceipts(child.routing.providerExecutionReceipts ?? [], child.taskId)
+  if (!prior || prior.length >= Math.min(11, child.maxAttempts)
+    || !Number.isSafeInteger(child.attemptCount) || child.attemptCount < 1 || child.attemptCount > 11
+    || prior.some(receipt => receipt.attemptCount === child.attemptCount)) throw new Error('N8N_MEDIA_PROVIDER_RECEIPT_CONFLICT')
+  const trusted = isObservedMediaProviderObservation(observation)
+  const body = { schema: 'aiworker-media-provider-receipt/v1' as const, childTaskId: child.taskId,
+    ownerInstanceId: lease.ownerInstanceId, leaseRevision: lease.revision,
+    leaseTokenSha256: createHash('sha256').update(JSON.stringify(lease.leaseToken)).digest('hex'),
+    attemptCount: child.attemptCount, status: trusted ? observation.status : 'unconfirmed' as const,
+    evidenceSha256: trusted ? observation.evidenceSha256 : providerReceiptDigest({ code: 'provider_not_observed' }) }
+  const routing = { ...child.routing, providerExecutionReceipts: [...prior,
+    { ...body, receiptSha256: providerReceiptDigest(body) }] }
+  db.prepare(`UPDATE n8n_task_runs SET routing=? WHERE task_id=? AND tenant_id=? AND workspace_id=?`)
+    .run(JSON.stringify(routing), child.taskId, scope.tenantId, scope.workspaceId)
+}
+
+export function readN8nMediaProviderExecutionRisk(child: N8nTaskRun) {
+  const receipts = validProviderReceipts(child.routing.providerExecutionReceipts ?? [], child.taskId)
+  const expected = Math.max(0, child.attemptCount - (child.status === 'running' ? 1 : 0))
+  const covered = Number.isSafeInteger(expected) && expected <= 11 && receipts && receipts.length === expected
+    && Array.from({ length: expected }, (_, offset) => offset + 1)
+      .every(attempt => receipts.some(receipt => receipt.attemptCount === attempt))
+  const status = !covered || receipts!.some(receipt => receipt.status === 'unconfirmed') ? 'unconfirmed' as const
+    : receipts!.some(receipt => receipt.status === 'confirmed') ? 'confirmed' as const : 'not_started' as const
+  return { status, evidenceSha256: providerReceiptDigest({ childTaskId: child.taskId, expected,
+    receipts: receipts || 'invalid' }) }
+}
+
+function snapshotTaskRouting(routing: Record<string, unknown>) {
+  const safe = { ...routing }
+  delete safe.providerExecutionReceipts
+  return snapshotN8nMediaRouting(safe)
 }
 
 export interface N8nTaskRun {
@@ -697,7 +785,9 @@ export function createN8nTaskRun(
       input.bindingId,
       input.source,
       input.requestedBy,
-      JSON.stringify(snapshotN8nMediaRouting(input.routing)),
+      JSON.stringify(snapshotTaskRouting({ ...input.routing,
+        ...(['openclaw', 'video-autoworker'].includes(input.source) && input.routing.taskType === 'video-analysis'
+          ? { executionControlVersion: 'durable-stop-v1' } : {}) })),
       JSON.stringify(input.taskInput),
       JSON.stringify(input.delivery),
       Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
@@ -714,6 +804,8 @@ export function createN8nTaskRun(
 }
 
 export function markN8nTaskAccepted(db: Database.Database, taskId: string): N8nTaskRun | null {
+  const current = getN8nTaskRunByTaskId(db, taskId)
+  if (current && hasScopedN8nVideoStopRequest(db, taskId, current)) return current
   db.prepare(`
     UPDATE n8n_task_runs
     SET status = 'accepted', accepted_at = COALESCE(accepted_at, unixepoch()),
@@ -727,6 +819,8 @@ export function claimN8nTaskRun(
   db: Database.Database,
   taskId: string,
 ): { run: N8nTaskRun | null; claimed: boolean } {
+  const current = getN8nTaskRunByTaskId(db, taskId)
+  if (current && hasScopedN8nVideoStopRequest(db, taskId, current)) return { run: current, claimed: false }
   const result = db.prepare(`
     UPDATE n8n_task_runs
     SET status = 'running', started_at = unixepoch(), completed_at = NULL,
@@ -751,6 +845,9 @@ export function claimScopedN8nVideoTaskRun(
   input: { taskId: string; idempotencyKey: string; bindingId: number },
   scope: N8nTaskScope,
 ): { outcome: N8nVideoTaskClaimOutcome; run: N8nTaskRun | null } {
+  if (hasScopedN8nVideoStopRequest(db, input.taskId, scope)) {
+    return { outcome: 'rejected', run: getScopedN8nTaskRunByTaskId(db, input.taskId, scope) }
+  }
   const result = db.prepare(`
     UPDATE n8n_task_runs
     SET status = 'running',
@@ -810,6 +907,7 @@ export function claimScopedN8nTaskRun(
   const claim = db.transaction((): { outcome: N8nParentTaskClaimOutcome; run: N8nTaskRun | null } => {
     const run = getScopedN8nTaskRunByTaskId(db, input.taskId, scope)
     if (!run) return { outcome: 'not_found', run: null }
+    if (hasScopedN8nVideoStopRequest(db, input.taskId, scope)) return { outcome: 'rejected', run }
     if (run.idempotencyKey !== input.idempotencyKey || run.bindingId !== input.bindingId
       || !TOP_LEVEL_TASK_SOURCES.includes(run.source as typeof TOP_LEVEL_TASK_SOURCES[number])) {
       return { outcome: 'rejected', run }
@@ -940,6 +1038,7 @@ function validChildParent(
   input: N8nChildRunInput & { executionOwner?: string },
   scope: N8nTaskScope,
 ): boolean {
+  if (hasScopedN8nVideoStopRequest(db, parent.taskId, scope)) return false
   const mode = input.parentMode ?? 'running_execution'
   if (mode === 'succeeded_postprocess') return parent.status === 'succeeded' && !hasPartialVideoLearning(parent.output || {})
   if (parent.status !== 'running' || !input.executionOwner) return false
@@ -988,7 +1087,7 @@ export function ensureN8nChildRunFromParent(
       ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
     `).run(
       input.childTaskId, input.childIdempotencyKey, input.bindingId, input.source,
-      parent.requestedBy, JSON.stringify(snapshotN8nMediaRouting(input.routing)), JSON.stringify(input.taskInput),
+      parent.requestedBy, JSON.stringify(snapshotTaskRouting(input.routing)), JSON.stringify(input.taskInput),
       JSON.stringify(input.delivery), Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
       scope.workspaceId, scope.tenantId, now, now,
     )
@@ -1060,7 +1159,8 @@ export function createAndClaimN8nChildRunFromParent(
         input.bindingId,
         input.source,
         parent.requestedBy,
-        JSON.stringify(snapshotN8nMediaRouting(input.routing)),
+        JSON.stringify(snapshotTaskRouting({ ...input.routing,
+          ...(input.source === 'n8n-media-node' ? { executionControlVersion: 'durable-stop-v1' } : {}) })),
         JSON.stringify(input.taskInput),
         JSON.stringify(input.delivery),
         Math.max(1, Math.min(11, Math.floor(input.maxAttempts))),
@@ -1227,6 +1327,7 @@ export function renewN8nChildExecutionLease(
   scope: N8nTaskScope,
   options: { nowSeconds?: number; leaseSeconds?: number } = {},
 ): N8nChildExecutionLease | null {
+  if (hasScopedN8nVideoStopRequest(db, lease.taskId, scope)) return null
   assertChildLeaseIdentity(lease.ownerInstanceId, lease.leaseToken)
   const now = childLeaseClock(options.nowSeconds)
   const leaseSeconds = options.leaseSeconds ?? N8N_CHILD_EXECUTION_LEASE_SECONDS
@@ -1257,30 +1358,80 @@ export async function runWithN8nChildExecutionHeartbeat<T>(
   db: Database.Database,
   lease: N8nChildExecutionLease,
   scope: N8nTaskScope,
-  operation: () => Promise<T>,
-  options: { heartbeatSeconds?: number; leaseSeconds?: number } = {},
+  operation: (control: N8nMediaExecutionControl) => Promise<T>,
+  options: { heartbeatSeconds?: number; leaseSeconds?: number; stopPollMilliseconds?: number } = {},
 ): Promise<T> {
   const heartbeatSeconds = options.heartbeatSeconds ?? N8N_CHILD_EXECUTION_HEARTBEAT_SECONDS
   if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 1) {
     throw new TypeError('n8n 子任务执行心跳周期无效')
   }
-  let lost = false
+  const controller = new AbortController()
+  const assertActive = () => {
+    if (controller.signal.aborted) throw controller.signal.reason
+    try {
+      assertScopedN8nVideoExecutionActive(db, lease.taskId, scope)
+      const owned = db.prepare(`SELECT 1 FROM n8n_child_execution_leases lease
+        JOIN n8n_task_runs child ON child.task_id=lease.task_id
+        WHERE lease.task_id=? AND lease.tenant_id=? AND lease.workspace_id=?
+          AND lease.owner_instance_id=? AND lease.lease_token=? AND lease.revision=?
+          AND lease.lease_expires_at>unixepoch() AND child.status='running'`)
+        .get(lease.taskId, scope.tenantId, scope.workspaceId, lease.ownerInstanceId, lease.leaseToken, lease.revision)
+      if (!owned) throw new N8nChildExecutionLeaseLostError()
+    } catch (error) {
+      const reason = error instanceof N8nVideoStopRequestedError || error instanceof N8nChildExecutionLeaseLostError
+        ? error : new N8nChildExecutionLeaseLostError()
+      controller.abort(reason)
+      throw reason
+    }
+  }
   const timer = setInterval(() => {
     try {
-      if (!renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) lost = true
+      assertActive()
+      if (!renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) {
+        controller.abort(new N8nChildExecutionLeaseLostError())
+      }
     } catch {
-      lost = true
+      if (!controller.signal.aborted) controller.abort(new N8nChildExecutionLeaseLostError())
     }
   }, heartbeatSeconds * 1_000)
+  const pollMilliseconds = options.stopPollMilliseconds ?? 1000
+  if (!Number.isSafeInteger(pollMilliseconds) || pollMilliseconds < 5 || pollMilliseconds > 60_000) {
+    clearInterval(timer)
+    throw new TypeError('n8n 停止检查周期无效')
+  }
+  const stopTimer = setInterval(() => { try { assertActive() } catch { /* Signal carries the authoritative reason. */ } }, pollMilliseconds)
+  const commitIfActive = <T>(publish: () => T): T => {
+    if (typeof publish !== 'function' || publish.constructor.name === 'AsyncFunction') {
+      throw new TypeError('媒体发布围栏只接受同步操作')
+    }
+    return db.transaction(() => {
+      assertActive()
+      if (!renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) {
+        throw new N8nChildExecutionLeaseLostError()
+      }
+      const value = publish()
+      if (value && typeof value === 'object' && 'then' in value) throw new TypeError('媒体发布围栏拒绝异步操作')
+      assertActive()
+      return value
+    }).immediate()
+  }
   timer.unref()
+  stopTimer.unref()
   try {
-    const result = await operation()
-    if (lost || !renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) {
+    assertActive()
+    const result = await operation({ signal: controller.signal, assertActive, commitIfActive })
+    assertActive()
+    if (!renewN8nChildExecutionLease(db, lease, scope, { leaseSeconds: options.leaseSeconds })) {
       throw new N8nChildExecutionLeaseLostError()
     }
     return result
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'N8N_MEDIA_TERMINATION_UNCONFIRMED') throw error
+    assertActive()
+    throw error
   } finally {
     clearInterval(timer)
+    clearInterval(stopTimer)
   }
 }
 
@@ -1290,11 +1441,14 @@ function settleN8nChildExecution(
   scope: N8nTaskScope,
   kind: 'complete' | 'fail',
   value: Record<string, unknown> | string,
-  options: { nowSeconds?: number; parentTaskId?: string } = {},
+  options: { nowSeconds?: number; parentTaskId?: string; providerObservation?: N8nMediaProviderObservation } = {},
 ): { settled: boolean; run: N8nTaskRun | null; parent: N8nTaskRun | null } {
   assertChildLeaseIdentity(lease.ownerInstanceId, lease.leaseToken)
   const now = childLeaseClock(options.nowSeconds)
   const settle = db.transaction(() => {
+    if (hasScopedN8nVideoStopRequest(db, lease.taskId, scope)) return {
+      settled: false, run: getScopedN8nTaskRunByTaskId(db, lease.taskId, scope), parent: null,
+    }
     const serialized = kind === 'complete' ? JSON.stringify(value) : String(value).slice(0, 2_000)
     const result = kind === 'complete'
       ? db.prepare(`
@@ -1332,6 +1486,7 @@ function settleN8nChildExecution(
         parent: options.parentTaskId ? getScopedN8nTaskRunByTaskId(db, options.parentTaskId, scope) : null,
       }
     }
+    appendMediaProviderReceipt(db, lease, scope, options.providerObservation)
     if (kind === 'complete' && options.parentTaskId) {
       const parentResult = db.prepare(`
         UPDATE n8n_task_runs
@@ -1365,7 +1520,7 @@ export function completeN8nChildExecution(
   lease: N8nChildExecutionLease,
   output: Record<string, unknown>,
   scope: N8nTaskScope,
-  options: { nowSeconds?: number; parentTaskId?: string } = {},
+  options: { nowSeconds?: number; parentTaskId?: string; providerObservation?: N8nMediaProviderObservation } = {},
 ) {
   return settleN8nChildExecution(db, lease, scope, 'complete', output, options)
 }
@@ -1375,7 +1530,7 @@ export function failN8nChildExecution(
   lease: N8nChildExecutionLease,
   error: string,
   scope: N8nTaskScope,
-  options: { nowSeconds?: number } = {},
+  options: { nowSeconds?: number; providerObservation?: N8nMediaProviderObservation } = {},
 ) {
   return settleN8nChildExecution(db, lease, scope, 'fail', error, options)
 }
@@ -1446,6 +1601,8 @@ export function completeN8nTaskRun(
   taskId: string,
   output: Record<string, unknown>,
 ): N8nTaskRun | null {
+  const current = getN8nTaskRunByTaskId(db, taskId)
+  if (current && hasScopedN8nVideoStopRequest(db, taskId, current)) return current
   db.prepare(`
     UPDATE n8n_task_runs
     SET status = 'succeeded', output = ?, error = NULL,
@@ -1460,6 +1617,8 @@ export function failN8nTaskRun(
   taskId: string,
   error: string,
 ): N8nTaskRun | null {
+  const current = getN8nTaskRunByTaskId(db, taskId)
+  if (current && hasScopedN8nVideoStopRequest(db, taskId, current)) return current
   db.prepare(`
     UPDATE n8n_task_runs
     SET status = 'failed', error = ?, completed_at = unixepoch(), updated_at = unixepoch()
@@ -1567,6 +1726,7 @@ export function completeN8nFinalizeRun(
     childTaskId: string
     output?: Record<string, unknown> | null
     executionLease?: N8nChildExecutionLease
+    providerObservation?: N8nMediaProviderObservation
     nowSeconds?: number
   },
 ): {
@@ -1581,6 +1741,9 @@ export function completeN8nFinalizeRun(
     let child = getN8nTaskRunByTaskId(db, input.childTaskId)
     if (!parent || !child) {
       return { outcome: 'not_found' as const, parent, child, output: null }
+    }
+    if (hasScopedN8nVideoStopRequest(db, parent.taskId, parent)) {
+      return { outcome: 'rejected' as const, parent, child, output: null }
     }
     const expectedChildTaskId = mediaChildTaskId(parent.taskId, 'finalize')
     if (
@@ -1626,6 +1789,8 @@ export function completeN8nFinalizeRun(
       if (childUpdate.changes !== 1) {
         return { outcome: 'rejected' as const, parent, child, output: null }
       }
+      if (input.executionLease) appendMediaProviderReceipt(db, input.executionLease,
+        { tenantId: child.tenantId, workspaceId: child.workspaceId }, input.providerObservation)
       child = getN8nTaskRunByTaskId(db, child.taskId)!
     } else if (child.status === 'succeeded' && child.output) {
       output = child.output
@@ -1685,6 +1850,9 @@ export function reconcileScopedN8nVideoTaskRun(
   scope: N8nTaskScope,
   options: { nowSeconds?: number; leaseSeconds?: number; finalizeLeaseSeconds?: number } = {},
 ): { outcome: N8nVideoTaskReconcileOutcome; run: N8nTaskRun | null; code: string | null } {
+  if (hasScopedN8nVideoStopRequest(db, taskId, scope)) return {
+    outcome: 'active', run: getScopedN8nTaskRunByTaskId(db, taskId, scope), code: 'N8N_VIDEO_STOP_REQUESTED',
+  }
   const nowSeconds = Number.isFinite(options.nowSeconds)
     ? Math.max(0, Math.floor(Number(options.nowSeconds)))
     : Math.floor(Date.now() / 1_000)

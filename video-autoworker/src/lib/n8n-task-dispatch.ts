@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import {
   getScopedN8nTaskRunByTaskId,
+  hasScopedN8nVideoStopRequest,
   type N8nTaskRun,
   type N8nTaskScope,
 } from '@/lib/n8n-task-runs'
@@ -99,7 +100,7 @@ export function acquireN8nTaskDispatchOwnership(
 
   const acquire = db.transaction((): N8nTaskDispatchOwnership => {
     const run = getScopedN8nTaskRunByTaskId(db, taskId, scope)
-    if (!run || run.status !== 'queued') {
+    if (!run || run.status !== 'queued' || hasScopedN8nVideoStopRequest(db, taskId, scope)) {
       return {
         outcome: 'ineligible', token: null, leaseExpiresAt: null, revision: null, run,
       }

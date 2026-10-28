@@ -2,7 +2,7 @@ import { createHash } from 'crypto'
 import { lstatSync, readFileSync } from 'fs'
 import { join } from 'path'
 import type Database from 'better-sqlite3'
-import { inspectVideoEditingSchema, VIDEO_EDIT_MIGRATION, videoEditingEnabled } from '@/lib/database-capabilities'
+import { inspectVideoEditingSchema, inspectVideoStopSchema, VIDEO_EDIT_MIGRATION, videoEditingEnabled } from '@/lib/database-capabilities'
 import { ensureDirectorMaintainabilitySchema, assertDirectorMaintainabilitySchema } from '@/lib/director-maintainability-schema'
 
 type MigrationContext = {
@@ -1886,6 +1886,94 @@ const migrations: Migration[] = [
           WHERE status IN ('running', 'unknown');
       `)
     }
+  },
+  {
+    id: '061_n8n_video_stop_requests',
+    up(db: Database.Database) {
+      // A stop is durable intent, never evidence that a model already exited.
+      // Narrow triggers also fence old application instances during rollout.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS n8n_video_stop_requests (
+          request_id TEXT PRIMARY KEY CHECK(length(request_id)=64 AND request_id NOT GLOB '*[^0-9a-f]*'),
+          task_id TEXT NOT NULL UNIQUE,
+          target_kind TEXT NOT NULL DEFAULT 'runtime' CHECK(target_kind IN ('runtime','batch_item')),
+          binding_id INTEGER NOT NULL CHECK(binding_id>0),
+          tenant_id INTEGER NOT NULL CHECK(tenant_id>0),
+          workspace_id INTEGER NOT NULL CHECK(workspace_id>0),
+          requested_by_id INTEGER NOT NULL CHECK(requested_by_id>=0),
+          state TEXT NOT NULL CHECK(state IN ('requested','stopping','blocked','stopped')),
+          snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json) AND json_type(snapshot_json)='object'),
+          snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64 AND snapshot_sha256 NOT GLOB '*[^0-9a-f]*'),
+          child_task_ids_json TEXT NOT NULL CHECK(json_valid(child_task_ids_json) AND json_type(child_task_ids_json)='array'
+            AND json_array_length(child_task_ids_json)=4),
+          owner_instance_id TEXT,
+          lease_token TEXT,
+          lease_expires_at INTEGER NOT NULL DEFAULT 0 CHECK(lease_expires_at>=0),
+          revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>=1),
+          error_code TEXT,
+          evidence_json TEXT CHECK(evidence_json IS NULL OR json_valid(evidence_json)),
+          local_ack_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(local_ack_json) AND json_type(local_ack_json)='object'),
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          completed_at INTEGER,
+          CHECK((owner_instance_id IS NULL AND lease_token IS NULL)
+            OR (length(owner_instance_id)=64 AND owner_instance_id NOT GLOB '*[^0-9a-f]*'
+              AND length(lease_token)=64 AND lease_token NOT GLOB '*[^0-9a-f]*'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_n8n_video_stop_requests_scope
+          ON n8n_video_stop_requests(tenant_id,workspace_id,state,updated_at);
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_run_insert
+        BEFORE INSERT ON n8n_task_runs
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id
+            AND (stop.task_id=NEW.task_id OR NEW.task_id IN (SELECT value FROM json_each(stop.child_task_ids_json))))
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_reserve_batch_identity
+        BEFORE INSERT ON n8n_task_runs
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop WHERE stop.target_kind='batch_item'
+          AND (stop.task_id=NEW.task_id OR NEW.task_id IN (SELECT value FROM json_each(stop.child_task_ids_json))))
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_run_update
+        BEFORE UPDATE OF status,output,error ON n8n_task_runs
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.tenant_id=OLD.tenant_id AND stop.workspace_id=OLD.workspace_id
+            AND (stop.task_id=OLD.task_id OR OLD.task_id IN (SELECT value FROM json_each(stop.child_task_ids_json))))
+          AND NOT (NEW.status='cancelled' AND OLD.status IN ('queued','accepted','running'))
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_child_lease_insert
+        BEFORE INSERT ON n8n_child_execution_leases
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id
+            AND NEW.task_id IN (SELECT value FROM json_each(stop.child_task_ids_json)))
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_child_lease_update
+        BEFORE UPDATE ON n8n_child_execution_leases
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id
+            AND NEW.task_id IN (SELECT value FROM json_each(stop.child_task_ids_json)))
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_dispatch_insert
+        BEFORE INSERT ON n8n_task_dispatch_leases
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.task_id=NEW.task_id AND stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id)
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_dispatch_update
+        BEFORE UPDATE ON n8n_task_dispatch_leases
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.task_id=NEW.task_id AND stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id)
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_parent_claim_insert
+        BEFORE INSERT ON n8n_parent_execution_claims
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.task_id=NEW.task_id AND stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id)
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+        CREATE TRIGGER IF NOT EXISTS n8n_video_stop_fence_parent_claim_update
+        BEFORE UPDATE ON n8n_parent_execution_claims
+        WHEN EXISTS (SELECT 1 FROM n8n_video_stop_requests stop
+          WHERE stop.task_id=NEW.task_id AND stop.tenant_id=NEW.tenant_id AND stop.workspace_id=NEW.workspace_id)
+        BEGIN SELECT RAISE(ABORT,'N8N_VIDEO_STOP_REQUESTED'); END;
+      `)
+    }
   }
 ]
 
@@ -1898,6 +1986,7 @@ export function assertDatabaseSchemaCurrent(db: Database.Database): void {
     throw new Error('database_schema_prepare_required')
   }
   inspectVideoEditingSchema(db)
+  inspectVideoStopSchema(db)
   assertDirectorMaintainabilitySchema(db)
 }
 

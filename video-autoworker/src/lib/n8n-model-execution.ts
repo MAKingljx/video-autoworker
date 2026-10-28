@@ -5,6 +5,10 @@ import { runOpenClaw } from '@/lib/command'
 import type { N8nTaskDelivery } from '@/lib/n8n-task-runs'
 import type { N8nModelRoute } from '@/lib/n8n-model-routing'
 import { SafeOperationError, projectSafeOperationError } from '@/lib/operational-errors'
+import { config } from '@/lib/config'
+import { assertMediaExecutionActive, mediaProviderRequestSignal, noteUnconfirmedProviderCancellation,
+  rethrowMediaExecutionInterruption, runOwnedMediaCommand, mediaProviderRequestStarted,
+  mediaProviderRequestFinished, type N8nMediaExecutionControl } from '@/lib/n8n-media-control'
 
 const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'])
 
@@ -61,6 +65,7 @@ async function executeOpenClaw(
   route: Extract<N8nModelRoute, { transport: 'openclaw' }>,
   options: ExecutionOptions,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(options.executionControl)
   if (options.structuredOutput) {
     throw new Error('OpenClaw 路由不支持严格结构化输出')
   }
@@ -70,6 +75,7 @@ async function executeOpenClaw(
   const timeoutSeconds = options.timeoutSeconds || route.timeoutSeconds
   try {
     await writeFile(promptPath, prompt, { encoding: 'utf8', mode: 0o600 })
+    assertMediaExecutionActive(options.executionControl)
     const args = [
       '--profile', route.profile,
       'agent',
@@ -90,10 +96,19 @@ async function executeOpenClaw(
     }
     let result: Awaited<ReturnType<typeof runOpenClaw>>
     try {
-      result = await runOpenClaw(args, { timeoutMs: (timeoutSeconds + 15) * 1_000 })
+      mediaProviderRequestStarted(options.executionControl)
+      result = options.executionControl
+        ? await runOwnedMediaCommand(config.openclawBin, args, { control: options.executionControl,
+          timeoutMs: (timeoutSeconds + 15) * 1_000, cwd: config.openclawStateDir || process.cwd() })
+        : await runOpenClaw(args, { timeoutMs: (timeoutSeconds + 15) * 1_000 })
     } catch (error) {
+      // Stopping a CLI client does not attest cancellation inside the shared Gateway.
+      noteUnconfirmedProviderCancellation(options.executionControl)
+      rethrowMediaExecutionInterruption(error, options.executionControl)
       throw new SafeOperationError('N8N_OPENCLAW_EXECUTION_FAILED', error)
     }
+    mediaProviderRequestFinished(options.executionControl)
+    assertMediaExecutionActive(options.executionControl)
     return {
       ...parseOpenClawOutput(result.stdout),
       routeId: route.id,
@@ -112,6 +127,7 @@ async function executeCompatibleApi(
   route: Extract<N8nModelRoute, { transport: 'openai-compatible' }>,
   options: ExecutionOptions,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(options.executionControl)
   if (options.delivery.mode === 'reply') {
     throw new Error('直接模型 API 节点不能负责会话回投；请让最终节点使用 OpenClaw 路由')
   }
@@ -132,25 +148,37 @@ async function executeCompatibleApi(
     responseFormat = { type: 'json_schema', json_schema: { name, strict: true, schema } }
   }
   const timeoutSeconds = options.timeoutSeconds || route.timeoutSeconds
-  const response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify({
-      model: route.model,
-      messages: [
-        { role: 'system', content: options.instruction || route.systemPrompt || `你是 ${options.nodeKey} 节点。` },
-        { role: 'user', content: JSON.stringify(options.input, null, 2) },
-      ],
-      ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
-      ...(route.maxTokens === undefined ? {} : { max_tokens: route.maxTokens }),
-      ...(responseFormat ? { response_format: responseFormat } : {}),
-    }),
-    signal: AbortSignal.timeout(timeoutSeconds * 1_000),
-  })
-  const raw = await response.text()
+  let response: Response
+  let raw: string
+  const request = mediaProviderRequestSignal(options.executionControl, timeoutSeconds * 1_000, { drainOnUserStop: route.location === 'local' })
+  mediaProviderRequestStarted(options.executionControl)
+  try {
+    response = await fetch(`${route.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: route.model,
+        messages: [
+          { role: 'system', content: options.instruction || route.systemPrompt || `你是 ${options.nodeKey} 节点。` },
+          { role: 'user', content: JSON.stringify(options.input, null, 2) },
+        ],
+        ...(route.temperature === undefined ? {} : { temperature: route.temperature }),
+        ...(route.maxTokens === undefined ? {} : { max_tokens: route.maxTokens }),
+        ...(responseFormat ? { response_format: responseFormat } : {}),
+      }),
+      signal: request.signal,
+    })
+    raw = await response.text()
+  } catch (error) {
+    noteUnconfirmedProviderCancellation(options.executionControl)
+    rethrowMediaExecutionInterruption(error, options.executionControl)
+    throw error
+  } finally { request.dispose() }
+  if (response.ok) mediaProviderRequestFinished(options.executionControl)
+  assertMediaExecutionActive(options.executionControl)
   let parsed: any
   try {
     parsed = raw ? JSON.parse(raw) : null
@@ -187,6 +215,7 @@ export interface ExecutionOptions {
   sessionKey: string
   delivery: N8nTaskDelivery
   timeoutSeconds?: number
+  executionControl?: N8nMediaExecutionControl
   structuredOutput?: {
     name: string
     schema: Record<string, unknown>
@@ -197,6 +226,7 @@ export async function executeN8nModelRoute(
   route: N8nModelRoute,
   options: ExecutionOptions,
 ): Promise<Record<string, unknown>> {
+  assertMediaExecutionActive(options.executionControl)
   return route.transport === 'openclaw'
     ? executeOpenClaw(route, options)
     : executeCompatibleApi(route, options)

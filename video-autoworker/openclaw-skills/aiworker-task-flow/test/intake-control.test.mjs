@@ -23,7 +23,16 @@ const submitScript = new URL('../scripts/submit-task.mjs', import.meta.url)
 const workerScript = new URL('../scripts/run-video-batch.mjs', import.meta.url)
 
 async function withPlatform(handler, callback) {
-  const server = createServer(handler)
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    if (request.method === 'GET' && url.pathname === '/api/n8n/runs/stop') {
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ inspection: {
+        taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null,
+      } }))
+      return
+    }
+    handler(request, response)
+  })
   await new Promise((resolvePromise, rejectPromise) => {
     server.once('error', rejectPromise)
     server.listen(0, '127.0.0.1', resolvePromise)
@@ -315,5 +324,70 @@ test('worker parks an intake race with staged media and resumes the same task af
     assert.deepEqual(dispatchedTaskIds, [taskId, taskId])
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('a stopped video retains its staged handoff and never dispatches again', async () => {
+  for (const differentVideoKey of [false, true]) {
+    const root = await mkdtemp(join(tmpdir(), 'aiworker-stop-retained-handoff-'))
+    const batchRoot = join(root, 'batches')
+    const inboxRoot = join(root, 'inbox')
+    const video = join(root, 'video.mp4')
+    const taskId = `video-command-${'e'.repeat(64)}`
+    await writeFile(video, 'retain-the-original-and-staged-video')
+    let stopped = false
+    let videoKey = null
+    let triggerCalls = 0
+    let reads = 0
+    try {
+      await withPlatform(async (request, response) => {
+        const url = new URL(request.url, 'http://127.0.0.1')
+        if (request.method === 'GET' && url.pathname === '/api/n8n/runs') {
+          reads += 1
+          response.writeHead(200, { 'Content-Type': 'application/json' })
+          response.end(JSON.stringify({ runs: stopped ? [{ taskId, status: 'cancelled',
+            input: { videoKey: differentVideoKey ? 'different-video.mp4' : videoKey } }] : [] }))
+          return
+        }
+        if (request.method === 'POST' && url.pathname === '/api/n8n/trigger') {
+          const chunks = []
+          for await (const chunk of request) chunks.push(chunk)
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          assert.equal(body.taskId, taskId)
+          videoKey = body.input.videoKey
+          triggerCalls += 1
+          response.writeHead(423, { 'Content-Type': 'application/json' })
+          response.end(JSON.stringify({ code: 'N8N_INTAKE_DRAINING', error: 'draining' }))
+          return
+        }
+        response.writeHead(404).end()
+      }, async baseUrl => {
+        const created = await createSingleVideoState({ taskId, idempotencyKey: taskId, baseUrl,
+          bindingId: 1, prompt: '分析视频', videoFile: video, inboxRoot, batchRoot })
+        const env = { ...process.env, AIWORKER_VIDEO_BATCH_DIR: batchRoot, AIWORKER_MEDIA_INGEST_DIR: inboxRoot }
+        await execute(process.execPath, [workerScript.pathname, '--state-file', created.statePath], { env })
+        const parked = await readBatchState(created.statePath)
+        const stagedPath = join(inboxRoot, videoKey)
+        const before = await lstat(stagedPath)
+        const stagedBytes = await readFile(stagedPath)
+        const sourceBytes = await readFile(video)
+        assert.equal(parked.items[0].stagingRecovery.phase, 'triggering')
+
+        stopped = true
+        await execute(process.execPath, [workerScript.pathname, '--state-file', created.statePath], { env })
+        const retained = await readBatchState(created.statePath)
+        assert.equal(retained.items[0].status, differentVideoKey ? 'attention' : 'cancelled')
+        assert.deepEqual(retained.items[0].stagingRecovery, parked.items[0].stagingRecovery)
+        assert.equal((await lstat(stagedPath)).ino, before.ino)
+        assert.deepEqual(await readFile(stagedPath), stagedBytes)
+        assert.deepEqual(await readFile(video), sourceBytes)
+        const readsBefore = reads
+        await execute(process.execPath, [workerScript.pathname, '--state-file', created.statePath], { env })
+        assert.equal(reads, readsBefore)
+        assert.equal(triggerCalls, 1)
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   }
 })

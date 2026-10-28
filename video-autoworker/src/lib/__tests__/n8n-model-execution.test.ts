@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({ runOpenClaw: vi.fn() }))
 vi.mock('@/lib/command', () => ({ runOpenClaw: mocks.runOpenClaw }))
 
 import { executeN8nModelRoute } from '@/lib/n8n-model-execution'
+import { N8nVideoStopRequestedError } from '@/lib/n8n-task-runs'
 
 const noDelivery = { mode: 'none' as const }
 
@@ -16,6 +17,24 @@ afterEach(() => {
 })
 
 describe('n8n model execution', () => {
+  it('drains a late successful direct-model response after a task stop and discards its output', async () => {
+    const controller = new AbortController(), reason = new N8nVideoStopRequestedError()
+    const fetcher = vi.fn().mockImplementation(async () => {
+      controller.abort(reason)
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'late result' } }] }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    await expect(executeN8nModelRoute({
+      id: 'local-test', label: 'local test', description: '', location: 'local', transport: 'openai-compatible',
+      model: 'local', baseUrl: 'http://127.0.0.1:18094/v1', enabled: true, timeoutSeconds: 60,
+      thinking: 'off', capabilities: ['text'], systemPrompt: '',
+    }, { nodeKey: 'executor', input: {}, sessionKey: 'unused', delivery: noDelivery,
+      executionControl: { signal: controller.signal, assertActive: () => controller.signal.throwIfAborted() },
+    })).rejects.toBe(reason)
+    expect(reason.providerCancellation).toBe('confirmed')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(mocks.runOpenClaw).not.toHaveBeenCalled()
+  })
   it('passes an OpenClaw prompt through a protected file instead of command arguments', async () => {
     mocks.runOpenClaw.mockImplementation(async (args: string[]) => {
       const promptPath = args[args.indexOf('--message-file') + 1]
