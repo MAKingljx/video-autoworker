@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fsyncSync, linkSync, lstatSync, openSync,
-  realpathSync, renameSync, unlinkSync } from 'node:fs'
+import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync,
+  readSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -60,6 +60,35 @@ function preserveClaim(claim, pathname) {
   try { linkSync(claim, pathname); unlinkSync(claim) }
   catch { fail('worker_replacement_endpoint_claim_preserved') }
 }
+function reservationIdentity(entry) {
+  return ['dev', 'ino', 'uid', 'mode', 'nlink', 'size', 'birthtimeNs', 'mtimeNs', 'ctimeNs'].map(key => String(entry[key]))
+}
+function verifyReservation(claim, fd, marker) {
+  const opened = fstatSync(fd, { bigint: true }), current = lstatSync(claim, { bigint: true })
+  if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== BigInt(process.getuid())
+    || (opened.mode & 0o7777n) !== 0o600n || opened.size !== BigInt(marker.length)
+    || digest(reservationIdentity(opened)) !== digest(reservationIdentity(current))) fail('worker_replacement_endpoint_claim_conflict')
+  const bytes = Buffer.alloc(marker.length)
+  if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length || !bytes.equals(marker)
+    || digest(reservationIdentity(opened)) !== digest(reservationIdentity(fstatSync(fd, { bigint: true })))
+    || digest(reservationIdentity(opened)) !== digest(reservationIdentity(lstatSync(claim, { bigint: true })))) fail('worker_replacement_endpoint_claim_conflict')
+}
+function reserveClaim(claim, marker, existing = false) {
+  let fd
+  try {
+    fd = openSync(claim, constants.O_NOFOLLOW | (existing ? constants.O_RDONLY
+      : constants.O_RDWR | constants.O_CREAT | constants.O_EXCL), 0o600)
+    if (!existing) { writeFileSync(fd, marker); fsyncSync(fd) }
+    verifyReservation(claim, fd, marker)
+    return fd
+  } catch (error) {
+    if (fd !== undefined) closeSync(fd)
+    // Incomplete reservations are retained, never mistaken for an owned
+    // socket. A complete same-operation marker can resume after interruption.
+    if (error.code === 'EEXIST') fail('worker_replacement_endpoint_claim_conflict')
+    throw error
+  }
+}
 
 /** Only an already stopped, lease-free, operation-owned worker may retire its
  * exact recorded endpoint. A stale filename or ECONNREFUSED alone is no proof. */
@@ -77,13 +106,26 @@ export async function retireExitedSchedulerEndpoint({ stateDir, operationId, exp
   // Keep the claim shorter than worker.sock: Darwin AF_UNIX has a small
   // pathname bound. A collision is an identity-checked refusal, never overwrite.
   const claim = join(stateDir, `.w${digest({ operationId, expected }).slice(0, 8)}`)
-  let recoveredClaim = false
+  const marker = Buffer.from(JSON.stringify({ schema: 'scheduler-endpoint-claim-reservation/v1', operationId, endpointSha256: digest(expected) }) + '\n')
+  let recoveredClaim = false, recoveredReservation = false, reservationFd
   if (entryExists(claim)) {
-    if (entryExists(pathname) || !sameGeneration(expected.endpoint, socket(claim))) fail('worker_replacement_endpoint_claim_conflict')
-    recoveredClaim = true
-  } else {
+    if (lstatSync(claim).isFile()) {
+      reservationFd = reserveClaim(claim, marker, true)
+      recoveredReservation = true
+    } else {
+      if (entryExists(pathname) || !sameGeneration(expected.endpoint, socket(claim))) fail('worker_replacement_endpoint_claim_conflict')
+      recoveredClaim = true
+    }
+  }
+  if (!recoveredClaim) {
+    try {
     const before = socket(pathname)
-    if (!before) return { retired: false }
+    if (!before) {
+      if (reservationFd !== undefined) {
+        assertQuiescent(); verifyReservation(claim, reservationFd, marker); unlinkSync(claim); syncDirectory(stateDir)
+      }
+      return { retired: false, recoveredReservation }
+    }
     if (!sameGeneration(expected.endpoint, before) || before.mtimeNs !== expected.endpoint.mtimeNs
       || before.ctimeNs !== expected.endpoint.ctimeNs) fail('worker_replacement_endpoint_changed')
     await probe(pathname)
@@ -91,7 +133,12 @@ export async function retireExitedSchedulerEndpoint({ stateDir, operationId, exp
     if (digest(directory(stateDir)) !== digest(expected.root)) fail('worker_replacement_endpoint_directory_changed')
     const after = socket(pathname)
     if (!after || digest(after) !== digest(before)) fail('worker_replacement_endpoint_changed')
+    // O_EXCL closes the ordinary creation race across await probe(). Keep its
+    // descriptor open and verify that rename replaces only our reservation.
+    if (reservationFd === undefined) reservationFd = reserveClaim(claim, marker)
+    verifyReservation(claim, reservationFd, marker)
     renameSync(pathname, claim)
+    } finally { if (reservationFd !== undefined) closeSync(reservationFd) }
     let captured
     try { captured = socket(claim) }
     catch { preserveClaim(claim, pathname); fail('worker_replacement_endpoint_changed') }
@@ -110,5 +157,5 @@ export async function retireExitedSchedulerEndpoint({ stateDir, operationId, exp
   unlinkSync(claim)
   syncDirectory(stateDir)
   if (entryExists(pathname)) fail('worker_replacement_endpoint_successor_present')
-  return { retired: true, recoveredClaim, endpointSha256: digest(expected) }
+  return { retired: true, recoveredClaim, recoveredReservation, endpointSha256: digest(expected) }
 }

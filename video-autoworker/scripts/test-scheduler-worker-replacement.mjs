@@ -383,6 +383,61 @@ test('an interrupted retirement claim is resumed only by the same operation and 
   })
 })
 
+for (const content of ['late foreign claim', '']) test(`a claim created after the real refused probe is never overwritten (empty=${content === ''})`, { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services, faults, receipt }) => {
+    await prepareSchedulerReplacement(options, services); faults.hardStop = true
+    const expected = receipt().before.endpoint, pathname = join(options.stateDir, 'worker.sock')
+    const claim = join(options.stateDir, `.w${sha(JSON.stringify({ operationId: options.operationId, expected })).slice(0, 8)}`)
+    const originalConnect = net.createConnection
+    let inserted = false, foreignInode, endpointInode
+    faults.afterStop = () => { endpointInode = lstatSync(pathname).ino }
+    net.createConnection = (...args) => {
+      const connection = originalConnect(...args)
+      if (args[0]?.path === pathname && !inserted) connection.prependOnceListener('error', error => {
+        if (error.code === 'ECONNREFUSED') {
+          inserted = true; writeFileSync(claim, content, { flag: 'wx', mode: 0o600 }); foreignInode = lstatSync(claim).ino
+        }
+      })
+      return connection
+    }
+    try {
+      await assert.rejects(drainSchedulerReplacement(options, services), /worker_replacement_endpoint_claim_conflict/u)
+      assert.equal(inserted, true); assert.equal(lstatSync(claim).ino, foreignInode)
+      assert.equal(readFileSync(claim, 'utf8'), content); assert.equal(lstatSync(pathname).ino, endpointInode)
+      await assert.rejects(drainSchedulerReplacement(options, services), /worker_replacement_endpoint_claim_conflict/u)
+      assert.equal(lstatSync(claim).ino, foreignInode); assert.equal(readFileSync(claim, 'utf8'), content)
+      assert.equal(receipt().step, 'stopping')
+    } finally { net.createConnection = originalConnect }
+  })
+})
+
+test('an interrupted complete claim reservation resumes without reserving or deleting a foreign object', { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services, faults, receipt }) => {
+    await prepareSchedulerReplacement(options, services); faults.hardStop = true
+    const expected = receipt().before.endpoint, pathname = join(options.stateDir, 'worker.sock')
+    const claim = join(options.stateDir, `.w${sha(JSON.stringify({ operationId: options.operationId, expected })).slice(0, 8)}`)
+    const originalRename = fs.renameSync
+    let interrupted = false
+    fs.renameSync = (from, to) => {
+      if (from === pathname && to === claim && !interrupted) {
+        interrupted = true
+        const marker = JSON.parse(readFileSync(claim, 'utf8'))
+        assert.equal(marker.operationId, options.operationId); assert.equal(marker.endpointSha256, sha(JSON.stringify(expected)))
+        throw Object.assign(new Error('isolated interrupted claim reservation'), { code: 'EIO' })
+      }
+      return originalRename(from, to)
+    }
+    syncBuiltinESMExports()
+    try { await assert.rejects(drainSchedulerReplacement(options, services), /isolated interrupted claim reservation/u) }
+    finally { fs.renameSync = originalRename; syncBuiltinESMExports() }
+    assert.equal(interrupted, true); assert.equal(lstatSync(claim).isFile(), true)
+    assert.equal(lstatSync(pathname).isSocket(), true); assert.equal(receipt().step, 'stopping')
+    assert.equal((await drainSchedulerReplacement(options, services)).currentState, 'stopped')
+    assert.equal(receipt().endpointRetirement.recoveredReservation, true)
+    assert.equal(existsSync(claim), false); assert.equal(existsSync(pathname), false)
+  })
+})
+
 const legacyIndex = process.argv.indexOf('--legacy-control-product')
 test('a genuine legacy stopping receipt without the former live endpoint proof never authorizes deletion', {
   timeout: 120000, skip: legacyIndex < 0,
