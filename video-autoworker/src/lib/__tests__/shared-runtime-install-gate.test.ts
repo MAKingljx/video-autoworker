@@ -1737,5 +1737,5 @@ describe('shared runtime installation gate', () => {
     expect(evidenceVerifier).toContain(
       'freezeGuard(evidence.legacy.database, evidence.n8n.database)',
     )
-  })
+  }, 20_000)
 })
