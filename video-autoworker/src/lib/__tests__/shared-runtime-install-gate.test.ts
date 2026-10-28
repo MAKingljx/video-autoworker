@@ -19,6 +19,7 @@ const applicationReleaseManifestContractPath = resolve(
   repositoryRoot, 'scripts/lib/application-release-manifest-contract.mjs',
 )
 const installedManagerPath = resolve(repositoryRoot, 'scripts/lib/blue-green-installed-manager.mjs')
+const gitSourceLayoutPath = resolve(repositoryRoot, 'scripts/lib/git-source-layout.mjs')
 const execveContractPath = resolve(repositoryRoot, 'scripts/lib/blue-green-execve-contract.mjs')
 const execveAdapterPath = resolve(
   repositoryRoot, 'ops/recovery/install-blue-green-execve-adapter.mjs',
@@ -683,6 +684,7 @@ describe('shared runtime installation gate', () => {
         copyFile(offlineQueueHelperPath, copiedHelper),
         copyFile(applicationReleaseManifestContractPath, copiedManifestContract),
         copyFile(installedManagerPath, copiedManager),
+        copyFile(gitSourceLayoutPath, resolve(standaloneLib, 'git-source-layout.mjs')),
         copyFile(execveContractPath, copiedExecveContract),
         copyFile(execveAdapterPath, copiedAdapter),
       ])
@@ -1671,8 +1673,55 @@ describe('shared runtime installation gate', () => {
       expect(source).toContain('scripts/lib/runtime-tree-manifest.mjs')
     }
     expect(task).toContain('assert_canonical_clean_source_repository')
-    expect(task).toContain('diff-index --quiet HEAD --')
-    expect(task).toContain('status --porcelain=v1 --untracked-files=all')
+    expect(task).toContain('source "$GIT_SOURCE_LAYOUT_SHELL"')
+    expect(task).toContain('assert_git_source_layout_helper_bootstrap "$REPOSITORY_ROOT" "$NODE_BIN"')
+    expect(task).toContain('"$GIT_SOURCE_LAYOUT" assert-clean')
+    expect(task).toContain('"$GIT_SOURCE_LAYOUT" verify-file')
+    // Clean-source authority moved into the shared layout helper. Exercise
+    // that authority rather than requiring its old inline shell commands.
+    const cleanRoot = await realpath(await mkdtemp(resolve(tmpdir(), 'shared-gate-clean-source-')))
+    try {
+      const gitEnv = { ...process.env }
+      for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE',
+        'GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) delete gitEnv[key]
+      const git = (...args: string[]) => {
+        const result = spawnSync('/usr/bin/git', ['-C', cleanRoot, '-c', 'core.hooksPath=/dev/null',
+          '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: gitEnv })
+        expect(result.status, result.stderr).toBe(0)
+        return result.stdout.trim()
+      }
+      git('-c', 'init.defaultBranch=main', 'init')
+      const packageSource = '{"name":"video-autoworker"}\n'
+      await Promise.all([
+        writeFile(resolve(cleanRoot, 'package.json'), packageSource),
+        writeFile(resolve(cleanRoot, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n'),
+        writeFile(resolve(cleanRoot, 'next.config.js'), 'module.exports = {}\n'),
+      ])
+      git('add', '--', 'package.json', 'pnpm-lock.yaml', 'next.config.js')
+      git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'baseline')
+      const head = git('rev-parse', 'HEAD')
+      const inspectClean = () => spawnSync(process.execPath,
+        [gitSourceLayoutPath, 'assert-clean', cleanRoot, head], { encoding: 'utf8', env: gitEnv })
+      const clean = inspectClean()
+      expect(clean.status, clean.stderr).toBe(0)
+      expect(JSON.parse(clean.stdout)).toMatchObject({ productRoot: cleanRoot, headCommit: head })
+      const rejectDirty = () => {
+        const result = inspectClean()
+        expect(result.status).not.toBe(0)
+        expect(result.stderr).toContain('git_source_layout_worktree_not_clean')
+      }
+      await writeFile(resolve(cleanRoot, 'package.json'), '{"name":"video-autoworker","changed":true}\n')
+      rejectDirty()
+      git('add', '--', 'package.json')
+      rejectDirty()
+      await writeFile(resolve(cleanRoot, 'package.json'), packageSource)
+      git('add', '--', 'package.json')
+      expect(inspectClean().status).toBe(0)
+      await writeFile(resolve(cleanRoot, 'untracked-source.ts'), 'export const unexpected = true\n')
+      rejectDirty()
+    } finally {
+      await rm(cleanRoot, { recursive: true, force: true })
+    }
     for (const source of [video, director]) {
       const sharedLock = source.indexOf('acquire_shared_deployment_lock',
         source.indexOf('verify_shared_install_gate'))
