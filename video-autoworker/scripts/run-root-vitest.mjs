@@ -8,6 +8,10 @@ import { availableParallelism } from 'node:os'
 import { partitionTargetedTests } from './lib/targeted-test-partition.mjs'
 import { assertExactRootTestCollection, parseRootVitestArguments, resolveExplicitRootTests } from './lib/root-vitest-selection.mjs'
 
+// Match Vitest's CLI before programmatic collection: Vite otherwise defaults
+// an unset NODE_ENV to development and leaves it set for the test children.
+process.env.NODE_ENV ??= 'test'
+
 const repositoryRoot = process.cwd()
 const vitestCli = resolve(repositoryRoot, 'node_modules/vitest/vitest.mjs')
 const heavyRootTests = [

@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({ runOpenClaw: vi.fn() }))
@@ -62,7 +63,8 @@ describe('n8n model execution', () => {
   })
 
   it('reads a cloud API key only from the named environment variable', async () => {
-    process.env.TEST_MODEL_API_KEY = 'external-secret-value'
+    const mockKey = randomUUID()
+    process.env.TEST_MODEL_API_KEY = mockKey
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       choices: [{ message: { content: 'cloud result' } }],
       usage: { total_tokens: 12 },
@@ -80,9 +82,9 @@ describe('n8n model execution', () => {
     })
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(new Headers(init.headers).get('Authorization')).toBe('Bearer external-secret-value')
+    expect(new Headers(init.headers).get('Authorization')).toBe(`Bearer ${mockKey}`)
     expect(output).toMatchObject({ text: 'cloud result', routeId: 'cloud-qwen', model: 'qwen3.7-plus' })
-    expect(JSON.stringify(output)).not.toContain('external-secret-value')
+    expect(JSON.stringify(output)).not.toContain(mockKey)
   })
 
   it('passes a bounded strict JSON schema to a compatible structured-output route', async () => {

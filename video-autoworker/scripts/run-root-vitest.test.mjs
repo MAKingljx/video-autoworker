@@ -38,6 +38,10 @@ if (args[0] === 'list') {
   if (process.env.FIXTURE_COLLECTION === 'extra') files.push('src/lib/__tests__/unrequested.test.ts')
   process.stdout.write(files.join('\\n') + '\\n')
 } else if (process.env.FIXTURE_RUN_FAIL === '1') process.exitCode = 1
+else if (process.env.FIXTURE_EXPECT_NODE_ENV && process.env.NODE_ENV !== process.env.FIXTURE_EXPECT_NODE_ENV) {
+  process.stderr.write('unexpected_test_environment:' + process.env.NODE_ENV)
+  process.exitCode = 86
+}
 `)
 })
 afterEach(async () => { await rm(temp, { recursive: true, force: true }) })
@@ -134,4 +138,25 @@ test('explicit test failures cannot be reported as success', () => {
   const result = run([regular[0]], { FIXTURE_RUN_FAIL: '1' })
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /Targeted test partition failed/)
+})
+
+test('impact collection initializes an absent NODE_ENV before Vite can change the child environment', async () => {
+  const pathname = join(root, 'impact.json')
+  await writeFile(pathname, JSON.stringify({ mode: 'targeted', relatedFiles: [], testFiles: [regular[0]] }))
+  const result = run(['--partition', 'regular', '--impact-plan', pathname], {
+    NODE_ENV: undefined, FIXTURE_EXPECT_NODE_ENV: 'test',
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout.trim().split('\n')[0]).selection, 'changed_production_dependencies')
+  assert.deepEqual((await calls()).filter(args => args[0] === 'run')[0].filter(arg => arg.endsWith('.test.ts')), [regular[0]])
+})
+
+test('impact collection preserves an explicitly provided production NODE_ENV', async () => {
+  const pathname = join(root, 'impact.json')
+  await writeFile(pathname, JSON.stringify({ mode: 'targeted', relatedFiles: [], testFiles: [regular[0]] }))
+  const result = run(['--partition', 'regular', '--impact-plan', pathname], {
+    NODE_ENV: 'production', FIXTURE_EXPECT_NODE_ENV: 'production',
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal((await calls()).filter(args => args[0] === 'run').length, 1)
 })
