@@ -17,14 +17,14 @@ const sha = value => createHash('sha256').update(value).digest('hex')
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 const fail = code => { throw new Error(code) }
 
-function privateFile(pathname) {
+function privateFile(pathname, { parseJson = true, maxBytes = 65_536 } = {}) {
   const fd = openSync(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const stat = fstatSync(fd)
-    if (!stat.isFile() || stat.size > 65_536 || (stat.mode & 0o077)
+    if (!stat.isFile() || stat.size > maxBytes || (stat.mode & 0o077)
       || stat.uid !== process.getuid()) fail('worker_handoff_file_unsafe')
     const bytes = readFileSync(fd)
-    return { bytes, sha256: sha(bytes), value: JSON.parse(bytes.toString('utf8')) }
+    return { bytes, sha256: sha(bytes), value: parseJson ? JSON.parse(bytes.toString('utf8')) : null }
   } finally { closeSync(fd) }
 }
 
@@ -336,6 +336,13 @@ export async function rollbackSchedulerHandoff(options) {
       nextAction: 'restore_previous_web_then_verify_its_leadership' }
   })
 }
+
+// Replacement is a different maintenance operation from the first Web→Worker
+// handoff. Share these identity/ownership primitives without rewriting history.
+export const schedulerWorkerMaintenance = Object.freeze({
+  withLock, context, privateFile, stateRoot, equalDatabase, lease, alive,
+  processIdentity, drain, stopOwnedWorker,
+})
 
 async function main(argv) {
   const [command, ...rest] = argv
