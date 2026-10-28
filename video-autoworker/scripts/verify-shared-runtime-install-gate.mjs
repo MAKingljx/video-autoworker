@@ -323,7 +323,8 @@ function verifyStandaloneRelease(sourceRepositoryRoot, binding) {
   ))
     !== binding.manifestSha256) fail('rolling_release_manifest_mismatch')
   try {
-    execFileSync(process.execPath, [auditor, binding.releaseRoot], {
+    execFileSync(process.execPath, [auditor, '--audit-bound', binding.releaseRoot,
+      sourceRepositoryRoot, binding.releaseId, binding.manifestSha256], {
       cwd: sourceRepositoryRoot,
       encoding: 'utf8', timeout: 60_000, maxBuffer: 4 * 1024 * 1024,
     })

@@ -2,6 +2,7 @@
 
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
+import { createRequire } from 'node:module'
 import {
   cp,
   lstat,
@@ -34,6 +35,9 @@ import {
 } from './lib/director-projection-contract-compatibility.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import { scanStandaloneSensitiveContent } from './check-sensitive-content.mjs'
+import { readGitProductFile, resolveGitSourceLayout } from './lib/git-source-layout.mjs'
+
+const moduleRequire = createRequire(import.meta.url)
 
 export const FORBIDDEN_STANDALONE_NAMES = new Set([
   '.phoenixbrain',
@@ -960,15 +964,81 @@ export async function assertStandaloneRequiredServerFilesSanitized(
   return true
 }
 
-export async function assertRequiredStandaloneMembers(rootPath = resolve('.next/standalone')) {
+/** Read immutable release requirements as data; never import or execute old code. */
+export function readStandaloneArtifactContractForGitCommit(repositoryRoot, commit) {
+  if (!/^[a-f0-9]{40}$/u.test(commit || '')) throw new Error('standalone_historical_contract_commit_invalid')
+  const { gitRoot } = resolveGitSourceLayout(repositoryRoot)
+  const auditor = readGitProductFile(gitRoot, commit, 'scripts/check-standalone-artifact.mjs')
+  const writer = readGitProductFile(gitRoot, commit, 'scripts/lib/director-extraction-release-provenance.mjs')
+  const ts = moduleRequire('typescript')
+  const declarations = source => {
+    const file = ts.createSourceFile('contract.mjs', source.toString('utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+    if (file.parseDiagnostics.length) throw new Error('standalone_historical_contract_unrecognized')
+    const values = new Map()
+    for (const statement of file.statements) {
+      if (!ts.isVariableStatement(statement)) continue
+      for (const declaration of statement.declarationList.declarations) {
+        if (!ts.isIdentifier(declaration.name)) continue
+        if (values.has(declaration.name.text)) throw new Error('standalone_historical_contract_unrecognized')
+        values.set(declaration.name.text, { declaration, initializer: declaration.initializer,
+          immutable: Boolean(statement.declarationList.flags & ts.NodeFlags.Const), file })
+      }
+    }
+    return values
+  }
+  const values = declarations(auditor), writerValues = declarations(writer)
+  const provenanceName = writerValues.get('DIRECTOR_EXTRACTION_PROVENANCE_NAME')?.initializer
+  if (!provenanceName || !ts.isStringLiteral(provenanceName) || provenanceName.text !== 'release-provenance.json') {
+    throw new Error('standalone_historical_contract_unrecognized')
+  }
+  const array = name => {
+    const binding = values.get(name), initializer = binding?.initializer
+    if (!binding?.immutable || !initializer || !ts.isArrayLiteralExpression(initializer)) throw new Error('standalone_historical_contract_unrecognized')
+    const visit = node => {
+      if (ts.isIdentifier(node) && node.text === name && node !== binding.declaration.name) {
+        let target = node
+        while ((ts.isPropertyAccessExpression(target.parent) || ts.isElementAccessExpression(target.parent))
+          && target.parent.expression === target) target = target.parent
+        const parent = target.parent
+        if ((ts.isBinaryExpression(parent) && parent.left === target
+          && parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+          && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment)
+          || ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)
+          || (ts.isCallExpression(parent) && (parent.expression === target || parent.arguments.includes(target)))
+          || (ts.isVariableDeclaration(parent) && parent.initializer === target)) {
+          throw new Error('standalone_historical_contract_unrecognized')
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(binding.file)
+    const members = initializer.elements.map(element => {
+      if (ts.isStringLiteral(element)) return element.text
+      if (ts.isIdentifier(element) && element.text === 'DIRECTOR_EXTRACTION_PROVENANCE_NAME') return provenanceName.text
+      throw new Error('standalone_historical_contract_unrecognized')
+    })
+    if (!members.length || members.length > 4096 || new Set(members).size !== members.length
+      || members.some(member => !member || isAbsolute(member) || member.includes('\\')
+        || /[\u0000-\u001f\u007f]/u.test(member) || member.split('/').some(part => ['', '.', '..'].includes(part)))) {
+      throw new Error('standalone_historical_contract_unrecognized')
+    }
+    return Object.freeze(members)
+  }
+  return Object.freeze({ sourceCommit: commit,
+    auditorSha256: createHash('sha256').update(auditor).digest('hex'),
+    requiredFiles: array('REQUIRED_STANDALONE_FILES'),
+    requiredDirectories: array('REQUIRED_STANDALONE_DIRECTORIES') })
+}
+
+async function assertRequiredStandaloneContract(rootPath, contract) {
   const { root } = await assertStandalonePhysicalRoot(rootPath)
-  for (const member of REQUIRED_STANDALONE_FILES) {
+  for (const member of contract.requiredFiles) {
     const memberStat = await lstat(resolve(root, member)).catch(() => null)
     if (!memberStat?.isFile() || memberStat.isSymbolicLink() || memberStat.size === 0) {
       throw new Error(`standalone_required_file_missing:${member}`)
     }
   }
-  for (const member of REQUIRED_STANDALONE_DIRECTORIES) {
+  for (const member of contract.requiredDirectories) {
     const pathname = resolve(root, member)
     const memberStat = await lstat(pathname).catch(() => null)
     if (!memberStat?.isDirectory() || memberStat.isSymbolicLink()) {
@@ -979,6 +1049,12 @@ export async function assertRequiredStandaloneMembers(rootPath = resolve('.next/
     }
   }
   return true
+}
+
+export async function assertRequiredStandaloneMembers(rootPath = resolve('.next/standalone')) {
+  return assertRequiredStandaloneContract(rootPath, {
+    requiredFiles: REQUIRED_STANDALONE_FILES, requiredDirectories: REQUIRED_STANDALONE_DIRECTORIES,
+  })
 }
 
 async function resolveStandaloneRelativeModule(importerPath, specifier) {
@@ -1385,7 +1461,7 @@ export async function sanitizeStandaloneArtifact(
   }
 }
 
-export async function auditStandaloneArtifact(rootPath = resolve('.next/standalone')) {
+async function auditStandaloneAgainstContract(rootPath, contract) {
   const { root } = await assertStandalonePhysicalRoot(rootPath)
   const forbidden = await findForbiddenStandaloneMembers(root)
   if (forbidden.length > 0) {
@@ -1395,7 +1471,7 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
   if (unsafeLinks.length > 0) {
     throw new Error(`standalone_unsafe_links:${unsafeLinks.join(',')}`)
   }
-  await assertRequiredStandaloneMembers(root)
+  await assertRequiredStandaloneContract(root, contract)
   await assertStandaloneServerConfigSanitized(root)
   await assertStandaloneRequiredServerFilesSanitized(root)
   const importClosure = await assertStandaloneStaticImportClosure(root)
@@ -1416,6 +1492,58 @@ export async function auditStandaloneArtifact(rootPath = resolve('.next/standalo
     importClosure,
     verificationBundle,
   }
+}
+
+/** New candidates always satisfy the current, complete artifact contract. */
+export async function auditStandaloneArtifact(rootPath = resolve('.next/standalone')) {
+  return auditStandaloneAgainstContract(rootPath, {
+    requiredFiles: REQUIRED_STANDALONE_FILES, requiredDirectories: REQUIRED_STANDALONE_DIRECTORIES,
+  })
+}
+
+async function pinnedBoundManifest(root, expectedSha256) {
+  if (!/^[a-f0-9]{64}$/u.test(expectedSha256 || '')) throw new Error('standalone_bound_manifest_binding_invalid')
+  const pathname = resolve(root, RELEASE_MANIFEST_NAME)
+  const before = await lstat(pathname, { bigint: true })
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+    || before.uid !== BigInt(process.getuid()) || (before.mode & 0o022n) !== 0n
+    || before.size <= 0n || before.size > BigInt(MAX_APPLICATION_RELEASE_MANIFEST_BYTES)) {
+    throw new Error('standalone_bound_manifest_unsafe')
+  }
+  const handle = await open(pathname, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const opened = await handle.stat({ bigint: true })
+    const source = await handle.readFile()
+    const after = await handle.stat({ bigint: true }), current = await lstat(pathname, { bigint: true })
+    const same = sample => sample.dev === before.dev && sample.ino === before.ino && sample.size === before.size
+      && sample.uid === before.uid && sample.mode === before.mode && sample.nlink === before.nlink
+      && sample.mtimeNs === before.mtimeNs && sample.ctimeNs === before.ctimeNs
+    if (![opened, after, current].every(same) || createHash('sha256').update(source).digest('hex') !== expectedSha256) {
+      throw new Error('standalone_bound_manifest_changed')
+    }
+    return { dev: String(before.dev), ino: String(before.ino), mtimeNs: String(before.mtimeNs), ctimeNs: String(before.ctimeNs) }
+  } finally { await handle.close() }
+}
+
+/** Existing slot bindings retain their release's requirements and all current safety checks. */
+export async function auditBoundStandaloneArtifact(rootPath, {
+  repositoryRoot, releaseId, manifestSha256,
+}) {
+  const { root } = await assertStandalonePhysicalRoot(rootPath)
+  const before = await pinnedBoundManifest(root, manifestSha256)
+  // This verifier already owns canonical Git/mainline, exact build-source
+  // closure, source anchor and provenance/content binding. Reuse that authority.
+  const { assertRepositoryRelease, verifyDirectorExtractionReleaseProvenance } = await import('./verify-director-video-release-readiness.mjs')
+  const commit = assertRepositoryRelease(repositoryRoot, releaseId, 'ancestor')
+  const provenance = verifyDirectorExtractionReleaseProvenance({ repositoryRoot, releaseRoot: root, commit })
+  const contract = readStandaloneArtifactContractForGitCommit(repositoryRoot, commit)
+  const audit = await auditStandaloneAgainstContract(root, contract)
+  if (JSON.stringify(provenance.artifactContent) !== JSON.stringify(audit.artifactContent)) {
+    throw new Error('standalone_bound_artifact_content_changed')
+  }
+  const after = await pinnedBoundManifest(root, manifestSha256)
+  if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('standalone_bound_manifest_changed')
+  return { ...audit, auditMode: 'bound-release', sourceCommit: commit, auditorSha256: contract.auditorSha256 }
 }
 
 export async function createStandaloneVerificationBundle(
@@ -1548,10 +1676,18 @@ export async function verifyStandaloneVerificationBundle(rootPath, bundle) {
 
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : null
 if (invokedPath === import.meta.url) {
+  // Finish module evaluation before importing the existing readiness verifier,
+  // which also imports this auditor. The CLI promise retains its own errors.
+  void (async () => {
   try {
     const command = process.argv[2]
     const rootPath = command?.startsWith('--') ? process.argv[3] : command
-    const result = command === '--sanitize'
+    if (command === '--audit-bound' && process.argv.length !== 7) throw new Error('standalone_bound_audit_arguments_invalid')
+    const result = command === '--audit-bound'
+      ? await auditBoundStandaloneArtifact(rootPath, {
+        repositoryRoot: process.argv[4], releaseId: process.argv[5], manifestSha256: process.argv[6],
+      })
+      : command === '--sanitize'
       ? await sanitizeStandaloneArtifact(rootPath)
       : command === '--write-manifest'
         ? await writeStandaloneReleaseManifest(rootPath)
@@ -1564,4 +1700,5 @@ if (invokedPath === import.meta.url) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: message })}\n`)
     process.exitCode = 1
   }
+  })()
 }

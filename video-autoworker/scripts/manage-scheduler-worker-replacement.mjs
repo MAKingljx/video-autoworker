@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { schedulerWorkerMaintenance as core } from './manage-scheduler-worker.mjs'
 import { readIndependentWorkerStatus } from './lib/independent-worker-release.mjs'
+import { captureSchedulerEndpoint, assertSchedulerEndpointUnchanged, retireExitedSchedulerEndpoint, hasSchedulerEndpoint } from './lib/scheduler-worker-endpoint.mjs'
 import { acquireSharedDeploymentLockSync, verifySharedDeploymentLockDelegationSync } from './lib/shared-deployment-lock.mjs'
 import { SCHEDULER_WORKER_LAUNCHD_LABEL as LABEL,
   validateSchedulerLaunchdReplacement as validateLaunchdReplacement,
@@ -98,7 +99,7 @@ function ready(status) {
     && status.leadership?.state === 'leader'
 }
 function assertNoWorker(options, record, context) {
-  if (core.alive(record.before.pid) || existsSync(join(options.stateDir, 'worker.sock')) || core.lease(context)) fail('worker_replacement_old_execution_remaining')
+  if (core.alive(record.before.pid) || hasSchedulerEndpoint(options.stateDir) || core.lease(context)) fail('worker_replacement_old_execution_remaining')
 }
 function staticBinding(options, ctx, service) {
   return { operationId: options.operationId, stateDir: options.stateDir, database: ctx.before.database,
@@ -183,6 +184,24 @@ async function locked(options, action) {
   }
 }
 
+async function bindLiveEndpoint(options, loaded, ctx, side, pid, startedAt) {
+  const endpoint = captureSchedulerEndpoint(options.stateDir)
+  const status = await observe(options, ctx[side], pid, startedAt)
+  assertSchedulerEndpointUnchanged(endpoint, captureSchedulerEndpoint(options.stateDir))
+  if (loaded.record[side].endpoint) assertSchedulerEndpointUnchanged(loaded.record[side].endpoint, endpoint)
+  else update(loaded, loaded.record.step, { [side]: { ...loaded.record[side], endpoint } })
+  return status
+}
+async function retireEndpoint(options, loaded, ctx, side, pid) {
+  return retireExitedSchedulerEndpoint({ stateDir: options.stateDir, operationId: options.operationId,
+    expected: loaded.record[side].endpoint, assertQuiescent: () => {
+      // Re-read the same operation, shared lock, pause and immutable handoff
+      // after each asynchronous probe; never delete another owner's endpoint.
+      readOwned(options, ctx)
+      if (core.alive(pid) || core.lease(ctx[side])) fail('worker_replacement_endpoint_execution_remaining')
+    } })
+}
+
 export function validateSchedulerLaunchdReplacement(options, ctx = contexts(options)) {
   return validateLaunchdReplacement(options, ctx)
 }
@@ -198,7 +217,9 @@ export async function prepareSchedulerReplacement(options, services = null) {
       const loaded = readOwned(options, ctx)
       return { currentState: loaded.record.step, receiptSha256: loaded.sha256, reused: true }
     }
+    const endpoint = captureSchedulerEndpoint(options.stateDir)
     const current = await observe(options, ctx.before, options.expectedOldPid)
+    assertSchedulerEndpointUnchanged(endpoint, captureSchedulerEndpoint(options.stateDir))
     if (!ready(current)) fail('worker_replacement_before_not_ready')
     const oldHandoff = handoff(options, ctx.before)
     const service = services ? { kind: 'process' } : validateSchedulerLaunchdReplacement(options, ctx)
@@ -216,7 +237,7 @@ export async function prepareSchedulerReplacement(options, services = null) {
     }
     const record = { schema: SCHEMA, operationId: options.operationId, bindingSha256, binding,
       handoffSha256: oldHandoff.sha256, step: 'prepared', createdAt: Date.now(), updatedAt: Date.now(),
-      before: { pid: current.worker.pid, startedAt: current.worker.startedAt, contentSha256: ctx.before.manifest.contentSha256 },
+      before: { pid: current.worker.pid, startedAt: current.worker.startedAt, contentSha256: ctx.before.manifest.contentSha256, endpoint },
       target: { contentSha256: ctx.target.manifest.contentSha256 } }
     const receiptSha256 = writeJson(paths.receipt, record)
     await services?.afterPreparedReceipt?.()
@@ -232,7 +253,7 @@ export async function drainSchedulerReplacement(options, services = null) {
     if (record.step === 'stopped') { assertNoWorker(options, record, ctx.before); return { currentState: 'stopped', reused: true } }
     const adapter = services || productionAdapter(options, loaded, ctx)
     if (record.step !== 'stopping') {
-      await observe(options, ctx.before, record.before.pid, record.before.startedAt)
+      await bindLiveEndpoint(options, loaded, ctx, 'before', record.before.pid, record.before.startedAt)
       update(loaded, 'draining')
       await core.drain(options.stateDir)
       await services?.afterDrain?.()
@@ -252,12 +273,13 @@ export async function drainSchedulerReplacement(options, services = null) {
       await adapter.stop('before', record.before.pid)
     }
     const deadline = Date.now() + (options.waitMs ?? 30_000)
-    while (core.alive(record.before.pid) || existsSync(join(options.stateDir, 'worker.sock'))) {
+    while (core.alive(record.before.pid)) {
       if (Date.now() >= deadline) return { currentState: 'stopping', nextAction: 'resume_same_operation_after_owned_exit' }
       await sleep(50)
     }
+    const endpointRetirement = await retireEndpoint(options, loaded, ctx, 'before', record.before.pid)
     assertNoWorker(options, record, ctx.before)
-    update(loaded, 'stopped')
+    update(loaded, 'stopped', { endpointRetirement })
     return { currentState: 'stopped', receiptSha256: loaded.sha256, reused: false }
   })
 }
@@ -324,6 +346,7 @@ export async function prepareSchedulerReplacementDatabase(options, backupReceipt
 }
 
 async function verifyTarget(options, loaded, ctx) {
+  const endpoint = captureSchedulerEndpoint(options.stateDir)
   const current = await observe(options, ctx.target, loaded.record.target.pid ?? null, loaded.record.target.startedAt ?? null)
   if (!ready(current) || current.worker.startedAt < loaded.record.activationRequestedAt) fail('worker_replacement_target_not_ready')
   const shape = databaseShape(ctx.target)
@@ -331,7 +354,9 @@ async function verifyTarget(options, loaded, ctx) {
   if (loaded.record.binding.service.kind === 'launchd') {
     assertSchedulerLaunchdReadiness(loaded.record.binding.service, ctx.target.root, current.worker.pid)
   }
-  return current
+  assertSchedulerEndpointUnchanged(endpoint, captureSchedulerEndpoint(options.stateDir))
+  if (loaded.record.target.endpoint) assertSchedulerEndpointUnchanged(loaded.record.target.endpoint, endpoint)
+  return { ...current, endpoint }
 }
 export async function activateSchedulerReplacement(options, services = null) {
   return locked(options, async ctx => {
@@ -344,7 +369,7 @@ export async function activateSchedulerReplacement(options, services = null) {
       assertNoWorker(options, loaded.record, ctx.target)
       update(loaded, 'activation_requested', { activationRequestedAt: Date.now() })
     }
-    if (!existsSync(join(options.stateDir, 'worker.sock'))) await adapter.start('target')
+    if (!hasSchedulerEndpoint(options.stateDir)) await adapter.start('target')
     const deadline = Date.now() + (options.waitMs ?? 30_000)
     let current
     while (true) {
@@ -353,7 +378,7 @@ export async function activateSchedulerReplacement(options, services = null) {
         await sleep(100)
       }
     }
-    update(loaded, 'ready', { target: { ...loaded.record.target, pid: current.worker.pid, startedAt: current.worker.startedAt } })
+    update(loaded, 'ready', { target: { ...loaded.record.target, pid: current.worker.pid, startedAt: current.worker.startedAt, endpoint: current.endpoint } })
     return { currentState: 'ready', worker: loaded.record.target, receiptSha256: loaded.sha256, reused: false }
   })
 }
@@ -362,7 +387,7 @@ export async function restoreSchedulerReplacement(options, services = null) {
   return locked(options, async ctx => {
     const loaded = readOwned(options, ctx), adapter = services || productionAdapter(options, loaded, ctx)
     if (loaded.record.step === 'completed') fail('worker_replacement_completed_restore_requires_new_operation')
-    if (existsSync(join(options.stateDir, 'worker.sock'))) {
+    if (hasSchedulerEndpoint(options.stateDir)) {
       const current = await readIndependentWorkerStatus(options.stateDir)
       if (current.worker?.contentSha256 === ctx.before.manifest.contentSha256 && ready(current)) {
         const isOriginal = current.worker.pid === loaded.record.before.pid && current.worker.startedAt === loaded.record.before.startedAt
@@ -388,13 +413,15 @@ export async function restoreSchedulerReplacement(options, services = null) {
           await sleep(100)
         }
         assertPause(options, ctx.before)
+        await bindLiveEndpoint(options, loaded, ctx, 'before', current.worker.pid, current.worker.startedAt)
         await adapter.stop('before', current.worker.pid)
-        while (core.alive(current.worker.pid) || existsSync(join(options.stateDir, 'worker.sock'))) {
+        while (core.alive(current.worker.pid)) {
           if (Date.now() >= deadline) fail('worker_replacement_previous_exit_unconfirmed')
           await sleep(50)
         }
+        await retireEndpoint(options, loaded, ctx, 'before', current.worker.pid)
       } else {
-      const target = await observe(options, ctx.target, loaded.record.target.pid ?? null, loaded.record.target.startedAt ?? null)
+      const target = await bindLiveEndpoint(options, loaded, ctx, 'target', loaded.record.target.pid ?? null, loaded.record.target.startedAt ?? null)
       if (target.worker.startedAt < loaded.record.activationRequestedAt) fail('worker_replacement_target_scope_changed')
       await core.drain(options.stateDir)
       const deadline = Date.now() + (options.waitMs ?? 30_000)
@@ -405,10 +432,11 @@ export async function restoreSchedulerReplacement(options, services = null) {
         await sleep(100)
       }
       await adapter.stop('target', target.worker.pid)
-      while (core.alive(target.worker.pid) || existsSync(join(options.stateDir, 'worker.sock'))) {
+      while (core.alive(target.worker.pid)) {
         if (Date.now() >= deadline) fail('worker_replacement_target_exit_unconfirmed')
         await sleep(50)
       }
+      await retireEndpoint(options, loaded, ctx, 'target', target.worker.pid)
       }
     }
     if (core.lease(ctx.before)) fail('worker_replacement_lease_remaining')

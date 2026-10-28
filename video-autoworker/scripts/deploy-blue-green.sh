@@ -1063,10 +1063,31 @@ cache_release_verification() {
 }
 
 full_audit_release() {
-  local root="$1" audit
+  local root="$1" release_id="${2:-}" bound_manifest="${3:-}" audit
   increment_release_verification_count full
-  audit="$("$NODE_BIN" "$AUDITOR" "$root")" || return 1
+  if [[ -n "$release_id" && -n "$bound_manifest" ]]; then
+    audit="$("$NODE_BIN" "$AUDITOR" --audit-bound "$root" "$PROJECT_ROOT" "$release_id" "$bound_manifest")" || return 1
+  else
+    audit="$("$NODE_BIN" "$AUDITOR" "$root")" || return 1
+  fi
   cache_release_verification "$root" "$audit" || return 1
+}
+
+bound_release_manifest() {
+  local release_id="$1" root="$2" slot binding registered_release registered_root manifest
+  [[ -f "$STATE_FILE" && ! -L "$STATE_FILE" ]] || return 0
+  for slot in blue green; do
+    registered_release="$(read_state_slot_release "$slot")" || return 1
+    [[ "$registered_release" == "$release_id" ]] || continue
+    binding="$(binding_values "$slot")" || return 1
+    registered_root="$(printf '%s\n' "$binding" | sed -n '2p')"
+    [[ "$(printf '%s\n' "$binding" | sed -n '1p')" == "$release_id" \
+      && "$registered_root" == "$root" ]] || return 1
+    manifest="$(printf '%s\n' "$binding" | sed -n '3p')"
+    [[ "$manifest" =~ ^[a-f0-9]{64}$ ]] || return 1
+    printf '%s\n' "$manifest"
+    return 0
+  done
 }
 
 quick_verify_release() {
@@ -1089,7 +1110,7 @@ rebind_release_verification_cache() {
 assert_release() {
   local release_id="$1"
   local standalone_root="$2"
-  local physical_releases physical_expected physical_root
+  local physical_releases physical_expected physical_root bound_manifest
   validate_release_id "$release_id"
   assert_absolute "standalone release root" "$standalone_root"
   [[ -d "$standalone_root" && ! -L "$standalone_root" ]] || fail "standalone release root is not a physical directory"
@@ -1104,7 +1125,9 @@ assert_release() {
       && -f "$(release_verification_cache_path "$physical_root")" ]]; then
       increment_release_verification_count fallback
     fi
-    full_audit_release "$physical_root" \
+    bound_manifest="$(bound_release_manifest "$release_id" "$physical_root")" \
+      || fail "existing standalone binding does not match the registered release"
+    full_audit_release "$physical_root" "$release_id" "$bound_manifest" \
       || fail "standalone release failed artifact verification"
   fi
   printf '%s\n' "$physical_root"

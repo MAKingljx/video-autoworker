@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import net from 'node:net'
+import { syncBuiltinESMExports } from 'node:module'
 import { spawn, execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
 import { readIndependentWorkerStatus } from './lib/independent-worker-release.mjs'
 import { acquireSharedDeploymentLockSync, verifySharedDeploymentLockDelegationSync } from './lib/shared-deployment-lock.mjs'
@@ -17,7 +20,7 @@ const arg = name => { const index = process.argv.indexOf(name); if (index < 0 ||
 const beforeRoot = arg('--old-artifact'), targetRoot = arg('--target-artifact')
 const pythonIndex = process.argv.indexOf('--python-bin'), pythonBin = pythonIndex >= 0 ? realpathSync(process.argv[pythonIndex + 1]) : '/usr/bin/python3'
 const require = createRequire(join(beforeRoot, 'worker.cjs')), Database = require('better-sqlite3')
-const launcher = fileURLToPath(new URL('./start-scheduler-worker.mjs', import.meta.url))
+const launcher = realpathSync(fileURLToPath(new URL('./start-scheduler-worker.mjs', import.meta.url)))
 const sha = value => createHash('sha256').update(value).digest('hex')
 const sleep = ms => new Promise(done => setTimeout(done, ms))
 async function until(action) {
@@ -52,7 +55,7 @@ async function fixture(run) {
     OPENCLAW_WORKSPACE_DIR: join(root, 'workspace'), MC_AUTH_MODE: 'openclaw-loopback', LOG_LEVEL: 'silent',
     AIWORKER_DATABASE_BACKUP_CONFIG: join(root, 'missing-backup.json') }
   writeFileSync(envFile, Object.entries(environment).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join('\n'), { mode: 0o600 })
-  const processes = [], starts = { before: 0, target: 0 }, faults = { stop: false, start: false }
+  const processes = [], starts = { before: 0, target: 0 }, faults = { stop: false, start: false, hardStop: false, afterStop: null }
   const start = side => {
     const artifact = side === 'before' ? beforeRoot : targetRoot
     const child = spawn(process.execPath, [launcher, '--artifact', artifact, '--state-dir', stateDir, '--env-file', envFile], {
@@ -64,11 +67,12 @@ async function fixture(run) {
   const stop = async pid => {
     const owned = processes.find(value => value.child.pid === pid)
     assert.ok(owned)
-    if (owned.child.exitCode === null) owned.child.kill('SIGTERM')
+    if (owned.child.exitCode === null) owned.child.kill(faults.hardStop ? 'SIGKILL' : 'SIGTERM')
     const result = await owned.exited
-    assert.equal(result.code, 0, result.stderr)
+    if (faults.hardStop) assert.equal(result.signal, 'SIGKILL', result.stderr)
+    else assert.equal(result.code, 0, result.stderr)
   }
-  const services = { async stop(_side, pid) { await stop(pid); if (faults.stop) { faults.stop = false; throw new Error('lost stop response') } },
+  const services = { async stop(_side, pid) { await stop(pid); await faults.afterStop?.(); if (faults.stop) { faults.stop = false; throw new Error('lost stop response') } },
     async start(side) { const pid = start(side); if (faults.start) { faults.start = false; await until(async () => (await readIndependentWorkerStatus(stateDir)).healthy); throw new Error('lost start response') } return pid } }
   const oldPid = start('before')
   const options = { stateDir, operationId, databasePath, runDirectory: join(root, 'run'), oldManifestPath: join(beforeRoot, 'worker-manifest.json'),
@@ -239,5 +243,161 @@ test('the real launchd adapter validates only its old/target plist and rejects u
     writeFileSync(recoveryPath, JSON.stringify(before), { mode: 0o600 })
     writeFileSync(targetPath, JSON.stringify({ ...target, EnvironmentVariables: { UNSCOPED: 'changed' } }), { mode: 0o600 })
     assert.throws(() => validateSchedulerLaunchdReplacement({ ...options, service: { ...service, targetSha256: sha(readFileSync(targetPath)) } }), /worker_replacement_unscoped_service_change/u)
+  })
+})
+
+test('an actually drained then killed original leaves a refused endpoint that only its operation safely retires', { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services, faults, receipt, backup }) => {
+    await prepareSchedulerReplacement(options, services)
+    const expected = receipt().before.endpoint
+    assert.ok(expected?.endpoint.birthtimeNs)
+    faults.hardStop = true
+    let inode
+    faults.afterStop = () => {
+      const details = lstatSync(join(options.stateDir, 'worker.sock'))
+      assert.equal(details.isSocket(), true); inode = String(details.ino)
+    }
+    assert.equal((await drainSchedulerReplacement(options, services)).currentState, 'stopped')
+    assert.equal(inode, expected.endpoint.ino)
+    assert.equal(receipt().endpointRetirement.retired, true)
+    assert.equal(existsSync(join(options.stateDir, 'worker.sock')), false)
+    faults.afterStop = null
+    await prepareSchedulerReplacementDatabase(options, backup()); await activateSchedulerReplacement(options, services)
+    assert.equal((await restoreSchedulerReplacement(options, services)).currentState, 'restored')
+    assert.equal(existsSync(join(options.stateDir, 'worker.sock')), true)
+    await completeSchedulerReplacement(options)
+  })
+})
+
+test('a requested service stop that has not actually exited never retires its live endpoint', { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services }) => {
+    const bounded = { ...options, waitMs: 1000 }
+    await prepareSchedulerReplacement(bounded, services)
+    const pathname = join(options.stateDir, 'worker.sock'), before = lstatSync(pathname)
+    const waiting = await drainSchedulerReplacement(bounded, { ...services, async stop() { /* Delayed manager acknowledgment; original remains alive. */ } })
+    assert.equal(waiting.currentState, 'stopping')
+    assert.equal((await readIndependentWorkerStatus(options.stateDir)).worker.pid, options.expectedOldPid)
+    assert.equal(lstatSync(pathname).ino, before.ino)
+    assert.equal((await drainSchedulerReplacement(bounded, services)).currentState, 'stopped')
+  })
+})
+
+test('another real Scheduler lease prevents cleanup even after the original PID exited', { timeout: 120000 }, async () => {
+  await fixture(async ({ root, options, services, faults, processes }) => {
+    await prepareSchedulerReplacement(options, services); faults.hardStop = true
+    let foreign
+    faults.afterStop = async () => {
+      const foreignState = join(root, 'other-state'); mkdirSync(foreignState, { mode: 0o700 })
+      const handoff = JSON.parse(readFileSync(join(options.stateDir, 'handoff.json'), 'utf8'))
+      writeFileSync(join(foreignState, 'handoff.json'), JSON.stringify({ ...handoff, operationId: 'other-isolated-scheduler' }), { mode: 0o600 })
+      const environmentFile = join(root, 'platform.env')
+      const child = spawn(process.execPath, [launcher, '--artifact', beforeRoot, '--state-dir', foreignState, '--env-file', environmentFile], {
+        env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root }, stdio: ['ignore', 'pipe', 'pipe'] })
+      let stderr = ''; child.stdout.resume(); child.stderr.on('data', part => { stderr += part })
+      const exited = new Promise(done => child.once('exit', (code, signal) => done({ code, signal, stderr })))
+      foreign = { child, exited, side: 'other-scheduler' }; processes.push(foreign)
+      await until(async () => (await readIndependentWorkerStatus(foreignState)).healthy)
+    }
+    await assert.rejects(drainSchedulerReplacement(options, services), /worker_replacement_endpoint_execution_remaining/u)
+    const pathname = join(options.stateDir, 'worker.sock'), before = lstatSync(pathname)
+    assert.equal(before.isSocket(), true)
+    faults.afterStop = null; foreign.child.kill('SIGTERM'); assert.equal((await foreign.exited).code, 0)
+    assert.equal(lstatSync(pathname).ino, before.ino)
+    assert.equal((await drainSchedulerReplacement(options, services)).currentState, 'stopped')
+  })
+})
+
+for (const kind of ['live-socket', 'foreign-file', 'foreign-stale-socket', 'foreign-symlink']) test(`an unrelated ${kind} replacing the old endpoint is never deleted`, { timeout: 120000 }, async () => {
+  await fixture(async ({ root, options, services, faults, processes }) => {
+    await prepareSchedulerReplacement(options, services)
+    faults.hardStop = true
+    const pathname = join(options.stateDir, 'worker.sock')
+    let foreignServer, foreignInode
+    faults.afterStop = async () => {
+      fs.renameSync(pathname, join(options.stateDir, 'original-preserved.sock'))
+      if (kind === 'foreign-file') writeFileSync(pathname, 'foreign object retained', { mode: 0o600 })
+      else if (kind === 'foreign-symlink') fs.symlinkSync(join(root, 'not-existing-foreign-target'), pathname)
+      else if (kind === 'live-socket') {
+        foreignServer = net.createServer(connection => connection.destroy())
+        await new Promise(done => foreignServer.listen(pathname, done)); chmodSync(pathname, 0o600)
+      } else {
+        const marker = join(root, 'foreign-listener-ready')
+        const program = "const net=require('node:net'),fs=require('node:fs');net.createServer().listen(process.argv[1],()=>{fs.chmodSync(process.argv[1],0o600);fs.writeFileSync(process.argv[2],'ready',{mode:0o600})});"
+        const child = spawn(process.execPath, ['-e', program, pathname, marker], { stdio: ['ignore', 'ignore', 'pipe'] })
+        let stderr = ''; child.stderr.on('data', bytes => { stderr += bytes })
+        const exited = new Promise(done => child.once('exit', (code, signal) => done({ code, signal, stderr })))
+        processes.push({ child, exited, side: 'foreign-fixture' })
+        await until(() => existsSync(marker)); child.kill('SIGKILL'); await exited
+      }
+      foreignInode = String(lstatSync(pathname).ino)
+    }
+    try {
+      await assert.rejects(drainSchedulerReplacement(options, services), /worker_replacement_endpoint_(changed|unsafe)/u)
+      assert.equal(String(lstatSync(pathname).ino), foreignInode)
+      if (kind === 'foreign-symlink') assert.equal(lstatSync(pathname).isSymbolicLink(), true)
+      else assert.equal(existsSync(pathname), true)
+      if (kind === 'foreign-file') assert.equal(readFileSync(pathname, 'utf8'), 'foreign object retained')
+    } finally { if (foreignServer) await new Promise(done => foreignServer.close(done)) }
+  })
+})
+
+test('a file swapped after the refused probe is preserved by the atomic claim identity check', { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services, faults }) => {
+    await prepareSchedulerReplacement(options, services); faults.hardStop = true
+    const pathname = join(options.stateDir, 'worker.sock'), originalRename = fs.renameSync
+    let replaced = false, foreignInode
+    fs.renameSync = (from, to) => {
+      if (from === pathname && !replaced) {
+        replaced = true; originalRename(pathname, join(options.stateDir, 'original-preserved.sock'))
+        writeFileSync(pathname, 'late foreign object retained', { mode: 0o600 }); foreignInode = String(lstatSync(pathname).ino)
+      }
+      return originalRename(from, to)
+    }
+    syncBuiltinESMExports()
+    try {
+      await assert.rejects(drainSchedulerReplacement(options, services), /worker_replacement_endpoint_changed/u)
+      assert.equal(replaced, true); assert.equal(String(lstatSync(pathname).ino), foreignInode)
+      assert.equal(readFileSync(pathname, 'utf8'), 'late foreign object retained')
+    } finally { fs.renameSync = originalRename; syncBuiltinESMExports() }
+  })
+})
+
+test('an interrupted retirement claim is resumed only by the same operation and original endpoint identity', { timeout: 120000 }, async () => {
+  await fixture(async ({ options, services, faults, receipt }) => {
+    await prepareSchedulerReplacement(options, services); faults.hardStop = true
+    const originalUnlink = fs.unlinkSync
+    let injected = false
+    fs.unlinkSync = pathname => {
+      if (!injected && dirname(pathname) === options.stateDir && /^\.w[a-f0-9]{8}$/u.test(pathname.split('/').at(-1))) {
+        injected = true; throw Object.assign(new Error('isolated interrupted endpoint retirement'), { code: 'EIO' })
+      }
+      return originalUnlink(pathname)
+    }
+    syncBuiltinESMExports()
+    try { await assert.rejects(drainSchedulerReplacement(options, services), /isolated interrupted endpoint retirement/u) }
+    finally { fs.unlinkSync = originalUnlink; syncBuiltinESMExports() }
+    assert.equal(injected, true); assert.equal(receipt().step, 'stopping')
+    assert.equal(existsSync(join(options.stateDir, 'worker.sock')), false)
+    assert.equal((await drainSchedulerReplacement(options, services)).currentState, 'stopped')
+    assert.equal(receipt().endpointRetirement.recoveredClaim, true)
+  })
+})
+
+const legacyIndex = process.argv.indexOf('--legacy-control-product')
+test('a genuine legacy stopping receipt without the former live endpoint proof never authorizes deletion', {
+  timeout: 120000, skip: legacyIndex < 0,
+}, async () => {
+  const legacyRoot = realpathSync(process.argv[legacyIndex + 1])
+  const legacy = await import(pathToFileURL(join(legacyRoot, 'scripts/manage-scheduler-worker-replacement.mjs')).href)
+  await fixture(async ({ options, services, faults, receipt }) => {
+    const oldOptions = { ...options, waitMs: 1000 }
+    await legacy.prepareSchedulerReplacement(oldOptions, services)
+    assert.equal(receipt().before.endpoint, undefined)
+    faults.hardStop = true
+    assert.equal((await legacy.drainSchedulerReplacement(oldOptions, services)).currentState, 'stopping')
+    const pathname = join(options.stateDir, 'worker.sock'), before = lstatSync(pathname)
+    await assert.rejects(drainSchedulerReplacement(oldOptions, services), /worker_replacement_endpoint_identity_missing/u)
+    assert.equal(lstatSync(pathname).ino, before.ino)
+    assert.equal(receipt().step, 'stopping')
   })
 })

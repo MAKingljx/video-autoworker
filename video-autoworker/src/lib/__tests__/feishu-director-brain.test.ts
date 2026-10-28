@@ -211,6 +211,8 @@ async function prepareRequiredStandaloneFixture(
     'openclaw-skills/aiworker-task-flow/lib/task-status-authority.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-batch-state.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-result-page.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs': 'export {}\n',
+    'openclaw-skills/aiworker-task-flow/lib/video-learning-result.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/video-task.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/lib/worker-launch-authorization.mjs': 'export {}\n',
     'openclaw-skills/aiworker-task-flow/scripts/project-director-evidence.mjs': 'export {}\n',
