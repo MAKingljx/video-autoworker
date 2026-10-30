@@ -9,7 +9,7 @@ import { createImageNotifications } from '../lib/image-notifications.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
 const jobId = '3'.repeat(32)
-const params = { action: 'submit', prompt: '完整中文封面', images: ['/approved/source.png'] }
+const params = { action: 'submit', prompt: '完整中文封面', creativeRedraw: true, images: ['/approved/source.png'] }
 
 function namedStoreFactory() {
   // The public named-slot semantics of OpenClaw's runtime-store. Separate

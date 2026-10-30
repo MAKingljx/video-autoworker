@@ -9,7 +9,7 @@ const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main'
 const jobId = 'a'.repeat(32)
 const scope = imageSessionScope(context)
 const queued = { jobId, currentState: 'QUEUED' }
-const params = { action: 'submit', prompt: '用原图生成冷冻人的中文封面', images: ['/approved/source.png'] }
+const params = { action: 'submit', prompt: '用原图生成冷冻人的中文封面', creativeRedraw: true, images: ['/approved/source.png'] }
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0])
 const digest = createHash('sha256').update(png).digest('hex')
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
@@ -40,7 +40,7 @@ test('same tool call and canonical payload have the same request key', async () 
   const client = { submit: async input => { keys.push(input.requestKey); return queued } }
   const tool = createImageCommandTool({ context, client })
   await tool.execute('same-call', params)
-  await tool.execute('same-call', { images: params.images, prompt: params.prompt, action: params.action })
+  await tool.execute('same-call', { images: params.images, prompt: params.prompt, creativeRedraw: true, action: params.action })
   await tool.execute('other-call', params)
   assert.equal(keys[0], keys[1])
   assert.notEqual(keys[0], keys[2])
@@ -60,8 +60,9 @@ test('model parameters cannot replace identity, destinations, paths or service U
 test('submit validates prompt XOR design, normalized paths and allowed numeric settings', () => {
   const design = { schema: 'aiworker-qwen-cover-design/v1', profile: 'ice-documentary',
     text: { kicker: '纪实短片', title: '冷冻人', subtitle: '等待未来？', caption: '走进低温保存现场' } }
-  assert.ok(normalizeImageRequest({ action: 'submit', images: params.images, design }))
+  assert.ok(normalizeImageRequest({ action: 'submit', images: params.images, design, creativeRedraw: true }))
   for (const request of [{ ...params, design }, { action: 'submit', images: params.images },
+    { action: 'submit', images: params.images, prompt: params.prompt },
     { ...params, prompt: '' }, { ...params, prompt: 'x'.repeat(8193) },
     { ...params, images: ['https://outside/image.png'] }, { ...params, images: ['/approved/../secret.png'] },
     { ...params, images: ['/approved/a.png\n'] }, { ...params, images: [] },
@@ -192,7 +193,7 @@ test('release maintenance does not submit and error output cannot leak credentia
 test('HTTP client uses only loopback routes, refuses redirects, and keeps scope on reads/cancel', async () => {
   const calls = []
   const client = createImageJobClient({ fetchImpl: async (...args) => { calls.push(args); return json(queued) } })
-  await client.submit({ scope, requestKey: 'b'.repeat(64), images: params.images, prompt: params.prompt })
+  await client.submit({ scope, requestKey: 'b'.repeat(64), images: params.images, prompt: params.prompt, creativeRedraw: true })
   await client.status(jobId, scope)
   await client.cancel(jobId, scope)
   await client.list(scope)

@@ -7,7 +7,7 @@ export const IMAGE_COMMAND_TOOL_NAME = 'aiworker_generate_image'
 export const IMAGE_AGENT_ID = 'image-studio'
 const JOB_ID = /^[0-9a-f]{32}$/u
 const STATES = new Set(['QUEUED', 'RUNNING', 'GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED', 'CANCEL_REQUESTED', 'RECONCILE_REQUIRED'])
-const SUBMIT_KEYS = new Set(['action', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed'])
+const SUBMIT_KEYS = new Set(['action', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed', 'creativeRedraw'])
 const TEXT_FIELDS = ['kicker', 'title', 'subtitle', 'caption']
 const RECTANGLE = { type: 'object', additionalProperties: false, required: ['x', 'y', 'width', 'height'],
   properties: { x: { type: 'integer', minimum: 0, maximum: 8192 }, y: { type: 'integer', minimum: 0, maximum: 8192 },
@@ -19,7 +19,9 @@ const PARAMETERS = {
     action: { type: 'string', enum: ['submit', 'status', 'result', 'inspect', 'cancel'] },
     jobId: { type: 'string', pattern: '^[0-9a-f]{32}$', description: '由本工具返回的图片任务编号；status 可省略，列出本会话最近任务。' },
     prompt: { type: 'string', minLength: 1, maxLength: 8192,
-      description: '原生创作出图要求。与 design、protected 三选一；照片封面保真编辑优先 protected。' },
+      description: '原生整图创作要求。与 design、protected 三选一；只有明确创意重绘时才能使用，真实视频帧封面使用 protected。' },
+    creativeRedraw: { type: 'boolean',
+      description: '仅 prompt/design 必填且必须为 true：明确授权模型重绘整张参考图。真实视频帧封面不得填写，改用 protected。' },
     design: {
       type: 'object', additionalProperties: false, required: ['schema', 'profile', 'text'],
       properties: {
@@ -39,10 +41,11 @@ const PARAMETERS = {
         textLayers: { type: 'array', maxItems: 4, items: {
           type: 'object', additionalProperties: false, required: ['text', 'box'],
           properties: { text: { type: 'string', minLength: 1, maxLength: 128 }, box: RECTANGLE,
-            style: { type: 'string', maxLength: 1000 }, align: { type: 'string', enum: ['left', 'center'] } },
+            style: { type: 'string', maxLength: 1000 }, align: { type: 'string', enum: ['left', 'center'] },
+            role: { type: 'string', enum: ['kicker', 'title', 'subtitle', 'caption'] } },
         } },
       },
-      description: '原片保护封面：只传一张真实高清原图；坐标是源图原生像素，不能按缩略图猜。H1模型生成字形/修补素材，应用自动合成并核验保护区。至少有一项编辑；保持原尺寸，不填写外层width/height。',
+      description: '原片保护封面：只传一张真实高清原图；坐标是源图原生像素，不能按缩略图猜。H1模型生成字形/修补素材，应用自动合成并核验保护区。标题层填写 role；未填时第一行自动为 title、第二行为 subtitle。至少有一项编辑；保持原尺寸，不填写外层width/height。',
     },
     images: { type: 'array', minItems: 1, maxItems: 3,
       items: { type: 'string', minLength: 1, maxLength: 4096 },
@@ -89,15 +92,17 @@ function protectedRequest(value) {
   const erasures = eraseRegions.map(rectangle)
   if (erasures.some(item => item === null)) return null
   const layers = []
-  for (const item of textLayers) {
-    if (!plainObject(item) || Object.keys(item).some(key => !['text', 'box', 'style', 'align'].includes(key))
+  for (const [index, item] of textLayers.entries()) {
+    if (!plainObject(item) || Object.keys(item).some(key => !['text', 'box', 'style', 'align', 'role'].includes(key))
       || !safeString(item.text, 128) || item.text !== item.text.trim() || /[\r\n\t]/u.test(item.text)
       || (Object.hasOwn(item, 'style') && !safeString(item.style, 1000, true))
-      || (Object.hasOwn(item, 'align') && !['left', 'center'].includes(item.align))) return null
+      || (Object.hasOwn(item, 'align') && !['left', 'center'].includes(item.align))
+      || (Object.hasOwn(item, 'role') && !['kicker', 'title', 'subtitle', 'caption'].includes(item.role))) return null
     const box = rectangle(item.box)
     if (!box) return null
+    const role = Object.hasOwn(item, 'role') ? item.role : (index === 0 ? 'title' : index === 1 ? 'subtitle' : 'caption')
     layers.push({ text: item.text, box, ...(Object.hasOwn(item, 'style') ? { style: item.style } : {}),
-      ...(Object.hasOwn(item, 'align') ? { align: item.align } : {}) })
+      ...(Object.hasOwn(item, 'align') ? { align: item.align } : {}), role })
   }
   return { schema: value.schema, eraseRegions: erasures, textLayers: layers }
 }
@@ -115,24 +120,26 @@ export function normalizeImageRequest(params) {
     || !params.images.every(absolutePath)) return null
   const request = { action: 'submit', images: [...params.images] }
   if (Object.hasOwn(params, 'protected')) {
-    if (params.images.length !== 1 || Object.hasOwn(params, 'width') || Object.hasOwn(params, 'height')) return null
+    if (params.images.length !== 1 || Object.hasOwn(params, 'width') || Object.hasOwn(params, 'height')
+      || Object.hasOwn(params, 'creativeRedraw')) return null
     const plan = protectedRequest(params.protected)
     if (!plan) return null
     request.protected = plan
   } else if (Object.hasOwn(params, 'prompt')) {
-    if (!safeString(params.prompt, 8192)) return null
+    if (!safeString(params.prompt, 8192) || params.creativeRedraw !== true) return null
     request.prompt = params.prompt
   } else {
     const d = params.design
     if (!plainObject(d) || Object.keys(d).some(key => !['schema', 'profile', 'text', 'scene'].includes(key))
       || d.schema !== 'aiworker-qwen-cover-design/v1' || !safeString(d.profile, 128)
       || !plainObject(d.text) || Object.keys(d.text).sort().join(',') !== [...TEXT_FIELDS].sort().join(',')
-      || TEXT_FIELDS.some(key => !safeString(d.text[key], 128))
+      || TEXT_FIELDS.some(key => !safeString(d.text[key], 128)) || params.creativeRedraw !== true
       || (Object.hasOwn(d, 'scene') && !safeString(d.scene, 1000, true))) return null
     request.design = { schema: d.schema, profile: d.profile,
       text: Object.fromEntries(TEXT_FIELDS.map(key => [key, d.text[key]])),
       ...(Object.hasOwn(d, 'scene') ? { scene: d.scene } : {}) }
   }
+  if (!Object.hasOwn(params, 'protected')) request.creativeRedraw = true
   for (const key of ['width', 'height']) {
     if (Object.hasOwn(params, key)) {
       if (!Number.isSafeInteger(params[key]) || params[key] < 512 || params[key] > 2048 || params[key] % 16) return null

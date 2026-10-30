@@ -146,7 +146,7 @@ class ImageJobs:
         return {'source': str(path), 'sha256': sha(data), 'suffix': path.suffix.lower()}, data
 
     def normalize(self, request):
-        allowed = {'scope', 'requestKey', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed'}
+        allowed = {'scope', 'requestKey', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed', 'creativeRedraw'}
         if not isinstance(request, dict) or set(request) - allowed:
             raise ValueError('image_request_invalid')
         self.check_scope(request.get('scope'))
@@ -156,13 +156,21 @@ class ImageJobs:
             raise ValueError('image_prompt_or_design_required')
         protected = 'protected' in request
         if protected:
+            if 'creativeRedraw' in request:
+                raise ValueError('image_creative_redraw_not_allowed_for_protected')
             if 'width' in request or 'height' in request:
                 raise ValueError('image_protected_native_dimensions_required')
             limit = 1
-        elif 'design' in request:
+        else:
+            # Prompt/design modes redraw the full reference frame. Make that
+            # destructive visual choice explicit so documentary source frames
+            # cannot silently lose people, objects or photography detail.
+            if request.get('creativeRedraw') is not True:
+                raise ValueError('image_creative_redraw_confirmation_required')
+        if not protected and 'design' in request:
             self.backend.cover_design_prompt(request['design'], self.profiles)
             limit = self.profiles['profiles'][request['design']['profile']]['maximum_reference_images']
-        else:
+        elif not protected:
             prompt = request['prompt']
             if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode('utf-8')) > 16 * 1024 or '\x00' in prompt:
                 raise ValueError('image_prompt_invalid')
@@ -196,6 +204,7 @@ class ImageJobs:
                                  'backendSha256': self.backend_sha, 'profilesSha256': self.profiles_sha,
                                  **protected_execution},
                    **({key: request[key] for key in ('prompt', 'design') if key in request}),
+                   **({'creativeRedraw': True} if not protected else {}),
                    **({'protected': protected_spec} if protected else {})}
         return payload, [r[1] for r in references]
 

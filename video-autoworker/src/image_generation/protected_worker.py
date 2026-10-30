@@ -15,7 +15,7 @@ from PIL import Image
 from .protected_cover import (RESULT_SCHEMA, digest_bytes, erase_context, font_prompt,
     implementation_digest, keyed_letters, normalize_protected, paste_erasure, erasure_prompt,
     paste_letters, protection_summary, source_image, split_letter_rows,
-    validate_ocr, verify_protected_result, text_roi, lettering_row, white_preview)
+    validate_ocr, verify_protected_result, text_roi, lettering_row, text_layout_summary, white_preview)
 from .ocr import recognize
 from .stage_cache import HEX, read_cached_asset, validate_stage_cache, erasure_reference_matches
 
@@ -285,6 +285,10 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                         if attempt==1 or str(error) not in quality_errors:raise
                         previous_error=str(error)
         progress('verify')
+        # Existing sealed jobs may predate editorial roles. Only new role-aware
+        # requests receive the visual hierarchy gate and matching receipt.
+        text_layout = (text_layout_summary(original.size, spec['textLayers'], placements)
+                       if spec['textLayers'] and all('role' in layer for layer in spec['textLayers']) else None)
         proof=protection_summary(original,composed,spec)
         if proof['outsideChangedPixels']!=0:raise ValueError('protected_photo_pixels_changed')
         if source_path.read_bytes()!=source_raw or spec_file.read_bytes()!=spec_raw:
@@ -328,6 +332,7 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
             'steps':steps,'guidance':guidance,'seed':seed,'protectedSourceSha256':implementation,
             'elapsedSeconds':round(time.monotonic()-started,3),'output':str(output),
             'outputBytes':temp.stat().st_size,'outputSha256':digest_bytes(temp.read_bytes())}
+        if text_layout is not None:result['textLayout']=text_layout
         if cache_raw is not None:result['stageCacheSha256']=digest_bytes(cache_raw)
         # Verify the actual encoded PNG independently before making it visible.
         verify_protected_result(source_path,temp,spec,result,

@@ -64,18 +64,20 @@ test('native image tool stays directly visible without changing optional activat
   assert.equal(createImageCommandTool({ context: { ...context, agentId: 'gpt-main' } }), null)
   const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.2.1')
+  assert.equal(manifest.version, '0.2.2')
   assert.equal(pkg.version, manifest.version)
   assert.deepEqual(manifest.toolMetadata, { aiworker_generate_image: { optional: true } })
   assert.deepEqual(manifest.contracts.tools, ['aiworker_generate_image'])
 })
 
-test('protected requests preserve one native source, normalize optional lists and reject ambiguous modes', () => {
-  assert.deepEqual(normalizeImageRequest(request), { ...request, protected: { ...plan, eraseRegions: [] } })
+test('protected requests preserve one native source, assign editorial roles and reject ambiguous modes', () => {
+  assert.deepEqual(normalizeImageRequest(request), { ...request, protected: { ...plan, eraseRegions: [],
+    textLayers: [{ ...plan.textLayers[0], role: 'title' }] } })
   assert.ok(normalizeImageRequest({ action: 'submit', images: request.images,
     protected: { schema: plan.schema, eraseRegions: [rect] } }))
   for (const invalid of [
     { ...request, prompt: 'rewrite scene' }, { ...request, design: {} },
+    { ...request, creativeRedraw: true },
     { ...request, width: 1920 }, { ...request, height: 1080 },
     { ...request, images: [...request.images, '/approved/other.png'] },
     { ...request, protected: { schema: plan.schema } },
@@ -95,6 +97,12 @@ test('protected requests preserve one native source, normalize optional lists an
   assert.deepEqual(normalizeImageRequest({ action: 'inspect', jobId }), { action: 'inspect', jobId })
 })
 
+test('full-frame redraw requires explicit intent while protected requests cannot carry it', () => {
+  assert.equal(normalizeImageRequest({ action: 'submit', images: request.images, prompt: '重绘场景' }), null)
+  assert.ok(normalizeImageRequest({ action: 'submit', images: request.images, prompt: '重绘场景', creativeRedraw: true }))
+  assert.equal(normalizeImageRequest({ ...request, creativeRedraw: true }), null)
+})
+
 test('protected submission stays on the existing application and scope without rendering pixels', async () => {
   let received
   const tool = createImageCommandTool({ context, client: { submit: async value => {
@@ -103,7 +111,7 @@ test('protected submission stays on the existing application and scope without r
   } } })
   const result = await tool.execute('protected-submit', request)
   assert.equal(received.scope, scope)
-  assert.deepEqual(received.protected.textLayers, plan.textLayers)
+  assert.deepEqual(received.protected.textLayers, [{ ...plan.textLayers[0], role: 'title' }])
   assert.ok(!Object.hasOwn(received, 'width') && !Object.hasOwn(received, 'height'))
   assert.equal(result.details.mode, 'protected')
   assert.doesNotMatch(JSON.stringify(result), /approved|textLayers|base64/u)

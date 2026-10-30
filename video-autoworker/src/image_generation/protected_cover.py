@@ -19,6 +19,7 @@ MAX_SOURCE_PIXELS = 24 * 1024 * 1024
 MAX_SOURCE_BYTES = 40 * 1024 * 1024
 MAX_SIDE = 8192
 RECT_KEYS = {'x', 'y', 'width', 'height'}
+TEXT_ROLES = {'kicker', 'title', 'subtitle', 'caption'}
 
 
 def digest_bytes(data):
@@ -69,7 +70,87 @@ def _clean_text(value, maximum, field):
     return value
 
 
-def normalize_protected(spec, source_bytes, *, compile_prompt=True):
+def default_text_role(index, count):
+    """Give new protected cover requests a stable editorial hierarchy."""
+    if index == 0:
+        return 'title'
+    if index == 1:
+        return 'subtitle'
+    return 'caption'
+
+
+def _layout_inset(size):
+    return max(12, round(min(size) * .02))
+
+
+def _layout_minimums(role, size):
+    width, height = size
+    if role == 'title':
+        return max(160, round(width * .30)), max(48, round(height * .10))
+    if role == 'subtitle':
+        return max(120, round(width * .18)), max(24, round(height * .035))
+    if role == 'kicker':
+        return max(96, round(width * .12)), max(20, round(height * .026))
+    return 32, 12
+
+
+def validate_text_box_layout(box, role, size):
+    """Reject a layout that is technically valid but visually undersized."""
+    if role not in TEXT_ROLES:
+        raise ValueError('protected_text_role_invalid')
+    minimum_width, minimum_height = _layout_minimums(role, size)
+    if box['width'] < minimum_width or box['height'] < minimum_height:
+        raise ValueError('protected_' + role + '_box_too_small')
+    if role in {'title', 'subtitle', 'kicker'}:
+        inset = _layout_inset(size)
+        if (box['x'] < inset or box['y'] < inset
+                or box['x'] + box['width'] > size[0] - inset
+                or box['y'] + box['height'] > size[1] - inset):
+            raise ValueError('protected_' + role + '_unsafe_margin')
+
+
+def text_layout_summary(size, layers, placements):
+    """Bind intended hierarchy to the actual native glyph placement."""
+    if len(layers) != len(placements):
+        raise ValueError('protected_text_layout_count_invalid')
+    if not layers:
+        return {'schema': 'aiworker-text-layout/v1', 'safeInset': _layout_inset(size), 'layers': []}
+    if any('role' not in layer for layer in layers):
+        raise ValueError('protected_text_layout_role_missing')
+    title_count = sum(layer['role'] == 'title' for layer in layers)
+    if title_count > 1:
+        raise ValueError('protected_title_role_duplicate')
+    entries = []
+    for layer, placement in zip(layers, placements):
+        role, box = layer['role'], layer['box']
+        placed = placement.get('placedBox')
+        if not isinstance(placed, dict) or set(placed) != RECT_KEYS:
+            raise ValueError('protected_text_placement_invalid')
+        validate_text_box_layout(box, role, size)
+        if (placed['x'] < box['x'] or placed['y'] < box['y']
+                or placed['x'] + placed['width'] > box['x'] + box['width']
+                or placed['y'] + placed['height'] > box['y'] + box['height']):
+            raise ValueError('protected_text_placement_outside_box')
+        width_fill = round(placed['width'] * 100 / box['width'])
+        height_fill = round(placed['height'] * 100 / box['height'])
+        if role == 'title':
+            minimum_width, minimum_height = _layout_minimums(role, size)
+            if (placed['width'] < minimum_width or placed['height'] < minimum_height
+                    or width_fill < 60 or height_fill < 60):
+                raise ValueError('protected_title_placement_too_small')
+        entries.append({'role': role, 'text': layer['text'], 'requestedBox': box,
+                        'placedBox': placed, 'widthFillPercent': width_fill,
+                        'heightFillPercent': height_fill})
+    title = next((entry for entry in entries if entry['role'] == 'title'), None)
+    subtitles = [entry for entry in entries if entry['role'] == 'subtitle']
+    if title and subtitles:
+        if any(title['placedBox']['height'] * 100 < subtitle['placedBox']['height'] * 160
+               for subtitle in subtitles):
+            raise ValueError('protected_title_subtitle_hierarchy_invalid')
+    return {'schema': 'aiworker-text-layout/v1', 'safeInset': _layout_inset(size), 'layers': entries}
+
+
+def normalize_protected(spec, source_bytes, *, compile_prompt=True, assign_default_roles=False):
     if (not isinstance(spec, dict) or set(spec) - {'schema', 'eraseRegions', 'textLayers'}
             or spec.get('schema') != SCHEMA):
         raise ValueError('protected_spec_invalid')
@@ -83,8 +164,8 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True):
         if max(r['width'], r['height']) > 1920:
             raise ValueError('protected_erase_region_too_large')
     texts = []
-    for value in layers:
-        if (not isinstance(value, dict) or set(value) - {'text', 'style', 'box', 'align'}
+    for index, value in enumerate(layers):
+        if (not isinstance(value, dict) or set(value) - {'text', 'style', 'box', 'align', 'role'}
                 or not {'text', 'box'} <= set(value)):
             raise ValueError('protected_text_layer_invalid')
         box = checked_rect(value['box'], image.size)
@@ -94,6 +175,14 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True):
         if align not in ('left', 'center'):
             raise ValueError('protected_text_align_invalid')
         item = {'text': _clean_text(value['text'], 128, 'text'), 'box': box, 'align': align}
+        role = value.get('role')
+        if role is None and assign_default_roles:
+            role = default_text_role(index, len(layers))
+        if role is not None:
+            if role not in TEXT_ROLES:
+                raise ValueError('protected_text_role_invalid')
+            validate_text_box_layout(box, role, image.size)
+            item['role'] = role
         if 'style' in value:
             item['style'] = _clean_text(value['style'], 1000, 'style')
         texts.append(item)
@@ -155,7 +244,11 @@ def protection_summary(source, output, spec):
 
 def verify_protected_result(source_path, output_path, spec, receipt, *, strict_live=True, stage_cache=None):
     original = Path(source_path).read_bytes()
-    canonical, size = normalize_protected(spec, original, compile_prompt=strict_live)
+    # Older sealed results do not have editorial-role evidence. Keep their
+    # existing composition readable; new results always carry textLayout.
+    has_layout = receipt.get('textLayout') is not None
+    canonical, size = normalize_protected(spec, original, compile_prompt=strict_live,
+                                         assign_default_roles=has_layout)
     source = source_image(original)
     raw = Path(output_path).read_bytes()
     if (receipt.get('schema') != RESULT_SCHEMA or receipt.get('postProcessing') is not True
@@ -297,8 +390,11 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
                 if view.mode != 'RGB' or view.size != crop.size or view.tobytes() != crop.tobytes():
                     raise ValueError('protected_final_ocr_preview_changed')
             validate_ocr([layer], binding.get('observed', {}))
-        if strict_live and placements != receipt.get('textPlacements'):
-            raise ValueError('protected_text_placement_changed')
+        if strict_live:
+            if placements != receipt.get('textPlacements'):
+                raise ValueError('protected_text_placement_changed')
+            if has_layout and text_layout_summary(size, canonical['textLayers'], placements) != receipt.get('textLayout'):
+                raise ValueError('protected_text_layout_changed')
         if any(type(a.get('layerIndex')) is not int or not 0 <= a['layerIndex'] < len(canonical['textLayers']) for a in lettering):
             raise ValueError('protected_text_asset_layer_invalid')
     if strict_live and rebuilt.tobytes() != final_image.tobytes():
@@ -428,15 +524,23 @@ def font_prompt(layer, retry=False):
         raise ValueError('protected_font_layer_invalid')
     text = layer['text']
     style = layer.get('style', 'Readable documentary display lettering with subtle material and crisp edges.')
+    role = layer.get('role')
+    role_instruction = {
+        'title': '这是封面主标题。字面要厚实、饱满、占据可用宽度的大部分，轮廓和材质清楚。',
+        'subtitle': '这是副标题。保持清晰、克制，并与主标题形成明显字号层级。',
+        'kicker': '这是导语短句。保持小而清晰，不抢主标题。',
+        'caption': '这是说明文字。保持清晰可读，不模仿主标题。',
+    }.get(role, '')
     if retry:
         style += ' 优先保证笔画准确清楚，可以简化装饰，但保留指定文字颜色。'
     # Styling prose is not a second copy of the target inscription.
     style = style.replace(text, '').strip()
     return ('标题文字内容：' + text + '\n'
-            '在纯品红色背景上设计这行艺术字，文字完整只写一次，水平单行，四周留足背景。\n'
-            '字体样式：' + style + '\n'
-            '字形准确，边缘清晰，不要引号、标签、其他文字或多排对照，不要照片或场景。'
-            '文字、描边和阴影不用品红色。')
+            + '在纯品红色背景上设计这行艺术字，文字完整只写一次，水平单行，四周留足背景。\n'
+            + (role_instruction + '\n' if role_instruction else '')
+            + '字体样式：' + style + '\n'
+            + '字形准确，边缘清晰，不要引号、标签、其他文字或多排对照，不要照片或场景。'
+            + '文字、描边和阴影不用品红色。')
 
 
 def keyed_letters(image):

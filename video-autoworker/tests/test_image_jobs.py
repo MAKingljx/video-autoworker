@@ -73,7 +73,8 @@ class ImageJobTest(unittest.TestCase):
                                     self.backend, Path(sys.executable), self.profiles, 'a' * 40)
         self.jobs = ImageJobs(self.config)
         self.request = {'scope': 'a' * 64, 'requestKey': 'b' * 64,
-                        'prompt': '完整中文封面测试', 'images': [str(self.reference)]}
+                        'prompt': '完整中文封面测试', 'creativeRedraw': True,
+                        'images': [str(self.reference)]}
 
     def tearDown(self):
         self.jobs.close()
@@ -100,6 +101,14 @@ class ImageJobTest(unittest.TestCase):
             self.jobs.submit({**self.request, 'images': [str(linked)]})
         with self.assertRaisesRegex(ValueError, 'request_invalid'):
             self.jobs.submit({**self.request, 'output': '/arbitrary/path'})
+
+    def test_full_frame_redraw_requires_explicit_confirmation(self):
+        omitted={key:value for key,value in self.request.items() if key!='creativeRedraw'}
+        with self.assertRaisesRegex(ValueError,'creative_redraw_confirmation_required'):
+            self.jobs.submit(omitted)
+        protected=self.protected_request()
+        with self.assertRaisesRegex(ValueError,'creative_redraw_not_allowed_for_protected'):
+            self.jobs.submit({**protected,'creativeRedraw':True})
 
     def test_snapshot_and_queued_cancel(self):
         receipt = self.jobs.submit(self.request)

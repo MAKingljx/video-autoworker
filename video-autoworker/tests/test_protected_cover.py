@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 from image_generation.protected_cover import (font_prompt, keyed_letters, normalize_protected,
     paste_letters, normalized_text, protection_summary, source_image,
-    split_letter_rows, validate_ocr, verify_protected_result)
+    split_letter_rows, text_layout_summary, validate_ocr, verify_protected_result)
 from image_generation.protected_worker import build_protected
 
 
@@ -75,8 +75,38 @@ class ProtectedCoverTest(unittest.TestCase):
     def test_native_full_hd_size_is_not_aligned_or_rescaled(self):
         raw=png(Image.new('RGB',(1920,1080),'white'))
         spec,size=normalize_protected({'schema':'aiworker-protected-cover/v1',
-            'textLayers':[{'text':'标题','box':{'x':40,'y':30,'width':600,'height':140}}]},raw)
+            'textLayers':[{'text':'标题','role':'title','box':{'x':40,'y':30,'width':600,'height':140}}]},raw)
         self.assertEqual(size,(1920,1080));self.assertEqual(spec['eraseRegions'],[])
+        self.assertEqual(spec['textLayers'][0]['role'],'title')
+
+    def test_title_layout_rejects_small_boxes_and_records_actual_hierarchy(self):
+        raw=png(Image.new('RGB',(1920,1080),'white'))
+        undersized={'schema':'aiworker-protected-cover/v1','textLayers':[
+            {'text':'北极驯鹿人','role':'title','box':{'x':700,'y':50,'width':750,'height':80}}]}
+        with self.assertRaisesRegex(ValueError,'title_box_too_small'):
+            normalize_protected(undersized,raw)
+        spec,_=normalize_protected({'schema':'aiworker-protected-cover/v1','textLayers':[
+            {'text':'北极驯鹿人','role':'title','align':'center',
+             'box':{'x':600,'y':50,'width':900,'height':160}},
+            {'text':'逐鹿而生','role':'subtitle','align':'center',
+             'box':{'x':780,'y':220,'width':500,'height':50}}]},raw)
+        base=Image.new('RGB',(1920,1080),'white')
+        title=Image.new('RGBA',(1438,292),(75,35,4,255))
+        subtitle=Image.new('RGBA',(486,100),(75,35,4,255))
+        placements=paste_letters(base,[title,subtitle],spec['textLayers'])
+        summary=text_layout_summary(base.size,spec['textLayers'],placements)
+        self.assertEqual([layer['role'] for layer in summary['layers']],['title','subtitle'])
+        self.assertGreaterEqual(summary['layers'][0]['placedBox']['height'],108)
+        self.assertGreater(summary['layers'][0]['placedBox']['height'],summary['layers'][1]['placedBox']['height'])
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);source=root/'reference-0.png';specpath=root/'input.json';output=root/'image.png'
+            source.write_bytes(raw);specpath.write_text(json.dumps(spec))
+            result=build_protected(specpath,source,output,FixtureRunner(),ocr=self.fixture_ocr)
+            self.assertEqual(result['textLayout']['layers'][0]['role'],'title')
+            self.assertGreaterEqual(result['textLayout']['layers'][0]['placedBox']['height'],108)
+            altered=json.loads(json.dumps(result));altered['textLayout']['layers'][0]['role']='caption'
+            with self.assertRaisesRegex(ValueError,'text_layout_changed'):
+                verify_protected_result(source,output,spec,altered)
 
     def test_one_layer_prompt_separates_inscription_from_concise_instructions(self):
         layer={'text':'北极驯鹿人','style':'北极驯鹿人 Warm gold with a dark brown outline.'}
