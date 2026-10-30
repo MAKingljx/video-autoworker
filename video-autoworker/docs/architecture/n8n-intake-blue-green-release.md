@@ -396,11 +396,12 @@ outbox pending 为零；durable 根目录缺失不能按空队列处理。无 du
 三个安装器都会把当前源码提交和 `<commit>-runtime` 传给 gate，A attempt 不能安装 B release；缺表
 本身不能作为放行条件。
 
-## 当前状态
+## 当前状态（2026-10-30 只读核验）
 
-遗留媒体记录已按授权完成四字段 CAS，当前活跃媒体节点、n8n active execution 和正式队列
-waiting/running 均为零；video lane 仍保持 disabled、unloaded、worker-free。远端 OpenClaw 已可使用
-导演脑 `0.3.0` 的只读与候选入口，但生产 3017 仍运行 `57f6e6c-runtime`。当前 `0.5.14`、迁移
-`057` 证据 outbox、`058/059` 导演知识提炼扩展、导演脑 `0.4.0` 和自动投影链仍是待切换候选；首次 n8n 离线迁移、blue/green bootstrap、
-真实视频投影和恢复 lane 均须以当次运行核验为准。bootstrap 硬门会拒绝旧生产工作流、未发布
-工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走 legacy 3017。
+本节只保留机制性结论；**动态运行状态以生产 `current-runtime.json` 与 `doctor` 为准**，不把带日期的快照写成永久事实。
+
+- 生产已处于本方案的蓝绿常态：应用 green `75ce4de-runtime`、router generation 18、控制提交 `e60ea4f`；独立 Scheduler Worker 内容 `ce9cb630` 且唯一持有租约；数据库迁移 `061` 已装、`060` 未启用；运行收据 ready、mismatches 空。
+- `57f6e6c-runtime` 已被永久 fence，只作为历史恢复对象，不得作为普通 slot 或普通 rollback 目标。
+- 首次 n8n 离线迁移与 blue/green bootstrap 已完成；bootstrap 硬门继续拒绝旧生产工作流、未发布工作流、内容漂移以及 n8n PID/SQLite 错绑，防止在协议迁移不完整时切走当前 3017。
+- video lane 已于 2026-09-09 恢复启用；如需停用必须走受管操作并保留数据，不随普通页面部署擅自开关。
+
