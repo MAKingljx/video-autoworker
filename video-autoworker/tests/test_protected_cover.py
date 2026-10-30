@@ -163,6 +163,19 @@ class ProtectedCoverTest(unittest.TestCase):
         self.assertEqual(len(rows),2)
         with self.assertRaisesRegex(ValueError,'key_mismatch'):keyed_letters(Image.new('RGB',(1024,768),'white'))
 
+    def test_uniform_warm_pink_key_is_accepted_but_red_lookalike_is_rejected(self):
+        accepted=Image.new('RGB',(1024,768),(243,2,118));draw=ImageDraw.Draw(accepted)
+        draw.rectangle((100,100,900,500),fill=(75,35,4))
+        matte=keyed_letters(accepted)
+        self.assertEqual(matte.getchannel('A').getbbox(),(100,100,901,501))
+        center=matte.getpixel((500,300))
+        self.assertEqual(center[:3],(75,35,4))
+        self.assertGreater(center[3],0)
+        rejected=Image.new('RGB',(1024,768),(243,2,80));draw=ImageDraw.Draw(rejected)
+        draw.rectangle((100,100,900,500),fill=(75,35,4))
+        with self.assertRaisesRegex(ValueError,'key_mismatch'):
+            keyed_letters(rejected)
+
     def test_ocr_does_not_silently_fix_wrong_characters_or_roman_numerals(self):
         validate_ocr([{'text':'地球之极 VI · 第5集'}],{'lines':[{'text':'地球之极 VI • 第 5 集'}]})
         with self.assertRaisesRegex(ValueError,'mismatch'):

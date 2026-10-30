@@ -550,9 +550,12 @@ def keyed_letters(image):
     key = np.median(edge, axis=0)
     if np.quantile(np.max(np.abs(edge - key), axis=1), .85) > 24:
         raise ValueError('protected_text_background_not_uniform')
-    # A white backdrop would silently erase ivory/white glyph fills. Require a
-    # chromatic key which remains distinct from the permitted lettering colors.
-    if min(key[0], key[2]) < 150 or key[1] > min(key[0], key[2]) - 60:
+    # A white backdrop would silently erase ivory/white glyph fills. Accept a
+    # uniformly pink-magenta key even when its blue channel is softened by the
+    # model, while rejecting red/orange or low-chroma backdrops that can blend
+    # into bronze and ivory lettering.
+    if (max(key[0], key[2]) < 180 or min(key[0], key[2]) < 96
+            or key[1] > min(key[0], key[2]) - 60):
         raise ValueError('protected_text_background_key_mismatch')
     distance = np.max(np.abs(rgb - key), axis=2)
     chroma = rgb / np.maximum(rgb.max(axis=2, keepdims=True), 1)
@@ -571,9 +574,15 @@ def keyed_letters(image):
         raise ValueError('protected_text_matte_invalid')
     if (alpha[:2] > .7).any() or (alpha[-2:] > .7).any() or (alpha[:, :2] > .7).any() or (alpha[:, -2:] > .7).any():
         raise ValueError('protected_text_asset_clipped')
-    # Unmix key-color contamination only in soft boundary pixels.
-    a = np.maximum(alpha[:, :, None], .001)
-    foreground = np.clip((rgb - (1 - a) * key) / a, 0, 255).astype('uint8')
+    # Unmix only a balanced magenta key. With a warm pink key, subtracting the
+    # softer blue channel reverses the hue of semi-transparent bronze edges;
+    # retaining the model's native RGB is visually safer and keeps the text
+    # material truthful.
+    if min(key[0], key[2]) >= 150:
+        a = np.maximum(alpha[:, :, None], .001)
+        foreground = np.clip((rgb - (1 - a) * key) / a, 0, 255).astype('uint8')
+    else:
+        foreground = rgb.astype('uint8')
     rgba = np.dstack((foreground, np.round(alpha * 255).astype('uint8')))
     return Image.fromarray(rgba, 'RGBA')
 
