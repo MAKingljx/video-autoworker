@@ -531,13 +531,17 @@ def font_prompt(layer, retry=False):
         'kicker': '这是导语短句。保持小而清晰，不抢主标题。',
         'caption': '这是说明文字。保持清晰可读，不模仿主标题。',
     }.get(role, '')
+    retry_instruction = ''
     if retry:
-        style += ' 优先保证笔画准确清楚，可以简化装饰，但保留指定文字颜色。'
+        retry_instruction = ('这是文字校验重试。使用标准简体中文字形，笔画连续完整，禁止异体字、'
+                             '拆字、断笔、夸张毛笔飞白、立体拉伸和会影响识别的纹理。')
+        style = '清晰标准的深棕与古铜金中文标题字，细深棕轮廓和短阴影，简洁但有纪实质感。'
     # Styling prose is not a second copy of the target inscription.
     style = style.replace(text, '').strip()
     return ('标题文字内容：' + text + '\n'
             + '在纯品红色背景上设计这行艺术字，文字完整只写一次，水平单行，四周留足背景。\n'
             + (role_instruction + '\n' if role_instruction else '')
+            + (retry_instruction + '\n' if retry_instruction else '')
             + '字体样式：' + style + '\n'
             + '字形准确，边缘清晰，不要引号、标签、其他文字或多排对照，不要照片或场景。'
             + '文字、描边和阴影不用品红色。')

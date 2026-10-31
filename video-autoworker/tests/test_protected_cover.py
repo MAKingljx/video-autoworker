@@ -121,9 +121,10 @@ class ProtectedCoverTest(unittest.TestCase):
         retry=font_prompt(layer,True)
         self.assertEqual(retry.splitlines()[0],'标题文字内容：'+layer['text'])
         self.assertEqual(retry.count(layer['text']),1)
-        self.assertIn('笔画准确清楚',retry)
-        self.assertIn('Warm gold with a dark brown outline.',retry)
-        self.assertIn('保留指定文字颜色',retry)
+        self.assertIn('文字校验重试',retry)
+        self.assertIn('标准简体中文字形',retry)
+        self.assertIn('深棕与古铜金',retry)
+        self.assertNotIn('Warm gold with a dark brown outline.',retry)
         with self.assertRaisesRegex(ValueError,'font_layer_invalid'):
             font_prompt([layer,{'text':'逐鹿而生'}])
 
