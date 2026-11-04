@@ -453,9 +453,6 @@ function main() {
     run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_validate',
     })
-    run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', patchPath, '--dry-run'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_patch_dry_run',
-    })
     if (options.mode === 'dry-run') {
       writeReceipt(home, attachment, {
         schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'DRY_RUN_PASSED',

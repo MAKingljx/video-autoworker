@@ -32,7 +32,7 @@ function fixture() {
   writeFileSync(join(state, 'openclaw.json'), `${JSON.stringify(qwenConfig(), null, 2)}\n`, { mode: 0o600 })
   mkdirSync(bin, { recursive: true, mode: 0o700 })
   const openclaw = join(bin, 'openclaw')
-  writeFileSync(openclaw, '#!/bin/sh\ncase "$*" in\n  *"config validate"*|*"config patch"*"--dry-run"*) exit 0 ;;\n  *) exit 66 ;;\nesac\n', { mode: 0o700 })
+  writeFileSync(openclaw, '#!/bin/sh\ncase "$*" in\n  *"config validate"*) exit 0 ;;\n  *"config patch"*) printf "%s" "$*" > "$HOME/unexpected-config-patch"; exit 77 ;;\n  *) exit 66 ;;\nesac\n', { mode: 0o700 })
   return { home, state }
 }
 
@@ -49,6 +49,7 @@ test('generic installer dry-run validates only the declared qwen attachment and 
     assert.equal(receipt.currentState, 'DRY_RUN_PASSED')
     assert.equal(receipt.attachment.agentId, 'second-original')
     assert.equal(receipt.nextAction, 'apply')
+    assert.equal(existsSync(join(home, 'unexpected-config-patch')), false)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
