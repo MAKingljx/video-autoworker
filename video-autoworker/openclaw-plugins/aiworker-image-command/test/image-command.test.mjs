@@ -6,6 +6,8 @@ import { createImageCommandTool, imageSessionScope, imageRequestKey, normalizeIm
 import { createImageJobClient, IMAGE_SERVICE_ORIGIN, ImageServiceError } from '../lib/image-job-client.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
+const qwenBinding = { profile: 'qwen-current', targetAgentId: 'second-original' }
+const qwenContext = { agentId: 'second-original', sessionKey: 'agent:second-original:main' }
 const jobId = 'a'.repeat(32)
 const scope = imageSessionScope(context)
 const queued = { jobId, currentState: 'QUEUED' }
@@ -22,6 +24,26 @@ test('scope comes only from the matching trusted agent and session', () => {
     assert.equal(createImageCommandTool({ context: invalid }), null)
   }
   assert.notEqual(imageSessionScope({ ...context, sessionKey: 'agent:image-studio:other' }), scope)
+})
+
+test('an explicitly bound qwen-current agent receives an isolated image scope', async () => {
+  const qwenScope = imageSessionScope(qwenContext, qwenBinding)
+  assert.match(qwenScope, /^[a-f0-9]{64}$/u)
+  assert.notEqual(qwenScope, scope)
+  assert.equal(imageSessionScope({ ...qwenContext, agentId: 'image-studio' }, qwenBinding), null)
+  assert.equal(imageSessionScope({ ...qwenContext, sessionKey: context.sessionKey }, qwenBinding), null)
+  assert.equal(imageSessionScope(qwenContext), null)
+  let captured
+  const tool = createImageCommandTool({ context: qwenContext, binding: qwenBinding,
+    client: { submit: async input => { captured = input; return queued } } })
+  await tool.execute('qwen-image-tool', params)
+  assert.equal(captured.scope, qwenScope)
+})
+
+test('explicit bindings accept the same underscore agent identifiers as the plugin schema', () => {
+  const binding = { profile: 'image_custom', targetAgentId: 'second_original' }
+  const scoped = imageSessionScope({ agentId: 'second_original', sessionKey: 'agent:second_original:main' }, binding)
+  assert.match(scoped, /^[a-f0-9]{64}$/u)
 })
 
 test('submit is a single quick application call and exposes no scope or prompt', async () => {

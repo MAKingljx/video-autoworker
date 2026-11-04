@@ -24,6 +24,7 @@ import time
 from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
+IMAGE_CAPABILITY_ATTACHMENTS = ROOT / "ops/openclaw/image-capability-attachments.json"
 spec = importlib.util.spec_from_file_location("image_install_contract", ROOT / "scripts/install-openclaw-image-studio.py")
 contract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(contract)
@@ -57,12 +58,46 @@ def bundle_payload(root: Path) -> dict[str, bytes]:
     return files
 
 
+def image_reference_roots(home: Path) -> list[str]:
+    contract.safe_path(IMAGE_CAPABILITY_ATTACHMENTS, file=True)
+    try:
+        manifest = json.loads(IMAGE_CAPABILITY_ATTACHMENTS.read_bytes())
+    except (TypeError, ValueError):
+        raise contract.InstallError("image_capability_manifest_invalid") from None
+    plugin = manifest.get("plugin") if isinstance(manifest, dict) else None
+    attachments = manifest.get("attachments") if isinstance(manifest, dict) else None
+    contract.require(isinstance(manifest, dict) and manifest.get("schema") == "aiworker-openclaw-image-capabilities/v1"
+                     and isinstance(plugin, dict) and plugin.get("id") == "aiworker-image-command"
+                     and plugin.get("tool") == "aiworker_generate_image" and isinstance(attachments, list)
+                     and 1 <= len(attachments) <= 16, "image_capability_manifest_invalid")
+    roots, profiles, relative_paths = [str(home / "ai-worker/output/covers")], set(), set()
+    for attachment in attachments:
+        contract.require(isinstance(attachment, dict) and set(attachment) == {
+            "profile", "agentId", "stateRoot", "gatewayPort", "mediaRoot", "legacyScope"}, "image_capability_attachment_invalid")
+        profile, agent, state_root, media = (attachment["profile"], attachment["agentId"],
+                                             attachment["stateRoot"], attachment["mediaRoot"])
+        contract.require(all(isinstance(value, str) and value and len(value) <= 256 for value in (profile, agent, state_root, media))
+                         and isinstance(attachment["legacyScope"], bool)
+                         and isinstance(attachment["gatewayPort"], int) and 1024 <= attachment["gatewayPort"] <= 65535
+                         and all(not Path(value).is_absolute() and ".." not in Path(value).parts
+                                 and value == Path(value).as_posix() for value in (state_root, media))
+                         and profile not in profiles and media not in relative_paths,
+                         "image_capability_attachment_invalid")
+        profiles.add(profile)
+        relative_paths.add(media)
+        roots.append(str(home / media))
+    contract.require(any(item.get("legacyScope") is True and item.get("profile") == "image-studio"
+                         and item.get("agentId") == "image-studio" for item in attachments),
+                     "image_capability_legacy_attachment_missing")
+    return roots
+
+
 def configuration(home: Path, commit: str) -> dict:
     value = json.loads((ROOT / "ops/image-generation/service/service.template.json").read_bytes())
     service = home / "ai-worker/services/qwen-image-edit-2511"
     value.update({"state_root": str(home / "ai-worker/state/image-generation/jobs"),
         "output_root": str(home / "ai-worker/output/covers/image-jobs"),
-        "reference_roots": [str(home / "ai-worker/output/covers"), str(home / ".openclaw-image-studio/media")],
+        "reference_roots": image_reference_roots(home),
         "backend_script": str(service / "aiworker-qwen-cover.py"), "backend_python": str(service / "venv/bin/python"),
         "profiles_file": str(service / "cover-design-profiles.json"), "source_commit": commit})
     return value

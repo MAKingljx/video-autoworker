@@ -870,7 +870,16 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
   const videoPlugin = manifest.requiredPlugins.find(entry => (
     entry.id === 'aiworker-video-command'
   ))
+  const imagePlugin = manifest.requiredPlugins.find(entry => (
+    entry.id === 'aiworker-image-command'
+  ))
   assert.equal(videoPlugin.version, '0.5.20')
+  assert.deepEqual(imagePlugin, {
+    id: 'aiworker-image-command',
+    version: '0.3.0',
+    tool: 'aiworker_generate_image',
+    requiredConfig: { releaseReady: true, targetAgentId: 'second-original' },
+  })
   assert.deepEqual(
     directorPlugin.requiredHooks.toSorted(),
     ['before_agent_reply', 'before_message_write', 'tool_result_persist'],

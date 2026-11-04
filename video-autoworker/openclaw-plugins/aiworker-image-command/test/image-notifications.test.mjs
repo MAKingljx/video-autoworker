@@ -12,6 +12,8 @@ const scope = imageSessionScope({ agentId: 'image-studio', sessionKey })
 const jobId = '1'.repeat(32)
 const stamp = '2026-10-04T10:00:00Z'
 const completed = { jobId, currentState: 'GENERATED_PENDING_REVIEW', updatedAt: stamp }
+const qwenBinding = { profile: 'qwen-current', targetAgentId: 'second-original' }
+const qwenSessionKey = 'agent:second-original:main'
 
 async function fixture(run) {
   const dir = await mkdtemp(join(tmpdir(), 'aiworker-image-notifications-'))
@@ -49,6 +51,28 @@ test('completion emits only a same-session event and targeted heartbeat once', a
     assert.equal(stored.subscriptions[0].notified[jobId], `GENERATED_PENDING_REVIEW:${stamp}`)
     assert.ok(!Object.hasOwn(stored.subscriptions[0], 'currentState'))
     assert.equal((await stat(join(dir, 'aiworker-image-command', 'notifications.json'))).mode & 0o777, 0o600)
+  })
+})
+
+test('an explicitly bound qwen-current notification stays in its own agent and scope', async () => {
+  await fixture(async ({ dir, events, heartbeats, system }) => {
+    const qwenScope = imageSessionScope({ agentId: 'second-original', sessionKey: qwenSessionKey }, qwenBinding)
+    const service = createImageNotifications({
+      binding: qwenBinding,
+      client: { list: async input => { assert.equal(input, qwenScope); return { jobs: [completed] } } },
+      system,
+      pollIntervalMs: 3600000,
+    })
+    await service.start({ stateDir: dir })
+    await service.subscribe({ jobId, scope: qwenScope, sessionKey: qwenSessionKey })
+    await service.poll()
+    assert.equal(events.length, 1)
+    assert.equal(events[0][1].sessionKey, qwenSessionKey)
+    assert.deepEqual(heartbeats[0], {
+      agentId: 'second-original', sessionKey: qwenSessionKey, reason: `aiworker-image:${jobId}`,
+    })
+    await assert.rejects(service.subscribe({ jobId, scope, sessionKey }), /image_notification_subscription_invalid/u)
+    await service.stop()
   })
 })
 

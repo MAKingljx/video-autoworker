@@ -55,6 +55,14 @@ class ServiceInstallTests(unittest.TestCase):
         self.assertEqual(config["state_root"], "/Users/h1/ai-worker/state/image-generation/jobs")
         self.assertEqual(config["output_root"], "/Users/h1/ai-worker/output/covers/image-jobs")
         self.assertIn("/Users/h1/.openclaw-image-studio/media", config["reference_roots"])
+        self.assertIn("/Users/h1/.openclaw-qwen-current/media", config["reference_roots"])
+
+    def test_reference_roots_come_only_from_the_declared_capability_attachments(self):
+        self.assertEqual(install.image_reference_roots(Path("/Users/h1")), [
+            "/Users/h1/ai-worker/output/covers",
+            "/Users/h1/.openclaw-image-studio/media",
+            "/Users/h1/.openclaw-qwen-current/media",
+        ])
 
     def test_new_launchagent_pins_immutable_runtime_and_private_environment(self):
         plist = plistlib.loads(install.service_plist(Path("/Users/h1"), Path("/Users/h1/ai-worker/services/image-generation/releases/" + "b" * 40),

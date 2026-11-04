@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join } from 'node:path'
 
 import { createImageJobClient } from './image-job-client.js'
-import { IMAGE_AGENT_ID, imageReceipt, imageSessionScope } from './image-command-tool.js'
+import { imageReceipt } from './image-command-tool.js'
+import { imageSessionScope, legacyImageBinding } from './image-profile-binding.js'
 
 const SCHEMA = 'aiworker-image-notifications/v1'
 const JOB_ID = /^[0-9a-f]{32}$/u
@@ -14,11 +15,11 @@ const MAX_PENDING = 1000
 const MAX_NOTIFIED = 64
 const FILE_BYTES_LIMIT = 1024 * 1024
 
-function validateSubscription(value) {
+function validateSubscription(value, binding) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).some(key => !['scope', 'sessionKey', 'pendingJobIds', 'notified'].includes(key))
     || typeof value.scope !== 'string' || !/^[0-9a-f]{64}$/u.test(value.scope)
-    || imageSessionScope({ agentId: IMAGE_AGENT_ID, sessionKey: value.sessionKey }) !== value.scope
+    || imageSessionScope({ agentId: binding.targetAgentId, sessionKey: value.sessionKey }, binding) !== value.scope
     || !Array.isArray(value.pendingJobIds) || value.pendingJobIds.length > MAX_PENDING
     || value.pendingJobIds.some(id => typeof id !== 'string' || !JOB_ID.test(id))
     || new Set(value.pendingJobIds).size !== value.pendingJobIds.length
@@ -32,7 +33,7 @@ function validateSubscription(value) {
     pendingJobIds: [...value.pendingJobIds], notified: { ...value.notified } }
 }
 
-async function readStore(path) {
+async function readStore(path, binding) {
   let file
   try {
     const parent = await lstat(dirname(path))
@@ -49,7 +50,7 @@ async function readStore(path) {
     const data = JSON.parse(await file.readFile('utf8'))
     if (data?.schema !== SCHEMA || !Array.isArray(data.subscriptions)
       || data.subscriptions.length > MAX_SUBSCRIPTIONS) throw new Error('image_notification_store_invalid')
-    const rows = data.subscriptions.map(validateSubscription)
+    const rows = data.subscriptions.map(value => validateSubscription(value, binding))
     if (new Set(rows.map(row => row.scope)).size !== rows.length) throw new Error('image_notification_store_invalid')
     return new Map(rows.map(row => [row.scope, row]))
   } finally { await file.close() }
@@ -90,7 +91,8 @@ function noticeText(r) {
 // This store owns delivery subscriptions only. A notified marker means that
 // an event was queued in this process, never that a channel delivered it.
 // Job truth, scheduling, cancellation and recovery stay in the application.
-export function createImageNotifications({ client = createImageJobClient(), system, pollIntervalMs = 5000 } = {}) {
+export function createImageNotifications({ client = createImageJobClient(), system, binding = legacyImageBinding(),
+  pollIntervalMs = 5000 } = {}) {
   let subscriptions = new Map()
   let storagePath
   let controller
@@ -134,7 +136,7 @@ export function createImageNotifications({ client = createImageJobClient(), syst
               })
               // The configured profile controls delivery. There is no model-
               // supplied chat target and no direct Feishu outbound call.
-              system.requestHeartbeatNow({ agentId: IMAGE_AGENT_ID,
+              system.requestHeartbeatNow({ agentId: binding.targetAgentId,
                 sessionKey: subscription.sessionKey, reason: `aiworker-image:${jobId}` })
               subscription.notified[jobId] = marker
             }
@@ -170,7 +172,7 @@ export function createImageNotifications({ client = createImageJobClient(), syst
         throw new Error('image_notification_runtime_unavailable')
       }
       storagePath = join(context.stateDir, 'aiworker-image-command', 'notifications.json')
-      subscriptions = await readStore(storagePath)
+      subscriptions = await readStore(storagePath, binding)
       // Requeue unacknowledged events after a restart. The backend is reread;
       // the persisted marker is not a task state or a delivery receipt.
       for (const row of subscriptions.values()) {
@@ -191,7 +193,7 @@ export function createImageNotifications({ client = createImageJobClient(), syst
     async subscribe({ jobId, scope, sessionKey }) {
       if (stopped || !storagePath || typeof jobId !== 'string' || !JOB_ID.test(jobId)
         || typeof scope !== 'string' || !/^[0-9a-f]{64}$/u.test(scope)
-        || imageSessionScope({ agentId: IMAGE_AGENT_ID, sessionKey }) !== scope) {
+        || imageSessionScope({ agentId: binding.targetAgentId, sessionKey }, binding) !== scope) {
         throw new Error('image_notification_subscription_invalid')
       }
       let subscription = subscriptions.get(scope)
@@ -207,7 +209,7 @@ export function createImageNotifications({ client = createImageJobClient(), syst
     },
     async acknowledge({ jobId, scope, sessionKey }) {
       if (stopped || typeof scope !== 'string' || !/^[0-9a-f]{64}$/u.test(scope)
-        || imageSessionScope({ agentId: IMAGE_AGENT_ID, sessionKey }) !== scope
+        || imageSessionScope({ agentId: binding.targetAgentId, sessionKey }, binding) !== scope
         || typeof jobId !== 'string' || !JOB_ID.test(jobId)) throw new Error('image_notification_subscription_invalid')
       const subscription = subscriptions.get(scope)
       if (!subscription?.pendingJobIds.includes(jobId)) return

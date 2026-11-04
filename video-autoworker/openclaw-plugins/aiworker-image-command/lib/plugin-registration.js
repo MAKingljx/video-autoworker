@@ -1,21 +1,16 @@
 import { createHash } from 'node:crypto'
-import { isAbsolute, normalize } from 'node:path'
 
-import { createImageCommandTool, IMAGE_AGENT_ID, IMAGE_COMMAND_TOOL_NAME } from './image-command-tool.js'
+import { createImageCommandTool, IMAGE_COMMAND_TOOL_NAME } from './image-command-tool.js'
 import { createImageJobClient } from './image-job-client.js'
 import { createImageNotifications } from './image-notifications.js'
+import { resolveImagePluginBinding } from './image-profile-binding.js'
 
-function notificationBinding(env) {
-  const profile = env.OPENCLAW_PROFILE
-  const stateDir = env.OPENCLAW_STATE_DIR
-  // These values belong to the host process, never to model tool arguments.
-  // The dedicated managed profile sets both explicitly on startup.
-  if (profile !== IMAGE_AGENT_ID || typeof stateDir !== 'string' || !isAbsolute(stateDir)
-    || normalize(stateDir) !== stateDir || /[\u0000-\u001f\u007f]/u.test(stateDir)) {
-    throw new Error('image_notification_profile_binding_invalid')
-  }
-  const identity = createHash('sha256').update(JSON.stringify([profile, stateDir])).digest('hex')
-  return { stateDir, key: `aiworker-image-command:notifications:v1:${identity}` }
+function notificationBinding(env, pluginConfig) {
+  const binding = resolveImagePluginBinding(env, pluginConfig)
+  const identity = createHash('sha256').update(JSON.stringify([
+    binding.profile, binding.targetAgentId, binding.stateDir,
+  ])).digest('hex')
+  return { ...binding, key: `aiworker-image-command:notifications:v2:${identity}` }
 }
 
 export function registerImageCommands(api, {
@@ -25,10 +20,10 @@ export function registerImageCommands(api, {
   createClient = createImageJobClient,
   createNotifications = createImageNotifications,
 } = {}) {
-  const binding = notificationBinding(env)
+  const binding = notificationBinding(env, api.pluginConfig)
   const store = createRuntimeStore({ key: binding.key, errorMessage: 'image_notification_service_not_started' })
   const client = createClient()
-  const controller = createNotifications({ client, system: api.runtime.system })
+  const controller = createNotifications({ client, system: api.runtime.system, binding })
   let ownedRuntime
 
   async function withRunningNotifications(action, subscription) {
@@ -65,7 +60,7 @@ export function registerImageCommands(api, {
     },
   })
   api.registerTool(context => createImageCommandTool({
-    context,
+    context, binding,
     client,
     releaseReady: api.pluginConfig?.releaseReady === true,
     saveMedia,

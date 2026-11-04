@@ -51,6 +51,15 @@
         "releaseReady": true,
         "targetAgentId": "second-original"
       }
+    },
+    {
+      "id": "aiworker-image-command",
+      "version": "0.3.0",
+      "tool": "aiworker_generate_image",
+      "requiredConfig": {
+        "releaseReady": true,
+        "targetAgentId": "second-original"
+      }
     }
   ]
 }

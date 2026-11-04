@@ -81,6 +81,12 @@ function validateManifest(pathname) {
         requiredHookConfig: { allowConversationAccess: true },
         requiredConfig: { releaseReady: true, targetAgentId: 'second-original' },
       },
+      {
+        id: 'aiworker-image-command',
+        version: '0.3.0',
+        tool: 'aiworker_generate_image',
+        requiredConfig: { releaseReady: true, targetAgentId: 'second-original' },
+      },
     ],
   }
   if (!same(manifest, expected)) {
@@ -353,19 +359,18 @@ async function assertNoToolRegression(
   if (!same(baseline.catalogNotices, catalogNotices) || !same(baseline.effectiveNotices, effectiveNotices)) {
     fail('tool policy context changed after the pre-install baseline')
   }
-  const allowedAddition = manifest.requiredPlugins
-    .find(plugin => plugin.id === 'aiworker-director-brain')?.tool
+  const allowedAdditions = new Set(manifest.requiredPlugins.map(plugin => plugin.tool))
   const compare = async (before, after, label, kind) => {
     const definitionUpgrades = []
     const afterById = new Map(after.map(item => [item.id, item]))
     const beforeById = new Map(before.map(item => [item.id, item]))
     const removed = before.filter(item => !afterById.has(item.id)).map(item => item.id)
     const added = after.filter(item => !beforeById.has(item.id)).map(item => item.id)
-    if (removed.length > 0 || added.some(id => id !== allowedAddition)) {
-      fail(`${label} changed outside the allowed director-brain addition`)
+    if (removed.length > 0 || added.some(id => !allowedAdditions.has(id))) {
+      fail(`${label} changed outside the approved plugin additions`)
     }
     for (const item of before) {
-      if (item.id === allowedAddition || !afterById.has(item.id)) continue
+      if (!afterById.has(item.id)) continue
       if (!same(item, afterById.get(item.id))) {
         if (item.id !== 'aiworker_analyze_video') fail(`${label} descriptor surface changed for existing tool: ${item.id}`)
         try {
@@ -458,7 +463,7 @@ function pluginTreeEvidence(stateDir, descriptor, openclawVersion) {
         fail('plugin tree contains an unsafe object')
       }
       if (entry.isSymbolicLink()) {
-        if (descriptor.id !== 'aiworker-video-command'
+        if (!['aiworker-video-command', 'aiworker-image-command'].includes(descriptor.id)
           || childRelative !== 'node_modules/openclaw') {
           fail('plugin tree contains an unsafe object')
         }

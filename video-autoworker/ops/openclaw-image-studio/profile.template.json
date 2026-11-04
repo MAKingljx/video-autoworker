@@ -28,7 +28,7 @@
     "entries": {
       "aiworker-image-command": {
         "enabled": true,
-        "config": {"releaseReady": true}
+        "config": {"releaseReady": true, "targetAgentId": "image-studio"}
       }
     }
   }

@@ -152,9 +152,15 @@ for (const layout of ['flat', 'nested']) {
 test('each owned image entry and runtime instruction selects image component without Next', () => {
   for (const member of ['openclaw-plugins/aiworker-image-command/lib/image-command-tool.js',
     'scripts/install-aiworker-image-service.py', 'scripts/install-openclaw-image-studio.py',
+    'scripts/install-openclaw-image-capability.mjs',
+    'scripts/lib/openclaw-image-capability-contract.mjs',
+    'scripts/lib/openclaw-profile-private-gateway-rpc.mjs',
+    'scripts/test-openclaw-image-capability-contract.test.mjs',
+    'scripts/test-install-openclaw-image-capability.test.mjs',
     'scripts/aiworker-image-service.py', 'scripts/aiworker-qwen-cover.py',
     'scripts/aiworker-image-ocr.swift', 'scripts/extract-cover-reference.py',
-    'ops/openclaw-image-studio/AGENTS.md', 'ops/image-generation/service/service.template.json',
+    'ops/openclaw-image-studio/AGENTS.md', 'ops/openclaw/image-capability-attachments.json',
+    'ops/image-generation/service/service.template.json',
     'tests/test_protected_cover.py']) {
     const f = fixture()
     try { f.write(member, 'changed fixture\n');f.commit('owned image input');assert.equal(f.plan().mode, 'image-component', member) }

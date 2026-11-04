@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, normalize } from 'node:path'
 
 import { createImageJobClient, ImageServiceError, normalizeImageInspection } from './image-job-client.js'
+import { imageSessionScope, LEGACY_IMAGE_PROFILE, legacyImageBinding } from './image-profile-binding.js'
 
 export const IMAGE_COMMAND_TOOL_NAME = 'aiworker_generate_image'
-export const IMAGE_AGENT_ID = 'image-studio'
+export const IMAGE_AGENT_ID = LEGACY_IMAGE_PROFILE
+export { imageSessionScope }
 const JOB_ID = /^[0-9a-f]{32}$/u
 const STATES = new Set(['QUEUED', 'RUNNING', 'GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED', 'CANCEL_REQUESTED', 'RECONCILE_REQUIRED'])
 const SUBMIT_KEYS = new Set(['action', 'prompt', 'design', 'protected', 'images', 'width', 'height', 'steps', 'guidance', 'seed', 'creativeRedraw'])
@@ -161,13 +163,6 @@ export function normalizeImageRequest(params) {
   return request
 }
 
-export function imageSessionScope(context) {
-  const key = context?.sessionKey
-  if (context?.agentId !== IMAGE_AGENT_ID || !safeString(key, 4096)
-    || key !== key.trim() || !key.startsWith(`agent:${IMAGE_AGENT_ID}:`) || /[\r\n\t]/u.test(key)) return null
-  return createHash('sha256').update(`${IMAGE_AGENT_ID}\0${key}`).digest('hex')
-}
-
 function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
   if (plainObject(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
@@ -261,9 +256,9 @@ function stateText(r) {
   return `${names[r.currentState]}${stage}${progress}。任务编号：${r.jobId}。`
 }
 
-export function createImageCommandTool({ context, client = createImageJobClient(), saveMedia, releaseReady = true,
-  onSubmitted, onReceiptRead } = {}) {
-  const scope = imageSessionScope(context)
+export function createImageCommandTool({ context, binding = legacyImageBinding(), client = createImageJobClient(), saveMedia,
+  releaseReady = true, onSubmitted, onReceiptRead } = {}) {
+  const scope = imageSessionScope(context, binding)
   if (!scope) return null
   async function acknowledgeRead(r) {
     try { await onReceiptRead?.({ jobId: r.jobId, scope, sessionKey: context.sessionKey }) }

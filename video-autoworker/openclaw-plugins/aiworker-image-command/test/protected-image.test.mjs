@@ -64,7 +64,7 @@ test('native image tool stays directly visible without changing optional activat
   assert.equal(createImageCommandTool({ context: { ...context, agentId: 'gpt-main' } }), null)
   const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.2.2')
+  assert.equal(manifest.version, '0.3.0')
   assert.equal(pkg.version, manifest.version)
   assert.deepEqual(manifest.toolMetadata, { aiworker_generate_image: { optional: true } })
   assert.deepEqual(manifest.contracts.tools, ['aiworker_generate_image'])

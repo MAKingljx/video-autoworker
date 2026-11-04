@@ -1,0 +1,26 @@
+{
+  "schema": "aiworker-openclaw-image-capabilities/v1",
+  "plugin": {
+    "id": "aiworker-image-command",
+    "version": "0.3.0",
+    "tool": "aiworker_generate_image"
+  },
+  "attachments": [
+    {
+      "profile": "image-studio",
+      "agentId": "image-studio",
+      "stateRoot": ".openclaw-image-studio",
+      "gatewayPort": 19289,
+      "mediaRoot": ".openclaw-image-studio/media",
+      "legacyScope": true
+    },
+    {
+      "profile": "qwen-current",
+      "agentId": "second-original",
+      "stateRoot": ".openclaw-qwen-current",
+      "gatewayPort": 18889,
+      "mediaRoot": ".openclaw-qwen-current/media",
+      "legacyScope": false
+    }
+  ]
+}

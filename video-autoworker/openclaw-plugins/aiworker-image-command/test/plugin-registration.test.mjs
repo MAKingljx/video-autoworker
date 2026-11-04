@@ -159,3 +159,25 @@ test('failed startup never leaves a broken runtime owner in the shared slot', as
     await second.services[0].start({ stateDir: dir })
   })
 })
+
+test('qwen-current can bind the shared plugin to second-original without inheriting image-studio sessions', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'aiworker-image-registration-qwen-'))
+  const env = { OPENCLAW_PROFILE: 'qwen-current', OPENCLAW_STATE_DIR: dir }
+  const context = { agentId: 'second-original', sessionKey: 'agent:second-original:main' }
+  const host = api('full')
+  host.pluginConfig = { releaseReady: true, targetAgentId: 'second-original' }
+  try {
+    registerImageCommands(host, {
+      env,
+      createRuntimeStore: namedStoreFactory(),
+      createClient: () => ({ submit: async () => ({ jobId, currentState: 'QUEUED' }) }),
+    })
+    await host.services[0].start({ stateDir: dir })
+    const accepted = await host.toolFactory(context).execute('qwen-tool', params)
+    assert.equal(accepted.details.jobId, jobId)
+    assert.equal(host.toolFactory({ agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }), null)
+  } finally {
+    await host.services[0]?.stop()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -27,6 +27,12 @@ const IMAGE_COMPONENT_SCRIPTS = new Set([
   'scripts/aiworker-image-service.py', 'scripts/install-aiworker-image-service.py',
   'scripts/install-openclaw-image-studio.py', 'scripts/aiworker-qwen-cover.py',
   'scripts/aiworker-image-ocr.swift', 'scripts/extract-cover-reference.py',
+  'scripts/install-openclaw-image-capability.mjs',
+  'scripts/lib/openclaw-image-capability-contract.mjs',
+  'scripts/lib/openclaw-profile-private-gateway-rpc.mjs',
+  'scripts/test-openclaw-image-capability-contract.test.mjs',
+  'scripts/test-install-openclaw-image-capability.test.mjs',
+  'ops/openclaw/image-capability-attachments.json',
 ])
 const BUILD_CONFIG_FILES = Object.freeze([
   'package.json', '.nvmrc', 'next.config.js', 'next.config.mjs', 'next.config.ts',
