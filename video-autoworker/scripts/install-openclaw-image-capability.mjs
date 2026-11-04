@@ -421,8 +421,7 @@ function withoutAttachment(config, manifest, attachment) {
 
 function allowedConfigDelta(before, current, manifest, attachment) {
   try {
-    return isImageCapabilityAttached(current, manifest, attachment)
-      && JSON.stringify(stable(withoutAttachment(before, manifest, attachment)))
+    return JSON.stringify(stable(withoutAttachment(before, manifest, attachment)))
         === JSON.stringify(stable(withoutAttachment(current, manifest, attachment)))
   } catch { return false }
 }
@@ -483,10 +482,16 @@ function main() {
     const beforeCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'catalog', token }), attachment, 'catalog')
     backup = createBackup(home, paths, attachment, options.sourceCommit)
-    run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities', PLUGIN_ROOT], {
+    const configBeforePluginInstall = sha256(fs.readFileSync(paths.config))
+    // OpenClaw owns the package installation, while this component owns the
+    // single CAS configuration update below. --no-enable avoids an installer
+    // side effect that would otherwise create a half-enabled profile.
+    run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities',
+      '--acknowledge-install-policy-warning', '--no-enable', PLUGIN_ROOT], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install',
     })
     if (!installedPlugin(paths, manifest)) fail('plugin_install_invalid')
+    if (sha256(fs.readFileSync(paths.config)) !== configBeforePluginInstall) fail('plugin_install_mutated_config')
     const live = gatewayConfig(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'config-get', token }))
     const livePatch = renderImageCapabilityPatch(live.config, manifest, attachment)

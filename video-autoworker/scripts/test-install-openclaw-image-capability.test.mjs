@@ -71,3 +71,10 @@ test('installer documents its declared-profile interface without reading runtime
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /--profile <declared-profile>/u)
 })
+
+test('installer separates official package installation from the single CAS config enablement', () => {
+  const source = readFileSync(installer, 'utf8')
+  assert.match(source, /--acknowledge-install-policy-warning/u)
+  assert.match(source, /--no-enable/u)
+  assert.match(source, /plugin_install_mutated_config/u)
+})
