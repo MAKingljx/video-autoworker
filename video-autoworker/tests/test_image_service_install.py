@@ -270,6 +270,27 @@ class ServiceInstallTests(unittest.TestCase):
                 self.assertEqual(install.main(args + ["--resume"]), 0)
             self.assertEqual((len(fixture.bootouts), len(fixture.bootstraps)), (1, 2))
 
+    def test_upgrade_accepts_a_sealed_historical_config_after_a_new_template_adds_a_root(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture = Fixture(Path(task_dir).resolve())
+            args = fixture.arguments("--apply", commit="d" * 40) + ["--upgrade-existing", "--previous-source-commit", "b" * 40]
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                install.main(fixture.arguments("--apply"))
+                fixture.add_history()
+                config_path = fixture.home / "ai-worker/state/image-generation/image-service/service.json"
+                old_config = json.loads(config_path.read_bytes())
+                old_config["reference_roots"] = old_config["reference_roots"][:-1]
+                old_bytes = install.contract.encoded(old_config)
+                config_path.write_bytes(old_bytes)
+                config_path.chmod(0o600)
+                receipt_path = fixture.home / "ai-worker/state/image-generation/image-service/install-receipt.json"
+                receipt = json.loads(receipt_path.read_bytes())
+                receipt["configSha256"] = install.contract.sha(old_bytes)
+                receipt_path.write_bytes(install.contract.encoded(receipt))
+                receipt_path.chmod(0o600)
+                self.assertEqual(install.main(args), 0)
+            self.assertEqual(json.loads((fixture.home / "ai-worker/state/image-generation/image-service/install-receipt.json").read_bytes())["sourceCommit"], "d" * 40)
+
     def test_recovery_rejects_tampered_database_and_keeps_valid_previous_versions(self):
         with tempfile.TemporaryDirectory() as task_dir:
             fixture = Fixture(Path(task_dir).resolve())

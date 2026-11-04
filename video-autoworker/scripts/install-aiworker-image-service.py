@@ -195,7 +195,8 @@ def check_zero_jobs(value: dict) -> None:
                      "owned_unvalidated_service_has_jobs")
 
 
-def previous_artifact(home: Path, previous: str, receipt: dict, runtime: dict) -> dict:
+def previous_artifact(home: Path, previous: str, receipt: dict, runtime: dict, *,
+                      historical_config: bytes | None = None, historical_plist: bytes | None = None) -> dict:
     old_runtime = receipt.get("runtime")
     contract.require(receipt.get("schema") == SCHEMA and receipt.get("sourceCommit") == previous
         and receipt.get("sourceEvidence", {}).get("sourceCommit") == previous
@@ -211,12 +212,21 @@ def previous_artifact(home: Path, previous: str, receipt: dict, runtime: dict) -
         "previous_artifact_manifest_invalid")
     inventory = contract.bounded_files(release)
     contract.require(inventory == {**manifest["files"], "manifest.json": contract.sha(manifest_raw)}, "previous_artifact_drift")
+    # A later installer may add a capability-derived setting to its current
+    # template. Historical releases remain owned when their *recorded* config
+    # and plist still exactly match their sealed receipt; never recompute an
+    # old configuration using a newer template.
     config_file = home / "ai-worker/state/image-generation/image-service/service.json"
-    expected_config = contract.encoded(configuration(home, previous))
-    expected_plist = service_plist(home, release, config_file, config_file.parent / "logs")
-    contract.require(contract.sha(expected_config) == receipt.get("configSha256")
-        and contract.sha(expected_plist) == receipt.get("launchAgentSha256"), "previous_owned_receipt_digest_invalid")
-    return {"config": expected_config, "plist": expected_plist, "receipt": contract.encoded(receipt)}
+    plist = home / "Library/LaunchAgents" / f"{LABEL}.plist"
+    if historical_config is None:
+        historical_config = contract.private_file(config_file)
+    if historical_plist is None:
+        historical_plist = contract.private_file(plist)
+    contract.require(isinstance(historical_config, bytes) and isinstance(historical_plist, bytes),
+                     "previous_owned_receipt_digest_invalid")
+    contract.require(contract.sha(historical_config) == receipt.get("configSha256")
+        and contract.sha(historical_plist) == receipt.get("launchAgentSha256"), "previous_owned_receipt_digest_invalid")
+    return {"config": historical_config, "plist": historical_plist, "receipt": contract.encoded(receipt)}
 
 
 def verify_previous_installation(home: Path, previous: str, receipt: dict, config_file: Path,
@@ -484,7 +494,9 @@ def upgrade_existing(home: Path, args, *, payload: dict, manifest_bytes: bytes, 
         contract.require(saved.get("previousSourceCommit") == previous and saved.get("replacementSourceCommit") == current,
                          "owned_image_upgrade_backup_mismatch")
         old_receipt = json.loads(contract.private_file(backup / "install-receipt.json"))
-        before = previous_artifact(home, previous, old_receipt, runtime)
+        before = previous_artifact(home, previous, old_receipt, runtime,
+                                   historical_config=contract.private_file(backup / "service.json"),
+                                   historical_plist=contract.private_file(backup / "launch-agent.plist"))
         before.update({"databaseSummary": operation["beforeDatabaseSummary"],
                        "health": {"databaseIdentity": operation["databaseIdentity"]}})
         phase = operation.get("currentState")
