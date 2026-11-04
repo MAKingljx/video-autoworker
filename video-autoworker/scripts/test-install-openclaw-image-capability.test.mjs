@@ -63,3 +63,11 @@ test('generic installer refuses undeclared profiles before creating profile stat
     assert.equal(existsSync(join(home, '.openclaw-qwen-weixin-new')), false)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
+
+test('installer documents its declared-profile interface without reading runtime state', () => {
+  const result = spawnSync(process.execPath, [installer, '--help'], {
+    cwd: root, encoding: 'utf8', timeout: 30_000,
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /--profile <declared-profile>/u)
+})

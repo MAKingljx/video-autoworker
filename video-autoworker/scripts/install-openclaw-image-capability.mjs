@@ -115,6 +115,7 @@ function run(binary, args, { env, cwd, timeout = 120_000 } = {}) {
 }
 
 function parseArguments(values) {
+  if (values.length === 1 && ['--help', '-h'].includes(values[0])) return { help: true }
   const parsed = { mode: '', profile: '', sourceCommit: '' }
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index]
@@ -131,6 +132,10 @@ function parseArguments(values) {
     fail('arguments_invalid')
   }
   return parsed
+}
+
+function usage() {
+  process.stdout.write('Usage: install-openclaw-image-capability.mjs (--dry-run|--apply) --profile <declared-profile> --source-commit <40-hex-git-commit>\n')
 }
 
 function sourceCommit(expected) {
@@ -422,6 +427,7 @@ function allowedConfigDelta(before, current, manifest, attachment) {
 
 function main() {
   const options = parseArguments(process.argv.slice(2))
+  if (options.help) { usage(); return }
   const home = os.homedir()
   if (!path.isAbsolute(home) || path.resolve(home) !== home) fail('home_invalid')
   sourceCommit(options.sourceCommit)
