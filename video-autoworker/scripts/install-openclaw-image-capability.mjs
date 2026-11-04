@@ -106,11 +106,11 @@ function readJson(filename, options = {}) {
   try { return JSON.parse(fs.readFileSync(filename, 'utf8')) } catch { fail('json_invalid') }
 }
 
-function run(binary, args, { env, cwd, timeout = 120_000 } = {}) {
+function run(binary, args, { env, cwd, timeout = 120_000, phase = 'component' } = {}) {
   const result = spawnSync(binary, args, {
     cwd, env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024, shell: false,
   })
-  if (result.error || result.signal || result.status !== 0) fail('component_command_failed')
+  if (result.error || result.signal || result.status !== 0) fail(`component_command_failed_${phase}`)
   return result.stdout
 }
 
@@ -300,7 +300,9 @@ function gatewayRpc({ work, home, openclaw, attachment, operation, token, patch,
     })
   }
   try {
-    run(process.execPath, [RPC_HELPER, operation, output], { env: environment, cwd: ROOT, timeout: 45_000 })
+    run(process.execPath, [RPC_HELPER, operation, output], {
+      env: environment, cwd: ROOT, timeout: 45_000, phase: `gateway_${operation}`,
+    })
     return readJson(output, { mode: 0o600 })
   } finally {
     fs.unlinkSync(output)
@@ -364,7 +366,7 @@ function restoreBackup(paths, backup, home, openclaw, attachment) {
     fs.cpSync(previous, paths.plugin, { recursive: true, preserveTimestamps: true, dereference: false })
   }
   run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
-    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000,
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'recovery_restart',
   })
 }
 
@@ -430,9 +432,9 @@ function main() {
   if (options.help) { usage(); return }
   const home = os.homedir()
   if (!path.isAbsolute(home) || path.resolve(home) !== home) fail('home_invalid')
-  sourceCommit(options.sourceCommit)
   const manifest = validateImageCapabilityManifest(readJson(MANIFEST_PATH, { readOnly: true }))
   const attachment = attachmentForProfile(manifest, options.profile)
+  sourceCommit(options.sourceCommit)
   const source = sourceManifest(manifest)
   const paths = profilePaths(home, attachment)
   const openclaw = safeCommand(path.join(home, 'ai-worker/bin/openclaw'))
@@ -449,9 +451,11 @@ function main() {
   try {
     const patchPath = path.join(work, 'config.patch.json')
     atomicWrite(patchPath, patchText)
-    run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], { env: baseEnvironment(home, openclaw), cwd: ROOT })
+    run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], {
+      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_validate',
+    })
     run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', patchPath, '--dry-run'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT,
+      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_patch_dry_run',
     })
     if (options.mode === 'dry-run') {
       writeReceipt(home, attachment, {
@@ -487,7 +491,7 @@ function main() {
       operation: 'effective', token, sessionKey }), attachment, 'effective')
     backup = createBackup(home, paths, attachment, options.sourceCommit)
     run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities', PLUGIN_ROOT], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000,
+      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install',
     })
     if (!installedPlugin(paths, manifest)) fail('plugin_install_invalid')
     const live = gatewayConfig(gatewayRpc({ work, home, openclaw, attachment,
@@ -496,15 +500,17 @@ function main() {
     const livePatchPath = path.join(work, 'config.live.patch.json')
     atomicWrite(livePatchPath, `${JSON.stringify(livePatch, null, 2)}\n`)
     run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', livePatchPath, '--dry-run'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT,
+      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_patch_live_dry_run',
     })
     const patched = gatewayRpc({ work, home, openclaw, attachment, operation: 'config-patch', token,
       patch: { baseHash: live.hash, path: livePatchPath } })
     if (patched?.ok !== true || !isImageCapabilityAttached(patched.config, manifest, attachment)) fail('config_patch_invalid')
     run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000,
+      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'gateway_restart',
     })
-    run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], { env: baseEnvironment(home, openclaw), cwd: ROOT })
+    run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], {
+      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'post_restart_config_validate',
+    })
     const afterConfig = readJson(paths.config, { mode: 0o600 })
     if (!isImageCapabilityAttached(afterConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
       fail('post_restart_contract_invalid')
