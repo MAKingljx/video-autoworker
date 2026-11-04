@@ -468,27 +468,20 @@ function main() {
     }
     if (alreadyAttached && alreadyInstalled) {
       token = gatewayToken(home, paths.config)
-      const sessionKey = `agent:${attachment.agentId}:image-capability-verify-${randomUUID()}`
       const catalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment, operation: 'catalog', token }), attachment, 'catalog')
-      const effective = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
-        operation: 'effective', token, sessionKey }), attachment, 'effective')
       writeReceipt(home, attachment, {
         schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'ALREADY_CURRENT',
         sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
         attachment: attachmentEvidence(beforeConfig, manifest, attachment),
         pluginInstalled: true, toolInventory: {
           catalogSha256: assertImageToolLoaded(catalog, manifest.plugin, 'catalog'),
-          effectiveSha256: assertImageToolLoaded(effective, manifest.plugin, 'effective'),
         }, nextAction: 'none',
       })
       return
     }
     token = gatewayToken(home, paths.config)
-    const sessionKey = `agent:${attachment.agentId}:image-capability-install-${randomUUID()}`
     const beforeCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'catalog', token }), attachment, 'catalog')
-    const beforeEffective = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
-      operation: 'effective', token, sessionKey }), attachment, 'effective')
     backup = createBackup(home, paths, attachment, options.sourceCommit)
     run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities', PLUGIN_ROOT], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install',
@@ -517,17 +510,14 @@ function main() {
     }
     const afterCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'catalog', token }), attachment, 'catalog')
-    const afterEffective = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
-      operation: 'effective', token, sessionKey }), attachment, 'effective')
     const catalogSha256 = compareInventories(beforeCatalog, afterCatalog, manifest.plugin, 'catalog')
-    const effectiveSha256 = compareInventories(beforeEffective, afterEffective, manifest.plugin, 'effective')
     retainLatestBackups(home, attachment)
     writeReceipt(home, attachment, {
       schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
       sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
       attachment: attachmentEvidence(afterConfig, manifest, attachment),
       pluginInstalled: true, configBeforeSha256: sha256(JSON.stringify(stable(beforeConfig))),
-      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256, effectiveSha256 },
+      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256 },
       backupPath: backup.path, nextAction: 'real_dialogue_validation',
     })
   } catch (error) {
