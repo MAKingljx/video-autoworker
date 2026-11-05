@@ -149,13 +149,6 @@
       "reason": "Synthetic detector or redaction fixture"
     },
     {
-      "path": "src/lib/__tests__/n8n-model-execution.test.ts",
-      "type": "bearer_token",
-      "fingerprint": "171a315fc594aecdbfb2d39fc20ce5de8994fe193f1cfcff860caeff5348d4a4",
-      "occurrences": 1,
-      "reason": "Synthetic detector or redaction fixture"
-    },
-    {
       "path": "src/lib/__tests__/operational-errors.test.ts",
       "type": "bearer_token",
       "fingerprint": "31b03229dee8734241e465334988de2a645e9d4d629a4215a63b76afdb3e8575",
@@ -230,13 +223,6 @@
       "type": "hardcoded_credential",
       "fingerprint": "b654401266bf2f172515892879172dcace8af4184d525a1fd906a22253ab273a",
       "occurrences": 5,
-      "reason": "Synthetic contextual credential fixture"
-    },
-    {
-      "path": "src/lib/__tests__/n8n-model-execution.test.ts",
-      "type": "hardcoded_credential",
-      "fingerprint": "f0e5c0c3263588a1cfcd3acd0d16d150211f252099fa129096f470f419029d14",
-      "occurrences": 1,
       "reason": "Synthetic contextual credential fixture"
     },
     {

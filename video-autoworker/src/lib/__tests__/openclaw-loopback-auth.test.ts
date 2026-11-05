@@ -53,6 +53,7 @@ describe('OpenClaw loopback authentication boundary', () => {
 
   it.each([
     '/api/n8n/director-brain',
+    '/api/n8n/video-cover-frames',
     '/api/n8n/director-extraction',
     '/api/n8n/director-extraction/review',
     '/api/n8n/runs/recovery',
