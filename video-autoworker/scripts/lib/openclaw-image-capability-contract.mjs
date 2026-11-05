@@ -6,6 +6,7 @@ import { readOpenClawAgentEntries, writeOpenClawAgentEntries } from './openclaw-
 export const IMAGE_CAPABILITY_SCHEMA = 'aiworker-openclaw-image-capabilities/v2'
 const IDENTIFIER = /^[a-z][a-z0-9_-]{0,63}$/u
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/u
+const LEGACY_IMAGE_PLUGIN_LOAD_PATH = /(?:^|\/)ai-worker\/services\/openclaw-image-command\/releases\/[a-f0-9]{40}$/u
 
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -138,6 +139,16 @@ function assertConfigShape(config, manifest, attachment) {
   return validateImageCapabilityManifest(manifest).plugin
 }
 
+function legacyImagePluginLoadPaths(config, attachment) {
+  if (!attachment.legacyScope) return []
+  const paths = config.plugins?.load?.paths
+  if (paths === undefined) return []
+  if (!Array.isArray(paths) || paths.some(value => typeof value !== 'string' || value.length === 0 || value.length > 4_096)) {
+    fail('plugin_load_paths_invalid')
+  }
+  return paths.filter(value => LEGACY_IMAGE_PLUGIN_LOAD_PATH.test(value))
+}
+
 export function isImageCapabilityAttached(config, manifest, attachment) {
   try {
     const plugin = assertConfigShape(config, manifest, attachment)
@@ -147,12 +158,14 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
     const targetBindingValid = attachment.legacyScope
       ? entry?.config?.targetAgentId === undefined
       : entry?.config?.targetAgentId === attachment.agentId
+    const legacySourceRetired = legacyImagePluginLoadPaths(config, attachment).length === 0
     return plugin.tools.every(tool => tools.alsoAllow?.includes(tool) === true)
       && plugin.retiredTools.every(tool => tools.alsoAllow?.includes(tool) !== true)
       && config.plugins.allow.includes(plugin.id)
       && entry?.enabled === true
       && entry.config?.releaseReady === true
       && targetBindingValid
+      && legacySourceRetired
   } catch {
     return false
   }
@@ -198,6 +211,11 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
     enabled: true,
     config: capabilityConfig,
   }
+  const retiredLoadPaths = legacyImagePluginLoadPaths(next, attachment)
+  if (retiredLoadPaths.length > 0) {
+    next.plugins.load.paths = next.plugins.load.paths.filter(value => !retiredLoadPaths.includes(value))
+    if (next.plugins.load.paths.length === 0 && Object.keys(next.plugins.load).length === 1) delete next.plugins.load
+  }
   return next
 }
 
@@ -208,13 +226,17 @@ export function renderImageCapabilityPatch(config, manifest, attachment) {
     ? { list: next.agents.list }
     : { entries: { [attachment.agentId]: next.agents.entries[attachment.agentId] } }
   const plugin = validateImageCapabilityManifest(manifest).plugin
-  return {
+  const patch = {
     agents: agentPatch,
     plugins: {
       allow: next.plugins.allow,
       entries: { [plugin.id]: next.plugins.entries[plugin.id] },
     },
   }
+  if (!same(config.plugins.load, next.plugins.load)) {
+    patch.plugins.load = next.plugins.load === undefined ? null : { paths: next.plugins.load.paths }
+  }
+  return patch
 }
 
 // OpenClaw protects destructive array changes behind an explicit path-level
@@ -227,10 +249,14 @@ export function imageCapabilityReplacePaths(config, manifest, attachment) {
   const tools = agent.tools === undefined ? {} : agent.tools
   if (!plainObject(tools)) fail('agent_tools_invalid')
   const allowed = tools.alsoAllow === undefined ? [] : list(tools.alsoAllow, 'agent_tool_allowlist')
-  if (!plugin.retiredTools.some(tool => allowed.includes(tool))) return []
-  return [Object.hasOwn(config.agents, 'list')
-    ? 'agents.list[].tools.alsoAllow'
-    : `agents.entries.${attachment.agentId}.tools.alsoAllow`]
+  const replacePaths = []
+  if (plugin.retiredTools.some(tool => allowed.includes(tool))) {
+    replacePaths.push(Object.hasOwn(config.agents, 'list')
+      ? 'agents.list[].tools.alsoAllow'
+      : `agents.entries.${attachment.agentId}.tools.alsoAllow`)
+  }
+  if (legacyImagePluginLoadPaths(config, attachment).length > 0) replacePaths.push('plugins.load.paths')
+  return replacePaths
 }
 
 export function assertImageCapabilityPluginManifest(value, manifest) {

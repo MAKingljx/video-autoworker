@@ -94,11 +94,19 @@ test('uses the existing image-studio binding without plugin-specific config befo
     agents: { entries: { 'image-studio': {
       workspace: '/safe/workspace', tools: { alsoAllow: ['aiworker_generate_image'], deny: ['exec'] },
     } } },
-    plugins: { allow: [], entries: {} },
+    plugins: {
+      allow: [], entries: {},
+      load: { paths: ['/Users/heisenbergs-1/ai-worker/services/openclaw-image-command/releases/63eb38fed966d028241c61cdea4861ae819333a6'] },
+    },
   }
   const after = renderImageCapabilityConfig(before, manifest, attachment)
   assert.equal(after.plugins.entries['aiworker-image-command'].config.releaseReady, true)
   assert.equal(Object.hasOwn(after.plugins.entries['aiworker-image-command'].config, 'targetAgentId'), false)
+  assert.equal(Object.hasOwn(after.plugins, 'load'), false)
+  assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [
+    'agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths',
+  ])
+  assert.equal(renderImageCapabilityPatch(before, manifest, attachment).plugins.load, null)
   assert.equal(isImageCapabilityAttached(after, manifest, attachment), true)
 })
 

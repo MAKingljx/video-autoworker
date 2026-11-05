@@ -89,7 +89,7 @@ function plainObject(value) {
 }
 
 export function validateConfigPatchReplacePaths(binding, patch, replacePaths) {
-  if (!Array.isArray(replacePaths) || replacePaths.length > 1
+  if (!Array.isArray(replacePaths) || replacePaths.length > 2
     || replacePaths.some(item => typeof item !== 'string' || item.length === 0 || item.length > 256)) fail()
   if (replacePaths.length === 0) return []
   if (!plainObject(patch.agents)) fail()
@@ -99,7 +99,12 @@ export function validateConfigPatchReplacePaths(binding, patch, replacePaths) {
   const expected = hasList
     ? 'agents.list[].tools.alsoAllow'
     : `agents.entries.${binding.agentId}.tools.alsoAllow`
-  if (replacePaths[0] !== expected) fail()
+  const allowedPaths = new Set([expected])
+  const mayRetireLegacySource = binding.profile === 'image-studio' && plainObject(patch.plugins)
+    && Object.hasOwn(patch.plugins, 'load')
+    && (patch.plugins.load === null || plainObject(patch.plugins.load))
+  if (mayRetireLegacySource) allowedPaths.add('plugins.load.paths')
+  if (new Set(replacePaths).size !== replacePaths.length || replacePaths.some(item => !allowedPaths.has(item))) fail()
   if (expected.startsWith('agents.list')) {
     if (!Array.isArray(patch.agents.list)
       || !patch.agents.list.some(agent => plainObject(agent) && agent.id === binding.agentId

@@ -37,6 +37,19 @@ test('uses the ID-merged legacy list path and rejects broader replacements', () 
   ]), /openclaw_profile_private_gateway_rpc_failed/u)
 })
 
+test('allows the image-studio migration to retire only its legacy plugin load path', () => {
+  const imageBinding = { profile: 'image-studio', agentId: 'image-studio', port: 19289 }
+  const patch = { agents: { entries: { 'image-studio': {
+    tools: { alsoAllow: ['aiworker_submit_creative_image'] },
+  } } }, plugins: { load: null } }
+  assert.deepEqual(validateConfigPatchReplacePaths(imageBinding, patch, [
+    'agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths',
+  ]), ['agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths'])
+  assert.throws(() => validateConfigPatchReplacePaths(imageBinding, patch, [
+    'agents.entries.image-studio.tools.alsoAllow', 'plugins.allow',
+  ]), /openclaw_profile_private_gateway_rpc_failed/u)
+})
+
 test('rejects a replacement path when its target is absent from the patch', () => {
   const patch = entriesPatch()
   delete patch.agents.entries['second-original'].tools.alsoAllow
