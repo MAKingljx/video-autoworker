@@ -854,9 +854,9 @@ test('runtime manifest pins the bounded transcript policy and verifies persisten
     set: {
       model: 'qwen36-tools-local/default_model',
       timeoutSeconds: 240,
-      keepRecentTokens: 8192,
-      recentTurnsPreserve: 4,
-      maxActiveTranscriptBytes: '16mb',
+      keepRecentTokens: 4096,
+      recentTurnsPreserve: 3,
+      maxActiveTranscriptBytes: '256kb',
       midTurnPrecheck: { enabled: true },
     },
     remove: ['identifierInstructions', 'truncateAfterCompaction'],

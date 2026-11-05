@@ -58,9 +58,9 @@ function validateManifest(pathname) {
       set: {
         model: 'qwen36-tools-local/default_model',
         timeoutSeconds: 240,
-        keepRecentTokens: 8_192,
-        recentTurnsPreserve: 4,
-        maxActiveTranscriptBytes: '16mb',
+        keepRecentTokens: 4_096,
+        recentTurnsPreserve: 3,
+        maxActiveTranscriptBytes: '256kb',
         midTurnPrecheck: { enabled: true },
       },
       remove: ['identifierInstructions', 'truncateAfterCompaction'],
