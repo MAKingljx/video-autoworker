@@ -419,10 +419,12 @@ export function createImageCommandTool({ context, binding = legacyImageBinding()
       } catch (error) {
         const errorCode = error instanceof ImageServiceError ? error.errorCode
           : signal?.aborted ? 'IMAGE_REQUEST_ABORTED' : 'IMAGE_SERVICE_UNAVAILABLE'
+        const safeErrorCode = /^[A-Za-z0-9_:-]{1,96}$/u.test(errorCode)
+          ? errorCode : 'IMAGE_SERVICE_UNAVAILABLE'
         const text = request.action === 'submit'
-          ? '暂时无法确认图片是否受理，请先查询任务，避免重复提交。'
+          ? `图片服务未确认受理（${safeErrorCode}），请先查询任务，避免重复提交。`
           : '暂时无法读取或操作图片任务，请稍后再查询。'
-        return result(text, { errorCode })
+        return result(text, { errorCode: safeErrorCode })
       }
     },
   }

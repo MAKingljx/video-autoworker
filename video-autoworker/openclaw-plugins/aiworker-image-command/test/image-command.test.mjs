@@ -273,7 +273,17 @@ test('release maintenance does not submit and error output cannot leak credentia
   const broken = createImageCommandTool({ context, client: { submit: async () => { throw new Error('secret=private-value') } } })
   const answer = await broken.execute('call', params)
   assert.equal(answer.details.errorCode, 'IMAGE_SERVICE_UNAVAILABLE')
+  assert.match(answer.content[0].text, /IMAGE_SERVICE_UNAVAILABLE/u)
   assert.doesNotMatch(JSON.stringify(answer), /private-value/u)
+})
+
+test('known image service rejections expose only their bounded error code to the model', async () => {
+  const tool = createImageCommandTool({ context, client: {
+    submit: async () => { throw new ImageServiceError('image_protected_text_box_out_of_bounds') },
+  } })
+  const answer = await tool.execute('protected-error', params)
+  assert.equal(answer.details.errorCode, 'image_protected_text_box_out_of_bounds')
+  assert.match(answer.content[0].text, /image_protected_text_box_out_of_bounds/u)
 })
 
 test('HTTP client uses only loopback routes, refuses redirects, and keeps scope on reads/cancel', async () => {
