@@ -111,12 +111,12 @@ function readJson(filename, options = {}) {
   try { return JSON.parse(fs.readFileSync(filename, 'utf8')) } catch { fail('json_invalid') }
 }
 
-function run(binary, args, { env, cwd, timeout = 120_000, phase = 'component' } = {}) {
+function run(binary, args, { env, cwd, timeout = 120_000, phase = 'component', allowNonzero = false } = {}) {
   const result = spawnSync(binary, args, {
     cwd, env, encoding: 'utf8', timeout, maxBuffer: 1024 * 1024, shell: false,
   })
-  if (result.error || result.signal || result.status !== 0) fail(`component_command_failed_${phase}`)
-  return result.stdout
+  if (result.error || result.signal || (!allowNonzero && result.status !== 0)) fail(`component_command_failed_${phase}`)
+  return result
 }
 
 function parseArguments(values) {
@@ -520,9 +520,20 @@ function main() {
     // OpenClaw owns the package installation, while this component owns the
     // single CAS configuration update below. --no-enable avoids an installer
     // side effect that would otherwise create a half-enabled profile.
-    run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities',
+    // OpenClaw 2026.9.9 can persist a trusted local package before returning a
+    // nonzero owner-metadata diagnostic. Refresh its official registry and
+    // doctor it before deciding whether the atomic capability update may
+    // continue; no configuration change is allowed during this phase.
+    const pluginInstall = run(openclaw, ['--profile', attachment.profile, 'plugins', 'install', '--force', '--accept-capabilities',
       '--acknowledge-install-policy-warning', '--no-enable', PLUGIN_ROOT], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install',
+      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install', allowNonzero: true,
+    })
+    if (pluginInstall.status !== 0 && !installedPlugin(paths, manifest)) fail('plugin_install_invalid')
+    run(openclaw, ['--profile', attachment.profile, 'plugins', 'registry', '--refresh'], {
+      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_registry_refresh',
+    })
+    run(openclaw, ['--profile', attachment.profile, 'plugins', 'doctor'], {
+      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_doctor',
     })
     if (!installedPlugin(paths, manifest)) fail('plugin_install_invalid')
     if (sha256(fs.readFileSync(paths.config)) !== configBeforePluginInstall) fail('plugin_install_mutated_config')
