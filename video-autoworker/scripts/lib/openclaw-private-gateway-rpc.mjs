@@ -18,6 +18,18 @@ const SUPPORTED_OPERATIONS = new Set([
 const ERROR_CATEGORIES = new Set([
   'contract_invalid', 'result_contains_secret', 'result_projection_invalid', 'rpc_call_failed',
 ])
+const MAX_LOG_LINES = 5_000
+const MAX_LOG_LINE_BYTES = 64 * 1024
+const SAFE_CONFIG_CHANGE = /^config change detected; evaluating reload \(([A-Za-z0-9_.-]+(?:,\s*[A-Za-z0-9_.-]+)*)\)$/u
+const SAFE_FAILURE_MESSAGES = [
+  [/^config hot-reload failed\b/iu, 'config hot-reload failed'],
+  [/^config reload (?:in-process )?last-known-good promotion failed\b/iu, 'config reload last-known-good promotion failed'],
+  [/^config reload disabled \(gateway\.reload\.mode=off\)$/iu, 'config reload disabled (gateway.reload.mode=off)'],
+  [/^config change requires gateway restart\b/iu, 'config change requires gateway restart'],
+  [/^config reload requires gateway restart\b/iu, 'config reload requires gateway restart'],
+  [/^config restart failed\b/iu, 'config restart failed'],
+  [/\brestart pending\b/iu, 'restart pending'],
+]
 
 function fail(category = 'contract_invalid') {
   const error = new Error('private Gateway RPC failed')
@@ -121,8 +133,56 @@ function operationRequest(operation) {
   fail()
 }
 
+function logMessageCandidates(line) {
+  try {
+    const value = JSON.parse(line)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+    return [value.message, value.msg, ...Object.keys(value)
+      .filter(key => /^\d+$/u.test(key))
+      .toSorted((left, right) => Number(left) - Number(right))
+      .map(key => value[key])]
+      .filter(value => typeof value === 'string')
+  } catch { return [line] }
+}
+
+function projectSafeLogMessage(line) {
+  for (const candidate of logMessageCandidates(line)) {
+    if (Buffer.byteLength(candidate) > MAX_LOG_LINE_BYTES) continue
+    const message = candidate.trim()
+    if (SAFE_CONFIG_CHANGE.test(message)) return message
+    for (const [pattern, canonical] of SAFE_FAILURE_MESSAGES) {
+      if (pattern.test(message)) return canonical
+    }
+  }
+  return null
+}
+
+function projectGatewayLogTail(result) {
+  if (!result || typeof result !== 'object' || Array.isArray(result)
+    || typeof result.file !== 'string' || !path.isAbsolute(result.file)
+    || path.resolve(result.file) !== result.file || /[\u0000-\u001f\u007f]/u.test(result.file)
+    || !Number.isSafeInteger(result.cursor) || result.cursor < 0
+    || !Number.isSafeInteger(result.size) || result.size < 0 || result.cursor !== result.size
+    || !Array.isArray(result.lines) || result.lines.length > MAX_LOG_LINES
+    || result.lines.some(line => typeof line !== 'string' || Buffer.byteLength(line) > MAX_LOG_LINE_BYTES)
+    || typeof result.reset !== 'boolean' || typeof result.truncated !== 'boolean') {
+    fail('result_projection_invalid')
+  }
+  const lines = []
+  let omitted = false
+  for (const line of result.lines) {
+    const message = projectSafeLogMessage(line)
+    if (message === null) { omitted = true; continue }
+    lines.push(JSON.stringify({ message }))
+  }
+  if (omitted) lines.push(JSON.stringify({ message: '[redacted gateway log entries omitted]' }))
+  return { file: result.file, cursor: result.cursor, size: result.size, lines,
+    truncated: result.truncated, reset: result.reset }
+}
+
 export function projectPrivateGatewayResult(operation, result) {
   if (!SUPPORTED_OPERATIONS.has(operation)) fail('contract_invalid')
+  if (operation === 'logs-tail') return projectGatewayLogTail(result)
   if (operation !== 'health') return result
   const hotReloadStatus = result?.configReload?.hotReloadStatus
   if (typeof result?.ok !== 'boolean' || typeof hotReloadStatus !== 'string'
