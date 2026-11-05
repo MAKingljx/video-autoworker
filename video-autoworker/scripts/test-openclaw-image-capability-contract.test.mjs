@@ -88,6 +88,20 @@ test('does not request an array replacement when no legacy image tool is retired
   assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [])
 })
 
+test('uses the existing image-studio binding without plugin-specific config before first load', () => {
+  const attachment = attachmentForProfile(manifest, 'image-studio')
+  const before = {
+    agents: { entries: { 'image-studio': {
+      workspace: '/safe/workspace', tools: { alsoAllow: ['aiworker_generate_image'], deny: ['exec'] },
+    } } },
+    plugins: { allow: [], entries: {} },
+  }
+  const after = renderImageCapabilityConfig(before, manifest, attachment)
+  assert.equal(after.plugins.entries['aiworker-image-command'].config.releaseReady, true)
+  assert.equal(Object.hasOwn(after.plugins.entries['aiworker-image-command'].config, 'targetAgentId'), false)
+  assert.equal(isImageCapabilityAttached(after, manifest, attachment), true)
+})
+
 test('refuses conflicting target-agent ownership', () => {
   const attachment = attachmentForProfile(manifest, 'qwen-current')
   const wrong = config()

@@ -144,12 +144,15 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
     const agent = profileAgent(config, attachment)
     const tools = plainObject(agent.tools) ? agent.tools : {}
     const entry = config.plugins.entries[plugin.id]
+    const targetBindingValid = attachment.legacyScope
+      ? entry?.config?.targetAgentId === undefined
+      : entry?.config?.targetAgentId === attachment.agentId
     return plugin.tools.every(tool => tools.alsoAllow?.includes(tool) === true)
       && plugin.retiredTools.every(tool => tools.alsoAllow?.includes(tool) !== true)
       && config.plugins.allow.includes(plugin.id)
       && entry?.enabled === true
       && entry.config?.releaseReady === true
-      && entry.config?.targetAgentId === attachment.agentId
+      && targetBindingValid
   } catch {
     return false
   }
@@ -184,10 +187,16 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
   if (existingConfig.releaseReady !== undefined && existingConfig.releaseReady !== true) {
     fail('plugin_readiness_conflict')
   }
+  const capabilityConfig = { ...existingConfig, releaseReady: true }
+  // The existing image-studio profile has a trusted, profile-local default
+  // binding. Omitting the redundant field lets its first install validate
+  // before OpenClaw has loaded this plugin's optional config schema.
+  if (attachment.legacyScope) delete capabilityConfig.targetAgentId
+  else capabilityConfig.targetAgentId = attachment.agentId
   next.plugins.entries[plugin.id] = {
     ...existing,
     enabled: true,
-    config: { ...existingConfig, releaseReady: true, targetAgentId: attachment.agentId },
+    config: capabilityConfig,
   }
   return next
 }
