@@ -16,6 +16,12 @@ export const IMAGE_SUBMIT_DESIGN_TOOL_NAME = 'aiworker_submit_designed_cover'
 export const IMAGE_SUBMIT_PROTECTED_TOOL_NAME = 'aiworker_submit_protected_cover'
 export const IMAGE_TASK_TOOL_NAME = 'aiworker_image_task'
 export const IMAGE_HELP_TOOL_NAME = 'aiworker_image_help'
+export const IMAGE_VIDEO_FRAMES_TOOL_NAME = 'aiworker_video_cover_frames'
+export const IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME = 'aiworker_submit_protected_cover_from_frame'
+export const QWEN_IMAGE_FRAME_TOOL_NAMES = Object.freeze([
+  IMAGE_VIDEO_FRAMES_TOOL_NAME,
+  IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME,
+])
 export const IMAGE_COMMAND_TOOL_NAMES = Object.freeze([
   IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
   IMAGE_SUBMIT_DESIGN_TOOL_NAME,
@@ -23,6 +29,13 @@ export const IMAGE_COMMAND_TOOL_NAMES = Object.freeze([
   IMAGE_TASK_TOOL_NAME,
   IMAGE_HELP_TOOL_NAME,
 ])
+export const IMAGE_PLUGIN_TOOL_NAMES = Object.freeze([...IMAGE_COMMAND_TOOL_NAMES, ...QWEN_IMAGE_FRAME_TOOL_NAMES])
+
+export function imageCommandToolNamesForProfile(profile) {
+  return profile === 'qwen-current'
+    ? [...IMAGE_COMMAND_TOOL_NAMES, ...QWEN_IMAGE_FRAME_TOOL_NAMES]
+    : [...IMAGE_COMMAND_TOOL_NAMES]
+}
 export const IMAGE_AGENT_ID = LEGACY_IMAGE_PROFILE
 export { imageSessionScope }
 const JOB_ID = /^[0-9a-f]{32}$/u
@@ -121,6 +134,24 @@ const TASK_PARAMETERS = {
 }
 
 const HELP_PARAMETERS = { type: 'object', additionalProperties: false, properties: {} }
+const VIDEO_COVER_FRAMES_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['query', 'segmentIndexes'],
+  properties: {
+    query: { type: 'string', minLength: 1, maxLength: 120,
+      description: '必须是已学习视频的精确原文件名。先用视频任务工具读取片段摘要，再选择一个最相关片段。' },
+    segmentIndexes: { type: 'array', minItems: 1, maxItems: 1, uniqueItems: true,
+      items: { type: 'integer', minimum: 1 },
+      description: '从已读取的片段目录中选出的一个片段编号；只能使用真实目录中的编号。' },
+  },
+}
+const PROTECTED_FRAME_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['frameRef', 'protected'],
+  properties: {
+    frameRef: { type: 'string', pattern: '^[a-f0-9]{32}$',
+      description: '由 aiworker_video_cover_frames 返回的当前会话帧引用。不可自造、复制其他会话引用或填写路径。' },
+    protected: PARAMETERS.properties.protected,
+  },
+}
 
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -502,7 +533,8 @@ function createImageHelpTool() {
 // executor remains private to this module so every path still reaches the same
 // application queue, idempotency rules, notification service and media bridge.
 export function createImageCommandTools({ context, binding = legacyImageBinding(), client = createImageJobClient(), saveMedia,
-  releaseReady = true, onSubmitted, onReceiptRead, submissionFence = createImageSubmissionFence() } = {}) {
+  releaseReady = true, onSubmitted, onReceiptRead, submissionFence = createImageSubmissionFence(),
+  videoFrameClient, videoFrameStore } = {}) {
   const scope = imageSessionScope(context, binding)
   if (!scope) return []
   const executor = createImageCommandTool({ context, binding, client, saveMedia, releaseReady, onSubmitted, onReceiptRead })
@@ -559,6 +591,97 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
     },
   }
 
+  const frameTools = binding.profile === 'qwen-current' && videoFrameClient && videoFrameStore ? [
+    {
+      name: IMAGE_VIDEO_FRAMES_TOOL_NAME,
+      label: 'H1 已学习视频候选帧',
+      catalogMode: 'direct-only',
+      description: '从已学习视频的真实原片和片段时间窗重新抽取3张候选帧，供你结合片段摘要自行挑选。先用 aiworker_analyze_video 的 segments 读取视频片段目录，再选择其中一个最相关片段编号调用本工具。返回候选包含原生图片和短期opaque frameRef，不含文件路径。仅支持已完成学习且原片仍可读取的视频；不创建学习任务或图片任务。',
+      parameters: VIDEO_COVER_FRAMES_PARAMETERS,
+      executionMode: 'sequential',
+      async execute(toolCallId, params, signal) {
+        if (!releaseReady) return result('图片能力正在维护，请稍后再试。', { errorCode: 'IMAGE_SERVICE_NOT_READY' })
+        if (!safeString(toolCallId, 4096) || !plainObject(params)
+          || Object.keys(params).sort().join(',') !== 'query,segmentIndexes'
+          || !safeString(params.query, 120) || params.query !== params.query.trim()
+          || !Array.isArray(params.segmentIndexes) || params.segmentIndexes.length < 1
+          || params.segmentIndexes.length !== 1 || params.segmentIndexes.some(index => !Number.isSafeInteger(index) || index < 1)
+          || new Set(params.segmentIndexes).size !== params.segmentIndexes.length) {
+          return result('视频帧请求无效，请先读取片段目录并选择其中的编号。', {
+            errorCode: 'VIDEO_FRAME_REQUEST_INVALID', nextAction: 'READ_VIDEO_SEGMENT_DIRECTORY',
+          })
+        }
+        try {
+          const response = await videoFrameClient.candidates({
+            query: params.query, segmentIndexes: params.segmentIndexes,
+          }, signal)
+          const stored = await videoFrameStore.captureBatch({
+            imageScope: scope, sessionKey: context.sessionKey, candidates: response.candidates,
+          })
+          const content = [{ type: 'text', text: `视频：${response.videoName}。候选帧 ${stored.length} 张，来自片段 ${stored[0]?.segmentIndex ?? '未知'}。片段摘要：${stored[0]?.summary ?? '无'}。请结合摘要和画面选一张，并只用对应 frameRef 提交一次；不要询问或构造路径。` }]
+          for (const frame of stored) {
+            content.push({ type: 'text', text: `frameRef=${frame.frameRef}；片段 ${frame.segmentIndex}；${frame.timeRange}；原片时间 ${frame.frameTimeSeconds.toFixed(3)} 秒；${frame.width}×${frame.height}` })
+            content.push({ type: 'image', data: frame.data, mimeType: 'image/jpeg' })
+          }
+          return { content, details: { videoName: response.videoName,
+            candidateCount: stored.length,
+            candidates: stored.map(({ frameRef, segmentIndex, timeRange, frameTimeSeconds, width, height, sha256 }) => ({
+              frameRef, segmentIndex, timeRange, frameTimeSeconds, width, height, sha256,
+            })),
+            nextAction: 'CHOOSE_ONE_FRAME_AND_SUBMIT_PROTECTED_COVER' } }
+        } catch (error) {
+          const errorCode = typeof error?.errorCode === 'string' ? error.errorCode : 'VIDEO_FRAME_UNAVAILABLE'
+          return result('暂时无法读取该视频的受控候选帧；未创建图片任务。', {
+            errorCode, nextAction: 'REPORT_FRAME_REFERENCE_FAILURE',
+          })
+        }
+      },
+    },
+    {
+      name: IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME,
+      label: 'H1 学习帧封面提交',
+      catalogMode: 'direct-only',
+      description: '用 aiworker_video_cover_frames 在当前会话返回的一个真实候选帧提交原片保护封面。必须提供 frameRef 和完整 protected 文字/擦除计划；不得提供路径或任意图像引用。成功只返回任务编号，随后等待完成提醒。',
+      parameters: PROTECTED_FRAME_PARAMETERS,
+      executionMode: 'sequential',
+      async execute(toolCallId, params, signal) {
+        if (!releaseReady) return result('图片服务正在维护，请稍后再试。', { errorCode: 'IMAGE_SERVICE_NOT_READY' })
+        if (!safeString(toolCallId, 4096) || !plainObject(params)
+          || Object.keys(params).sort().join(',') !== 'frameRef,protected'
+          || !/^[a-f0-9]{32}$/u.test(params.frameRef)) {
+          return result('候选帧请求无效，请使用当前会话的 frameRef。', {
+            errorCode: 'VIDEO_FRAME_REFERENCE_INVALID', nextAction: 'READ_VIDEO_COVER_FRAMES',
+          })
+        }
+        const plan = protectedRequest(params.protected)
+        if (!plan) return result('封面文字或局部编辑计划不完整。', {
+          errorCode: 'IMAGE_REQUEST_INVALID', nextAction: 'PROVIDE_VALID_PROTECTED_COVER_PLAN',
+        })
+        try {
+          const source = await videoFrameStore.resolve({
+            frameRef: params.frameRef, imageScope: scope, sessionKey: context.sessionKey,
+          })
+          const request = { action: 'submit', protected: plan, images: [source.path] }
+          if (submissionFence.isBlocked(scope, IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME, request)) {
+            return submissionFailure({ blocked: true })
+          }
+          const answer = await executor.execute(`cover-frame:${params.frameRef}`, request, signal)
+          const details = plainObject(answer?.details) ? answer.details : {}
+          if (!details.jobId && NO_PROGRESS_SUBMISSION_CODES.has(details.errorCode)) {
+            submissionFence.block(scope, IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME, request)
+            return withSafeDetails(answer, { nextAction: 'REPORT_IMAGE_SUBMISSION_UNCONFIRMED' })
+          }
+          return withSafeDetails(answer, { nextAction: submissionNextAction(details) })
+        } catch (error) {
+          const errorCode = typeof error?.errorCode === 'string' ? error.errorCode : 'VIDEO_FRAME_REFERENCE_INVALID'
+          return result('候选帧已失效或不属于当前会话；未创建图片任务。', {
+            errorCode, nextAction: 'READ_VIDEO_COVER_FRAMES_AGAIN',
+          })
+        }
+      },
+    },
+  ] : []
+
   return [
     submit(submissionDefinition({
       name: IMAGE_SUBMIT_CREATIVE_TOOL_NAME, label: 'H1 原创图片提交', parameters: CREATIVE_SUBMIT_PARAMETERS,
@@ -574,5 +697,6 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
     })),
     task,
     createImageHelpTool(),
+    ...frameTools,
   ]
 }

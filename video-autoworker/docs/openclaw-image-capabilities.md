@@ -10,6 +10,13 @@
 - `aiworker_image_task`：仅以已返回的任务编号执行 `status`、`result`、`inspect` 或用户明确要求的 `cancel`；
 - `aiworker_image_help`：可被通用工具检索的只读说明，不创建任务。
 
+`qwen-current / second-original` 另有两个仅该 profile 可见的学习视频封面工具：
+
+- `aiworker_video_cover_frames`：先读取已学习片段摘要，再由 OpenClaw 选一个片段；应用只从该片段的真实原片时间窗抽取三张候选帧，以原生图片和短期会话帧引用交还模型，不暴露文件路径；
+- `aiworker_submit_protected_cover_from_frame`：OpenClaw 选定一张后，通过已有原片保护封面应用与同一图片队列提交，不创建第二条图片链。
+
+候选帧不是学习任务的长期产物。应用从受控视频源索引按需重取原片，学习摘要由 OpenClaw 决定选段，画面由 OpenClaw 决定选帧；临时引用绑定 `qwen-current` 会话，60 分钟到期。原片不可用、学习结果不唯一或片段失败时拒绝抽帧。
+
 提交未返回任务编号时，调用方必须停止重试并报告安全错误码与下一步；不能把“工具调用完成”误认为图片已受理。
 
 ## 能力清单
@@ -21,6 +28,7 @@
 - `stateRoot` 与 `gatewayPort`：该入口的受控运行身份；
 - `mediaRoot`：图片应用可以读取的唯一该入口媒体目录；
 - `legacyScope`：仅历史 `image-studio` 使用，确保已受理图片任务仍能被原会话查询。
+- `toolIds`：每个 profile 的最小可见工具集合，避免 qwen 专用视频帧能力泄漏到 image-studio。
 
 当前清单保留既有 `image-studio`，并声明首个复用入口 `qwen-current / second-original`。新增入口必须先经用户授权，新增一条完整声明并验证该入口的媒体目录；不能复制插件、工作区或图片服务。
 

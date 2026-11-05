@@ -3,7 +3,7 @@ import { isAbsolute, join, normalize, relative, sep } from 'node:path'
 
 import { readOpenClawAgentEntries, writeOpenClawAgentEntries } from './openclaw-agent-config.mjs'
 
-export const IMAGE_CAPABILITY_SCHEMA = 'aiworker-openclaw-image-capabilities/v2'
+export const IMAGE_CAPABILITY_SCHEMA = 'aiworker-openclaw-image-capabilities/v3'
 const IDENTIFIER = /^[a-z][a-z0-9_-]{0,63}$/u
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/u
 const LEGACY_IMAGE_PLUGIN_LOAD_PATH = /(?:^|\/)ai-worker\/services\/openclaw-image-command\/releases\/[a-f0-9]{40}$/u
@@ -66,10 +66,12 @@ export function validateImageCapabilityManifest(value) {
   const stateRoots = new Set()
   const gatewayPorts = new Set()
   const attachments = value.attachments.map(attachment => {
-    if (!plainObject(attachment) || Object.keys(attachment).sort().join(',') !== 'agentId,gatewayPort,legacyScope,mediaRoot,profile,stateRoot'
+    if (!plainObject(attachment) || Object.keys(attachment).sort().join(',') !== 'agentId,gatewayPort,legacyScope,mediaRoot,profile,stateRoot,toolIds'
       || !IDENTIFIER.test(attachment.profile) || !IDENTIFIER.test(attachment.agentId)
       || !relativeMediaRoot(attachment.stateRoot) || !relativeMediaRoot(attachment.mediaRoot)
       || !Number.isSafeInteger(attachment.gatewayPort) || attachment.gatewayPort < 1024 || attachment.gatewayPort > 65535
+      || !Array.isArray(attachment.toolIds) || attachment.toolIds.length === 0
+      || attachment.toolIds.some(tool => !tools.includes(tool)) || new Set(attachment.toolIds).size !== attachment.toolIds.length
       || typeof attachment.legacyScope !== 'boolean'
       || profiles.has(attachment.profile) || agents.has(`${attachment.profile}\0${attachment.agentId}`)
       || roots.has(attachment.mediaRoot) || stateRoots.has(attachment.stateRoot)
@@ -79,7 +81,7 @@ export function validateImageCapabilityManifest(value) {
     roots.add(attachment.mediaRoot)
     stateRoots.add(attachment.stateRoot)
     gatewayPorts.add(attachment.gatewayPort)
-    return Object.freeze({ ...attachment })
+    return Object.freeze({ ...attachment, toolIds: Object.freeze([...attachment.toolIds]) })
   })
   const legacy = attachments.filter(attachment => attachment.legacyScope)
   if (legacy.length !== 1 || legacy[0].profile !== 'image-studio' || legacy[0].agentId !== 'image-studio') {
@@ -171,7 +173,7 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
       ? entry?.config?.targetAgentId === undefined
       : entry?.config?.targetAgentId === attachment.agentId
     const legacySourceRetired = legacyImagePluginLoadPaths(config, attachment).length === 0
-    return plugin.tools.every(tool => tools.alsoAllow?.includes(tool) === true)
+    return attachment.toolIds.every(tool => tools.alsoAllow?.includes(tool) === true)
       && plugin.retiredTools.every(tool => tools.alsoAllow?.includes(tool) !== true)
       && config.plugins.allow.includes(plugin.id)
       && entry?.enabled === true
@@ -196,7 +198,7 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
   const keptAllow = existingAllow.filter(tool => !plugin.retiredTools.includes(tool))
   agent.tools = {
     ...existingTools,
-    alsoAllow: [...keptAllow, ...plugin.tools.filter(tool => !keptAllow.includes(tool))],
+    alsoAllow: [...keptAllow, ...attachment.toolIds.filter(tool => !keptAllow.includes(tool))],
   }
   writeOpenClawAgentEntries(next, [agent])
 
@@ -287,7 +289,7 @@ export function attachmentEvidence(config, manifest, attachment) {
     agentId: attachment.agentId,
     pluginId: plugin.id,
     pluginVersion: plugin.version,
-    toolIds: plugin.tools,
+    toolIds: attachment.toolIds,
     attached: isImageCapabilityAttached(next, manifest, attachment),
     configSha256: sha256(JSON.stringify(stable(next))),
   }

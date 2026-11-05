@@ -258,13 +258,13 @@ function toolInventory(value, attachment, kind) {
   return result
 }
 
-function compareInventories(before, after, plugin, label) {
+function compareInventories(before, after, plugin, attachment, label) {
   const beforeById = new Map(before.map(item => [item.id, item]))
   const afterById = new Map(after.map(item => [item.id, item]))
   const removed = before.filter(item => !afterById.has(item.id))
   const added = after.filter(item => !beforeById.has(item.id))
   if (!same(removed.map(item => item.id).toSorted(), plugin.retiredTools.toSorted())
-    || !same(added.map(item => item.id).toSorted(), plugin.tools.toSorted())
+    || !same(added.map(item => item.id).toSorted(), attachment.toolIds.toSorted())
     || added.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)) {
     fail(`${label}_tool_delta_invalid`)
   }
@@ -275,10 +275,10 @@ function compareInventories(before, after, plugin, label) {
   return sha256(JSON.stringify(after))
 }
 
-function assertImageToolLoaded(inventory, plugin, label) {
-  const matches = inventory.filter(item => plugin.tools.includes(item.id))
-  if (matches.length !== plugin.tools.length
-    || new Set(matches.map(item => item.id)).size !== plugin.tools.length
+function assertImageToolLoaded(inventory, plugin, attachment, label) {
+  const matches = inventory.filter(item => attachment.toolIds.includes(item.id))
+  if (matches.length !== attachment.toolIds.length
+    || new Set(matches.map(item => item.id)).size !== attachment.toolIds.length
     || matches.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)
     || inventory.some(item => plugin.retiredTools.includes(item.id))) {
     fail(`${label}_image_tool_missing`)
@@ -534,7 +534,7 @@ function main() {
       token = gatewayToken(home, paths.config)
       const catalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment, operation: 'catalog', token }), attachment, 'catalog')
       let catalogSha256
-      try { catalogSha256 = assertImageToolLoaded(catalog, manifest.plugin, 'catalog') } catch (error) {
+      try { catalogSha256 = assertImageToolLoaded(catalog, manifest.plugin, attachment, 'catalog') } catch (error) {
         if (!attachment.legacyScope) throw error
         refreshPluginRegistry(home, openclaw, attachment)
         restartGatewayAndValidate(home, openclaw, attachment)
@@ -544,7 +544,7 @@ function main() {
         }
         const reconciledCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
           operation: 'catalog', token }), attachment, 'catalog')
-        catalogSha256 = assertImageToolLoaded(reconciledCatalog, manifest.plugin, 'catalog')
+        catalogSha256 = assertImageToolLoaded(reconciledCatalog, manifest.plugin, attachment, 'catalog')
         retainLatestBackups(home, attachment)
         writeReceipt(home, attachment, {
           schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
@@ -607,7 +607,7 @@ function main() {
     }
     const afterCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'catalog', token }), attachment, 'catalog')
-    const catalogSha256 = compareInventories(beforeCatalog, afterCatalog, manifest.plugin, 'catalog')
+    const catalogSha256 = compareInventories(beforeCatalog, afterCatalog, manifest.plugin, attachment, 'catalog')
     retainLatestBackups(home, attachment)
     writeReceipt(home, attachment, {
       schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',

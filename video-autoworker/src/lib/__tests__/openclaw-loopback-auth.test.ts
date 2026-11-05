@@ -56,6 +56,7 @@ describe('OpenClaw loopback authentication boundary', () => {
     '/api/n8n/director-extraction',
     '/api/n8n/director-extraction/review',
     '/api/n8n/runs/recovery',
+    '/api/n8n/video-cover-frames',
   ])(
     'admits %s only as a local POST through the existing OpenClaw boundary', pathname => {
       const endpoint = `http://127.0.0.1:3017${pathname}`

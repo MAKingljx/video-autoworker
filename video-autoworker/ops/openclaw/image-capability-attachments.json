@@ -1,14 +1,16 @@
 {
-  "schema": "aiworker-openclaw-image-capabilities/v2",
+  "schema": "aiworker-openclaw-image-capabilities/v3",
   "plugin": {
     "id": "aiworker-image-command",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "tools": [
       "aiworker_submit_creative_image",
       "aiworker_submit_designed_cover",
       "aiworker_submit_protected_cover",
       "aiworker_image_task",
-      "aiworker_image_help"
+      "aiworker_image_help",
+      "aiworker_video_cover_frames",
+      "aiworker_submit_protected_cover_from_frame"
     ],
     "retiredTools": ["aiworker_generate_image"]
   },
@@ -19,7 +21,14 @@
       "stateRoot": ".openclaw-image-studio",
       "gatewayPort": 19289,
       "mediaRoot": ".openclaw-image-studio/media",
-      "legacyScope": true
+      "legacyScope": true,
+      "toolIds": [
+        "aiworker_submit_creative_image",
+        "aiworker_submit_designed_cover",
+        "aiworker_submit_protected_cover",
+        "aiworker_image_task",
+        "aiworker_image_help"
+      ]
     },
     {
       "profile": "qwen-current",
@@ -27,7 +36,16 @@
       "stateRoot": ".openclaw-qwen-current",
       "gatewayPort": 18889,
       "mediaRoot": ".openclaw-qwen-current/media",
-      "legacyScope": false
+      "legacyScope": false,
+      "toolIds": [
+        "aiworker_submit_creative_image",
+        "aiworker_submit_designed_cover",
+        "aiworker_submit_protected_cover",
+        "aiworker_image_task",
+        "aiworker_image_help",
+        "aiworker_video_cover_frames",
+        "aiworker_submit_protected_cover_from_frame"
+      ]
     }
   ]
 }

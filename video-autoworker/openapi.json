@@ -12152,6 +12152,30 @@
         }
       }
     },
+    "/api/n8n/video-cover-frames": {
+      "post": {
+        "tags": ["n8n"],
+        "summary": "Read bounded original-video frame candidates for a completed learning segment",
+        "operationId": "readN8nVideoCoverFrameCandidates",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["query", "segmentIndexes"],
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "segmentIndexes": { "type": "array", "minItems": 1, "maxItems": 1,
+              "items": { "type": "integer", "minimum": 1 } }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "Three source-frame candidates from the selected successfully learned segment" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Video, learning result, segment, or source identity is ambiguous or unavailable" },
+          "503": { "description": "The controlled frame extraction service is temporarily unavailable" }
+        }
+      }
+    },
     "/api/n8n/director-extraction": {
       "post": {
         "tags": ["n8n"],

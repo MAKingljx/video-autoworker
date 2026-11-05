@@ -3,9 +3,11 @@ import { createHash } from 'node:crypto'
 import {
   createImageCommandTools,
   createImageSubmissionFence,
-  IMAGE_COMMAND_TOOL_NAMES,
+  imageCommandToolNamesForProfile,
 } from './image-command-tool.js'
 import { createImageJobClient } from './image-job-client.js'
+import { createVideoCoverFrameClient } from './video-cover-frame-client.js'
+import { createVideoFrameReferenceStore } from './video-frame-reference-store.js'
 import { createImageNotifications } from './image-notifications.js'
 import { imageSessionScope, resolveImagePluginBinding } from './image-profile-binding.js'
 import { createImageTranscriptReceiptBridge } from './image-transcript-receipt-bridge.js'
@@ -38,6 +40,9 @@ export function registerImageCommands(api, {
     errorMessage: 'image_transcript_receipt_bridge_not_started',
   })
   const client = createClient()
+  const frameToolsEnabled = binding.profile === 'qwen-current'
+  const videoFrameClient = frameToolsEnabled ? createVideoCoverFrameClient() : undefined
+  const videoFrameStore = frameToolsEnabled ? createVideoFrameReferenceStore({ stateDir: binding.stateDir }) : undefined
   const controller = createNotifications({ client, system: api.runtime.system, binding })
   const submissionFence = createImageSubmissionFence()
   const receiptBridge = receiptStore.tryGetRuntime() ?? createImageTranscriptReceiptBridge({
@@ -65,9 +70,13 @@ export function registerImageCommands(api, {
       const runtime = { controller, ready: undefined }
       ownedRuntime = runtime
       store.setRuntime(runtime)
-      runtime.ready = Promise.resolve().then(() => controller.start(context)).catch(error => {
+      runtime.ready = Promise.resolve().then(async () => {
+        await videoFrameStore?.start()
+        await controller.start(context)
+      }).catch(async error => {
         if (store.tryGetRuntime() === runtime) store.clearRuntime()
         ownedRuntime = undefined
+        await videoFrameStore?.stop().catch(() => {})
         throw error
       })
       return runtime.ready
@@ -76,13 +85,16 @@ export function registerImageCommands(api, {
       if (ownedRuntime && store.tryGetRuntime() === ownedRuntime) store.clearRuntime()
       await ownedRuntime?.ready.catch(() => {})
       await controller.stop()
+      await videoFrameStore?.stop()
       ownedRuntime = undefined
     },
   })
-  for (const name of IMAGE_COMMAND_TOOL_NAMES) {
+  for (const name of imageCommandToolNamesForProfile(binding.profile)) {
     api.registerTool(context => createImageCommandTools({
       context, binding,
       client,
+      videoFrameClient,
+      videoFrameStore,
       releaseReady: api.pluginConfig?.releaseReady === true,
       saveMedia,
       submissionFence,

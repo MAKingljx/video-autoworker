@@ -18,17 +18,20 @@ const IMAGE_TOOLS = [
   'aiworker_submit_protected_cover',
   'aiworker_image_task',
   'aiworker_image_help',
+  'aiworker_video_cover_frames',
+  'aiworker_submit_protected_cover_from_frame',
 ]
+const LEGACY_IMAGE_TOOLS = IMAGE_TOOLS.slice(0, 5)
 
 const manifest = validateImageCapabilityManifest({
-  schema: 'aiworker-openclaw-image-capabilities/v2',
+  schema: 'aiworker-openclaw-image-capabilities/v3',
   plugin: {
-    id: 'aiworker-image-command', version: '0.4.0', tools: IMAGE_TOOLS,
+    id: 'aiworker-image-command', version: '0.5.0', tools: IMAGE_TOOLS,
     retiredTools: ['aiworker_generate_image'],
   },
   attachments: [
-    { profile: 'image-studio', agentId: 'image-studio', stateRoot: '.openclaw-image-studio', gatewayPort: 19289, mediaRoot: '.openclaw-image-studio/media', legacyScope: true },
-    { profile: 'qwen-current', agentId: 'second-original', stateRoot: '.openclaw-qwen-current', gatewayPort: 18889, mediaRoot: '.openclaw-qwen-current/media', legacyScope: false },
+    { profile: 'image-studio', agentId: 'image-studio', stateRoot: '.openclaw-image-studio', gatewayPort: 19289, mediaRoot: '.openclaw-image-studio/media', legacyScope: true, toolIds: LEGACY_IMAGE_TOOLS },
+    { profile: 'qwen-current', agentId: 'second-original', stateRoot: '.openclaw-qwen-current', gatewayPort: 18889, mediaRoot: '.openclaw-qwen-current/media', legacyScope: false, toolIds: IMAGE_TOOLS },
   ],
 })
 
@@ -110,6 +113,7 @@ test('uses the existing image-studio binding without plugin-specific config befo
   ])
   assert.deepEqual(renderImageCapabilityPatch(before, manifest, attachment).plugins.load, { paths: null })
   assert.equal(isImageCapabilityAttached(after, manifest, attachment), true)
+  assert.deepEqual(attachment.toolIds, LEGACY_IMAGE_TOOLS)
 })
 
 test('refuses conflicting target-agent ownership', () => {

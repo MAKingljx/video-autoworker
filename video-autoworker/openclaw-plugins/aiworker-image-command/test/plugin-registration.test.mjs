@@ -6,7 +6,8 @@ import { join } from 'node:path'
 
 import { registerImageCommands } from '../lib/plugin-registration.js'
 import { createImageNotifications } from '../lib/image-notifications.js'
-import { IMAGE_COMMAND_TOOL_NAMES, IMAGE_SUBMIT_CREATIVE_TOOL_NAME } from '../lib/image-command-tool.js'
+import { IMAGE_COMMAND_TOOL_NAMES, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, imageCommandToolNamesForProfile,
+  IMAGE_VIDEO_FRAMES_TOOL_NAME, IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME } from '../lib/image-command-tool.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
 const jobId = '3'.repeat(32)
@@ -196,7 +197,9 @@ test('qwen-current can bind the shared plugin to second-original without inherit
       createClient: () => ({ submit: async () => ({ jobId, currentState: 'QUEUED' }) }),
     })
     await host.services[0].start({ stateDir: dir })
-    assert.deepEqual(host.toolFactories.map(entry => entry.options.names[0]), IMAGE_COMMAND_TOOL_NAMES)
+    assert.deepEqual(host.toolFactories.map(entry => entry.options.names[0]), imageCommandToolNamesForProfile('qwen-current'))
+    assert.ok(host.toolFactories.some(entry => entry.options.names.includes(IMAGE_VIDEO_FRAMES_TOOL_NAME)))
+    assert.ok(host.toolFactories.some(entry => entry.options.names.includes(IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME)))
     const accepted = await registeredTool(host, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
       .execute('qwen-tool', params)
     assert.equal(accepted.details.jobId, jobId)
