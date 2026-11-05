@@ -2,7 +2,17 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 
-import { createImageCommandTool, imageSessionScope, imageRequestKey, normalizeImageRequest } from '../lib/image-command-tool.js'
+import {
+  createImageCommandTool,
+  createImageCommandTools,
+  createImageSubmissionFence,
+  IMAGE_HELP_TOOL_NAME,
+  IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
+  IMAGE_TASK_TOOL_NAME,
+  imageSessionScope,
+  imageRequestKey,
+  normalizeImageRequest,
+} from '../lib/image-command-tool.js'
 import { createImageJobClient, IMAGE_SERVICE_ORIGIN, ImageServiceError } from '../lib/image-job-client.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
@@ -15,6 +25,60 @@ const params = { action: 'submit', prompt: '用原图生成冷冻人的中文封
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0])
 const digest = createHash('sha256').update(png).digest('hex')
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+
+function actionTool(tools, name) {
+  const tool = tools.find(item => item.name === name)
+  assert.ok(tool, `missing tool ${name}`)
+  return tool
+}
+
+test('action-specific model contracts make every image submission field explicit', async () => {
+  let submitted = 0
+  const fence = createImageSubmissionFence()
+  const tools = createImageCommandTools({ context, submissionFence: fence, client: {
+    submit: async () => { submitted += 1; return queued },
+  } })
+  const creative = actionTool(tools, IMAGE_SUBMIT_CREATIVE_TOOL_NAME)
+  const task = actionTool(tools, IMAGE_TASK_TOOL_NAME)
+  const help = actionTool(tools, IMAGE_HELP_TOOL_NAME)
+  assert.deepEqual(creative.parameters.required, ['prompt', 'images'])
+  assert.deepEqual(task.parameters.required, ['action', 'jobId'])
+  assert.equal(creative.catalogMode, undefined)
+  assert.equal(task.catalogMode, 'direct-only')
+
+  const first = await creative.execute('invalid-submit', {})
+  assert.equal(first.isError, true)
+  assert.equal(first.details.errorCode, 'IMAGE_REQUEST_INVALID')
+  assert.equal(first.details.nextAction, 'PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS')
+  const second = await creative.execute('invalid-submit-retry', {})
+  assert.equal(second.isError, true)
+  assert.equal(second.details.errorCode, 'IMAGE_REPEAT_BLOCKED')
+  assert.equal(second.details.nextAction, 'REPORT_IMAGE_SUBMISSION_BLOCKED')
+  assert.equal(submitted, 0)
+
+  const instructions = await help.execute('help', {})
+  assert.equal(instructions.details.nextAction, 'USE_ACTION_SPECIFIC_IMAGE_TOOL')
+  assert.match(instructions.content[0].text, /aiworker_submit_creative_image/u)
+})
+
+test('strict creative submission and task follow-up reuse the same scoped application executor', async () => {
+  let submitPayload
+  const tools = createImageCommandTools({ context, client: {
+    submit: async payload => { submitPayload = payload; return queued },
+    status: async () => ({ jobId, currentState: 'RUNNING', completedSteps: 7, totalSteps: 40 }),
+  } })
+  const creative = actionTool(tools, IMAGE_SUBMIT_CREATIVE_TOOL_NAME)
+  const accepted = await creative.execute('creative-submit', { prompt: params.prompt, images: params.images })
+  assert.equal(submitPayload.scope, scope)
+  assert.equal(submitPayload.creativeRedraw, true)
+  assert.equal(accepted.details.jobId, jobId)
+  assert.equal(accepted.details.nextAction, 'WAIT_FOR_IMAGE_NOTIFICATION')
+
+  const status = await actionTool(tools, IMAGE_TASK_TOOL_NAME)
+    .execute('status', { action: 'status', jobId })
+  assert.equal(status.details.currentState, 'RUNNING')
+  assert.equal(status.details.nextAction, 'WAIT_FOR_IMAGE_NOTIFICATION')
+})
 
 test('scope comes only from the matching trusted agent and session', () => {
   assert.equal(scope, createHash('sha256').update('image-studio\0agent:image-studio:main').digest('hex'))

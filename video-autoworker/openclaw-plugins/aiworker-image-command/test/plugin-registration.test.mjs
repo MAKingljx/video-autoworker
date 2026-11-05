@@ -6,10 +6,11 @@ import { join } from 'node:path'
 
 import { registerImageCommands } from '../lib/plugin-registration.js'
 import { createImageNotifications } from '../lib/image-notifications.js'
+import { IMAGE_COMMAND_TOOL_NAMES, IMAGE_SUBMIT_CREATIVE_TOOL_NAME } from '../lib/image-command-tool.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
 const jobId = '3'.repeat(32)
-const params = { action: 'submit', prompt: '完整中文封面', creativeRedraw: true, images: ['/approved/source.png'] }
+const params = { prompt: '完整中文封面', images: ['/approved/source.png'] }
 
 function namedStoreFactory() {
   // The public named-slot semantics of OpenClaw's runtime-store. Separate
@@ -29,11 +30,17 @@ function namedStoreFactory() {
 
 function api(mode, system = { enqueueSystemEvent() {}, requestHeartbeatNow() {} }) {
   const result = { registrationMode: mode, runtime: { system }, pluginConfig: { releaseReady: true },
-    services: [], toolFactory: undefined,
+    services: [], toolFactories: [],
     registerService(service) { result.services.push(service) },
-    registerTool(factory) { result.toolFactory = factory },
+    registerTool(factory, options) { result.toolFactories.push({ factory, options }) },
   }
   return result
+}
+
+function registeredTool(host, name, context) {
+  const registration = host.toolFactories.find(entry => entry.options.names.includes(name))
+  assert.ok(registration, `missing registration for ${name}`)
+  return registration.factory(context)
 }
 
 async function fixture(run) {
@@ -72,7 +79,8 @@ test('full startup and separate tool-discovery registrations share the running t
     register(startup, dependencies)
     await startup.services[0].start({ stateDir: dir })
     register(discovery, dependencies)
-    const answer = await discovery.toolFactory(context).execute('separate-tool-registry', params)
+    const answer = await registeredTool(discovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
+      .execute('separate-tool-registry', params)
     assert.equal(answer.details.jobId, jobId)
     assert.equal(answer.details.notificationErrorCode, undefined)
     const stored = JSON.parse(await readFile(join(dir, 'aiworker-image-command', 'notifications.json'), 'utf8'))
@@ -95,7 +103,8 @@ test('an unstarted discovery cleanup cannot clear the startup owner', async () =
     await startup.services[0].start({ stateDir: dir })
     register(discovery, dependencies)
     await discovery.services[0].stop()
-    const answer = await discovery.toolFactory(context).execute('after-unowned-stop', params)
+    const answer = await registeredTool(discovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
+      .execute('after-unowned-stop', params)
     assert.equal(answer.details.notificationErrorCode, undefined)
   })
 })
@@ -110,7 +119,8 @@ test('stopping the startup owner clears the slot and keeps accepted job feedback
     await startup.services[0].start({ stateDir: dir })
     register(discovery, dependencies)
     await startup.services[0].stop()
-    const answer = await discovery.toolFactory(context).execute('after-owned-stop', params)
+    const answer = await registeredTool(discovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
+      .execute('after-owned-stop', params)
     assert.equal(answer.details.jobId, jobId)
     assert.equal(answer.details.notificationErrorCode, 'IMAGE_NOTIFICATION_UNAVAILABLE')
   })
@@ -126,7 +136,8 @@ test('same process slots are isolated by trusted profile state root', async () =
     register(startup, { ...base, env })
     await startup.services[0].start({ stateDir: dir })
     register(otherDiscovery, { ...base, env: envOther })
-    const answer = await otherDiscovery.toolFactory(context).execute('wrong-profile-state', params)
+    const answer = await registeredTool(otherDiscovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
+      .execute('wrong-profile-state', params)
     assert.equal(answer.details.notificationErrorCode, 'IMAGE_NOTIFICATION_UNAVAILABLE')
     assert.throws(() => registerImageCommands(api('tool-discovery'), { ...base,
       env: { ...env, OPENCLAW_PROFILE: 'qwen-current' } }), /image_notification_profile_binding_invalid/u)
@@ -173,9 +184,12 @@ test('qwen-current can bind the shared plugin to second-original without inherit
       createClient: () => ({ submit: async () => ({ jobId, currentState: 'QUEUED' }) }),
     })
     await host.services[0].start({ stateDir: dir })
-    const accepted = await host.toolFactory(context).execute('qwen-tool', params)
+    assert.deepEqual(host.toolFactories.map(entry => entry.options.names[0]), IMAGE_COMMAND_TOOL_NAMES)
+    const accepted = await registeredTool(host, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
+      .execute('qwen-tool', params)
     assert.equal(accepted.details.jobId, jobId)
-    assert.equal(host.toolFactory({ agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }), null)
+    assert.equal(registeredTool(host, IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
+      { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }), null)
   } finally {
     await host.services[0]?.stop()
     await rm(dir, { recursive: true, force: true })

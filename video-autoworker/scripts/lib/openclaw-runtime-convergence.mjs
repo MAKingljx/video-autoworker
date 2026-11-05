@@ -18,6 +18,7 @@ import {
 } from './openclaw-tool-capability-fingerprint.mjs'
 
 const GATEWAY_PORT = 18889
+const TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/u
 
 function fail(message) {
   throw new Error(message)
@@ -48,6 +49,17 @@ function same(left, right) {
   return JSON.stringify(stable(left)) === JSON.stringify(stable(right))
 }
 
+function descriptorTools(descriptor) {
+  const tools = Array.isArray(descriptor?.tools)
+    ? descriptor.tools
+    : descriptor?.tool === undefined ? [] : [descriptor.tool]
+  if (tools.length === 0 || tools.some(tool => typeof tool !== 'string' || !TOOL_NAME.test(tool))
+    || new Set(tools).size !== tools.length) {
+    fail(`required plugin tools are invalid: ${descriptor?.id ?? 'unknown'}`)
+  }
+  return tools
+}
+
 function validateManifest(pathname) {
   const manifest = readJson(pathname, 'runtime convergence manifest')
   const expected = {
@@ -58,9 +70,9 @@ function validateManifest(pathname) {
       set: {
         model: 'qwen36-tools-local/default_model',
         timeoutSeconds: 240,
-        keepRecentTokens: 8_192,
-        recentTurnsPreserve: 4,
-        maxActiveTranscriptBytes: '16mb',
+        keepRecentTokens: 4_096,
+        recentTurnsPreserve: 3,
+        maxActiveTranscriptBytes: '256kb',
         midTurnPrecheck: { enabled: true },
       },
       remove: ['identifierInstructions', 'truncateAfterCompaction'],
@@ -79,12 +91,6 @@ function validateManifest(pathname) {
         tool: 'aiworker_director_brain',
         requiredHooks: ['before_agent_reply', 'before_message_write', 'tool_result_persist'],
         requiredHookConfig: { allowConversationAccess: true },
-        requiredConfig: { releaseReady: true, targetAgentId: 'second-original' },
-      },
-      {
-        id: 'aiworker-image-command',
-        version: '0.3.0',
-        tool: 'aiworker_generate_image',
         requiredConfig: { releaseReady: true, targetAgentId: 'second-original' },
       },
     ],
@@ -155,11 +161,12 @@ function validatePlugin(config, stateDir, descriptor) {
   const versionAccepted = descriptor.version !== undefined
     ? pluginManifest.version === descriptor.version
     : Array.isArray(compatibleVersions) && compatibleVersions.includes(pluginManifest.version)
+  const tools = descriptorTools(descriptor)
   if (pluginManifest.id !== descriptor.id
     || !versionAccepted
     || !Array.isArray(pluginManifest?.contracts?.tools)
-    || !pluginManifest.contracts.tools.includes(descriptor.tool)
-    || pluginManifest?.toolMetadata?.[descriptor.tool]?.optional !== true) {
+    || !tools.every(tool => pluginManifest.contracts.tools.includes(tool))
+    || !tools.every(tool => pluginManifest?.toolMetadata?.[tool]?.optional === true)) {
     fail(`required optional plugin contract is not ready: ${descriptor.id}`)
   }
   const packagePath = path.join(stateDir, 'extensions', descriptor.id, 'package.json')
@@ -359,14 +366,17 @@ async function assertNoToolRegression(
   if (!same(baseline.catalogNotices, catalogNotices) || !same(baseline.effectiveNotices, effectiveNotices)) {
     fail('tool policy context changed after the pre-install baseline')
   }
-  const allowedAdditions = new Set(manifest.requiredPlugins.map(plugin => plugin.tool))
+  const allowedAdditions = new Set(manifest.requiredPlugins.flatMap(descriptorTools))
+  const allowedRemovals = new Set(manifest.requiredPlugins.flatMap(plugin => (
+    Array.isArray(plugin.replacesTools) ? plugin.replacesTools : []
+  )))
   const compare = async (before, after, label, kind) => {
     const definitionUpgrades = []
     const afterById = new Map(after.map(item => [item.id, item]))
     const beforeById = new Map(before.map(item => [item.id, item]))
     const removed = before.filter(item => !afterById.has(item.id)).map(item => item.id)
     const added = after.filter(item => !beforeById.has(item.id)).map(item => item.id)
-    if (removed.length > 0 || added.some(id => !allowedAdditions.has(id))) {
+    if (removed.some(id => !allowedRemovals.has(id)) || added.some(id => !allowedAdditions.has(id))) {
       fail(`${label} changed outside the approved plugin additions`)
     }
     for (const item of before) {
@@ -641,7 +651,7 @@ function validateRuntimeInspection(value, descriptor) {
     ? value?.plugin?.version === descriptor.version
     : descriptor.compatibleVersions?.includes(value?.plugin?.version)
   if (value?.plugin?.id !== descriptor.id || value.plugin.status !== 'loaded'
-    || !versionAccepted || !same(toolNames, [descriptor.tool])
+    || !versionAccepted || !same(toolNames, descriptorTools(descriptor).toSorted())
     || typedHookNames === null
     || !same(typedHookNames, (descriptor.requiredHooks || []).toSorted())
     || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')) {
@@ -665,16 +675,20 @@ function validateRuntimeCatalog(value, manifest, descriptor) {
     fail('director-brain runtime catalog is invalid')
   }
   for (const required of manifest.requiredPlugins) {
-    if (toolIds.filter(id => id === required.tool).length !== 1) {
-      fail(`required runtime tool is missing: ${required.tool}`)
+    for (const toolName of descriptorTools(required)) {
+      if (toolIds.filter(id => id === toolName).length !== 1) {
+        fail(`required runtime tool is missing: ${toolName}`)
+      }
     }
   }
-  const matches = bindings.filter(({ tool }) => tool.id === descriptor.tool)
-  if (matches.length !== 1) fail('director-brain runtime catalog is invalid')
-  const { group, tool } = matches[0]
-  if (group?.pluginId !== descriptor.id || group?.source !== 'plugin'
-    || tool?.pluginId !== descriptor.id || tool?.source !== 'plugin' || tool?.optional !== true) {
-    fail('director-brain runtime catalog binding is invalid')
+  const descriptorToolNames = descriptorTools(descriptor)
+  const matches = bindings.filter(({ tool }) => descriptorToolNames.includes(tool.id))
+  if (matches.length !== descriptorToolNames.length) fail('director-brain runtime catalog is invalid')
+  for (const { group, tool } of matches) {
+    if (group?.pluginId !== descriptor.id || group?.source !== 'plugin'
+      || tool?.pluginId !== descriptor.id || tool?.source !== 'plugin' || tool?.optional !== true) {
+      fail('director-brain runtime catalog binding is invalid')
+    }
   }
   const capabilities = toolCapabilitiesFromInventory(
     value, 'director-brain runtime catalog', manifest.agent.id, 'catalog',
@@ -704,8 +718,10 @@ function validateEffectiveInventory(value, manifest) {
     fail('effective tool inventory is invalid')
   }
   for (const required of manifest.requiredPlugins) {
-    if (toolIds.filter(id => id === required.tool).length !== 1) {
-      fail(`required effective tool is missing: ${required.tool}`)
+    for (const toolName of descriptorTools(required)) {
+      if (toolIds.filter(id => id === toolName).length !== 1) {
+        fail(`required effective tool is missing: ${toolName}`)
+      }
     }
   }
   return {

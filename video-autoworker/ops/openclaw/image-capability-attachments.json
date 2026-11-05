@@ -1,9 +1,16 @@
 {
-  "schema": "aiworker-openclaw-image-capabilities/v1",
+  "schema": "aiworker-openclaw-image-capabilities/v2",
   "plugin": {
     "id": "aiworker-image-command",
-    "version": "0.3.0",
-    "tool": "aiworker_generate_image"
+    "version": "0.4.0",
+    "tools": [
+      "aiworker_submit_creative_image",
+      "aiworker_submit_designed_cover",
+      "aiworker_submit_protected_cover",
+      "aiworker_image_task",
+      "aiworker_image_help"
+    ],
+    "retiredTools": ["aiworker_generate_image"]
   },
   "attachments": [
     {

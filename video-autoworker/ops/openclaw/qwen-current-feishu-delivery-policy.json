@@ -1,0 +1,8 @@
+{
+  "schema": "video-autoworker-openclaw-feishu-delivery-policy/v1",
+  "profile": "qwen-current",
+  "channel": "feishu",
+  "streaming": {
+    "mode": "off"
+  }
+}

@@ -4,7 +4,25 @@ import { isAbsolute, normalize } from 'node:path'
 import { createImageJobClient, ImageServiceError, normalizeImageInspection } from './image-job-client.js'
 import { imageSessionScope, LEGACY_IMAGE_PROFILE, legacyImageBinding } from './image-profile-binding.js'
 
-export const IMAGE_COMMAND_TOOL_NAME = 'aiworker_generate_image'
+// The previous public tool combined submission, inspection and cancellation
+// behind one `action` field. Its JSON schema could only require `action`, while
+// the application correctly required more fields for a submission. Local tool
+// callers could therefore emit a syntactically valid but business-invalid
+// `{ action: 'submit' }`. Keep the shared executor below, but expose only
+// action-specific contracts to OpenClaw.
+const INTERNAL_IMAGE_COMMAND_TOOL_NAME = 'aiworker_image_executor'
+export const IMAGE_SUBMIT_CREATIVE_TOOL_NAME = 'aiworker_submit_creative_image'
+export const IMAGE_SUBMIT_DESIGN_TOOL_NAME = 'aiworker_submit_designed_cover'
+export const IMAGE_SUBMIT_PROTECTED_TOOL_NAME = 'aiworker_submit_protected_cover'
+export const IMAGE_TASK_TOOL_NAME = 'aiworker_image_task'
+export const IMAGE_HELP_TOOL_NAME = 'aiworker_image_help'
+export const IMAGE_COMMAND_TOOL_NAMES = Object.freeze([
+  IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
+  IMAGE_SUBMIT_DESIGN_TOOL_NAME,
+  IMAGE_SUBMIT_PROTECTED_TOOL_NAME,
+  IMAGE_TASK_TOOL_NAME,
+  IMAGE_HELP_TOOL_NAME,
+])
 export const IMAGE_AGENT_ID = LEGACY_IMAGE_PROFILE
 export { imageSessionScope }
 const JOB_ID = /^[0-9a-f]{32}$/u
@@ -59,6 +77,50 @@ const PARAMETERS = {
     seed: { type: 'integer', minimum: 0, maximum: 2147483647 },
   },
 }
+
+const CREATIVE_SUBMIT_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['prompt', 'images'],
+  properties: {
+    prompt: PARAMETERS.properties.prompt,
+    images: PARAMETERS.properties.images,
+    width: PARAMETERS.properties.width,
+    height: PARAMETERS.properties.height,
+    steps: PARAMETERS.properties.steps,
+    guidance: PARAMETERS.properties.guidance,
+    seed: PARAMETERS.properties.seed,
+  },
+}
+
+const DESIGN_SUBMIT_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['design', 'images'],
+  properties: {
+    design: PARAMETERS.properties.design,
+    images: PARAMETERS.properties.images,
+    width: PARAMETERS.properties.width,
+    height: PARAMETERS.properties.height,
+    steps: PARAMETERS.properties.steps,
+    guidance: PARAMETERS.properties.guidance,
+    seed: PARAMETERS.properties.seed,
+  },
+}
+
+const PROTECTED_SUBMIT_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['protected', 'images'],
+  properties: {
+    protected: PARAMETERS.properties.protected,
+    images: { ...PARAMETERS.properties.images, maxItems: 1 },
+  },
+}
+
+const TASK_PARAMETERS = {
+  type: 'object', additionalProperties: false, required: ['action', 'jobId'],
+  properties: {
+    action: { type: 'string', enum: ['status', 'result', 'inspect', 'cancel'] },
+    jobId: PARAMETERS.properties.jobId,
+  },
+}
+
+const HELP_PARAMETERS = { type: 'object', additionalProperties: false, properties: {} }
 
 function plainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -266,7 +328,7 @@ export function createImageCommandTool({ context, binding = legacyImageBinding()
   }
   function isErrorNotice(r) { return ['FAILED', 'CANCELLED', 'RECONCILE_REQUIRED'].includes(r.currentState) }
   return {
-    name: IMAGE_COMMAND_TOOL_NAME, label: 'H1 图片生成',
+    name: INTERNAL_IMAGE_COMMAND_TOOL_NAME, label: 'H1 图片生成',
     // Tool Search's generic JSON bridge cannot preserve native image blocks.
     // This public SDK contract changes presentation, not the tool allowlist.
     catalogMode: 'direct-only',
@@ -333,4 +395,184 @@ export function createImageCommandTool({ context, binding = legacyImageBinding()
       }
     },
   }
+}
+
+const NO_PROGRESS_SUBMISSION_CODES = new Set([
+  'IMAGE_REQUEST_INVALID',
+  'IMAGE_REQUEST_ABORTED',
+  'IMAGE_SERVICE_UNAVAILABLE',
+  'IMAGE_RESPONSE_INVALID',
+  'IMAGE_RESPONSE_TOO_LARGE',
+])
+
+function submissionSignature(scope, toolName, request) {
+  return createHash('sha256').update(`${scope}\0${toolName}\0${canonicalJson(request)}`).digest('hex')
+}
+
+// This is intentionally memory-only. It scopes a no-progress fence to one
+// trusted image session and one agent turn; it never persists prompts, source
+// paths or image data and cannot change application-owned job state.
+export function createImageSubmissionFence({ maxEntries = 256 } = {}) {
+  const entries = new Map()
+  function prune() {
+    while (entries.size > maxEntries) entries.delete(entries.keys().next().value)
+  }
+  return Object.freeze({
+    isBlocked(scope, toolName, request) {
+      return entries.has(submissionSignature(scope, toolName, request))
+    },
+    block(scope, toolName, request) {
+      entries.set(submissionSignature(scope, toolName, request), true)
+      prune()
+    },
+  })
+}
+
+function withSafeDetails(answer, details) {
+  return {
+    ...answer,
+    details: { ...(plainObject(answer?.details) ? answer.details : {}), ...details },
+  }
+}
+
+function submissionFailure({ errorCode, blocked = false } = {}) {
+  const code = blocked ? 'IMAGE_REPEAT_BLOCKED' : errorCode || 'IMAGE_REQUEST_INVALID'
+  const nextAction = blocked
+    ? 'REPORT_IMAGE_SUBMISSION_BLOCKED'
+    : code === 'IMAGE_REQUEST_INVALID'
+      ? 'PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS'
+      : 'REPORT_IMAGE_SUBMISSION_UNCONFIRMED'
+  const text = blocked
+    ? '本轮相同图片提交没有取得进展，已停止重复调用。请如实说明失败原因，不要继续提交。'
+    : code === 'IMAGE_REQUEST_INVALID'
+      ? '图片请求不完整，未提交到图片服务。请提供指定图片和完整生成要求。'
+      : '暂时无法确认图片是否受理，本轮已停止重复提交。请先如实报告当前状态。'
+  return { ...result(text, { errorCode: code, nextAction }), isError: true }
+}
+
+function submissionNextAction(receipt) {
+  if (receipt?.currentState === 'QUEUED' || receipt?.currentState === 'RUNNING') return 'WAIT_FOR_IMAGE_NOTIFICATION'
+  if (receipt?.currentState === 'GENERATED_PENDING_REVIEW') return 'READ_IMAGE_RESULT'
+  return 'REPORT_IMAGE_TASK_STATE'
+}
+
+function taskNextAction(action, receipt) {
+  if (action === 'cancel') return receipt?.currentState === 'CANCEL_REQUESTED'
+    ? 'WAIT_FOR_IMAGE_CANCELLATION' : 'REPORT_IMAGE_TASK_STATE'
+  if (action === 'result' && receipt?.currentState === 'GENERATED_PENDING_REVIEW') return 'INSPECT_IMAGE_RESULT'
+  if (action === 'inspect') return 'REPORT_IMAGE_INSPECTION'
+  return submissionNextAction(receipt)
+}
+
+function submitRequest(toolName, params) {
+  if (!plainObject(params)) return null
+  if (toolName === IMAGE_SUBMIT_CREATIVE_TOOL_NAME) {
+    return normalizeImageRequest({ ...params, action: 'submit', creativeRedraw: true })
+  }
+  if (toolName === IMAGE_SUBMIT_DESIGN_TOOL_NAME) {
+    return normalizeImageRequest({ ...params, action: 'submit', creativeRedraw: true })
+  }
+  if (toolName === IMAGE_SUBMIT_PROTECTED_TOOL_NAME) {
+    return normalizeImageRequest({ ...params, action: 'submit' })
+  }
+  return null
+}
+
+function submissionDefinition({ name, label, description, parameters }) {
+  return { name, label, description, parameters, executionMode: 'sequential' }
+}
+
+function createImageHelpTool() {
+  return {
+    name: IMAGE_HELP_TOOL_NAME,
+    label: '图片工具说明',
+    description: '说明 H1 图片工具的严格提交方式。只返回安全用法，不创建图片任务。',
+    parameters: HELP_PARAMETERS,
+    executionMode: 'sequential',
+    async execute() {
+      return result(
+        '提交原创图用 aiworker_submit_creative_image；设计封面用 aiworker_submit_designed_cover；保留原片用 aiworker_submit_protected_cover。三者都会返回任务编号。后续只能用 aiworker_image_task 携带该任务编号查询、读取、检查或取消。提交未返回任务编号时不得重试。',
+        { nextAction: 'USE_ACTION_SPECIFIC_IMAGE_TOOL' },
+      )
+    },
+  }
+}
+
+// Public image tools use strict action-specific schemas. The old mixed-action
+// executor remains private to this module so every path still reaches the same
+// application queue, idempotency rules, notification service and media bridge.
+export function createImageCommandTools({ context, binding = legacyImageBinding(), client = createImageJobClient(), saveMedia,
+  releaseReady = true, onSubmitted, onReceiptRead, submissionFence = createImageSubmissionFence() } = {}) {
+  const scope = imageSessionScope(context, binding)
+  if (!scope) return []
+  const executor = createImageCommandTool({ context, binding, client, saveMedia, releaseReady, onSubmitted, onReceiptRead })
+  if (!executor) return []
+
+  const submit = definition => ({
+    ...definition,
+    async execute(toolCallId, params, signal) {
+      const request = submitRequest(definition.name, params)
+      if (!request || !safeString(toolCallId, 4096)) {
+        const raw = plainObject(params) ? params : {}
+        if (submissionFence.isBlocked(scope, definition.name, raw)) return submissionFailure({ blocked: true })
+        submissionFence.block(scope, definition.name, raw)
+        return submissionFailure({ errorCode: 'IMAGE_REQUEST_INVALID' })
+      }
+      if (submissionFence.isBlocked(scope, definition.name, request)) return submissionFailure({ blocked: true })
+      const answer = await executor.execute(toolCallId, request, signal)
+      const details = plainObject(answer?.details) ? answer.details : {}
+      if (!details.jobId && NO_PROGRESS_SUBMISSION_CODES.has(details.errorCode)) {
+        submissionFence.block(scope, definition.name, request)
+        return withSafeDetails(answer, {
+          errorCode: details.errorCode,
+          nextAction: details.errorCode === 'IMAGE_REQUEST_INVALID'
+            ? 'PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS'
+            : 'REPORT_IMAGE_SUBMISSION_UNCONFIRMED',
+        })
+      }
+      return withSafeDetails(answer, { nextAction: submissionNextAction(details) })
+    },
+  })
+
+  const task = {
+    name: IMAGE_TASK_TOOL_NAME,
+    label: 'H1 图片任务',
+    // Result and inspection can carry native image blocks, so this capability
+    // stays directly visible to the model rather than passing through the
+    // generic tool-search JSON bridge.
+    catalogMode: 'direct-only',
+    description: '仅对提交工具返回的图片任务编号执行 status、result、inspect 或 cancel。不得用它再次提交图片。',
+    parameters: TASK_PARAMETERS,
+    executionMode: 'sequential',
+    async execute(toolCallId, params, signal) {
+      const request = normalizeImageRequest(params)
+      if (!request || request.action === 'submit' || !safeString(toolCallId, 4096)) {
+        return result('图片任务请求不完整，请提供工具返回的任务编号。', {
+          errorCode: 'IMAGE_TASK_REQUEST_INVALID', nextAction: 'USE_RETURNED_IMAGE_JOB_ID',
+        })
+      }
+      const answer = await executor.execute(toolCallId, request, signal)
+      const details = plainObject(answer?.details) ? answer.details : {}
+      return withSafeDetails(answer, {
+        nextAction: details.errorCode ? 'REPORT_IMAGE_TASK_FAILURE' : taskNextAction(request.action, details),
+      })
+    },
+  }
+
+  return [
+    submit(submissionDefinition({
+      name: IMAGE_SUBMIT_CREATIVE_TOOL_NAME, label: 'H1 原创图片提交', parameters: CREATIVE_SUBMIT_PARAMETERS,
+      description: '仅用于已明确授权的整图创意重绘。必须提供至少一张获准参考图片和完整 prompt；成功只返回任务编号，随后等待完成提醒。',
+    })),
+    submit(submissionDefinition({
+      name: IMAGE_SUBMIT_DESIGN_TOOL_NAME, label: 'H1 设计封面提交', parameters: DESIGN_SUBMIT_PARAMETERS,
+      description: '仅用于已部署封面设计方案。必须提供参考图片和完整 design；成功只返回任务编号，随后等待完成提醒。',
+    })),
+    submit(submissionDefinition({
+      name: IMAGE_SUBMIT_PROTECTED_TOOL_NAME, label: 'H1 原片保护封面提交', parameters: PROTECTED_SUBMIT_PARAMETERS,
+      description: '默认视频封面工具。必须提供一张真实原图和完整 protected 编辑计划；成功只返回任务编号，随后等待完成提醒。',
+    })),
+    task,
+    createImageHelpTool(),
+  ]
 }

@@ -1,11 +1,23 @@
 {
   "id": "aiworker-image-command",
   "name": "AI-worker Image Command",
-  "version": "0.3.0",
-  "description": "Thin protected-cover, image submission, native-size media, scoped inspection and cancellation for one explicitly bound OpenClaw agent.",
+  "version": "0.4.0",
+  "description": "Action-specific protected-cover and image task commands for one explicitly bound OpenClaw agent and one shared image service.",
   "activation": { "onStartup": true, "onCapabilities": ["tool"] },
-  "contracts": { "tools": ["aiworker_generate_image"] },
-  "toolMetadata": { "aiworker_generate_image": { "optional": true } },
+  "contracts": { "tools": [
+    "aiworker_submit_creative_image",
+    "aiworker_submit_designed_cover",
+    "aiworker_submit_protected_cover",
+    "aiworker_image_task",
+    "aiworker_image_help"
+  ] },
+  "toolMetadata": {
+    "aiworker_submit_creative_image": { "optional": true },
+    "aiworker_submit_designed_cover": { "optional": true },
+    "aiworker_submit_protected_cover": { "optional": true },
+    "aiworker_image_task": { "optional": true },
+    "aiworker_image_help": { "optional": true }
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,

@@ -51,7 +51,13 @@ class ProfileInstallTests(unittest.TestCase):
         self.assertEqual(list(config["agents"]["entries"]), ["image-studio"])
         self.assertEqual(agent["workspace"], "/Users/h1/ai-worker/workspaces/image-studio")
         self.assertEqual(agent["agentDir"], "/Users/h1/.openclaw-image-studio/agents/image-studio/agent")
-        self.assertEqual(agent["tools"]["alsoAllow"], ["aiworker_generate_image"])
+        self.assertEqual(agent["tools"]["alsoAllow"], [
+            "aiworker_submit_creative_image",
+            "aiworker_submit_designed_cover",
+            "aiworker_submit_protected_cover",
+            "aiworker_image_task",
+            "aiworker_image_help",
+        ])
         self.assertIn("exec", agent["tools"]["deny"])
         self.assertFalse(config["browser"]["enabled"])
         self.assertFalse(config["cron"]["enabled"])

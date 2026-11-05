@@ -17,7 +17,13 @@
       "name": "图片工作室",
       "tools": {
         "profile": "minimal",
-        "alsoAllow": ["aiworker_generate_image"],
+        "alsoAllow": [
+          "aiworker_submit_creative_image",
+          "aiworker_submit_designed_cover",
+          "aiworker_submit_protected_cover",
+          "aiworker_image_task",
+          "aiworker_image_help"
+        ],
         "deny": ["exec", "process", "browser", "nodes", "message", "sessions_spawn", "sessions_send", "cron", "gateway"]
       }
     }}

@@ -6,9 +6,9 @@
     "set": {
       "model": "qwen36-tools-local/default_model",
       "timeoutSeconds": 240,
-      "keepRecentTokens": 8192,
-      "recentTurnsPreserve": 4,
-      "maxActiveTranscriptBytes": "16mb",
+      "keepRecentTokens": 4096,
+      "recentTurnsPreserve": 3,
+      "maxActiveTranscriptBytes": "256kb",
       "midTurnPrecheck": {
         "enabled": true
       }
@@ -47,15 +47,6 @@
       "requiredHookConfig": {
         "allowConversationAccess": true
       },
-      "requiredConfig": {
-        "releaseReady": true,
-        "targetAgentId": "second-original"
-      }
-    },
-    {
-      "id": "aiworker-image-command",
-      "version": "0.3.0",
-      "tool": "aiworker_generate_image",
       "requiredConfig": {
         "releaseReady": true,
         "targetAgentId": "second-original"

@@ -3,7 +3,7 @@ import { isAbsolute, join, normalize, relative, sep } from 'node:path'
 
 import { readOpenClawAgentEntries, writeOpenClawAgentEntries } from './openclaw-agent-config.mjs'
 
-export const IMAGE_CAPABILITY_SCHEMA = 'aiworker-openclaw-image-capabilities/v1'
+export const IMAGE_CAPABILITY_SCHEMA = 'aiworker-openclaw-image-capabilities/v2'
 const IDENTIFIER = /^[a-z][a-z0-9_-]{0,63}$/u
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/u
 
@@ -15,6 +15,10 @@ function stable(value) {
   if (Array.isArray(value)) return value.map(stable)
   if (plainObject(value)) return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]))
   return value
+}
+
+function same(left, right) {
+  return JSON.stringify(stable(left)) === JSON.stringify(stable(right))
 }
 
 function fail(message) {
@@ -48,9 +52,13 @@ export function validateImageCapabilityManifest(value) {
     fail('manifest_invalid')
   }
   const plugin = value.plugin
-  if (Object.keys(plugin).sort().join(',') !== 'id,tool,version'
-    || !IDENTIFIER.test(plugin.id) || !IDENTIFIER.test(plugin.tool) || !VERSION.test(plugin.version)
+  if (Object.keys(plugin).sort().join(',') !== 'id,retiredTools,tools,version'
+    || !IDENTIFIER.test(plugin.id) || !VERSION.test(plugin.version)
     || value.attachments.length === 0 || value.attachments.length > 16) fail('manifest_invalid')
+  const tools = list(plugin.tools, 'plugin_tools')
+  const retiredTools = list(plugin.retiredTools, 'plugin_retired_tools')
+  if (tools.some(tool => !IDENTIFIER.test(tool)) || retiredTools.some(tool => !IDENTIFIER.test(tool))
+    || retiredTools.some(tool => tools.includes(tool))) fail('manifest_invalid')
   const profiles = new Set()
   const agents = new Set()
   const roots = new Set()
@@ -76,7 +84,8 @@ export function validateImageCapabilityManifest(value) {
   if (legacy.length !== 1 || legacy[0].profile !== 'image-studio' || legacy[0].agentId !== 'image-studio') {
     fail('legacy_attachment_invalid')
   }
-  return Object.freeze({ schema: value.schema, plugin: Object.freeze({ ...plugin }),
+  return Object.freeze({ schema: value.schema, plugin: Object.freeze({ ...plugin, tools: Object.freeze([...tools]),
+    retiredTools: Object.freeze([...retiredTools]) }),
     attachments: Object.freeze(attachments) })
 }
 
@@ -135,7 +144,8 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
     const agent = profileAgent(config, attachment)
     const tools = plainObject(agent.tools) ? agent.tools : {}
     const entry = config.plugins.entries[plugin.id]
-    return tools.alsoAllow?.includes(plugin.tool) === true
+    return plugin.tools.every(tool => tools.alsoAllow?.includes(tool) === true)
+      && plugin.retiredTools.every(tool => tools.alsoAllow?.includes(tool) !== true)
       && config.plugins.allow.includes(plugin.id)
       && entry?.enabled === true
       && entry.config?.releaseReady === true
@@ -155,9 +165,10 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
   const existingTools = agent.tools === undefined ? {} : agent.tools
   if (!plainObject(existingTools)) fail('agent_tools_invalid')
   const existingAllow = existingTools.alsoAllow === undefined ? [] : list(existingTools.alsoAllow, 'agent_tool_allowlist')
+  const keptAllow = existingAllow.filter(tool => !plugin.retiredTools.includes(tool))
   agent.tools = {
     ...existingTools,
-    alsoAllow: existingAllow.includes(plugin.tool) ? [...existingAllow] : [...existingAllow, plugin.tool],
+    alsoAllow: [...keptAllow, ...plugin.tools.filter(tool => !keptAllow.includes(tool))],
   }
   writeOpenClawAgentEntries(next, [agent])
 
@@ -200,8 +211,10 @@ export function renderImageCapabilityPatch(config, manifest, attachment) {
 export function assertImageCapabilityPluginManifest(value, manifest) {
   const plugin = validateImageCapabilityManifest(manifest).plugin
   if (!plainObject(value) || value.id !== plugin.id || value.version !== plugin.version
-    || !Array.isArray(value?.contracts?.tools) || value.contracts.tools.length !== 1
-    || value.contracts.tools[0] !== plugin.tool || value?.toolMetadata?.[plugin.tool]?.optional !== true) {
+    || !same(value?.contracts?.tools, plugin.tools)
+    || !plainObject(value?.toolMetadata)
+    || !plugin.tools.every(tool => value.toolMetadata?.[tool]?.optional === true)
+    || Object.keys(value.toolMetadata).some(tool => !plugin.tools.includes(tool))) {
     fail('plugin_manifest_invalid')
   }
   return value
@@ -216,7 +229,7 @@ export function attachmentEvidence(config, manifest, attachment) {
     agentId: attachment.agentId,
     pluginId: plugin.id,
     pluginVersion: plugin.version,
-    toolId: plugin.tool,
+    toolIds: plugin.tools,
     attached: isImageCapabilityAttached(next, manifest, attachment),
     configSha256: sha256(JSON.stringify(stable(next))),
   }

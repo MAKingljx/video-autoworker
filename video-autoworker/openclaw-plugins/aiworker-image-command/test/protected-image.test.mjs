@@ -4,7 +4,15 @@ import { createHash } from 'node:crypto'
 import { crc32, deflateSync } from 'node:zlib'
 import { readFileSync } from 'node:fs'
 
-import { createImageCommandTool, imageReceipt, imageSessionScope, normalizeImageRequest } from '../lib/image-command-tool.js'
+import {
+  createImageCommandTool,
+  createImageCommandTools,
+  IMAGE_COMMAND_TOOL_NAMES,
+  IMAGE_TASK_TOOL_NAME,
+  imageReceipt,
+  imageSessionScope,
+  normalizeImageRequest,
+} from '../lib/image-command-tool.js'
 import { createImageJobClient, IMAGE_BYTES_LIMIT, IMAGE_SERVICE_ORIGIN, INSPECTION_JSON_BYTES_LIMIT,
   normalizeImageInspection, PROTECTED_IMAGE_BYTES_LIMIT } from '../lib/image-job-client.js'
 
@@ -57,17 +65,18 @@ const completed = { jobId, currentState: 'GENERATED_PENDING_REVIEW', mode: 'prot
     sourceWidth: 1920, sourceHeight: 1080 },
   textValidation: { matched: true, engine: 'apple-vision', mode: 'normalized_text_sequence', expectedCount: 1, observedCount: 1 } }
 
-test('native image tool stays directly visible without changing optional activation or profile isolation', () => {
-  const tool = createImageCommandTool({ context })
-  assert.equal(tool.catalogMode, 'direct-only')
-  assert.equal(tool.name, 'aiworker_generate_image')
-  assert.equal(createImageCommandTool({ context: { ...context, agentId: 'gpt-main' } }), null)
+test('action-specific image tools preserve direct native media handling and profile isolation', () => {
+  const tools = createImageCommandTools({ context })
+  const task = tools.find(tool => tool.name === IMAGE_TASK_TOOL_NAME)
+  assert.deepEqual(tools.map(tool => tool.name), IMAGE_COMMAND_TOOL_NAMES)
+  assert.equal(task.catalogMode, 'direct-only')
+  assert.deepEqual(createImageCommandTools({ context: { ...context, agentId: 'gpt-main' } }), [])
   const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.3.0')
+  assert.equal(manifest.version, '0.4.0')
   assert.equal(pkg.version, manifest.version)
-  assert.deepEqual(manifest.toolMetadata, { aiworker_generate_image: { optional: true } })
-  assert.deepEqual(manifest.contracts.tools, ['aiworker_generate_image'])
+  assert.deepEqual(Object.keys(manifest.toolMetadata), IMAGE_COMMAND_TOOL_NAMES)
+  assert.deepEqual(manifest.contracts.tools, IMAGE_COMMAND_TOOL_NAMES)
 })
 
 test('protected requests preserve one native source, assign editorial roles and reject ambiguous modes', () => {

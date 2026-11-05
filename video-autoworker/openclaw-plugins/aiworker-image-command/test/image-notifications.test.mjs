@@ -43,7 +43,7 @@ test('completion emits only a same-session event and targeted heartbeat once', a
     await service.poll()
     assert.equal(events.length, 1)
     assert.equal(events[0][1].sessionKey, sessionKey)
-    assert.match(events[0][0], /result/u)
+    assert.match(events[0][0], /aiworker_image_task.*result/u)
     assert.deepEqual(heartbeats[0], { agentId: 'image-studio', sessionKey, reason: `aiworker-image:${jobId}` })
     assert.ok(!Object.hasOwn(heartbeats[0], 'to'))
     const stored = JSON.parse(await readFile(join(dir, 'aiworker-image-command', 'notifications.json'), 'utf8'))

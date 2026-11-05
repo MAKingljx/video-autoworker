@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
 
-import { createImageCommandTool, IMAGE_COMMAND_TOOL_NAME } from './image-command-tool.js'
+import {
+  createImageCommandTools,
+  createImageSubmissionFence,
+  IMAGE_COMMAND_TOOL_NAMES,
+} from './image-command-tool.js'
 import { createImageJobClient } from './image-job-client.js'
 import { createImageNotifications } from './image-notifications.js'
 import { resolveImagePluginBinding } from './image-profile-binding.js'
@@ -24,6 +28,7 @@ export function registerImageCommands(api, {
   const store = createRuntimeStore({ key: binding.key, errorMessage: 'image_notification_service_not_started' })
   const client = createClient()
   const controller = createNotifications({ client, system: api.runtime.system, binding })
+  const submissionFence = createImageSubmissionFence()
   let ownedRuntime
 
   async function withRunningNotifications(action, subscription) {
@@ -59,12 +64,15 @@ export function registerImageCommands(api, {
       ownedRuntime = undefined
     },
   })
-  api.registerTool(context => createImageCommandTool({
-    context, binding,
-    client,
-    releaseReady: api.pluginConfig?.releaseReady === true,
-    saveMedia,
-    onSubmitted: subscription => withRunningNotifications('subscribe', subscription),
-    onReceiptRead: subscription => withRunningNotifications('acknowledge', subscription),
-  }), { names: [IMAGE_COMMAND_TOOL_NAME], optional: true })
+  for (const name of IMAGE_COMMAND_TOOL_NAMES) {
+    api.registerTool(context => createImageCommandTools({
+      context, binding,
+      client,
+      releaseReady: api.pluginConfig?.releaseReady === true,
+      saveMedia,
+      submissionFence,
+      onSubmitted: subscription => withRunningNotifications('subscribe', subscription),
+      onReceiptRead: subscription => withRunningNotifications('acknowledge', subscription),
+    }).find(tool => tool.name === name) ?? null, { names: [name], optional: true })
+  }
 }

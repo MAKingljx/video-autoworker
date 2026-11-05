@@ -40,6 +40,10 @@ function stable(value) {
   return value
 }
 
+function same(left, right) {
+  return JSON.stringify(stable(left)) === JSON.stringify(stable(right))
+}
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -237,19 +241,24 @@ function compareInventories(before, after, plugin, label) {
   const afterById = new Map(after.map(item => [item.id, item]))
   const removed = before.filter(item => !afterById.has(item.id))
   const added = after.filter(item => !beforeById.has(item.id))
-  if (removed.length !== 0 || added.length !== 1 || added[0].id !== plugin.tool
-    || added[0].source !== 'plugin' || added[0].pluginId !== plugin.id) {
+  if (!same(removed.map(item => item.id).toSorted(), plugin.retiredTools.toSorted())
+    || !same(added.map(item => item.id).toSorted(), plugin.tools.toSorted())
+    || added.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)) {
     fail(`${label}_tool_delta_invalid`)
   }
   for (const entry of before) {
+    if (plugin.retiredTools.includes(entry.id)) continue
     if (JSON.stringify(entry) !== JSON.stringify(afterById.get(entry.id))) fail(`${label}_tool_changed`)
   }
   return sha256(JSON.stringify(after))
 }
 
 function assertImageToolLoaded(inventory, plugin, label) {
-  const matches = inventory.filter(item => item.id === plugin.tool)
-  if (matches.length !== 1 || matches[0].source !== 'plugin' || matches[0].pluginId !== plugin.id) {
+  const matches = inventory.filter(item => plugin.tools.includes(item.id))
+  if (matches.length !== plugin.tools.length
+    || new Set(matches.map(item => item.id)).size !== plugin.tools.length
+    || matches.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)
+    || inventory.some(item => plugin.retiredTools.includes(item.id))) {
     fail(`${label}_image_tool_missing`)
   }
   return sha256(JSON.stringify(inventory))
@@ -400,7 +409,8 @@ function withoutAttachment(config, manifest, attachment) {
   if (!agent) fail('agent_binding_invalid')
   if (agent.tools && typeof agent.tools === 'object' && !Array.isArray(agent.tools)
     && Array.isArray(agent.tools.alsoAllow)) {
-    agent.tools.alsoAllow = agent.tools.alsoAllow.filter(item => item !== plugin.tool)
+    const ownedTools = new Set([...plugin.tools, ...plugin.retiredTools])
+    agent.tools.alsoAllow = agent.tools.alsoAllow.filter(item => !ownedTools.has(item))
     if (agent.tools.alsoAllow.length === 0) delete agent.tools.alsoAllow
     if (Object.keys(agent.tools).length === 0) delete agent.tools
   }

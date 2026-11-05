@@ -25,6 +25,14 @@ from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGE_CAPABILITY_ATTACHMENTS = ROOT / "ops/openclaw/image-capability-attachments.json"
+IMAGE_CAPABILITY_TOOLS = [
+    "aiworker_submit_creative_image",
+    "aiworker_submit_designed_cover",
+    "aiworker_submit_protected_cover",
+    "aiworker_image_task",
+    "aiworker_image_help",
+]
+RETIRED_IMAGE_CAPABILITY_TOOLS = ["aiworker_generate_image"]
 spec = importlib.util.spec_from_file_location("image_install_contract", ROOT / "scripts/install-openclaw-image-studio.py")
 contract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(contract)
@@ -66,9 +74,11 @@ def image_reference_roots(home: Path) -> list[str]:
         raise contract.InstallError("image_capability_manifest_invalid") from None
     plugin = manifest.get("plugin") if isinstance(manifest, dict) else None
     attachments = manifest.get("attachments") if isinstance(manifest, dict) else None
-    contract.require(isinstance(manifest, dict) and manifest.get("schema") == "aiworker-openclaw-image-capabilities/v1"
+    contract.require(isinstance(manifest, dict) and manifest.get("schema") == "aiworker-openclaw-image-capabilities/v2"
                      and isinstance(plugin, dict) and plugin.get("id") == "aiworker-image-command"
-                     and plugin.get("tool") == "aiworker_generate_image" and isinstance(attachments, list)
+                     and plugin.get("version") == "0.4.0"
+                     and plugin.get("tools") == IMAGE_CAPABILITY_TOOLS
+                     and plugin.get("retiredTools") == RETIRED_IMAGE_CAPABILITY_TOOLS and isinstance(attachments, list)
                      and 1 <= len(attachments) <= 16, "image_capability_manifest_invalid")
     roots, profiles, relative_paths = [str(home / "ai-worker/output/covers")], set(), set()
     for attachment in attachments:

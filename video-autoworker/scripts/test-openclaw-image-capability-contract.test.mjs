@@ -10,9 +10,20 @@ import {
   validateImageCapabilityManifest,
 } from './lib/openclaw-image-capability-contract.mjs'
 
+const IMAGE_TOOLS = [
+  'aiworker_submit_creative_image',
+  'aiworker_submit_designed_cover',
+  'aiworker_submit_protected_cover',
+  'aiworker_image_task',
+  'aiworker_image_help',
+]
+
 const manifest = validateImageCapabilityManifest({
-  schema: 'aiworker-openclaw-image-capabilities/v1',
-  plugin: { id: 'aiworker-image-command', version: '0.3.0', tool: 'aiworker_generate_image' },
+  schema: 'aiworker-openclaw-image-capabilities/v2',
+  plugin: {
+    id: 'aiworker-image-command', version: '0.4.0', tools: IMAGE_TOOLS,
+    retiredTools: ['aiworker_generate_image'],
+  },
   attachments: [
     { profile: 'image-studio', agentId: 'image-studio', stateRoot: '.openclaw-image-studio', gatewayPort: 19289, mediaRoot: '.openclaw-image-studio/media', legacyScope: true },
     { profile: 'qwen-current', agentId: 'second-original', stateRoot: '.openclaw-qwen-current', gatewayPort: 18889, mediaRoot: '.openclaw-qwen-current/media', legacyScope: false },
@@ -22,7 +33,7 @@ const manifest = validateImageCapabilityManifest({
 function config(layout = 'entries') {
   const agent = {
     name: '第二原始', workspace: '/safe/workspace',
-    tools: { alsoAllow: ['aiworker_analyze_video'], deny: ['exec'] },
+    tools: { alsoAllow: ['aiworker_analyze_video', 'aiworker_generate_image'], deny: ['exec'] },
   }
   return {
     agents: layout === 'list' ? { list: [{ id: 'second-original', ...agent }] }
@@ -48,7 +59,8 @@ for (const layout of ['entries', 'list']) {
     assert.deepEqual(after.channels, before.channels)
     assert.deepEqual(after.plugins.entries['aiworker-video-command'], before.plugins.entries['aiworker-video-command'])
     const agent = layout === 'list' ? after.agents.list[0] : { id: 'second-original', ...after.agents.entries['second-original'] }
-    assert.deepEqual(agent.tools.alsoAllow, ['aiworker_analyze_video', 'aiworker_generate_image'])
+    assert.deepEqual(agent.tools.alsoAllow, ['aiworker_analyze_video', ...IMAGE_TOOLS])
+    assert.equal(agent.tools.alsoAllow.includes('aiworker_generate_image'), false)
     const patch = renderImageCapabilityPatch(before, manifest, attachment)
     assert.deepEqual(Object.keys(patch.plugins.entries), ['aiworker-image-command'])
   })
@@ -72,4 +84,16 @@ test('refuses conflicting target-agent ownership', () => {
     enabled: true, config: { releaseReady: true, targetAgentId: 'another-agent' },
   }
   assert.throws(() => renderImageCapabilityConfig(wrong, manifest, attachment), /plugin_agent_conflict/u)
+})
+
+test('refuses duplicate, overlapping, or non-identifier image tool declarations', () => {
+  for (const mutate of [
+    value => { value.plugin.tools = [IMAGE_TOOLS[0], IMAGE_TOOLS[0]] },
+    value => { value.plugin.retiredTools = [IMAGE_TOOLS[0]] },
+    value => { value.plugin.tools = ['Bad Tool'] },
+  ]) {
+    const invalid = structuredClone(manifest)
+    mutate(invalid)
+    assert.throws(() => validateImageCapabilityManifest(invalid), /manifest_invalid|plugin_tools_invalid/u)
+  }
 })
