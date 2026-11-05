@@ -166,41 +166,6 @@ describe('AI-worker persisted tool-result projection', () => {
     expect(JSON.stringify(collision)).not.toContain('Bearer')
   })
 
-  it('keeps a bounded actionable image rejection instead of a generic success status', () => {
-    const event = toolResult('aiworker_submit_creative_image',
-      '图片请求不完整，请提供图片和生成要求。', {
-        errorCode: 'IMAGE_REQUEST_INVALID',
-        nextAction: 'PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS',
-        prompt: 'must-not-persist',
-        images: ['/Users/private/source.png'],
-      })
-    const result = projectAiworkerToolResultForTranscript(event)
-
-    expect(result.message.isError).toBe(true)
-    expect(result.message.content[0].text).toBe(
-      '图片工具回执：errorCode=IMAGE_REQUEST_INVALID；nextAction=PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS。',
-    )
-    expect(JSON.stringify(result.message)).not.toMatch(/must-not-persist|\/Users/u)
-  })
-
-  it('keeps only the safe image task receipt needed for a later status read', () => {
-    const result = projectAiworkerToolResultForTranscript(toolResult(
-      'aiworker_image_task',
-      '已受理。', {
-        jobId: 'a'.repeat(32),
-        currentState: 'QUEUED',
-        nextAction: 'wait_for_completion',
-        scope: 'must-not-persist',
-        output: '/Users/private/result.png',
-      },
-    ))
-
-    expect(result.message.isError).toBe(false)
-    expect(result.message.content[0].text).toBe(
-      `图片工具回执：jobId=${'a'.repeat(32)}；state=QUEUED；nextAction=wait_for_completion。`,
-    )
-    expect(JSON.stringify(result.message)).not.toMatch(/scope|private|output/u)
-  })
 
   it('projects only the persisted AI-worker tool-call arguments and keeps execution input intact', () => {
     const event = {
@@ -235,30 +200,6 @@ describe('AI-worker persisted tool-result projection', () => {
     expect(projectAiworkerMessageBeforeWrite(event)).toEqual(result)
   })
 
-  it('drops image submit inputs but retains a safe task action and job identity', () => {
-    const submit = projectAiworkerToolCallForTranscript({
-      message: {
-        role: 'assistant',
-        content: [{
-          type: 'toolCall', id: 'call-image-submit', name: 'aiworker_submit_creative_image',
-          arguments: { prompt: 'must-not-persist', images: ['/Users/private/source.png'] },
-        }],
-      },
-    })
-    const task = projectAiworkerToolCallForTranscript({
-      message: {
-        role: 'assistant',
-        content: [{
-          type: 'toolCall', id: 'call-image-status', name: 'aiworker_image_task',
-          arguments: { action: 'status', jobId: 'b'.repeat(32), path: '/Users/private/source.png' },
-        }],
-      },
-    })
-
-    expect(submit.message.content[0].arguments).toEqual({})
-    expect(task.message.content[0].arguments).toEqual({ action: 'status', jobId: 'b'.repeat(32) })
-    expect(JSON.stringify({ submit, task })).not.toMatch(/must-not-persist|\/Users/u)
-  })
 
   it('projects generic assistant tool-call arguments without reducing execution input', () => {
     const event = {

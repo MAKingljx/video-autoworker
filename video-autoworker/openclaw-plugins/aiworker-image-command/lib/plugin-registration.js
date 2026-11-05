@@ -7,7 +7,14 @@ import {
 } from './image-command-tool.js'
 import { createImageJobClient } from './image-job-client.js'
 import { createImageNotifications } from './image-notifications.js'
-import { resolveImagePluginBinding } from './image-profile-binding.js'
+import { imageSessionScope, resolveImagePluginBinding } from './image-profile-binding.js'
+import { createImageTranscriptReceiptBridge } from './image-transcript-receipt-bridge.js'
+
+const RECEIPT_CAPTURE_PRIORITY = 100
+// The director-brain transcript projector runs at -1000. Project the safe
+// image receipt afterwards so its generic long-session reduction cannot hide
+// a job id or the actionable image error code.
+const RECEIPT_PROJECT_PRIORITY = -1001
 
 function notificationBinding(env, pluginConfig) {
   const binding = resolveImagePluginBinding(env, pluginConfig)
@@ -26,9 +33,17 @@ export function registerImageCommands(api, {
 } = {}) {
   const binding = notificationBinding(env, api.pluginConfig)
   const store = createRuntimeStore({ key: binding.key, errorMessage: 'image_notification_service_not_started' })
+  const receiptStore = createRuntimeStore({
+    key: `${binding.key}:transcript-receipt-bridge`,
+    errorMessage: 'image_transcript_receipt_bridge_not_started',
+  })
   const client = createClient()
   const controller = createNotifications({ client, system: api.runtime.system, binding })
   const submissionFence = createImageSubmissionFence()
+  const receiptBridge = receiptStore.tryGetRuntime() ?? createImageTranscriptReceiptBridge({
+    isEligible: context => imageSessionScope(context, binding) !== null,
+  })
+  receiptStore.setRuntime(receiptBridge)
   let ownedRuntime
 
   async function withRunningNotifications(action, subscription) {
@@ -74,5 +89,16 @@ export function registerImageCommands(api, {
       onSubmitted: subscription => withRunningNotifications('subscribe', subscription),
       onReceiptRead: subscription => withRunningNotifications('acknowledge', subscription),
     }).find(tool => tool.name === name) ?? null, { names: [name], optional: true })
+  }
+  if (typeof api.on === 'function') {
+    api.on('tool_result_persist', (event, context) => receiptBridge.capture(event, context), {
+      priority: RECEIPT_CAPTURE_PRIORITY,
+    })
+    api.on('tool_result_persist', (event, context) => receiptBridge.project(event, context), {
+      priority: RECEIPT_PROJECT_PRIORITY,
+    })
+    api.on('before_message_write', (event, context) => receiptBridge.project(event, context), {
+      priority: RECEIPT_PROJECT_PRIORITY,
+    })
   }
 }

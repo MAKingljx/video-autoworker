@@ -13,19 +13,6 @@ const GENERIC_SUCCESS_STATUS = '工具执行已完成；长期会话仅保留本
 const GENERIC_ERROR_STATUS = '工具执行未完成；长期会话仅保留失败状态。'
 const EMPTY_ASSISTANT_STATUS = '本轮未生成可复用回复。'
 const NARRATIVE_TOOLS = new Set(['aiworker_director_brain', 'aiworker_analyze_video'])
-const IMAGE_SUBMIT_TOOLS = new Set([
-  'aiworker_submit_creative_image',
-  'aiworker_submit_designed_cover',
-  'aiworker_submit_protected_cover',
-])
-const IMAGE_RECEIPT_TOOLS = new Set([...IMAGE_SUBMIT_TOOLS, 'aiworker_image_task'])
-const IMAGE_STATES = new Set([
-  'QUEUED', 'RUNNING', 'GENERATED_PENDING_REVIEW', 'FAILED', 'CANCELLED',
-  'CANCEL_REQUESTED', 'RECONCILE_REQUIRED',
-])
-const IMAGE_JOB_ID = /^[0-9a-f]{32}$/u
-const IMAGE_ERROR_CODE = /^[A-Z][A-Z0-9_]{2,127}$/u
-const IMAGE_NEXT_ACTION = /^(?:[A-Z][A-Z0-9_]{2,127}|[a-z][a-z0-9_]{2,127})$/u
 const MAX_ASSISTANT_TEXT_CHARS = 2_048
 const REDACTED = '[已省略]'
 const CREDENTIAL_QUOTE = String.raw`(?:\\?["']|&(?:quot|apos);|&#(?:34|39);|&#x(?:22|27);)`
@@ -123,54 +110,6 @@ function plainNarrative(summary) {
   return facts.join('\n')
 }
 
-function imageReceipt(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
-  const jobId = typeof value.jobId === 'string' && IMAGE_JOB_ID.test(value.jobId)
-    ? value.jobId : undefined
-  const currentState = typeof value.currentState === 'string' && IMAGE_STATES.has(value.currentState)
-    ? value.currentState : undefined
-  const errorCode = typeof value.errorCode === 'string' && IMAGE_ERROR_CODE.test(value.errorCode)
-    ? value.errorCode : undefined
-  const nextAction = typeof value.nextAction === 'string' && IMAGE_NEXT_ACTION.test(value.nextAction)
-    ? value.nextAction : undefined
-  if (!jobId && !currentState && !errorCode && !nextAction) return null
-  return { ...(jobId ? { jobId } : {}), ...(currentState ? { currentState } : {}),
-    ...(errorCode ? { errorCode } : {}), ...(nextAction ? { nextAction } : {}) }
-}
-
-function imageReceipts(details) {
-  const direct = imageReceipt(details)
-  if (direct) return [direct]
-  if (!Array.isArray(details?.jobs) || details.jobs.length > 3) return []
-  const receipts = details.jobs.map(imageReceipt)
-  return receipts.every(Boolean) ? receipts : []
-}
-
-function imageReceiptText(receipt) {
-  const fields = [
-    receipt.jobId ? `jobId=${receipt.jobId}` : undefined,
-    receipt.currentState ? `state=${receipt.currentState}` : undefined,
-    receipt.errorCode ? `errorCode=${receipt.errorCode}` : undefined,
-    receipt.nextAction ? `nextAction=${receipt.nextAction}` : undefined,
-  ].filter(Boolean)
-  return `图片工具回执：${fields.join('；')}。`
-}
-
-function projectImageToolResult(message, toolName) {
-  const receipts = imageReceipts(message.details)
-  if (receipts.length === 0) return null
-  const failed = message.isError === true || receipts.some(receipt => receipt.errorCode)
-  return {
-    message: {
-      role: 'toolResult',
-      toolCallId: message.toolCallId,
-      toolName,
-      content: [{ type: 'text', text: receipts.map(imageReceiptText).join('\n') }],
-      isError: failed,
-    },
-  }
-}
-
 export function projectAiworkerToolResultForTranscript(event = {}) {
   let fallbackToolCallId
   let fallbackToolName
@@ -188,13 +127,6 @@ export function projectAiworkerToolResultForTranscript(event = {}) {
     const isNarrativeTool = fallbackToolName
       ? NARRATIVE_TOOLS.has(fallbackToolName)
       : false
-    const isImageTool = fallbackToolName
-      ? IMAGE_RECEIPT_TOOLS.has(fallbackToolName)
-      : false
-    if (isImageTool) {
-      const projected = projectImageToolResult(message, fallbackToolName)
-      if (projected) return projected
-    }
     const status = isNarrativeTool
       ? message.isError === true ? BUSINESS_ERROR_STATUS : BUSINESS_SUCCESS_STATUS
       : message.isError === true ? GENERIC_ERROR_STATUS : GENERIC_SUCCESS_STATUS
@@ -273,18 +205,11 @@ function projectedToolCallPart(part) {
   const usesInput = Object.hasOwn(part, 'input') && !Object.hasOwn(part, 'arguments')
   const source = usesInput ? part.input : part.arguments
   const action = source && typeof source === 'object' ? safeAction(source.action) : undefined
-  const jobId = source && typeof source === 'object' && typeof source.jobId === 'string'
-    && IMAGE_JOB_ID.test(source.jobId) ? source.jobId : undefined
-  const imageArguments = IMAGE_SUBMIT_TOOLS.has(part.name)
-    ? {}
-    : part.name === 'aiworker_image_task'
-      ? { ...(action ? { action } : {}), ...(jobId ? { jobId } : {}) }
-      : null
   return {
     type: 'toolCall',
     id: part.id,
     name: part.name,
-    [usesInput ? 'input' : 'arguments']: imageArguments ?? (action ? { action } : {}),
+    [usesInput ? 'input' : 'arguments']: action ? { action } : {},
   }
 }
 

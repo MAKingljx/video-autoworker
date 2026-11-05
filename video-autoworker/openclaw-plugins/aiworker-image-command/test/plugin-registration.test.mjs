@@ -30,12 +30,24 @@ function namedStoreFactory() {
 
 function api(mode, system = { enqueueSystemEvent() {}, requestHeartbeatNow() {} }) {
   const result = { registrationMode: mode, runtime: { system }, pluginConfig: { releaseReady: true },
-    services: [], toolFactories: [],
+    services: [], toolFactories: [], hooks: [],
     registerService(service) { result.services.push(service) },
     registerTool(factory, options) { result.toolFactories.push({ factory, options }) },
+    on(event, handler, options) { result.hooks.push({ event, handler, options }) },
   }
   return result
 }
+
+test('receipt bridge captures raw image receipts before and restores them after generic projection', () => {
+  const host = api('full')
+  registerImageCommands(host, { env: { OPENCLAW_PROFILE: 'image-studio', OPENCLAW_STATE_DIR: '/tmp/image-state' },
+    createRuntimeStore: namedStoreFactory() })
+  assert.deepEqual(host.hooks.map(hook => [hook.event, hook.options.priority]), [
+    ['tool_result_persist', 100],
+    ['tool_result_persist', -1001],
+    ['before_message_write', -1001],
+  ])
+})
 
 function registeredTool(host, name, context) {
   const registration = host.toolFactories.find(entry => entry.options.names.includes(name))
