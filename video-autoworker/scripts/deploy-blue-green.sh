@@ -1066,7 +1066,7 @@ full_audit_release() {
   local root="$1" release_id="${2:-}" bound_manifest="${3:-}" audit
   increment_release_verification_count full
   if [[ -n "$release_id" && -n "$bound_manifest" ]]; then
-    audit="$("$NODE_BIN" "$AUDITOR" --audit-bound "$root" "$PROJECT_ROOT" "$release_id" "$bound_manifest")" || return 1
+    audit="$("$NODE_BIN" "$AUDITOR" --audit-bound "$root" "$APPLICATION_SOURCE_ROOT" "$release_id" "$bound_manifest")" || return 1
   else
     audit="$("$NODE_BIN" "$AUDITOR" "$root")" || return 1
   fi
