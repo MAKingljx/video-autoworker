@@ -102,11 +102,11 @@ test('uses the existing image-studio binding without plugin-specific config befo
   const after = renderImageCapabilityConfig(before, manifest, attachment)
   assert.equal(after.plugins.entries['aiworker-image-command'].config.releaseReady, true)
   assert.equal(Object.hasOwn(after.plugins.entries['aiworker-image-command'].config, 'targetAgentId'), false)
-  assert.equal(Object.hasOwn(after.plugins, 'load'), false)
+  assert.deepEqual(after.plugins.load, {})
   assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [
     'agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths',
   ])
-  assert.equal(renderImageCapabilityPatch(before, manifest, attachment).plugins.load, null)
+  assert.deepEqual(renderImageCapabilityPatch(before, manifest, attachment).plugins.load, { paths: null })
   assert.equal(isImageCapabilityAttached(after, manifest, attachment), true)
 })
 

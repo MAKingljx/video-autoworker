@@ -41,7 +41,7 @@ test('allows the image-studio migration to retire only its legacy plugin load pa
   const imageBinding = { profile: 'image-studio', agentId: 'image-studio', port: 19289 }
   const patch = { agents: { entries: { 'image-studio': {
     tools: { alsoAllow: ['aiworker_submit_creative_image'] },
-  } } }, plugins: { load: null } }
+  } } }, plugins: { load: { paths: null } } }
   assert.deepEqual(validateConfigPatchReplacePaths(imageBinding, patch, [
     'agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths',
   ]), ['agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths'])

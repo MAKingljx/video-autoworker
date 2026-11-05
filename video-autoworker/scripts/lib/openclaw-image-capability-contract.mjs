@@ -214,7 +214,7 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
   const retiredLoadPaths = legacyImagePluginLoadPaths(next, attachment)
   if (retiredLoadPaths.length > 0) {
     next.plugins.load.paths = next.plugins.load.paths.filter(value => !retiredLoadPaths.includes(value))
-    if (next.plugins.load.paths.length === 0 && Object.keys(next.plugins.load).length === 1) delete next.plugins.load
+    if (next.plugins.load.paths.length === 0 && Object.keys(next.plugins.load).length === 1) delete next.plugins.load.paths
   }
   return next
 }
@@ -234,7 +234,7 @@ export function renderImageCapabilityPatch(config, manifest, attachment) {
     },
   }
   if (!same(config.plugins.load, next.plugins.load)) {
-    patch.plugins.load = next.plugins.load === undefined ? null : { paths: next.plugins.load.paths }
+    patch.plugins.load = { paths: next.plugins.load?.paths ?? null }
   }
   return patch
 }

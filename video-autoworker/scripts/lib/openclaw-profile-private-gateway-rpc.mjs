@@ -102,7 +102,8 @@ export function validateConfigPatchReplacePaths(binding, patch, replacePaths) {
   const allowedPaths = new Set([expected])
   const mayRetireLegacySource = binding.profile === 'image-studio' && plainObject(patch.plugins)
     && Object.hasOwn(patch.plugins, 'load')
-    && (patch.plugins.load === null || plainObject(patch.plugins.load))
+    && plainObject(patch.plugins.load) && Object.hasOwn(patch.plugins.load, 'paths')
+    && (patch.plugins.load.paths === null || Array.isArray(patch.plugins.load.paths))
   if (mayRetireLegacySource) allowedPaths.add('plugins.load.paths')
   if (new Set(replacePaths).size !== replacePaths.length || replacePaths.some(item => !allowedPaths.has(item))) fail()
   if (expected.startsWith('agents.list')) {
