@@ -93,6 +93,8 @@ test('installer separates official package installation from the single CAS conf
   assert.match(source, /--no-enable/u)
   assert.match(source, /plugins', 'registry', '--refresh'/u)
   assert.match(source, /plugins', 'doctor'/u)
+  assert.match(source, /reconciledLegacySource: true/u)
+  assert.match(source, /restartGatewayAndValidate/u)
   assert.match(source, /pluginInstall\.status !== 0 && !installedPlugin/u)
   assert.match(source, /plugin_install_mutated_config/u)
   assert.match(source, /ensureExtensionsDirectory/u)

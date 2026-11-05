@@ -149,6 +149,18 @@ function legacyImagePluginLoadPaths(config, attachment) {
   return paths.filter(value => LEGACY_IMAGE_PLUGIN_LOAD_PATH.test(value))
 }
 
+// Retire only the known pre-registry image plugin source. This is a config
+// migration, not a second plugin lifecycle; unrelated plugin load paths stay
+// untouched.
+export function retireLegacyImagePluginSource(config, attachment) {
+  const next = clone(config)
+  const retiredPaths = legacyImagePluginLoadPaths(next, attachment)
+  if (retiredPaths.length === 0) return next
+  next.plugins.load.paths = next.plugins.load.paths.filter(value => !retiredPaths.includes(value))
+  if (next.plugins.load.paths.length === 0 && Object.keys(next.plugins.load).length === 1) delete next.plugins.load.paths
+  return next
+}
+
 export function isImageCapabilityAttached(config, manifest, attachment) {
   try {
     const plugin = assertConfigShape(config, manifest, attachment)
@@ -176,7 +188,7 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
 // policy; no profile receives a separate task chain.
 export function renderImageCapabilityConfig(config, manifest, attachment) {
   const plugin = assertConfigShape(config, manifest, attachment)
-  const next = clone(config)
+  const next = retireLegacyImagePluginSource(config, attachment)
   const agent = profileAgent(next, attachment)
   const existingTools = agent.tools === undefined ? {} : agent.tools
   if (!plainObject(existingTools)) fail('agent_tools_invalid')
@@ -210,11 +222,6 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
     ...existing,
     enabled: true,
     config: capabilityConfig,
-  }
-  const retiredLoadPaths = legacyImagePluginLoadPaths(next, attachment)
-  if (retiredLoadPaths.length > 0) {
-    next.plugins.load.paths = next.plugins.load.paths.filter(value => !retiredLoadPaths.includes(value))
-    if (next.plugins.load.paths.length === 0 && Object.keys(next.plugins.load).length === 1) delete next.plugins.load.paths
   }
   return next
 }

@@ -6,6 +6,7 @@ import {
   imageCapabilityReplacePaths,
   imageReferenceRoots,
   isImageCapabilityAttached,
+  retireLegacyImagePluginSource,
   renderImageCapabilityConfig,
   renderImageCapabilityPatch,
   validateImageCapabilityManifest,
@@ -103,6 +104,7 @@ test('uses the existing image-studio binding without plugin-specific config befo
   assert.equal(after.plugins.entries['aiworker-image-command'].config.releaseReady, true)
   assert.equal(Object.hasOwn(after.plugins.entries['aiworker-image-command'].config, 'targetAgentId'), false)
   assert.deepEqual(after.plugins.load, {})
+  assert.deepEqual(retireLegacyImagePluginSource(before, attachment).plugins.load, {})
   assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [
     'agents.entries.image-studio.tools.alsoAllow', 'plugins.load.paths',
   ])

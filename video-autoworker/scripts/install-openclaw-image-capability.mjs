@@ -18,6 +18,7 @@ import {
   imageCapabilityReplacePaths,
   isImageCapabilityAttached,
   renderImageCapabilityPatch,
+  retireLegacyImagePluginSource,
   resolveAttachmentStateRoot,
   validateImageCapabilityManifest,
 } from './lib/openclaw-image-capability-contract.mjs'
@@ -405,6 +406,24 @@ function restoreBackup(paths, backup, home, openclaw, attachment) {
   })
 }
 
+function refreshPluginRegistry(home, openclaw, attachment) {
+  run(openclaw, ['--profile', attachment.profile, 'plugins', 'registry', '--refresh'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_registry_refresh',
+  })
+  run(openclaw, ['--profile', attachment.profile, 'plugins', 'doctor'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_doctor',
+  })
+}
+
+function restartGatewayAndValidate(home, openclaw, attachment) {
+  run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'gateway_restart',
+  })
+  run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'post_restart_config_validate',
+  })
+}
+
 function retainLatestBackups(home, attachment) {
   const root = path.join(home, 'ai-worker/backups/openclaw-image-capabilities', attachment.profile)
   safeDirectory(root, { mode: 0o700 })
@@ -429,7 +448,7 @@ function writeReceipt(home, attachment, value) {
 }
 
 function withoutAttachment(config, manifest, attachment) {
-  const next = structuredClone(config)
+  const next = retireLegacyImagePluginSource(config, attachment)
   const plugin = manifest.plugin
   const agent = readOpenClawAgentEntries(next).find(item => item.id === attachment.agentId)
   if (!agent) fail('agent_binding_invalid')
@@ -501,12 +520,32 @@ function main() {
     if (alreadyAttached && alreadyInstalled) {
       token = gatewayToken(home, paths.config)
       const catalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment, operation: 'catalog', token }), attachment, 'catalog')
+      let catalogSha256
+      try { catalogSha256 = assertImageToolLoaded(catalog, manifest.plugin, 'catalog') } catch (error) {
+        if (!attachment.legacyScope) throw error
+        refreshPluginRegistry(home, openclaw, attachment)
+        restartGatewayAndValidate(home, openclaw, attachment)
+        const reconciledConfig = readJson(paths.config, { mode: 0o600 })
+        if (!isImageCapabilityAttached(reconciledConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
+          fail('post_reconcile_contract_invalid')
+        }
+        const reconciledCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
+          operation: 'catalog', token }), attachment, 'catalog')
+        catalogSha256 = assertImageToolLoaded(reconciledCatalog, manifest.plugin, 'catalog')
+        writeReceipt(home, attachment, {
+          schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
+          sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
+          attachment: attachmentEvidence(reconciledConfig, manifest, attachment), pluginInstalled: true,
+          toolInventory: { catalogSha256 }, reconciledLegacySource: true, nextAction: 'real_dialogue_validation',
+        })
+        return
+      }
       writeReceipt(home, attachment, {
         schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'ALREADY_CURRENT',
         sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
         attachment: attachmentEvidence(beforeConfig, manifest, attachment),
         pluginInstalled: true, toolInventory: {
-          catalogSha256: assertImageToolLoaded(catalog, manifest.plugin, 'catalog'),
+          catalogSha256,
         }, nextAction: 'none',
       })
       return
@@ -529,12 +568,7 @@ function main() {
       env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 180_000, phase: 'plugin_install', allowNonzero: true,
     })
     if (pluginInstall.status !== 0 && !installedPlugin(paths, manifest)) fail('plugin_install_invalid')
-    run(openclaw, ['--profile', attachment.profile, 'plugins', 'registry', '--refresh'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_registry_refresh',
-    })
-    run(openclaw, ['--profile', attachment.profile, 'plugins', 'doctor'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_doctor',
-    })
+    refreshPluginRegistry(home, openclaw, attachment)
     if (!installedPlugin(paths, manifest)) fail('plugin_install_invalid')
     if (sha256(fs.readFileSync(paths.config)) !== configBeforePluginInstall) fail('plugin_install_mutated_config')
     const live = gatewayConfig(gatewayRpc({ work, home, openclaw, attachment,
@@ -550,12 +584,8 @@ function main() {
     const patched = gatewayRpc({ work, home, openclaw, attachment, operation: 'config-patch', token,
       patch: { baseHash: live.hash, path: livePatchPath, replacePaths: liveReplacePaths } })
     if (patched?.ok !== true || !isImageCapabilityAttached(patched.config, manifest, attachment)) fail('config_patch_invalid')
-    run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'gateway_restart',
-    })
-    run(openclaw, ['--profile', attachment.profile, 'config', 'validate'], {
-      env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'post_restart_config_validate',
-    })
+    refreshPluginRegistry(home, openclaw, attachment)
+    restartGatewayAndValidate(home, openclaw, attachment)
     const afterConfig = readJson(paths.config, { mode: 0o600 })
     if (!isImageCapabilityAttached(afterConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
       fail('post_restart_contract_invalid')
