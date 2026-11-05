@@ -543,7 +543,8 @@ function main() {
     const liveReplacePaths = imageCapabilityReplacePaths(live.config, manifest, attachment)
     const livePatchPath = path.join(work, 'config.live.patch.json')
     atomicWrite(livePatchPath, `${JSON.stringify(livePatch, null, 2)}\n`)
-    run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', livePatchPath, '--dry-run'], {
+    run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', livePatchPath, '--dry-run',
+      ...liveReplacePaths.flatMap(replacePath => ['--replace-path', replacePath])], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_patch_live_dry_run',
     })
     const patched = gatewayRpc({ work, home, openclaw, attachment, operation: 'config-patch', token,

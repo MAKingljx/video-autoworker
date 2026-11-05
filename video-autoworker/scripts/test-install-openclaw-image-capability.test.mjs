@@ -97,5 +97,6 @@ test('installer separates official package installation from the single CAS conf
   assert.match(source, /plugin_install_mutated_config/u)
   assert.match(source, /ensureExtensionsDirectory/u)
   assert.match(source, /imageCapabilityReplacePaths\(live\.config, manifest, attachment\)/u)
+  assert.match(source, /--replace-path', replacePath/u)
   assert.match(source, /AIWORKER_OPENCLAW_CAPABILITY_REPLACE_PATHS/u)
 })
