@@ -134,6 +134,8 @@ test('catalog upgrade preserves existing image tools and admits only newly decla
     { id: 'other', source: 'builtin', pluginId: 'core' },
   ]
   assert.match(compareInventories(before, after, plugin, attachment, 'catalog'), /^[a-f0-9]{64}$/u)
+  assert.match(compareInventories(before.filter(item => item.id !== 'aiworker_generate_image'), after,
+    plugin, attachment, 'catalog'), /^[a-f0-9]{64}$/u)
   assert.throws(() => compareInventories(before, [...after, { id: 'unexpected', source: 'plugin', pluginId: plugin.id }],
     plugin, attachment, 'catalog'), /catalog_tool_delta_invalid/u)
 })

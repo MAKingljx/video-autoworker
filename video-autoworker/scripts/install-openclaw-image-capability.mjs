@@ -269,7 +269,8 @@ export function compareInventories(before, after, plugin, attachment, label) {
   const removed = before.filter(item => !afterById.has(item.id))
   const added = after.filter(item => !beforeById.has(item.id))
   const expectedAdded = attachment.toolIds.filter(tool => !beforeById.has(tool))
-  if (!same(removed.map(item => item.id).toSorted(), plugin.retiredTools.toSorted())
+  const expectedRemoved = plugin.retiredTools.filter(tool => beforeById.has(tool))
+  if (!same(removed.map(item => item.id).toSorted(), expectedRemoved.toSorted())
     || !same(added.map(item => item.id).toSorted(), expectedAdded.toSorted())
     || added.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)
     || attachment.toolIds.some(tool => {
