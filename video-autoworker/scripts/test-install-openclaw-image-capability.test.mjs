@@ -22,13 +22,14 @@ function qwenConfig() {
   }
 }
 
-function fixture() {
+function fixture({ extensions = true } = {}) {
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'aiworker-image-capability-install-')))
   const state = join(home, '.openclaw-qwen-current')
   const bin = join(home, 'ai-worker/bin')
-  mkdirSync(join(state, 'extensions'), { recursive: true, mode: 0o700 })
+  mkdirSync(state, { recursive: true, mode: 0o700 })
+  if (extensions) mkdirSync(join(state, 'extensions'), { recursive: true, mode: 0o700 })
   chmodSync(state, 0o700)
-  chmodSync(join(state, 'extensions'), 0o700)
+  if (extensions) chmodSync(join(state, 'extensions'), 0o700)
   writeFileSync(join(state, 'openclaw.json'), `${JSON.stringify(qwenConfig(), null, 2)}\n`, { mode: 0o600 })
   mkdirSync(bin, { recursive: true, mode: 0o700 })
   const openclaw = join(bin, 'openclaw')
@@ -50,6 +51,19 @@ test('generic installer dry-run validates only the declared qwen attachment and 
     assert.equal(receipt.attachment.agentId, 'second-original')
     assert.equal(receipt.nextAction, 'apply')
     assert.equal(existsSync(join(home, 'unexpected-config-patch')), false)
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('dry-run accepts an existing declared profile without an extensions directory and does not create one', () => {
+  const { home, state } = fixture({ extensions: false })
+  try {
+    const extensions = join(state, 'extensions')
+    assert.equal(existsSync(extensions), false)
+    const result = spawnSync(process.execPath, [installer, '--dry-run', '--profile', 'qwen-current', '--source-commit', sourceCommit], {
+      cwd: root, env: { HOME: home, PATH: process.env.PATH || '/usr/bin:/bin' }, encoding: 'utf8', timeout: 30_000,
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(existsSync(extensions), false)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
@@ -78,4 +92,5 @@ test('installer separates official package installation from the single CAS conf
   assert.match(source, /--acknowledge-install-policy-warning/u)
   assert.match(source, /--no-enable/u)
   assert.match(source, /plugin_install_mutated_config/u)
+  assert.match(source, /ensureExtensionsDirectory/u)
 })

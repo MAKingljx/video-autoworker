@@ -191,9 +191,29 @@ function profilePaths(home, attachment) {
   const config = path.join(stateDir, 'openclaw.json')
   safeFile(config, { mode: 0o600 })
   const extensions = path.join(stateDir, 'extensions')
-  safeDirectory(extensions)
-  if (!physicalInside(stateDir, extensions)) fail('extensions_outside_state')
-  return { stateDir, config, extensions, plugin: path.join(extensions, 'aiworker-image-command') }
+  const extensionsPresent = fs.existsSync(extensions)
+  if (extensionsPresent) {
+    safeDirectory(extensions)
+    if (!physicalInside(stateDir, extensions)) fail('extensions_outside_state')
+  } else if (path.relative(stateDir, extensions) !== 'extensions') {
+    fail('extensions_outside_state')
+  }
+  return {
+    stateDir,
+    config,
+    extensions,
+    extensionsPresent,
+    plugin: path.join(extensions, 'aiworker-image-command'),
+  }
+}
+
+function ensureExtensionsDirectory(paths) {
+  if (paths.extensionsPresent) return
+  fs.mkdirSync(paths.extensions, { mode: 0o700 })
+  fs.chmodSync(paths.extensions, 0o700)
+  safeDirectory(paths.extensions, { mode: 0o700 })
+  if (!physicalInside(paths.stateDir, paths.extensions)) fail('extensions_outside_state')
+  paths.extensionsPresent = true
 }
 
 function acquireInstallLock(paths, attachment) {
@@ -362,7 +382,8 @@ function restoreBackup(paths, backup, home, openclaw, attachment) {
   const configBackup = path.join(backup.path, 'openclaw.json')
   safeFile(configBackup, { mode: 0o600 })
   atomicWrite(paths.config, fs.readFileSync(configBackup))
-  if (fs.existsSync(paths.plugin) || fs.lstatSync(paths.extensions).isDirectory()) {
+  if (fs.existsSync(paths.extensions)) {
+    safeDirectory(paths.extensions)
     if (fs.existsSync(paths.plugin)) {
       safeDirectory(paths.plugin)
       if (!physicalInside(paths.extensions, paths.plugin)) fail('plugin_outside_extensions')
@@ -489,6 +510,7 @@ function main() {
     const beforeCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'catalog', token }), attachment, 'catalog')
     backup = createBackup(home, paths, attachment, options.sourceCommit)
+    ensureExtensionsDirectory(paths)
     const configBeforePluginInstall = sha256(fs.readFileSync(paths.config))
     // OpenClaw owns the package installation, while this component owns the
     // single CAS configuration update below. --no-enable avoids an installer
