@@ -46,6 +46,11 @@ function same(left, right) {
   return JSON.stringify(stable(left)) === JSON.stringify(stable(right))
 }
 
+function plainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+}
+
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -410,9 +415,39 @@ function refreshPluginRegistry(home, openclaw, attachment) {
   run(openclaw, ['--profile', attachment.profile, 'plugins', 'registry', '--refresh'], {
     env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_registry_refresh',
   })
-  run(openclaw, ['--profile', attachment.profile, 'plugins', 'doctor'], {
-    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_doctor',
+}
+
+function acceptPluginCapabilities(home, openclaw, attachment, plugin) {
+  run(openclaw, ['--profile', attachment.profile, 'plugins', 'enable', '--accept-capabilities', plugin.id], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_capability_consent',
   })
+}
+
+export function inspectImagePluginDoctor(value, pluginId) {
+  if (!plainObject(value) || typeof pluginId !== 'string' || !pluginId
+    || !Array.isArray(value.pluginErrors) || !Array.isArray(value.diagnostics)) {
+    fail('plugin_doctor_invalid')
+  }
+  if (value.pluginErrors.length > 0) fail('plugin_doctor_plugin_errors')
+  const unrelatedWarningPlugins = new Set()
+  for (const item of value.diagnostics) {
+    if (!plainObject(item) || typeof item.pluginId !== 'string' || item.pluginId.length < 1
+      || !['info', 'warn', 'error', 'critical'].includes(item.level)) fail('plugin_doctor_invalid')
+    if (item.pluginId === pluginId) fail('plugin_doctor_target_unhealthy')
+    if (!['info', 'warn'].includes(item.level)) fail('plugin_doctor_unrelated_error')
+    if (item.level === 'warn') unrelatedWarningPlugins.add(item.pluginId)
+  }
+  return { unrelatedWarningPlugins: [...unrelatedWarningPlugins].sort() }
+}
+
+function verifyPluginDoctor(home, openclaw, attachment, plugin) {
+  const result = run(openclaw, ['--profile', attachment.profile, 'plugins', 'doctor', '--json'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_doctor', allowNonzero: true,
+  })
+  if (result.error || result.signal || typeof result.stdout !== 'string') fail('plugin_doctor_invalid')
+  let report
+  try { report = JSON.parse(result.stdout) } catch { fail('plugin_doctor_invalid') }
+  return inspectImagePluginDoctor(report, plugin.id)
 }
 
 function restartGatewayAndValidate(home, openclaw, attachment) {
@@ -531,12 +566,19 @@ function main() {
       return
     }
     if (alreadyAttached && alreadyInstalled) {
+      backup = createBackup(home, paths, attachment, options.sourceCommit)
+      acceptPluginCapabilities(home, openclaw, attachment, manifest.plugin)
+      refreshPluginRegistry(home, openclaw, attachment)
+      const doctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
+      restartGatewayAndValidate(home, openclaw, attachment)
       token = gatewayToken(home, paths.config)
       const catalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment, operation: 'catalog', token }), attachment, 'catalog')
       let catalogSha256
       try { catalogSha256 = assertImageToolLoaded(catalog, manifest.plugin, attachment, 'catalog') } catch (error) {
         if (!attachment.legacyScope) throw error
+        acceptPluginCapabilities(home, openclaw, attachment, manifest.plugin)
         refreshPluginRegistry(home, openclaw, attachment)
+        const reconciledDoctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
         restartGatewayAndValidate(home, openclaw, attachment)
         const reconciledConfig = readJson(paths.config, { mode: 0o600 })
         if (!isImageCapabilityAttached(reconciledConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
@@ -550,7 +592,8 @@ function main() {
           schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
           sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
           attachment: attachmentEvidence(reconciledConfig, manifest, attachment), pluginInstalled: true,
-          toolInventory: { catalogSha256 }, reconciledLegacySource: true, nextAction: 'real_dialogue_validation',
+          toolInventory: { catalogSha256 }, doctor: reconciledDoctor,
+          reconciledLegacySource: true, nextAction: 'real_dialogue_validation',
         })
         return
       }
@@ -561,7 +604,7 @@ function main() {
         attachment: attachmentEvidence(beforeConfig, manifest, attachment),
         pluginInstalled: true, toolInventory: {
           catalogSha256,
-        }, nextAction: 'none',
+        }, doctor, nextAction: 'none',
       })
       return
     }
@@ -599,7 +642,9 @@ function main() {
     const patched = gatewayRpc({ work, home, openclaw, attachment, operation: 'config-patch', token,
       patch: { baseHash: live.hash, path: livePatchPath, replacePaths: liveReplacePaths } })
     if (patched?.ok !== true || !isImageCapabilityAttached(patched.config, manifest, attachment)) fail('config_patch_invalid')
+    acceptPluginCapabilities(home, openclaw, attachment, manifest.plugin)
     refreshPluginRegistry(home, openclaw, attachment)
+    const doctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
     restartGatewayAndValidate(home, openclaw, attachment)
     const afterConfig = readJson(paths.config, { mode: 0o600 })
     if (!isImageCapabilityAttached(afterConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
@@ -614,7 +659,7 @@ function main() {
       sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
       attachment: attachmentEvidence(afterConfig, manifest, attachment),
       pluginInstalled: true, configBeforeSha256: sha256(JSON.stringify(stable(beforeConfig))),
-      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256 },
+      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256 }, doctor,
       backupPath: backup.path, nextAction: 'real_dialogue_validation',
     })
   } catch (error) {

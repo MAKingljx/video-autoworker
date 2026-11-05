@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
+import { inspectImagePluginDoctor, staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const installer = fileURLToPath(new URL('./install-openclaw-image-capability.mjs', import.meta.url))
@@ -93,8 +93,9 @@ test('installer separates official package installation from the single CAS conf
   const source = readFileSync(installer, 'utf8')
   assert.match(source, /--acknowledge-install-policy-warning/u)
   assert.match(source, /--no-enable/u)
+  assert.match(source, /plugins', 'enable', '--accept-capabilities'/u)
   assert.match(source, /plugins', 'registry', '--refresh'/u)
-  assert.match(source, /plugins', 'doctor'/u)
+  assert.match(source, /plugins', 'doctor', '--json'/u)
   assert.match(source, /reconciledLegacySource: true/u)
   assert.match(source, /restartGatewayAndValidate/u)
   assert.match(source, /pluginInstall\.status !== 0 && !installedPlugin/u)
@@ -103,6 +104,19 @@ test('installer separates official package installation from the single CAS conf
   assert.match(source, /imageCapabilityReplacePaths\(live\.config, manifest, attachment\)/u)
   assert.match(source, /--replace-path', replacePath/u)
   assert.match(source, /AIWORKER_OPENCLAW_CAPABILITY_REPLACE_PATHS/u)
+})
+
+test('doctor accepts unrelated warnings but rejects any image-plugin or critical finding', () => {
+  assert.deepEqual(inspectImagePluginDoctor({
+    pluginErrors: [],
+    diagnostics: [{ pluginId: 'diffs', level: 'warn' }],
+  }, 'aiworker-image-command'), { unrelatedWarningPlugins: ['diffs'] })
+  assert.throws(() => inspectImagePluginDoctor({
+    pluginErrors: [], diagnostics: [{ pluginId: 'aiworker-image-command', level: 'warn' }],
+  }, 'aiworker-image-command'), /plugin_doctor_target_unhealthy/u)
+  assert.throws(() => inspectImagePluginDoctor({
+    pluginErrors: [], diagnostics: [{ pluginId: 'other', level: 'error' }],
+  }, 'aiworker-image-command'), /plugin_doctor_unrelated_error/u)
 })
 
 test('backup retention keeps the two newest verified backup directories by real timestamp', () => {
