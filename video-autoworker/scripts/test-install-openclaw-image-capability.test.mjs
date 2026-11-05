@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
+import { staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
+
 const root = fileURLToPath(new URL('..', import.meta.url))
 const installer = fileURLToPath(new URL('./install-openclaw-image-capability.mjs', import.meta.url))
 const sourceCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
@@ -101,4 +103,17 @@ test('installer separates official package installation from the single CAS conf
   assert.match(source, /imageCapabilityReplacePaths\(live\.config, manifest, attachment\)/u)
   assert.match(source, /--replace-path', replacePath/u)
   assert.match(source, /AIWORKER_OPENCLAW_CAPABILITY_REPLACE_PATHS/u)
+})
+
+test('backup retention keeps the two newest verified backup directories by real timestamp', () => {
+  const stale = staleBackupsForRetention([
+    { path: '/safe/current-z', mtimeNs: 20n },
+    { path: '/safe/current-a', mtimeNs: 10n },
+    { path: '/safe/current-b', mtimeNs: 30n },
+    { path: '/safe/current-c', mtimeNs: 40n },
+  ])
+  assert.deepEqual(stale, [
+    { path: '/safe/current-a', mtimeNs: 10n },
+    { path: '/safe/current-z', mtimeNs: 20n },
+  ])
 })

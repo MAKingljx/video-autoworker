@@ -424,12 +424,25 @@ function restartGatewayAndValidate(home, openclaw, attachment) {
   })
 }
 
+export function staleBackupsForRetention(entries, keep = 2) {
+  if (!Array.isArray(entries) || !Number.isSafeInteger(keep) || keep < 1
+    || entries.some(entry => !entry || typeof entry.path !== 'string' || typeof entry.mtimeNs !== 'bigint')) {
+    fail('backup_retention_invalid')
+  }
+  return [...entries].sort((left, right) => left.mtimeNs === right.mtimeNs
+    ? left.path.localeCompare(right.path)
+    : left.mtimeNs < right.mtimeNs ? -1 : 1).slice(0, Math.max(0, entries.length - keep))
+}
+
 function retainLatestBackups(home, attachment) {
   const root = path.join(home, 'ai-worker/backups/openclaw-image-capabilities', attachment.profile)
   safeDirectory(root, { mode: 0o700 })
   const backups = fs.readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory() && entry.name.startsWith('current-'))
-    .map(entry => path.join(root, entry.name)).sort()
-  for (const stale of backups.slice(0, Math.max(0, backups.length - 2))) {
+    .map(entry => {
+      const candidate = path.join(root, entry.name)
+      return { path: candidate, mtimeNs: fs.statSync(candidate, { bigint: true }).mtimeNs }
+    })
+  for (const { path: stale } of staleBackupsForRetention(backups)) {
     const metadata = path.join(stale, 'metadata.json')
     safeDirectory(stale, { mode: 0o700 })
     safeFile(metadata, { mode: 0o600 })
@@ -532,6 +545,7 @@ function main() {
         const reconciledCatalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment,
           operation: 'catalog', token }), attachment, 'catalog')
         catalogSha256 = assertImageToolLoaded(reconciledCatalog, manifest.plugin, 'catalog')
+        retainLatestBackups(home, attachment)
         writeReceipt(home, attachment, {
           schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
           sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
@@ -540,6 +554,7 @@ function main() {
         })
         return
       }
+      retainLatestBackups(home, attachment)
       writeReceipt(home, attachment, {
         schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'ALREADY_CURRENT',
         sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
