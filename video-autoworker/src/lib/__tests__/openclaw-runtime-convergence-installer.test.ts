@@ -364,11 +364,11 @@ if (args[0] === 'config' && args[1] === 'patch') {
     ])
     && compactionPatch.model === 'qwen36-tools-local/default_model'
     && compactionPatch.timeoutSeconds === 240
-    && compactionPatch.keepRecentTokens === 8192
+    && compactionPatch.keepRecentTokens === 4096
     && compactionPatch.identifierInstructions === null
-    && compactionPatch.recentTurnsPreserve === 4
+    && compactionPatch.recentTurnsPreserve === 3
     && compactionPatch.truncateAfterCompaction === null
-    && compactionPatch.maxActiveTranscriptBytes === '16mb'
+    && compactionPatch.maxActiveTranscriptBytes === '256kb'
     && isObject(compactionPatch.midTurnPrecheck)
     && Object.keys(compactionPatch.midTurnPrecheck).length === 1
     && compactionPatch.midTurnPrecheck.enabled === true
@@ -1142,9 +1142,9 @@ export async function callGatewayFromCli(method, options, params, extra) {
         set: {
           model: 'qwen36-tools-local/default_model',
           timeoutSeconds: 240,
-          keepRecentTokens: 8192,
-          recentTurnsPreserve: 4,
-          maxActiveTranscriptBytes: '16mb',
+          keepRecentTokens: 4096,
+          recentTurnsPreserve: 3,
+          maxActiveTranscriptBytes: '256kb',
           midTurnPrecheck: { enabled: true },
         },
         remove: ['identifierInstructions', 'truncateAfterCompaction'],
@@ -1505,13 +1505,13 @@ export async function callGatewayFromCli(method, options, params, extra) {
       reserveTokens: 4096,
       model: 'qwen36-tools-local/default_model',
       timeoutSeconds: 240,
-      keepRecentTokens: 8192,
+      keepRecentTokens: 4096,
       maxHistoryShare: 0.75,
-      maxActiveTranscriptBytes: '16mb',
+      maxActiveTranscriptBytes: '256kb',
       notifyUser: false,
       customInstructions: 'Preserve every tool value.',
       identifierPolicy: 'strict',
-      recentTurnsPreserve: 4,
+      recentTurnsPreserve: 3,
       midTurnPrecheck: { minimumBytes: 4096, enabled: true },
     })
     expect(target.tools).toEqual(entry.initial.agents.list[0].tools)
