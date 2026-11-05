@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   attachmentForProfile,
+  imageCapabilityReplacePaths,
   imageReferenceRoots,
   isImageCapabilityAttached,
   renderImageCapabilityConfig,
@@ -61,6 +62,9 @@ for (const layout of ['entries', 'list']) {
     const agent = layout === 'list' ? after.agents.list[0] : { id: 'second-original', ...after.agents.entries['second-original'] }
     assert.deepEqual(agent.tools.alsoAllow, ['aiworker_analyze_video', ...IMAGE_TOOLS])
     assert.equal(agent.tools.alsoAllow.includes('aiworker_generate_image'), false)
+    assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [layout === 'list'
+      ? 'agents.list[].tools.alsoAllow'
+      : 'agents.entries.second-original.tools.alsoAllow'])
     const patch = renderImageCapabilityPatch(before, manifest, attachment)
     assert.deepEqual(Object.keys(patch.plugins.entries), ['aiworker-image-command'])
   })
@@ -75,6 +79,13 @@ test('manifests centrally declare the only approved profile media roots', () => 
   const invalid = structuredClone(manifest)
   invalid.attachments[1].mediaRoot = '../../private'
   assert.throws(() => validateImageCapabilityManifest(invalid), /attachment_invalid/u)
+})
+
+test('does not request an array replacement when no legacy image tool is retired', () => {
+  const attachment = attachmentForProfile(manifest, 'qwen-current')
+  const before = config()
+  before.agents.entries['second-original'].tools.alsoAllow = ['aiworker_analyze_video']
+  assert.deepEqual(imageCapabilityReplacePaths(before, manifest, attachment), [])
 })
 
 test('refuses conflicting target-agent ownership', () => {

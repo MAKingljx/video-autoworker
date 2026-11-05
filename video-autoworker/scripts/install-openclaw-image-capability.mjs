@@ -15,6 +15,7 @@ import {
   attachmentEvidence,
   attachmentForProfile,
   assertImageCapabilityPluginManifest,
+  imageCapabilityReplacePaths,
   isImageCapabilityAttached,
   renderImageCapabilityPatch,
   resolveAttachmentStateRoot,
@@ -323,9 +324,13 @@ function gatewayRpc({ work, home, openclaw, attachment, operation, token, patch,
     ...(sessionKey ? { AIWORKER_OPENCLAW_CAPABILITY_SESSION_KEY: sessionKey } : {}),
   }
   if (patch) {
+    const replacePaths = Array.isArray(patch.replacePaths) ? patch.replacePaths : []
     Object.assign(environment, {
       AIWORKER_OPENCLAW_CAPABILITY_CONFIG_REVISION: patch.baseHash,
       AIWORKER_OPENCLAW_CAPABILITY_PATCH_FILE: patch.path,
+      ...(replacePaths.length > 0
+        ? { AIWORKER_OPENCLAW_CAPABILITY_REPLACE_PATHS: JSON.stringify(replacePaths) }
+        : {}),
     })
   }
   try {
@@ -524,13 +529,14 @@ function main() {
     const live = gatewayConfig(gatewayRpc({ work, home, openclaw, attachment,
       operation: 'config-get', token }))
     const livePatch = renderImageCapabilityPatch(live.config, manifest, attachment)
+    const liveReplacePaths = imageCapabilityReplacePaths(live.config, manifest, attachment)
     const livePatchPath = path.join(work, 'config.live.patch.json')
     atomicWrite(livePatchPath, `${JSON.stringify(livePatch, null, 2)}\n`)
     run(openclaw, ['--profile', attachment.profile, 'config', 'patch', '--file', livePatchPath, '--dry-run'], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, phase: 'config_patch_live_dry_run',
     })
     const patched = gatewayRpc({ work, home, openclaw, attachment, operation: 'config-patch', token,
-      patch: { baseHash: live.hash, path: livePatchPath } })
+      patch: { baseHash: live.hash, path: livePatchPath, replacePaths: liveReplacePaths } })
     if (patched?.ok !== true || !isImageCapabilityAttached(patched.config, manifest, attachment)) fail('config_patch_invalid')
     run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
       env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'gateway_restart',

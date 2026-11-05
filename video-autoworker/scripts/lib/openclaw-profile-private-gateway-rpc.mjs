@@ -84,6 +84,43 @@ function safeOutput(pathname, data, sensitive = []) {
   try { fs.writeFileSync(descriptor, data); fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
 }
 
+function plainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+export function validateConfigPatchReplacePaths(binding, patch, replacePaths) {
+  if (!Array.isArray(replacePaths) || replacePaths.length > 1
+    || replacePaths.some(item => typeof item !== 'string' || item.length === 0 || item.length > 256)) fail()
+  if (replacePaths.length === 0) return []
+  if (!plainObject(patch.agents)) fail()
+  const hasList = Object.hasOwn(patch.agents, 'list')
+  const hasEntries = Object.hasOwn(patch.agents, 'entries')
+  if (hasList === hasEntries) fail()
+  const expected = hasList
+    ? 'agents.list[].tools.alsoAllow'
+    : `agents.entries.${binding.agentId}.tools.alsoAllow`
+  if (replacePaths[0] !== expected) fail()
+  if (expected.startsWith('agents.list')) {
+    if (!Array.isArray(patch.agents.list)
+      || !patch.agents.list.some(agent => plainObject(agent) && agent.id === binding.agentId
+        && plainObject(agent.tools) && Array.isArray(agent.tools.alsoAllow))) fail()
+  } else {
+    const agent = patch.agents.entries?.[binding.agentId]
+    if (!plainObject(patch.agents.entries) || !plainObject(agent)
+      || !plainObject(agent.tools) || !Array.isArray(agent.tools.alsoAllow)) fail()
+  }
+  return [...replacePaths]
+}
+
+function requestedReplacePaths(binding, patch) {
+  const raw = process.env.AIWORKER_OPENCLAW_CAPABILITY_REPLACE_PATHS || ''
+  if (raw.length === 0) return []
+  if (raw.length > 1024 || /[\u0000-\u001f\u007f]/u.test(raw)) fail()
+  let replacePaths
+  try { replacePaths = JSON.parse(raw) } catch { fail() }
+  return validateConfigPatchReplacePaths(binding, patch, replacePaths)
+}
+
 function request(operation, binding) {
   if (operation === 'catalog') return { method: 'tools.catalog', params: { agentId: binding.agentId, includePlugins: true } }
   if (operation === 'effective') return {
@@ -101,7 +138,10 @@ function request(operation, binding) {
     const raw = fs.readFileSync(patchPath, 'utf8')
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) fail()
-    return { method: 'config.patch', params: { raw, baseHash } }
+    const replacePaths = requestedReplacePaths(binding, parsed)
+    return { method: 'config.patch', params: {
+      raw, baseHash, ...(replacePaths.length > 0 ? { replacePaths } : {}),
+    } }
   }
   fail()
 }
@@ -115,11 +155,12 @@ async function main() {
   const invoke = await callGateway()
   let result
   try {
-    result = await invoke(request(operation, binding).method, {
+    const invocation = request(operation, binding)
+    result = await invoke(invocation.method, {
       url: `ws://127.0.0.1:${binding.port}`,
       token,
       timeout: 20_000,
-    }, request(operation, binding).params, { expectFinal: true, sharedStateMode: 'read-only' })
+    }, invocation.params, { expectFinal: true, sharedStateMode: 'read-only' })
   } catch { fail() }
   const output = `${JSON.stringify(result)}\n`
   safeOutput(outputPath, output, [token, sessionKey])

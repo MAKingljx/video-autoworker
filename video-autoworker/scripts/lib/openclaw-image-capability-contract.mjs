@@ -208,6 +208,22 @@ export function renderImageCapabilityPatch(config, manifest, attachment) {
   }
 }
 
+// OpenClaw protects destructive array changes behind an explicit path-level
+// acknowledgement. This component only needs that acknowledgement while
+// retiring one of its own legacy tools; unrelated agent arrays remain outside
+// its ownership boundary.
+export function imageCapabilityReplacePaths(config, manifest, attachment) {
+  const plugin = assertConfigShape(config, manifest, attachment)
+  const agent = profileAgent(config, attachment)
+  const tools = agent.tools === undefined ? {} : agent.tools
+  if (!plainObject(tools)) fail('agent_tools_invalid')
+  const allowed = tools.alsoAllow === undefined ? [] : list(tools.alsoAllow, 'agent_tool_allowlist')
+  if (!plugin.retiredTools.some(tool => allowed.includes(tool))) return []
+  return [Object.hasOwn(config.agents, 'list')
+    ? 'agents.list[].tools.alsoAllow'
+    : `agents.entries.${attachment.agentId}.tools.alsoAllow`]
+}
+
 export function assertImageCapabilityPluginManifest(value, manifest) {
   const plugin = validateImageCapabilityManifest(manifest).plugin
   if (!plainObject(value) || value.id !== plugin.id || value.version !== plugin.version
