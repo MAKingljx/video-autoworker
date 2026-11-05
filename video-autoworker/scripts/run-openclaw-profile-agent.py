@@ -11,6 +11,12 @@ from pathlib import Path
 import re
 import subprocess
 
+GATEWAY_TOKEN = re.compile(r"(?:[a-f0-9]{48}|[a-f0-9]{64})")
+
+
+def is_gateway_token(value: str) -> bool:
+    return GATEWAY_TOKEN.fullmatch(value) is not None
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -36,7 +42,7 @@ def main():
                               str(home / ('.openclaw-' + args.profile) / 'openclaw.json')],
                              capture_output=True, text=True, timeout=15)
     token = resolved.stdout.strip()
-    if resolved.returncode or not re.fullmatch(r'[a-f0-9]{64}', token):
+    if resolved.returncode or not is_gateway_token(token):
         raise ValueError('profile_secretref_unavailable_in_current_session')
     result = subprocess.run([str(home / 'ai-worker/bin/openclaw'), '--profile', args.profile,
                              'agent', '--agent', args.agent, '--message', message_path.read_text(), '--json'],
