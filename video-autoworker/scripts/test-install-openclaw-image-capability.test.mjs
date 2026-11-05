@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { inspectImagePluginDoctor, staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
+import { compareInventories, inspectImagePluginDoctor, staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const installer = fileURLToPath(new URL('./install-openclaw-image-capability.mjs', import.meta.url))
@@ -117,6 +117,25 @@ test('doctor accepts unrelated warnings but rejects any image-plugin or critical
   assert.throws(() => inspectImagePluginDoctor({
     pluginErrors: [], diagnostics: [{ pluginId: 'other', level: 'error' }],
   }, 'aiworker-image-command'), /plugin_doctor_unrelated_error/u)
+})
+
+test('catalog upgrade preserves existing image tools and admits only newly declared frame tools', () => {
+  const plugin = { id: 'aiworker-image-command', retiredTools: ['aiworker_generate_image'] }
+  const attachment = { toolIds: ['creative', 'protected', 'task', 'frames', 'frame_submit'] }
+  const oldImageTool = { id: 'creative', source: 'plugin', pluginId: plugin.id, version: '0.4.0' }
+  const before = [oldImageTool, { id: 'aiworker_generate_image', source: 'plugin', pluginId: plugin.id },
+    { id: 'other', source: 'builtin', pluginId: 'core' }]
+  const after = [
+    { ...oldImageTool, version: '0.5.0' },
+    { id: 'protected', source: 'plugin', pluginId: plugin.id },
+    { id: 'task', source: 'plugin', pluginId: plugin.id },
+    { id: 'frames', source: 'plugin', pluginId: plugin.id },
+    { id: 'frame_submit', source: 'plugin', pluginId: plugin.id },
+    { id: 'other', source: 'builtin', pluginId: 'core' },
+  ]
+  assert.match(compareInventories(before, after, plugin, attachment, 'catalog'), /^[a-f0-9]{64}$/u)
+  assert.throws(() => compareInventories(before, [...after, { id: 'unexpected', source: 'plugin', pluginId: plugin.id }],
+    plugin, attachment, 'catalog'), /catalog_tool_delta_invalid/u)
 })
 
 test('backup retention keeps the two newest verified backup directories by real timestamp', () => {

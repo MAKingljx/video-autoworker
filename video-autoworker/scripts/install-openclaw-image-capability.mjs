@@ -263,18 +263,23 @@ function toolInventory(value, attachment, kind) {
   return result
 }
 
-function compareInventories(before, after, plugin, attachment, label) {
+export function compareInventories(before, after, plugin, attachment, label) {
   const beforeById = new Map(before.map(item => [item.id, item]))
   const afterById = new Map(after.map(item => [item.id, item]))
   const removed = before.filter(item => !afterById.has(item.id))
   const added = after.filter(item => !beforeById.has(item.id))
+  const expectedAdded = attachment.toolIds.filter(tool => !beforeById.has(tool))
   if (!same(removed.map(item => item.id).toSorted(), plugin.retiredTools.toSorted())
-    || !same(added.map(item => item.id).toSorted(), attachment.toolIds.toSorted())
-    || added.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)) {
+    || !same(added.map(item => item.id).toSorted(), expectedAdded.toSorted())
+    || added.some(item => item.source !== 'plugin' || item.pluginId !== plugin.id)
+    || attachment.toolIds.some(tool => {
+      const entry = afterById.get(tool)
+      return !entry || entry.source !== 'plugin' || entry.pluginId !== plugin.id
+    })) {
     fail(`${label}_tool_delta_invalid`)
   }
   for (const entry of before) {
-    if (plugin.retiredTools.includes(entry.id)) continue
+    if (plugin.retiredTools.includes(entry.id) || attachment.toolIds.includes(entry.id)) continue
     if (JSON.stringify(entry) !== JSON.stringify(afterById.get(entry.id))) fail(`${label}_tool_changed`)
   }
   return sha256(JSON.stringify(after))
