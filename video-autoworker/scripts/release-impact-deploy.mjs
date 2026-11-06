@@ -1126,7 +1126,7 @@ async function captureRuntimeReceiptReconciliation({
     runtimeBinding,
   })
   const imageCapability = imageCapabilityReconcileBinding(
-    imageCapabilityReceiptPath, profileStateRoot, route.sourceCommit,
+    imageCapabilityReceiptPath, profileStateRoot, control.headCommit,
   )
   const currentReceiptPath = runtimeReceiptPath(runtimeBinding.runDir)
   const currentReceipt = {

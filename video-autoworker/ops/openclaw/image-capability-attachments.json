@@ -2,17 +2,21 @@
   "schema": "aiworker-openclaw-image-capabilities/v3",
   "plugin": {
     "id": "aiworker-image-command",
-    "version": "0.5.2",
+    "version": "0.5.3",
     "tools": [
       "aiworker_submit_creative_image",
       "aiworker_submit_designed_cover",
       "aiworker_submit_protected_cover",
       "aiworker_image_task",
       "aiworker_image_help",
-      "aiworker_video_cover_workflow"
+      "aiworker_video_cover_read_directory",
+      "aiworker_video_cover_get_candidates",
+      "aiworker_video_cover_submit_protected",
+      "aiworker_video_cover_task"
     ],
     "retiredTools": [
       "aiworker_generate_image",
+      "aiworker_video_cover_workflow",
       "aiworker_video_cover_frames",
       "aiworker_submit_protected_cover_from_frame"
     ]
@@ -46,7 +50,10 @@
         "aiworker_submit_protected_cover",
         "aiworker_image_task",
         "aiworker_image_help",
-        "aiworker_video_cover_workflow"
+        "aiworker_video_cover_read_directory",
+        "aiworker_video_cover_get_candidates",
+        "aiworker_video_cover_submit_protected",
+        "aiworker_video_cover_task"
       ]
     }
   ]

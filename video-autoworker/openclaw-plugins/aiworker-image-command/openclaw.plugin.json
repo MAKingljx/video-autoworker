@@ -1,7 +1,7 @@
 {
   "id": "aiworker-image-command",
   "name": "AI-worker Image Command",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Action-specific protected-cover and image task commands for one explicitly bound OpenClaw agent and one shared image service.",
   "activation": { "onStartup": true, "onCapabilities": ["tool"] },
   "contracts": { "tools": [
@@ -10,7 +10,10 @@
     "aiworker_submit_protected_cover",
     "aiworker_image_task",
     "aiworker_image_help",
-    "aiworker_video_cover_workflow"
+    "aiworker_video_cover_read_directory",
+    "aiworker_video_cover_get_candidates",
+    "aiworker_video_cover_submit_protected",
+    "aiworker_video_cover_task"
   ] },
   "toolMetadata": {
     "aiworker_submit_creative_image": { "optional": true },
@@ -18,7 +21,10 @@
     "aiworker_submit_protected_cover": { "optional": true },
     "aiworker_image_task": { "optional": true },
     "aiworker_image_help": { "optional": true },
-    "aiworker_video_cover_workflow": { "optional": true }
+    "aiworker_video_cover_read_directory": { "optional": true },
+    "aiworker_video_cover_get_candidates": { "optional": true },
+    "aiworker_video_cover_submit_protected": { "optional": true },
+    "aiworker_video_cover_task": { "optional": true }
   },
   "configSchema": {
     "type": "object",

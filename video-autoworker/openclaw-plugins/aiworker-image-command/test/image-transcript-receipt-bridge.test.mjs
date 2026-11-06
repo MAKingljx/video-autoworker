@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import {
   IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
   IMAGE_TASK_TOOL_NAME,
-  IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+  IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
 } from '../lib/image-command-tool.js'
 import { createImageTranscriptReceiptBridge } from '../lib/image-transcript-receipt-bridge.js'
 
@@ -72,14 +72,47 @@ test('invalid image submission remains an actionable error after the generic pro
 test('unified video-cover submission preserves the same bounded image receipt', () => {
   const bridge = createImageTranscriptReceiptBridge()
   bridge.capture(rawResult({
-    toolName: IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+    toolName: IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
     details: { jobId, currentState: 'QUEUED', nextAction: 'WAIT_FOR_IMAGE_NOTIFICATION' },
   }), context)
   const projected = bridge.project({
-    message: { role: 'toolResult', toolName: IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+    message: { role: 'toolResult', toolName: IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
       toolCallId: 'call-image-1', content: [], isError: false },
   }, context)
   assert.match(projected.message.content[0].text, new RegExp(`jobId=${jobId}`, 'u'))
+})
+
+test('video-cover request failures replace an internal assistant plan with a safe final reply once', () => {
+  const bridge = createImageTranscriptReceiptBridge()
+  bridge.capture(rawResult({
+    toolName: IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
+    details: {
+      errorCode: 'VIDEO_COVER_WORKFLOW_REQUEST_INVALID',
+      nextAction: 'USE_WORKFLOW_SCHEMA',
+    },
+    isError: true,
+  }), context)
+  const event = {
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: '我需要告知用户并询问是否重试。' }],
+    },
+  }
+  const projected = bridge.projectUserVisibleFailure(event, context)
+  assert.equal(projected.message.role, 'assistant')
+  assert.equal(projected.message.content[0].text, '这次封面提交信息不完整，未创建图片任务。请重新发起一次封面生成。')
+  assert.doesNotMatch(JSON.stringify(projected), /需要告知|是否重试/u)
+  assert.equal(bridge.projectUserVisibleFailure(event, context), undefined)
+})
+
+test('ordinary image failures never overwrite a model final reply', () => {
+  const bridge = createImageTranscriptReceiptBridge()
+  bridge.capture(rawResult({
+    details: { errorCode: 'IMAGE_REQUEST_INVALID', nextAction: 'PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS' },
+    isError: true,
+  }), context)
+  const event = { message: { role: 'assistant', content: [{ type: 'text', text: '请补充图片。' }] } }
+  assert.equal(bridge.projectUserVisibleFailure(event, context), undefined)
 })
 
 test('bridge ignores non-image tools and a different trusted-agent context', () => {

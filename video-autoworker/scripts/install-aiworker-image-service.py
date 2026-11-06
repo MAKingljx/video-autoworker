@@ -31,9 +31,12 @@ IMAGE_CAPABILITY_TOOLS = [
     "aiworker_submit_protected_cover",
     "aiworker_image_task",
     "aiworker_image_help",
-    "aiworker_video_cover_workflow",
+    "aiworker_video_cover_read_directory",
+    "aiworker_video_cover_get_candidates",
+    "aiworker_video_cover_submit_protected",
+    "aiworker_video_cover_task",
 ]
-RETIRED_IMAGE_CAPABILITY_TOOLS = ["aiworker_generate_image", "aiworker_video_cover_frames",
+RETIRED_IMAGE_CAPABILITY_TOOLS = ["aiworker_generate_image", "aiworker_video_cover_workflow", "aiworker_video_cover_frames",
                                   "aiworker_submit_protected_cover_from_frame"]
 spec = importlib.util.spec_from_file_location("image_install_contract", ROOT / "scripts/install-openclaw-image-studio.py")
 contract = importlib.util.module_from_spec(spec)

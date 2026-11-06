@@ -120,36 +120,42 @@ test('doctor accepts unrelated warnings but rejects any image-plugin or critical
 })
 
 test('runtime inspection requires the qwen cover routing hook and only declared tools', () => {
-  const plugin = { id: 'aiworker-image-command', version: '0.5.2' }
-  const attachment = { legacyScope: false, toolIds: ['aiworker_video_cover_workflow'] }
+  const plugin = { id: 'aiworker-image-command', version: '0.5.3' }
+  const attachment = { legacyScope: false, toolIds: [
+    'aiworker_video_cover_read_directory', 'aiworker_video_cover_get_candidates',
+    'aiworker_video_cover_submit_protected', 'aiworker_video_cover_task',
+  ] }
   const report = {
     plugin: { ...plugin, status: 'loaded' },
-    tools: [{ names: ['aiworker_video_cover_workflow'] }],
+    tools: [{ names: attachment.toolIds }],
     typedHooks: [
       { name: 'before_prompt_build' }, { name: 'tool_result_persist' }, { name: 'before_message_write' },
     ],
     diagnostics: [],
   }
-  assert.deepEqual(inspectImagePluginRuntime(report, plugin, attachment).toolIds, attachment.toolIds)
+  assert.deepEqual(inspectImagePluginRuntime(report, plugin, attachment).toolIds, attachment.toolIds.toSorted())
   assert.throws(() => inspectImagePluginRuntime({ ...report, typedHooks: report.typedHooks.slice(1) }, plugin, attachment),
     /plugin_runtime_unhealthy/u)
   assert.throws(() => inspectImagePluginRuntime({ ...report, tools: [{ names: ['old_tool'] }] }, plugin, attachment),
     /plugin_runtime_unhealthy/u)
 })
 
-test('catalog upgrade retires the split frame pair and exposes the one workflow facade', () => {
-  const plugin = { id: 'aiworker-image-command', retiredTools: ['aiworker_generate_image', 'frames', 'frame_submit'] }
-  const attachment = { toolIds: ['creative', 'protected', 'task', 'workflow'] }
+test('catalog upgrade retires the old facade and exposes typed workflow actions', () => {
+  const plugin = { id: 'aiworker-image-command', retiredTools: ['aiworker_generate_image', 'workflow', 'frames', 'frame_submit'] }
+  const attachment = { toolIds: ['creative', 'protected', 'task', 'directory', 'candidates', 'submit', 'workflow_task'] }
   const oldImageTool = { id: 'creative', source: 'plugin', pluginId: plugin.id, version: '0.4.0' }
   const before = [oldImageTool, { id: 'aiworker_generate_image', source: 'plugin', pluginId: plugin.id },
     { id: 'frames', source: 'plugin', pluginId: plugin.id },
     { id: 'frame_submit', source: 'plugin', pluginId: plugin.id },
     { id: 'other', source: 'builtin', pluginId: 'core' }]
   const after = [
-    { ...oldImageTool, version: '0.5.2' },
+    { ...oldImageTool, version: '0.5.3' },
     { id: 'protected', source: 'plugin', pluginId: plugin.id },
     { id: 'task', source: 'plugin', pluginId: plugin.id },
-    { id: 'workflow', source: 'plugin', pluginId: plugin.id },
+    { id: 'directory', source: 'plugin', pluginId: plugin.id },
+    { id: 'candidates', source: 'plugin', pluginId: plugin.id },
+    { id: 'submit', source: 'plugin', pluginId: plugin.id },
+    { id: 'workflow_task', source: 'plugin', pluginId: plugin.id },
     { id: 'other', source: 'builtin', pluginId: 'core' },
   ]
   assert.match(compareInventories(before, after, plugin, attachment, 'catalog'), /^[a-f0-9]{64}$/u)

@@ -10,11 +10,11 @@
 - `aiworker_image_task`：仅以已返回的任务编号执行 `status`、`result`、`inspect` 或用户明确要求的 `cancel`；
 - `aiworker_image_help`：可被通用工具检索的只读说明，不创建任务。
 
-`qwen-current / second-original` 的已学习视频封面只暴露一个 direct-only 能力：`aiworker_video_cover_workflow`。它以同一个浅层阶段协议依次处理 `read_segments`、`cover_frames`、`submit_protected_cover` 和 `image_task`；模型不会在视频目录型工具与原生图片工具之间选择或桥接。
+`qwen-current / second-original` 的已学习视频封面保持一条 direct-only 业务工作流，但模型可见层使用四个严格动作：`aiworker_video_cover_read_directory`、`aiworker_video_cover_get_candidates`、`aiworker_video_cover_submit_protected` 与 `aiworker_video_cover_task`。每个动作的实际字段均为 Schema 必填，避免模型仅发送 `action` 后落入无效提交；它们仍复用同一个后台状态机、会话绑定、图片队列和结果权威。
 
 工作流从应用权威的已学习摘要目录读取可用片段，返回当前会话绑定的 `operationId`；候选帧步骤只接受该编号和目录中真实存在的片段，返回三张原生图片块及短期 `frameRef`；提交步骤同时核验工作流、会话、图片 scope 和帧引用后复用既有原片保护图片队列。候选帧不是学习任务的长期产物，工作流和帧引用均在 60 分钟后过期。原片不可用、学习结果不唯一、片段失败、阶段跳过或跨会话引用都会被拒绝。
 
-旧的 `aiworker_video_cover_frames` 与 `aiworker_submit_protected_cover_from_frame` 已从 qwen-current 工具面退役；历史记录保留，但新请求不得走旧的分段桥接链。
+旧的 `aiworker_video_cover_workflow`、`aiworker_video_cover_frames` 与 `aiworker_submit_protected_cover_from_frame` 已从 qwen-current 工具面退役；历史记录保留，但新请求不得走旧的分段桥接链。
 
 为保证组件发布失败时能够恢复已验证的旧图片插件，应用暂时保留同名的 loopback-only HTTP 兼容适配器；它没有 OpenClaw 工具注册、不会进入 Tool Search，也不会形成第二条业务状态机。新应用切换、图片插件升级和真实对话验收完成后，适配器将在后续单独版本按保留期退役。
 

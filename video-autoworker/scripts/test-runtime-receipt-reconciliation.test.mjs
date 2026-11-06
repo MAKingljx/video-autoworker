@@ -17,12 +17,13 @@ function input(overrides = {}) {
     currentState: 'SERVICE_HEALTHY',
     sourceCommit: commit,
     pluginSourceSha256: sha('b'),
-    attachment: { pluginId: 'aiworker-image-command', pluginVersion: '0.5.2' },
+    attachment: { pluginId: 'aiworker-image-command', pluginVersion: '0.5.3' },
     runtime: {
       toolIds: [
         'aiworker_image_help', 'aiworker_image_task', 'aiworker_submit_creative_image',
         'aiworker_submit_designed_cover', 'aiworker_submit_protected_cover',
-        'aiworker_video_cover_workflow',
+        'aiworker_video_cover_read_directory', 'aiworker_video_cover_get_candidates',
+        'aiworker_video_cover_submit_protected', 'aiworker_video_cover_task',
       ],
       hookNames: ['before_message_write', 'before_prompt_build', 'tool_result_persist'],
     },
@@ -79,5 +80,11 @@ test('refuses a changed image capability binding before any receipt write', () =
 test('refuses legacy frame tools in the image capability receipt', () => {
   const value = input().imageCapability
   value.receipt.runtime.toolIds.push('aiworker_video_cover_frames')
+  assert.throws(() => imageCapabilityBinding(value.receipt, value), /image_capability_receipt_invalid/u)
+})
+
+test('refuses the retired action-only workflow facade in the image capability receipt', () => {
+  const value = input().imageCapability
+  value.receipt.runtime.toolIds.push('aiworker_video_cover_workflow')
   assert.throws(() => imageCapabilityBinding(value.receipt, value), /image_capability_receipt_invalid/u)
 })

@@ -64,10 +64,13 @@ test('apply creates one recoverable backup and rejects concurrent source drift',
   }
 })
 
-test('managed template tells qwen-current to use the one direct video-cover workflow', async () => {
+test('managed template tells qwen-current to use strict typed video-cover actions', async () => {
   const source = await readFile(new URL('../ops/openclaw/qwen-current-image-guidance.md', import.meta.url), 'utf8')
-  assert.match(source, /aiworker_video_cover_workflow/u)
+  assert.match(source, /aiworker_video_cover_read_directory/u)
+  assert.match(source, /aiworker_video_cover_get_candidates/u)
+  assert.match(source, /aiworker_video_cover_submit_protected/u)
+  assert.match(source, /aiworker_video_cover_task/u)
   assert.match(source, /tool_search/u)
   assert.match(source, /tool_call/u)
-  assert.doesNotMatch(source, /aiworker_video_cover_frames|aiworker_submit_protected_cover_from_frame/u)
+  assert.doesNotMatch(source, /aiworker_video_cover_workflow|aiworker_video_cover_frames|aiworker_submit_protected_cover_from_frame/u)
 })

@@ -4,6 +4,12 @@ import { isAbsolute, resolve } from 'node:path'
 export const RUNTIME_RECEIPT_RECONCILE_SCHEMA = 'video-autoworker-runtime-receipt-reconcile/v1'
 const SHA = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
+const REQUIRED_TYPED_COVER_TOOLS = Object.freeze([
+  'aiworker_video_cover_read_directory',
+  'aiworker_video_cover_get_candidates',
+  'aiworker_video_cover_submit_protected',
+  'aiworker_video_cover_task',
+])
 
 function fail(code) { throw new Error(`runtime receipt reconcile failed: ${code}`) }
 function digest(value) { return createHash('sha256').update(JSON.stringify(value)).digest('hex') }
@@ -40,7 +46,11 @@ export function imageCapabilityBinding(receipt, binding = {}) {
   const runtime = receipt?.runtime
   const tools = Array.isArray(runtime?.toolIds) ? runtime.toolIds : []
   const hooks = Array.isArray(runtime?.hookNames) ? runtime.hookNames : []
-  const forbidden = new Set(['aiworker_video_cover_frames', 'aiworker_submit_protected_cover_from_frame'])
+  const forbidden = new Set([
+    'aiworker_video_cover_workflow',
+    'aiworker_video_cover_frames',
+    'aiworker_submit_protected_cover_from_frame',
+  ])
   if (receipt !== undefined) {
     if (receipt?.schema !== 'aiworker-openclaw-image-capability-receipt/v1'
       || receipt?.currentState !== 'SERVICE_HEALTHY'
@@ -48,7 +58,7 @@ export function imageCapabilityBinding(receipt, binding = {}) {
       || attachment?.pluginId !== 'aiworker-image-command'
       || typeof attachment?.pluginVersion !== 'string' || !attachment.pluginVersion
       || !SHA.test(receipt?.pluginSourceSha256 || '')
-      || !tools.includes('aiworker_video_cover_workflow')
+      || REQUIRED_TYPED_COVER_TOOLS.some(tool => !tools.includes(tool))
       || !hooks.includes('before_prompt_build')
       || tools.some(tool => forbidden.has(tool))) {
       fail('image_capability_receipt_invalid')
@@ -58,7 +68,7 @@ export function imageCapabilityBinding(receipt, binding = {}) {
       || typeof binding.pluginVersion !== 'string' || !binding.pluginVersion
       || !SHA.test(binding.pluginSourceSha256 || '')
       || !Array.isArray(binding.toolIds) || !Array.isArray(binding.hookNames)
-      || !binding.toolIds.includes('aiworker_video_cover_workflow')
+      || REQUIRED_TYPED_COVER_TOOLS.some(tool => !binding.toolIds.includes(tool))
       || !binding.hookNames.includes('before_prompt_build')
       || binding.toolIds.some(tool => forbidden.has(tool))) {
       fail('image_capability_binding_invalid')

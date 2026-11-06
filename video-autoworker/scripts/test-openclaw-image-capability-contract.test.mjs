@@ -18,15 +18,18 @@ const IMAGE_TOOLS = [
   'aiworker_submit_protected_cover',
   'aiworker_image_task',
   'aiworker_image_help',
-  'aiworker_video_cover_workflow',
+  'aiworker_video_cover_read_directory',
+  'aiworker_video_cover_get_candidates',
+  'aiworker_video_cover_submit_protected',
+  'aiworker_video_cover_task',
 ]
 const LEGACY_IMAGE_TOOLS = IMAGE_TOOLS.slice(0, 5)
 
 const manifest = validateImageCapabilityManifest({
   schema: 'aiworker-openclaw-image-capabilities/v3',
   plugin: {
-    id: 'aiworker-image-command', version: '0.5.2', tools: IMAGE_TOOLS,
-    retiredTools: ['aiworker_generate_image', 'aiworker_video_cover_frames', 'aiworker_submit_protected_cover_from_frame'],
+    id: 'aiworker-image-command', version: '0.5.3', tools: IMAGE_TOOLS,
+    retiredTools: ['aiworker_generate_image', 'aiworker_video_cover_workflow', 'aiworker_video_cover_frames', 'aiworker_submit_protected_cover_from_frame'],
   },
   attachments: [
     { profile: 'image-studio', agentId: 'image-studio', stateRoot: '.openclaw-image-studio', gatewayPort: 19289, mediaRoot: '.openclaw-image-studio/media', legacyScope: true, toolIds: LEGACY_IMAGE_TOOLS },

@@ -1,4 +1,4 @@
-import { IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME } from './image-command-tool.js'
+import { QWEN_IMAGE_WORKFLOW_TOOL_NAMES } from './image-command-tool.js'
 
 const TARGET_AGENT_ID = 'second-original'
 const COVER_TERMS = /(?:封面|封皮|头图|缩略图|thumbnail|cover)/iu
@@ -23,6 +23,6 @@ export function createVideoCoverWorkflowMode() {
     const current = typeof event?.currentUserMessage === 'string'
       ? event.currentUserMessage : ''
     if (!isVideoCoverWorkflowRequest(current)) return undefined
-    return { toolsAllow: [IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME] }
+    return { toolsAllow: [...QWEN_IMAGE_WORKFLOW_TOOL_NAMES] }
   }
 }

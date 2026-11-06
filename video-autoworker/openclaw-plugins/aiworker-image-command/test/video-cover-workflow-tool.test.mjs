@@ -4,7 +4,11 @@ import test from 'node:test'
 import {
   createImageCommandTools,
   IMAGE_COMMAND_TOOL_NAMES,
-  IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+  IMAGE_VIDEO_COVER_CANDIDATES_TOOL_NAME,
+  IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME,
+  IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
+  IMAGE_VIDEO_COVER_TASK_TOOL_NAME,
+  QWEN_IMAGE_WORKFLOW_TOOL_NAMES,
   imageCommandToolNamesForProfile,
   imageSessionScope,
 } from '../lib/image-command-tool.js'
@@ -78,29 +82,34 @@ function tools(overrides = {}) {
   }
 }
 
-function workflowTool(instance) {
-  const tool = instance.tools.find(item => item.name === IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME)
-  assert.ok(tool, 'missing unified video cover workflow tool')
+function workflowTool(instance, name) {
+  const tool = instance.tools.find(item => item.name === name)
+  assert.ok(tool, `missing video cover tool ${name}`)
   return tool
 }
 
-test('qwen-current exposes one direct-only video-cover workflow instead of the legacy frame pair', () => {
+test('qwen-current exposes strict direct-only video-cover actions instead of the legacy frame pair', () => {
   assert.deepEqual(imageCommandToolNamesForProfile('qwen-current'), [
-    ...IMAGE_COMMAND_TOOL_NAMES, IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+    ...IMAGE_COMMAND_TOOL_NAMES, ...QWEN_IMAGE_WORKFLOW_TOOL_NAMES,
   ])
   assert.deepEqual(imageCommandToolNamesForProfile('image-studio'), IMAGE_COMMAND_TOOL_NAMES)
   const instance = tools()
-  const tool = workflowTool(instance)
-  assert.equal(tool.catalogMode, 'direct-only')
-  assert.match(tool.description, /唯一规范入口/u)
+  for (const name of QWEN_IMAGE_WORKFLOW_TOOL_NAMES) {
+    assert.equal(workflowTool(instance, name).catalogMode, 'direct-only')
+  }
+  assert.deepEqual(workflowTool(instance, IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME).parameters.required, ['query'])
+  assert.deepEqual(workflowTool(instance, IMAGE_VIDEO_COVER_CANDIDATES_TOOL_NAME).parameters.required, ['operationId', 'segmentIndex'])
+  assert.deepEqual(workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME).parameters.required, ['operationId', 'frameRef', 'protected'])
+  assert.deepEqual(workflowTool(instance, IMAGE_VIDEO_COVER_TASK_TOOL_NAME).parameters.required, ['jobId', 'taskAction'])
+  assert.equal(instance.tools.some(item => item.name === 'aiworker_video_cover_workflow'), false)
   assert.equal(instance.tools.some(item => item.name === 'aiworker_video_cover_frames'), false)
   assert.equal(instance.tools.some(item => item.name === 'aiworker_submit_protected_cover_from_frame'), false)
 })
 
 test('the unified state machine returns a directory, native frames, then one protected submission', async () => {
   const instance = tools()
-  const tool = workflowTool(instance)
-  const directory = await tool.execute('cover-directory', { action: 'read_segments', query: '北美火车短片.mp4' })
+  const directory = await workflowTool(instance, IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME)
+    .execute('cover-directory', { query: '北美火车短片.mp4' })
   assert.deepEqual(instance.calls.segments, [{ query: '北美火车短片.mp4' }])
   assert.deepEqual(instance.calls.begin[0], {
     imageScope: scope, sessionKey: context.sessionKey, videoName: '北美火车短片.mp4', segmentIndexes: [3],
@@ -109,7 +118,8 @@ test('the unified state machine returns a directory, native frames, then one pro
   assert.equal(directory.details.operationId, operationId)
   assert.match(directory.content[0].text, /operationId=/u)
 
-  const frames = await tool.execute('cover-frames', { action: 'cover_frames', operationId, segmentIndex: 3 })
+  const frames = await workflowTool(instance, IMAGE_VIDEO_COVER_CANDIDATES_TOOL_NAME)
+    .execute('cover-frames', { operationId, segmentIndex: 3 })
   assert.deepEqual(instance.calls.workflow[0], { operationId, imageScope: scope, sessionKey: context.sessionKey })
   assert.deepEqual(instance.calls.frames, [{ query: '北美火车短片.mp4', segmentIndex: 3 }])
   assert.deepEqual(instance.calls.capture[0], {
@@ -119,9 +129,8 @@ test('the unified state machine returns a directory, native frames, then one pro
   assert.equal(frames.content.filter(item => item.type === 'image').length, 3)
   assert.doesNotMatch(JSON.stringify(frames), /\/private\//u)
 
-  const submitted = await tool.execute('cover-submit', {
-    action: 'submit_protected_cover', operationId, frameRef, protected: protectedPlan,
-  })
+  const submitted = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('cover-submit', { operationId, frameRef, protected: protectedPlan })
   assert.deepEqual(instance.calls.resolve[0], { frameRef, imageScope: scope, sessionKey: context.sessionKey, workflowId: operationId })
   assert.equal(instance.calls.submit.length, 1)
   assert.deepEqual(instance.calls.submit[0].images, ['/private/qwen/media/video-frame-references/frame-a.jpg'])
@@ -143,12 +152,11 @@ test('the workflow rejects skipped phases and never reaches the image queue', as
   const instance = tools({ videoFrameStore: {
     async resolveWorkflow() { throw new Error('video_frame_reference_scope_mismatch') },
   } })
-  const tool = workflowTool(instance)
-  const result = await tool.execute('bad-submit', {
-    action: 'submit_protected_cover', operationId, frameRef, protected: protectedPlan,
-  })
+  const result = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('bad-submit', { operationId, frameRef, protected: protectedPlan })
   assert.equal(result.isError, true)
   assert.equal(result.details.phase, 'failed')
+  assert.equal(result.details.errorCode, 'VIDEO_COVER_SESSION_SCOPE_MISMATCH')
   assert.equal(instance.calls.submit.length, 0)
 })
 
@@ -161,12 +169,22 @@ test('repeated stages reuse scoped workflow state instead of reading or extracti
       sha256: 'c'.repeat(64), data: frameData,
     }] },
   } })
-  const tool = workflowTool(instance)
-  const directory = await tool.execute('repeat-directory', { action: 'read_segments', query: '北美火车短片.mp4' })
+  const directory = await workflowTool(instance, IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME)
+    .execute('repeat-directory', { query: '北美火车短片.mp4' })
   assert.equal(directory.details.status, 'blocked')
   assert.equal(instance.calls.segments.length, 0)
-  const frames = await tool.execute('repeat-frames', { action: 'cover_frames', operationId, segmentIndex: 3 })
+  const frames = await workflowTool(instance, IMAGE_VIDEO_COVER_CANDIDATES_TOOL_NAME)
+    .execute('repeat-frames', { operationId, segmentIndex: 3 })
   assert.equal(frames.details.status, 'blocked')
   assert.equal(instance.calls.frames.length, 0)
   assert.equal(frames.content.filter(item => item.type === 'image').length, 1)
+})
+
+test('strict submit schema rejects an action-only legacy shape before the image queue', async () => {
+  const instance = tools()
+  const result = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('action-only-submit', { action: 'submit_protected_cover' })
+  assert.equal(result.isError, true)
+  assert.equal(result.details.errorCode, 'VIDEO_COVER_WORKFLOW_REQUEST_INVALID')
+  assert.equal(instance.calls.submit.length, 0)
 })

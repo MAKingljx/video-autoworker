@@ -113,7 +113,7 @@ export function registerImageCommands(api, {
     api.on('tool_result_persist', (event, context) => receiptBridge.project(event, context), {
       priority: RECEIPT_PROJECT_PRIORITY,
     })
-    api.on('before_message_write', (event, context) => receiptBridge.project(event, context), {
+    api.on('before_message_write', (event, context) => receiptBridge.projectUserVisibleFailure(event, context), {
       priority: RECEIPT_PROJECT_PRIORITY,
     })
   }

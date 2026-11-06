@@ -9,6 +9,7 @@ import {
   IMAGE_HELP_TOOL_NAME,
   IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
   IMAGE_TASK_TOOL_NAME,
+  IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME,
   imageSessionScope,
   imageRequestKey,
   normalizeImageRequest,
@@ -69,7 +70,7 @@ test('qwen-current help gives the unified cover workflow a non-catalog route', a
     videoFrameStore: {},
   })
   const instructions = await actionTool(tools, IMAGE_HELP_TOOL_NAME).execute('qwen-help', {})
-  assert.match(instructions.content[0].text, /aiworker_video_cover_workflow/u)
+  assert.match(instructions.content[0].text, new RegExp(IMAGE_VIDEO_COVER_DIRECTORY_TOOL_NAME, 'u'))
   assert.match(instructions.content[0].text, /tool_search/u)
   assert.match(instructions.content[0].text, /tool_describe/u)
   assert.match(instructions.content[0].text, /tool_call/u)

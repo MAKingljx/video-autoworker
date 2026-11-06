@@ -49,6 +49,18 @@ function receiptText(value) {
   return `图片工具回执：${fields.join('；')}。`
 }
 
+function videoCoverFailureReply(receipt) {
+  if (receipt?.errorCode === 'VIDEO_COVER_WORKFLOW_REQUEST_INVALID') {
+    return '这次封面提交信息不完整，未创建图片任务。请重新发起一次封面生成。'
+  }
+  return '这次封面未创建成功，因此没有可查询的图片任务。请重新发起一次封面生成。'
+}
+
+function isVideoCoverFailure(receipt) {
+  return typeof receipt?.errorCode === 'string'
+    && (receipt.errorCode.startsWith('VIDEO_COVER_') || receipt.nextAction === 'REPORT_WORKFLOW_FAILURE')
+}
+
 // The director-brain projector intentionally removes arbitrary tool details
 // from long transcripts. Image commands need only four safe receipt fields to
 // continue without repeating a submission, so keep an in-memory bridge for
@@ -56,8 +68,10 @@ function receiptText(value) {
 // arbitrary output, and its bounded map is not persisted.
 export function createImageTranscriptReceiptBridge({ maxEntries = 512, isEligible = () => true } = {}) {
   const entries = new Map()
+  const finalFailures = new Map()
   function prune() {
     while (entries.size > maxEntries) entries.delete(entries.keys().next().value)
+    while (finalFailures.size > maxEntries) finalFailures.delete(finalFailures.keys().next().value)
   }
   function capture(event, context) {
     const name = toolName(event)
@@ -72,6 +86,7 @@ export function createImageTranscriptReceiptBridge({ maxEntries = 512, isEligibl
       receipt: safe,
       isError: message.isError === true || Boolean(safe.errorCode),
     })
+    if (isVideoCoverFailure(safe)) finalFailures.set(sessionKey, safe)
     prune()
     return undefined
   }
@@ -93,5 +108,20 @@ export function createImageTranscriptReceiptBridge({ maxEntries = 512, isEligibl
       },
     }
   }
-  return Object.freeze({ capture, project })
+  function projectUserVisibleFailure(event, context) {
+    const message = event?.message
+    const sessionKey = context?.sessionKey
+    if (!isEligible(context) || message?.role !== 'assistant'
+      || typeof sessionKey !== 'string' || !SAFE_SESSION_KEY.test(sessionKey)) return undefined
+    const failure = finalFailures.get(sessionKey)
+    if (!failure) return undefined
+    finalFailures.delete(sessionKey)
+    return {
+      message: {
+        ...message,
+        content: [{ type: 'text', text: videoCoverFailureReply(failure) }],
+      },
+    }
+  }
+  return Object.freeze({ capture, project, projectUserVisibleFailure })
 }

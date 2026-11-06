@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { registerImageCommands } from '../lib/plugin-registration.js'
 import { createImageNotifications } from '../lib/image-notifications.js'
 import { IMAGE_COMMAND_TOOL_NAMES, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, imageCommandToolNamesForProfile,
-  IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME } from '../lib/image-command-tool.js'
+  QWEN_IMAGE_WORKFLOW_TOOL_NAMES } from '../lib/image-command-tool.js'
 
 const context = { agentId: 'image-studio', sessionKey: 'agent:image-studio:main' }
 const jobId = '3'.repeat(32)
@@ -198,7 +198,9 @@ test('qwen-current can bind the shared plugin to second-original without inherit
     })
     await host.services[0].start({ stateDir: dir })
     assert.deepEqual(host.toolFactories.map(entry => entry.options.names[0]), imageCommandToolNamesForProfile('qwen-current'))
-    assert.ok(host.toolFactories.some(entry => entry.options.names.includes(IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME)))
+    for (const name of QWEN_IMAGE_WORKFLOW_TOOL_NAMES) {
+      assert.ok(host.toolFactories.some(entry => entry.options.names.includes(name)))
+    }
     assert.deepEqual(host.hooks.map(item => item.event), [
       'before_prompt_build', 'tool_result_persist', 'tool_result_persist', 'before_message_write',
     ])
