@@ -12,6 +12,7 @@ import {
   imageCommandToolNamesForProfile,
   imageSessionScope,
 } from '../lib/image-command-tool.js'
+import { ImageServiceError } from '../lib/image-job-client.js'
 
 const binding = { profile: 'qwen-current', targetAgentId: 'second-original' }
 const context = { agentId: 'second-original', sessionKey: 'agent:second-original:video-cover-test' }
@@ -188,4 +189,23 @@ test('strict submit schema rejects an action-only legacy shape before the image 
   assert.equal(result.isError, true)
   assert.equal(result.details.errorCode, 'VIDEO_COVER_WORKFLOW_REQUEST_INVALID')
   assert.equal(instance.calls.submit.length, 0)
+})
+
+test('maps a protected title layout rejection without creating a job', async () => {
+  let submissions = 0
+  const instance = tools({
+    client: {
+      async submit() {
+        submissions += 1
+        throw new ImageServiceError('protected_title_box_too_small')
+      },
+    },
+  })
+  const result = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('small-title-box', { operationId, frameRef, protected: protectedPlan })
+  assert.equal(submissions, 1)
+  assert.equal(result.isError, true)
+  assert.equal(result.details.errorCode, 'VIDEO_COVER_TITLE_BOX_TOO_SMALL')
+  assert.equal(result.details.nextAction, 'REVISE_PROTECTED_TITLE_BOX')
+  assert.equal(result.details.jobId, undefined)
 })

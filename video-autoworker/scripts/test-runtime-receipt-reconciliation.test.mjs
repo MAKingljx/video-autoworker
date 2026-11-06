@@ -17,7 +17,7 @@ function input(overrides = {}) {
     currentState: 'SERVICE_HEALTHY',
     sourceCommit: commit,
     pluginSourceSha256: sha('b'),
-    attachment: { pluginId: 'aiworker-image-command', pluginVersion: '0.5.4' },
+    attachment: { pluginId: 'aiworker-image-command', pluginVersion: '0.5.5' },
     runtime: {
       toolIds: [
         'aiworker_image_help', 'aiworker_image_task', 'aiworker_submit_creative_image',

@@ -105,6 +105,21 @@ test('video-cover request failures replace an internal assistant plan with a saf
   assert.equal(bridge.projectUserVisibleFailure(event, context), undefined)
 })
 
+test('a successful typed cover submit clears a prior cover failure before the final reply', () => {
+  const bridge = createImageTranscriptReceiptBridge()
+  bridge.capture(rawResult({
+    toolName: IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
+    details: { errorCode: 'VIDEO_COVER_TITLE_BOX_TOO_SMALL', nextAction: 'REVISE_PROTECTED_TITLE_BOX' },
+    isError: true,
+  }), context)
+  bridge.capture(rawResult({
+    toolName: IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
+    details: { jobId, currentState: 'QUEUED', nextAction: 'WAIT_FOR_IMAGE_NOTIFICATION' },
+  }), context)
+  const event = { message: { role: 'assistant', content: [{ type: 'text', text: '已受理。' }] } }
+  assert.equal(bridge.projectUserVisibleFailure(event, context), undefined)
+})
+
 test('ordinary image failures never overwrite a model final reply', () => {
   const bridge = createImageTranscriptReceiptBridge()
   bridge.capture(rawResult({

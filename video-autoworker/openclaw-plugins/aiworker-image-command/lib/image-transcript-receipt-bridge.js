@@ -1,4 +1,7 @@
-import { IMAGE_PLUGIN_TOOL_NAMES } from './image-command-tool.js'
+import {
+  IMAGE_PLUGIN_TOOL_NAMES,
+  IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME,
+} from './image-command-tool.js'
 
 const TOOL_NAMES = new Set(IMAGE_PLUGIN_TOOL_NAMES)
 const JOB_ID = /^[0-9a-f]{32}$/u
@@ -53,6 +56,9 @@ function videoCoverFailureReply(receipt) {
   if (receipt?.errorCode === 'VIDEO_COVER_WORKFLOW_REQUEST_INVALID') {
     return '这次封面提交信息不完整，未创建图片任务。请重新发起一次封面生成。'
   }
+  if (receipt?.errorCode === 'VIDEO_COVER_TITLE_BOX_TOO_SMALL') {
+    return '这次封面未创建成功：主标题区域太小。请调整标题区域后重新生成。'
+  }
   return '这次封面未创建成功，因此没有可查询的图片任务。请重新发起一次封面生成。'
 }
 
@@ -86,7 +92,8 @@ export function createImageTranscriptReceiptBridge({ maxEntries = 512, isEligibl
       receipt: safe,
       isError: message.isError === true || Boolean(safe.errorCode),
     })
-    if (isVideoCoverFailure(safe)) finalFailures.set(sessionKey, safe)
+    if (name === IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME && safe.jobId) finalFailures.delete(sessionKey)
+    else if (isVideoCoverFailure(safe)) finalFailures.set(sessionKey, safe)
     prune()
     return undefined
   }

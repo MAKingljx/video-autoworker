@@ -575,8 +575,10 @@ function workflowFailure(errorCode, nextAction) {
 }
 
 function workflowErrorCode(error) {
-  if (typeof error?.errorCode === 'string' && /^[A-Z0-9_]{1,96}$/u.test(error.errorCode)) {
-    return error.errorCode
+  const reported = typeof error?.errorCode === 'string' ? error.errorCode : ''
+  if (reported === 'protected_title_box_too_small') return 'VIDEO_COVER_TITLE_BOX_TOO_SMALL'
+  if (/^[A-Z0-9_]{1,96}$/u.test(reported)) {
+    return reported
   }
   const message = typeof error?.message === 'string' ? error.message : ''
   const known = {
@@ -588,6 +590,16 @@ function workflowErrorCode(error) {
     video_frame_reference_workflow_reference_invalid: 'VIDEO_COVER_WORKFLOW_REFERENCE_INVALID',
   }
   return known[message] || 'VIDEO_COVER_WORKFLOW_UNAVAILABLE'
+}
+
+function coverSubmissionFailure(errorCode) {
+  if (errorCode === 'protected_title_box_too_small' || errorCode === 'VIDEO_COVER_TITLE_BOX_TOO_SMALL') {
+    return { errorCode: 'VIDEO_COVER_TITLE_BOX_TOO_SMALL', nextAction: 'REVISE_PROTECTED_TITLE_BOX' }
+  }
+  if (typeof errorCode === 'string' && /^[A-Z0-9_:-]{1,96}$/u.test(errorCode)) {
+    return { errorCode: `VIDEO_COVER_${errorCode.toUpperCase().replaceAll(/[^A-Z0-9]+/gu, '_')}`.slice(0, 96), nextAction: 'REVISE_PROTECTED_LAYOUT' }
+  }
+  return { errorCode: 'VIDEO_COVER_SUBMISSION_UNCONFIRMED', nextAction: 'REPORT_IMAGE_SUBMISSION_UNCONFIRMED' }
 }
 
 function createImageHelpTool({ videoCoverWorkflowEnabled = false } = {}) {
@@ -759,10 +771,11 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
         }
         const answer = await executor.execute(`cover-workflow:${request.operationId}:${request.frameRef}`, imageRequest, signal)
         const details = plainObject(answer?.details) ? answer.details : {}
-        if (!details.jobId && NO_PROGRESS_SUBMISSION_CODES.has(details.errorCode)) {
+        if (!details.jobId) {
           submissionFence.block(scope, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME, imageRequest)
+          const failure = coverSubmissionFailure(details.errorCode)
           return { ...answer, isError: true, details: workflowDetails('submitted', 'failed', {
-            errorCode: details.errorCode, nextAction: 'REPORT_IMAGE_SUBMISSION_UNCONFIRMED',
+            errorCode: failure.errorCode, nextAction: failure.nextAction,
           }) }
         }
         return { ...answer, details: workflowDetails('submitted', 'ok', {
