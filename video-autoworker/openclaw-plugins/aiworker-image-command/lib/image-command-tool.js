@@ -584,6 +584,7 @@ function workflowErrorCode(error) {
     video_frame_reference_scope_mismatch: 'VIDEO_COVER_SESSION_SCOPE_MISMATCH',
     video_frame_reference_workflow_mismatch: 'VIDEO_COVER_WORKFLOW_MISMATCH',
     video_frame_reference_reference_invalid: 'VIDEO_COVER_REFERENCE_INVALID',
+    video_frame_reference_receipt_invalid: 'VIDEO_COVER_REFERENCE_INVALID',
     video_frame_reference_workflow_reference_invalid: 'VIDEO_COVER_WORKFLOW_REFERENCE_INVALID',
   }
   return known[message] || 'VIDEO_COVER_WORKFLOW_UNAVAILABLE'
@@ -727,7 +728,8 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
         }
         const response = await videoWorkflowClient.frames({ query: workflow.videoName, segmentIndex: request.segmentIndex }, signal)
         const stored = await videoFrameStore.captureBatch({
-          imageScope: scope, sessionKey: context.sessionKey, workflowId: workflow.operationId, candidates: response.candidates,
+          imageScope: scope, sessionKey: context.sessionKey, videoName: response.videoName,
+          workflowId: workflow.operationId, candidates: response.candidates,
         })
         const content = [{ type: 'text', text: `视频：${response.videoName}。候选帧 ${stored.length} 张，来自片段 ${request.segmentIndex}。请选择一张当前返回的 frameRef，并以同一 operationId 调用 ${IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME}；不得构造路径或重读目录。` }]
         for (const frame of stored) {

@@ -74,7 +74,7 @@ test('action-specific image tools preserve direct native media handling and prof
   assert.deepEqual(createImageCommandTools({ context: { ...context, agentId: 'gpt-main' } }), [])
   const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.5.3')
+  assert.equal(manifest.version, '0.5.4')
   assert.equal(pkg.version, manifest.version)
   assert.deepEqual(Object.keys(manifest.toolMetadata).sort(), [...IMAGE_PLUGIN_TOOL_NAMES].sort())
   assert.deepEqual(manifest.contracts.tools, IMAGE_PLUGIN_TOOL_NAMES)

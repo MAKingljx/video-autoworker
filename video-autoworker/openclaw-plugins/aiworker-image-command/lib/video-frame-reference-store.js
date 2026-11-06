@@ -183,8 +183,9 @@ export function createVideoFrameReferenceStore({ stateDir, now = Date.now } = {}
       const receipt = matches[0]
       return { operationId: receipt.operationId, videoName: receipt.videoName, segmentIndexes: receipt.segmentIndexes }
     },
-    async captureBatch({ imageScope, sessionKey, candidates, workflowId } = {}) {
+    async captureBatch({ imageScope, sessionKey, videoName, candidates, workflowId } = {}) {
       if (!SHA256.test(imageScope) || typeof sessionKey !== 'string' || !sessionKey || sessionKey.length > 4096
+        || typeof videoName !== 'string' || !videoName || videoName.length > 180
         || !Array.isArray(candidates) || candidates.length < 1 || candidates.length > 3
         || (workflowId !== undefined && !WORKFLOW_ID.test(workflowId))) fail('capture_invalid')
       await prune()
@@ -212,7 +213,7 @@ export function createVideoFrameReferenceStore({ stateDir, now = Date.now } = {}
             segmentIndex: candidate.segmentIndex,
             sessionKeySha256: sha256(Buffer.from(sessionKey, 'utf8')),
             timeRange: candidate.timeRange,
-            videoName: candidate.videoName,
+            videoName,
             workflowId: workflowId ?? null,
             width: candidate.width,
             height: candidate.height,

@@ -29,12 +29,13 @@ async function fixture(run) {
 
 test('stores frames privately and resolves only for the issuing profile session', async () => {
   await fixture(async ({ stateDir, store, candidate }) => {
-    const stored = await store.captureBatch({ imageScope: scopeA, sessionKey: sessionA, candidates: [candidate] })
+    const stored = await store.captureBatch({ imageScope: scopeA, sessionKey: sessionA, videoName: candidate.videoName, candidates: [candidate] })
     assert.equal(stored.length, 1)
     assert.equal(stored[0].frameRef, candidate.frameRef)
     assert.equal(stored[0].data, jpeg.toString('base64'))
     const resolved = await store.resolve({ frameRef: candidate.frameRef, imageScope: scopeA, sessionKey: sessionA })
     assert.deepEqual(await readFile(resolved.path), jpeg)
+    assert.equal(resolved.receipt.videoName, candidate.videoName)
     const details = await stat(resolved.path)
     assert.equal(details.mode & 0o777, 0o600)
     await assert.rejects(store.resolve({ frameRef: candidate.frameRef, imageScope: scopeB, sessionKey: sessionA }),
@@ -45,9 +46,16 @@ test('stores frames privately and resolves only for the issuing profile session'
   })
 })
 
+test('requires the resolved video name when writing a frame receipt', async () => {
+  await fixture(async ({ store, candidate }) => {
+    await assert.rejects(store.captureBatch({ imageScope: scopeA, sessionKey: sessionA, candidates: [candidate] }),
+      /video_frame_reference_capture_invalid/u)
+  })
+})
+
 test('expires references and rejects unissued frame identifiers', async () => {
   await fixture(async ({ store, candidate, setNow }) => {
-    await store.captureBatch({ imageScope: scopeA, sessionKey: sessionA, candidates: [candidate] })
+    await store.captureBatch({ imageScope: scopeA, sessionKey: sessionA, videoName: candidate.videoName, candidates: [candidate] })
     setNow(3_601_001)
     await assert.rejects(store.resolve({ frameRef: candidate.frameRef, imageScope: scopeA, sessionKey: sessionA }),
       /video_frame_reference_receipt_invalid|ENOENT/u)
@@ -66,7 +74,8 @@ test('binds cover workflow state and frame references to the same scoped session
       operationId: workflow.operationId, imageScope: scopeA, sessionKey: sessionA,
     }), workflow)
     await store.captureBatch({
-      imageScope: scopeA, sessionKey: sessionA, workflowId: workflow.operationId, candidates: [candidate],
+      imageScope: scopeA, sessionKey: sessionA, videoName: candidate.videoName,
+      workflowId: workflow.operationId, candidates: [candidate],
     })
     await assert.doesNotReject(store.resolve({
       frameRef: candidate.frameRef, imageScope: scopeA, sessionKey: sessionA, workflowId: workflow.operationId,

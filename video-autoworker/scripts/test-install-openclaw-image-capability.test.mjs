@@ -120,7 +120,7 @@ test('doctor accepts unrelated warnings but rejects any image-plugin or critical
 })
 
 test('runtime inspection requires the qwen cover routing hook and only declared tools', () => {
-  const plugin = { id: 'aiworker-image-command', version: '0.5.3' }
+  const plugin = { id: 'aiworker-image-command', version: '0.5.4' }
   const attachment = { legacyScope: false, toolIds: [
     'aiworker_video_cover_read_directory', 'aiworker_video_cover_get_candidates',
     'aiworker_video_cover_submit_protected', 'aiworker_video_cover_task',
@@ -149,7 +149,7 @@ test('catalog upgrade retires the old facade and exposes typed workflow actions'
     { id: 'frame_submit', source: 'plugin', pluginId: plugin.id },
     { id: 'other', source: 'builtin', pluginId: 'core' }]
   const after = [
-    { ...oldImageTool, version: '0.5.3' },
+    { ...oldImageTool, version: '0.5.4' },
     { id: 'protected', source: 'plugin', pluginId: plugin.id },
     { id: 'task', source: 'plugin', pluginId: plugin.id },
     { id: 'directory', source: 'plugin', pluginId: plugin.id },

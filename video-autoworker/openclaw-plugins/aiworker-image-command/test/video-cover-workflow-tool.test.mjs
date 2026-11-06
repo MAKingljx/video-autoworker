@@ -123,7 +123,8 @@ test('the unified state machine returns a directory, native frames, then one pro
   assert.deepEqual(instance.calls.workflow[0], { operationId, imageScope: scope, sessionKey: context.sessionKey })
   assert.deepEqual(instance.calls.frames, [{ query: '北美火车短片.mp4', segmentIndex: 3 }])
   assert.deepEqual(instance.calls.capture[0], {
-    imageScope: scope, sessionKey: context.sessionKey, workflowId: operationId, candidates: expectCandidates(),
+    imageScope: scope, sessionKey: context.sessionKey, videoName: '北美火车短片.mp4',
+    workflowId: operationId, candidates: expectCandidates(),
   })
   assert.equal(frames.details.phase, 'frames')
   assert.equal(frames.content.filter(item => item.type === 'image').length, 3)

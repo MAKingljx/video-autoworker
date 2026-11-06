@@ -2,7 +2,7 @@
   "schema": "aiworker-openclaw-image-capabilities/v3",
   "plugin": {
     "id": "aiworker-image-command",
-    "version": "0.5.3",
+    "version": "0.5.4",
     "tools": [
       "aiworker_submit_creative_image",
       "aiworker_submit_designed_cover",
