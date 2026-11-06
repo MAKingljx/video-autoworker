@@ -21,7 +21,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-from urllib.parse import quote
 from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -407,7 +406,7 @@ def database_summary(database: Path, *, check_integrity: bool = False) -> dict:
     contract.require(database.stat().st_uid == os.getuid() and database.stat().st_mode & 0o077 == 0,
                      "private_database_required")
     before = database.stat()
-    with contextlib.closing(sqlite3.connect(readonly_sqlite_uri(database), uri=True)) as db:
+    with contextlib.closing(open_database_snapshot(database)) as db:
         db.execute("PRAGMA query_only=ON")
         if check_integrity:
             contract.require(db.execute("PRAGMA quick_check").fetchone()[0] == "ok", "image_recovery_database_integrity_failed")
@@ -426,14 +425,17 @@ def database_summary(database: Path, *, check_integrity: bool = False) -> dict:
             "rowsSha256": digest.hexdigest(), "counts": counts}
 
 
-def readonly_sqlite_uri(database: Path) -> str:
-    """Return the read-only URI accepted by the target macOS SQLite runtime."""
+def open_database_snapshot(database: Path) -> sqlite3.Connection:
+    """Open a local WAL participant, then make its SQL view query-only.
+
+    A `mode=ro` URI cannot create the transient shared-memory sidecar needed
+    to read a cold WAL database on the target macOS SQLite runtime. This
+    process owns the private database directory, so it may open the file in
+    normal mode solely to join WAL; every caller immediately enables
+    `PRAGMA query_only=ON` before reading or backing up it.
+    """
     contract.safe_path(database, file=True)
-    # `Path.as_uri()` emits three slashes. The bundled macOS SQLite can reject
-    # that spelling for this live private database, while the equivalent POSIX
-    # path URI below is stable. Only the application-owned absolute path is
-    # quoted; callers never supply a URI.
-    return "file:" + quote(str(database), safe="/") + "?mode=ro"
+    return sqlite3.connect(database, timeout=10)
 
 
 def finish_database_backup(backup: Path, database: Path, expected_summary: dict) -> None:
@@ -460,7 +462,7 @@ def finish_database_backup(backup: Path, database: Path, expected_summary: dict)
     if not target.exists():
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         os.close(fd)
-        with contextlib.closing(sqlite3.connect(readonly_sqlite_uri(database), uri=True)) as source, \
+        with contextlib.closing(open_database_snapshot(database)) as source, \
              contextlib.closing(sqlite3.connect(target)) as destination:
             source.execute("PRAGMA query_only=ON")
             source.backup(destination)
