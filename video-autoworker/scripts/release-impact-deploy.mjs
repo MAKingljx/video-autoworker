@@ -1011,8 +1011,10 @@ function imageCapabilityReconcileBinding(receiptPath, profileStateRoot, sourceCo
 
 async function currentWorkerReconcileBinding({ manifestPath, stateDir, runtimeBinding }) {
   privateDirectory(stateDir)
-  const manifestSha256 = privateFileSha256(manifestPath)
-  const manifest = privateRead(manifestPath)
+  const manifestBytes = readRuntimeFile(manifestPath, 32 * 1024 * 1024)
+  const manifestSha256 = runtimeDigest(manifestBytes)
+  let manifest
+  try { manifest = JSON.parse(manifestBytes.toString('utf8')) } catch { fail('worker manifest is invalid') }
   if (manifest?.schema !== 'video-autoworker-scheduler-artifact/v1'
     || !SHA256.test(manifest.contentSha256 || '')) {
     fail('worker manifest is invalid')
