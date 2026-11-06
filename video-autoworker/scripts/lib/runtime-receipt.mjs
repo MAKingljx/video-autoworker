@@ -126,8 +126,11 @@ export function validateRuntimeReceipt(value) {
     || !/^\d+$/u.test(value.database?.ino || '') || !SHA.test(value.database?.pathSha256 || '')
     || value.evidence?.acceptance !== 'verified' || !SHA.test(value.evidence?.sha256 || '')
     || runtimeDigest(evidence) !== value.evidence.sha256
-    || !Array.isArray(value.references) || value.references.length > 12
-    || value.references.some(reference => !SHA.test(reference.sha256 || '') || !['file', 'tree'].includes(reference.kind))) {
+    || !Array.isArray(value.references) || value.references.length > 16
+    || value.references.some(reference => typeof reference?.name !== 'string'
+      || !/^[A-Za-z][A-Za-z0-9-]{0,63}$/u.test(reference.name)
+      || !SHA.test(reference.sha256 || '') || !['file', 'tree'].includes(reference.kind))
+    || new Set(value.references.map(reference => reference.name)).size !== value.references.length) {
     throw new Error('runtime_receipt_invalid')
   }
   return value

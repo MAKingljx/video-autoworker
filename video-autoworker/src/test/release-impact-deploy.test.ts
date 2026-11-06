@@ -591,6 +591,16 @@ describe('release impact deployment', () => {
     expect(value.controlSourceCommit).toBe(sourceCommit)
     expect(() => assertAllowedArguments('plan', new Map([['--failure-policy', 'automatic']]))).toThrow('release_failure_policy_invalid')
     expect(() => assertAllowedArguments('resume', new Map([['--plan', '/private/plan.json'], ['--failure-policy', 'restore-previous']]))).not.toThrow()
+    expect(() => assertAllowedArguments('receipt-reconcile-plan', new Map([
+      ['--output', '/private/reconcile-plan.json'],
+      ['--worker-manifest', '/private/worker-manifest.json'],
+      ['--worker-state-dir', '/private/worker'],
+      ['--runtime-convergence-proof', '/private/runtime-proof.json'],
+      ['--image-capability-receipt', '/private/image-capability.json'],
+    ]))).not.toThrow()
+    expect(() => assertAllowedArguments('receipt-reconcile-apply', new Map([
+      ['--plan', '/private/reconcile-plan.json'],
+    ]))).not.toThrow()
   })
 
   it('seals the independently versioned deployment controller into the application plan', () => {

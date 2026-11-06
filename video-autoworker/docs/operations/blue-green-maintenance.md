@@ -8,6 +8,8 @@ macOS 远端维护应从已验证的固定 Node 运行环境启动该入口，�
 
 控制器和应用源码按提交独立绑定。控制器始终从当前受管 control checkout 执行；需要用更新后的控制器发布先前已验证应用制品时，通过 `AIWORKER_RELEASE_PRODUCT_ROOT` 指向该应用提交的准确、干净、同仓库源码副本。计划同时封存应用提交和控制提交，低层门禁用应用源码核对制品、投影协议与已安装载荷，用控制源码核对发布脚本和运行管理器。两者任一提交或工作树发生变化都拒绝续作；这条分责只复用原制品，不放宽来源、数据库、运行证明或路由校验。
 
+`deploy-blue-green.sh transition-app` 是低层路由操作，不是完整发布收尾。正式发布统一经 `release-impact-deploy.mjs plan/apply`，由协调器在验收和入口结算后写入唯一 `current-runtime.json`。仅当历史操作已经原子切流、但在发布收据前中断时，使用两阶段 `receipt-reconcile-plan` / `receipt-reconcile-apply`：先密封当前路由、数据库、Worker、接单、收敛证明及图片能力引用，随后在同一共享发布锁内逐项回读；任一身份变化即零写入退出。该补偿只能原子更新运行收据，不能 stage、bind、switch、重启、安装插件、发送模型请求或改变任务/入口状态。
+
 应用更新按已存在的 stage、bind、switch、rollback、retire 合同执行。绑定或切换前先读取实际路由、槽位和安装状态；已暂存但从未激活的候选不能当作生产退役槽位覆盖，须在精确证明其进程退出后保留原绑定证据，再重新准备候选。应用成功切换后，核验实际 HTTP、浏览器、数据库身份和业务数据，再按当前 revision 恢复入口。
 
 旧槽退役先完成数据库、任务、回调和scheduler门，再由持有共享发布锁的retire操作创建0600单次请求，绑定router PID、generation、previous slot和release。router只关闭旧槽的EventSource与升级连接，让客户端按当前路由自动重连；普通HTTP、下载和无法分类的请求继续阻止退役，不能为清零计数被强制中断。单次请求消费后删除，网页和普通loopback调用都不能生成有效请求。

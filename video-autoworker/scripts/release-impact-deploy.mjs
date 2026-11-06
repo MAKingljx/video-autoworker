@@ -21,15 +21,36 @@ import {
 } from './lib/git-source-layout.mjs'
 import { resolveInstalledBlueGreenManager } from './lib/blue-green-installed-manager.mjs'
 import { readRouterState } from './standalone-router.mjs'
-import { inspectInstalledReleaseComponent } from './verify-director-video-release-readiness.mjs'
+import {
+  inspectInstalledReleaseComponent,
+  verifyDirectorVideoReleasePreflight,
+} from './verify-director-video-release-readiness.mjs'
 import { RECOGNIZED_LEGACY_OPENCLAW_VERSION } from './lib/openclaw-managed-sdk.mjs'
 import { OPENCLAW_RUNTIME_VERSION } from './lib/openclaw-runtime-contract.mjs'
-import { validateOpenClawSdkLink } from './lib/openclaw-runtime-convergence.mjs'
+import {
+  assertConvergenceProof,
+  validateOpenClawSdkLink,
+} from './lib/openclaw-runtime-convergence.mjs'
 import { inspectRuntimeIdentityDoctor } from './runtime-identity-doctor.mjs'
-import { inspectWorkerRelease, releaseAdmissionPolicy, validateWorkerReleaseBinding } from './lib/independent-worker-release.mjs'
+import {
+  inspectWorkerRelease,
+  readIndependentWorkerStatus,
+  releaseAdmissionPolicy,
+  validateWorkerReleaseBinding,
+} from './lib/independent-worker-release.mjs'
 import { discoverDeploymentEnvironment } from './lib/deployment-discovery.mjs'
 import { observeRuntime, publicRuntimeReceiptStatus, readCurrentRuntimeReceipt,
-  runtimeDigest, writeCurrentRuntimeReceipt } from './lib/runtime-receipt.mjs'
+  fingerprintRuntimeReference, readRuntimeFile, runtimeDigest, runtimeReceiptPath,
+  writeCurrentRuntimeReceipt } from './lib/runtime-receipt.mjs'
+import {
+  assertRuntimeReceiptReconciliationPlan,
+  buildRuntimeReceiptReconciliationPlan,
+  imageCapabilityBinding,
+} from './lib/runtime-receipt-reconciliation.mjs'
+import {
+  acquireSharedDeploymentLockSync,
+  releaseSharedDeploymentLockSync,
+} from './lib/shared-deployment-lock.mjs'
 import { applyRuntimeRetention, planRuntimeRetention } from './lib/runtime-retention.mjs'
 import { releaseFailureAssessment, releaseFailurePolicy } from './lib/release-failure-policy.mjs'
 import { operationsRecoveryBoundaryDeclaration } from './lib/operations-governance.mjs'
@@ -961,6 +982,310 @@ function privateFileSha256(pathname, maxBytes = 1024 * 1024) {
   return sha256(readFileSync(pathname))
 }
 
+function requiredValue(values, name) {
+  const value = values.get(name)
+  if (typeof value !== 'string' || !value) fail(`${name} is required`)
+  return value
+}
+
+function activeRuntimeRoute(router) {
+  const releaseId = router?.slots?.[router.active]
+  const match = /^([a-f0-9]{40})-runtime$/u.exec(releaseId || '')
+  if (!match || !['blue', 'green'].includes(router?.active)
+    || !Number.isSafeInteger(router?.generation) || router.generation < 1) {
+    fail('active router release is invalid')
+  }
+  return { active: router.active, generation: router.generation, releaseId, sourceCommit: match[1] }
+}
+
+function imageCapabilityReconcileBinding(receiptPath, profileStateRoot, sourceCommit) {
+  const receiptSha256 = privateFileSha256(receiptPath)
+  const configPath = join(profileStateRoot, 'openclaw.json')
+  const pluginRoot = join(profileStateRoot, 'extensions', 'aiworker-image-command')
+  const pluginSha256 = fingerprintRuntimeReference(pluginRoot, 'tree').sha256
+  const configSha256 = privateFileSha256(configPath)
+  return imageCapabilityBinding(privateRead(receiptPath), {
+    receiptPath, receiptSha256, pluginRoot, pluginSha256, configPath, configSha256, sourceCommit,
+  })
+}
+
+async function currentWorkerReconcileBinding({ manifestPath, stateDir, runtimeBinding }) {
+  privateDirectory(stateDir)
+  const manifestSha256 = privateFileSha256(manifestPath)
+  const manifest = privateRead(manifestPath)
+  if (manifest?.schema !== 'video-autoworker-scheduler-artifact/v1'
+    || !SHA256.test(manifest.contentSha256 || '')) {
+    fail('worker manifest is invalid')
+  }
+  const status = await readIndependentWorkerStatus(stateDir)
+  const expectedDatabase = runtimeBinding.database
+  if (status?.schema !== 'video-autoworker-scheduler-worker/v1'
+    || status.executionMode !== 'external-worker' || status.currentState !== 'ready'
+    || status.healthy !== true || status.leaseVerified !== true
+    || status.leadership?.state !== 'leader'
+    || !Number.isSafeInteger(status.worker?.pid) || status.worker.pid < 1
+    || status.worker.contentSha256 !== manifest.contentSha256
+    || status.worker.database?.dev !== expectedDatabase.dev
+    || status.worker.database?.ino !== expectedDatabase.ino
+    || status.worker.database?.pathSha256 !== runtimeDigest(runtimeBinding.liveDbPath)
+    || !Number.isSafeInteger(status.observedAt) || Math.abs(Date.now() - status.observedAt) > 15_000) {
+    fail('worker runtime is not ready')
+  }
+  return {
+    stateDir,
+    manifestPath,
+    manifestSha256,
+    contentSha256: manifest.contentSha256,
+    pid: status.worker.pid,
+  }
+}
+
+function reconciliationReferences({ runtimeBinding, installed, profileStateRoot, workspaceRoot, imageCapability }) {
+  const installation = privateRead(installed.installation.path)
+  const executables = installation?.executables
+  const services = installation?.services
+  if (!executables?.routerScript?.path || !executables?.slotStartScript?.path
+    || !['router', 'blue', 'green'].every(name => services?.[name]?.plist)) {
+    fail('installed control references are invalid')
+  }
+  return [
+    { name: 'platform', kind: 'file', path: runtimeBinding.platformEnvPath },
+    { name: 'control-installation', kind: 'file', path: installed.installation.path },
+    { name: 'control-manager', kind: 'file', path: installed.manager.path },
+    { name: 'control-router', kind: 'file', path: executables.routerScript.path },
+    { name: 'control-slot-start', kind: 'file', path: executables.slotStartScript.path },
+    ...['router', 'blue', 'green'].map(name => ({
+      name: `control-${name}-launch-agent`, kind: 'file', path: services[name].plist,
+    })),
+    { name: 'taskFlow', kind: 'tree', path: join(workspaceRoot, 'skills/aiworker-task-flow') },
+    { name: 'videoCommand', kind: 'tree', path: join(profileStateRoot, 'extensions/aiworker-video-command') },
+    { name: 'directorBrain', kind: 'tree', path: join(profileStateRoot, 'extensions/aiworker-director-brain') },
+    { name: 'directorSkill', kind: 'tree', path: join(workspaceRoot, 'skills/aiworker-director-brain') },
+    { name: 'image-capability-receipt', kind: 'file', path: imageCapability.receiptPath },
+    { name: 'image-capability-plugin', kind: 'tree', path: imageCapability.pluginRoot },
+    { name: 'qwen-current-config', kind: 'file', path: imageCapability.configPath },
+  ]
+}
+
+async function captureRuntimeReceiptReconciliation({
+  workerManifestPath,
+  workerStateDir,
+  runtimeConvergenceProofPath,
+  imageCapabilityReceiptPath,
+  createdAt = undefined,
+}) {
+  const runtimeBinding = runtimeBindingSnapshot()
+  const intakeUrl = `http://127.0.0.1:${runtimeBinding.ports.router}/api/n8n/intake-control`
+  const router = await plannedRouterState(intakeUrl, runtimeBinding)
+  const route = activeRuntimeRoute(router)
+  const profileStateRoot = process.env.AIWORKER_OPENCLAW_QWEN_STATE_DIR
+    || join(homedir(), '.openclaw-qwen-current')
+  const workspaceRoot = process.env.AIWORKER_QWEN_WORKSPACE
+    || join(homedir(), 'AI-worker-second-original-workspace')
+  privateDirectory(profileStateRoot)
+  privateDirectory(workspaceRoot)
+  const runtimeConvergenceSha256 = privateFileSha256(runtimeConvergenceProofPath)
+  try {
+    assertConvergenceProof(runtimeConvergenceProofPath,
+      join(coordinatorRoot, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json'),
+      profileStateRoot, join(profileStateRoot, 'openclaw.json'), false)
+  } catch {
+    fail('runtime convergence proof is invalid')
+  }
+  const control = assertCleanGitSource(coordinatorRoot)
+  const installed = resolveInstalledBlueGreenManager({
+    deploymentProjectRoot: sourceRoles.control,
+    runDir: runtimeBinding.runDir,
+    releasesDir: runtimeBinding.releasesDir,
+    launchAgentsDir: process.env.AIWORKER_BG_LAUNCH_AGENTS_DIR || join(homedir(), 'Library/LaunchAgents'),
+  })
+  if (installed.manager.sourceCommit !== control.headCommit) fail('installed control source changed')
+  const releaseRoot = join(runtimeBinding.releasesDir, route.releaseId, 'standalone')
+  let preflight
+  try {
+    preflight = await verifyDirectorVideoReleasePreflight({
+      repositoryRoot: productRoot,
+      releasesRoot: runtimeBinding.releasesDir,
+      releaseRoot,
+      releaseId: route.releaseId,
+      profileStateRoot,
+      workspaceRoot,
+      runtimeConvergenceProofPath,
+      repositoryReleaseMode: 'ancestor',
+    })
+  } catch {
+    fail('active release preflight failed')
+  }
+  if (preflight.commit !== route.sourceCommit) fail('active release source changed')
+  const intake = await intakeClient(intakeUrl).read()
+  const worker = await currentWorkerReconcileBinding({
+    manifestPath: workerManifestPath,
+    stateDir: workerStateDir,
+    runtimeBinding,
+  })
+  const imageCapability = imageCapabilityReconcileBinding(
+    imageCapabilityReceiptPath, profileStateRoot, route.sourceCommit,
+  )
+  const currentReceiptPath = runtimeReceiptPath(runtimeBinding.runDir)
+  const currentReceipt = {
+    path: currentReceiptPath,
+    sha256: privateFileSha256(currentReceiptPath),
+  }
+  const plan = buildRuntimeReceiptReconciliationPlan({
+    ...(createdAt ? { createdAt } : {}),
+    runtimeBinding,
+    route,
+    intake,
+    worker,
+    currentReceipt,
+    runtimeConvergence: { path: runtimeConvergenceProofPath, sha256: runtimeConvergenceSha256 },
+    control: {
+      sourceCommit: control.headCommit,
+      managerPath: installed.manager.path,
+      managerSha256: installed.manager.sha256,
+    },
+    imageCapability: { receipt: privateRead(imageCapabilityReceiptPath), ...imageCapability },
+  })
+  return {
+    plan,
+    router,
+    preflight,
+    installed,
+    profileStateRoot,
+    workspaceRoot,
+    intakeUrl,
+  }
+}
+
+async function createRuntimeReceiptReconciliationPlan(values) {
+  const output = requiredValue(values, '--output')
+  const workerManifestPath = requiredValue(values, '--worker-manifest')
+  const workerStateDir = requiredValue(values, '--worker-state-dir')
+  const runtimeConvergenceProofPath = requiredValue(values, '--runtime-convergence-proof')
+  const imageCapabilityReceiptPath = requiredValue(values, '--image-capability-receipt')
+  if (!isAbsolute(output) || resolve(output) !== output) fail('reconciliation plan output is invalid')
+  privateDirectory(dirname(output))
+  if (existsSync(output)) fail('reconciliation plan already exists')
+  const captured = await captureRuntimeReceiptReconciliation({
+    workerManifestPath,
+    workerStateDir,
+    runtimeConvergenceProofPath,
+    imageCapabilityReceiptPath,
+  })
+  privateWrite(output, captured.plan)
+  process.stdout.write(`${JSON.stringify({
+    schema: captured.plan.schema,
+    currentState: 'PLAN_READY',
+    planSha256: captured.plan.planSha256,
+    output,
+    sourceCommit: captured.plan.route.releaseId.slice(0, 40),
+    releaseId: captured.plan.route.releaseId,
+    routerGeneration: captured.plan.route.generation,
+  })}\n`)
+}
+
+async function applyRuntimeReceiptReconciliation(values) {
+  const planPath = requiredValue(values, '--plan')
+  const plan = validateRuntimeReceiptReconciliationPlan(privateRead(planPath))
+  const resultPath = join(dirname(planPath), 'receipt-reconcile-result.json')
+  if (existsSync(resultPath)) fail('reconciliation result already exists')
+  let lease
+  try {
+    lease = acquireSharedDeploymentLockSync({ runDirectory: plan.runtimeBinding.runDir })
+    const captured = await captureRuntimeReceiptReconciliation({
+      workerManifestPath: plan.worker.manifestPath,
+      workerStateDir: plan.worker.stateDir,
+      runtimeConvergenceProofPath: plan.runtimeConvergence.path,
+      imageCapabilityReceiptPath: plan.imageCapability.receiptPath,
+      createdAt: plan.createdAt,
+    })
+    const reconciled = assertRuntimeReceiptReconciliationPlan(plan, captured.plan)
+    const references = reconciliationReferences({
+      runtimeBinding: reconciled.runtimeBinding,
+      installed: captured.installed,
+      profileStateRoot: captured.profileStateRoot,
+      workspaceRoot: captured.workspaceRoot,
+      imageCapability: reconciled.imageCapability,
+    })
+    const observation = await observeRuntime({
+      runDir: reconciled.runtimeBinding.runDir,
+      databasePath: reconciled.runtimeBinding.liveDbPath,
+      workerBinding: { stateDir: reconciled.worker.stateDir, manifestPath: reconciled.worker.manifestPath },
+      references,
+    })
+    if (observation.sourceCommit !== reconciled.route.releaseId.slice(0, 40)
+      || observation.releaseId !== reconciled.route.releaseId
+      || observation.route.active !== reconciled.route.active
+      || observation.route.generation !== reconciled.route.generation) {
+      fail('runtime observation changed')
+    }
+    const evidence = {
+      acceptance: 'verified',
+      settlement: 'verified',
+      mode: 'receipt-reconciliation',
+      operationId: sha256(`${reconciled.planSha256}:${reconciled.currentReceipt.sha256}`),
+      planSha256: reconciled.planSha256,
+      intakeRevision: reconciled.intake.revision,
+      operationsRoot: join(dirname(reconciled.runtimeBinding.runDir), 'operations'),
+      requestedCommit: observation.sourceCommit,
+      routeSha256: runtimeDigest(observation.route),
+      activeReleasePreflightSha256: sha256(JSON.stringify({
+        commit: captured.preflight.commit,
+        app: captured.preflight.app,
+        contracts: captured.preflight.contracts,
+      })),
+      imageCapabilityReceiptSha256: reconciled.imageCapability.receiptSha256,
+    }
+    const receipt = writeCurrentRuntimeReceipt({
+      runDir: reconciled.runtimeBinding.runDir,
+      databasePath: reconciled.runtimeBinding.liveDbPath,
+      observation,
+      components: {
+        control: {
+          sourceCommit: captured.installed.manager.sourceCommit,
+          releaseCoordinatorCommit: reconciled.control.sourceCommit,
+        },
+        imageCapability: {
+          sourceCommit: reconciled.imageCapability.sourceCommit,
+          pluginId: reconciled.imageCapability.pluginId,
+          pluginVersion: reconciled.imageCapability.pluginVersion,
+          pluginSourceSha256: reconciled.imageCapability.pluginSourceSha256,
+          toolIds: reconciled.imageCapability.toolIds,
+          hookNames: reconciled.imageCapability.hookNames,
+        },
+      },
+      evidence,
+      expectedReceiptSha256: reconciled.currentReceipt.sha256,
+    })
+    const status = await readCurrentRuntimeReceipt({
+      runDir: reconciled.runtimeBinding.runDir,
+      databasePath: reconciled.runtimeBinding.liveDbPath,
+    })
+    if (status.currentState !== 'ready') fail('runtime receipt readback failed')
+    privateWrite(resultPath, {
+      schema: 'video-autoworker-runtime-receipt-reconcile-result/v1',
+      currentState: 'READY', errorCode: null, nextAction: null,
+      planSha256: reconciled.planSha256,
+      receiptSha256: runtimeDigest(readRuntimeFile(runtimeReceiptPath(reconciled.runtimeBinding.runDir))),
+      sourceCommit: receipt.sourceCommit,
+      releaseId: receipt.releaseId,
+      routerGeneration: receipt.route.generation,
+      intakeRevision: reconciled.intake.revision,
+      imageCapabilityReceiptSha256: reconciled.imageCapability.receiptSha256,
+    })
+    process.stdout.write(`${JSON.stringify({
+      currentState: 'READY', errorCode: null, nextAction: null,
+      planSha256: reconciled.planSha256,
+      sourceCommit: receipt.sourceCommit,
+      releaseId: receipt.releaseId,
+      routerGeneration: receipt.route.generation,
+      receiptSha256: runtimeDigest(readRuntimeFile(runtimeReceiptPath(reconciled.runtimeBinding.runDir))),
+    })}\n`)
+  } finally {
+    if (lease) releaseSharedDeploymentLockSync(lease)
+  }
+}
+
 function artifactPlanBinding(rootPath, sourceCommit) {
   if (!isAbsolute(rootPath || '') || realpathSync.native(rootPath) !== rootPath) {
     fail('artifact root is unsafe')
@@ -1233,6 +1558,13 @@ export function assertAllowedArguments(command, values) {
     : command === 'retention-apply' ? new Set(['--plan', '--confirmed-plan-sha256'])
     : command === 'resume'
       ? new Set(['--plan', '--runtime-convergence-proof', '--failure-policy'])
+      : command === 'receipt-reconcile-plan'
+        ? new Set([
+          '--output', '--worker-manifest', '--worker-state-dir',
+          '--runtime-convergence-proof', '--image-capability-receipt',
+        ])
+        : command === 'receipt-reconcile-apply'
+          ? new Set(['--plan'])
       : ['apply', 'status', 'cancel', 'doctor', 'prewarm'].includes(command)
       ? new Set(['--plan']) : new Set()
   if ([...values.keys()].some(key => !allowed.has(key))) fail('arguments are invalid')
@@ -2354,6 +2686,8 @@ async function publishCurrentRuntimeReceipt(plan, operationId) {
 async function main() {
   const { command, values } = parseArgs(process.argv.slice(2))
   assertAllowedArguments(command, values)
+  if (command === 'receipt-reconcile-plan') return createRuntimeReceiptReconciliationPlan(values)
+  if (command === 'receipt-reconcile-apply') return applyRuntimeReceiptReconciliation(values)
   if (['plan', 'apply', 'resume', 'discover', 'current', 'retention-plan', 'retention-apply'].includes(command)) {
     const discovery = await discoverDeploymentEnvironment({ verifyWorker: command !== 'current', env: {
       ...process.env, ...(values.has('--worker-manifest')
