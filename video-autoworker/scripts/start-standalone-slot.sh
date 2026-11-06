@@ -151,7 +151,8 @@ ACTUAL_MANIFEST="$(shasum -a 256 "$PHYSICAL_ROOT/release-manifest.json" | awk '{
   printf 'release manifest digest mismatch\n' >&2
   exit 1
 }
-"$NODE_BIN" "$AUDITOR" "$PHYSICAL_ROOT" >/dev/null || {
+"$NODE_BIN" "$AUDITOR" --audit-bound "$PHYSICAL_ROOT" "$PROJECT_ROOT" \
+  "$RELEASE_ID" "$EXPECTED_MANIFEST" >/dev/null || {
   printf 'standalone artifact integrity verification failed\n' >&2
   exit 1
 }
