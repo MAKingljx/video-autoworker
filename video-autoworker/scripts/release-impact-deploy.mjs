@@ -50,7 +50,6 @@ import {
 } from './lib/runtime-receipt-reconciliation.mjs'
 import {
   acquireSharedDeploymentLockSync,
-  releaseSharedDeploymentLockSync,
 } from './lib/shared-deployment-lock.mjs'
 import { applyRuntimeRetention, planRuntimeRetention } from './lib/runtime-retention.mjs'
 import { releaseFailureAssessment, releaseFailurePolicy } from './lib/release-failure-policy.mjs'
@@ -1285,7 +1284,7 @@ async function applyRuntimeReceiptReconciliation(values) {
       receiptSha256: runtimeDigest(readRuntimeFile(runtimeReceiptPath(reconciled.runtimeBinding.runDir))),
     })}\n`)
   } finally {
-    if (lease) releaseSharedDeploymentLockSync(lease)
+    if (lease) lease.release()
   }
 }
 
