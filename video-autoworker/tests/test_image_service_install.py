@@ -141,6 +141,19 @@ class ServiceInstallTests(unittest.TestCase):
                 with self.assertRaisesRegex(install.contract.InstallError, "image_database_integrity_failed"):
                     install.health("b" * 40, database)
 
+    def test_database_summary_uses_a_portable_readonly_absolute_uri(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            database = Path(task_dir).resolve() / "jobs with space.sqlite"
+            with sqlite3.connect(database) as db:
+                db.execute("CREATE TABLE image_jobs (job_id TEXT, state TEXT)")
+                db.execute("INSERT INTO image_jobs VALUES ('a', 'FAILED')")
+            database.chmod(0o600)
+            uri = install.readonly_sqlite_uri(database)
+            self.assertTrue(uri.startswith("file:/"))
+            self.assertNotIn("file:///", uri)
+            self.assertIn("jobs%20with%20space.sqlite?mode=ro", uri)
+            self.assertEqual(install.database_summary(database)["counts"], {"FAILED": 1})
+
     def test_owned_unvalidated_replacement_preserves_database_output_and_old_release(self):
         with tempfile.TemporaryDirectory() as task_dir:
             fixture = Fixture(Path(task_dir).resolve())
