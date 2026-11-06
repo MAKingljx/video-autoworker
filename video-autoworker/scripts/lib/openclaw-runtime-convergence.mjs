@@ -849,7 +849,7 @@ function mergeCompaction(existing, desired) {
 }
 
 function mergeToolSearch(existing, desired) {
-  const current = existing === undefined ? {} : assertObject(existing, 'agents.defaults.tools.toolSearch')
+  const current = existing === undefined ? {} : assertObject(existing, 'tools.toolSearch')
   return { ...current, ...desired }
 }
 
@@ -861,7 +861,7 @@ function render(configPath, manifestPath, patchPath, expectedPath) {
   exclusiveProfileAgent(config, manifest.agent.id)
 
   const expectedCompaction = mergeCompaction(defaults.compaction, manifest.compaction.set)
-  const expectedToolSearch = mergeToolSearch(defaults.tools?.toolSearch, manifest.toolSearch)
+  const expectedToolSearch = mergeToolSearch(config.tools?.toolSearch, manifest.toolSearch)
   for (const key of manifest.compaction.remove) delete expectedCompaction[key]
   const patchCompaction = structuredClone(manifest.compaction.set)
   for (const key of manifest.compaction.remove) patchCompaction[key] = null
@@ -870,14 +870,15 @@ function render(configPath, manifestPath, patchPath, expectedPath) {
       defaults: { compaction: patchCompaction },
     },
   }
-  patch.agents.defaults.tools = { toolSearch: structuredClone(manifest.toolSearch) }
+  patch.tools = { toolSearch: structuredClone(manifest.toolSearch) }
   const expected = structuredClone(config)
   expected.agents.defaults ??= {}
   expected.agents.defaults.compaction = expectedCompaction
-  expected.agents.defaults.tools ??= {}
-  if (!expected.agents.defaults.tools || typeof expected.agents.defaults.tools !== 'object'
-    || Array.isArray(expected.agents.defaults.tools)) fail('agents.defaults.tools must be an object')
-  expected.agents.defaults.tools.toolSearch = expectedToolSearch
+  expected.tools ??= {}
+  if (!expected.tools || typeof expected.tools !== 'object' || Array.isArray(expected.tools)) {
+    fail('tools must be an object')
+  }
+  expected.tools.toolSearch = expectedToolSearch
   fs.writeFileSync(patchPath, `${JSON.stringify(patch, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   fs.writeFileSync(expectedPath, `${JSON.stringify(expected, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
 }
@@ -912,14 +913,14 @@ function withoutManagedFields(config, manifest) {
     }
     if (Object.keys(compaction).length === 0) delete defaults.compaction
   }
-  const tools = defaults?.tools
+  const tools = clone?.tools
   if (tools && typeof tools === 'object' && !Array.isArray(tools)) {
     const toolSearch = tools.toolSearch
     if (toolSearch && typeof toolSearch === 'object' && !Array.isArray(toolSearch)) {
       for (const key of Object.keys(manifest.toolSearch)) delete toolSearch[key]
       if (Object.keys(toolSearch).length === 0) delete tools.toolSearch
     }
-    if (Object.keys(tools).length === 0) delete defaults.tools
+    if (Object.keys(tools).length === 0) delete clone.tools
   }
   exclusiveProfileAgent(clone, manifest.agent.id)
   return clone
@@ -947,7 +948,7 @@ function assertTarget(config, manifest) {
       fail(`compaction.${key} was not removed`)
     }
   }
-  const installedToolSearch = config?.agents?.defaults?.tools?.toolSearch
+  const installedToolSearch = config?.tools?.toolSearch
   if (!installedToolSearch || typeof installedToolSearch !== 'object' || Array.isArray(installedToolSearch)) {
     fail('approved tool search policy is missing')
   }
@@ -1050,10 +1051,10 @@ const MANAGED_RUNTIME_CONFIG_PATHS = new Set([
   'agents.defaults.compaction.midTurnPrecheck',
   'agents.defaults.compaction.midTurnPrecheck.enabled',
   'agents.defaults.compaction.identifierInstructions',
-  'agents.defaults.tools',
-  'agents.defaults.tools.toolSearch',
-  'agents.defaults.tools.toolSearch.enabled',
-  'agents.defaults.tools.toolSearch.mode',
+  'tools',
+  'tools.toolSearch',
+  'tools.toolSearch.enabled',
+  'tools.toolSearch.mode',
 ])
 const AUTO_MANAGED_CONFIG_PATHS = new Set(['meta.lastTouchedAt', 'meta.lastTouchedVersion'])
 const HOT_RELOAD_FAILED = [
@@ -1172,7 +1173,7 @@ function classifyHotReloadMessages(lines) {
     if (!match) continue
     const changedPaths = match[1].split(',').map(item => item.trim()).filter(Boolean)
     const hasManagedRuntimeChange = changedPaths.some(item => (
-      item.startsWith('agents.defaults.compaction') || item.startsWith('agents.defaults.tools.toolSearch')
+      item.startsWith('agents.defaults.compaction') || item.startsWith('tools.toolSearch')
     ))
     if (!hasManagedRuntimeChange) continue
     if (changedPaths.length === 0 || changedPaths.some(item => (
@@ -1363,7 +1364,7 @@ function verifyHotReload(
     Object.keys(manifest.compaction.set).map(key => [key, patch.config.agents.defaults.compaction[key]]),
   ))
   const toolSearch = stable(Object.fromEntries(
-    Object.keys(manifest.toolSearch).map(key => [key, patch.config.agents.defaults.tools.toolSearch[key]]),
+    Object.keys(manifest.toolSearch).map(key => [key, patch.config.tools.toolSearch[key]]),
   ))
   process.stdout.write(`${JSON.stringify(stable({
     schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
@@ -1400,7 +1401,7 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
     Object.keys(manifest.compaction.set).map(key => [key, config.agents.defaults.compaction[key]]),
   ))
   const toolSearch = stable(Object.fromEntries(
-    Object.keys(manifest.toolSearch).map(key => [key, config.agents.defaults.tools.toolSearch[key]]),
+    Object.keys(manifest.toolSearch).map(key => [key, config.tools.toolSearch[key]]),
   ))
   process.stdout.write(`${JSON.stringify(stable({
     schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
