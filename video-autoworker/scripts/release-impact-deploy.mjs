@@ -46,6 +46,7 @@ import {
   assertRuntimeReceiptReconciliationPlan,
   buildRuntimeReceiptReconciliationPlan,
   imageCapabilityBinding,
+  validateRuntimeReceiptReconciliationPlan,
 } from './lib/runtime-receipt-reconciliation.mjs'
 import {
   acquireSharedDeploymentLockSync,
