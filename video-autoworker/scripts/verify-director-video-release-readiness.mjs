@@ -1350,7 +1350,7 @@ export async function verifyDirectorVideoReleasePreflight({
   try {
     runtimeConvergence = assertConvergenceProof(
       runtimeConvergenceProofPath,
-      join(repository, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json'),
+      join(MODULE_ROOT, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json'),
       profileStateRoot,
       join(profileStateRoot, 'openclaw.json'),
       false,

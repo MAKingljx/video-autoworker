@@ -227,18 +227,19 @@ describe('immutable bound standalone release contracts', () => {
       .toThrow('standalone_historical_contract_unrecognized')
   })
 
-  it('keeps the new-copy audit strict while routing only an explicitly bound audit through its historical contract', () => {
+  it('keeps the new-copy audit strict while routing a bound audit through the application source contract', () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'bound-audit-routing-'))); roots.push(root)
     const script = readFileSync(resolve('scripts/deploy-blue-green.sh'), 'utf8')
     const start = script.indexOf('full_audit_release() {'), end = script.indexOf('\nquick_verify_release() {', start)
     const auditor = join(root, 'auditor.mjs'), harness = join(root, 'routing.sh'), calls = join(root, 'calls.jsonl')
+    const applicationSourceRoot = join(root, 'application-source')
     write(auditor, "import{appendFileSync}from'node:fs';appendFileSync(process.env.AUDIT_LOG,JSON.stringify(process.argv.slice(2))+'\\n');process.stdout.write('{}')\n")
-    write(harness, `${script.slice(start, end)}\nincrement_release_verification_count() { :; }\ncache_release_verification() { :; }\nNODE_BIN="$1"\nAUDITOR="$2"\nPROJECT_ROOT="$3"\nfull_audit_release "$3"\nfull_audit_release "$3" "${commit}-runtime" "${'a'.repeat(64)}"\n`)
-    execFileSync('/bin/bash', [harness, process.execPath, auditor, root], {
+    write(harness, `${script.slice(start, end)}\nincrement_release_verification_count() { :; }\ncache_release_verification() { :; }\nNODE_BIN="$1"\nAUDITOR="$2"\nPROJECT_ROOT="$3"\nAPPLICATION_SOURCE_ROOT="$4"\nfull_audit_release "$3"\nfull_audit_release "$3" "${commit}-runtime" "${'a'.repeat(64)}"\n`)
+    execFileSync('/bin/bash', [harness, process.execPath, auditor, root, applicationSourceRoot], {
       env: { ...process.env, AUDIT_LOG: calls }, timeout: 5000,
     })
     const invocations = readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    expect(invocations).toEqual([[root], ['--audit-bound', root, root, `${commit}-runtime`, 'a'.repeat(64)]])
+    expect(invocations).toEqual([[root], ['--audit-bound', root, applicationSourceRoot, `${commit}-runtime`, 'a'.repeat(64)]])
   })
 
   it('does not issue a bound-audit digest for a mismatched registered root or an unknown release', () => {

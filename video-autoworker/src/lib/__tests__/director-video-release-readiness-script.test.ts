@@ -1035,6 +1035,9 @@ describe('director video release readiness verifier', () => {
     )
     expect(verifier).toContain('video-autoworker-director-video-preflight/v1')
     expect(verifier).toContain("options.verificationPhase === 'pre-bootstrap'")
+    expect(verifier).toContain(
+      "join(MODULE_ROOT, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json')",
+    )
   })
 
   it('accepts current v3 reports from the shared source and rejects wrong versions while preserving declared transitions', async () => {
