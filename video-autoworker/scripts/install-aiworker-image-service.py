@@ -444,6 +444,10 @@ def finish_database_backup(backup: Path, database: Path, expected_summary: dict)
     if saved.get("databasePending") is not True:
         verify_recovery_backup(backup, require_database=True)
         contract.require(saved.get("databaseSummary") == expected_summary, "image_recovery_database_changed")
+        # A resumed operation can reach this already-complete backup without
+        # passing the normal finalization branch. Enforce the same two-object
+        # retention rule before it returns.
+        prune_recovery_backups(backup.parent)
         return
     contract.require(database_summary(database) == expected_summary, "image_database_changed_before_backup")
     target = backup / "jobs.sqlite"
@@ -468,8 +472,10 @@ def finish_database_backup(backup: Path, database: Path, expected_summary: dict)
             source.backup(destination)
             destination.commit()
             # A recovery file is standalone, never dependent on missing WAL.
-            destination.execute("PRAGMA journal_mode=DELETE")
+            journal_mode = destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            contract.require(journal_mode == "delete", "image_recovery_database_journal_mode_invalid")
             destination.commit()
+        remove_backup_sqlite_sidecars(target)
         with target.open("rb") as f:
             os.fsync(f.fileno())
     contract.require(database_summary(database) == expected_summary
@@ -479,6 +485,18 @@ def finish_database_backup(backup: Path, database: Path, expected_summary: dict)
     replace_owned_file(manifest_path, contract.encoded(saved), contract.encoded(updated))
     verify_recovery_backup(backup, require_database=True)
     prune_recovery_backups(backup.parent)
+
+
+def remove_backup_sqlite_sidecars(database: Path) -> None:
+    """Remove only stale WAL sidecars after the standalone DELETE backup seals."""
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(database) + suffix)
+        if not sidecar.exists():
+            continue
+        contract.safe_path(sidecar, file=True)
+        contract.require(sidecar.stat().st_uid == os.getuid() and sidecar.stat().st_mode & 0o077 == 0,
+                         "image_recovery_sidecar_not_private")
+        sidecar.unlink()
 
 
 def replace_or_confirm(path: Path, old: bytes, new: bytes) -> None:

@@ -352,6 +352,31 @@ class ServiceInstallTests(unittest.TestCase):
             self.assertEqual((len(fixture.bootouts), len(fixture.bootstraps)), (1, 2))
             self.assertEqual(install.verify_recovery_backup(backup, require_database=True)["databaseSummary"]["rows"], 1)
 
+    def test_completed_recovery_reapplies_retention_when_a_resume_revisits_it(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            fixture = Fixture(Path(task_dir).resolve())
+            with fixture.patches(), contextlib.redirect_stdout(io.StringIO()):
+                install.main(fixture.arguments("--apply"));fixture.add_history()
+                install.main(fixture.arguments("--apply", commit="d" * 40)
+                    + ["--upgrade-existing", "--previous-source-commit", "b" * 40])
+                receipt = json.loads((fixture.home / "ai-worker/state/image-generation/image-service/install-receipt.json").read_bytes())
+                backup = Path(receipt["recoveryBackup"])
+                summary = install.database_summary(fixture.home / "ai-worker/state/image-generation/jobs/jobs.sqlite")
+                with patch.object(install, "prune_recovery_backups") as prune:
+                    install.finish_database_backup(backup, fixture.home / "ai-worker/state/image-generation/jobs/jobs.sqlite", summary)
+            prune.assert_called_once_with(backup.parent)
+
+    def test_sealed_recovery_removes_only_private_sqlite_sidecars(self):
+        with tempfile.TemporaryDirectory() as task_dir:
+            root = Path(task_dir).resolve()
+            database = root / "jobs.sqlite";database.write_bytes(b"database");database.chmod(0o600)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(str(database) + suffix);sidecar.write_bytes(b"sidecar");sidecar.chmod(0o600)
+            install.remove_backup_sqlite_sidecars(database)
+            self.assertFalse(Path(str(database) + "-wal").exists())
+            self.assertFalse(Path(str(database) + "-shm").exists())
+            self.assertEqual(database.read_bytes(), b"database")
+
     def test_only_two_verified_recovery_versions_retained_after_later_upgrades(self):
         with tempfile.TemporaryDirectory() as task_dir:
             fixture = Fixture(Path(task_dir).resolve())
