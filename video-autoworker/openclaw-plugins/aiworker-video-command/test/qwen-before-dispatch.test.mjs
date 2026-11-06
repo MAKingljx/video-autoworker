@@ -760,7 +760,7 @@ describe('native fragment lookup routing', () => {
     expect(runner.taskResult).toHaveBeenCalledOnce()
     expect(runner.taskResult).toHaveBeenCalledWith({ query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 10 })
     expect(value.text).toContain('共 200 个片段')
-    expect(value.text).toContain('不要循环读取全部片段')
+    expect(value.text).toContain('当前读取至目录位置 1')
   })
 
   it('leaves Word delivery to the structured tool and existing attachment channel', async () => {

@@ -496,7 +496,14 @@ export function resultReceipt(result, action = 'result') {
   if (result.kind === 'segments') {
     const heading = `${partial}${result.name ? searchName(result.name) : '视频'}：共 ${result.totalSegments} 个${partial ? '已保存' : ''}片段。`
     if (!result.items.length) return `${heading}当前没有可读取的片段摘要；不要重新提交学习或猜测片段内容。`
-    return `${heading}\n${result.items.map(item => `片段 ${item.index}（${item.timeRange}）：${item.preview}`).join('\n')}\n任务编号：${result.taskId}。按需用 segment 和 segmentIndex 读取指定片段。${result.nextSegmentOffset === null ? '' : `目录后续偏移：${result.nextSegmentOffset}。`}不要循环读取全部片段；用户明确要求文件时直接 export。目录只是局部预览，不代表全部内容的总结。`
+    const coverage = result.directoryComplete === true
+      ? result.directoryPreviewCompacted === true
+        ? '目录已完整读取；摘要预览已按目录大小压缩，按需用 segment 读取指定片段。'
+        : '目录已完整读取。'
+      : result.nextSegmentOffset === null
+        ? '目录已读取完毕。'
+        : `当前读取至目录位置 ${result.nextSegmentOffset}；继续读取时沿用同一查询和偏移。`
+    return `${heading}\n${result.items.map(item => `片段 ${item.index}（${item.timeRange}）${item.preview ? `：${item.preview}` : ''}`).join('\n')}\n任务编号：${result.taskId}。按需用 segment 和 segmentIndex 读取指定片段。${coverage}用户明确要求文件时直接 export。目录预览不等于全视频总结。`
   }
   if (result.kind === 'segment') {
     if (!result.segment) return result.failureMessage || '该任务没有此编号的可读取片段摘要；不要猜测或重新提交学习。'

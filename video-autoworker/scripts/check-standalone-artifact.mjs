@@ -257,6 +257,7 @@ export const REQUIRED_STANDALONE_FILES = [
   'openclaw-plugins/aiworker-video-command/lib/qwen-before-dispatch.js',
   'openclaw-plugins/aiworker-video-command/lib/qwen-video-classifier.js',
   'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js',
+  'openclaw-plugins/aiworker-video-command/lib/segment-directory-reader.js',
   'openclaw-plugins/aiworker-video-command/lib/stable-message-key.js',
   'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js',
   'openclaw-plugins/aiworker-video-command/lib/video-path-policy.js',

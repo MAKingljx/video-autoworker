@@ -321,9 +321,9 @@ describe('current video-command plugin installer', () => {
 
     expect(script).toContain('PROFILE="qwen-current"')
     expect(script).toContain('AGENT_ID="second-original"')
-    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13" "0.5.14" "0.5.15" "0.5.16" "0.5.17" "0.5.18" "0.5.19")')
+    expect(script).toContain('SUPPORTED_PREVIOUS_VERSIONS=("0.5.8" "0.5.9" "0.5.10" "0.5.11" "0.5.12" "0.5.13" "0.5.14" "0.5.15" "0.5.16" "0.5.17" "0.5.18" "0.5.19" "0.5.20")')
     expect(script).toContain('is_supported_previous_version "$installed_version"')
-    expect(script).toContain('CURRENT_VERSION="0.5.20"')
+    expect(script).toContain('CURRENT_VERSION="0.5.21"')
     expect(script).toContain('EXPECTED_USER="heisenbergs-1"')
     expect(script).toContain('EXPECTED_HOST="HEISENBERGS-1deMac-Studio.local"')
     expect(script).toContain('validate_git_target')
@@ -430,7 +430,7 @@ describe('current video-command plugin installer', () => {
     } finally { await rm(fixture.root, { recursive: true, force: true }) }
   }, 30_000)
 
-  it.each(['0.5.14', '0.5.15', '0.5.16', '0.5.17', '0.5.18', '0.5.19'])('upgrades %s to 0.5.20 and writes bound no-op and rollback results', async previousVersion => {
+  it.each(['0.5.14', '0.5.15', '0.5.16', '0.5.17', '0.5.18', '0.5.19', '0.5.20'])('upgrades %s to 0.5.21 and writes bound no-op and rollback results', async previousVersion => {
     const fixture = await createVideoInstallerFixture('list', previousVersion)
     try {
       const applyOutput = resolve(fixture.root, 'apply.json')
@@ -462,7 +462,7 @@ describe('current video-command plugin installer', () => {
       )).version).toBe(previousVersion)
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
       const resultSource = await readFile(applyOutput, 'utf8')
       expect(resultSource).not.toContain(privateFixtureMarker)
       expect(resultSource).not.toContain('private config body')
@@ -574,7 +574,7 @@ describe('current video-command plugin installer', () => {
       })
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }
@@ -583,14 +583,14 @@ describe('current video-command plugin installer', () => {
   it('waits through a bounded transient Gateway restart window', async () => {
     const fixture = await createVideoInstallerFixture('entries')
     try {
-      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.20'
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.21'
       fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_COUNT = '2'
       const result = await runFixtureInstaller(fixture, '--apply')
       expect(result.stderr).toContain('Runtime readiness current attempt 1/8 failed at gateway-status (exit 1).')
       expect(result.stderr).toContain('Runtime readiness current passed on attempt 3/8.')
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
       const statusCalls = (await openclawCalls(fixture))
         .filter(args => args.includes('gateway') && args.includes('status'))
       expect(statusCalls).toHaveLength(4)
@@ -602,7 +602,7 @@ describe('current video-command plugin installer', () => {
   it('retains exact runtime failure evidence after the restart window expires', async () => {
     const fixture = await createVideoInstallerFixture('entries')
     try {
-      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.20'
+      fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_VERSION = '0.5.21'
       fixture.environment.AIWORKER_TEST_RUNTIME_FAIL_COUNT = '99'
       const failure = await runFixtureInstaller(fixture, '--apply').then(
         () => null,
@@ -731,7 +731,7 @@ describe('current video-command plugin installer', () => {
       )))
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
       expect(await pathExists(lockRoot)).toBe(false)
       expect(await pathExists(evidenceRoot)).toBe(true)
     } finally {
@@ -818,7 +818,7 @@ describe('current video-command plugin installer', () => {
       await runFixtureInstaller(fixture, '--apply')
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
       expect(await pathExists(resolve(
         fixture.stateDir, '.aiworker-video-command-install.lock',
       ))).toBe(false)
@@ -856,7 +856,7 @@ describe('current video-command plugin installer', () => {
       expect(exitCode).not.toBe(0)
       expect(JSON.parse(await readFile(
         resolve(fixture.installedPlugin, 'package.json'), 'utf8',
-      )).version).toBe('0.5.20')
+      )).version).toBe('0.5.21')
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }

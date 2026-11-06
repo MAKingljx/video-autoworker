@@ -126,7 +126,7 @@ test('catalog upgrade preserves existing image tools and admits only newly decla
   const before = [oldImageTool, { id: 'aiworker_generate_image', source: 'plugin', pluginId: plugin.id },
     { id: 'other', source: 'builtin', pluginId: 'core' }]
   const after = [
-    { ...oldImageTool, version: '0.5.0' },
+    { ...oldImageTool, version: '0.5.1' },
     { id: 'protected', source: 'plugin', pluginId: plugin.id },
     { id: 'task', source: 'plugin', pluginId: plugin.id },
     { id: 'frames', source: 'plugin', pluginId: plugin.id },

@@ -77,6 +77,7 @@ function validateManifest(pathname) {
       },
       remove: ['identifierInstructions', 'truncateAfterCompaction'],
     },
+    toolSearch: { enabled: true, mode: 'directory' },
     agent: { id: 'second-original' },
     requiredPlugins: [
       {
@@ -847,6 +848,11 @@ function mergeCompaction(existing, desired) {
   }
 }
 
+function mergeToolSearch(existing, desired) {
+  const current = existing === undefined ? {} : assertObject(existing, 'agents.defaults.tools.toolSearch')
+  return { ...current, ...desired }
+}
+
 function render(configPath, manifestPath, patchPath, expectedPath) {
   const manifest = validateManifest(manifestPath)
   const config = readJson(configPath, 'OpenClaw config')
@@ -855,6 +861,7 @@ function render(configPath, manifestPath, patchPath, expectedPath) {
   exclusiveProfileAgent(config, manifest.agent.id)
 
   const expectedCompaction = mergeCompaction(defaults.compaction, manifest.compaction.set)
+  const expectedToolSearch = mergeToolSearch(defaults.tools?.toolSearch, manifest.toolSearch)
   for (const key of manifest.compaction.remove) delete expectedCompaction[key]
   const patchCompaction = structuredClone(manifest.compaction.set)
   for (const key of manifest.compaction.remove) patchCompaction[key] = null
@@ -863,9 +870,14 @@ function render(configPath, manifestPath, patchPath, expectedPath) {
       defaults: { compaction: patchCompaction },
     },
   }
+  patch.agents.defaults.tools = { toolSearch: structuredClone(manifest.toolSearch) }
   const expected = structuredClone(config)
   expected.agents.defaults ??= {}
   expected.agents.defaults.compaction = expectedCompaction
+  expected.agents.defaults.tools ??= {}
+  if (!expected.agents.defaults.tools || typeof expected.agents.defaults.tools !== 'object'
+    || Array.isArray(expected.agents.defaults.tools)) fail('agents.defaults.tools must be an object')
+  expected.agents.defaults.tools.toolSearch = expectedToolSearch
   fs.writeFileSync(patchPath, `${JSON.stringify(patch, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
   fs.writeFileSync(expectedPath, `${JSON.stringify(expected, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
 }
@@ -900,6 +912,15 @@ function withoutManagedFields(config, manifest) {
     }
     if (Object.keys(compaction).length === 0) delete defaults.compaction
   }
+  const tools = defaults?.tools
+  if (tools && typeof tools === 'object' && !Array.isArray(tools)) {
+    const toolSearch = tools.toolSearch
+    if (toolSearch && typeof toolSearch === 'object' && !Array.isArray(toolSearch)) {
+      for (const key of Object.keys(manifest.toolSearch)) delete toolSearch[key]
+      if (Object.keys(toolSearch).length === 0) delete tools.toolSearch
+    }
+    if (Object.keys(tools).length === 0) delete defaults.tools
+  }
   exclusiveProfileAgent(clone, manifest.agent.id)
   return clone
 }
@@ -925,6 +946,13 @@ function assertTarget(config, manifest) {
     if (Object.hasOwn(installedCompaction, key)) {
       fail(`compaction.${key} was not removed`)
     }
+  }
+  const installedToolSearch = config?.agents?.defaults?.tools?.toolSearch
+  if (!installedToolSearch || typeof installedToolSearch !== 'object' || Array.isArray(installedToolSearch)) {
+    fail('approved tool search policy is missing')
+  }
+  for (const [key, expected] of Object.entries(manifest.toolSearch)) {
+    if (!same(installedToolSearch[key], expected)) fail(`tools.toolSearch.${key} was not installed exactly`)
   }
 
   exclusiveProfileAgent(config, manifest.agent.id)
@@ -1011,7 +1039,7 @@ function readLogCursor(pathname) {
 }
 
 const HOT_RELOAD_DETECTED = /^config change detected; evaluating reload \(([^\r\n]*)\)$/u
-const MANAGED_COMPACTION_PATHS = new Set([
+const MANAGED_RUNTIME_CONFIG_PATHS = new Set([
   'agents.defaults.compaction',
   'agents.defaults.compaction.model',
   'agents.defaults.compaction.timeoutSeconds',
@@ -1022,6 +1050,10 @@ const MANAGED_COMPACTION_PATHS = new Set([
   'agents.defaults.compaction.midTurnPrecheck',
   'agents.defaults.compaction.midTurnPrecheck.enabled',
   'agents.defaults.compaction.identifierInstructions',
+  'agents.defaults.tools',
+  'agents.defaults.tools.toolSearch',
+  'agents.defaults.tools.toolSearch.enabled',
+  'agents.defaults.tools.toolSearch.mode',
 ])
 const AUTO_MANAGED_CONFIG_PATHS = new Set(['meta.lastTouchedAt', 'meta.lastTouchedVersion'])
 const HOT_RELOAD_FAILED = [
@@ -1139,10 +1171,12 @@ function classifyHotReloadMessages(lines) {
     const match = HOT_RELOAD_DETECTED.exec(message)
     if (!match) continue
     const changedPaths = match[1].split(',').map(item => item.trim()).filter(Boolean)
-    const hasCompaction = changedPaths.some(item => item.startsWith('agents.defaults.compaction'))
-    if (!hasCompaction) continue
+    const hasManagedRuntimeChange = changedPaths.some(item => (
+      item.startsWith('agents.defaults.compaction') || item.startsWith('agents.defaults.tools.toolSearch')
+    ))
+    if (!hasManagedRuntimeChange) continue
     if (changedPaths.length === 0 || changedPaths.some(item => (
-      !MANAGED_COMPACTION_PATHS.has(item) && !AUTO_MANAGED_CONFIG_PATHS.has(item)
+      !MANAGED_RUNTIME_CONFIG_PATHS.has(item) && !AUTO_MANAGED_CONFIG_PATHS.has(item)
     ))) {
       invalidDetection = true
     } else {
@@ -1262,7 +1296,7 @@ function classifyHotReloadLogs(logsPath, baselineSource) {
     return
   }
   const classification = classifyHotReloadMessages(logs.lines)
-  if (classification.failed) fail('Gateway reported a compaction hot-reload failure')
+  if (classification.failed) fail('Gateway reported a runtime convergence hot-reload failure')
   if (!classification.detected) process.exitCode = 75
 }
 
@@ -1328,6 +1362,9 @@ function verifyHotReload(
   const compaction = stable(Object.fromEntries(
     Object.keys(manifest.compaction.set).map(key => [key, patch.config.agents.defaults.compaction[key]]),
   ))
+  const toolSearch = stable(Object.fromEntries(
+    Object.keys(manifest.toolSearch).map(key => [key, patch.config.agents.defaults.tools.toolSearch[key]]),
+  ))
   process.stdout.write(`${JSON.stringify(stable({
     schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
     pid,
@@ -1335,6 +1372,7 @@ function verifyHotReload(
     restartPending: false,
     reloadFailure: false,
     compaction,
+    toolSearch,
     baseFileSha256: baseHash,
     newFileSha256: expectedHash,
     baseRevisionHash,
@@ -1361,6 +1399,9 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
   const compaction = stable(Object.fromEntries(
     Object.keys(manifest.compaction.set).map(key => [key, config.agents.defaults.compaction[key]]),
   ))
+  const toolSearch = stable(Object.fromEntries(
+    Object.keys(manifest.toolSearch).map(key => [key, config.agents.defaults.tools.toolSearch[key]]),
+  ))
   process.stdout.write(`${JSON.stringify(stable({
     schema: 'video-autoworker-openclaw-hot-reload-proof/v3',
     pid: runtime.gateway.pid,
@@ -1369,6 +1410,7 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
     reloadFailure: false,
     loadSource: 'gateway-startup-after-config',
     compaction,
+    toolSearch,
     baseFileSha256: null,
     newFileSha256: configFile.snapshot.sha256,
     baseRevisionHash: null,
@@ -1379,13 +1421,14 @@ function verifyStartupLoaded(runtimePath, healthPath, manifestPath, configPath) 
   }))}\n`)
 }
 
-function validateHotReloadProof(value, configSha256) {
+function validateHotReloadProof(value, configSha256, manifest) {
   if (value?.schema !== 'video-autoworker-openclaw-hot-reload-proof/v3'
     || value.hotReloadStatus !== 'active'
     || value.restartPending !== false
     || value.reloadFailure !== false
     || !/^[a-f0-9]{64}$/u.test(value.newFileSha256)
-    || value.newFileSha256 !== configSha256) return false
+    || value.newFileSha256 !== configSha256
+    || !same(value.toolSearch, manifest.toolSearch)) return false
   if (value.loadSource === 'gateway-startup-after-config') {
     return value.baseFileSha256 === null
       && value.baseRevisionHash === null
@@ -1449,7 +1492,7 @@ function writeConvergenceProof(
   validateRuntimeToolPolicyEvidence(runtime, manifest)
   const hotReload = readJson(hotReloadPath, 'hot-reload convergence evidence')
   const configSnapshot = configScopeSnapshot(configPath, manifestPath, false)
-  if (!validateHotReloadProof(hotReload, configSnapshot.sha256)
+  if (!validateHotReloadProof(hotReload, configSnapshot.sha256, manifest)
     || runtime?.gateway?.pid !== hotReload.pid
     || runtime?.preInstallToolBaseline?.sessionKeySha256 === undefined
     || !/^[a-f0-9]{64}$/u.test(runtime.preInstallToolBaseline.sessionKeySha256)) {
@@ -1489,7 +1532,7 @@ export function assertConvergenceProof(proofPath, manifestPath, stateDir, config
     || !Number.isFinite(Date.parse(proof.createdAt))
     || Date.now() - Date.parse(proof.createdAt) < -5_000
     || Date.now() - Date.parse(proof.createdAt) > 30 * 60 * 1_000
-    || !validateHotReloadProof(proof.hotReload, proof.configSnapshot?.sha256)
+    || !validateHotReloadProof(proof.hotReload, proof.configSnapshot?.sha256, manifest)
     || proof.runtime?.gateway?.pid !== proof.hotReload.pid
     || !/^[a-f0-9]{64}$/u.test(proof.runtime?.preInstallToolBaseline?.sessionKeySha256)) {
     fail('runtime convergence proof is invalid or stale')

@@ -67,8 +67,17 @@ test('only qwen-current receives the learned-video frame tools', () => {
   ])
   assert.deepEqual(imageCommandToolNamesForProfile('image-studio'), IMAGE_COMMAND_TOOL_NAMES)
   const instance = tools()
-  assert.ok(instance.tools.some(tool => tool.name === IMAGE_VIDEO_FRAMES_TOOL_NAME))
-  assert.ok(instance.tools.some(tool => tool.name === IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME))
+  const frames = instance.tools.find(tool => tool.name === IMAGE_VIDEO_FRAMES_TOOL_NAME)
+  const submit = instance.tools.find(tool => tool.name === IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME)
+  assert.ok(frames)
+  assert.ok(submit)
+  assert.equal(frames.catalogMode, 'direct-only')
+  assert.equal(submit.catalogMode, 'direct-only')
+  for (const definition of [frames, submit]) {
+    assert.match(definition.description, /直接暴露/u)
+    assert.match(definition.description, /tool_search/u)
+    assert.match(definition.description, /tool_call/u)
+  }
 })
 
 test('returns native candidate image blocks and opaque references without file paths', async () => {

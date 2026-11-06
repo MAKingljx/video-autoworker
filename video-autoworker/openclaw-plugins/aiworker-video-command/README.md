@@ -106,7 +106,7 @@ git diff --check
 
 `aiworker_analyze_video` 默认用 `segments` 读取有界目录，再按需以 `segment`
 读取单段；`export` 仅在用户明确要求文件时直接组装 Word/Markdown。
-目录参数 `offset`（片段偏移）、`limit`（1..20，默认10）；单段参数
+目录参数 `offset`（片段偏移）和可选 `limit`（1..10000；不传即读取全部可用目录）。底层每页仍保持 20 条，插件在内部自动分页、核对同一任务身份后合并结果；20 不是用户或模型可见的总量上限。完整目录始终保留每段编号和时间范围，但会按总量压缩预览文字；不会把 100/200 个完整摘要拼成一段再交给模型。单段参数
 `segmentIndex` 从1开始；导出参数 `format` 为 `docx|markdown`。
 三者均以原始文件名查询或使用已有候选返回的精确 taskId，不猜文件身份。
 底层统一走 `submit-task.mjs --result ... --result-view segments|segment|export`。

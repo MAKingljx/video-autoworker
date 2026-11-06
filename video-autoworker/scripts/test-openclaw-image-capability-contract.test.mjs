@@ -26,7 +26,7 @@ const LEGACY_IMAGE_TOOLS = IMAGE_TOOLS.slice(0, 5)
 const manifest = validateImageCapabilityManifest({
   schema: 'aiworker-openclaw-image-capabilities/v3',
   plugin: {
-    id: 'aiworker-image-command', version: '0.5.0', tools: IMAGE_TOOLS,
+    id: 'aiworker-image-command', version: '0.5.1', tools: IMAGE_TOOLS,
     retiredTools: ['aiworker_generate_image'],
   },
   attachments: [

@@ -1,7 +1,7 @@
 {
   "id": "aiworker-image-command",
   "name": "AI-worker Image Command",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Action-specific protected-cover and image task commands for one explicitly bound OpenClaw agent and one shared image service.",
   "activation": { "onStartup": true, "onCapabilities": ["tool"] },
   "contracts": { "tools": [

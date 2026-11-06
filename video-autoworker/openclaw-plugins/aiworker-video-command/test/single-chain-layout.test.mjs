@@ -15,6 +15,7 @@ const currentModules = [
   'qwen-video-classifier.js',
   'saved-summary-direct-dispatch.js',
   'scheduler-runner.js',
+  'segment-directory-reader.js',
   'stable-message-key.js',
   'task-chain-tool.js',
   'video-path-policy.js',

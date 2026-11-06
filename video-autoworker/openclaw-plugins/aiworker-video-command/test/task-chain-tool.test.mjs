@@ -380,7 +380,7 @@ describe('AI-worker direct task-chain tool', () => {
 
 describe('bounded fragment and export actions', () => {
   it.each([
-    [{ action: 'segments', query: 'S03E03' }, { query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 10 }],
+    [{ action: 'segments', query: 'S03E03' }, { query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 20 }],
     [{ action: 'segment', query: 'S03E03', segmentIndex: 3 }, { query: 'S03E03', view: 'segment', segmentIndex: 3 }],
     [{ action: 'export', query: 'S03E03', format: 'docx' }, { query: 'S03E03', view: 'export', exportFormat: 'docx' }],
   ])('routes %j once to the shared reader', async (request, expected) => {
@@ -390,8 +390,42 @@ describe('bounded fragment and export actions', () => {
     expect(runner.taskResult).toHaveBeenCalledWith(expected)
   })
 
+  it('accepts more than one transport page and reads one consistent directory through internal pages', async () => {
+    const taskId = `video-command-${'a'.repeat(64)}`
+    const runner = {
+      taskResult: vi.fn(async ({ query, view, segmentOffset, segmentLimit }) => {
+        expect(view).toBe('segments')
+        expect(query === 'S03E03' || query === taskId).toBe(true)
+        const totalSegments = 45
+        const items = Array.from({ length: Math.min(segmentLimit, totalSegments - segmentOffset) }, (_, index) => {
+          const value = segmentOffset + index + 1
+          return { index: value, timeRange: `00:00:${String(value).padStart(2, '0')}`, preview: `片段${value}` }
+        })
+        return {
+          kind: 'segments', taskId, name: 'S03E03.mp4', status: 'succeeded', source: 'segment_summary',
+          totalSegments, segmentOffset, segmentLimit, items,
+          nextSegmentOffset: segmentOffset + items.length < totalSegments ? segmentOffset + items.length : null,
+        }
+      }),
+    }
+
+    const response = await tool({ runner }).execute('all-directory', {
+      action: 'segments', query: 'S03E03', limit: 45,
+    })
+
+    expect(runner.taskResult).toHaveBeenCalledTimes(3)
+    expect(runner.taskResult.mock.calls.map(([value]) => value).sort((left, right) => left.segmentOffset - right.segmentOffset)).toEqual([
+      { query: 'S03E03', view: 'segments', segmentOffset: 0, segmentLimit: 20 },
+      { query: taskId, view: 'segments', segmentOffset: 20, segmentLimit: 20 },
+      { query: taskId, view: 'segments', segmentOffset: 40, segmentLimit: 5 },
+    ])
+    expect(response.content[0].text).toContain('共 45 个片段')
+    expect(response.content[0].text).toContain('片段 45')
+    expect(response.content[0].text).toContain('目录已完整读取')
+  })
+
   it.each([
-    { action: 'segments', query: 'x', limit: 21 },
+    { action: 'segments', query: 'x', limit: 10_001 },
     { action: 'segments', query: 'x', offset: -1 },
     { action: 'segment', query: 'x', segmentIndex: 0 },
     { action: 'segment', query: 'x', segmentIndex: 1.5 },

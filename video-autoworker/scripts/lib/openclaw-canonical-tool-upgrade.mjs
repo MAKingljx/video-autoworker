@@ -11,8 +11,8 @@ const toolPath = 'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js
 const pluginId = 'aiworker-video-command'
 const toolId = 'aiworker_analyze_video'
 const declaration = Object.freeze({
-  fromVersion: '0.5.17', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION,
-  sourceCommit: '28433d5ca59cc4dbe849b8747ec86aeea7191c9e',
+  fromVersion: '0.5.20', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION,
+  sourceCommit: '2d80f5ed49baac237738e2aa779de782475615a7',
   sourceSha256: '450873716ecf72dcf943482648f5efbb394961da8f643ee9c62a1263a7354ddb',
 })
 const stable = value => Array.isArray(value) ? value.map(stable)
@@ -51,6 +51,12 @@ export function assertBackwardCompatibleToolSchema(before, after) {
         || before.enum.some(value => !after.enum.some(next => equal(value, next)))) throw new Error('tool schema removed enum capability')
     } else if (key === 'required') {
       if ((after.required ?? []).some(value => !(before.required ?? []).includes(value))) throw new Error('tool schema added required input')
+    } else if (key === 'maximum') {
+      if (after.maximum !== undefined && (!Number.isFinite(after.maximum) || after.maximum < before.maximum)) {
+        throw new Error('tool schema narrowed maximum')
+      }
+    } else if (key === 'minimum') {
+      if (!Number.isFinite(after.minimum) || after.minimum > before.minimum) throw new Error('tool schema narrowed minimum')
     } else if (!equal(before[key], after[key])) throw new Error(`tool schema changed validation: ${key}`)
   }
 }

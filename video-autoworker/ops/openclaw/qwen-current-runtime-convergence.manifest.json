@@ -18,13 +18,17 @@
       "truncateAfterCompaction"
     ]
   },
+  "toolSearch": {
+    "enabled": true,
+    "mode": "directory"
+  },
   "agent": {
     "id": "second-original"
   },
   "requiredPlugins": [
     {
       "id": "aiworker-video-command",
-      "version": "0.5.20",
+      "version": "0.5.21",
       "tool": "aiworker_analyze_video",
       "requiredConfig": {
         "releaseReady": true

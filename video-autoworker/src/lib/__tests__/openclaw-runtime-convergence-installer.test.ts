@@ -181,6 +181,11 @@ async function createFixture() {
           notifyUser: false,
           midTurnPrecheck: { minimumBytes: 4096 },
         },
+        tools: {
+          web: { search: 'preserve' },
+          media: { image: 'preserve' },
+          elevated: { enabled: false },
+        },
       },
       list: [
         {
@@ -262,7 +267,7 @@ async function createFixture() {
     'aiworker-video-command',
     'aiworker_analyze_video',
     false,
-    '0.5.20',
+    '0.5.21',
     openclawSdkRoot,
   )
   await installPluginManifest(
@@ -351,6 +356,7 @@ if (args[0] === 'config' && args[1] === 'patch') {
   if (fileIndex < 0 || !args[fileIndex + 1]) process.exit(91)
   const patch = read(args[fileIndex + 1])
   const compactionPatch = patch?.agents?.defaults?.compaction
+  const toolSearchPatch = patch?.agents?.defaults?.tools?.toolSearch
   const isApprovedCompactionPatch = isObject(compactionPatch)
     && JSON.stringify(Object.keys(compactionPatch).sort()) === JSON.stringify([
       'identifierInstructions',
@@ -372,11 +378,16 @@ if (args[0] === 'config' && args[1] === 'patch') {
     && isObject(compactionPatch.midTurnPrecheck)
     && Object.keys(compactionPatch.midTurnPrecheck).length === 1
     && compactionPatch.midTurnPrecheck.enabled === true
+  const isApprovedToolSearchPatch = isObject(toolSearchPatch)
+    && Object.keys(toolSearchPatch).sort().join(',') === 'enabled,mode'
+    && toolSearchPatch.enabled === true
+    && toolSearchPatch.mode === 'directory'
   fs.appendFileSync(
     process.env.FAKE_OPENCLAW_CALL_LOG,
-    'patch-approved-compaction=' + String(isApprovedCompactionPatch) + '\\n',
+    'patch-approved-compaction=' + String(isApprovedCompactionPatch)
+      + ';patch-approved-tool-search=' + String(isApprovedToolSearchPatch) + '\\n',
   )
-  if (!isApprovedCompactionPatch) process.exit(96)
+  if (!isApprovedCompactionPatch || !isApprovedToolSearchPatch) process.exit(96)
   const dryRun = args.includes('--dry-run')
   if (dryRun && process.env.FAKE_MUTATE_ON_DRY_RUN === '1') {
     const concurrent = read(configPath)
@@ -668,6 +679,9 @@ if (operation === 'config-patch') {
   const source = fs.readFileSync(configPath, 'utf8')
   if (process.env.AIWORKER_OPENCLAW_RUNTIME_REVISION_TOKEN !== casRevision(source)) process.exit(95)
   const patch = read(process.env.AIWORKER_OPENCLAW_RUNTIME_PATCH_FILE)
+  const toolSearch = patch?.agents?.defaults?.tools?.toolSearch
+  if (!isObject(toolSearch) || toolSearch.enabled !== true || toolSearch.mode !== 'directory'
+    || Object.keys(toolSearch).sort().join(',') !== 'enabled,mode') process.exit(96)
   const updated = mergePatch(JSON.parse(source), patch)
   updated.meta ??= {}
   updated.meta.lastTouchedVersion = process.env.FAKE_OPENCLAW_VERSION || '2026.9.9'
@@ -678,11 +692,11 @@ if (operation === 'config-patch') {
       updated.agents.list.push({ id: 'late-agent', tools: { profile: 'coding' } })
     }
   fs.writeFileSync(configPath, JSON.stringify(updated, null, 2) + '\\n', { mode: 0o600 })
-  fs.appendFileSync(callLog, 'config rpc-patch\\npatch-approved-compaction=true\\n')
+  fs.appendFileSync(callLog, 'config rpc-patch\\npatch-approved-compaction=true;patch-approved-tool-search=true\\n')
   fs.appendFileSync(runtimeLog, JSON.stringify({
     msg: process.env.FAKE_RELOAD_LOG_TEXT || (process.env.FAKE_RELOAD_FAILURE_LOG === '1'
       ? 'config hot reload failed (agents.defaults.compaction)'
-      : 'config change detected; evaluating reload (agents.defaults.compaction.keepRecentTokens, meta.lastTouchedAt)'),
+      : 'config change detected; evaluating reload (agents.defaults.compaction.keepRecentTokens, agents.defaults.tools.toolSearch.mode, meta.lastTouchedAt)'),
   }) + '\\n')
   // The pinned reloader promotes last-good only after all noop/dynamic callbacks complete.
   if (process.env.FAKE_RELOAD_FAILURE_LOG !== '1'
@@ -964,6 +978,8 @@ describe('hot-reload log evidence', () => {
     ['structured named notification', [JSON.stringify({ message: detected })], 0],
     ['unrelated hot-handler completion', ['config change applied (dynamic reads: agents.defaults.compaction)'], 75],
     ['dynamic change notification', [JSON.stringify({ 0: 'gateway/reload', 1: 'config change detected; evaluating reload (agents.defaults.compaction.model, meta.lastTouchedAt)' })], 0],
+    ['tool directory change', ['config change detected; evaluating reload (agents.defaults.tools.toolSearch.mode, meta.lastTouchedAt)'], 0],
+    ['mixed directory and compaction changes', ['config change detected; evaluating reload (agents.defaults.compaction.model, agents.defaults.tools.toolSearch.mode)'], 0],
     ['mixed tool changes', ['config change detected; evaluating reload (agents.defaults.compaction.model, tools.exec)'], 1],
     ['unmanaged compaction change', ['config change detected; evaluating reload (agents.defaults.compaction.reserveTokens)'], 1],
     ['lookalike compaction prefix', ['config change detected; evaluating reload (agents.defaults.compactionOther)'], 1],
@@ -1149,11 +1165,12 @@ export async function callGatewayFromCli(method, options, params, extra) {
         },
         remove: ['identifierInstructions', 'truncateAfterCompaction'],
       },
+      toolSearch: { enabled: true, mode: 'directory' },
       agent: { id: 'second-original' },
       requiredPlugins: [
         {
           id: 'aiworker-video-command',
-          version: '0.5.20',
+          version: '0.5.21',
           tool: 'aiworker_analyze_video',
           requiredConfig: { releaseReady: true },
         },
@@ -1490,7 +1507,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
     ])).rejects.toThrow(/effective tool inventory is incomplete/u)
   })
 
-  it('applies only compaction policy for the sole profile agent and preserves its tools', async () => {
+  it('applies the sole profile runtime policy and preserves its agent tools', async () => {
     const entry = await createFixture()
 
     const result = await run(entry, '--apply')
@@ -1517,6 +1534,12 @@ export async function callGatewayFromCli(method, options, params, extra) {
     expect(target.tools).toEqual(entry.initial.agents.list[0].tools)
     expect(installed.agents.defaults.compaction).not.toHaveProperty('identifierInstructions')
     expect(installed.agents.defaults.compaction).not.toHaveProperty('truncateAfterCompaction')
+    expect(installed.agents.defaults.tools).toEqual({
+      web: { search: 'preserve' },
+      media: { image: 'preserve' },
+      elevated: { enabled: false },
+      toolSearch: { enabled: true, mode: 'directory' },
+    })
     expect(installed.agents.list).toHaveLength(1)
     expect(installed.plugins).toEqual(entry.initial.plugins)
     expect(installed.gateway).toEqual(entry.initial.gateway)
@@ -1533,6 +1556,7 @@ export async function callGatewayFromCli(method, options, params, extra) {
       baseFileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       newFileSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
       baseRevisionHash: expect.stringMatching(/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u),
+      toolSearch: { enabled: true, mode: 'directory' },
       newRevisionHash: expect.stringMatching(/^hmac-sha256:v1:[A-Za-z0-9_-]{43}$/u),
     })
     expect(proofValue.hotReload.baseFileSha256).not.toBe(proofValue.hotReload.newFileSha256)

@@ -32,7 +32,7 @@ describe('declared canonical video tool definition upgrade', () => {
   it.each(['catalog', 'effective'] as const)('accepts only the Git-bound old and canonical current %s definitions', async kind => {
     const { request } = await fixture(kind)
     const proof = await verifyCanonicalVideoToolUpgrade(request)
-    expect(proof).toMatchObject({ toolId, kind, fromVersion: '0.5.17', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION })
+    expect(proof).toMatchObject({ toolId, kind, fromVersion: '0.5.20', toVersion: OPENCLAW_VIDEO_PLUGIN_VERSION })
     expect(proof.canonicalSchemaSha256).toMatch(/^[a-f0-9]{64}$/u)
     expect(proof.beforeDescriptorSha256).toBe(request.before.descriptorSurfaceSha256)
   })
@@ -91,5 +91,8 @@ describe('declared canonical video tool definition upgrade', () => {
     const narrowed = structuredClone(definitions.after.parameters)
     narrowed.properties.query.maxLength = 8
     expect(() => assertBackwardCompatibleToolSchema(definitions.before.parameters, narrowed)).toThrow('changed validation')
+    const widened = structuredClone(definitions.after.parameters)
+    delete widened.properties.limit.maximum
+    expect(() => assertBackwardCompatibleToolSchema(definitions.before.parameters, widened)).not.toThrow()
   })
 })

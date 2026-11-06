@@ -515,7 +515,10 @@ function submissionDefinition({ name, label, description, parameters }) {
   return { name, label, description, parameters, executionMode: 'sequential' }
 }
 
-function createImageHelpTool() {
+function createImageHelpTool({ frameToolsEnabled = false } = {}) {
+  const frameWorkflow = frameToolsEnabled
+    ? ' 视频封面先用 aiworker_analyze_video 读取已学习片段目录，再直接调用 aiworker_video_cover_frames；看到候选帧后直接调用 aiworker_submit_protected_cover_from_frame。后两项已在当前工具表直接可调用，绝不能通过 tool_search、tool_describe、tool_call 或其他通用工具目录转发。'
+    : ''
   return {
     name: IMAGE_HELP_TOOL_NAME,
     label: '图片工具说明',
@@ -524,7 +527,7 @@ function createImageHelpTool() {
     executionMode: 'sequential',
     async execute() {
       return result(
-        '提交原创图用 aiworker_submit_creative_image；设计封面用 aiworker_submit_designed_cover；保留原片用 aiworker_submit_protected_cover。三者都会返回任务编号。后续只能用 aiworker_image_task 携带该任务编号查询、读取、检查或取消。提交未返回任务编号时不得重试。',
+        `提交原创图用 aiworker_submit_creative_image；设计封面用 aiworker_submit_designed_cover；保留原片用 aiworker_submit_protected_cover。三者都会返回任务编号。后续只能用 aiworker_image_task 携带该任务编号查询、读取、检查或取消。提交未返回任务编号时不得重试。${frameWorkflow}`,
         { nextAction: 'USE_ACTION_SPECIFIC_IMAGE_TOOL' },
       )
     },
@@ -598,7 +601,7 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
       name: IMAGE_VIDEO_FRAMES_TOOL_NAME,
       label: 'H1 已学习视频候选帧',
       catalogMode: 'direct-only',
-      description: '从已学习视频的真实原片和片段时间窗重新抽取3张候选帧，供你结合片段摘要自行挑选。先用 aiworker_analyze_video 的 segments 读取视频片段目录，再选择其中一个最相关片段编号调用本工具。返回候选包含原生图片和短期opaque frameRef，不含文件路径。仅支持已完成学习且原片仍可读取的视频；不创建学习任务或图片任务。',
+      description: '从已学习视频的真实原片和片段时间窗重新抽取3张候选帧，供你结合片段摘要自行挑选。先用 aiworker_analyze_video 的 segments 读取视频片段目录，再选择其中一个最相关片段编号直接调用本工具。当前工具已直接暴露；严禁通过 tool_search、tool_describe、tool_call 或其他通用工具目录调用它，否则原生图片不能安全传回。返回候选包含原生图片和短期opaque frameRef，不含文件路径。仅支持已完成学习且原片仍可读取的视频；不创建学习任务或图片任务。',
       parameters: VIDEO_COVER_FRAMES_PARAMETERS,
       executionMode: 'sequential',
       async execute(toolCallId, params, signal) {
@@ -643,7 +646,7 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
       name: IMAGE_SUBMIT_PROTECTED_FRAME_TOOL_NAME,
       label: 'H1 学习帧封面提交',
       catalogMode: 'direct-only',
-      description: '用 aiworker_video_cover_frames 在当前会话返回的一个真实候选帧提交原片保护封面。必须提供 frameRef 和完整 protected 文字/擦除计划；不得提供路径或任意图像引用。成功只返回任务编号，随后等待完成提醒。',
+      description: '用 aiworker_video_cover_frames 在当前会话返回的一个真实候选帧提交原片保护封面。当前工具已直接暴露；严禁通过 tool_search、tool_describe、tool_call 或其他通用工具目录调用它。必须提供 frameRef 和完整 protected 文字/擦除计划；不得提供路径或任意图像引用。成功只返回任务编号，随后等待完成提醒。',
       parameters: PROTECTED_FRAME_PARAMETERS,
       executionMode: 'sequential',
       async execute(toolCallId, params, signal) {
@@ -698,7 +701,7 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
       description: '默认视频封面工具。必须提供一张真实原图和完整 protected 编辑计划；成功只返回任务编号，随后等待完成提醒。',
     })),
     task,
-    createImageHelpTool(),
+    createImageHelpTool({ frameToolsEnabled: frameTools.length > 0 }),
     ...frameTools,
   ]
 }

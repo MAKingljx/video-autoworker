@@ -301,7 +301,7 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     })
-    expect(result.videoCommand).toMatchObject({ version: '0.5.20' })
+    expect(result.videoCommand).toMatchObject({ version: '0.5.21' })
     expect(result.directorBrain).toMatchObject({ version: '0.4.4' })
     expect(result.taskFlow.files).toBeGreaterThan(3)
     expect(Object.keys(result.closure)).toHaveLength(8)
@@ -351,7 +351,7 @@ describe('director video release readiness verifier', () => {
       profileStateRoot: profileRoot,
       workspaceRoot,
     })
-    expect(result.videoCommand).toMatchObject({ version: '0.5.20' })
+    expect(result.videoCommand).toMatchObject({ version: '0.5.21' })
     expect(result.directorBrain).toMatchObject({ version: '0.4.4' })
 
     const drifted = JSON.parse(readFileSync(videoPackage, 'utf8'))
@@ -424,7 +424,7 @@ describe('director video release readiness verifier', () => {
       repositoryRoot,
       profileStateRoot: profileRoot,
       workspaceRoot,
-    }).videoCommand).toMatchObject({ version: '0.5.20' })
+    }).videoCommand).toMatchObject({ version: '0.5.21' })
   })
 
   it('allows safe auxiliary content changes while binding them into the actual manifest', async () => {
