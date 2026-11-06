@@ -122,6 +122,7 @@ function createLauncherFixture(): LauncherFixture {
     'openclaw-plugins/aiworker-video-command/lib/qwen-before-dispatch.js': 'export {}\n',
     'openclaw-plugins/aiworker-video-command/lib/qwen-video-classifier.js': 'export {}\n',
     'openclaw-plugins/aiworker-video-command/lib/scheduler-runner.js': 'export {}\n',
+    'openclaw-plugins/aiworker-video-command/lib/segment-directory-reader.js': 'export {}\n',
     'openclaw-plugins/aiworker-video-command/lib/stable-message-key.js': 'export {}\n',
     'openclaw-plugins/aiworker-video-command/lib/task-chain-tool.js': 'export {}\n',
     'openclaw-plugins/aiworker-video-command/lib/video-path-policy.js': 'export {}\n',

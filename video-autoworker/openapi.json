@@ -12155,8 +12155,9 @@
     "/api/n8n/video-cover-frames": {
       "post": {
         "tags": ["n8n"],
-        "summary": "Read bounded original-video frame candidates for a completed learning segment",
-        "operationId": "readN8nVideoCoverFrameCandidates",
+        "deprecated": true,
+        "summary": "Transition-only compatibility adapter for a previously installed video-cover frame plugin",
+        "operationId": "readLegacyN8nVideoCoverFrameCandidates",
         "requestBody": { "required": true, "content": { "application/json": { "schema": {
           "type": "object", "additionalProperties": false,
           "required": ["query", "segmentIndexes"],
@@ -12167,12 +12168,36 @@
           }
         } } } },
         "responses": {
-          "200": { "description": "Three source-frame candidates from the selected successfully learned segment" },
+          "200": { "description": "Three source-frame candidates for a verified old-plugin call; new model traffic uses video-cover-workflow" },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "description": "Video, learning result, segment, or source identity is ambiguous or unavailable" },
           "503": { "description": "The controlled frame extraction service is temporarily unavailable" }
+        }
+      }
+    },
+    "/api/n8n/video-cover-workflow": {
+      "post": {
+        "tags": ["n8n"],
+        "summary": "Read one authoritative saved-summary or native-frame step for an owned video cover workflow",
+        "operationId": "operateN8nVideoCoverWorkflow",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": {
+          "type": "object", "additionalProperties": false,
+          "required": ["action", "query"],
+          "properties": {
+            "action": { "type": "string", "enum": ["segments", "frames"] },
+            "query": { "type": "string", "minLength": 1, "maxLength": 120 },
+            "segmentIndex": { "type": "integer", "minimum": 1 }
+          }
+        } } } },
+        "responses": {
+          "200": { "description": "A bounded saved-summary directory or three native source-frame candidates" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Video title, learning state, segment, or source identity is ambiguous or unavailable" },
+          "503": { "description": "The authoritative cover-workflow service is temporarily unavailable" }
         }
       }
     },

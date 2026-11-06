@@ -172,6 +172,8 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
     const targetBindingValid = attachment.legacyScope
       ? entry?.config?.targetAgentId === undefined
       : entry?.config?.targetAgentId === attachment.agentId
+    const workflowHookPolicyValid = attachment.legacyScope
+      || (entry?.hooks?.allowConversationAccess === true && entry?.hooks?.allowPromptInjection === true)
     const legacySourceRetired = legacyImagePluginLoadPaths(config, attachment).length === 0
     return attachment.toolIds.every(tool => tools.alsoAllow?.includes(tool) === true)
       && plugin.retiredTools.every(tool => tools.alsoAllow?.includes(tool) !== true)
@@ -179,6 +181,7 @@ export function isImageCapabilityAttached(config, manifest, attachment) {
       && entry?.enabled === true
       && entry.config?.releaseReady === true
       && targetBindingValid
+      && workflowHookPolicyValid
       && legacySourceRetired
   } catch {
     return false
@@ -215,6 +218,8 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
     fail('plugin_readiness_conflict')
   }
   const capabilityConfig = { ...existingConfig, releaseReady: true }
+  const existingHooks = existing?.hooks === undefined ? {} : existing.hooks
+  if (!plainObject(existingHooks)) fail('plugin_hooks_invalid')
   // The existing image-studio profile has a trusted, profile-local default
   // binding. Omitting the redundant field lets its first install validate
   // before OpenClaw has loaded this plugin's optional config schema.
@@ -224,6 +229,11 @@ export function renderImageCapabilityConfig(config, manifest, attachment) {
     ...existing,
     enabled: true,
     config: capabilityConfig,
+    ...(attachment.legacyScope ? {} : { hooks: {
+      ...existingHooks,
+      allowConversationAccess: true,
+      allowPromptInjection: true,
+    } }),
   }
   return next
 }

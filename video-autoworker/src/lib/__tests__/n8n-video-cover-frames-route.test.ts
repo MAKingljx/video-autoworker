@@ -13,7 +13,7 @@ vi.mock('@/lib/n8n-cover-frame-candidates', () => ({ createN8nCoverFrameCandidat
 
 import { POST } from '@/app/api/n8n/video-cover-frames/route'
 
-describe('n8n video cover frame route', () => {
+describe('legacy n8n video cover frame adapter', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.getDatabase.mockReturnValue({})
@@ -23,20 +23,7 @@ describe('n8n video cover frame route', () => {
     })
   })
 
-  it('requires the current OpenClaw loopback operator boundary', async () => {
-    mocks.getOpenClawN8nOperatorUser.mockReturnValue(null)
-    const response = await POST(new NextRequest('http://127.0.0.1:3017/api/n8n/video-cover-frames', {
-      method: 'POST', body: JSON.stringify({ query: '北美火车短片.mp4', segmentIndexes: [3] }),
-    }))
-    expect(response.status).toBe(403)
-    expect(mocks.createN8nCoverFrameCandidates).not.toHaveBeenCalled()
-  })
-
-  it('validates a bounded query and selected segment indices before extraction', async () => {
-    const invalid = await POST(new NextRequest('http://127.0.0.1:3017/api/n8n/video-cover-frames', {
-      method: 'POST', body: JSON.stringify({ query: '北美火车短片.mp4', segmentIndexes: [3, 3] }),
-    }))
-    expect(invalid.status).toBe(400)
+  it('remains loopback-only and preserves the old one-segment request shape during migration', async () => {
     const response = await POST(new NextRequest('http://127.0.0.1:3017/api/n8n/video-cover-frames', {
       method: 'POST', body: JSON.stringify({ query: '北美火车短片.mp4', segmentIndexes: [3] }),
     }))

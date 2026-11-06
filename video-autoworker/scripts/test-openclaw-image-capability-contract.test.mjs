@@ -18,16 +18,15 @@ const IMAGE_TOOLS = [
   'aiworker_submit_protected_cover',
   'aiworker_image_task',
   'aiworker_image_help',
-  'aiworker_video_cover_frames',
-  'aiworker_submit_protected_cover_from_frame',
+  'aiworker_video_cover_workflow',
 ]
 const LEGACY_IMAGE_TOOLS = IMAGE_TOOLS.slice(0, 5)
 
 const manifest = validateImageCapabilityManifest({
   schema: 'aiworker-openclaw-image-capabilities/v3',
   plugin: {
-    id: 'aiworker-image-command', version: '0.5.1', tools: IMAGE_TOOLS,
-    retiredTools: ['aiworker_generate_image'],
+    id: 'aiworker-image-command', version: '0.5.2', tools: IMAGE_TOOLS,
+    retiredTools: ['aiworker_generate_image', 'aiworker_video_cover_frames', 'aiworker_submit_protected_cover_from_frame'],
   },
   attachments: [
     { profile: 'image-studio', agentId: 'image-studio', stateRoot: '.openclaw-image-studio', gatewayPort: 19289, mediaRoot: '.openclaw-image-studio/media', legacyScope: true, toolIds: LEGACY_IMAGE_TOOLS },
@@ -63,6 +62,9 @@ for (const layout of ['entries', 'list']) {
     assert.equal(isImageCapabilityAttached(after, manifest, attachment), true)
     assert.deepEqual(after.channels, before.channels)
     assert.deepEqual(after.plugins.entries['aiworker-video-command'], before.plugins.entries['aiworker-video-command'])
+    assert.deepEqual(after.plugins.entries['aiworker-image-command'].hooks, {
+      allowConversationAccess: true, allowPromptInjection: true,
+    })
     const agent = layout === 'list' ? after.agents.list[0] : { id: 'second-original', ...after.agents.entries['second-original'] }
     assert.deepEqual(agent.tools.alsoAllow, ['aiworker_analyze_video', ...IMAGE_TOOLS])
     assert.equal(agent.tools.alsoAllow.includes('aiworker_generate_image'), false)

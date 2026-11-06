@@ -116,6 +116,12 @@ describe('director work natural-language dispatch integration', () => {
         }))
         return
       }
+      if (request.method === 'GET' && url.pathname === '/api/n8n/runs/stop') {
+        response.writeHead(200).end(JSON.stringify({ inspection: {
+          taskId: url.searchParams.get('taskId'), bindingId: Number(url.searchParams.get('bindingId')), stop: null,
+        } }))
+        return
+      }
       if (request.method === 'GET' && url.pathname === '/api/n8n/runs') {
         response.writeHead(200).end(JSON.stringify({
           runs: triggerBody === null ? [] : [{

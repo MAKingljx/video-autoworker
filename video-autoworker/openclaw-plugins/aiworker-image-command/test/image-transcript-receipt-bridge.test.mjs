@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   IMAGE_SUBMIT_CREATIVE_TOOL_NAME,
   IMAGE_TASK_TOOL_NAME,
+  IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
 } from '../lib/image-command-tool.js'
 import { createImageTranscriptReceiptBridge } from '../lib/image-transcript-receipt-bridge.js'
 
@@ -66,6 +67,19 @@ test('invalid image submission remains an actionable error after the generic pro
   assert.equal(projected.message.isError, true)
   assert.match(projected.message.content[0].text, /errorCode=IMAGE_REQUEST_INVALID/u)
   assert.match(projected.message.content[0].text, /nextAction=PROVIDE_REQUIRED_IMAGE_SUBMISSION_FIELDS/u)
+})
+
+test('unified video-cover submission preserves the same bounded image receipt', () => {
+  const bridge = createImageTranscriptReceiptBridge()
+  bridge.capture(rawResult({
+    toolName: IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+    details: { jobId, currentState: 'QUEUED', nextAction: 'WAIT_FOR_IMAGE_NOTIFICATION' },
+  }), context)
+  const projected = bridge.project({
+    message: { role: 'toolResult', toolName: IMAGE_VIDEO_COVER_WORKFLOW_TOOL_NAME,
+      toolCallId: 'call-image-1', content: [], isError: false },
+  }, context)
+  assert.match(projected.message.content[0].text, new RegExp(`jobId=${jobId}`, 'u'))
 })
 
 test('bridge ignores non-image tools and a different trusted-agent context', () => {

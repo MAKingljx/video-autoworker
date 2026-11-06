@@ -31,8 +31,10 @@ IMAGE_CAPABILITY_TOOLS = [
     "aiworker_submit_protected_cover",
     "aiworker_image_task",
     "aiworker_image_help",
+    "aiworker_video_cover_workflow",
 ]
-RETIRED_IMAGE_CAPABILITY_TOOLS = ["aiworker_generate_image"]
+RETIRED_IMAGE_CAPABILITY_TOOLS = ["aiworker_generate_image", "aiworker_video_cover_frames",
+                                  "aiworker_submit_protected_cover_from_frame"]
 spec = importlib.util.spec_from_file_location("image_install_contract", ROOT / "scripts/install-openclaw-image-studio.py")
 contract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(contract)
@@ -74,21 +76,24 @@ def image_reference_roots(home: Path) -> list[str]:
         raise contract.InstallError("image_capability_manifest_invalid") from None
     plugin = manifest.get("plugin") if isinstance(manifest, dict) else None
     attachments = manifest.get("attachments") if isinstance(manifest, dict) else None
-    contract.require(isinstance(manifest, dict) and manifest.get("schema") == "aiworker-openclaw-image-capabilities/v2"
+    contract.require(isinstance(manifest, dict) and manifest.get("schema") == "aiworker-openclaw-image-capabilities/v3"
                      and isinstance(plugin, dict) and plugin.get("id") == "aiworker-image-command"
-                     and plugin.get("version") == "0.4.0"
+                     and isinstance(plugin.get("version"), str) and re.fullmatch(r"\d+\.\d+\.\d+", plugin["version"])
                      and plugin.get("tools") == IMAGE_CAPABILITY_TOOLS
                      and plugin.get("retiredTools") == RETIRED_IMAGE_CAPABILITY_TOOLS and isinstance(attachments, list)
                      and 1 <= len(attachments) <= 16, "image_capability_manifest_invalid")
     roots, profiles, relative_paths = [str(home / "ai-worker/output/covers")], set(), set()
     for attachment in attachments:
         contract.require(isinstance(attachment, dict) and set(attachment) == {
-            "profile", "agentId", "stateRoot", "gatewayPort", "mediaRoot", "legacyScope"}, "image_capability_attachment_invalid")
+            "profile", "agentId", "stateRoot", "gatewayPort", "mediaRoot", "legacyScope", "toolIds"}, "image_capability_attachment_invalid")
         profile, agent, state_root, media = (attachment["profile"], attachment["agentId"],
                                              attachment["stateRoot"], attachment["mediaRoot"])
         contract.require(all(isinstance(value, str) and value and len(value) <= 256 for value in (profile, agent, state_root, media))
                          and isinstance(attachment["legacyScope"], bool)
                          and isinstance(attachment["gatewayPort"], int) and 1024 <= attachment["gatewayPort"] <= 65535
+                         and isinstance(attachment["toolIds"], list) and attachment["toolIds"]
+                         and all(isinstance(tool, str) and tool in IMAGE_CAPABILITY_TOOLS for tool in attachment["toolIds"])
+                         and len(set(attachment["toolIds"])) == len(attachment["toolIds"])
                          and all(not Path(value).is_absolute() and ".." not in Path(value).parts
                                  and value == Path(value).as_posix() for value in (state_root, media))
                          and profile not in profiles and media not in relative_paths,

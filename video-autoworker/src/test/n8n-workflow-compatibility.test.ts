@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import Database from 'better-sqlite3'
 
@@ -32,6 +32,10 @@ interface WorkflowDefinition {
 
 const cleanup: Array<() => void> = []
 const projectRoot = realpathSync(process.cwd())
+const gitRoot = realpathSync(execFileSync('git', [
+  '-C', projectRoot, 'rev-parse', '--show-toplevel',
+], { encoding: 'utf8' }).trim())
+const gitProductPrefix = relative(gitRoot, projectRoot).split('\\').join('/')
 const workflowDir = resolve(projectRoot, 'ops/n8n/workflows')
 const verifier = resolve(projectRoot, 'scripts/verify-n8n-blue-green-workflows.mjs')
 const projectCommit = execFileSync('git', [
@@ -152,10 +156,13 @@ function sha256(value: string | Buffer): string {
 }
 
 function gitSource(pathname: string): Buffer {
-  const result = spawnSync('git', ['-C', projectRoot, 'show', `${projectCommit}:${pathname}`], {
-    maxBuffer: 4 * 1024 * 1024,
-  })
-  if (result.status === 0 && result.stdout) return result.stdout
+  const candidates = [pathname, ...(gitProductPrefix ? [`${gitProductPrefix}/${pathname}`] : [])]
+  for (const candidate of candidates) {
+    const result = spawnSync('git', ['-C', projectRoot, 'show', `${projectCommit}:${candidate}`], {
+      maxBuffer: 4 * 1024 * 1024,
+    })
+    if (result.status === 0 && result.stdout) return result.stdout
+  }
   const candidateOnly = new Set([
     'scripts/lib/application-release-manifest-contract.mjs',
     'scripts/lib/legacy-preinstall-handoff-contract.mjs',

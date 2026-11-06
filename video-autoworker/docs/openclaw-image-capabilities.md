@@ -10,12 +10,13 @@
 - `aiworker_image_task`：仅以已返回的任务编号执行 `status`、`result`、`inspect` 或用户明确要求的 `cancel`；
 - `aiworker_image_help`：可被通用工具检索的只读说明，不创建任务。
 
-`qwen-current / second-original` 另有两个仅该 profile 可见的学习视频封面工具：
+`qwen-current / second-original` 的已学习视频封面只暴露一个 direct-only 能力：`aiworker_video_cover_workflow`。它以同一个浅层阶段协议依次处理 `read_segments`、`cover_frames`、`submit_protected_cover` 和 `image_task`；模型不会在视频目录型工具与原生图片工具之间选择或桥接。
 
-- `aiworker_video_cover_frames`：先读取已学习片段摘要，再由 OpenClaw 选一个片段；应用只从该片段的真实原片时间窗抽取三张候选帧，以原生图片和短期会话帧引用交还模型，不暴露文件路径；
-- `aiworker_submit_protected_cover_from_frame`：OpenClaw 选定一张后，通过已有原片保护封面应用与同一图片队列提交，不创建第二条图片链。
+工作流从应用权威的已学习摘要目录读取可用片段，返回当前会话绑定的 `operationId`；候选帧步骤只接受该编号和目录中真实存在的片段，返回三张原生图片块及短期 `frameRef`；提交步骤同时核验工作流、会话、图片 scope 和帧引用后复用既有原片保护图片队列。候选帧不是学习任务的长期产物，工作流和帧引用均在 60 分钟后过期。原片不可用、学习结果不唯一、片段失败、阶段跳过或跨会话引用都会被拒绝。
 
-候选帧不是学习任务的长期产物。应用从受控视频源索引按需重取原片，学习摘要由 OpenClaw 决定选段，画面由 OpenClaw 决定选帧；临时引用绑定 `qwen-current` 会话，60 分钟到期。原片不可用、学习结果不唯一或片段失败时拒绝抽帧。
+旧的 `aiworker_video_cover_frames` 与 `aiworker_submit_protected_cover_from_frame` 已从 qwen-current 工具面退役；历史记录保留，但新请求不得走旧的分段桥接链。
+
+为保证组件发布失败时能够恢复已验证的旧图片插件，应用暂时保留同名的 loopback-only HTTP 兼容适配器；它没有 OpenClaw 工具注册、不会进入 Tool Search，也不会形成第二条业务状态机。新应用切换、图片插件升级和真实对话验收完成后，适配器将在后续单独版本按保留期退役。
 
 提交未返回任务编号时，调用方必须停止重试并报告安全错误码与下一步；不能把“工具调用完成”误认为图片已受理。
 

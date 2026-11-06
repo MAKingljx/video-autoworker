@@ -6,11 +6,12 @@ import {
   imageCommandToolNamesForProfile,
 } from './image-command-tool.js'
 import { createImageJobClient } from './image-job-client.js'
-import { createVideoCoverFrameClient } from './video-cover-frame-client.js'
+import { createVideoCoverWorkflowClient } from './video-cover-workflow-client.js'
 import { createVideoFrameReferenceStore } from './video-frame-reference-store.js'
 import { createImageNotifications } from './image-notifications.js'
 import { imageSessionScope, resolveImagePluginBinding } from './image-profile-binding.js'
 import { createImageTranscriptReceiptBridge } from './image-transcript-receipt-bridge.js'
+import { createVideoCoverWorkflowMode } from './video-cover-workflow-mode.js'
 
 const RECEIPT_CAPTURE_PRIORITY = 100
 // The director-brain transcript projector runs at -1000. Project the safe
@@ -41,7 +42,7 @@ export function registerImageCommands(api, {
   })
   const client = createClient()
   const frameToolsEnabled = binding.profile === 'qwen-current'
-  const videoFrameClient = frameToolsEnabled ? createVideoCoverFrameClient() : undefined
+  const videoWorkflowClient = frameToolsEnabled ? createVideoCoverWorkflowClient() : undefined
   const videoFrameStore = frameToolsEnabled ? createVideoFrameReferenceStore({ stateDir: binding.stateDir }) : undefined
   const controller = createNotifications({ client, system: api.runtime.system, binding })
   const submissionFence = createImageSubmissionFence()
@@ -93,7 +94,7 @@ export function registerImageCommands(api, {
     api.registerTool(context => createImageCommandTools({
       context, binding,
       client,
-      videoFrameClient,
+      videoWorkflowClient,
       videoFrameStore,
       releaseReady: api.pluginConfig?.releaseReady === true,
       saveMedia,
@@ -103,6 +104,9 @@ export function registerImageCommands(api, {
     }).find(tool => tool.name === name) ?? null, { names: [name], optional: true })
   }
   if (typeof api.on === 'function') {
+    if (binding.profile === 'qwen-current') {
+      api.on('before_prompt_build', createVideoCoverWorkflowMode(), { priority: 200 })
+    }
     api.on('tool_result_persist', (event, context) => receiptBridge.capture(event, context), {
       priority: RECEIPT_CAPTURE_PRIORITY,
     })

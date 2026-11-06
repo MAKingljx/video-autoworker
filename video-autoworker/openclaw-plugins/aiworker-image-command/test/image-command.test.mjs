@@ -61,19 +61,19 @@ test('action-specific model contracts make every image submission field explicit
   assert.match(instructions.content[0].text, /aiworker_submit_creative_image/u)
 })
 
-test('qwen-current help gives direct-only frame tools a non-catalog route', async () => {
+test('qwen-current help gives the unified cover workflow a non-catalog route', async () => {
   const tools = createImageCommandTools({
     context: qwenContext,
     binding: qwenBinding,
-    videoFrameClient: {},
+    videoWorkflowClient: {},
     videoFrameStore: {},
   })
   const instructions = await actionTool(tools, IMAGE_HELP_TOOL_NAME).execute('qwen-help', {})
-  assert.match(instructions.content[0].text, /aiworker_video_cover_frames/u)
-  assert.match(instructions.content[0].text, /aiworker_submit_protected_cover_from_frame/u)
+  assert.match(instructions.content[0].text, /aiworker_video_cover_workflow/u)
   assert.match(instructions.content[0].text, /tool_search/u)
   assert.match(instructions.content[0].text, /tool_describe/u)
   assert.match(instructions.content[0].text, /tool_call/u)
+  assert.doesNotMatch(instructions.content[0].text, /aiworker_video_cover_frames|aiworker_submit_protected_cover_from_frame/u)
 })
 
 test('strict creative submission and task follow-up reuse the same scoped application executor', async () => {

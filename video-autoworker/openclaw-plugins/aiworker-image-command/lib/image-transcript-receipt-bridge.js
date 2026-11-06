@@ -1,6 +1,6 @@
-import { IMAGE_COMMAND_TOOL_NAMES } from './image-command-tool.js'
+import { IMAGE_PLUGIN_TOOL_NAMES } from './image-command-tool.js'
 
-const TOOL_NAMES = new Set(IMAGE_COMMAND_TOOL_NAMES)
+const TOOL_NAMES = new Set(IMAGE_PLUGIN_TOOL_NAMES)
 const JOB_ID = /^[0-9a-f]{32}$/u
 const STATE = new Set([
   'QUEUED',

@@ -456,6 +456,33 @@ function verifyPluginDoctor(home, openclaw, attachment, plugin) {
   return inspectImagePluginDoctor(report, plugin.id)
 }
 
+export function inspectImagePluginRuntime(value, plugin, attachment) {
+  const runtimeTools = Array.isArray(value?.tools)
+    ? value.tools.flatMap(item => Array.isArray(item?.names) ? item.names : []) : []
+  const hookNames = Array.isArray(value?.typedHooks)
+    ? value.typedHooks.map(item => item?.name).filter(name => typeof name === 'string') : []
+  const diagnostics = Array.isArray(value?.diagnostics) ? value.diagnostics : []
+  if (value?.plugin?.id !== plugin.id || value?.plugin?.version !== plugin.version
+    || value?.plugin?.status !== 'loaded'
+    || !same(runtimeTools.toSorted(), attachment.toolIds.toSorted())
+    || diagnostics.some(item => item?.level === 'error' || item?.severity === 'error')
+    || !hookNames.includes('tool_result_persist') || !hookNames.includes('before_message_write')
+    || (!attachment.legacyScope && !hookNames.includes('before_prompt_build'))) {
+    fail('plugin_runtime_unhealthy')
+  }
+  return { toolIds: runtimeTools.toSorted(), hookNames: hookNames.toSorted() }
+}
+
+function verifyPluginRuntime(home, openclaw, attachment, plugin) {
+  const result = run(openclaw, ['--profile', attachment.profile, 'plugins', 'inspect', plugin.id, '--runtime', '--json'], {
+    env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'plugin_runtime_inspect', allowNonzero: true,
+  })
+  if (result.error || result.signal || result.status !== 0 || typeof result.stdout !== 'string') fail('plugin_runtime_unhealthy')
+  let report
+  try { report = JSON.parse(result.stdout) } catch { fail('plugin_runtime_unhealthy') }
+  return inspectImagePluginRuntime(report, plugin, attachment)
+}
+
 function restartGatewayAndValidate(home, openclaw, attachment) {
   run(openclaw, ['--profile', attachment.profile, 'gateway', 'restart', '--wait', '90s', '--json'], {
     env: baseEnvironment(home, openclaw), cwd: ROOT, timeout: 120_000, phase: 'gateway_restart',
@@ -577,6 +604,7 @@ function main() {
       refreshPluginRegistry(home, openclaw, attachment)
       const doctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
       restartGatewayAndValidate(home, openclaw, attachment)
+      const runtime = verifyPluginRuntime(home, openclaw, attachment, manifest.plugin)
       token = gatewayToken(home, paths.config)
       const catalog = toolInventory(gatewayRpc({ work, home, openclaw, attachment, operation: 'catalog', token }), attachment, 'catalog')
       let catalogSha256
@@ -586,6 +614,7 @@ function main() {
         refreshPluginRegistry(home, openclaw, attachment)
         const reconciledDoctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
         restartGatewayAndValidate(home, openclaw, attachment)
+        const reconciledRuntime = verifyPluginRuntime(home, openclaw, attachment, manifest.plugin)
         const reconciledConfig = readJson(paths.config, { mode: 0o600 })
         if (!isImageCapabilityAttached(reconciledConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
           fail('post_reconcile_contract_invalid')
@@ -598,7 +627,7 @@ function main() {
           schema: 'aiworker-openclaw-image-capability-receipt/v1', currentState: 'SERVICE_HEALTHY',
           sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
           attachment: attachmentEvidence(reconciledConfig, manifest, attachment), pluginInstalled: true,
-          toolInventory: { catalogSha256 }, doctor: reconciledDoctor,
+          toolInventory: { catalogSha256 }, doctor: reconciledDoctor, runtime: reconciledRuntime,
           reconciledLegacySource: true, nextAction: 'real_dialogue_validation',
         })
         return
@@ -610,7 +639,7 @@ function main() {
         attachment: attachmentEvidence(beforeConfig, manifest, attachment),
         pluginInstalled: true, toolInventory: {
           catalogSha256,
-        }, doctor, nextAction: 'none',
+        }, doctor, runtime, nextAction: 'none',
       })
       return
     }
@@ -652,6 +681,7 @@ function main() {
     refreshPluginRegistry(home, openclaw, attachment)
     const doctor = verifyPluginDoctor(home, openclaw, attachment, manifest.plugin)
     restartGatewayAndValidate(home, openclaw, attachment)
+    const runtime = verifyPluginRuntime(home, openclaw, attachment, manifest.plugin)
     const afterConfig = readJson(paths.config, { mode: 0o600 })
     if (!isImageCapabilityAttached(afterConfig, manifest, attachment) || !installedPlugin(paths, manifest)) {
       fail('post_restart_contract_invalid')
@@ -665,7 +695,7 @@ function main() {
       sourceCommit: options.sourceCommit, pluginSourceSha256: source.treeSha256,
       attachment: attachmentEvidence(afterConfig, manifest, attachment),
       pluginInstalled: true, configBeforeSha256: sha256(JSON.stringify(stable(beforeConfig))),
-      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256 }, doctor,
+      configAfterSha256: sha256(JSON.stringify(stable(afterConfig))), toolInventory: { catalogSha256 }, doctor, runtime,
       backupPath: backup.path, nextAction: 'real_dialogue_validation',
     })
   } catch (error) {

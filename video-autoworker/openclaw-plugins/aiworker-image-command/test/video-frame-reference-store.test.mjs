@@ -55,3 +55,27 @@ test('expires references and rejects unissued frame identifiers', async () => {
       /ENOENT/u)
   })
 })
+
+test('binds cover workflow state and frame references to the same scoped session', async () => {
+  await fixture(async ({ store, candidate }) => {
+    const workflow = await store.beginWorkflow({
+      imageScope: scopeA, sessionKey: sessionA, videoName: candidate.videoName, segmentIndexes: [candidate.segmentIndex],
+    })
+    assert.match(workflow.operationId, /^[a-f0-9]{32}$/u)
+    assert.deepEqual(await store.resolveWorkflow({
+      operationId: workflow.operationId, imageScope: scopeA, sessionKey: sessionA,
+    }), workflow)
+    await store.captureBatch({
+      imageScope: scopeA, sessionKey: sessionA, workflowId: workflow.operationId, candidates: [candidate],
+    })
+    await assert.doesNotReject(store.resolve({
+      frameRef: candidate.frameRef, imageScope: scopeA, sessionKey: sessionA, workflowId: workflow.operationId,
+    }))
+    await assert.rejects(store.resolve({
+      frameRef: candidate.frameRef, imageScope: scopeA, sessionKey: sessionA, workflowId: 'd'.repeat(32),
+    }), /video_frame_reference_workflow_mismatch/u)
+    await assert.rejects(store.resolveWorkflow({
+      operationId: workflow.operationId, imageScope: scopeA, sessionKey: sessionB,
+    }), /video_frame_reference_workflow_scope_mismatch/u)
+  })
+})

@@ -140,7 +140,8 @@ const endpoints: Endpoint[] = [
   { path: '/api/openclaw/version', methods: ['GET'], description: 'Installed OpenClaw version and latest release metadata', tag: 'System', auth: 'public' },
   { path: '/api/openclaw/update', methods: ['POST'], description: 'Update OpenClaw to the latest stable release', tag: 'System', auth: 'admin' },
   { path: '/api/openclaw/doctor', methods: ['GET', 'POST'], description: 'Inspect and fix OpenClaw configuration drift', tag: 'System', auth: 'admin' },
-  { path: '/api/n8n/video-cover-frames', methods: ['POST'], description: 'Read controlled cover frame candidates for an owned completed video learning task', tag: 'n8n', auth: 'openclaw-loopback' },
+  { path: '/api/n8n/video-cover-frames', methods: ['POST'], description: 'Transition-only compatibility adapter for the retired qwen video-cover frame pair', tag: 'n8n', auth: 'openclaw-loopback' },
+  { path: '/api/n8n/video-cover-workflow', methods: ['POST'], description: 'Run one authoritative video-cover workflow step for an owned completed learning task', tag: 'n8n', auth: 'openclaw-loopback' },
 
   // ── Local ─────────────────────────────────────────
   { path: '/api/local/flight-deck', methods: ['GET'], description: 'Local flight deck status', tag: 'Local', auth: 'viewer' },

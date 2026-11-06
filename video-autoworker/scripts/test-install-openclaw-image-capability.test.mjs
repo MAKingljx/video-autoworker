@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { compareInventories, inspectImagePluginDoctor, staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
+import { compareInventories, inspectImagePluginDoctor, inspectImagePluginRuntime, staleBackupsForRetention } from './install-openclaw-image-capability.mjs'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
 const installer = fileURLToPath(new URL('./install-openclaw-image-capability.mjs', import.meta.url))
@@ -119,18 +119,37 @@ test('doctor accepts unrelated warnings but rejects any image-plugin or critical
   }, 'aiworker-image-command'), /plugin_doctor_unrelated_error/u)
 })
 
-test('catalog upgrade preserves existing image tools and admits only newly declared frame tools', () => {
-  const plugin = { id: 'aiworker-image-command', retiredTools: ['aiworker_generate_image'] }
-  const attachment = { toolIds: ['creative', 'protected', 'task', 'frames', 'frame_submit'] }
+test('runtime inspection requires the qwen cover routing hook and only declared tools', () => {
+  const plugin = { id: 'aiworker-image-command', version: '0.5.2' }
+  const attachment = { legacyScope: false, toolIds: ['aiworker_video_cover_workflow'] }
+  const report = {
+    plugin: { ...plugin, status: 'loaded' },
+    tools: [{ names: ['aiworker_video_cover_workflow'] }],
+    typedHooks: [
+      { name: 'before_prompt_build' }, { name: 'tool_result_persist' }, { name: 'before_message_write' },
+    ],
+    diagnostics: [],
+  }
+  assert.deepEqual(inspectImagePluginRuntime(report, plugin, attachment).toolIds, attachment.toolIds)
+  assert.throws(() => inspectImagePluginRuntime({ ...report, typedHooks: report.typedHooks.slice(1) }, plugin, attachment),
+    /plugin_runtime_unhealthy/u)
+  assert.throws(() => inspectImagePluginRuntime({ ...report, tools: [{ names: ['old_tool'] }] }, plugin, attachment),
+    /plugin_runtime_unhealthy/u)
+})
+
+test('catalog upgrade retires the split frame pair and exposes the one workflow facade', () => {
+  const plugin = { id: 'aiworker-image-command', retiredTools: ['aiworker_generate_image', 'frames', 'frame_submit'] }
+  const attachment = { toolIds: ['creative', 'protected', 'task', 'workflow'] }
   const oldImageTool = { id: 'creative', source: 'plugin', pluginId: plugin.id, version: '0.4.0' }
   const before = [oldImageTool, { id: 'aiworker_generate_image', source: 'plugin', pluginId: plugin.id },
-    { id: 'other', source: 'builtin', pluginId: 'core' }]
-  const after = [
-    { ...oldImageTool, version: '0.5.1' },
-    { id: 'protected', source: 'plugin', pluginId: plugin.id },
-    { id: 'task', source: 'plugin', pluginId: plugin.id },
     { id: 'frames', source: 'plugin', pluginId: plugin.id },
     { id: 'frame_submit', source: 'plugin', pluginId: plugin.id },
+    { id: 'other', source: 'builtin', pluginId: 'core' }]
+  const after = [
+    { ...oldImageTool, version: '0.5.2' },
+    { id: 'protected', source: 'plugin', pluginId: plugin.id },
+    { id: 'task', source: 'plugin', pluginId: plugin.id },
+    { id: 'workflow', source: 'plugin', pluginId: plugin.id },
     { id: 'other', source: 'builtin', pluginId: 'core' },
   ]
   assert.match(compareInventories(before, after, plugin, attachment, 'catalog'), /^[a-f0-9]{64}$/u)

@@ -6,6 +6,10 @@ import { createN8nCoverFrameCandidates } from '@/lib/n8n-cover-frame-candidates'
 
 export const runtime = 'nodejs'
 
+// Transition-only adapter for the prior image plugin. New qwen-current turns
+// use /video-cover-workflow through the single direct-only facade. Keeping this
+// adapter briefly lets a failed plugin rollout restore its verified 0.5.1
+// payload without losing its authoritative application endpoint.
 const requestSchema = z.object({
   query: z.string().trim().min(1).max(120),
   segmentIndexes: z.array(z.number().int().positive()).length(1),
@@ -23,9 +27,7 @@ const safeError = (error: unknown): { errorCode: string; status: number } => {
   if (code === 'cover_frame_learning_result_unavailable') return { errorCode: 'N8N_COVER_FRAME_LEARNING_RESULT_UNAVAILABLE', status: 404 }
   if (code === 'cover_frame_segment_unavailable') return { errorCode: 'N8N_COVER_FRAME_SEGMENT_UNAVAILABLE', status: 404 }
   if (code === 'cover_frame_original_unavailable') return { errorCode: 'N8N_COVER_FRAME_ORIGINAL_UNAVAILABLE', status: 404 }
-  if (code.startsWith('cover_frame_')) {
-    return { errorCode: 'N8N_COVER_FRAME_EXTRACTION_FAILED', status: 409 }
-  }
+  if (code.startsWith('cover_frame_')) return { errorCode: 'N8N_COVER_FRAME_EXTRACTION_FAILED', status: 409 }
   return { errorCode: 'N8N_COVER_FRAME_UNAVAILABLE', status: 503 }
 }
 
@@ -40,12 +42,9 @@ export async function POST(request: NextRequest) {
       getDatabase(), { workspaceId: user.workspace_id, tenantId: user.tenant_id }, parsed.data,
       undefined, { signal: request.signal },
     )
-    return NextResponse.json(result, {
-      headers: noStore,
-    })
+    return NextResponse.json(result, { headers: noStore })
   } catch (error) {
     const safe = safeError(error)
-    return NextResponse.json({ errorCode: safe.errorCode }, { status: safe.status,
-      headers: noStore })
+    return NextResponse.json({ errorCode: safe.errorCode }, { status: safe.status, headers: noStore })
   }
 }
