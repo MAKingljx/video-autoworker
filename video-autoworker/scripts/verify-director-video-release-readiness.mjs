@@ -14,7 +14,10 @@ import { fileURLToPath } from 'node:url'
 
 import { renderManagedMarkdownSection } from './lib/render-managed-markdown-section.mjs'
 import { readOpenClawAgentEntries } from './lib/openclaw-agent-config.mjs'
-import { auditStandaloneArtifact } from './check-standalone-artifact.mjs'
+import {
+  auditBoundStandaloneArtifact,
+  auditStandaloneArtifact,
+} from './check-standalone-artifact.mjs'
 import { MAX_APPLICATION_RELEASE_MANIFEST_BYTES } from './lib/application-release-manifest-contract.mjs'
 import {
   assertRepositoryRelease, verifyDirectorExtractionReleaseProvenance,
@@ -1315,7 +1318,20 @@ export async function verifyDirectorVideoReleasePreflight({
   const release = assertPhysicalDirectory(releaseRoot, 'app_release')
   if (release !== join(releases, releaseId, 'standalone')) fail('app_release_boundary_mismatch')
   const commit = assertRepositoryRelease(repository, releaseId, repositoryReleaseMode)
-  const artifactAudit = await auditStandaloneArtifact(release)
+  const releaseManifestPath = join(release, 'release-manifest.json')
+  safeApplicationReleaseManifest(releaseManifestPath, 'app_release_manifest')
+  // A release that is still serving the previous slot must be checked against
+  // the contract it was built with. Applying the current candidate's required
+  // file list to it would make a valid older release fail before the router can
+  // move to the candidate. New candidates are still held to the current full
+  // artifact contract.
+  const artifactAudit = repositoryReleaseMode === 'ancestor'
+    ? await auditBoundStandaloneArtifact(release, {
+      repositoryRoot: repository,
+      releaseId,
+      manifestSha256: fileSha256(releaseManifestPath),
+    })
+    : await auditStandaloneArtifact(release)
   const provenance = verifyDirectorExtractionReleaseProvenance({
     repositoryRoot: repository,
     releaseRoot: release,
@@ -1358,8 +1374,6 @@ export async function verifyDirectorVideoReleasePreflight({
   } catch {
     fail('runtime_convergence_proof_invalid')
   }
-  const releaseManifestPath = join(release, 'release-manifest.json')
-  safeApplicationReleaseManifest(releaseManifestPath, 'app_release_manifest')
   return {
     schema: 'video-autoworker-director-video-preflight/v1',
     phase: 'pre-bootstrap',

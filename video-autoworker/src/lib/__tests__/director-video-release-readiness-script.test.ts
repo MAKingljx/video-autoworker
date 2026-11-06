@@ -1038,6 +1038,11 @@ describe('director video release readiness verifier', () => {
     expect(verifier).toContain(
       "join(MODULE_ROOT, 'ops/openclaw/qwen-current-runtime-convergence.manifest.json')",
     )
+    // The currently serving slot can legitimately predate a newly required
+    // standalone member. It must be audited against its immutable release
+    // manifest rather than against the candidate's current file contract.
+    expect(verifier).toContain("repositoryReleaseMode === 'ancestor'")
+    expect(verifier).toContain('auditBoundStandaloneArtifact(release')
   })
 
   it('accepts current v3 reports from the shared source and rejects wrong versions while preserving declared transitions', async () => {
