@@ -120,7 +120,7 @@ describe('immutable bound standalone release contracts', () => {
     await expect(auditBoundStandaloneArtifact(f.root, f.options)).resolves.toMatchObject({
       ok: true, auditMode: 'bound-release', sourceCommit: commit,
     })
-    await expect(auditStandaloneArtifact(f.root)).rejects.toThrow('standalone_required_file_missing:openclaw-skills/aiworker-task-flow/lib/video-segment-report.mjs')
+    await expect(auditStandaloneArtifact(f.root)).rejects.toThrow('standalone_required_file_missing:openclaw-plugins/aiworker-video-command/lib/segment-directory-reader.js')
     expect(readFileSync(join(f.root, 'release-manifest.json'))).toEqual(before)
   })
 
@@ -139,6 +139,7 @@ describe('immutable bound standalone release contracts', () => {
     for (const member of ['video-learning-result.mjs', 'video-segment-report.mjs']) {
       write(join(f.root, 'openclaw-skills/aiworker-task-flow/lib', member), 'export {}\n')
     }
+    write(join(f.root, 'openclaw-plugins/aiworker-video-command/lib/segment-directory-reader.js'), 'export {}\n')
     write(join(f.root, 'scripts/check-standalone-artifact.mjs'),
       "export * from './lib/standalone-release-source-proof.mjs'\n")
     const helper = join(f.root, 'scripts/lib/standalone-release-source-proof.mjs')
