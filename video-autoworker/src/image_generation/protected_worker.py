@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -15,7 +16,8 @@ from PIL import Image
 from .protected_cover import (RESULT_SCHEMA, digest_bytes, erase_context, font_prompt,
     implementation_digest, keyed_letters, normalize_protected, paste_erasure, erasure_prompt,
     paste_letters, protection_summary, source_image, split_letter_rows,
-    validate_ocr, verify_protected_result, text_roi, lettering_row, text_layout_summary, white_preview)
+    validate_ocr, verify_protected_result, text_roi, lettering_row, text_layout_summary, white_preview,
+    text_asset_seed, TEXT_ASSET_ATTEMPT_LIMIT)
 from .ocr import recognize
 from .stage_cache import HEX, read_cached_asset, validate_stage_cache, erasure_reference_matches
 
@@ -58,6 +60,12 @@ class NativeRunner:
             raise ValueError('protected_stage_cache_job_invalid')
         self.stage_cache=validate_stage_cache(stage_cache,self.job_folder)if stage_cache is not None else None
 
+    def stage_seed(self, folder):
+        match = re.fullmatch(r'text_layer_(\d+)_attempt_(\d+)', folder.name)
+        if not match:
+            return self.seed
+        return text_asset_seed(self.seed, int(match.group(1)), int(match.group(2)))
+
     def cached(self,folder,reference,prompt,width,height):
         if self.stage_cache is None:return None
         if folder.parent.parent!=self.job_folder:
@@ -67,13 +75,14 @@ class NativeRunner:
         native,receipt=read_cached_asset(entry,self.job_folder)
         sheet=entry.get('selectionMode')=='complete-line'
         material=entry.get('selectionMode')=='erasure-material'
+        stage_seed = self.stage_seed(folder)
         if (receipt.get('repository')!=self.repository or receipt.get('revision')!=self.revision
                 or receipt.get('precision')!='BF16'or receipt.get('offline')is not True
                 or not isinstance(receipt.get('componentDtypes'),dict)
                 or set(receipt.get('componentDtypes',{}).values())!={'torch.bfloat16'}
                 or not sheet and (receipt.get('width')!=width or receipt.get('height')!=height)
                 or receipt.get('steps')!=self.steps or receipt.get('guidance')!=self.guidance
-                or receipt.get('seed')!=self.seed):
+                or not sheet and receipt.get('seed')!=stage_seed):
             return None
         path=Path(receipt['output']);parent=path.parent
         if not (sheet or material)and (parent/'prompt.txt').read_text()!=prompt:return None
@@ -87,6 +96,7 @@ class NativeRunner:
         return native,{'path':str(path),'sha256':receipt['outputSha256'],
             'receiptSha256':entry['receiptSha256'],'repository':self.repository,
             'revision':self.revision,'precision':'BF16','offline':True,
+            'seed':receipt['seed'],
             'cacheSourceJobId':entry['sourceJobId'],
             **({'selectionMode':entry['selectionMode']}if sheet or material else{})}
 
@@ -107,6 +117,7 @@ class NativeRunner:
             prompt_file.chmod(0o600)
         if prompt_file.read_text() != prompt:
             raise ValueError('protected_stage_prompt_drift')
+        stage_seed = self.stage_seed(folder)
         cached=self.cached(folder,reference,prompt,width,height)
         if cached is not None and not receipt_file.exists():
             if output.exists()or output.with_suffix('.intent.json').exists():
@@ -121,7 +132,7 @@ class NativeRunner:
             command = [sys.executable, str(self.script), 'generate', '--wait-for-model',
                 '--prompt-file', str(prompt_file), '--images', str(ref), '--output', str(output),
                 '--width', str(width), '--height', str(height), '--steps', str(self.steps),
-                '--guidance', str(self.guidance), '--seed', str(self.seed)]
+                '--guidance', str(self.guidance), '--seed', str(stage_seed)]
             with (folder / 'generator.log').open('xb') as log:
                 os.chmod(log.name, 0o600)
                 # Inherit the service-owned process group so its one cancel
@@ -150,7 +161,7 @@ class NativeRunner:
                 or receipt.get('postProcessing') is not False
                 or receipt.get('width') != width or receipt.get('height') != height
                 or receipt.get('steps') != self.steps or receipt.get('guidance') != self.guidance
-                or receipt.get('seed') != self.seed or receipt.get('output') != str(output)
+                or receipt.get('seed') != stage_seed or receipt.get('output') != str(output)
                 or receipt.get('outputSha256') != digest_bytes(output.read_bytes())
                 or receipt.get('promptSha256') != digest_bytes(prompt.encode())):
             raise ValueError('protected_native_asset_receipt_invalid')
@@ -165,7 +176,7 @@ class NativeRunner:
         return result, {'path': str(output), 'sha256': receipt['outputSha256'],
                         'receiptSha256': digest_bytes(receipt_file.read_bytes()),
                         'repository': receipt['repository'], 'revision': receipt['revision'],
-                        'precision': 'BF16', 'offline': True}
+                        'precision': 'BF16', 'offline': True, 'seed': stage_seed}
 
 
 def build_protected(spec_file, source_path, output, runner, *, steps=30, guidance=4,
@@ -228,19 +239,22 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                 'protected_text_component_ambiguous','protected_text_ocr_line_without_ink',
                 'protected_text_ocr_row_geometry_ambiguous','protected_text_line_asset_clipped',
                 'protected_text_line_selection_budget'}
+            fidelity_errors={'protected_generated_text_mismatch',
+                'protected_text_line_selection_missing','protected_text_line_ocr_uncertain'}
             for index,layer in enumerate(spec['textLayers']):
                 # Each exact string gets its own native asset. A later layer's
                 # retry does not regenerate earlier accepted model stages.
-                previous_error=None
+                previous_error=None;attempt_limit=2
                 native_size=(1024 if len(layer['text'])<=4 else 1536),512
-                for attempt in range(2):
+                for attempt in range(TEXT_ASSET_ATTEMPT_LIMIT):
                     stage='text_layer_'+str(index)+'_attempt_'+str(attempt+1);progress(stage)
                     # More pixels address insufficient native glyph size, not
                     # spelling, repeated lines or an unsuitable background.
                     width,height=((2048,768) if previous_error=='protected_text_native_resolution_too_low'
                                   else native_size)
                     canvas=Image.new('RGB',(width,height),(255,0,255))
-                    raw,record=runner(stage_folder(stage),canvas,font_prompt(layer,attempt>0),
+                    raw,record=runner(stage_folder(stage),canvas,font_prompt(
+                        layer,retry=attempt>0,fidelity_retry=attempt>1),
                         width,height,lambda count,total:progress(stage,count,total))
                     completed+=steps;asset_attempts+=1
                     assets.append({'role':'lettering','layerIndex':index,'attempt':attempt+1,**record})
@@ -282,8 +296,10 @@ def build_protected(spec_file, source_path, output, runner, *, steps=30, guidanc
                         break
                     except ValueError as error:
                         atomic_json(stage_folder(stage)/'validation.json',{'matched':False,'errorCode':str(error)})
-                        if attempt==1 or str(error) not in quality_errors:raise
-                        previous_error=str(error)
+                        error_code=str(error)
+                        if error_code in fidelity_errors:attempt_limit=TEXT_ASSET_ATTEMPT_LIMIT
+                        if attempt+1>=attempt_limit or error_code not in quality_errors:raise
+                        previous_error=error_code
         progress('verify')
         # Existing sealed jobs may predate editorial roles. Only new role-aware
         # requests receive the visual hierarchy gate and matching receipt.

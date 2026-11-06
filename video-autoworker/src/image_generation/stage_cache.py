@@ -15,7 +15,7 @@ from PIL import Image
 SCHEMA='aiworker-protected-stage-cache/v1'
 HEX=re.compile(r'[a-f0-9]{64}')
 JOB=re.compile(r'[a-f0-9]{32}')
-SOURCE_STAGE=re.compile(r'(?:erase_[1-4]|text_layer_[0-3]_attempt_[12])')
+SOURCE_STAGE=re.compile(r'(?:erase_[1-4]|text_layer_[0-3]_attempt_[1-4])')
 TARGET_STAGE=re.compile(r'(?:erase_[1-4]|text_layer_[0-3]_attempt_1)')
 ENTRY_KEYS={'stage','sourceJobId','sourceStage','sourcePayloadSha256','sha256','receiptSha256'}
 REGION_KEYS={'x','y','width','height'}

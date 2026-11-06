@@ -122,7 +122,7 @@ test('an unstarted discovery cleanup cannot clear the startup owner', async () =
   })
 })
 
-test('stopping the startup owner clears the slot and keeps accepted job feedback honest', async () => {
+test('stopping the startup owner keeps the accepted receipt but refuses an unpersisted capability', async () => {
   await fixture(async ({ dir, env, register }) => {
     const dependencies = { env, createRuntimeStore: namedStoreFactory(),
       createClient: () => ({ submit: async () => ({ jobId, currentState: 'QUEUED' }) }) }
@@ -135,7 +135,7 @@ test('stopping the startup owner clears the slot and keeps accepted job feedback
     const answer = await registeredTool(discovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
       .execute('after-owned-stop', params)
     assert.equal(answer.details.jobId, jobId)
-    assert.equal(answer.details.notificationErrorCode, 'IMAGE_NOTIFICATION_UNAVAILABLE')
+    assert.equal(answer.details.errorCode, 'IMAGE_TASK_CAPABILITY_PERSISTENCE_UNAVAILABLE')
   })
 })
 
@@ -151,7 +151,7 @@ test('same process slots are isolated by trusted profile state root', async () =
     register(otherDiscovery, { ...base, env: envOther })
     const answer = await registeredTool(otherDiscovery, IMAGE_SUBMIT_CREATIVE_TOOL_NAME, context)
       .execute('wrong-profile-state', params)
-    assert.equal(answer.details.notificationErrorCode, 'IMAGE_NOTIFICATION_UNAVAILABLE')
+    assert.equal(answer.details.errorCode, 'IMAGE_TASK_CAPABILITY_PERSISTENCE_UNAVAILABLE')
     assert.throws(() => registerImageCommands(api('tool-discovery'), { ...base,
       env: { ...env, OPENCLAW_PROFILE: 'qwen-current' } }), /image_notification_profile_binding_invalid/u)
   })

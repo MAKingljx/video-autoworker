@@ -393,7 +393,7 @@ class ImageJobs:
     def select_stage_cache(self, db, scope, payload, source_bytes, folder):
         """Bounded, read-only discovery of already completed native stages."""
         from .protected_cover import (source_image, erase_context, erasure_prompt,
-                                      font_prompt, _verify_asset_reference)
+                                      font_prompt, text_asset_seed, _verify_asset_reference)
         from .stage_cache import cached_asset_paths, erasure_reference_matches, read_cached_asset
         manifest = {'schema': 'aiworker-protected-stage-cache/v1', 'assets': []}
         candidates = db.execute(
@@ -409,6 +409,10 @@ class ImageJobs:
                 try:erasure_compatible.append((row, self.compatible_cache_source(row, payload, allow_lineage=True, db=db)))
                 except (OSError, ValueError, KeyError, IndexError):pass
         original = source_image(source_bytes)
+
+        def expected_asset_seed(source_stage):
+            match = re.fullmatch(r'text_layer_(\d+)_attempt_(\d+)', source_stage)
+            return text_asset_seed(payload['seed'], int(match.group(1)), int(match.group(2))) if match else payload['seed']
 
         def native_entry(path, target, *, text=False, selection_mode=None, reference_region=None, allow_lineage=False):
             path = Path(path)
@@ -445,7 +449,11 @@ class ImageJobs:
                     or proof.get('postProcessing') is not False
                     or not isinstance(proof.get('componentDtypes'), dict)
                     or set(proof.get('componentDtypes', {}).values()) != {'torch.bfloat16'}
-                    or any(proof.get(key) != payload[key] for key in ('steps', 'guidance', 'seed'))
+                    or any(proof.get(key) != payload[key] for key in ('steps', 'guidance'))
+                    # Pre-multiseed sealed assets have only the job seed. Keep
+                    # them eligible as read-only cache sources while new text
+                    # candidates bind to their deterministic stage seed.
+                    or proof.get('seed') not in {expected_asset_seed(relative.parts[2]), payload['seed']}
                     or not all(512 <= side <= 2048 and side % 16 == 0 for side in image.size)):
                 raise ValueError('image_stage_cache_native_runtime_invalid')
             return entry, image
@@ -508,10 +516,12 @@ class ImageJobs:
             # failed request may supply a sheet. Its rows still have to pass
             # fresh component selection, OCR and final-ROI verification.
             for row, old in compatible:
-                if (row['state'] != 'FAILED' or row['error_code'] != 'protected_generated_text_mismatch'
+                if (row['state'] != 'FAILED' or row['error_code'] not in {
+                        'protected_generated_text_mismatch','protected_text_line_selection_missing',
+                        'protected_text_line_ocr_uncertain'}
                         or self.protected_generation_identity(old['protected']) !=
                            self.protected_generation_identity(payload['protected'])):continue
-                for attempt in (2, 1):
+                for attempt in (4, 3, 2, 1):
                     try:
                         path = (self.folder(row['job_id']) / 'stages' /
                                 ('text_layer_' + str(index) + '_attempt_' + str(attempt)) / 'model.png')

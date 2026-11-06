@@ -33,6 +33,14 @@ function actionTool(tools, name) {
   return tool
 }
 
+function issuedJobCapabilities(...issued) {
+  const jobs = new Set(issued.length ? issued : [jobId])
+  return {
+    grant: async value => { jobs.add(value.jobId); return true },
+    authorize: async value => jobs.has(value.jobId),
+  }
+}
+
 test('action-specific model contracts make every image submission field explicit', async () => {
   let submitted = 0
   const fence = createImageSubmissionFence()
@@ -178,7 +186,7 @@ test('submit validates prompt XOR design, normalized paths and allowed numeric s
 
 test('job queries only accept the exact id and action fields', async () => {
   const calls = []
-  const tool = createImageCommandTool({ context, client: {
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: {
     status: async (...args) => { calls.push(args); return { jobId, currentState: 'RUNNING', completedSteps: 7, totalSteps: 40 } },
   } })
   const answer = await tool.execute('status', { action: 'status', jobId })
@@ -188,9 +196,26 @@ test('job queries only accept the exact id and action fields', async () => {
   assert.equal(normalizeImageRequest({ action: 'status', jobId, scope: 'wrong' }), null)
 })
 
+test('an unissued but well-formed job id is rejected before any service request', async () => {
+  let statusCalls = 0
+  let cancelCalls = 0
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: {
+    status: async () => { statusCalls += 1; return queued },
+    cancel: async () => { cancelCalls += 1; return { jobId: 'b'.repeat(32), currentState: 'CANCELLED' } },
+  } })
+  const unknown = 'b'.repeat(32)
+  for (const action of ['status', 'result', 'inspect', 'cancel']) {
+    const answer = await tool.execute(`unknown-${action}`, { action, jobId: unknown })
+    assert.equal(answer.isError, true)
+    assert.equal(answer.details.errorCode, 'IMAGE_TASK_NOT_ISSUED_FOR_SESSION')
+  }
+  assert.equal(statusCalls, 0)
+  assert.equal(cancelCalls, 0)
+})
+
 test('cancel uses the same session ownership and actual backend receipt', async () => {
   let args
-  const tool = createImageCommandTool({ context, client: { cancel: async (...input) => {
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { cancel: async (...input) => {
     args = input; return { jobId, currentState: 'CANCELLED' }
   } } })
   const answer = await tool.execute('cancel', { action: 'cancel', jobId })
@@ -199,7 +224,7 @@ test('cancel uses the same session ownership and actual backend receipt', async 
 })
 
 test('cancel requested is not falsely presented as cancellation complete', async () => {
-  const tool = createImageCommandTool({ context, client: { cancel: async () => ({ jobId, currentState: 'CANCEL_REQUESTED' }) } })
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { cancel: async () => ({ jobId, currentState: 'CANCEL_REQUESTED' }) } })
   const answer = await tool.execute('cancel', { action: 'cancel', jobId })
   assert.match(answer.content[0].text, /正在取消/u)
   assert.equal(answer.details.currentState, 'CANCEL_REQUESTED')
@@ -229,7 +254,7 @@ test('notification subscription errors preserve the known accepted job', async (
 test('result stores only a verified service image and returns a native MEDIA path', async () => {
   let saved
   let imageArgs
-  const tool = createImageCommandTool({ context,
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(),
     client: {
       status: async () => ({ jobId, currentState: 'GENERATED_PENDING_REVIEW', outputSha256: digest,
         output: '/untrusted/ignored.png', prompt: 'must not leak' }),
@@ -246,14 +271,14 @@ test('result stores only a verified service image and returns a native MEDIA pat
 })
 
 test('pending result never attempts image retrieval', async () => {
-  const tool = createImageCommandTool({ context, client: { status: async () => queued,
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { status: async () => queued,
     image: async () => { throw new Error('must not fetch') } } })
   assert.equal((await tool.execute('result', { action: 'result', jobId })).details.currentState, 'QUEUED')
 })
 
 test('generated status does not acknowledge an image; an actual MEDIA read does', async () => {
   const acknowledgements = []
-  const tool = createImageCommandTool({ context, client: {
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: {
     status: async () => ({ jobId, currentState: 'GENERATED_PENDING_REVIEW', outputSha256: digest }),
     image: async () => png,
   }, saveMedia: async () => ({ path: '/safe/media/image.png' }),
@@ -266,7 +291,7 @@ test('generated status does not acknowledge an image; an actual MEDIA read does'
 })
 
 test('notification acknowledgement failure never hides a verified candidate image', async () => {
-  const tool = createImageCommandTool({ context, client: {
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: {
     status: async () => ({ jobId, currentState: 'GENERATED_PENDING_REVIEW', outputSha256: digest }),
     image: async () => png,
   }, saveMedia: async () => ({ path: '/safe/media/image.png' }),
@@ -278,7 +303,7 @@ test('notification acknowledgement failure never hides a verified candidate imag
 
 test('wrong id or unknown status from the service fails closed', async () => {
   for (const data of [{ jobId: 'b'.repeat(32), currentState: 'RUNNING' }, { jobId, currentState: 'PUBLISHED' }]) {
-    const tool = createImageCommandTool({ context, client: { status: async () => data } })
+    const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { status: async () => data } })
     assert.equal((await tool.execute('status', { action: 'status', jobId })).details.errorCode, 'IMAGE_RECEIPT_INVALID')
   }
 })

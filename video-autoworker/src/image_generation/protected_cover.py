@@ -20,6 +20,7 @@ MAX_SOURCE_BYTES = 40 * 1024 * 1024
 MAX_SIDE = 8192
 RECT_KEYS = {'x', 'y', 'width', 'height'}
 TEXT_ROLES = {'kicker', 'title', 'subtitle', 'caption'}
+TEXT_ASSET_ATTEMPT_LIMIT = 4
 
 
 def digest_bytes(data):
@@ -77,6 +78,22 @@ def default_text_role(index, count):
     if index == 1:
         return 'subtitle'
     return 'caption'
+
+
+def text_asset_seed(job_seed, layer_index, attempt):
+    """Derive a reproducible, bounded seed for one native lettering attempt.
+
+    The first candidate remains byte-for-byte compatible with the job seed.
+    Later candidates deliberately explore distinct model trajectories after OCR
+    rejects a long Chinese inscription; they never alter the job's public seed.
+    """
+    if (type(job_seed) is not int or not 0 <= job_seed < 2 ** 31
+            or type(layer_index) is not int or layer_index < 0
+            or type(attempt) is not int or not 1 <= attempt <= TEXT_ASSET_ATTEMPT_LIMIT):
+        raise ValueError('protected_text_attempt_seed_invalid')
+    if attempt == 1:
+        return job_seed
+    return (job_seed + (layer_index + 1) * 1_000_003 + (attempt - 1) * 104_729) % (2 ** 31)
 
 
 def _layout_inset(size):
@@ -201,8 +218,8 @@ def normalize_protected(spec, source_bytes, *, compile_prompt=True, assign_defau
         # Each model stage renders one layer. Budget the actual first/retry
         # prompts rather than compiling a multi-line font sample sheet.
         for layer in texts:
-            if any(len(font_prompt(layer, retry).encode('utf-8')) > 16 * 1024
-                   for retry in (False, True)):
+            if any(len(font_prompt(layer, retry=attempt > 1, fidelity_retry=attempt > 2).encode('utf-8')) > 16 * 1024
+                   for attempt in range(1, TEXT_ASSET_ATTEMPT_LIMIT + 1)):
                 raise ValueError('protected_font_prompt_too_large')
     return canonical, image.size
 
@@ -307,7 +324,8 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
                 or proof.get('revision') != receipt.get('revision')
                 or proof.get('precision') != 'BF16' or proof.get('offline') is not True
                 or set(proof.get('componentDtypes', {}).values()) != {'torch.bfloat16'}
-                or any(proof.get(key) != receipt.get(key) for key in ('steps', 'guidance', 'seed'))):
+                or any(proof.get(key) != receipt.get(key) for key in ('steps', 'guidance'))
+                or proof.get('seed') != asset.get('seed', receipt.get('seed'))):
             raise ValueError('protected_native_asset_receipt_invalid')
         input_paths = [p.parent / 'prompt.txt', p.parent / 'reference.png']
         for member in input_paths:checked_native_file(member, job, cached)
@@ -327,7 +345,8 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
     erasures = [a for a in assets if a.get('role') == 'erasure']
     lettering = [a for a in assets if a.get('role') == 'lettering']
     if (len(erasures) != len(canonical['eraseRegions']) or len(erasures) + len(lettering) != len(assets)
-            or len(lettering) > 2 * len(canonical['textLayers']) or bool(lettering) != bool(canonical['textLayers'])):
+            or len(lettering) > TEXT_ASSET_ATTEMPT_LIMIT * len(canonical['textLayers'])
+            or bool(lettering) != bool(canonical['textLayers'])):
         raise ValueError('protected_native_asset_roles_invalid')
     for index, (asset, region) in enumerate(zip(erasures, canonical['eraseRegions'])):
         if asset.get('region') != region:raise ValueError('protected_erase_asset_region_changed')
@@ -354,7 +373,8 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
         placements = []
         for i, (layer, binding) in enumerate(zip(canonical['textLayers'], bindings)):
             attempts = [a for a in lettering if a.get('layerIndex') == i]
-            if not 1 <= len(attempts) <= 2 or [a.get('attempt') for a in attempts] != list(range(1, len(attempts) + 1)):
+            if (not 1 <= len(attempts) <= TEXT_ASSET_ATTEMPT_LIMIT
+                    or [a.get('attempt') for a in attempts] != list(range(1, len(attempts) + 1))):
                 raise ValueError('protected_text_asset_attempts_invalid')
             chosen = attempts[-1]
             if selected[i] != {'layerIndex': i, 'path': chosen['path'], 'sha256': chosen['sha256']}:
@@ -365,7 +385,8 @@ def verify_protected_result(source_path, output_path, spec, receipt, *, strict_l
             if strict_live:
                 native = decoded[chosen['path']]
                 _verify_asset_reference(chosen, Image.new('RGB', native.size, (255, 0, 255)),
-                    None if chosen.get('selectionMode') == 'complete-line' else font_prompt(layer, chosen.get('attempt', 1) > 1))
+                    None if chosen.get('selectionMode') == 'complete-line' else font_prompt(
+                        layer, retry=chosen.get('attempt', 1) > 1, fidelity_retry=chosen.get('attempt', 1) > 2))
                 matte = keyed_letters(native)
                 row, selection = lettering_row(matte, binding.get('nativeObserved', {}), layer)
                 if selection != binding.get('assetSelection'):
@@ -518,7 +539,7 @@ def erasure_prompt(local):
             '不新增文字、标志、图案或物体，不全图调色，不磨皮。')
 
 
-def font_prompt(layer, retry=False):
+def font_prompt(layer, retry=False, fidelity_retry=False):
     """Compile one text asset, never a typography comparison/sample sheet."""
     if not isinstance(layer, dict) or not isinstance(layer.get('text'), str) or not layer['text']:
         raise ValueError('protected_font_layer_invalid')
@@ -536,12 +557,17 @@ def font_prompt(layer, retry=False):
         retry_instruction = ('这是文字校验重试。使用标准简体中文字形，笔画连续完整，禁止异体字、'
                              '拆字、断笔、夸张毛笔飞白、立体拉伸和会影响识别的纹理。')
         style = '清晰标准的深棕与古铜金中文标题字，细深棕轮廓和短阴影，简洁但有纪实质感。'
+    fidelity_instruction = ''
+    if fidelity_retry:
+        fidelity_instruction = ('这是逐字保真候选。生成前后逐字核对标题文字内容中的每个字符；'
+                                '不得漏字、换字、加字、合字或用形近字替代。')
     # Styling prose is not a second copy of the target inscription.
     style = style.replace(text, '').strip()
     return ('标题文字内容：' + text + '\n'
             + '在纯品红色背景上设计这行艺术字，文字完整只写一次，水平单行，四周留足背景。\n'
             + (role_instruction + '\n' if role_instruction else '')
             + (retry_instruction + '\n' if retry_instruction else '')
+            + (fidelity_instruction + '\n' if fidelity_instruction else '')
             + '字体样式：' + style + '\n'
             + '字形准确，边缘清晰，不要引号、标签、其他文字或多排对照，不要照片或场景。'
             + '文字、描边和阴影不用品红色。')

@@ -26,6 +26,14 @@ const plan = { schema: 'aiworker-protected-cover/v1', textLayers: [{ text: 'åŒ—æ
 const request = { action: 'submit', images: ['/approved/native-1920.png'], protected: plan }
 const json = body => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
 
+function issuedJobCapabilities(...issued) {
+  const jobs = new Set(issued.length ? issued : [jobId])
+  return {
+    grant: async value => { jobs.add(value.jobId); return true },
+    authorize: async value => jobs.has(value.jobId),
+  }
+}
+
 test('protected erasure-only OCR is explicitly not applicable and stage is bounded', () => {
   const data = { jobId, currentState: 'GENERATED_PENDING_REVIEW', mode: 'protected',
     textValidation: { matched: true, engine: 'not-applicable', mode: 'normalized_text_sequence', expectedCount: 0, observedCount: 0 } }
@@ -74,7 +82,7 @@ test('action-specific image tools preserve direct native media handling and prof
   assert.deepEqual(createImageCommandTools({ context: { ...context, agentId: 'gpt-main' } }), [])
   const manifest = JSON.parse(readFileSync(new URL('../openclaw.plugin.json', import.meta.url), 'utf8'))
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(manifest.version, '0.5.5')
+  assert.equal(manifest.version, '0.5.6')
   assert.equal(pkg.version, manifest.version)
   assert.deepEqual(Object.keys(manifest.toolMetadata).sort(), [...IMAGE_PLUGIN_TOOL_NAMES].sort())
   assert.deepEqual(manifest.contracts.tools, IMAGE_PLUGIN_TOOL_NAMES)
@@ -144,7 +152,7 @@ test('protected receipt exposes bounded counts, not source paths or OCR body', (
 test('inspection yields labeled native image blocks and never reads an arbitrary path', async () => {
   let args
   let acknowledged = false
-  const tool = createImageCommandTool({ context, client: {
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: {
     status: async () => completed,
     inspection: async (...value) => { args = value; return inspection({ source: '/ignored/private.png' }) },
   }, onReceiptRead: () => { acknowledged = true } })
@@ -165,11 +173,11 @@ test('inspection yields labeled native image blocks and never reads an arbitrary
 
 test('pending inspection never fetches previews and malformed results fail closed', async () => {
   let inspected = false
-  const pending = createImageCommandTool({ context, client: { status: async () => ({ jobId, currentState: 'RUNNING' }),
+  const pending = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { status: async () => ({ jobId, currentState: 'RUNNING' }),
     inspection: async () => { inspected = true } } })
   assert.equal((await pending.execute('pending', { action: 'inspect', jobId })).details.currentState, 'RUNNING')
   assert.equal(inspected, false)
-  const malformed = createImageCommandTool({ context, client: { status: async () => completed,
+  const malformed = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { status: async () => completed,
     inspection: async () => inspection({ images: [view('source'), view('source')] }) } })
   assert.equal((await malformed.execute('bad', { action: 'inspect', jobId })).details.errorCode, 'IMAGE_INSPECTION_INVALID')
 })
@@ -248,7 +256,7 @@ test('only protected native-size result download opts into the 40MiB bound', asy
 
 test('protected result labels composition truthfully and selects HD storage only after owned status', async () => {
   let args
-  const tool = createImageCommandTool({ context, client: { status: async () => completed,
+  const tool = createImageCommandTool({ context, jobCapabilities: issuedJobCapabilities(), client: { status: async () => completed,
     image: async (...input) => { args = input; return image } },
   saveMedia: async () => ({ path: '/safe/media/protected.png' }) })
   const answer = await tool.execute('protected-result', { action: 'result', jobId })

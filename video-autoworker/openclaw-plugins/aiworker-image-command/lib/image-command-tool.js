@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, normalize } from 'node:path'
 
 import { createImageJobClient, ImageServiceError, normalizeImageInspection } from './image-job-client.js'
+import { createEphemeralImageJobCapabilities } from './image-job-capability-store.js'
 import { imageSessionScope, LEGACY_IMAGE_PROFILE, legacyImageBinding } from './image-profile-binding.js'
 
 // The previous public tool combined submission, inspection and cancellation
@@ -369,9 +370,19 @@ function stateText(r) {
 }
 
 export function createImageCommandTool({ context, binding = legacyImageBinding(), client = createImageJobClient(), saveMedia,
-  releaseReady = true, onSubmitted, onReceiptRead } = {}) {
+  releaseReady = true, onSubmitted, onReceiptRead, jobCapabilities = createEphemeralImageJobCapabilities() } = {}) {
   const scope = imageSessionScope(context, binding)
   if (!scope) return null
+  async function grantJob(r) {
+    try {
+      return await jobCapabilities.grant({ jobId: r.jobId, scope, sessionKey: context.sessionKey }) === true
+    } catch { return false }
+  }
+  async function hasJobCapability(jobId) {
+    try {
+      return await jobCapabilities.authorize({ jobId, scope, sessionKey: context.sessionKey }) === true
+    } catch { return null }
+  }
   async function acknowledgeRead(r) {
     try { await onReceiptRead?.({ jobId: r.jobId, scope, sessionKey: context.sessionKey }) }
     catch { /* A notification-store failure cannot hide a valid job result. */ }
@@ -395,15 +406,16 @@ export function createImageCommandTool({ context, binding = legacyImageBinding()
           const { action: _action, ...payload } = request
           const data = await client.submit({ ...payload, scope, requestKey: imageRequestKey(scope, toolCallId, payload) }, signal)
           const r = imageReceipt(data)
+          if (!await grantJob(r)) {
+            return { ...result(`${stateText(r)}本会话任务凭证暂未保存；请勿重复提交，待凭证恢复后再按该任务编号查询。`, {
+              ...r, errorCode: 'IMAGE_TASK_CAPABILITY_PERSISTENCE_UNAVAILABLE',
+              nextAction: 'WAIT_FOR_IMAGE_CAPABILITY_RECOVERY',
+            }), isError: true }
+          }
           if (onSubmitted) {
             try { await onSubmitted({ jobId: r.jobId, scope, sessionKey: context.sessionKey }) }
             catch { return result(`${stateText(r)}完成提醒暂不可用，可按任务编号查询。`, { ...r, notificationErrorCode: 'IMAGE_NOTIFICATION_UNAVAILABLE' }) }
           }
-          return result(stateText(r), r)
-        }
-        if (request.action === 'cancel') {
-          const r = imageReceipt(await client.cancel(request.jobId, scope, signal), request.jobId)
-          if (isErrorNotice(r)) await acknowledgeRead(r)
           return result(stateText(r), r)
         }
         if (!request.jobId) {
@@ -412,6 +424,20 @@ export function createImageCommandTool({ context, binding = legacyImageBinding()
           const jobs = data.jobs.map(item => imageReceipt(item))
           for (const r of jobs) if (isErrorNotice(r)) await acknowledgeRead(r)
           return result(jobs.length ? jobs.map(stateText).join('\n') : '本会话还没有图片任务。', { jobs })
+        }
+        const authorized = await hasJobCapability(request.jobId)
+        if (authorized !== true) {
+          const errorCode = authorized === false
+            ? 'IMAGE_TASK_NOT_ISSUED_FOR_SESSION' : 'IMAGE_TASK_CAPABILITY_UNAVAILABLE'
+          const text = authorized === false
+            ? '该图片任务并非由本会话工具成功返回，未向图片服务发起查询或操作。'
+            : '本会话任务凭证暂不可用，未向图片服务发起查询或操作。'
+          return { ...result(text, { errorCode, nextAction: 'USE_RETURNED_IMAGE_JOB_ID' }), isError: true }
+        }
+        if (request.action === 'cancel') {
+          const r = imageReceipt(await client.cancel(request.jobId, scope, signal), request.jobId)
+          if (isErrorNotice(r)) await acknowledgeRead(r)
+          return result(stateText(r), r)
         }
         const data = await client.status(request.jobId, scope, signal)
         const r = imageReceipt(data, request.jobId)
@@ -626,10 +652,11 @@ function createImageHelpTool({ videoCoverWorkflowEnabled = false } = {}) {
 // application queue, idempotency rules, notification service and media bridge.
 export function createImageCommandTools({ context, binding = legacyImageBinding(), client = createImageJobClient(), saveMedia,
   releaseReady = true, onSubmitted, onReceiptRead, submissionFence = createImageSubmissionFence(),
-  videoWorkflowClient, videoFrameStore } = {}) {
+  videoWorkflowClient, videoFrameStore, videoCoverAttemptStore,
+  jobCapabilities = createEphemeralImageJobCapabilities() } = {}) {
   const scope = imageSessionScope(context, binding)
   if (!scope) return []
-  const executor = createImageCommandTool({ context, binding, client, saveMedia, releaseReady, onSubmitted, onReceiptRead })
+  const executor = createImageCommandTool({ context, binding, client, saveMedia, releaseReady, onSubmitted, onReceiptRead, jobCapabilities })
   if (!executor) return []
 
   const submit = definition => ({
@@ -763,8 +790,30 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
         const source = await videoFrameStore.resolve({
           frameRef: request.frameRef, imageScope: scope, sessionKey: context.sessionKey, workflowId: request.operationId,
         })
-        const imageRequest = { action: 'submit', protected: request.protected, images: [source.path] }
-        if (submissionFence.isBlocked(scope, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME, imageRequest)) {
+        const attempt = videoCoverAttemptStore
+          ? await videoCoverAttemptStore.beginOrResume({
+            imageScope: scope, sessionKey: context.sessionKey, operationId: request.operationId,
+            frameRef: request.frameRef, protected: request.protected,
+          })
+          : { action: 'new_submission', protected: request.protected }
+        if (attempt.action === 'existing_submission') {
+          const answer = await executor.execute(`cover-workflow-status:${request.operationId}:${request.frameRef}`,
+            { action: 'status', jobId: attempt.jobId }, signal)
+          const details = plainObject(answer?.details) ? answer.details : {}
+          return { ...answer, details: workflowDetails('submitted', details.errorCode ? 'failed' : 'ok', {
+            jobId: attempt.jobId, currentState: details.currentState, errorCode: details.errorCode,
+            nextAction: details.errorCode ? 'REPORT_IMAGE_TASK_FAILURE' : submissionNextAction(details),
+          }) }
+        }
+        if (attempt.action === 'rejected_same_plan' || attempt.action === 'revision_limit') {
+          return workflowFailure(
+            attempt.action === 'revision_limit' ? 'VIDEO_COVER_LAYOUT_REVISION_LIMIT' : 'VIDEO_COVER_LAYOUT_REVISION_REQUIRED',
+            attempt.action === 'revision_limit' ? 'REPORT_LAYOUT_REVISION_LIMIT' : 'REVISE_PROTECTED_TITLE_BOX',
+          )
+        }
+        const imageRequest = { action: 'submit', protected: attempt.protected, images: [source.path] }
+        if (attempt.action !== 'retry_unconfirmed'
+          && submissionFence.isBlocked(scope, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME, imageRequest)) {
           return { ...submissionFailure({ blocked: true }), details: workflowDetails('submitted', 'blocked', {
             errorCode: 'IMAGE_REPEAT_BLOCKED', nextAction: 'REPORT_IMAGE_SUBMISSION_BLOCKED',
           }) }
@@ -774,12 +823,25 @@ export function createImageCommandTools({ context, binding = legacyImageBinding(
         if (!details.jobId) {
           submissionFence.block(scope, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME, imageRequest)
           const failure = coverSubmissionFailure(details.errorCode)
+          if (videoCoverAttemptStore && failure.errorCode === 'VIDEO_COVER_TITLE_BOX_TOO_SMALL') {
+            await videoCoverAttemptStore.markRejected({
+              imageScope: scope, sessionKey: context.sessionKey, operationId: request.operationId,
+              frameRef: request.frameRef, errorCode: failure.errorCode,
+            })
+          }
           return { ...answer, isError: true, details: workflowDetails('submitted', 'failed', {
             errorCode: failure.errorCode, nextAction: failure.nextAction,
           }) }
         }
-        return { ...answer, details: workflowDetails('submitted', 'ok', {
-          jobId: details.jobId, currentState: details.currentState, nextAction: submissionNextAction(details),
+        if (videoCoverAttemptStore) {
+          await videoCoverAttemptStore.markSubmitted({
+            imageScope: scope, sessionKey: context.sessionKey, operationId: request.operationId,
+            frameRef: request.frameRef, jobId: details.jobId,
+          })
+        }
+        return { ...answer, details: workflowDetails('submitted', details.errorCode ? 'failed' : 'ok', {
+          jobId: details.jobId, currentState: details.currentState, errorCode: details.errorCode,
+          nextAction: details.errorCode ? 'WAIT_FOR_IMAGE_CAPABILITY_RECOVERY' : submissionNextAction(details),
         }) }
       }
       const answer = await executor.execute(toolCallId, { action: request.taskAction, jobId: request.jobId }, signal)

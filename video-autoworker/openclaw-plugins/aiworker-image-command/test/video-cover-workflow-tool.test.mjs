@@ -79,7 +79,8 @@ function tools(overrides = {}) {
   }
   return {
     calls,
-    tools: createImageCommandTools({ context, binding, videoWorkflowClient, videoFrameStore, client }),
+    tools: createImageCommandTools({ context, binding, videoWorkflowClient, videoFrameStore, client,
+      videoCoverAttemptStore: overrides.videoCoverAttemptStore, jobCapabilities: overrides.jobCapabilities }),
   }
 }
 
@@ -208,4 +209,48 @@ test('maps a protected title layout rejection without creating a job', async () 
   assert.equal(result.details.errorCode, 'VIDEO_COVER_TITLE_BOX_TOO_SMALL')
   assert.equal(result.details.nextAction, 'REVISE_PROTECTED_TITLE_BOX')
   assert.equal(result.details.jobId, undefined)
+})
+
+test('an unconfirmed frame submission replays its original protected plan instead of accepting a changed layout', async () => {
+  const original = {
+    schema: 'aiworker-protected-cover/v1',
+    textLayers: [{ text: '老大的火车体验又升级了', role: 'title', box: { x: 30, y: 30, width: 1200, height: 260 } }],
+  }
+  const revised = {
+    schema: 'aiworker-protected-cover/v1',
+    textLayers: [{ text: '老大的火车体验又升级了', role: 'title', box: { x: 40, y: 40, width: 1500, height: 320 } }],
+  }
+  const calls = []
+  const instance = tools({
+    videoCoverAttemptStore: {
+      async beginOrResume() { return { action: 'retry_unconfirmed', protected: original } },
+      async markSubmitted() { calls.push('submitted') },
+    },
+    client: { async submit(value) { calls.push(value); return { jobId: 'e'.repeat(32), currentState: 'QUEUED' } } },
+  })
+  const answer = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('reconcile-unconfirmed', { operationId, frameRef, protected: revised })
+  assert.equal(calls.filter(value => typeof value === 'object').length, 1)
+  assert.deepEqual(calls.find(value => typeof value === 'object').protected, { ...original, eraseRegions: [] })
+  assert.equal(answer.details.jobId, 'e'.repeat(32))
+})
+
+test('a previously submitted frame only reads its returned job and never creates another image', async () => {
+  let submitted = 0
+  let status = 0
+  const existingJob = 'e'.repeat(32)
+  const instance = tools({
+    videoCoverAttemptStore: { async beginOrResume() { return { action: 'existing_submission', jobId: existingJob } } },
+    jobCapabilities: { async grant() { return true }, async authorize() { return true } },
+    client: {
+      async submit() { submitted += 1; throw new Error('must not submit') },
+      async status() { status += 1; return { jobId: existingJob, currentState: 'RUNNING' } },
+    },
+  })
+  const answer = await workflowTool(instance, IMAGE_VIDEO_COVER_SUBMIT_TOOL_NAME)
+    .execute('reuse-submitted', { operationId, frameRef, protected: protectedPlan })
+  assert.equal(submitted, 0)
+  assert.equal(status, 1)
+  assert.equal(answer.details.jobId, existingJob)
+  assert.equal(answer.details.currentState, 'RUNNING')
 })

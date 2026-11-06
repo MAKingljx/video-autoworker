@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw
 
 from image_generation.protected_cover import (font_prompt, keyed_letters, normalize_protected,
     paste_letters, normalized_text, protection_summary, source_image,
-    split_letter_rows, text_layout_summary, validate_ocr, verify_protected_result)
+    split_letter_rows, text_asset_seed, text_layout_summary, validate_ocr, verify_protected_result)
 from image_generation.protected_worker import build_protected
 
 
@@ -49,6 +49,14 @@ class FixtureRunner:
 
 
 class ProtectedCoverTest(unittest.TestCase):
+    def test_text_asset_seed_is_stable_and_first_attempt_preserves_job_seed(self):
+        self.assertEqual(text_asset_seed(301,0,1),301)
+        self.assertEqual(text_asset_seed(301,0,2),text_asset_seed(301,0,2))
+        self.assertNotEqual(text_asset_seed(301,0,2),301)
+        self.assertNotEqual(text_asset_seed(301,1,2),text_asset_seed(301,0,2))
+        with self.assertRaisesRegex(ValueError,'attempt_seed_invalid'):
+            text_asset_seed(301,0,5)
+
     def test_erasure_model_prompt_is_stable_after_json_key_reordering(self):
         from image_generation.protected_cover import erasure_prompt
         ordered={'x':3,'y':7,'width':40,'height':30}
@@ -125,15 +133,19 @@ class ProtectedCoverTest(unittest.TestCase):
         self.assertIn('标准简体中文字形',retry)
         self.assertIn('深棕与古铜金',retry)
         self.assertNotIn('Warm gold with a dark brown outline.',retry)
+        fidelity=font_prompt(layer,True,True)
+        self.assertIn('逐字保真候选',fidelity)
+        self.assertIn('不得漏字、换字、加字、合字或用形近字替代',fidelity)
         with self.assertRaisesRegex(ValueError,'font_layer_invalid'):
             font_prompt([layer,{'text':'逐鹿而生'}])
 
     def test_prompt_budget_checks_each_real_first_and_retry_layer(self):
         with patch('image_generation.protected_cover.font_prompt',return_value='short')as compile:
             spec,_=normalize_protected(self.spec(),png(self.source()))
-        self.assertEqual([(call.args[0]['text'],call.args[1])for call in compile.call_args_list],
-            [('北极驯鹿人',False),('北极驯鹿人',True),('逐鹿而生',False),('逐鹿而生',True)])
-        def oversized_retry(layer,retry):
+        self.assertEqual([(call.args[0]['text'],call.kwargs['retry'],call.kwargs['fidelity_retry'])for call in compile.call_args_list],
+            [('北极驯鹿人',False,False),('北极驯鹿人',True,False),('北极驯鹿人',True,True),('北极驯鹿人',True,True),
+             ('逐鹿而生',False,False),('逐鹿而生',True,False),('逐鹿而生',True,True),('逐鹿而生',True,True)])
+        def oversized_retry(layer,retry=False,fidelity_retry=False):
             return '字'*6000 if layer['text']=='逐鹿而生'and retry else 'short'
         with patch('image_generation.protected_cover.font_prompt',side_effect=oversized_retry):
             with self.assertRaisesRegex(ValueError,'font_prompt_too_large'):
@@ -274,7 +286,7 @@ class ProtectedCoverTest(unittest.TestCase):
             runner=FixtureRunner()
             with self.assertRaisesRegex(ValueError,'mismatch'):
                 build_protected(specpath,source,output,runner,ocr=misplaced)
-            self.assertFalse(output.exists());self.assertEqual(len(runner.calls),3)
+            self.assertFalse(output.exists());self.assertEqual(len(runner.calls),5)
 
     def test_parent_stage_symlink_is_rejected(self):
         with tempfile.TemporaryDirectory()as temp:
@@ -285,14 +297,14 @@ class ProtectedCoverTest(unittest.TestCase):
                 build_protected(specpath,source,job/'image.png',FixtureRunner(),ocr=self.fixture_ocr)
             self.assertEqual(list(elsewhere.iterdir()),[])
 
-    def test_wrong_generated_text_gets_two_bounded_attempts_and_no_final_output(self):
+    def test_wrong_generated_text_gets_four_bounded_fidelity_candidates_and_no_final_output(self):
         with tempfile.TemporaryDirectory()as temp:
             root=Path(temp);source=root/'reference-0.png';specpath=root/'input.json';output=root/'image.png'
             source.write_bytes(png(self.source()));specpath.write_text(json.dumps(self.spec()))
             runner=FixtureRunner()
             with self.assertRaisesRegex(ValueError,'mismatch'):
                 build_protected(specpath,source,output,runner,ocr=lambda _: {'lines':[{'text':'错误'}]})
-            self.assertEqual(len(runner.calls),3)
+            self.assertEqual(len(runner.calls),5)
             self.assertEqual(runner.calls[0],'erase_1')
             self.assertTrue(all(name.startswith('text_layer_0_attempt_')for name in runner.calls[1:]))
             self.assertFalse(output.exists())
